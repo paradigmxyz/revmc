@@ -1,6 +1,28 @@
-[package]
-name = "cranelift-jit-evm"
-version = "0.1.0"
-edition = "2021"
+[workspace]
+members = ["crates/*"]
+resolver = "2"
 
-[dependencies]
+[workspace.package]
+version = "0.1.0"
+authors = ["DaniPopes <57450786+DaniPopes@users.noreply.github.com>"]
+description = "Cranelift JIT for EVM"
+edition = "2021"
+rust-version = "1.76"
+license = "MIT OR Apache-2.0"
+categories = []
+keywords = ["compile", "compiler", "jit", "evm", "ethereum"]
+homepage = "https://github.com/danipopes/cranelift-jit-evm"
+repository = "https://github.com/danipopes/cranelift-jit-evm"
+exclude = [".github/", "benches/", "fuzz/", "tests/"]
+
+[workspace.lints]
+rust.missing_debug_implementations = "warn"
+rust.missing_docs = "warn"
+rust.unreachable_pub = "warn"
+rust.unused_must_use = "deny"
+rust.rust_2018_idioms = "deny"
+rustdoc.all = "warn"
+
+[workspace.dependencies]
+revm-primitives = "3.0.0"
+revm-interpreter = "3.3.0"

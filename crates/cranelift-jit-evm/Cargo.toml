@@ -1,0 +1,27 @@
+[package]
+name = "cranelift-jit-evm"
+description = "Cranelift JIT for EVM"
+homepage = "https://github.com/danipopes/revm-jit/tree/main/crates/cranelift-jit-evm"
+
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+categories.workspace = true
+keywords.workspace = true
+repository.workspace = true
+exclude.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+cranelift = "0.105"
+cranelift-jit = "0.105"
+cranelift-module = "0.105"
+cranelift-native = "0.105"
+revm-primitives.workspace = true
+revm-interpreter.workspace = true
+
+color-eyre = "0.6"

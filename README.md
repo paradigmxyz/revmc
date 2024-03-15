@@ -1,6 +1,6 @@
-# cranelift-jit-evm
+# revm-jit
 
-Experimental [Ethereum Virtual Machine][EVM] [JIT compiler][JIT] using [Cranelift].
+Experimental [JIT compiler][JIT] for [Ethereum Virtual Machine][EVM] using [Cranelift].
 
 [EVM]: https://ethereum.org/en/developers/docs/evm/
 [JIT]: https://en.wikipedia.org/wiki/Just-in-time_compilation
