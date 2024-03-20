@@ -11,8 +11,8 @@ fn main() -> color_eyre::Result<()> {
     let bytecode = [
         //
         op::PUSH0,
-        op::PUSH1,
-        0x69,
+        op::PUSH0,
+        op::ADD,
         op::STOP,
     ];
     let mut jit = cranelift_jit_evm::JitEvm::new();

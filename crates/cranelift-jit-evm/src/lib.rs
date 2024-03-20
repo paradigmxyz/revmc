@@ -75,7 +75,7 @@ impl JitEvm {
     /// Creates a `clif` directory in the given directory and writes `function.unopt.clif` and
     /// `function.opt.clif` files for each function that's compiled.
     pub fn dump_ir_to(&mut self, output_dir: Option<PathBuf>) {
-        self.ctx.want_disasm = output_dir.is_some();
+        self.ctx.set_disasm(output_dir.is_some());
         self.ir_out_dir = output_dir;
     }
 
@@ -113,7 +113,7 @@ impl JitEvm {
         // function below.
         self.module.define_function(id, &mut self.ctx)?;
 
-        // Print the optimized IR.
+        // Print the optimized IR and disassembly.
         if let Some(output_dir) = &self.ir_out_dir {
             crate::pretty_clif::write_clif_file(
                 output_dir,
@@ -123,6 +123,12 @@ impl JitEvm {
                 &self.ctx.func,
                 &clif_comments,
             );
+
+            if let Some(disasm) = &self.ctx.compiled_code().unwrap().vcode {
+                crate::pretty_clif::write_ir_file(output_dir, &format!("{name}.vcode"), |file| {
+                    file.write_all(disasm.as_bytes())
+                })
+            }
         }
 
         // Now that compilation is finished, we can clear out the context state.
@@ -230,7 +236,24 @@ impl<'a> FunctionCx<'a> {
         match opcode {
             op::STOP => self.build_return(Ret::Stop),
 
-            op::ADD => {}
+            op::ADD => {
+                let [mut a, b] = self.popn();
+                let mut carry = self.bcx.ins().iconst(types::I64, 0);
+                carry = self.bcx.ins().iconcat(carry, carry);
+                for i in 0..EvmWord::N_LIMBS {
+                    // Not implemented by cranelift.
+                    // (a[i], carry) = self.bcx.ins().iadd_carry(a[i], b[i], carry);
+
+                    let x = self.bcx.ins().uextend(types::I128, a[i]);
+                    let y = self.bcx.ins().uextend(types::I128, b[i]);
+                    let tmp = self.bcx.ins().iadd(x, y);
+                    carry = self.bcx.ins().iadd(carry, tmp);
+                    let tmp_carry;
+                    (a[i], tmp_carry) = self.bcx.ins().isplit(carry);
+                    carry = self.bcx.ins().uextend(types::I128, tmp_carry);
+                }
+                self.push_unchecked(a);
+            }
             op::MUL => {}
             op::SUB => {}
             op::DIV => {}
@@ -288,7 +311,9 @@ impl<'a> FunctionCx<'a> {
             op::BLOBHASH => {}
             op::BLOBBASEFEE => {}
 
-            op::POP => {}
+            op::POP => {
+                self.pop();
+            }
             op::MLOAD => {}
             op::MSTORE => {}
             op::MSTORE8 => {}
@@ -373,9 +398,9 @@ impl<'a> FunctionCx<'a> {
     }
 
     fn pushn_unchecked(&mut self, values: &[EvmWord]) {
-        let len = self.load_len();
+        let mut len = self.load_len();
         for value in values {
-            let len = self.bcx.ins().iadd_imm(len, 1);
+            len = self.bcx.ins().iadd_imm(len, 1);
             let sp = self.sp_at(len);
             for (i, value) in value.iter().enumerate() {
                 self.bcx.ins().store(MemFlags::trusted(), value, sp, i as i32 * 8);
@@ -498,11 +523,9 @@ impl<'a> FunctionCx<'a> {
         self.bcx.ins().brif(failure_cond, failure, &[], target, &[]);
 
         self.bcx.set_cold_block(failure);
-        self.bcx.seal_block(failure);
         self.bcx.switch_to_block(failure);
         self.build_return(ret);
 
-        self.bcx.seal_block(target);
         self.bcx.switch_to_block(target);
     }
 
@@ -516,7 +539,7 @@ impl<'a> FunctionCx<'a> {
         }
         let ret = self.bcx.ins().iconst(self.return_type, ret as i64);
         self.bcx.ins().return_(&[ret]);
-        // self.bcx.seal_block(old_block);
+        self.bcx.seal_block(old_block);
 
         let new_block = self.bcx.create_block();
         self.bcx.switch_to_block(new_block);
@@ -578,5 +601,27 @@ impl EvmWord {
 
     fn iter(&self) -> impl ExactSizeIterator<Item = Value> + '_ {
         self.values.iter().copied()
+    }
+}
+
+impl<I> std::ops::Index<I> for EvmWord
+where
+    [Value]: std::ops::Index<I>,
+{
+    type Output = <[Value] as std::ops::Index<I>>::Output;
+
+    #[inline]
+    fn index(&self, index: I) -> &Self::Output {
+        <[Value]>::index(&self.values, index)
+    }
+}
+
+impl<I> std::ops::IndexMut<I> for EvmWord
+where
+    [Value]: std::ops::IndexMut<I>,
+{
+    #[inline]
+    fn index_mut(&mut self, index: I) -> &mut Self::Output {
+        <[Value]>::index_mut(&mut self.values, index)
     }
 }
