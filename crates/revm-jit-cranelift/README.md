@@ -1,4 +1,4 @@
-# cranelift-jit-evm
+# revm-jit
 
 Experimental [JIT compiler][JIT] for [Ethereum Virtual Machine][EVM] bytecode using [Cranelift].
 

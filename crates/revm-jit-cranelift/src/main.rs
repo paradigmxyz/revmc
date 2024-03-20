@@ -1,9 +1,8 @@
 #![allow(missing_docs)]
 
-use std::path::PathBuf;
-
-use cranelift_jit_evm::Ret;
 use revm_interpreter::opcode as op;
+use revm_jit_cranelift::Ret;
+use std::path::PathBuf;
 
 fn main() -> color_eyre::Result<()> {
     let _ = color_eyre::install();
@@ -15,7 +14,7 @@ fn main() -> color_eyre::Result<()> {
         op::ADD,
         op::STOP,
     ];
-    let mut jit = cranelift_jit_evm::JitEvm::new();
+    let mut jit = revm_jit_cranelift::JitEvm::new();
     jit.dump_ir_to(Some(PathBuf::from("./target/")));
     let id = jit.compile(&bytecode)?;
     let f = jit.get_fn(id);

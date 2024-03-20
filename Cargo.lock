@@ -532,19 +532,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cranelift-jit-evm"
-version = "0.1.0"
-dependencies = [
- "color-eyre",
- "cranelift",
- "cranelift-jit",
- "cranelift-module",
- "cranelift-native",
- "revm-interpreter",
- "revm-primitives",
-]
-
-[[package]]
 name = "cranelift-module"
 version = "0.105.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1293,6 +1280,37 @@ dependencies = [
 [[package]]
 name = "revm-jit"
 version = "0.1.0"
+
+[[package]]
+name = "revm-jit-core"
+version = "0.1.0"
+dependencies = [
+ "color-eyre",
+ "revm-interpreter",
+ "revm-primitives",
+]
+
+[[package]]
+name = "revm-jit-cranelift"
+version = "0.1.0"
+dependencies = [
+ "color-eyre",
+ "cranelift",
+ "cranelift-jit",
+ "cranelift-module",
+ "cranelift-native",
+ "revm-interpreter",
+ "revm-primitives",
+]
+
+[[package]]
+name = "revm-jit-llvm"
+version = "0.1.0"
+dependencies = [
+ "color-eyre",
+ "revm-interpreter",
+ "revm-primitives",
+]
 
 [[package]]
 name = "revm-primitives"
