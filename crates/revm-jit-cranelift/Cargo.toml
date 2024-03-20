@@ -17,11 +17,13 @@ exclude.workspace = true
 workspace = true
 
 [dependencies]
+revm-jit-core.workspace = true
+
+revm-primitives.workspace = true
+
 cranelift = "0.105"
 cranelift-jit = "0.105"
 cranelift-module = "0.105"
 cranelift-native = "0.105"
-revm-primitives.workspace = true
-revm-interpreter.workspace = true
 
-color-eyre = "0.6"
+color-eyre.workspace = true

@@ -18,13 +18,17 @@ use std::{
     path::Path,
 };
 
-use crate::FunctionCx;
-
 #[derive(Clone, Debug)]
 pub(crate) struct CommentWriter {
     enabled: bool,
     global_comments: Vec<String>,
     entity_comments: HashMap<AnyEntity, String>,
+}
+
+impl Default for CommentWriter {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl CommentWriter {
@@ -131,55 +135,27 @@ impl FuncWriter for &'_ CommentWriter {
     }
 }
 
-impl FunctionCx<'_> {
-    pub(crate) fn add_global_comment<S: Into<String>>(&mut self, comment: S) {
-        self.clif_comments.add_global_comment(comment);
-    }
-
-    pub(crate) fn add_comment<S: Into<String> + AsRef<str>, E: Into<AnyEntity>>(
-        &mut self,
-        entity: E,
-        comment: S,
-    ) {
-        self.clif_comments.add_comment(entity, comment);
-    }
-}
-
 pub(crate) fn should_write_ir() -> bool {
     cfg!(debug_assertions)
 }
 
 pub(crate) fn write_ir_file(
-    output_dir: &Path,
-    name: &str,
-    write: impl FnOnce(&mut dyn Write) -> std::io::Result<()>,
+    path: &Path,
+    write: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>,
 ) {
-    let clif_output_dir = output_dir.join("clif");
-
-    match std::fs::create_dir(&clif_output_dir) {
-        Ok(()) => {}
-        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
-        res @ Err(_) => res.unwrap(),
-    }
-
-    let clif_file_name = clif_output_dir.join(name);
-
-    let res = std::fs::File::create(clif_file_name).and_then(|mut file| write(&mut file));
+    let res = std::fs::File::create(path).and_then(|mut file| write(&mut file));
     if let Err(err) = res {
         panic!("{err}")
     }
 }
 
 pub(crate) fn write_clif_file(
-    output_dir: &Path,
-    symbol_name: &str,
-    postfix: &str,
+    path: &Path,
     isa: &dyn TargetIsa,
     func: &Function,
     mut clif_comments: &CommentWriter,
 ) {
-    // FIXME work around filename too long errors
-    write_ir_file(output_dir, &format!("{}.{}.clif", symbol_name, postfix), |file| {
+    write_ir_file(path, |file| {
         let mut clif = String::new();
         cranelift::codegen::write::decorate_function(&mut clif_comments, &mut clif, func).unwrap();
 
@@ -195,17 +171,4 @@ pub(crate) fn write_clif_file(
         file.write_all(clif.as_bytes())?;
         Ok(())
     });
-}
-
-impl fmt::Debug for FunctionCx<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut clif = String::new();
-        cranelift::codegen::write::decorate_function(
-            &mut &self.clif_comments,
-            &mut clif,
-            self.bcx.func,
-        )
-        .unwrap();
-        writeln!(f, "\n{}", clif)
-    }
 }

@@ -20,4 +20,4 @@ workspace = true
 revm-primitives.workspace = true
 revm-interpreter.workspace = true
 
-color-eyre = "0.6"
+color-eyre.workspace = true

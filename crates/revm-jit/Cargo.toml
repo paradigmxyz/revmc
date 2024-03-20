@@ -17,3 +17,16 @@ exclude.workspace = true
 workspace = true
 
 [dependencies]
+revm-jit-core.workspace = true
+
+revm-jit-llvm = { workspace = true, optional = true }
+revm-jit-cranelift = { workspace = true, optional = true }
+
+revm-primitives.workspace = true
+revm-interpreter.workspace = true
+color-eyre.workspace = true
+
+[features]
+default = ["llvm"]
+llvm = ["dep:revm-jit-llvm"]
+cranelift = ["dep:revm-jit-cranelift"]

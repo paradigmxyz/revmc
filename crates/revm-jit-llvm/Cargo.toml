@@ -17,7 +17,13 @@ exclude.workspace = true
 workspace = true
 
 [dependencies]
+revm-jit-core.workspace = true
+
 revm-primitives.workspace = true
 revm-interpreter.workspace = true
 
-color-eyre = "0.6"
+color-eyre.workspace = true
+inkwell = { version = "0.4", default-features = true, features = [
+    "target-x86",
+    "llvm17-0-prefer-dynamic",
+] }

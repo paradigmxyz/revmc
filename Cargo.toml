@@ -1,5 +1,7 @@
 [workspace]
 members = ["crates/*"]
+# exclude cranelift as it doesn't work yet
+default-members = ["crates/revm-jit", "crates/revm-jit-core", "crates/revm-jit-llvm"]
 resolver = "2"
 
 [workspace.package]
@@ -23,5 +25,12 @@ rust.rust_2018_idioms = "deny"
 rustdoc.all = "warn"
 
 [workspace.dependencies]
-revm-primitives = "3.0.0"
-revm-interpreter = "3.3.0"
+revm-jit = { version = "0.1.0", path = "crates/revm-jit", default-features = false }
+revm-jit-core = { version = "0.1.0", path = "crates/revm-jit-core", default-features = false }
+revm-jit-cranelift = { version = "0.1.0", path = "crates/revm-jit-cranelift", default-features = false }
+revm-jit-llvm = { version = "0.1.0", path = "crates/revm-jit-llvm", default-features = false }
+
+revm-primitives = "3.1.0"
+revm-interpreter = "3.4.0"
+
+color-eyre = "0.6"
