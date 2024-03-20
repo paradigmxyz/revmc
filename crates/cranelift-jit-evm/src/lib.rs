@@ -40,6 +40,7 @@ pub struct JitEvm {
     function_counter: usize,
 }
 
+#[allow(clippy::new_without_default)]
 impl JitEvm {
     /// Returns `Ok(())` if the current architecture is supported, or `Err(())` if the host machine
     /// is not supported in the current configuration.
