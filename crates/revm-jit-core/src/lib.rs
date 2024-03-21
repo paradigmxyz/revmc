@@ -1,6 +1,8 @@
 //! TODO
 
 #![allow(missing_docs)]
+#![cfg_attr(not(test), warn(unused_extern_crates))]
+#![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
 
 mod context;
 pub use context::*;

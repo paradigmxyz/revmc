@@ -1,6 +1,7 @@
 //! TODO
 // #![doc = include_str!("../README.md")]
 #![cfg_attr(not(test), warn(unused_extern_crates))]
+#![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
 
 use inkwell::{
     attributes::{Attribute, AttributeLoc},

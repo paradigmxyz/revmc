@@ -50,18 +50,21 @@ impl<'a> RawBytecodeIter<'a> {
 }
 
 impl<'a> Iterator for RawBytecodeIter<'a> {
-    type Item = BytecodeOpcode<'a>;
+    type Item = RawOpcode<'a>;
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         self.iter.next().copied().map(|opcode| {
-            let immediate = imm_len(opcode).and_then(|len| {
+            let len = imm_len(opcode);
+            let immediate = if len > 0 {
                 let r = self.iter.as_slice().get(..len);
                 // TODO: Use `advance_by` when stable.
                 self.iter.by_ref().take(len).for_each(drop);
                 r
-            });
-            BytecodeOpcode { opcode, immediate }
+            } else {
+                None
+            };
+            RawOpcode { opcode, immediate }
         })
     }
 
@@ -76,20 +79,20 @@ impl std::iter::FusedIterator for RawBytecodeIter<'_> {}
 
 /// An opcode and its immediate data. Returned by [`RawBytecodeIterator`].
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct BytecodeOpcode<'a> {
+pub struct RawOpcode<'a> {
     /// The opcode.
     pub opcode: u8,
     /// The immediate data, if any.
     pub immediate: Option<&'a [u8]>,
 }
 
-impl fmt::Debug for BytecodeOpcode<'_> {
+impl fmt::Debug for RawOpcode<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Display::fmt(self, f)
     }
 }
 
-impl fmt::Display for BytecodeOpcode<'_> {
+impl fmt::Display for RawOpcode<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match OPCODE_JUMPMAP[self.opcode as usize] {
             Some(s) => f.write_str(s),
@@ -102,13 +105,22 @@ impl fmt::Display for BytecodeOpcode<'_> {
     }
 }
 
-/// Returns the length of the immediate data for the given opcode, if any.
+/// Returns the length of the immediate data for the given opcode, or `0` if none.
 #[inline]
-pub const fn imm_len(op: u8) -> Option<usize> {
+pub const fn imm_len(op: u8) -> usize {
     match op {
-        op::PUSH1..=op::PUSH32 => Some((op - op::PUSH0) as usize),
-        // op::DUPN | op::SWAPN => Some(2),
-        _ => None,
+        op::PUSH1..=op::PUSH32 => (op - op::PUSH0) as usize,
+        // op::DATALOADN => 1,
+        //
+        // op::RJUMP => 2,
+        // op::RJUMPI => 2,
+        // op::RJUMPV => 2,
+        // op::CALLF => 2,
+        // op::JUMPF => 2,
+        // op::DUPN => 1,
+        // op::SWAPN => 1,
+        // op::EXCHANGE => 1,
+        _ => 0,
     }
 }
 
@@ -127,11 +139,11 @@ mod tests {
         let bytecode = [0x01, 0x02, 0x03, 0x04, 0x05];
         let mut iter = RawBytecodeIter::new(&bytecode);
 
-        assert_eq!(iter.next(), Some(BytecodeOpcode { opcode: 0x01, immediate: None }));
-        assert_eq!(iter.next(), Some(BytecodeOpcode { opcode: 0x02, immediate: None }));
-        assert_eq!(iter.next(), Some(BytecodeOpcode { opcode: 0x03, immediate: None }));
-        assert_eq!(iter.next(), Some(BytecodeOpcode { opcode: 0x04, immediate: None }));
-        assert_eq!(iter.next(), Some(BytecodeOpcode { opcode: 0x05, immediate: None }));
+        assert_eq!(iter.next(), Some(RawOpcode { opcode: 0x01, immediate: None }));
+        assert_eq!(iter.next(), Some(RawOpcode { opcode: 0x02, immediate: None }));
+        assert_eq!(iter.next(), Some(RawOpcode { opcode: 0x03, immediate: None }));
+        assert_eq!(iter.next(), Some(RawOpcode { opcode: 0x04, immediate: None }));
+        assert_eq!(iter.next(), Some(RawOpcode { opcode: 0x05, immediate: None }));
         assert_eq!(iter.next(), None);
     }
 
@@ -140,14 +152,11 @@ mod tests {
         let bytecode = [op::PUSH0, op::PUSH1, 0x69, op::PUSH2, 0x01, 0x02];
         let mut iter = RawBytecodeIter::new(&bytecode);
 
-        assert_eq!(iter.next(), Some(BytecodeOpcode { opcode: op::PUSH0, immediate: None }));
+        assert_eq!(iter.next(), Some(RawOpcode { opcode: op::PUSH0, immediate: None }));
+        assert_eq!(iter.next(), Some(RawOpcode { opcode: op::PUSH1, immediate: Some(&[0x69]) }));
         assert_eq!(
             iter.next(),
-            Some(BytecodeOpcode { opcode: op::PUSH1, immediate: Some(&[0x69]) })
-        );
-        assert_eq!(
-            iter.next(),
-            Some(BytecodeOpcode { opcode: op::PUSH2, immediate: Some(&[0x01, 0x02]) })
+            Some(RawOpcode { opcode: op::PUSH2, immediate: Some(&[0x01, 0x02]) })
         );
         assert_eq!(iter.next(), None);
     }
@@ -157,7 +166,7 @@ mod tests {
         let bytecode = [op::PUSH2, 0x69];
         let mut iter = RawBytecodeIter::new(&bytecode);
 
-        assert_eq!(iter.next(), Some(BytecodeOpcode { opcode: op::PUSH2, immediate: None }));
+        assert_eq!(iter.next(), Some(RawOpcode { opcode: op::PUSH2, immediate: None }));
         assert_eq!(iter.next(), None);
     }
 

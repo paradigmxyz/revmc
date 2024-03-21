@@ -1,5 +1,6 @@
 #![doc = include_str!("../README.md")]
 #![cfg_attr(not(test), warn(unused_extern_crates))]
+#![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
 
 use cranelift::{codegen::ir::StackSlot, prelude::*};
 use cranelift_jit::{JITBuilder, JITModule};

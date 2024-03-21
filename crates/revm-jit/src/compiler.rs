@@ -112,8 +112,8 @@ impl<B: Builder> FunctionCx<B> {
     }
 
     fn translate_opcode(&mut self, opcode: u8, imm: Option<&[u8]>) -> Result<()> {
-        self.bcx.nop();
         /*
+        self.bcx.nop();
         if self.clif_comments.enabled() {
             let inst = self.last_inst();
             let mut comment = String::with_capacity(16);
