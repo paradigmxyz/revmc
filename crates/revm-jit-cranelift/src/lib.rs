@@ -215,6 +215,10 @@ impl<'a> Builder for JitEvmCraneliftBuilder<'a> {
         self.bcx.block_params(block)[index]
     }
 
+    fn bool_const(&mut self, value: bool) -> Self::Value {
+        self.iconst(types::I8, value as i64)
+    }
+
     fn iconst(&mut self, ty: Self::Type, value: i64) -> Self::Value {
         self.bcx.ins().iconst(ty, value)
     }

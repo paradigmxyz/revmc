@@ -49,6 +49,7 @@ pub trait Builder {
 
     fn fn_param(&mut self, index: usize) -> Self::Value;
 
+    fn bool_const(&mut self, value: bool) -> Self::Value;
     fn iconst(&mut self, ty: Self::Type, value: i64) -> Self::Value;
     fn iconst_256(&mut self, value: U256) -> Self::Value;
 

@@ -4,13 +4,14 @@
 
 use inkwell::{
     attributes::{Attribute, AttributeLoc},
+    basic_block::BasicBlock,
     context::Context,
     execution_engine::ExecutionEngine,
     module::Module,
     passes::PassBuilderOptions,
     targets::{CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine},
-    types::{BasicType, IntType, PointerType, StringRadix},
-    values::FunctionValue,
+    types::{BasicType, BasicTypeEnum, FunctionType, IntType, PointerType, StringRadix, VoidType},
+    values::{BasicValueEnum, FunctionValue, PointerValue},
     AddressSpace, IntPredicate, OptimizationLevel,
 };
 use revm_jit_core::{Backend, Builder, ContextStack, Error, IntCC, JitEvmFn, Result};
@@ -29,7 +30,9 @@ pub struct JitEvmLlvmBackend<'ctx> {
     exec_engine: ExecutionEngine<'ctx>,
     machine: TargetMachine,
 
+    ty_void: VoidType<'ctx>,
     ty_ptr: PointerType<'ctx>,
+    ty_i1: IntType<'ctx>,
     ty_i8: IntType<'ctx>,
     ty_i32: IntType<'ctx>,
     ty_i256: IntType<'ctx>,
@@ -77,6 +80,8 @@ impl<'ctx> JitEvmLlvmBackend<'ctx> {
 
         let bcx = cx.create_builder();
 
+        let ty_void = cx.void_type();
+        let ty_i1 = cx.bool_type();
         let ty_i8 = cx.i8_type();
         let ty_i32 = cx.i32_type();
         let ty_i256 = cx.custom_width_int_type(256);
@@ -88,6 +93,8 @@ impl<'ctx> JitEvmLlvmBackend<'ctx> {
             module,
             exec_engine,
             machine,
+            ty_void,
+            ty_i1,
             ty_i8,
             ty_i32,
             ty_i256,
@@ -215,11 +222,33 @@ impl<'a, 'ctx> std::ops::DerefMut for JitEvmLlvmBuilder<'a, 'ctx> {
     }
 }
 
+impl<'a, 'ctx> JitEvmLlvmBuilder<'a, 'ctx> {
+    fn assume_function(&mut self) -> FunctionValue<'ctx> {
+        self.get_function_or("llvm.assume", |this| {
+            this.ty_void.fn_type(&[this.ty_i1.into()], false)
+        })
+    }
+
+    fn get_function_or(
+        &mut self,
+        name: &str,
+        mk_ty: impl FnOnce(&mut Self) -> FunctionType<'ctx>,
+    ) -> FunctionValue<'ctx> {
+        match self.module.get_function(name) {
+            Some(function) => function,
+            None => {
+                let ty = mk_ty(self);
+                self.module.add_function(name, ty, None)
+            }
+        }
+    }
+}
+
 impl<'a, 'ctx> Builder for JitEvmLlvmBuilder<'a, 'ctx> {
-    type Type = inkwell::types::BasicTypeEnum<'ctx>;
-    type Value = inkwell::values::BasicValueEnum<'ctx>;
-    type StackSlot = inkwell::values::PointerValue<'ctx>;
-    type BasicBlock = inkwell::basic_block::BasicBlock<'ctx>;
+    type Type = BasicTypeEnum<'ctx>;
+    type Value = BasicValueEnum<'ctx>;
+    type StackSlot = PointerValue<'ctx>;
+    type BasicBlock = BasicBlock<'ctx>;
 
     fn type_ptr(&self) -> Self::Type {
         self.ty_ptr.into()
@@ -261,8 +290,18 @@ impl<'a, 'ctx> Builder for JitEvmLlvmBuilder<'a, 'ctx> {
     }
 
     fn set_cold_block(&mut self, block: Self::BasicBlock) {
-        let _ = block;
-        // TODO: call llvm assume with cold attribute
+        let prev = self.current_block();
+        self.switch_to_block(block);
+
+        let function = self.assume_function();
+        let true_ = self.bool_const(true);
+        let callsite = self.bcx.build_call(function, &[true_.into()], "cold").unwrap();
+        let cold = self.cx.create_enum_attribute(Attribute::get_named_enum_kind_id("cold"), 1);
+        callsite.add_attribute(AttributeLoc::Function, cold);
+
+        if let Some(prev) = prev {
+            self.switch_to_block(prev);
+        }
     }
 
     fn current_block(&mut self) -> Option<Self::BasicBlock> {
@@ -271,6 +310,10 @@ impl<'a, 'ctx> Builder for JitEvmLlvmBuilder<'a, 'ctx> {
 
     fn fn_param(&mut self, index: usize) -> Self::Value {
         self.function.get_nth_param(index as _).unwrap()
+    }
+
+    fn bool_const(&mut self, value: bool) -> Self::Value {
+        self.ty_i1.const_int(value as u64, false).into()
     }
 
     fn iconst(&mut self, ty: Self::Type, value: i64) -> Self::Value {
