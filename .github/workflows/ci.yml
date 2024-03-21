@@ -23,12 +23,14 @@ jobs:
       - uses: KyleMayes/install-llvm-action@v1
         with:
           version: ${{ env.LLVM_VERSION }}
+      - name: llvm-config
+        run: llvm-config --version --bindir --libdir
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
       - name: test
-        run: cargo test --workspace
+        run: cargo test --all-features --workspace --verbose
 
   feature-checks:
     runs-on: ubuntu-latest

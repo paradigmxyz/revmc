@@ -21,6 +21,11 @@ pub use cranelift::JitEvmCraneliftBackend;
 #[doc(inline)]
 pub use revm_jit_cranelift as cranelift;
 
+#[doc(no_inline)]
+pub use revm_interpreter as interpreter;
+#[doc(no_inline)]
+pub use revm_primitives as primitives;
+
 mod compiler;
 pub use compiler::JitEvm;
 

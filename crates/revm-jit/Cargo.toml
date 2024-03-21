@@ -30,3 +30,9 @@ color-eyre.workspace = true
 default = ["llvm"]
 llvm = ["dep:revm-jit-llvm"]
 cranelift = ["dep:revm-jit-cranelift"]
+
+[[bin]]
+name = "revm-jit"
+path = "src/main.rs"
+required-features = ["llvm"]
+doc = false
