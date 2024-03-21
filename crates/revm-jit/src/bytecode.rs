@@ -77,7 +77,7 @@ impl<'a> Iterator for RawBytecodeIter<'a> {
 
 impl std::iter::FusedIterator for RawBytecodeIter<'_> {}
 
-/// An opcode and its immediate data. Returned by [`RawBytecodeIterator`].
+/// An opcode and its immediate data. Returned by [`RawBytecodeIter`].
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct RawOpcode<'a> {
     /// The opcode.

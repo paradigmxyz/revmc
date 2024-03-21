@@ -1,9 +1,7 @@
 #![allow(missing_docs)]
 
 use revm_interpreter::opcode as op;
-use revm_jit::JitEvm;
-use revm_jit_core::{ContextStack, Ret};
-use revm_jit_llvm::JitEvmLlvmBackend;
+use revm_jit::{ContextStack, JitEvm, Ret};
 use std::path::PathBuf;
 
 fn main() -> color_eyre::Result<()> {
@@ -13,8 +11,8 @@ fn main() -> color_eyre::Result<()> {
     let _ = color_eyre::install();
 
     // Build the compiler.
-    let context = revm_jit_llvm::inkwell::context::Context::create();
-    let backend = JitEvmLlvmBackend::new(&context).unwrap();
+    let context = revm_jit::llvm::inkwell::context::Context::create();
+    let backend = revm_jit::llvm::JitEvmLlvmBackend::new(&context).unwrap();
     let mut jit = JitEvm::new(backend);
     jit.dump_to(Some(PathBuf::from("./target/")));
 
