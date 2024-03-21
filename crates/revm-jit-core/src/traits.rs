@@ -52,12 +52,12 @@ pub trait Builder {
     fn iconst(&mut self, ty: Self::Type, value: i64) -> Self::Value;
     fn iconst_256(&mut self, value: U256) -> Self::Value;
 
-    fn new_stack_slot(&mut self, ty: Self::Type) -> Self::StackSlot;
-    fn stack_load(&mut self, ty: Self::Type, slot: Self::StackSlot, offset: i32) -> Self::Value;
-    fn stack_store(&mut self, value: Self::Value, slot: Self::StackSlot, offset: i32);
+    fn new_stack_slot(&mut self, ty: Self::Type, name: &str) -> Self::StackSlot;
+    fn stack_load(&mut self, ty: Self::Type, slot: Self::StackSlot, name: &str) -> Self::Value;
+    fn stack_store(&mut self, value: Self::Value, slot: Self::StackSlot);
 
-    fn load(&mut self, ty: Self::Type, ptr: Self::Value, offset: i32) -> Self::Value;
-    fn store(&mut self, value: Self::Value, ptr: Self::Value, offset: i32);
+    fn load(&mut self, ty: Self::Type, ptr: Self::Value, name: &str) -> Self::Value;
+    fn store(&mut self, value: Self::Value, ptr: Self::Value);
 
     fn nop(&mut self);
     fn ret(&mut self, values: &[Self::Value]);
@@ -71,6 +71,19 @@ pub trait Builder {
         then_block: Self::BasicBlock,
         else_block: Self::BasicBlock,
     );
+    fn select(
+        &mut self,
+        cond: Self::Value,
+        then_value: Self::Value,
+        else_value: Self::Value,
+    ) -> Self::Value;
+    fn lazy_select(
+        &mut self,
+        cond: Self::Value,
+        ty: Self::Type,
+        then_value: impl FnOnce(&mut Self, Self::BasicBlock) -> Self::Value,
+        else_value: impl FnOnce(&mut Self, Self::BasicBlock) -> Self::Value,
+    ) -> Self::Value;
 
     fn iadd(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
     fn isub(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
@@ -79,9 +92,23 @@ pub trait Builder {
     fn sdiv(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
     fn urem(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
     fn srem(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
+    fn ipow(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
 
     fn iadd_imm(&mut self, lhs: Self::Value, rhs: i64) -> Self::Value;
+    fn isub_imm(&mut self, lhs: Self::Value, rhs: i64) -> Self::Value;
     fn imul_imm(&mut self, lhs: Self::Value, rhs: i64) -> Self::Value;
+
+    fn bitor(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
+    fn bitand(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
+    fn bitxor(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
+    fn bitnot(&mut self, value: Self::Value) -> Self::Value;
+
+    fn ishl(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
+    fn ushr(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
+    fn sshr(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
+
+    fn zext(&mut self, ty: Self::Type, value: Self::Value) -> Self::Value;
+    fn sext(&mut self, ty: Self::Type, value: Self::Value) -> Self::Value;
 
     fn gep_add(&mut self, ty: Self::Type, ptr: Self::Value, offset: Self::Value) -> Self::Value;
 }

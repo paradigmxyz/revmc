@@ -101,7 +101,11 @@ impl Backend for JitEvmCraneliftBackend {
         self.ctx.func.signature.returns.push(AbiParam::new(types::I32));
         let _id = self.module.declare_function(name, Linkage::Export, &self.ctx.func.signature)?;
         let bcx = FunctionBuilder::new(&mut self.ctx.func, &mut self.builder_context);
-        Ok(JitEvmCraneliftBuilder { bcx, ptr_type })
+        Ok(JitEvmCraneliftBuilder {
+            bcx,
+            ptr_type,
+            // var_count: 0
+        })
     }
 
     fn optimize_function(&mut self, name: &str) -> Result<()> {
@@ -136,6 +140,29 @@ impl Backend for JitEvmCraneliftBackend {
 pub struct JitEvmCraneliftBuilder<'a> {
     bcx: FunctionBuilder<'a>,
     ptr_type: Type,
+    // var_count: usize,
+}
+
+impl<'a> JitEvmCraneliftBuilder<'a> {
+    // TODO: How to do this
+    // fn new_var(&mut self, name: &str) -> Variable {
+    //     let var = Variable::new(self.var_count);
+    //     let label = ValueLabel::new(self.var_count);
+    //     self.bcx.set_val_label(var, label);
+    //     self.var_count += 1;
+    //     var
+    // }
+
+    // fn declare_var(&mut self, ty: Type, value: Value, name: &str) {
+    //     if name.is_empty() {
+    //         return;
+    //     }
+    //     let var = self.new_var(name);
+    //     self.bcx.declare_var(var, ty);
+    //     self.bcx.def_var(var, value);
+    //     let label = format!("{name} ({var})");
+    //     self.bcx.set_val_label(val, label);
+    // }
 }
 
 impl<'a> Builder for JitEvmCraneliftBuilder<'a> {
@@ -197,27 +224,38 @@ impl<'a> Builder for JitEvmCraneliftBuilder<'a> {
         unimplemented!("no i256 :(")
     }
 
-    fn new_stack_slot(&mut self, ty: Self::Type) -> Self::StackSlot {
+    fn new_stack_slot(&mut self, ty: Self::Type, name: &str) -> Self::StackSlot {
+        let _ = name;
         self.bcx.create_sized_stack_slot(StackSlotData {
             kind: StackSlotKind::ExplicitSlot,
             size: ty.bytes(),
         })
     }
 
-    fn stack_load(&mut self, ty: Self::Type, slot: Self::StackSlot, offset: i32) -> Self::Value {
-        self.bcx.ins().stack_load(ty, slot, offset)
+    fn stack_load(&mut self, ty: Self::Type, slot: Self::StackSlot, name: &str) -> Self::Value {
+        let value = self.bcx.ins().stack_load(ty, slot, 0);
+        let _ = name;
+        // if !name.is_empty() {
+        //     self.declare_var(ty, value, name);
+        // }
+        value
     }
 
-    fn stack_store(&mut self, value: Self::Value, slot: Self::StackSlot, offset: i32) {
-        self.bcx.ins().stack_store(value, slot, offset);
+    fn stack_store(&mut self, value: Self::Value, slot: Self::StackSlot) {
+        self.bcx.ins().stack_store(value, slot, 0);
     }
 
-    fn load(&mut self, ty: Self::Type, ptr: Self::Value, offset: i32) -> Self::Value {
-        self.bcx.ins().load(ty, MemFlags::trusted(), ptr, offset)
+    fn load(&mut self, ty: Self::Type, ptr: Self::Value, name: &str) -> Self::Value {
+        let value = self.bcx.ins().load(ty, MemFlags::trusted(), ptr, 0);
+        let _ = name;
+        // if !name.is_empty() {
+        //     self.declare_var(ty, value, name);
+        // }
+        value
     }
 
-    fn store(&mut self, value: Self::Value, ptr: Self::Value, offset: i32) {
-        self.bcx.ins().store(MemFlags::trusted(), value, ptr, offset);
+    fn store(&mut self, value: Self::Value, ptr: Self::Value) {
+        self.bcx.ins().store(MemFlags::trusted(), value, ptr, 0);
     }
 
     fn nop(&mut self) {
@@ -254,6 +292,44 @@ impl<'a> Builder for JitEvmCraneliftBuilder<'a> {
         self.bcx.ins().brif(cond, then_block, &[], else_block, &[]);
     }
 
+    fn select(
+        &mut self,
+        cond: Self::Value,
+        then_value: Self::Value,
+        else_value: Self::Value,
+    ) -> Self::Value {
+        self.bcx.ins().select(cond, then_value, else_value)
+    }
+
+    fn lazy_select(
+        &mut self,
+        cond: Self::Value,
+        ty: Self::Type,
+        then_value: impl FnOnce(&mut Self, Self::BasicBlock) -> Self::Value,
+        else_value: impl FnOnce(&mut Self, Self::BasicBlock) -> Self::Value,
+    ) -> Self::Value {
+        let then_block = self.create_block();
+        let else_block = self.create_block();
+        let done_block = self.create_block();
+        let done_value = self.bcx.append_block_param(done_block, ty);
+
+        self.brif(cond, then_block, else_block);
+
+        self.seal_block(then_block);
+        self.switch_to_block(then_block);
+        let then_value = then_value(self, then_block);
+        self.bcx.ins().jump(done_block, &[then_value]);
+
+        self.seal_block(else_block);
+        self.switch_to_block(else_block);
+        let else_value = else_value(self, else_block);
+        self.bcx.ins().jump(done_block, &[else_value]);
+
+        self.seal_block(done_block);
+        self.switch_to_block(done_block);
+        done_value
+    }
+
     fn iadd(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
         self.bcx.ins().iadd(lhs, rhs)
     }
@@ -282,12 +358,58 @@ impl<'a> Builder for JitEvmCraneliftBuilder<'a> {
         self.bcx.ins().srem(lhs, rhs)
     }
 
+    fn ipow(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
+        let _ = lhs;
+        let _ = rhs;
+        todo!("ipow")
+    }
+
     fn iadd_imm(&mut self, lhs: Self::Value, rhs: i64) -> Self::Value {
         self.bcx.ins().iadd_imm(lhs, rhs)
     }
 
+    fn isub_imm(&mut self, lhs: Self::Value, rhs: i64) -> Self::Value {
+        self.iadd_imm(lhs, -rhs)
+    }
+
     fn imul_imm(&mut self, lhs: Self::Value, rhs: i64) -> Self::Value {
         self.bcx.ins().imul_imm(lhs, rhs)
+    }
+
+    fn bitor(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
+        self.bcx.ins().bor(lhs, rhs)
+    }
+
+    fn bitand(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
+        self.bcx.ins().band(lhs, rhs)
+    }
+
+    fn bitxor(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
+        self.bcx.ins().bxor(lhs, rhs)
+    }
+
+    fn bitnot(&mut self, value: Self::Value) -> Self::Value {
+        self.bcx.ins().bnot(value)
+    }
+
+    fn ishl(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
+        self.bcx.ins().ishl(lhs, rhs)
+    }
+
+    fn ushr(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
+        self.bcx.ins().ushr(lhs, rhs)
+    }
+
+    fn sshr(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
+        self.bcx.ins().sshr(lhs, rhs)
+    }
+
+    fn zext(&mut self, ty: Self::Type, value: Self::Value) -> Self::Value {
+        self.bcx.ins().uextend(ty, value)
+    }
+
+    fn sext(&mut self, ty: Self::Type, value: Self::Value) -> Self::Value {
+        self.bcx.ins().sextend(ty, value)
     }
 
     fn gep_add(&mut self, ty: Self::Type, ptr: Self::Value, offset: Self::Value) -> Self::Value {

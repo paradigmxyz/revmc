@@ -22,8 +22,8 @@ fn main() -> color_eyre::Result<()> {
     #[rustfmt::skip]
     let bytecode = [
         op::PUSH1, 0x01,
-        op::PUSH1, 0x02,
-        op::ADD,
+        op::PUSH1, 0x00,
+        op::SDIV,
         op::STOP,
     ];
     let f = jit.compile(&bytecode)?;

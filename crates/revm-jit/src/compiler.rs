@@ -1,7 +1,7 @@
-use crate::{Backend, Builder, IntCC, JitEvmFn, Result, Ret};
+use crate::{Backend, Builder, IntCC, JitEvmFn, RawBytecodeIter, Result, Ret};
 use revm_interpreter::opcode as op;
 use revm_primitives::U256;
-use std::{path::PathBuf, slice};
+use std::path::PathBuf;
 
 const STACK_CAP: usize = 1024;
 // const WORD_SIZE: usize = 32;
@@ -82,9 +82,9 @@ fn translate<B: Builder>(mut bcx: B, bytecode: &[u8]) -> Result<()> {
     let word_type = bcx.type_int(256);
     // let stack_type = bcx.type_array(word_type, STACK_CAP as _);
 
-    let stack_len = bcx.new_stack_slot(isize_type);
+    let stack_len = bcx.new_stack_slot(isize_type, "len_slot");
     let zero = bcx.iconst(isize_type, 0);
-    bcx.stack_store(zero, stack_len, 0);
+    bcx.stack_store(zero, stack_len);
 
     let sp = bcx.fn_param(0);
 
@@ -105,14 +105,13 @@ struct FunctionCx<B: Builder> {
 
 impl<B: Builder> FunctionCx<B> {
     fn translate_bytecode(&mut self, bytecode: &[u8]) -> Result<()> {
-        let mut iter = bytecode.iter();
-        while let Some(&opcode) = iter.next() {
-            self.translate_opcode(opcode, &mut iter)?;
+        for op in RawBytecodeIter::new(bytecode) {
+            self.translate_opcode(op.opcode, op.immediate)?;
         }
         Ok(())
     }
 
-    fn translate_opcode(&mut self, opcode: u8, iter: &mut slice::Iter<'_, u8>) -> Result<()> {
+    fn translate_opcode(&mut self, opcode: u8, imm: Option<&[u8]>) -> Result<()> {
         self.bcx.nop();
         /*
         if self.clif_comments.enabled() {
@@ -139,46 +138,123 @@ impl<B: Builder> FunctionCx<B> {
         }
         */
 
-        let mut get_imm = |len: usize| {
-            let r = iter.as_slice().get(..len);
-            // This also takes care of the `None` case.
-            // TODO: Use `advance_by` when stable.
-            iter.take(len).for_each(drop);
-            r
-        };
+        macro_rules! unop {
+            ($op:ident) => {{
+                let mut a = self.pop();
+                a = self.bcx.$op(a);
+                self.push_unchecked(a);
+            }};
+        }
+
+        macro_rules! binop {
+            ($op:ident) => {{
+                let [a, b] = self.popn();
+                let r = self.bcx.$op(a, b);
+                self.push_unchecked(r);
+            }};
+            (@if_not_zero $op:ident $(, $extra_cond:expr)?) => {{
+                let [a, b] = self.popn();
+                let cond = self.bcx.icmp_imm(IntCC::Equal, b, 0);
+                let r = self.bcx.lazy_select(
+                    cond,
+                    self.word_type,
+                    |bcx, block| {
+                        bcx.set_cold_block(block);
+                        bcx.iconst_256(U256::ZERO)
+                    },
+                    |bcx, _op_block| {
+                        // TODO: segfault ??
+                        // $(
+                        //     let cond = $extra_cond(bcx, a, b);
+                        //     return bcx.lazy_select(
+                        //         cond,
+                        //         self.word_type,
+                        //         |bcx, block| {
+                        //             bcx.set_cold_block(block);
+                        //             bcx.iconst_256(U256::ZERO)
+                        //         },
+                        //         |bcx, _block| bcx.$op(a, b),
+                        //     );
+                        //     #[allow(unreachable_code)]
+                        // )?
+                        bcx.$op(a, b)
+                    },
+                );
+                self.push_unchecked(r);
+            }};
+        }
+
+        macro_rules! cmp_op {
+            ($op:ident) => {{
+                let [a, b] = self.popn();
+                let r = self.bcx.icmp(IntCC::$op, a, b);
+                let r = self.bcx.zext(self.word_type, r);
+                self.push_unchecked(r);
+            }};
+        }
+
         match opcode {
             op::STOP => self.build_return(Ret::Stop),
 
-            op::ADD => {
-                let [a, b] = self.popn();
-                let r = self.bcx.iadd(a, b);
+            op::ADD => binop!(iadd),
+            op::MUL => binop!(imul),
+            op::SUB => binop!(isub),
+            op::DIV => binop!(@if_not_zero udiv),
+            op::SDIV => binop!(@if_not_zero sdiv, |bcx: &mut B, a, b| {
+                let min = bcx.iconst_256(I256_MIN);
+                let a_is_min = bcx.icmp(IntCC::Equal, a, min);
+                let b_is_neg1 = bcx.icmp_imm(IntCC::Equal, b, -1);
+                bcx.bitand(a_is_min, b_is_neg1)
+            }),
+            op::MOD => binop!(@if_not_zero urem),
+            op::SMOD => binop!(@if_not_zero srem),
+            op::ADDMOD => {
+                // TODO
+                // let [a, b, c] = self.popn();
+            }
+            op::MULMOD => {
+                // TODO
+                // let [a, b, c] = self.popn();
+            }
+            op::EXP => {
+                // TODO
+                // let [base, exponent] = self.popn();
+                // let r = self.bcx.ipow(base, exponent);
+                // self.push_unchecked(r);
+            }
+            op::SIGNEXTEND => {
+                // TODO
+                // let [a, b] = self.popn();
+                // let r = self.bcx.sign_extend(a, b);
+                // self.push_unchecked(r);
+            }
+
+            op::LT => cmp_op!(UnsignedLessThan),
+            op::GT => cmp_op!(UnsignedGreaterThan),
+            op::SLT => cmp_op!(SignedLessThan),
+            op::SGT => cmp_op!(SignedGreaterThan),
+            op::EQ => cmp_op!(Equal),
+            op::ISZERO => {
+                let a = self.pop();
+                let r = self.bcx.icmp_imm(IntCC::Equal, a, 0);
+                let r = self.bcx.zext(self.word_type, r);
                 self.push_unchecked(r);
             }
-            op::MUL => {}
-            op::SUB => {}
-            op::DIV => {}
-            op::SDIV => {}
-            op::MOD => {}
-            op::SMOD => {}
-            op::ADDMOD => {}
-            op::MULMOD => {}
-            op::EXP => {}
-            op::SIGNEXTEND => {}
-
-            op::LT => {}
-            op::GT => {}
-            op::SLT => {}
-            op::SGT => {}
-            op::EQ => {}
-            op::ISZERO => {}
-            op::AND => {}
-            op::OR => {}
-            op::XOR => {}
-            op::NOT => {}
-            op::BYTE => {}
-            op::SHL => {}
-            op::SHR => {}
-            op::SAR => {}
+            op::AND => binop!(bitand),
+            op::OR => binop!(bitor),
+            op::XOR => binop!(bitxor),
+            op::NOT => unop!(bitnot),
+            op::BYTE => {
+                // TODO
+                // let [index, value] = self.popn();
+                // let cond = self.bcx.icmp_imm(IntCC::UnsignedLessThan, value, 32);
+                // let zero = self.bcx.iconst_256(U256::ZERO);
+                // let r = self.bcx.select(cond, cond, zero);
+                // self.push_unchecked(r);
+            }
+            op::SHL => binop!(ishl),
+            op::SHR => binop!(ushr),
+            op::SAR => binop!(sshr),
 
             op::KECCAK256 => {}
 
@@ -224,7 +300,9 @@ impl<B: Builder> FunctionCx<B> {
             op::PC => {}
             op::MSIZE => {}
             op::GAS => {}
-            op::JUMPDEST => {}
+            op::JUMPDEST => {
+                self.bcx.nop();
+            }
             op::TLOAD => {}
             op::TSTORE => {}
 
@@ -233,8 +311,7 @@ impl<B: Builder> FunctionCx<B> {
                 self.push(value);
             }
             op::PUSH1..=op::PUSH32 => {
-                let n = opcode - op::PUSH0;
-                let value = get_imm(n as usize).map(U256::from_be_slice).unwrap_or_default();
+                let value = imm.map(U256::from_be_slice).unwrap_or_default();
                 let value = self.bcx.iconst_256(value);
                 self.push(value);
             }
@@ -258,7 +335,7 @@ impl<B: Builder> FunctionCx<B> {
             op::INVALID => {}
             op::SELFDESTRUCT => {}
 
-            _ => todo!("unknown opcode: {opcode}"),
+            _ => {}
         }
 
         Ok(())
@@ -287,7 +364,7 @@ impl<B: Builder> FunctionCx<B> {
         let mut len = self.load_len();
         for &value in values {
             let sp = self.sp_at(len);
-            self.bcx.store(value, sp, 0);
+            self.bcx.store(value, sp);
             len = self.bcx.iadd_imm(len, 1);
         }
         self.store_len(len);
@@ -301,15 +378,17 @@ impl<B: Builder> FunctionCx<B> {
     /// Removes the topmost `N` elements from the stack and returns them.
     fn popn<const N: usize>(&mut self) -> [B::Value; N] {
         debug_assert_ne!(N, 0);
+        debug_assert!(N < 26, "too many pops");
 
         let mut len = self.load_len();
         let failure_cond = self.bcx.icmp_imm(IntCC::UnsignedLessThan, len, N as i64);
         self.build_failure(failure_cond, Ret::StackUnderflow);
 
-        let ret = std::array::from_fn(|_i| {
-            len = self.bcx.iadd_imm(len, -1);
+        let ret = std::array::from_fn(|i| {
+            len = self.bcx.isub_imm(len, 1);
             let sp = self.sp_at(len);
-            self.load_word(sp)
+            let name = b'a' + i as u8;
+            self.load_word(sp, core::str::from_utf8(&[name]).unwrap())
         });
         self.store_len(len);
         ret
@@ -325,7 +404,7 @@ impl<B: Builder> FunctionCx<B> {
         self.build_failure(failure_cond, Ret::StackUnderflow);
 
         let sp = self.sp_from_top(len, n as usize);
-        let value = self.bcx.load(self.word_type, sp, 0);
+        let value = self.load_word(sp, &format!("dup{n}"));
         self.push(value);
     }
 
@@ -338,45 +417,33 @@ impl<B: Builder> FunctionCx<B> {
         self.build_failure(failure_cond, Ret::StackUnderflow);
 
         // let tmp;
-        /* let tmp = self.bcx.create_sized_stack_slot(StackSlotData {
-            kind: StackSlotKind::ExplicitSlot,
-            size: WORD_SIZE as _,
-        });
+        let tmp = self.bcx.new_stack_slot(self.word_type, "tmp");
         // tmp = a;
         let a_sp = self.sp_from_top(len, n as usize);
-        let a = self.load_word(a_sp);
-        for (i, value) in a.iter().enumerate() {
-            let offset = (i * EvmWord::LIMB) as i32;
-            self.bcx.stack_store(value, tmp, offset);
-        }
+        let a = self.load_word(a_sp, "a");
+        self.bcx.stack_store(a, tmp);
         // a = b;
         let b_sp = self.sp_from_top(len, 1);
-        let b = self.load_word(b_sp);
-        for (i, value) in b.iter().enumerate() {
-            let offset = (i * EvmWord::LIMB) as i32;
-            self.bcx.store(MemFlags::trusted(), value, a_sp, offset);
-        }
+        let b = self.load_word(b_sp, "b");
+        self.bcx.store(b, a_sp);
         // b = tmp;
-        for i in 0..EvmWord::N_LIMBS {
-            let offset = (i * EvmWord::LIMB) as i32;
-            let v = self.bcx.stack_load(types::I64, tmp, offset);
-            self.bcx.store(MemFlags::trusted(), v, b_sp, offset);
-        } */
+        let tmp = self.bcx.stack_load(self.word_type, tmp, "tmp");
+        self.bcx.store(tmp, b_sp);
     }
 
     /// Loads the word at the given pointer.
-    fn load_word(&mut self, ptr: B::Value) -> B::Value {
-        self.bcx.load(self.word_type, ptr, 0)
+    fn load_word(&mut self, ptr: B::Value, name: &str) -> B::Value {
+        self.bcx.load(self.word_type, ptr, name)
     }
 
     /// Loads the stack length.
     fn load_len(&mut self) -> B::Value {
-        self.bcx.stack_load(self.isize_type, self.stack_len, 0)
+        self.bcx.stack_load(self.isize_type, self.stack_len, "len")
     }
 
     /// Stores the stack length.
     fn store_len(&mut self, value: B::Value) {
-        self.bcx.stack_store(value, self.stack_len, 0);
+        self.bcx.stack_store(value, self.stack_len);
     }
 
     /// Returns the stack pointer at `len` (`&stack[len]`).
@@ -426,4 +493,302 @@ impl<B: Builder> FunctionCx<B> {
     //     let block = self.bcx.current_block().unwrap();
     //     self.bcx.func.layout.last_inst(block).unwrap()
     // }
+}
+
+#[cfg(test)]
+#[allow(dead_code, unused_imports)]
+mod tests {
+    use super::*;
+    use crate::*;
+    use revm_interpreter::opcode as op;
+    use revm_primitives::ruint::uint;
+
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn test_llvm() {
+        let context = revm_jit_llvm::inkwell::context::Context::create();
+        run_tests_with_backend(|| crate::JitEvmLlvmBackend::new(&context).unwrap());
+    }
+
+    struct TestCase<'a> {
+        name: &'a str,
+        bytecode: &'a [u8],
+
+        expected_return: Ret,
+        expected_stack: &'a [U256],
+    }
+
+    const fn bytecode_unop(op: u8, a: U256) -> [u8; 36] {
+        let mut code = [0; 36];
+
+        let mut i = 0;
+
+        code[i] = op::PUSH32;
+        i += 1;
+        {
+            let mut j = 0;
+            let bytes = a.to_be_bytes::<32>();
+            while j < 32 {
+                code[i] = bytes[j];
+                i += 1;
+                j += 1;
+            }
+        }
+
+        code[i] = op;
+        i += 1;
+        code[i] = op::STOP;
+        // i += 1;
+
+        code
+    }
+
+    const fn bytecode_binop(op: u8, a: U256, b: U256) -> [u8; 68] {
+        // NOTE: push `b` first.
+
+        let mut code = [0; 68];
+
+        let mut i = 0;
+
+        code[i] = op::PUSH32;
+        i += 1;
+        {
+            let mut j = 0;
+            let bytes = b.to_be_bytes::<32>();
+            while j < 32 {
+                code[i] = bytes[j];
+                i += 1;
+                j += 1;
+            }
+        }
+
+        code[i] = op::PUSH32;
+        i += 1;
+        {
+            let mut j = 0;
+            let bytes = a.to_be_bytes::<32>();
+            while j < 32 {
+                code[i] = bytes[j];
+                i += 1;
+                j += 1;
+            }
+        }
+
+        code[i] = op;
+        i += 1;
+        code[i] = op::STOP;
+        // i += 1;
+
+        code
+    }
+
+    macro_rules! testcases {
+        (@op $op:expr, $a:expr) => { bytecode_unop($op, $a) };
+        (@op $op:expr, $a:expr, $b:expr) => { bytecode_binop($op, $a, $b) };
+
+        ($($name:ident($op:expr, $a:expr $(, $b:expr)? => $ret:expr)),* $(,)?) => {
+            uint!([$(TestCase {
+                name: stringify!($name),
+                bytecode: &testcases!(@op $op, $a $(, $b)?),
+                expected_return: Ret::Stop,
+                expected_stack: &[$ret],
+            }),*])
+        };
+    }
+
+    static BASIC_CASES: &[TestCase<'static>] = &[
+        // TODO: pad code
+        // TestCase { name: "empty", bytecode: &[], expected_return: Ret::Stop, expected_stack: &[]
+        // },
+        TestCase {
+            name: "stop",
+            bytecode: &[op::STOP],
+            expected_return: Ret::Stop,
+            expected_stack: &[],
+        },
+        TestCase {
+            name: "underflow1",
+            bytecode: &[op::ADD, op::STOP],
+            expected_return: Ret::StackUnderflow,
+            expected_stack: &[],
+        },
+        TestCase {
+            name: "underflow2",
+            bytecode: &[op::PUSH0, op::ADD, op::STOP],
+            expected_return: Ret::StackUnderflow,
+            expected_stack: &[U256::ZERO],
+        },
+    ];
+
+    static ARITH_CASES: &[TestCase<'static>] = &testcases![
+        add1(op::ADD, 0_U256, 0_U256 => 0_U256),
+        add2(op::ADD, 1_U256, 2_U256 => 3_U256),
+        add3(op::ADD, 255_U256, 255_U256 => 510_U256),
+        add4(op::ADD, U256::MAX, 1_U256 => 0_U256),
+        add5(op::ADD, U256::MAX, 2_U256 => 1_U256),
+
+        sub1(op::SUB, 3_U256, 2_U256 => 1_U256),
+        sub2(op::SUB, 1_U256, 2_U256 => MINUS_1),
+        sub2(op::SUB, 1_U256, 3_U256 => MINUS_1.wrapping_sub(1_U256)),
+        sub3(op::SUB, 255_U256, 255_U256 => 0_U256),
+
+        mul1(op::MUL, 1_U256, 2_U256 => 2_U256),
+        mul2(op::MUL, 32_U256, 32_U256 => 1024_U256),
+        mul3(op::MUL, U256::MAX, 2_U256 => U256::MAX.wrapping_sub(1_U256)),
+
+        div1(op::DIV, 32_U256, 32_U256 => 1_U256),
+        div2(op::DIV, 1_U256, 2_U256 => 0_U256),
+        div3(op::DIV, 2_U256, 2_U256 => 1_U256),
+        div4(op::DIV, 3_U256, 2_U256 => 1_U256),
+        div5(op::DIV, 4_U256, 2_U256 => 2_U256),
+        div_by_zero(op::DIV, 32_U256, 0_U256 => 0_U256),
+
+        rem1(op::MOD, 32_U256, 32_U256 => 0_U256),
+        rem2(op::MOD, 1_U256, 2_U256 => 1_U256),
+        rem3(op::MOD, 2_U256, 2_U256 => 0_U256),
+        rem4(op::MOD, 3_U256, 2_U256 => 1_U256),
+        rem5(op::MOD, 4_U256, 2_U256 => 0_U256),
+        rem_by_zero(op::MOD, 32_U256, 0_U256 => 0_U256),
+
+        sdiv1(op::SDIV, 32_U256, 32_U256 => 1_U256),
+        sdiv2(op::SDIV, 1_U256, 2_U256 => 0_U256),
+        sdiv3(op::SDIV, 2_U256, 2_U256 => 1_U256),
+        sdiv4(op::SDIV, 3_U256, 2_U256 => 1_U256),
+        sdiv5(op::SDIV, 4_U256, 2_U256 => 2_U256),
+        sdiv_by_zero(op::SDIV, 32_U256, 0_U256 => 0_U256),
+        sdiv_min_by_1(op::SDIV, I256_MIN, 1_U256 => I256_MIN.wrapping_neg()),
+        sdiv_min_by_minus_1(op::SDIV, I256_MIN, MINUS_1 => I256_MIN),
+        sdiv_max1(op::SDIV, I256_MAX, 1_U256 => I256_MAX),
+        sdiv_max2(op::SDIV, I256_MAX, MINUS_1 => I256_MAX.wrapping_neg()),
+
+        srem1(op::SMOD, 32_U256, 32_U256 => 0_U256),
+        srem2(op::SMOD, 1_U256, 2_U256 => 1_U256),
+        srem3(op::SMOD, 2_U256, 2_U256 => 0_U256),
+        srem4(op::SMOD, 3_U256, 2_U256 => 1_U256),
+        srem5(op::SMOD, 4_U256, 2_U256 => 0_U256),
+        srem_by_zero(op::SMOD, 32_U256, 0_U256 => 0_U256),
+
+        // TODO:
+        // ADDMOD
+        // MULMOD
+        // EXP
+        // SIGNEXTEND
+    ];
+
+    static CMP_CASES: &[TestCase<'static>] = &testcases![
+        lt1(op::LT, 1_U256, 2_U256 => 1_U256),
+        lt2(op::LT, 2_U256, 1_U256 => 0_U256),
+        lt3(op::LT, 1_U256, 1_U256 => 0_U256),
+        lt4(op::LT, MINUS_1, 1_U256 => 0_U256),
+
+        gt1(op::GT, 1_U256, 2_U256 => 0_U256),
+        gt2(op::GT, 2_U256, 1_U256 => 1_U256),
+        gt3(op::GT, 1_U256, 1_U256 => 0_U256),
+        gt4(op::GT, MINUS_1, 1_U256 => 1_U256),
+
+        slt1(op::SLT, 1_U256, 2_U256 => 1_U256),
+        slt2(op::SLT, 2_U256, 1_U256 => 0_U256),
+        slt3(op::SLT, 1_U256, 1_U256 => 0_U256),
+        slt4(op::SLT, MINUS_1, 1_U256 => 1_U256),
+
+        sgt1(op::SGT, 1_U256, 2_U256 => 0_U256),
+        sgt2(op::SGT, 2_U256, 1_U256 => 1_U256),
+        sgt3(op::SGT, 1_U256, 1_U256 => 0_U256),
+        sgt4(op::SGT, MINUS_1, 1_U256 => 0_U256),
+
+        eq1(op::EQ, 1_U256, 2_U256 => 0_U256),
+        eq2(op::EQ, 2_U256, 1_U256 => 0_U256),
+        eq3(op::EQ, 1_U256, 1_U256 => 1_U256),
+
+        iszero1(op::ISZERO, 0_U256 => 1_U256),
+        iszero2(op::ISZERO, 1_U256 => 0_U256),
+        iszero3(op::ISZERO, 2_U256 => 0_U256),
+    ];
+
+    static BITWISE_CASES: &[TestCase<'static>] = &testcases![
+        and1(op::AND, 0_U256, 0_U256 => 0_U256),
+        and2(op::AND, 1_U256, 1_U256 => 1_U256),
+        and3(op::AND, 1_U256, 2_U256 => 0_U256),
+        and4(op::AND, 255_U256, 255_U256 => 255_U256),
+
+        or1(op::OR, 0_U256, 0_U256 => 0_U256),
+        or2(op::OR, 1_U256, 2_U256 => 3_U256),
+        or3(op::OR, 1_U256, 3_U256 => 3_U256),
+        or4(op::OR, 2_U256, 2_U256 => 2_U256),
+
+        xor1(op::XOR, 0_U256, 0_U256 => 0_U256),
+        xor2(op::XOR, 1_U256, 2_U256 => 3_U256),
+        xor3(op::XOR, 1_U256, 3_U256 => 2_U256),
+        xor4(op::XOR, 2_U256, 2_U256 => 0_U256),
+
+        not1(op::NOT, 0_U256 => U256::MAX),
+        not2(op::NOT, U256::MAX => 0_U256),
+        not3(op::NOT, 1_U256 => U256::MAX.wrapping_sub(1_U256)),
+
+        // TODO
+        // byte1(op::BYTE, 0_U256, 0_U256 => 0_U256),
+        // byte2(op::BYTE, 0_U256, 1_U256 => 0_U256),
+        // byte3(op::BYTE, 0_U256, 2_U256 => 0_U256),
+
+        shl1(op::SHL, 1_U256, 0_U256 => 1_U256),
+        shl2(op::SHL, 1_U256, 1_U256 => 2_U256),
+        shl3(op::SHL, 1_U256, 2_U256 => 4_U256),
+
+        shr1(op::SHR, 1_U256, 0_U256 => 1_U256),
+        shr2(op::SHR, 2_U256, 1_U256 => 1_U256),
+        shr3(op::SHR, 4_U256, 2_U256 => 1_U256),
+
+        sar1(op::SAR, 1_U256, 0_U256 => 1_U256),
+        sar2(op::SAR, 2_U256, 1_U256 => 1_U256),
+        sar3(op::SAR, 4_U256, 2_U256 => 1_U256),
+        sar4(op::SAR, MINUS_1, 1_U256 => MINUS_1),
+        sar5(op::SAR, MINUS_1, 2_U256 => MINUS_1),
+    ];
+
+    static ALL_TEST_CASES: &[(&str, &[TestCase<'static>])] = &[
+        ("basic", BASIC_CASES),
+        ("arithmetic", ARITH_CASES),
+        ("comparison", CMP_CASES),
+        ("bitwise", BITWISE_CASES),
+    ];
+
+    // TODO: Have to create a new backend per call for now
+    fn run_tests_with_backend<B: Backend>(make_backend: impl Fn() -> B) {
+        let backend_name = std::any::type_name::<B>().split("::").last().unwrap();
+        for &(group_name, cases) in ALL_TEST_CASES {
+            println!("Running test group `{group_name}` for backend `{backend_name}`");
+            run_test_group(&make_backend, cases);
+            println!();
+        }
+    }
+
+    fn run_test_group<B: Backend>(make_backend: impl Fn() -> B, cases: &[TestCase<'_>]) {
+        for (i, &TestCase { name, bytecode, expected_return, expected_stack }) in
+            cases.iter().enumerate()
+        {
+            let mut jit = JitEvm::new(make_backend());
+            // TODO: segfaults if we don't disable IR optimizations
+            jit.no_optimize();
+
+            println!("Running test case {i:2}: {name}");
+            println!("  bytecode: {}", format_bytecode(bytecode));
+            let f = jit.compile(bytecode).unwrap();
+
+            let mut stack = ContextStack::new();
+            let actual_return = unsafe { f(&mut stack) };
+            assert_eq!(actual_return, expected_return);
+
+            for (j, (chunk, expected)) in
+                stack.as_slice().chunks_exact(32).zip(expected_stack).enumerate()
+            {
+                let bytes: [u8; 32] = chunk.try_into().unwrap();
+                let actual = if cfg!(target_endian = "big") {
+                    U256::from_be_bytes(bytes)
+                } else {
+                    U256::from_le_bytes(bytes)
+                };
+                assert_eq!(actual, *expected, "stack item {j} does not match");
+            }
+        }
+    }
 }

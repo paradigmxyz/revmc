@@ -257,12 +257,12 @@ impl<'a, 'ctx> Builder for JitEvmLlvmBuilder<'a, 'ctx> {
 
     fn seal_block(&mut self, block: Self::BasicBlock) {
         let _ = block;
-        // TODO
+        // Nothing to do.
     }
 
     fn set_cold_block(&mut self, block: Self::BasicBlock) {
         let _ = block;
-        // TODO
+        // TODO: call llvm assume with cold attribute
     }
 
     fn current_block(&mut self) -> Option<Self::BasicBlock> {
@@ -286,39 +286,29 @@ impl<'a, 'ctx> Builder for JitEvmLlvmBuilder<'a, 'ctx> {
         self.ty_i256.const_int_from_string(&value.to_string(), StringRadix::Decimal).unwrap().into()
     }
 
-    fn new_stack_slot(&mut self, ty: Self::Type) -> Self::StackSlot {
-        self.bcx.build_alloca(ty, "").unwrap()
+    fn new_stack_slot(&mut self, ty: Self::Type, name: &str) -> Self::StackSlot {
+        self.bcx.build_alloca(ty, name).unwrap()
     }
 
-    fn stack_load(&mut self, ty: Self::Type, slot: Self::StackSlot, offset: i32) -> Self::Value {
-        if offset != 0 {
-            todo!("non-zero offset");
-        }
-        self.load(ty, slot.into(), offset)
+    fn stack_load(&mut self, ty: Self::Type, slot: Self::StackSlot, name: &str) -> Self::Value {
+        self.load(ty, slot.into(), name)
     }
 
-    fn stack_store(&mut self, value: Self::Value, slot: Self::StackSlot, offset: i32) {
-        if offset != 0 {
-            todo!("non-zero offset");
-        }
-        self.store(value, slot.into(), offset)
+    fn stack_store(&mut self, value: Self::Value, slot: Self::StackSlot) {
+        self.store(value, slot.into())
     }
 
-    fn load(&mut self, ty: Self::Type, ptr: Self::Value, offset: i32) -> Self::Value {
-        if offset != 0 {
-            todo!("non-zero offset");
-        }
-        self.bcx.build_load(ty, ptr.into_pointer_value(), "").unwrap()
+    fn load(&mut self, ty: Self::Type, ptr: Self::Value, name: &str) -> Self::Value {
+        self.bcx.build_load(ty, ptr.into_pointer_value(), name).unwrap()
     }
 
-    fn store(&mut self, value: Self::Value, ptr: Self::Value, offset: i32) {
-        if offset != 0 {
-            todo!("non-zero offset");
-        }
+    fn store(&mut self, value: Self::Value, ptr: Self::Value) {
         self.bcx.build_store(ptr.into_pointer_value(), value).unwrap();
     }
 
-    fn nop(&mut self) {}
+    fn nop(&mut self) {
+        // Nothing to do.
+    }
 
     fn ret(&mut self, values: &[Self::Value]) {
         match values {
@@ -352,6 +342,42 @@ impl<'a, 'ctx> Builder for JitEvmLlvmBuilder<'a, 'ctx> {
         else_block: Self::BasicBlock,
     ) {
         self.bcx.build_conditional_branch(cond.into_int_value(), then_block, else_block).unwrap();
+    }
+
+    fn select(
+        &mut self,
+        cond: Self::Value,
+        then_value: Self::Value,
+        else_value: Self::Value,
+    ) -> Self::Value {
+        self.bcx.build_select(cond.into_int_value(), then_value, else_value, "").unwrap()
+    }
+
+    fn lazy_select(
+        &mut self,
+        cond: Self::Value,
+        ty: Self::Type,
+        then_value: impl FnOnce(&mut Self, Self::BasicBlock) -> Self::Value,
+        else_value: impl FnOnce(&mut Self, Self::BasicBlock) -> Self::Value,
+    ) -> Self::Value {
+        let then_block = self.create_block();
+        let else_block = self.create_block();
+        let done_block = self.create_block();
+
+        self.brif(cond, then_block, else_block);
+
+        self.switch_to_block(then_block);
+        let then_value = then_value(self, then_block);
+        self.br(done_block);
+
+        self.switch_to_block(else_block);
+        let else_value = else_value(self, else_block);
+        self.br(done_block);
+
+        self.switch_to_block(done_block);
+        let phi = self.bcx.build_phi(ty, "").unwrap();
+        phi.add_incoming(&[(&then_value, then_block), (&else_value, else_block)]);
+        phi.as_basic_value()
     }
 
     fn iadd(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
@@ -394,14 +420,67 @@ impl<'a, 'ctx> Builder for JitEvmLlvmBuilder<'a, 'ctx> {
             .into()
     }
 
+    fn ipow(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
+        let _ = lhs;
+        let _ = rhs;
+        todo!("ipow")
+    }
+
     fn iadd_imm(&mut self, lhs: Self::Value, rhs: i64) -> Self::Value {
         let rhs = self.iconst(lhs.get_type(), rhs);
         self.iadd(lhs, rhs)
     }
 
+    fn isub_imm(&mut self, lhs: Self::Value, rhs: i64) -> Self::Value {
+        let rhs = self.iconst(lhs.get_type(), rhs);
+        self.isub(lhs, rhs)
+    }
+
     fn imul_imm(&mut self, lhs: Self::Value, rhs: i64) -> Self::Value {
         let rhs = self.iconst(lhs.get_type(), rhs);
         self.imul(lhs, rhs)
+    }
+
+    fn bitor(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
+        self.bcx.build_or(lhs.into_int_value(), rhs.into_int_value(), "").unwrap().into()
+    }
+
+    fn bitand(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
+        self.bcx.build_and(lhs.into_int_value(), rhs.into_int_value(), "").unwrap().into()
+    }
+
+    fn bitxor(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
+        self.bcx.build_xor(lhs.into_int_value(), rhs.into_int_value(), "").unwrap().into()
+    }
+
+    fn bitnot(&mut self, value: Self::Value) -> Self::Value {
+        self.bcx.build_not(value.into_int_value(), "").unwrap().into()
+    }
+
+    fn ishl(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
+        self.bcx.build_left_shift(lhs.into_int_value(), rhs.into_int_value(), "").unwrap().into()
+    }
+
+    fn ushr(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
+        self.bcx
+            .build_right_shift(lhs.into_int_value(), rhs.into_int_value(), false, "")
+            .unwrap()
+            .into()
+    }
+
+    fn sshr(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
+        self.bcx
+            .build_right_shift(lhs.into_int_value(), rhs.into_int_value(), true, "")
+            .unwrap()
+            .into()
+    }
+
+    fn zext(&mut self, ty: Self::Type, value: Self::Value) -> Self::Value {
+        self.bcx.build_int_z_extend(value.into_int_value(), ty.into_int_type(), "").unwrap().into()
+    }
+
+    fn sext(&mut self, ty: Self::Type, value: Self::Value) -> Self::Value {
+        self.bcx.build_int_s_extend(value.into_int_value(), ty.into_int_type(), "").unwrap().into()
     }
 
     fn gep_add(
