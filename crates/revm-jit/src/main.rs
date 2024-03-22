@@ -17,54 +17,7 @@ fn main() -> color_eyre::Result<()> {
     let backend =
         revm_jit::llvm::JitEvmLlvmBackend::new(&context, OptimizationLevel::Aggressive).unwrap();
     let mut jit = JitEvm::new(backend);
-    jit.dump_to(Some(PathBuf::from("./target/")));
-
-    /*
-    vec![
-        // input to the program (which fib number we want)
-        Push(2, U256::zero() + 6000 - 2), // 5 (needs to be >= 3)
-        // 1st/2nd fib number
-        Push(1, U256::zero()),
-        Push(1, U256::one()),
-        // 7
-
-        // MAINLOOP:
-        Jumpdest,
-        Dup3,
-        Iszero,
-        Push(1, U256::zero() + 28), // CLEANUP
-        Jumpi,
-        // 13
-
-        // fib step
-        Dup2,
-        Dup2,
-        Add,
-        Swap2,
-        Pop,
-        Swap1,
-        // 19
-
-        // decrement fib step counter
-        Swap2,
-        Push(1, U256::one()),
-        Swap1,
-        Sub,
-        Swap2,
-        // 25
-        Push(1, U256::zero() + 7), // goto MAINLOOP
-        Jump,
-        // 28
-
-        // CLEANUP:
-        Jumpdest,
-        Swap2,
-        Pop,
-        Pop,
-        // done: requested fib number is only element on the stack!
-        Stop,
-    ]
-    */
+    jit.set_dump_to(Some(PathBuf::from("./target/")));
 
     // Compile the bytecode.
     let input: u16 = 100;
@@ -117,7 +70,7 @@ fn main() -> color_eyre::Result<()> {
 
     // Run the compiled function.
     let mut stack = ContextStack::new();
-    let ret = unsafe { f(&mut stack) };
+    let ret = unsafe { f(&mut stack, 100000) };
     assert_eq!(ret, InstructionResult::Stop);
     println!("{}", stack.word(0));
 

@@ -15,7 +15,7 @@ pub(crate) struct Bytecode<'a> {
     pub(crate) opcodes: Vec<OpcodeData>,
     /// `JUMPDEST` map.
     pub(crate) jumpdests: BitVec,
-    /// The [`SpecID`].
+    /// The [`SpecId`].
     #[allow(dead_code)]
     pub(crate) spec: SpecId,
 }
@@ -132,7 +132,7 @@ pub(crate) struct OpcodeData {
     pub(crate) flags: OpcodeFlags,
     /// Opcode-specific data:
     /// - if the opcode has immediate data, this is a packed offset+length into the bytecode;
-    /// - `kind == StaticJump`: the jump target. Index into `opcodes`;
+    /// - `STATIC_JUMP in kind`: the jump target, already converted to an index into `opcodes`;
     /// - `opcode == op::PC`: the program counter, meaning `self.code[pc]` is the opcode;
     /// - otherwise: no meaning.
     pub(crate) data: u32,
@@ -183,7 +183,7 @@ impl OpcodeData {
 }
 
 bitflags::bitflags! {
-    /// [`Opcode`] flags.
+    /// [`OpcodeData`] flags.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub(crate) struct OpcodeFlags: u8 {
         /// No modifiers.

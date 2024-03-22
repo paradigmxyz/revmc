@@ -141,7 +141,7 @@ impl<'ctx> Backend for JitEvmLlvmBackend<'ctx> {
     }
 
     fn build_function(&mut self, name: &str) -> Result<Self::Builder<'_>> {
-        let params = &[self.ty_ptr.into()];
+        let params = &[self.ty_ptr.into(), self.ty_isize.into()];
         let fn_type = self.ty_i32.fn_type(params, false);
         let function = self.module.add_function(name, fn_type, None);
 

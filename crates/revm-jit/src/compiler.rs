@@ -18,8 +18,8 @@ type Opcode = usize;
 #[derive(Debug)]
 pub struct JitEvm<B> {
     backend: B,
-
     out_dir: Option<PathBuf>,
+    config: FcxConfig,
     function_counter: usize,
 }
 
@@ -32,7 +32,7 @@ impl<B: Backend + Default> Default for JitEvm<B> {
 impl<B: Backend> JitEvm<B> {
     /// Creates a new instance of the JIT compiler with the given backend.
     pub fn new(backend: B) -> Self {
-        Self { backend, out_dir: None, function_counter: 0 }
+        Self { backend, out_dir: None, config: FcxConfig::default(), function_counter: 0 }
     }
 
     /// Dumps the IR and potential to the given directory after compilation.
@@ -40,16 +40,43 @@ impl<B: Backend> JitEvm<B> {
     /// Disables dumping if `output_dir` is `None`.
     ///
     /// Creates a subdirectory with the name of the backend in the given directory.
-    pub fn dump_to(&mut self, output_dir: Option<PathBuf>) {
+    pub fn set_dump_to(&mut self, output_dir: Option<PathBuf>) {
         self.backend.set_is_dumping(output_dir.is_some());
+        self.config.comments_enabled = self.out_dir.is_some();
         self.out_dir = output_dir;
     }
 
-    /// Set the optimization level.
+    /// Sets the optimization level.
     ///
     /// Note that some backends may not support setting the optimization level after initialization.
+    ///
+    /// Defaults to the backend's initial optimization level.
     pub fn set_opt_level(&mut self, level: OptimizationLevel) {
         self.backend.set_opt_level(level);
+    }
+
+    /// Sets whether to disable gas accounting.
+    ///
+    /// Greatly improves compilation speed and performance, at the cost of not being able to check
+    /// for gas exhaustion.
+    ///
+    /// Use with care.
+    ///
+    /// Defaults to `false`.
+    pub fn set_disable_gas(&mut self, disable_gas: bool) {
+        self.config.disable_gas = disable_gas;
+    }
+
+    /// Sets the static gas limit.
+    ///
+    /// Improves performance by being able to skip most gas checks.
+    ///
+    /// Has no effect if `disable_gas` is set, and will make the compiled function ignore the gas
+    /// limit argument.
+    ///
+    /// Defaults to `None`.
+    pub fn set_static_gas_limit(&mut self, static_gas_limit: Option<u64>) {
+        self.config.static_gas_limit = static_gas_limit;
     }
 
     fn new_name(&mut self) -> String {
@@ -76,7 +103,7 @@ impl<B: Backend> JitEvm<B> {
         let name = &self.new_name()[..];
         let bcx = self.backend.build_function(name)?;
 
-        trace_time!("translate", || FunctionCx::translate(bcx, &bytecode))?;
+        trace_time!("translate", || FunctionCx::translate(bcx, bytecode, &self.config))?;
 
         let verify = |b: &mut B| trace_time!("verify", || b.verify_function(name));
         if let Some(dir) = &self.out_dir {
@@ -114,7 +141,17 @@ impl<B: Backend> JitEvm<B> {
     }
 }
 
+#[derive(Clone, Debug, Default)]
+struct FcxConfig {
+    comments_enabled: bool,
+    disable_gas: bool,
+    static_gas_limit: Option<u64>,
+}
+
 struct FunctionCx<'a, B: Builder> {
+    disable_gas: bool,
+    comments_enabled: bool,
+
     /// The backend's function builder.
     bcx: B,
 
@@ -123,15 +160,21 @@ struct FunctionCx<'a, B: Builder> {
     word_type: B::Type,
     return_type: B::Type,
 
-    /// The stack length slot.
+    /// The stack length slot. `isize`.
     stack_len: B::StackSlot,
     /// The stack pointer. Constant throughout the function, passed in the arguments.
     sp: B::Value,
+    /// The amount of gas used. `isize`.
+    gas_used: B::StackSlot,
+    /// The gas limit. Constant throughout the function, passed in the arguments or set statically.
+    gas_limit: B::Value,
 
     /// The bytecode being translated.
     bytecode: &'a Bytecode<'a>,
     /// All entry blocks for each opcode.
     op_blocks: Vec<B::BasicBlock>,
+    /// Opcode information.
+    op_infos: &'static [op::OpInfo],
     /// The current opcode being translated.
     ///
     /// Note that `self.op_blocks[current_opcode]` does not necessarily equal the builder's current
@@ -140,7 +183,7 @@ struct FunctionCx<'a, B: Builder> {
 }
 
 impl<'a, B: Builder> FunctionCx<'a, B> {
-    fn translate(mut bcx: B, bytecode: &'a Bytecode<'a>) -> Result<()> {
+    fn translate(mut bcx: B, bytecode: &'a Bytecode<'a>, config: &FcxConfig) -> Result<()> {
         // Get common types.
         let isize_type = bcx.type_ptr_sized_int();
         let return_type = bcx.type_int(32);
@@ -148,11 +191,19 @@ impl<'a, B: Builder> FunctionCx<'a, B> {
         // let stack_type = bcx.type_array(word_type, STACK_CAP as _);
 
         // Set up entry block.
-        let stack_len = bcx.new_stack_slot(isize_type, "len_slot");
+        let stack_len = bcx.new_stack_slot(isize_type, "len.addr");
         let zero = bcx.iconst(isize_type, 0);
         bcx.stack_store(zero, stack_len);
 
         let sp = bcx.fn_param(0);
+
+        let gas_used = bcx.new_stack_slot(isize_type, "gas_used.addr");
+        bcx.stack_store(zero, gas_used);
+        let gas_limit = if let Some(static_gas_limit) = config.static_gas_limit {
+            bcx.iconst(isize_type, static_gas_limit as i64)
+        } else {
+            bcx.fn_param(1)
+        };
 
         // Create all opcode entry blocks.
         let op_blocks: Vec<_> = bytecode
@@ -166,15 +217,23 @@ impl<'a, B: Builder> FunctionCx<'a, B> {
         assert!(!op_blocks.is_empty(), "translating empty bytecode");
         bcx.br(op_blocks[0]);
 
+        let op_infos = op::spec_opcode_gas(bytecode.spec);
+
         let mut fx = FunctionCx {
+            comments_enabled: config.comments_enabled,
+            disable_gas: config.disable_gas,
+
+            bcx,
             isize_type,
             word_type,
             return_type,
             stack_len,
             sp,
-            bcx,
+            gas_used,
+            gas_limit,
             bytecode,
             op_blocks,
+            op_infos,
             current_opcode: 0,
         };
         for i in 0..bytecode.opcodes.len() {
@@ -204,8 +263,11 @@ impl<'a, B: Builder> FunctionCx<'a, B> {
 
         // Make sure to run the epilogue before returning.
         macro_rules! goto_return {
-            () => {
+            ($comment:literal) => {
                 branch_to_next_opcode(self);
+                if self.comments_enabled {
+                    self.add_comment($comment);
+                }
                 goto_return!(no_branch);
             };
             (no_branch) => {
@@ -222,16 +284,13 @@ impl<'a, B: Builder> FunctionCx<'a, B> {
             goto_return!(build InstructionResult::NotActivated);
         }
 
-        if !data.flags.contains(OpcodeFlags::SKIP_GAS) {
-            // TODO: Account static gas here.
+        if !self.disable_gas && !data.flags.contains(OpcodeFlags::SKIP_GAS) {
+            let gas = self.op_infos[op_byte as usize].get_gas();
+            self.gas_cost_imm(gas);
         }
 
         if data.flags.contains(OpcodeFlags::SKIP_LOGIC) {
-            if self.comments_enabled() {
-                self.bcx.nop();
-                self.add_comment("skipped");
-            }
-            goto_return!();
+            goto_return!("skipped");
         }
 
         macro_rules! unop {
@@ -465,7 +524,7 @@ impl<'a, B: Builder> FunctionCx<'a, B> {
             _ => goto_return!(build InstructionResult::OpcodeNotFound),
         }
 
-        goto_return!();
+        goto_return!("normal exit");
     }
 
     /// Pushes a 256-bit value onto the stack, checking for stack overflow.
@@ -548,7 +607,7 @@ impl<'a, B: Builder> FunctionCx<'a, B> {
         self.build_failure(failure_cond, InstructionResult::StackUnderflow);
 
         // let tmp;
-        let tmp = self.bcx.new_stack_slot(self.word_type, "tmp");
+        let tmp = self.bcx.new_stack_slot(self.word_type, "tmp.addr");
         // tmp = a;
         let a_sp = self.sp_from_top(len, n as usize + 1);
         let a = self.load_word(a_sp, "a");
@@ -584,9 +643,31 @@ impl<'a, B: Builder> FunctionCx<'a, B> {
 
     /// Returns the stack pointer at `len` from the top (`&stack[CAPACITY - len]`).
     fn sp_from_top(&mut self, len: B::Value, n: usize) -> B::Value {
-        debug_assert!(n > 0);
+        debug_assert_ne!(n, 0);
         let len = self.bcx.isub_imm(len, n as i64);
         self.sp_at(len)
+    }
+
+    /// Builds a gas cost deduction for an immediate value.
+    fn gas_cost_imm(&mut self, cost: u32) {
+        if self.disable_gas || cost == 0 {
+            return;
+        }
+        let value = self.bcx.iconst(self.isize_type, cost as i64);
+        self.gas_cost(value);
+    }
+
+    /// Builds a gas cost deduction for a value.
+    fn gas_cost(&mut self, cost: B::Value) {
+        if self.disable_gas {
+            return;
+        }
+
+        let gas_used = self.bcx.stack_load(self.isize_type, self.gas_used, "gas_used");
+        let added = self.bcx.iadd(gas_used, cost);
+        let failure_cond = self.bcx.icmp(IntCC::UnsignedLessThan, self.gas_limit, added);
+        self.build_failure(failure_cond, InstructionResult::OutOfGas);
+        self.bcx.stack_store(added, self.gas_used);
     }
 
     /// `if failure_cond { return ret } else { ... }`
@@ -607,17 +688,12 @@ impl<'a, B: Builder> FunctionCx<'a, B> {
         let old_block = self.bcx.current_block();
         let ret = self.bcx.iconst(self.return_type, ret as i64);
         self.bcx.ret(&[ret]);
-        if self.comments_enabled() {
+        if self.comments_enabled {
             self.add_comment(&format!("return {ret:?}"));
         }
         if let Some(old_block) = old_block {
             self.bcx.seal_block(old_block);
         }
-    }
-
-    /// Returns whether comments are enabled.
-    fn comments_enabled(&self) -> bool {
-        true
     }
 
     /// Adds a comment to the current instruction.
@@ -1022,7 +1098,7 @@ mod tests {
             let f = jit.compile(bytecode, SpecId::LATEST).unwrap();
 
             let mut stack = ContextStack::new();
-            let actual_return = unsafe { f(&mut stack) };
+            let actual_return = unsafe { f(&mut stack, 10000) };
             assert_eq!(actual_return, expected_return);
 
             for (j, (chunk, expected)) in
@@ -1056,7 +1132,7 @@ mod tests {
             let mut jit = JitEvm::new(make_backend());
             let f = jit.compile(&code, SpecId::LATEST).unwrap();
             let mut stack = ContextStack::new();
-            let r = unsafe { f(&mut stack) };
+            let r = unsafe { f(&mut stack, 10000) };
             assert_eq!(r, InstructionResult::Stop);
             // Apparently the code does `fibonacci(input + 1)`.
             assert_eq!(stack.word(0), fibonacci_rust(input + 1));
@@ -1068,7 +1144,7 @@ mod tests {
             [[op::PUSH2].as_slice(), input.as_slice(), FIBONACCI_CODE].concat()
         }
 
-        // Modified from jitevm: https://github.com/paradigmxyz/jitevm/blob/5ab9260774a44d63e2a43b9fc5db14afe74684a0/src/test_data.rs#L3
+        // Modified from jitevm: https://github.com/paradigmxyz/jitevm/blob/f82261fc8a1a6c1a3d40025a910ba0ce3fcaed71/src/test_data.rs#L3
         #[rustfmt::skip]
         const FIBONACCI_CODE: &[u8] = &[
             // 1st/2nd fib number

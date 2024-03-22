@@ -115,6 +115,7 @@ impl Backend for JitEvmCraneliftBackend {
     fn build_function(&mut self, name: &str) -> Result<Self::Builder<'_>> {
         let ptr_type = self.module.target_config().pointer_type();
         self.ctx.func.signature.params.push(AbiParam::new(ptr_type));
+        self.ctx.func.signature.params.push(AbiParam::new(ptr_type));
         self.ctx.func.signature.returns.push(AbiParam::new(types::I32));
         let _id = self.module.declare_function(name, Linkage::Export, &self.ctx.func.signature)?;
         let bcx = FunctionBuilder::new(&mut self.ctx.func, &mut self.builder_context);

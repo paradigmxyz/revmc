@@ -3,7 +3,8 @@ use revm_primitives::U256;
 use std::mem::MaybeUninit;
 
 /// The signature of a JIT'd EVM bytecode.
-pub type JitEvmFn = unsafe extern "C" fn(*mut ContextStack) -> InstructionResult;
+pub type JitEvmFn =
+    unsafe extern "C" fn(stack: *mut ContextStack, gas_limit: usize) -> InstructionResult;
 
 /// JIT EVM context stack.
 #[repr(C, align(32))]
