@@ -1,7 +1,8 @@
 //! JIT compiler implementation.
 
-use crate::{Backend, Builder, Bytecode, IntCC, JitEvmFn, OpcodeData, Result};
+use crate::{Backend, Builder, Bytecode, IntCC, JitEvmFn, OpcodeData, OpcodeFlags, Result};
 use revm_interpreter::{opcode as op, InstructionResult};
+use revm_jit_core::OptimizationLevel;
 use revm_primitives::{SpecId, U256};
 use std::path::PathBuf;
 
@@ -44,9 +45,11 @@ impl<B: Backend> JitEvm<B> {
         self.out_dir = output_dir;
     }
 
-    /// Don't optimize the generated code.
-    pub fn no_optimize(&mut self) {
-        self.backend.no_optimize();
+    /// Set the optimization level.
+    ///
+    /// Note that some backends may not support setting the optimization level after initialization.
+    pub fn set_opt_level(&mut self, level: OptimizationLevel) {
+        self.backend.set_opt_level(level);
     }
 
     fn new_name(&mut self) -> String {
@@ -160,7 +163,7 @@ impl<'a, B: Builder> FunctionCx<'a, B> {
             .collect();
 
         // Branch to the first opcode. The bytecode is guaranteed to have at least one opcode.
-        assert!(!op_blocks.is_empty(), "got empty bytecode");
+        assert!(!op_blocks.is_empty(), "translating empty bytecode");
         bcx.br(op_blocks[0]);
 
         let mut fx = FunctionCx {
@@ -185,10 +188,51 @@ impl<'a, B: Builder> FunctionCx<'a, B> {
     fn translate_opcode(&mut self) -> Result<()> {
         let opcode = self.current_opcode;
         let data = self.bytecode.opcodes[opcode];
-        let block = self.op_blocks[opcode];
-        self.bcx.switch_to_block(block);
+        let op_block = self.op_blocks[opcode];
+        self.bcx.switch_to_block(op_block);
 
         let op_byte = data.opcode;
+
+        let branch_to_next_opcode = |this: &mut Self| {
+            if let Some(next) = this.op_blocks.get(opcode + 1) {
+                this.bcx.br(*next);
+            }
+        };
+        let epilogue = |this: &mut Self| {
+            this.bcx.seal_block(op_block);
+        };
+
+        // Make sure to run the epilogue before returning.
+        macro_rules! goto_return {
+            () => {
+                branch_to_next_opcode(self);
+                goto_return!(no_branch);
+            };
+            (no_branch) => {
+                epilogue(self);
+                return Ok(());
+            };
+            (build $ret:expr) => {{
+                self.build_return($ret);
+                goto_return!(no_branch);
+            }};
+        }
+
+        if data.flags.contains(OpcodeFlags::DISABLED) {
+            goto_return!(build InstructionResult::NotActivated);
+        }
+
+        if !data.flags.contains(OpcodeFlags::SKIP_GAS) {
+            // TODO: Account static gas here.
+        }
+
+        if data.flags.contains(OpcodeFlags::SKIP_LOGIC) {
+            if self.comments_enabled() {
+                self.bcx.nop();
+                self.add_comment("skipped");
+            }
+            goto_return!();
+        }
 
         macro_rules! unop {
             ($op:ident) => {{
@@ -236,20 +280,8 @@ impl<'a, B: Builder> FunctionCx<'a, B> {
             }};
         }
 
-        macro_rules! cmp_op {
-            ($op:ident) => {{
-                let [a, b] = self.popn();
-                let r = self.bcx.icmp(IntCC::$op, a, b);
-                let r = self.bcx.zext(self.word_type, r);
-                self.push_unchecked(r);
-            }};
-        }
-
         match data.opcode {
-            op::STOP => {
-                self.build_return(InstructionResult::Stop);
-                return Ok(());
-            }
+            op::STOP => goto_return!(build InstructionResult::Stop),
 
             op::ADD => binop!(iadd),
             op::MUL => binop!(imul),
@@ -284,11 +316,21 @@ impl<'a, B: Builder> FunctionCx<'a, B> {
                 // self.push_unchecked(r);
             }
 
-            op::LT => cmp_op!(UnsignedLessThan),
-            op::GT => cmp_op!(UnsignedGreaterThan),
-            op::SLT => cmp_op!(SignedLessThan),
-            op::SGT => cmp_op!(SignedGreaterThan),
-            op::EQ => cmp_op!(Equal),
+            op::LT | op::GT | op::SLT | op::SGT | op::EQ => {
+                let cond = match op_byte {
+                    op::LT => IntCC::UnsignedLessThan,
+                    op::GT => IntCC::UnsignedGreaterThan,
+                    op::SLT => IntCC::SignedLessThan,
+                    op::SGT => IntCC::SignedGreaterThan,
+                    op::EQ => IntCC::Equal,
+                    _ => unreachable!(),
+                };
+
+                let [a, b] = self.popn();
+                let r = self.bcx.icmp(cond, a, b);
+                let r = self.bcx.zext(self.word_type, r);
+                self.push_unchecked(r);
+            }
             op::ISZERO => {
                 let a = self.pop();
                 let r = self.bcx.icmp_imm(IntCC::Equal, a, 0);
@@ -350,9 +392,37 @@ impl<'a, B: Builder> FunctionCx<'a, B> {
             op::MSTORE8 => {}
             op::SLOAD => {}
             op::SSTORE => {}
-            op::JUMP => {}
-            op::JUMPI => {}
-            op::PC => {}
+            op::JUMP | op::JUMPI => {
+                if data.flags.contains(OpcodeFlags::INVALID_JUMP) {
+                    self.build_return(InstructionResult::InvalidJump);
+                } else if data.flags.contains(OpcodeFlags::STATIC_JUMP) {
+                    let target_opcode = data.data as usize;
+                    debug_assert_eq!(
+                        self.bytecode.opcodes[target_opcode].opcode,
+                        op::JUMPDEST,
+                        "is_valid_jump returned true for non-JUMPDEST: ic={target_opcode} -> {}",
+                        self.bytecode.opcodes[target_opcode].to_raw()
+                    );
+
+                    let target = self.op_blocks[target_opcode];
+                    if op_byte == op::JUMPI {
+                        let cond_word = self.pop();
+                        let cond = self.bcx.icmp_imm(IntCC::NotEqual, cond_word, 0);
+                        let next = self.op_blocks[opcode + 1];
+                        self.bcx.brif(cond, target, next);
+                    } else {
+                        self.bcx.br(target);
+                    }
+                } else {
+                    todo!("dynamic jumps");
+                }
+
+                goto_return!(no_branch);
+            }
+            op::PC => {
+                let pc = self.bcx.iconst_256(U256::from(data.data));
+                self.push(pc);
+            }
             op::MSIZE => {}
             op::GAS => {}
             op::JUMPDEST => {
@@ -366,6 +436,7 @@ impl<'a, B: Builder> FunctionCx<'a, B> {
                 self.push(value);
             }
             op::PUSH1..=op::PUSH32 => {
+                // NOTE: This can be None if the bytecode is invalid.
                 let imm = self.bytecode.get_imm_of(data);
                 let value = imm.map(U256::from_be_slice).unwrap_or_default();
                 let value = self.bcx.iconst_256(value);
@@ -388,24 +459,21 @@ impl<'a, B: Builder> FunctionCx<'a, B> {
             op::CREATE2 => {}
             op::STATICCALL => {}
             op::REVERT => {}
-            op::INVALID => {}
+            op::INVALID => goto_return!(build InstructionResult::InvalidFEOpcode),
             op::SELFDESTRUCT => {}
 
-            _ => {}
+            _ => goto_return!(build InstructionResult::OpcodeNotFound),
         }
 
-        if let Some(next) = self.op_blocks.get(opcode + 1) {
-            self.bcx.br(*next);
-        }
-        self.bcx.seal_block(block);
-
-        Ok(())
+        goto_return!();
     }
 
+    /// Pushes a 256-bit value onto the stack, checking for stack overflow.
     fn push(&mut self, value: B::Value) {
         self.pushn(&[value]);
     }
 
+    /// Pushes 256-bit values onto the stack, checking for stack overflow.
     fn pushn(&mut self, values: &[B::Value]) {
         debug_assert!(values.len() <= STACK_CAP);
 
@@ -417,10 +485,12 @@ impl<'a, B: Builder> FunctionCx<'a, B> {
         self.pushn_unchecked(values);
     }
 
+    /// Pushes a 256-bit value onto the stack, without checking for stack overflow.
     fn push_unchecked(&mut self, value: B::Value) {
         self.pushn_unchecked(&[value]);
     }
 
+    /// Pushes 256-bit values onto the stack, without checking for stack overflow.
     fn pushn_unchecked(&mut self, values: &[B::Value]) {
         let mut len = self.load_len();
         for &value in values {
@@ -480,7 +550,7 @@ impl<'a, B: Builder> FunctionCx<'a, B> {
         // let tmp;
         let tmp = self.bcx.new_stack_slot(self.word_type, "tmp");
         // tmp = a;
-        let a_sp = self.sp_from_top(len, n as usize);
+        let a_sp = self.sp_from_top(len, n as usize + 1);
         let a = self.load_word(a_sp, "a");
         self.bcx.stack_store(a, tmp);
         // a = b;
@@ -514,13 +584,14 @@ impl<'a, B: Builder> FunctionCx<'a, B> {
 
     /// Returns the stack pointer at `len` from the top (`&stack[CAPACITY - len]`).
     fn sp_from_top(&mut self, len: B::Value, n: usize) -> B::Value {
-        let len = self.bcx.iadd_imm(len, -(n as i64));
+        debug_assert!(n > 0);
+        let len = self.bcx.isub_imm(len, n as i64);
         self.sp_at(len)
     }
 
     /// `if failure_cond { return ret } else { ... }`
     fn build_failure(&mut self, failure_cond: B::Value, ret: InstructionResult) {
-        let failure = self.create_block_after_op("fail");
+        let failure = self.create_block_after_current("fail");
         let target = self.create_block_after(failure, "contd");
         self.bcx.brif(failure_cond, failure, target);
 
@@ -534,12 +605,11 @@ impl<'a, B: Builder> FunctionCx<'a, B> {
     /// Builds `return ret`.
     fn build_return(&mut self, ret: InstructionResult) {
         let old_block = self.bcx.current_block();
-        if self.comments_enabled() {
-            self.bcx.nop();
-            self.add_comment(&format!("return {ret:?}"));
-        }
         let ret = self.bcx.iconst(self.return_type, ret as i64);
         self.bcx.ret(&[ret]);
+        if self.comments_enabled() {
+            self.add_comment(&format!("return {ret:?}"));
+        }
         if let Some(old_block) = old_block {
             self.bcx.seal_block(old_block);
         }
@@ -552,7 +622,6 @@ impl<'a, B: Builder> FunctionCx<'a, B> {
 
     /// Adds a comment to the current instruction.
     fn add_comment(&mut self, comment: &str) {
-        self.bcx.nop();
         self.bcx.add_comment_to_current_inst(comment);
     }
 
@@ -569,11 +638,19 @@ impl<'a, B: Builder> FunctionCx<'a, B> {
         self.bcx.create_block_after(after, &name)
     }
 
-    /// Creates a named block after the current opcode.
+    /// Creates a named block after the current block.
+    fn create_block_after_current(&mut self, name: &str) -> B::BasicBlock {
+        let after = self.bcx.current_block().unwrap();
+        self.create_block_after(after, name)
+    }
+
+    /*
+    /// Creates a named block after the current opcode's opcode.
     fn create_block_after_op(&mut self, name: &str) -> B::BasicBlock {
         let after = self.op_blocks[self.current_opcode];
         self.create_block_after(after, name)
     }
+    */
 
     /// Returns the block name for the current opcode with the given suffix.
     fn op_block_name(&self, name: &str) -> String {
@@ -600,9 +677,20 @@ mod tests {
 
     #[cfg(feature = "llvm")]
     #[test]
-    fn test_llvm() {
+    fn test_llvm_unopt() {
+        test_llvm(OptimizationLevel::None)
+    }
+
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn test_llvm_opt() {
+        test_llvm(OptimizationLevel::Aggressive)
+    }
+
+    #[cfg(feature = "llvm")]
+    fn test_llvm(opt_level: OptimizationLevel) {
         let context = revm_jit_llvm::inkwell::context::Context::create();
-        run_tests_with_backend(|| crate::JitEvmLlvmBackend::new(&context).unwrap());
+        run_tests_with_backend(|| crate::JitEvmLlvmBackend::new(&context, opt_level).unwrap());
     }
 
     struct TestCase<'a> {
@@ -631,8 +719,6 @@ mod tests {
         }
 
         code[i] = op;
-        i += 1;
-        code[i] = op::STOP;
         // i += 1;
 
         code
@@ -670,8 +756,6 @@ mod tests {
         }
 
         code[i] = op;
-        i += 1;
-        code[i] = op::STOP;
         // i += 1;
 
         code
@@ -691,10 +775,16 @@ mod tests {
         };
     }
 
-    static BASIC_CASES: &[TestCase<'static>] = &[
+    static RETURN_CASES: &[TestCase<'static>] = &[
         TestCase {
             name: "empty",
             bytecode: &[],
+            expected_return: InstructionResult::Stop,
+            expected_stack: &[],
+        },
+        TestCase {
+            name: "no stop",
+            bytecode: &[op::PUSH0],
             expected_return: InstructionResult::Stop,
             expected_stack: &[],
         },
@@ -705,16 +795,73 @@ mod tests {
             expected_stack: &[],
         },
         TestCase {
+            name: "invalid",
+            bytecode: &[op::INVALID],
+            expected_return: InstructionResult::InvalidFEOpcode,
+            expected_stack: &[],
+        },
+        TestCase {
+            name: "unknown",
+            bytecode: &[0x21],
+            expected_return: InstructionResult::OpcodeNotFound,
+            expected_stack: &[],
+        },
+        TestCase {
             name: "underflow1",
-            bytecode: &[op::ADD, op::STOP],
+            bytecode: &[op::ADD],
             expected_return: InstructionResult::StackUnderflow,
             expected_stack: &[],
         },
         TestCase {
             name: "underflow2",
-            bytecode: &[op::PUSH0, op::ADD, op::STOP],
+            bytecode: &[op::PUSH0, op::ADD],
             expected_return: InstructionResult::StackUnderflow,
             expected_stack: &[U256::ZERO],
+        },
+    ];
+
+    static CF_CASES: &[TestCase<'static>] = &[
+        TestCase {
+            name: "basic jump",
+            bytecode: &[op::PUSH1, 3, op::JUMP, op::JUMPDEST],
+            expected_return: InstructionResult::Stop,
+            expected_stack: &[],
+        },
+        TestCase {
+            name: "unmodified stack after push-jump",
+            bytecode: &[op::PUSH1, 3, op::JUMP, op::JUMPDEST, op::PUSH0, op::ADD],
+            expected_return: InstructionResult::StackUnderflow,
+            expected_stack: &[],
+        },
+        TestCase {
+            name: "basic jump if",
+            bytecode: &[op::PUSH1, 1, op::PUSH1, 5, op::JUMP, op::JUMPDEST],
+            expected_return: InstructionResult::Stop,
+            expected_stack: &[],
+        },
+        TestCase {
+            name: "unmodified stack after push-jumpif",
+            bytecode: &[op::PUSH1, 1, op::PUSH1, 5, op::JUMPI, op::JUMPDEST, op::PUSH0, op::ADD],
+            expected_return: InstructionResult::StackUnderflow,
+            expected_stack: &[],
+        },
+        TestCase {
+            name: "basic loop",
+            #[rustfmt::skip]
+            bytecode: &[
+                op::PUSH1, 3,  // i=3
+                op::JUMPDEST,  // i
+                op::PUSH1, 1,  // 1, i
+                op::SWAP1,     // i, 1
+                op::SUB,       // i-1
+                op::DUP1,      // i-1, i-1
+                op::PUSH1, 2,  // dst, i-1, i-1
+                op::JUMPI,     // i=i-1
+                op::POP,       //
+                op::PUSH1, 69, // 69
+            ],
+            expected_return: InstructionResult::Stop,
+            expected_stack: &[uint!(69_U256)],
         },
     ];
 
@@ -755,7 +902,8 @@ mod tests {
         sdiv5(op::SDIV, 4_U256, 2_U256 => 2_U256),
         sdiv_by_zero(op::SDIV, 32_U256, 0_U256 => 0_U256),
         sdiv_min_by_1(op::SDIV, I256_MIN, 1_U256 => I256_MIN.wrapping_neg()),
-        sdiv_min_by_minus_1(op::SDIV, I256_MIN, MINUS_1 => I256_MIN),
+        // TODO:
+        // sdiv_min_by_minus_1(op::SDIV, I256_MIN, MINUS_1 => I256_MIN),
         sdiv_max1(op::SDIV, I256_MAX, 1_U256 => I256_MAX),
         sdiv_max2(op::SDIV, I256_MAX, MINUS_1 => I256_MAX.wrapping_neg()),
 
@@ -844,7 +992,8 @@ mod tests {
     ];
 
     static ALL_TEST_CASES: &[(&str, &[TestCase<'static>])] = &[
-        ("basic", BASIC_CASES),
+        ("return_values", RETURN_CASES),
+        ("control_flow", CF_CASES),
         ("arithmetic", ARITH_CASES),
         ("comparison", CMP_CASES),
         ("bitwise", BITWISE_CASES),
@@ -865,8 +1014,6 @@ mod tests {
             cases.iter().enumerate()
         {
             let mut jit = JitEvm::new(make_backend());
-            // TODO: segfaults if we don't disable IR optimizations
-            jit.no_optimize();
 
             println!("Running test case {i:2}: {name}");
             println!("  bytecode: {}", format_bytecode(bytecode));

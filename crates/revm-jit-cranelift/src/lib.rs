@@ -6,7 +6,7 @@ use cranelift::{codegen::ir::StackSlot, prelude::*};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{FuncId, FuncOrDataId, Linkage, Module};
 use pretty_clif::CommentWriter;
-use revm_jit_core::{Backend, Builder, Error, Result};
+use revm_jit_core::{Backend, Builder, Error, OptimizationLevel, Result};
 use revm_primitives::U256;
 use std::{io::Write, path::Path};
 
@@ -50,9 +50,15 @@ impl JitEvmCraneliftBackend {
     /// Panics if the current architecture is not supported. See
     /// [`is_supported`](Self::is_supported).
     #[track_caller]
-    pub fn new() -> Self {
+    pub fn new(opt_level: OptimizationLevel) -> Self {
+        let opt_level: &str = match opt_level {
+            OptimizationLevel::None => "none",
+            OptimizationLevel::Less
+            | OptimizationLevel::Default
+            | OptimizationLevel::Aggressive => "speed",
+        };
         let builder = JITBuilder::with_flags(
-            &[("opt_level", "speed")],
+            &[("opt_level", opt_level)],
             cranelift_module::default_libcall_names(),
         )
         .unwrap();
@@ -84,7 +90,10 @@ impl Backend for JitEvmCraneliftBackend {
         self.ctx.set_disasm(yes);
     }
 
-    fn no_optimize(&mut self) {}
+    fn set_opt_level(&mut self, level: OptimizationLevel) {
+        // TODO: Cannot set this after initialization.
+        let _ = level;
+    }
 
     fn dump_ir(&mut self, path: &Path) -> Result<()> {
         crate::pretty_clif::write_clif_file(

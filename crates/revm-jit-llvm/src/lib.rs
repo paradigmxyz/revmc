@@ -38,17 +38,19 @@ pub struct JitEvmLlvmBackend<'ctx> {
     ty_i256: IntType<'ctx>,
     ty_isize: IntType<'ctx>,
 
-    no_opt: bool,
+    opt_level: OptimizationLevel,
 }
 
 impl<'ctx> JitEvmLlvmBackend<'ctx> {
     /// Creates a new LLVM-based EVM JIT backend.
     #[inline]
-    pub fn new(cx: &'ctx Context) -> Result<Self> {
-        revm_jit_core::debug_time!("new LLVM backend", || Self::new_inner(cx))
+    pub fn new(cx: &'ctx Context, opt_level: revm_jit_core::OptimizationLevel) -> Result<Self> {
+        revm_jit_core::debug_time!("new LLVM backend", || Self::new_inner(cx, opt_level))
     }
 
-    fn new_inner(cx: &'ctx Context) -> Result<Self> {
+    fn new_inner(cx: &'ctx Context, opt_level: revm_jit_core::OptimizationLevel) -> Result<Self> {
+        let opt_level = convert_opt_level(opt_level);
+
         let config = InitializationConfig {
             asm_parser: false,
             asm_printer: true,
@@ -68,7 +70,7 @@ impl<'ctx> JitEvmLlvmBackend<'ctx> {
                 &triple,
                 &cpu.to_string_lossy(),
                 &features.to_string_lossy(),
-                OptimizationLevel::Aggressive,
+                opt_level,
                 RelocMode::PIC,
                 CodeModel::Default,
             )
@@ -104,7 +106,7 @@ impl<'ctx> JitEvmLlvmBackend<'ctx> {
             ty_i256,
             ty_isize,
             ty_ptr,
-            no_opt: false,
+            opt_level,
         })
     }
 
@@ -126,8 +128,8 @@ impl<'ctx> Backend for JitEvmLlvmBackend<'ctx> {
         let _ = yes;
     }
 
-    fn no_optimize(&mut self) {
-        self.no_opt = true;
+    fn set_opt_level(&mut self, level: revm_jit_core::OptimizationLevel) {
+        self.opt_level = convert_opt_level(level);
     }
 
     fn dump_ir(&mut self, path: &Path) -> Result<()> {
@@ -190,12 +192,12 @@ impl<'ctx> Backend for JitEvmLlvmBackend<'ctx> {
     }
 
     fn optimize_function(&mut self, _name: &str) -> Result<()> {
-        // TODO: Segfaults in tests
-        if self.no_opt {
-            return Ok(());
-        }
-
-        let passes = if self.no_opt { "default<O0>" } else { "default<O3>" };
+        let passes = match self.opt_level {
+            OptimizationLevel::None => "default<O0>",
+            OptimizationLevel::Less => "default<O1>",
+            OptimizationLevel::Default => "default<O2>",
+            OptimizationLevel::Aggressive => "default<O3>",
+        };
         let opts = PassBuilderOptions::create();
         self.module.run_passes(passes, &self.machine, opts).map_err(error_msg)
     }
@@ -322,12 +324,13 @@ impl<'a, 'ctx> Builder for JitEvmLlvmBuilder<'a, 'ctx> {
     }
 
     fn add_comment_to_current_inst(&mut self, comment: &str) {
+        // TODO: Is this even possible?
         let _ = comment;
         // let Some(block) = self.current_block() else { return };
         // let Some(ins) = block.get_last_instruction() else { return };
         // let metadata = self.cx.metadata_string(comment);
-        // TODO: InstructionValue::set_metadata return Err for string metadata
-        // ret_instr.set_metadata(metadata, 0).unwrap();
+        // let metadata = self.cx.metadata_node(&[metadata.into()]);
+        // ins.set_metadata(metadata, 0).unwrap();
     }
 
     fn fn_param(&mut self, index: usize) -> Self::Value {
@@ -372,7 +375,7 @@ impl<'a, 'ctx> Builder for JitEvmLlvmBuilder<'a, 'ctx> {
     }
 
     fn nop(&mut self) {
-        // Nothing to do.
+        // LLVM doesn't have a NOP instruction.
     }
 
     fn ret(&mut self, values: &[Self::Value]) {
@@ -568,6 +571,15 @@ fn convert_intcc(cond: IntCC) -> IntPredicate {
         IntCC::UnsignedGreaterThanOrEqual => IntPredicate::UGE,
         IntCC::UnsignedGreaterThan => IntPredicate::UGT,
         IntCC::UnsignedLessThanOrEqual => IntPredicate::ULE,
+    }
+}
+
+fn convert_opt_level(level: revm_jit_core::OptimizationLevel) -> OptimizationLevel {
+    match level {
+        revm_jit_core::OptimizationLevel::None => OptimizationLevel::None,
+        revm_jit_core::OptimizationLevel::Less => OptimizationLevel::Less,
+        revm_jit_core::OptimizationLevel::Default => OptimizationLevel::Default,
+        revm_jit_core::OptimizationLevel::Aggressive => OptimizationLevel::Aggressive,
     }
 }
 

@@ -27,6 +27,19 @@ pub enum IntCC {
     UnsignedLessThanOrEqual,
 }
 
+/// Optimization level.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum OptimizationLevel {
+    /// No optimizations.
+    None,
+    /// Less optimizations.
+    Less,
+    /// Default optimizations.
+    Default,
+    /// Aggressive optimizations.
+    Aggressive,
+}
+
 pub trait Builder {
     type Type: Copy + Eq + fmt::Debug;
     type Value: Copy + Eq + fmt::Debug;
@@ -122,7 +135,7 @@ pub trait Backend {
     fn ir_extension(&self) -> &'static str;
 
     fn set_is_dumping(&mut self, yes: bool);
-    fn no_optimize(&mut self);
+    fn set_opt_level(&mut self, level: OptimizationLevel);
     fn dump_ir(&mut self, path: &Path) -> Result<()>;
     fn dump_disasm(&mut self, path: &Path) -> Result<()>;
 

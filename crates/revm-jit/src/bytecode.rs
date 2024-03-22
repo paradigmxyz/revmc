@@ -7,6 +7,7 @@ use revm_primitives::SpecId;
 use std::{fmt, slice};
 
 /// EVM bytecode.
+#[derive(Debug)]
 pub(crate) struct Bytecode<'a> {
     /// The original bytecode slice.
     pub(crate) code: &'a [u8],
@@ -23,8 +24,7 @@ impl<'a> Bytecode<'a> {
     pub(crate) fn new(code: &'a [u8], spec: SpecId) -> Self {
         let mut opcodes = Vec::with_capacity(code.len());
         let mut jumpdests = BitVec::repeat(false, code.len());
-        let mut pc = 0;
-        for RawOpcode { opcode, immediate } in RawBytecodeIter::new(code) {
+        for (pc, RawOpcode { opcode, immediate }) in RawBytecodeIter::new(code).with_pc() {
             let mut data = 0;
             match opcode {
                 op::JUMPDEST => jumpdests.set(pc, true),
@@ -33,7 +33,6 @@ impl<'a> Bytecode<'a> {
                     if let Some(imm) = immediate {
                         // `pc` is at `opcode` right now, add 1 for the data.
                         data = Immediate::pack(pc + 1, imm.len());
-                        pc += imm.len();
                     }
                 }
             }
@@ -41,11 +40,9 @@ impl<'a> Bytecode<'a> {
             let mut flags = OpcodeFlags::NORMAL;
             if !op_enabled_in(opcode, spec) {
                 flags |= OpcodeFlags::DISABLED;
-            };
+            }
 
             opcodes.push(OpcodeData { opcode, flags, data });
-
-            pc += 1;
         }
 
         // Pad code to ensure there is at least one diverging opcode.
@@ -78,7 +75,13 @@ impl<'a> Bytecode<'a> {
                 let target = usize::from_be_bytes(padded);
                 if self.is_valid_jump(target) {
                     self.opcodes[i].flags |= OpcodeFlags::SKIP_LOGIC;
-                    self.opcodes[i + 1].data = target as u32;
+                    let ic = self.pc_to_ic(target);
+                    debug_assert_eq!(
+                        self.opcodes[ic],
+                        op::JUMPDEST,
+                        "is_valid_jump returned true for non-JUMPDEST: target={target} ic={ic}",
+                    );
+                    self.opcodes[i + 1].data = ic as u32;
                 } else {
                     self.opcodes[i + 1].flags |= OpcodeFlags::INVALID_JUMP;
                 }
@@ -94,10 +97,6 @@ impl<'a> Bytecode<'a> {
         Ok(())
     }
 
-    // pub(crate) fn as_raw_opcode(&self, opcode: OpcodeData) -> RawOpcode<'a> {
-    //     RawOpcode { opcode: opcode.opcode, immediate: self.get_imm_of(opcode) }
-    // }
-
     pub(crate) fn get_imm_of(&self, opcode: OpcodeData) -> Option<&'a [u8]> {
         (opcode.imm_len() > 0).then(|| self.get_imm(opcode.data))
     }
@@ -107,8 +106,20 @@ impl<'a> Bytecode<'a> {
         &self.code[offset..offset + len]
     }
 
-    fn is_valid_jump(&self, target: usize) -> bool {
-        self.jumpdests.get(target).as_deref().copied() == Some(true)
+    fn is_valid_jump(&self, pc: usize) -> bool {
+        self.jumpdests.get(pc).as_deref().copied() == Some(true)
+    }
+
+    // TODO: is it worth it to make this a map?
+    fn pc_to_ic(&self, pc: usize) -> usize {
+        let (ic, (_, op)) = RawBytecodeIter::new(self.code)
+            .with_pc()
+            .enumerate()
+            .take_while(|(_ic, (pc2, _))| *pc2 <= pc)
+            .find(|(_ic, (pc2, _))| *pc2 == pc)
+            .unwrap();
+        debug_assert_eq!(self.opcodes[ic].to_raw_in(self), op, "pc {pc}, ic {ic}");
+        ic
     }
 }
 
@@ -125,6 +136,20 @@ pub(crate) struct OpcodeData {
     /// - `opcode == op::PC`: the program counter, meaning `self.code[pc]` is the opcode;
     /// - otherwise: no meaning.
     pub(crate) data: u32,
+}
+
+impl PartialEq<u8> for OpcodeData {
+    #[inline]
+    fn eq(&self, other: &u8) -> bool {
+        self.opcode == *other
+    }
+}
+
+impl PartialEq<OpcodeData> for u8 {
+    #[inline]
+    fn eq(&self, other: &OpcodeData) -> bool {
+        *self == other.opcode
+    }
 }
 
 impl fmt::Debug for OpcodeData {
@@ -148,6 +173,12 @@ impl OpcodeData {
     #[inline]
     pub(crate) const fn to_raw(self) -> RawOpcode<'static> {
         RawOpcode { opcode: self.opcode, immediate: None }
+    }
+
+    /// Converts this opcode to a raw opcode in the given bytecode.
+    #[inline]
+    pub(crate) fn to_raw_in<'a>(self, bytecode: &Bytecode<'a>) -> RawOpcode<'a> {
+        RawOpcode { opcode: self.opcode, immediate: bytecode.get_imm_of(self) }
     }
 }
 
@@ -191,6 +222,38 @@ impl Immediate {
     }
 }
 
+/// A bytecode iterator that yields opcodes and their immediate data, alongside the program counter.
+///
+/// Created by calling [`RawBytecodeIter::with_pc`].
+#[derive(Debug)]
+pub struct RawBytecodeIterWithPc<'a> {
+    iter: RawBytecodeIter<'a>,
+    pc: usize,
+}
+
+impl<'a> Iterator for RawBytecodeIterWithPc<'a> {
+    type Item = (usize, RawOpcode<'a>);
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        self.iter.next().map(|opcode| {
+            let pc = self.pc;
+            self.pc += 1;
+            if let Some(imm) = opcode.immediate {
+                self.pc += imm.len();
+            }
+            (pc, opcode)
+        })
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.iter.size_hint()
+    }
+}
+
+impl std::iter::FusedIterator for RawBytecodeIterWithPc<'_> {}
+
 /// A bytecode iterator that yields opcodes and their immediate data.
 ///
 /// If the bytecode is not well-formed, the iterator will still yield opcodes, but the immediate
@@ -218,6 +281,13 @@ impl<'a> RawBytecodeIter<'a> {
     #[inline]
     pub fn new(slice: &'a [u8]) -> Self {
         Self { iter: slice.iter() }
+    }
+
+    /// Returns a new iterator that also yields the program counter alongside the opcode and
+    /// immediate data.
+    #[inline]
+    pub fn with_pc(self) -> RawBytecodeIterWithPc<'a> {
+        RawBytecodeIterWithPc { iter: self, pc: 0 }
     }
 
     /// Returns the inner iterator.

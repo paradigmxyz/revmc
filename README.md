@@ -15,6 +15,10 @@ This project hosts two backend implementations:
 [Cranelift]: https://cranelift.dev/
 [`revm-jit-cranelift`]: /crates/revm-jit-cranelift
 
+## Credits
+
+The initial compiler implementation was inspired by [`paradigmxyz/jitevm`](https://github.com/paradigmxyz/jitevm).
+
 #### License
 
 <sup>
