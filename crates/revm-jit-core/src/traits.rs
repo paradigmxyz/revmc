@@ -27,25 +27,25 @@ pub enum IntCC {
     UnsignedLessThanOrEqual,
 }
 
-pub trait CodegenObject: Copy + PartialEq + fmt::Debug {}
-impl<T: Copy + PartialEq + fmt::Debug> CodegenObject for T {}
-
 pub trait Builder {
-    type Type: CodegenObject;
-    type Value: CodegenObject;
-    type StackSlot: CodegenObject;
-    type BasicBlock: CodegenObject;
+    type Type: Copy + Eq + fmt::Debug;
+    type Value: Copy + Eq + fmt::Debug;
+    type StackSlot: Copy + Eq + fmt::Debug;
+    type BasicBlock: Copy + Eq + fmt::Debug;
 
     fn type_ptr(&self) -> Self::Type;
     fn type_ptr_sized_int(&self) -> Self::Type;
     fn type_int(&self, bits: u32) -> Self::Type;
     fn type_array(&self, ty: Self::Type, size: u32) -> Self::Type;
 
-    fn create_block(&mut self) -> Self::BasicBlock;
+    fn create_block(&mut self, name: &str) -> Self::BasicBlock;
+    fn create_block_after(&mut self, after: Self::BasicBlock, name: &str) -> Self::BasicBlock;
     fn switch_to_block(&mut self, block: Self::BasicBlock);
     fn seal_block(&mut self, block: Self::BasicBlock);
     fn set_cold_block(&mut self, block: Self::BasicBlock);
     fn current_block(&mut self) -> Option<Self::BasicBlock>;
+
+    fn add_comment_to_current_inst(&mut self, comment: &str);
 
     fn fn_param(&mut self, index: usize) -> Self::Value;
 
@@ -111,7 +111,7 @@ pub trait Builder {
     fn zext(&mut self, ty: Self::Type, value: Self::Value) -> Self::Value;
     fn sext(&mut self, ty: Self::Type, value: Self::Value) -> Self::Value;
 
-    fn gep_add(&mut self, ty: Self::Type, ptr: Self::Value, offset: Self::Value) -> Self::Value;
+    fn gep(&mut self, ty: Self::Type, ptr: Self::Value, offset: Self::Value) -> Self::Value;
 }
 
 pub trait Backend {
@@ -127,6 +127,7 @@ pub trait Backend {
     fn dump_disasm(&mut self, path: &Path) -> Result<()>;
 
     fn build_function(&mut self, name: &str) -> Result<Self::Builder<'_>>;
+    fn verify_function(&mut self, name: &str) -> Result<()>;
     fn optimize_function(&mut self, name: &str) -> Result<()>;
     fn get_function(&mut self, name: &str) -> Result<JitEvmFn>;
 }

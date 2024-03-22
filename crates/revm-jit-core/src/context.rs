@@ -1,19 +1,8 @@
+use revm_interpreter::InstructionResult;
 use std::mem::MaybeUninit;
 
 /// The signature of a JIT'd EVM bytecode.
-pub type JitEvmFn = unsafe extern "C" fn(*mut ContextStack) -> Ret;
-
-/// The return value of a JIT'd EVM bytecode function.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[repr(i32)]
-pub enum Ret {
-    /// `STOP` instruction.
-    Stop,
-    /// Stack underflow.
-    StackUnderflow,
-    /// Stack overflow.
-    StackOverflow,
-}
+pub type JitEvmFn = unsafe extern "C" fn(*mut ContextStack) -> InstructionResult;
 
 /// JIT EVM context stack.
 #[repr(C, align(32))]

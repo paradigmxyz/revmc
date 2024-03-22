@@ -5,6 +5,7 @@
 use cranelift::{codegen::ir::StackSlot, prelude::*};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{FuncId, FuncOrDataId, Linkage, Module};
+use pretty_clif::CommentWriter;
 use revm_jit_core::{Backend, Builder, Error, Result};
 use revm_primitives::U256;
 use std::{io::Write, path::Path};
@@ -30,6 +31,8 @@ pub struct JitEvmCraneliftBackend {
 
     /// The module, with the jit backend, which manages the JIT'd functions.
     module: JITModule,
+
+    comments: CommentWriter,
 }
 
 #[allow(clippy::new_without_default)]
@@ -54,7 +57,12 @@ impl JitEvmCraneliftBackend {
         )
         .unwrap();
         let module = JITModule::new(builder);
-        Self { builder_context: FunctionBuilderContext::new(), ctx: module.make_context(), module }
+        Self {
+            builder_context: FunctionBuilderContext::new(),
+            ctx: module.make_context(),
+            module,
+            comments: CommentWriter::new(),
+        }
     }
 
     fn name_to_id(&mut self, name: &str) -> Result<FuncId> {
@@ -83,8 +91,7 @@ impl Backend for JitEvmCraneliftBackend {
             path,
             self.module.isa(),
             &self.ctx.func,
-            // &clif_comments,
-            &Default::default(),
+            &self.comments,
         );
         Ok(())
     }
@@ -102,11 +109,12 @@ impl Backend for JitEvmCraneliftBackend {
         self.ctx.func.signature.returns.push(AbiParam::new(types::I32));
         let _id = self.module.declare_function(name, Linkage::Export, &self.ctx.func.signature)?;
         let bcx = FunctionBuilder::new(&mut self.ctx.func, &mut self.builder_context);
-        Ok(JitEvmCraneliftBuilder {
-            bcx,
-            ptr_type,
-            // var_count: 0
-        })
+        Ok(JitEvmCraneliftBuilder { comments: &mut self.comments, bcx, ptr_type })
+    }
+
+    fn verify_function(&mut self, name: &str) -> Result<()> {
+        let _ = name;
+        Ok(())
     }
 
     fn optimize_function(&mut self, name: &str) -> Result<()> {
@@ -126,6 +134,8 @@ impl Backend for JitEvmCraneliftBackend {
         // (patching in addresses, now that they're available).
         self.module.finalize_definitions()?;
 
+        self.comments.clear();
+
         Ok(())
     }
 
@@ -139,31 +149,9 @@ impl Backend for JitEvmCraneliftBackend {
 /// The Cranelift-based EVM JIT function builder.
 #[allow(missing_debug_implementations)]
 pub struct JitEvmCraneliftBuilder<'a> {
+    comments: &'a mut CommentWriter,
     bcx: FunctionBuilder<'a>,
     ptr_type: Type,
-    // var_count: usize,
-}
-
-impl<'a> JitEvmCraneliftBuilder<'a> {
-    // TODO: How to do this
-    // fn new_var(&mut self, name: &str) -> Variable {
-    //     let var = Variable::new(self.var_count);
-    //     let label = ValueLabel::new(self.var_count);
-    //     self.bcx.set_val_label(var, label);
-    //     self.var_count += 1;
-    //     var
-    // }
-
-    // fn declare_var(&mut self, ty: Type, value: Value, name: &str) {
-    //     if name.is_empty() {
-    //         return;
-    //     }
-    //     let var = self.new_var(name);
-    //     self.bcx.declare_var(var, ty);
-    //     self.bcx.def_var(var, value);
-    //     let label = format!("{name} ({var})");
-    //     self.bcx.set_val_label(val, label);
-    // }
 }
 
 impl<'a> Builder for JitEvmCraneliftBuilder<'a> {
@@ -191,8 +179,18 @@ impl<'a> Builder for JitEvmCraneliftBuilder<'a> {
         unimplemented!("type: {size} x {ty}")
     }
 
-    fn create_block(&mut self) -> Self::BasicBlock {
-        self.bcx.create_block()
+    fn create_block(&mut self, name: &str) -> Self::BasicBlock {
+        let block = self.bcx.create_block();
+        if !name.is_empty() && self.comments.enabled() {
+            self.comments.add_comment(block, name);
+        }
+        block
+    }
+
+    fn create_block_after(&mut self, after: Self::BasicBlock, name: &str) -> Self::BasicBlock {
+        let block = self.create_block(name);
+        self.bcx.insert_block_after(block, after);
+        block
     }
 
     fn switch_to_block(&mut self, block: Self::BasicBlock) {
@@ -209,6 +207,12 @@ impl<'a> Builder for JitEvmCraneliftBuilder<'a> {
 
     fn current_block(&mut self) -> Option<Self::BasicBlock> {
         self.bcx.current_block()
+    }
+
+    fn add_comment_to_current_inst(&mut self, comment: &str) {
+        let Some(block) = self.bcx.current_block() else { return };
+        let Some(inst) = self.bcx.func.layout.last_inst(block) else { return };
+        self.comments.add_comment(inst, comment);
     }
 
     fn fn_param(&mut self, index: usize) -> Self::Value {
@@ -313,9 +317,9 @@ impl<'a> Builder for JitEvmCraneliftBuilder<'a> {
         then_value: impl FnOnce(&mut Self, Self::BasicBlock) -> Self::Value,
         else_value: impl FnOnce(&mut Self, Self::BasicBlock) -> Self::Value,
     ) -> Self::Value {
-        let then_block = self.create_block();
-        let else_block = self.create_block();
-        let done_block = self.create_block();
+        let then_block = self.bcx.create_block();
+        let else_block = self.bcx.create_block();
+        let done_block = self.bcx.create_block();
         let done_value = self.bcx.append_block_param(done_block, ty);
 
         self.brif(cond, then_block, else_block);
@@ -417,7 +421,7 @@ impl<'a> Builder for JitEvmCraneliftBuilder<'a> {
         self.bcx.ins().sextend(ty, value)
     }
 
-    fn gep_add(&mut self, ty: Self::Type, ptr: Self::Value, offset: Self::Value) -> Self::Value {
+    fn gep(&mut self, ty: Self::Type, ptr: Self::Value, offset: Self::Value) -> Self::Value {
         let offset = self.bcx.ins().imul_imm(offset, ty.bytes() as i64);
         self.bcx.ins().iadd(ptr, offset)
     }

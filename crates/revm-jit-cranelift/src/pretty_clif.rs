@@ -44,6 +44,11 @@ impl CommentWriter {
         self.enabled
     }
 
+    pub(crate) fn clear(&mut self) {
+        self.global_comments.clear();
+        self.entity_comments.clear();
+    }
+
     pub(crate) fn add_global_comment<S: Into<String>>(&mut self, comment: S) {
         debug_assert!(self.enabled);
         self.global_comments.push(comment.into());

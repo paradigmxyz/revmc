@@ -1,6 +1,6 @@
 [package]
 name = "revm-jit"
-description = "Revm JIT backend"
+description = "JIT compiler for EVM bytecode"
 homepage = "https://github.com/danipopes/revm-jit/tree/main/crates/revm-jit"
 
 version.workspace = true
@@ -18,13 +18,17 @@ workspace = true
 
 [dependencies]
 revm-jit-core.workspace = true
-
 revm-jit-llvm = { workspace = true, optional = true }
 revm-jit-cranelift = { workspace = true, optional = true }
 
-revm-primitives.workspace = true
 revm-interpreter.workspace = true
+revm-primitives.workspace = true
+
+bitflags = "2.5"
+bitvec = "1"
 color-eyre.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
 
 [features]
 default = ["llvm"]

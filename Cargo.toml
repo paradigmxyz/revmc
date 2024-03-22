@@ -10,7 +10,7 @@ authors = ["DaniPopes <57450786+DaniPopes@users.noreply.github.com>"]
 edition = "2021"
 rust-version = "1.76"
 license = "MIT OR Apache-2.0"
-categories = []
+categories = ["compilers", "cryptography::cryptocurrencies"]
 keywords = ["compile", "compiler", "jit", "evm", "ethereum"]
 homepage = "https://github.com/danipopes/cranelift-jit-evm"
 repository = "https://github.com/danipopes/cranelift-jit-evm"
@@ -34,3 +34,5 @@ revm-primitives = "3.1.0"
 revm-interpreter = "3.4.0"
 
 color-eyre = "0.6"
+tracing = "0.1"
+tracing-subscriber = "0.3"

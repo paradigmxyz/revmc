@@ -1,5 +1,4 @@
-//! TODO
-// #![doc = include_str!("../README.md")]
+#![doc = include_str!("../README.md")]
 #![cfg_attr(not(test), warn(unused_extern_crates))]
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
 
@@ -46,6 +45,10 @@ impl<'ctx> JitEvmLlvmBackend<'ctx> {
     /// Creates a new LLVM-based EVM JIT backend.
     #[inline]
     pub fn new(cx: &'ctx Context) -> Result<Self> {
+        revm_jit_core::debug_time!("new LLVM backend", || Self::new_inner(cx))
+    }
+
+    fn new_inner(cx: &'ctx Context) -> Result<Self> {
         let config = InitializationConfig {
             asm_parser: false,
             asm_printer: true,
@@ -181,6 +184,11 @@ impl<'ctx> Backend for JitEvmLlvmBackend<'ctx> {
         Ok(JitEvmLlvmBuilder { backend: self, function })
     }
 
+    fn verify_function(&mut self, name: &str) -> Result<()> {
+        let _ = name;
+        self.module.verify().map_err(error_msg)
+    }
+
     fn optimize_function(&mut self, _name: &str) -> Result<()> {
         // TODO: Segfaults in tests
         if self.no_opt {
@@ -277,8 +285,12 @@ impl<'a, 'ctx> Builder for JitEvmLlvmBuilder<'a, 'ctx> {
         ty.array_type(size).into()
     }
 
-    fn create_block(&mut self) -> Self::BasicBlock {
-        self.cx.append_basic_block(self.function, "")
+    fn create_block(&mut self, name: &str) -> Self::BasicBlock {
+        self.cx.append_basic_block(self.function, name)
+    }
+
+    fn create_block_after(&mut self, after: Self::BasicBlock, name: &str) -> Self::BasicBlock {
+        self.cx.insert_basic_block_after(after, name)
     }
 
     fn switch_to_block(&mut self, block: Self::BasicBlock) {
@@ -307,6 +319,15 @@ impl<'a, 'ctx> Builder for JitEvmLlvmBuilder<'a, 'ctx> {
 
     fn current_block(&mut self) -> Option<Self::BasicBlock> {
         self.bcx.get_insert_block()
+    }
+
+    fn add_comment_to_current_inst(&mut self, comment: &str) {
+        let _ = comment;
+        // let Some(block) = self.current_block() else { return };
+        // let Some(ins) = block.get_last_instruction() else { return };
+        // let metadata = self.cx.metadata_string(comment);
+        // TODO: InstructionValue::set_metadata return Err for string metadata
+        // ret_instr.set_metadata(metadata, 0).unwrap();
     }
 
     fn fn_param(&mut self, index: usize) -> Self::Value {
@@ -404,9 +425,9 @@ impl<'a, 'ctx> Builder for JitEvmLlvmBuilder<'a, 'ctx> {
         then_value: impl FnOnce(&mut Self, Self::BasicBlock) -> Self::Value,
         else_value: impl FnOnce(&mut Self, Self::BasicBlock) -> Self::Value,
     ) -> Self::Value {
-        let then_block = self.create_block();
-        let else_block = self.create_block();
-        let done_block = self.create_block();
+        let then_block = self.create_block("");
+        let else_block = self.create_block("");
+        let done_block = self.create_block("");
 
         self.brif(cond, then_block, else_block);
 
@@ -527,12 +548,7 @@ impl<'a, 'ctx> Builder for JitEvmLlvmBuilder<'a, 'ctx> {
         self.bcx.build_int_s_extend(value.into_int_value(), ty.into_int_type(), "").unwrap().into()
     }
 
-    fn gep_add(
-        &mut self,
-        elem_ty: Self::Type,
-        ptr: Self::Value,
-        offset: Self::Value,
-    ) -> Self::Value {
+    fn gep(&mut self, elem_ty: Self::Type, ptr: Self::Value, offset: Self::Value) -> Self::Value {
         let offset = offset.into_int_value();
         unsafe { self.bcx.build_in_bounds_gep(elem_ty, ptr.into_pointer_value(), &[offset], "") }
             .unwrap()

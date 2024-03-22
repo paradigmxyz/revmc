@@ -2,7 +2,18 @@
 #![cfg_attr(not(test), warn(unused_extern_crates))]
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
 
+#[macro_use]
+extern crate tracing;
+#[macro_use]
+extern crate revm_jit_core;
+
 use revm_primitives::U256;
+
+mod compiler;
+pub use compiler::JitEvm;
+
+mod bytecode;
+pub use bytecode::*;
 
 #[doc(inline)]
 pub use revm_jit_core::*;
@@ -20,17 +31,6 @@ pub use cranelift::JitEvmCraneliftBackend;
 #[cfg(feature = "cranelift")]
 #[doc(inline)]
 pub use revm_jit_cranelift as cranelift;
-
-#[doc(no_inline)]
-pub use revm_interpreter as interpreter;
-#[doc(no_inline)]
-pub use revm_primitives as primitives;
-
-mod compiler;
-pub use compiler::JitEvm;
-
-mod bytecode;
-pub use bytecode::{format_bytecode, imm_len, RawBytecodeIter, RawOpcode};
 
 #[allow(dead_code)]
 const MINUS_1: U256 = U256::MAX;

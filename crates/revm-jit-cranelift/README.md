@@ -1,7 +1,7 @@
-# revm-jit
+# revm-jit-cranelift
 
-Experimental [JIT compiler][JIT] for [Ethereum Virtual Machine][EVM] bytecode using [Cranelift].
+[Cranelift] backend for `revm-jit`.
 
-[EVM]: https://ethereum.org/en/developers/docs/evm/
-[JIT]: https://en.wikipedia.org/wiki/Just-in-time_compilation
+This crate is currently not functional due to missing `i256` support in Cranelift.
+
 [Cranelift]: https://cranelift.dev/

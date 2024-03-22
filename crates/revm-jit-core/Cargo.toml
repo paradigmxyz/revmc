@@ -21,3 +21,4 @@ revm-primitives.workspace = true
 revm-interpreter.workspace = true
 
 color-eyre.workspace = true
+tracing.workspace = true

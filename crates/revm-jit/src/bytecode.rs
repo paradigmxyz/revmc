@@ -1,5 +1,195 @@
+//! Internal EVM bytecode representation and helpers.
+
+use bitvec::vec::BitVec;
+use color_eyre::{eyre::bail, Result};
 use revm_interpreter::{opcode as op, OPCODE_JUMPMAP};
+use revm_primitives::SpecId;
 use std::{fmt, slice};
+
+/// EVM bytecode.
+pub(crate) struct Bytecode<'a> {
+    /// The original bytecode slice.
+    pub(crate) code: &'a [u8],
+    /// The parsed opcodes.
+    pub(crate) opcodes: Vec<OpcodeData>,
+    /// `JUMPDEST` map.
+    pub(crate) jumpdests: BitVec,
+    /// The [`SpecID`].
+    #[allow(dead_code)]
+    pub(crate) spec: SpecId,
+}
+
+impl<'a> Bytecode<'a> {
+    pub(crate) fn new(code: &'a [u8], spec: SpecId) -> Self {
+        let mut opcodes = Vec::with_capacity(code.len());
+        let mut jumpdests = BitVec::repeat(false, code.len());
+        let mut pc = 0;
+        for RawOpcode { opcode, immediate } in RawBytecodeIter::new(code) {
+            let mut data = 0;
+            match opcode {
+                op::JUMPDEST => jumpdests.set(pc, true),
+                op::PC => data = pc as u32,
+                _ => {
+                    if let Some(imm) = immediate {
+                        // `pc` is at `opcode` right now, add 1 for the data.
+                        data = Immediate::pack(pc + 1, imm.len());
+                        pc += imm.len();
+                    }
+                }
+            }
+
+            let mut flags = OpcodeFlags::NORMAL;
+            if !op_enabled_in(opcode, spec) {
+                flags |= OpcodeFlags::DISABLED;
+            };
+
+            opcodes.push(OpcodeData { opcode, flags, data });
+
+            pc += 1;
+        }
+
+        // Pad code to ensure there is at least one diverging opcode.
+        if opcodes.last().map_or(true, |last| last.opcode != op::STOP) {
+            opcodes.push(OpcodeData { opcode: op::STOP, flags: OpcodeFlags::NORMAL, data: 0 });
+        }
+
+        Self { code, opcodes, jumpdests, spec }
+    }
+
+    pub(crate) fn analyze(&mut self) -> Result<()> {
+        for i in 0..self.opcodes.len() {
+            let Some(next) = self.opcodes.get(i + 1) else { continue };
+            let opcode = &self.opcodes[i];
+            if matches!(opcode.opcode, op::PUSH1..=op::PUSH32)
+                && matches!(next.opcode, op::JUMP | op::JUMPI)
+            {
+                let imm_data = opcode.data;
+                let imm = self.get_imm(imm_data);
+                self.opcodes[i + 1].flags |= OpcodeFlags::STATIC_JUMP;
+
+                const USIZE_SIZE: usize = std::mem::size_of::<usize>();
+                if imm.len() > USIZE_SIZE {
+                    self.opcodes[i + 1].flags |= OpcodeFlags::INVALID_JUMP;
+                    continue;
+                }
+
+                let mut padded = [0; USIZE_SIZE];
+                padded[USIZE_SIZE - imm.len()..].copy_from_slice(imm);
+                let target = usize::from_be_bytes(padded);
+                if self.is_valid_jump(target) {
+                    self.opcodes[i].flags |= OpcodeFlags::SKIP_LOGIC;
+                    self.opcodes[i + 1].data = target as u32;
+                } else {
+                    self.opcodes[i + 1].flags |= OpcodeFlags::INVALID_JUMP;
+                }
+                continue;
+            }
+
+            if matches!(opcode.opcode, op::JUMP | op::JUMPI)
+                && !opcode.flags.contains(OpcodeFlags::STATIC_JUMP)
+            {
+                bail!("dynamic jumps are not yet implemented");
+            }
+        }
+        Ok(())
+    }
+
+    // pub(crate) fn as_raw_opcode(&self, opcode: OpcodeData) -> RawOpcode<'a> {
+    //     RawOpcode { opcode: opcode.opcode, immediate: self.get_imm_of(opcode) }
+    // }
+
+    pub(crate) fn get_imm_of(&self, opcode: OpcodeData) -> Option<&'a [u8]> {
+        (opcode.imm_len() > 0).then(|| self.get_imm(opcode.data))
+    }
+
+    fn get_imm(&self, data: u32) -> &'a [u8] {
+        let (offset, len) = Immediate::unpack(data);
+        &self.code[offset..offset + len]
+    }
+
+    fn is_valid_jump(&self, target: usize) -> bool {
+        self.jumpdests.get(target).as_deref().copied() == Some(true)
+    }
+}
+
+/// A single instruction in the bytecode.
+#[derive(Clone, Copy)]
+pub(crate) struct OpcodeData {
+    /// The opcode byte.
+    pub(crate) opcode: u8,
+    /// Opcode flags.
+    pub(crate) flags: OpcodeFlags,
+    /// Opcode-specific data:
+    /// - if the opcode has immediate data, this is a packed offset+length into the bytecode;
+    /// - `kind == StaticJump`: the jump target. Index into `opcodes`;
+    /// - `opcode == op::PC`: the program counter, meaning `self.code[pc]` is the opcode;
+    /// - otherwise: no meaning.
+    pub(crate) data: u32,
+}
+
+impl fmt::Debug for OpcodeData {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OpcodeData")
+            .field("opcode", &RawOpcode { opcode: self.opcode, immediate: None })
+            .field("flags", &self.flags)
+            .field("data", &self.data)
+            .finish()
+    }
+}
+
+impl OpcodeData {
+    /// Returns the length of the immediate data for this opcode.
+    #[inline]
+    pub(crate) const fn imm_len(self) -> usize {
+        imm_len(self.opcode)
+    }
+
+    /// Converts this opcode to a raw opcode. Note that the immediate data is not resolved.
+    #[inline]
+    pub(crate) const fn to_raw(self) -> RawOpcode<'static> {
+        RawOpcode { opcode: self.opcode, immediate: None }
+    }
+}
+
+bitflags::bitflags! {
+    /// [`Opcode`] flags.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) struct OpcodeFlags: u8 {
+        /// No modifiers.
+        const NORMAL = 0;
+        /// The `JUMP`/`JUMPI` target is known at compile time.
+        /// This is implied for other jump instructions which are always static.
+        const STATIC_JUMP = 1 << 0;
+        /// The jump target is known to be invalid.
+        /// Always returns `InvalidJump` at runtime.
+        const INVALID_JUMP = 1 << 1;
+
+        /// Skip gas accounting code.
+        const SKIP_GAS = 1 << 3;
+        /// Skip generating code.
+        const SKIP_LOGIC = 1 << 4;
+
+        /// The opcode is not enabled in the current EVM version.
+        /// Always returns `NotActivated`.
+        const DISABLED = 1 << 5;
+    }
+}
+
+/// Packed representation of an immediate value.
+struct Immediate;
+
+impl Immediate {
+    fn pack(offset: usize, len: usize) -> u32 {
+        debug_assert!(offset <= 1 << 26, "imm offset overflow: {offset} > (1 << 26)");
+        debug_assert!(len <= 1 << 6, "imm length overflow: {len} > (1 << 6)");
+        ((offset as u32) << 6) | len as u32
+    }
+
+    // `(offset, len)`
+    fn unpack(data: u32) -> (usize, usize) {
+        ((data >> 6) as usize, (data & ((1 << 6) - 1)) as usize)
+    }
+}
 
 /// A bytecode iterator that yields opcodes and their immediate data.
 ///
@@ -129,13 +319,54 @@ pub fn format_bytecode(bytecode: &[u8]) -> String {
     RawBytecodeIter::new(bytecode).to_string()
 }
 
+/// Returns `true` if the opcode is enabled in the given [`SpecId`].
+pub fn op_enabled_in(opcode: u8, spec: SpecId) -> bool {
+    const FT: SpecId = SpecId::FRONTIER;
+    // TODO
+    #[rustfmt::skip]
+    static SPEC_ID_MAP: [SpecId; 256] = [
+        FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT,
+        FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT,
+        FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT,
+        FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT,
+        FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT,
+        FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT,
+        FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT,
+        FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT,
+        FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT,
+        FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT,
+        FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT,
+        FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT,
+        FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT,
+        FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT,
+        FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT,
+        FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT,
+    ];
+    spec == SpecId::LATEST || SpecId::enabled(spec, SPEC_ID_MAP[opcode as usize])
+}
 #[cfg(test)]
 mod tests {
     use super::*;
     use revm_interpreter::opcode as op;
 
     #[test]
-    fn basic() {
+    fn imm_packing() {
+        let assert = |offset, len| {
+            let packed = Immediate::pack(offset, len);
+            assert_eq!(Immediate::unpack(packed), (offset, len), "packed: {packed}");
+        };
+        assert(0, 0);
+        assert(0, 1);
+        assert(0, 31);
+        assert(0, 32);
+        assert(1, 0);
+        assert(1, 1);
+        assert(1, 31);
+        assert(1, 32);
+    }
+
+    #[test]
+    fn iter_basic() {
         let bytecode = [0x01, 0x02, 0x03, 0x04, 0x05];
         let mut iter = RawBytecodeIter::new(&bytecode);
 
@@ -148,7 +379,7 @@ mod tests {
     }
 
     #[test]
-    fn with_imm() {
+    fn iter_with_imm() {
         let bytecode = [op::PUSH0, op::PUSH1, 0x69, op::PUSH2, 0x01, 0x02];
         let mut iter = RawBytecodeIter::new(&bytecode);
 
@@ -162,7 +393,7 @@ mod tests {
     }
 
     #[test]
-    fn with_imm_too_short() {
+    fn iter_with_imm_too_short() {
         let bytecode = [op::PUSH2, 0x69];
         let mut iter = RawBytecodeIter::new(&bytecode);
 

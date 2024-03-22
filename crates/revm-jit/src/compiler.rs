@@ -1,10 +1,15 @@
-use crate::{Backend, Builder, IntCC, JitEvmFn, RawBytecodeIter, Result, Ret};
-use revm_interpreter::opcode as op;
-use revm_primitives::U256;
+//! JIT compiler implementation.
+
+use crate::{Backend, Builder, Bytecode, IntCC, JitEvmFn, OpcodeData, Result};
+use revm_interpreter::{opcode as op, InstructionResult};
+use revm_primitives::{SpecId, U256};
 use std::path::PathBuf;
 
 const STACK_CAP: usize = 1024;
 // const WORD_SIZE: usize = 32;
+
+// TODO: indexvec or something
+type Opcode = usize;
 
 // TODO: cannot find function if `compile` is called a second time
 
@@ -51,92 +56,139 @@ impl<B: Backend> JitEvm<B> {
     }
 
     /// Compiles the given EVM bytecode into a JIT function.
-    pub fn compile(&mut self, bytecode: &[u8]) -> Result<JitEvmFn> {
+    #[instrument(level = "debug", skip_all, ret)]
+    pub fn compile(&mut self, bytecode: &[u8], spec: SpecId) -> Result<JitEvmFn> {
+        let bytecode = debug_time!("parse", || self.parse_bytecode(bytecode, spec))?;
+        debug_time!("compile", || self.compile_bytecode(&bytecode))
+    }
+
+    fn parse_bytecode<'a>(&mut self, bytecode: &'a [u8], spec: SpecId) -> Result<Bytecode<'a>> {
+        trace!(bytecode = revm_primitives::hex::encode(bytecode));
+        let mut bytecode = trace_time!("new bytecode", || Bytecode::new(bytecode, spec));
+        trace_time!("analyze", || bytecode.analyze())?;
+        Ok(bytecode)
+    }
+
+    fn compile_bytecode(&mut self, bytecode: &Bytecode<'_>) -> Result<JitEvmFn> {
         let name = &self.new_name()[..];
         let bcx = self.backend.build_function(name)?;
-        translate(bcx, bytecode)?;
-        if let Some(dir) = &self.out_dir {
-            let filename = format!("{name}.unopt.{}", self.backend.ir_extension());
-            self.backend.dump_ir(&dir.join(filename))?;
 
-            let filename = format!("{name}.unopt.s");
-            self.backend.dump_disasm(&dir.join(filename))?;
+        trace_time!("translate", || FunctionCx::translate(bcx, &bytecode))?;
+
+        let verify = |b: &mut B| trace_time!("verify", || b.verify_function(name));
+        if let Some(dir) = &self.out_dir {
+            trace_time!("dump unopt IR", || {
+                let filename = format!("{name}.unopt.{}", self.backend.ir_extension());
+                self.backend.dump_ir(&dir.join(filename))
+            })?;
+
+            // Dump IR before verifying for better debugging.
+            verify(&mut self.backend)?;
+
+            trace_time!("dump unopt disasm", || {
+                let filename = format!("{name}.unopt.s");
+                self.backend.dump_disasm(&dir.join(filename))
+            })?;
+        } else {
+            verify(&mut self.backend)?;
         }
 
-        self.backend.optimize_function(name)?;
-        if let Some(dir) = &self.out_dir {
-            let filename = format!("{name}.opt.{}", self.backend.ir_extension());
-            self.backend.dump_ir(&dir.join(filename))?;
+        trace_time!("optimize", || self.backend.optimize_function(name)?);
 
-            let filename = format!("{name}.opt.s");
-            self.backend.dump_disasm(&dir.join(filename))?;
+        if let Some(dir) = &self.out_dir {
+            trace_time!("dump opt IR", || {
+                let filename = format!("{name}.opt.{}", self.backend.ir_extension());
+                self.backend.dump_ir(&dir.join(filename))
+            })?;
+
+            trace_time!("dump opt disasm", || {
+                let filename = format!("{name}.opt.s");
+                self.backend.dump_disasm(&dir.join(filename))
+            })?;
         }
 
         self.backend.get_function(name)
     }
 }
 
-fn translate<B: Builder>(mut bcx: B, bytecode: &[u8]) -> Result<()> {
-    let isize_type = bcx.type_ptr_sized_int();
-    let return_type = bcx.type_int(32);
-    let word_type = bcx.type_int(256);
-    // let stack_type = bcx.type_array(word_type, STACK_CAP as _);
-
-    let stack_len = bcx.new_stack_slot(isize_type, "len_slot");
-    let zero = bcx.iconst(isize_type, 0);
-    bcx.stack_store(zero, stack_len);
-
-    let sp = bcx.fn_param(0);
-
-    FunctionCx { isize_type, word_type, return_type, stack_len, sp, bcx }
-        .translate_bytecode(bytecode)
-}
-
-struct FunctionCx<B: Builder> {
+struct FunctionCx<'a, B: Builder> {
+    /// The backend's function builder.
     bcx: B,
 
+    // Common types.
     isize_type: B::Type,
     word_type: B::Type,
     return_type: B::Type,
 
+    /// The stack length slot.
     stack_len: B::StackSlot,
+    /// The stack pointer. Constant throughout the function, passed in the arguments.
     sp: B::Value,
+
+    /// The bytecode being translated.
+    bytecode: &'a Bytecode<'a>,
+    /// All entry blocks for each opcode.
+    op_blocks: Vec<B::BasicBlock>,
+    /// The current opcode being translated.
+    ///
+    /// Note that `self.op_blocks[current_opcode]` does not necessarily equal the builder's current
+    /// block.
+    current_opcode: Opcode,
 }
 
-impl<B: Builder> FunctionCx<B> {
-    fn translate_bytecode(&mut self, bytecode: &[u8]) -> Result<()> {
-        for op in RawBytecodeIter::new(bytecode) {
-            self.translate_opcode(op.opcode, op.immediate)?;
+impl<'a, B: Builder> FunctionCx<'a, B> {
+    fn translate(mut bcx: B, bytecode: &'a Bytecode<'a>) -> Result<()> {
+        // Get common types.
+        let isize_type = bcx.type_ptr_sized_int();
+        let return_type = bcx.type_int(32);
+        let word_type = bcx.type_int(256);
+        // let stack_type = bcx.type_array(word_type, STACK_CAP as _);
+
+        // Set up entry block.
+        let stack_len = bcx.new_stack_slot(isize_type, "len_slot");
+        let zero = bcx.iconst(isize_type, 0);
+        bcx.stack_store(zero, stack_len);
+
+        let sp = bcx.fn_param(0);
+
+        // Create all opcode entry blocks.
+        let op_blocks: Vec<_> = bytecode
+            .opcodes
+            .iter()
+            .enumerate()
+            .map(|(i, opcode)| bcx.create_block(&op_block_name_with(i, *opcode, "")))
+            .collect();
+
+        // Branch to the first opcode. The bytecode is guaranteed to have at least one opcode.
+        assert!(!op_blocks.is_empty(), "got empty bytecode");
+        bcx.br(op_blocks[0]);
+
+        let mut fx = FunctionCx {
+            isize_type,
+            word_type,
+            return_type,
+            stack_len,
+            sp,
+            bcx,
+            bytecode,
+            op_blocks,
+            current_opcode: 0,
+        };
+        for i in 0..bytecode.opcodes.len() {
+            fx.current_opcode = i;
+            fx.translate_opcode()?;
         }
+
         Ok(())
     }
 
-    fn translate_opcode(&mut self, opcode: u8, imm: Option<&[u8]>) -> Result<()> {
-        /*
-        self.bcx.nop();
-        if self.clif_comments.enabled() {
-            let inst = self.last_inst();
-            let mut comment = String::with_capacity(16);
-            if let Some(as_str) = op::OPCODE_JUMPMAP[opcode as usize] {
-                comment.push_str(as_str);
-            } else {
-                write!(comment, "UNKNOWN(0x{opcode:02x})").unwrap();
-            }
-            if let op::PUSH1..=op::PUSH32 = opcode {
-                let n = (opcode - op::PUSH0) as usize;
-                let slice = iter.as_slice();
-                let slice = slice.get(..n.min(slice.len())).unwrap();
-                write!(comment, " 0x").unwrap();
-                for &b in slice {
-                    write!(comment, "{b:02x}").unwrap();
-                }
-                if slice.len() != n {
-                    write!(comment, " (truncated to {})", slice.len()).unwrap();
-                }
-            }
-            self.add_comment(inst, comment);
-        }
-        */
+    fn translate_opcode(&mut self) -> Result<()> {
+        let opcode = self.current_opcode;
+        let data = self.bytecode.opcodes[opcode];
+        let block = self.op_blocks[opcode];
+        self.bcx.switch_to_block(block);
+
+        let op_byte = data.opcode;
 
         macro_rules! unop {
             ($op:ident) => {{
@@ -193,8 +245,11 @@ impl<B: Builder> FunctionCx<B> {
             }};
         }
 
-        match opcode {
-            op::STOP => self.build_return(Ret::Stop),
+        match data.opcode {
+            op::STOP => {
+                self.build_return(InstructionResult::Stop);
+                return Ok(());
+            }
 
             op::ADD => binop!(iadd),
             op::MUL => binop!(imul),
@@ -311,17 +366,18 @@ impl<B: Builder> FunctionCx<B> {
                 self.push(value);
             }
             op::PUSH1..=op::PUSH32 => {
+                let imm = self.bytecode.get_imm_of(data);
                 let value = imm.map(U256::from_be_slice).unwrap_or_default();
                 let value = self.bcx.iconst_256(value);
                 self.push(value);
             }
 
-            op::DUP1..=op::DUP16 => self.dup(opcode - op::DUP1 + 1),
+            op::DUP1..=op::DUP16 => self.dup(op_byte - op::DUP1 + 1),
 
-            op::SWAP1..=op::SWAP16 => self.swap(opcode - op::SWAP1 + 1),
+            op::SWAP1..=op::SWAP16 => self.swap(op_byte - op::SWAP1 + 1),
 
             op::LOG0..=op::LOG4 => {
-                let _n = opcode - op::LOG0;
+                let _n = op_byte - op::LOG0;
             }
 
             op::CREATE => {}
@@ -338,6 +394,11 @@ impl<B: Builder> FunctionCx<B> {
             _ => {}
         }
 
+        if let Some(next) = self.op_blocks.get(opcode + 1) {
+            self.bcx.br(*next);
+        }
+        self.bcx.seal_block(block);
+
         Ok(())
     }
 
@@ -351,7 +412,7 @@ impl<B: Builder> FunctionCx<B> {
         let len = self.load_len();
         let failure_cond =
             self.bcx.icmp_imm(IntCC::UnsignedGreaterThan, len, (STACK_CAP - values.len()) as i64);
-        self.build_failure(failure_cond, Ret::StackOverflow);
+        self.build_failure(failure_cond, InstructionResult::StackOverflow);
 
         self.pushn_unchecked(values);
     }
@@ -382,7 +443,7 @@ impl<B: Builder> FunctionCx<B> {
 
         let mut len = self.load_len();
         let failure_cond = self.bcx.icmp_imm(IntCC::UnsignedLessThan, len, N as i64);
-        self.build_failure(failure_cond, Ret::StackUnderflow);
+        self.build_failure(failure_cond, InstructionResult::StackUnderflow);
 
         let ret = std::array::from_fn(|i| {
             len = self.bcx.isub_imm(len, 1);
@@ -401,7 +462,7 @@ impl<B: Builder> FunctionCx<B> {
 
         let len = self.load_len();
         let failure_cond = self.bcx.icmp_imm(IntCC::UnsignedLessThan, len, n as i64);
-        self.build_failure(failure_cond, Ret::StackUnderflow);
+        self.build_failure(failure_cond, InstructionResult::StackUnderflow);
 
         let sp = self.sp_from_top(len, n as usize);
         let value = self.load_word(sp, &format!("dup{n}"));
@@ -414,7 +475,7 @@ impl<B: Builder> FunctionCx<B> {
 
         let len = self.load_len();
         let failure_cond = self.bcx.icmp_imm(IntCC::UnsignedLessThan, len, n as i64);
-        self.build_failure(failure_cond, Ret::StackUnderflow);
+        self.build_failure(failure_cond, InstructionResult::StackUnderflow);
 
         // let tmp;
         let tmp = self.bcx.new_stack_slot(self.word_type, "tmp");
@@ -448,7 +509,7 @@ impl<B: Builder> FunctionCx<B> {
 
     /// Returns the stack pointer at `len` (`&stack[len]`).
     fn sp_at(&mut self, len: B::Value) -> B::Value {
-        self.bcx.gep_add(self.word_type, self.sp, len)
+        self.bcx.gep(self.word_type, self.sp, len)
     }
 
     /// Returns the stack pointer at `len` from the top (`&stack[CAPACITY - len]`).
@@ -458,9 +519,9 @@ impl<B: Builder> FunctionCx<B> {
     }
 
     /// `if failure_cond { return ret } else { ... }`
-    fn build_failure(&mut self, failure_cond: B::Value, ret: Ret) {
-        let failure = self.bcx.create_block();
-        let target = self.bcx.create_block();
+    fn build_failure(&mut self, failure_cond: B::Value, ret: InstructionResult) {
+        let failure = self.create_block_after_op("fail");
+        let target = self.create_block_after(failure, "contd");
         self.bcx.brif(failure_cond, failure, target);
 
         self.bcx.set_cold_block(failure);
@@ -470,29 +531,63 @@ impl<B: Builder> FunctionCx<B> {
         self.bcx.switch_to_block(target);
     }
 
-    /// `return ret`
-    fn build_return(&mut self, ret: Ret) {
+    /// Builds `return ret`.
+    fn build_return(&mut self, ret: InstructionResult) {
         let old_block = self.bcx.current_block();
-        /* if self.clif_comments.enabled() {
+        if self.comments_enabled() {
             self.bcx.nop();
-            let inst = self.bcx.func.layout.last_inst(old_block).unwrap();
-            self.add_comment(inst, format!("return {ret:?}"));
-        } */
+            self.add_comment(&format!("return {ret:?}"));
+        }
         let ret = self.bcx.iconst(self.return_type, ret as i64);
         self.bcx.ret(&[ret]);
         if let Some(old_block) = old_block {
             self.bcx.seal_block(old_block);
         }
-
-        let new_block = self.bcx.create_block();
-        self.bcx.switch_to_block(new_block);
-        // self.bcx.ensure_inserted_block();
     }
 
-    // fn last_inst(&self) -> Inst {
-    //     let block = self.bcx.current_block().unwrap();
-    //     self.bcx.func.layout.last_inst(block).unwrap()
-    // }
+    /// Returns whether comments are enabled.
+    fn comments_enabled(&self) -> bool {
+        true
+    }
+
+    /// Adds a comment to the current instruction.
+    fn add_comment(&mut self, comment: &str) {
+        self.bcx.nop();
+        self.bcx.add_comment_to_current_inst(comment);
+    }
+
+    /// Creates a named block.
+    #[allow(dead_code)]
+    fn create_block(&mut self, name: &str) -> B::BasicBlock {
+        let name = self.op_block_name(name);
+        self.bcx.create_block(&name)
+    }
+
+    /// Creates a named block after the given block.
+    fn create_block_after(&mut self, after: B::BasicBlock, name: &str) -> B::BasicBlock {
+        let name = self.op_block_name(name);
+        self.bcx.create_block_after(after, &name)
+    }
+
+    /// Creates a named block after the current opcode.
+    fn create_block_after_op(&mut self, name: &str) -> B::BasicBlock {
+        let after = self.op_blocks[self.current_opcode];
+        self.create_block_after(after, name)
+    }
+
+    /// Returns the block name for the current opcode with the given suffix.
+    fn op_block_name(&self, name: &str) -> String {
+        op_block_name_with(self.current_opcode, self.bytecode.opcodes[self.current_opcode], name)
+    }
+}
+
+fn op_block_name_with(op: Opcode, data: OpcodeData, with: &str) -> String {
+    let data = data.to_raw();
+    if with.is_empty() {
+        format!("_{op}_{data}")
+    } else {
+        format!("_{op}_{data}_{with}")
+    }
 }
 
 #[cfg(test)]
@@ -514,7 +609,7 @@ mod tests {
         name: &'a str,
         bytecode: &'a [u8],
 
-        expected_return: Ret,
+        expected_return: InstructionResult,
         expected_stack: &'a [U256],
     }
 
@@ -590,32 +685,35 @@ mod tests {
             uint!([$(TestCase {
                 name: stringify!($name),
                 bytecode: &testcases!(@op $op, $a $(, $b)?),
-                expected_return: Ret::Stop,
+                expected_return: InstructionResult::Stop,
                 expected_stack: &[$ret],
             }),*])
         };
     }
 
     static BASIC_CASES: &[TestCase<'static>] = &[
-        // TODO: pad code
-        // TestCase { name: "empty", bytecode: &[], expected_return: Ret::Stop, expected_stack: &[]
-        // },
+        TestCase {
+            name: "empty",
+            bytecode: &[],
+            expected_return: InstructionResult::Stop,
+            expected_stack: &[],
+        },
         TestCase {
             name: "stop",
             bytecode: &[op::STOP],
-            expected_return: Ret::Stop,
+            expected_return: InstructionResult::Stop,
             expected_stack: &[],
         },
         TestCase {
             name: "underflow1",
             bytecode: &[op::ADD, op::STOP],
-            expected_return: Ret::StackUnderflow,
+            expected_return: InstructionResult::StackUnderflow,
             expected_stack: &[],
         },
         TestCase {
             name: "underflow2",
             bytecode: &[op::PUSH0, op::ADD, op::STOP],
-            expected_return: Ret::StackUnderflow,
+            expected_return: InstructionResult::StackUnderflow,
             expected_stack: &[U256::ZERO],
         },
     ];
@@ -772,7 +870,7 @@ mod tests {
 
             println!("Running test case {i:2}: {name}");
             println!("  bytecode: {}", format_bytecode(bytecode));
-            let f = jit.compile(bytecode).unwrap();
+            let f = jit.compile(bytecode, SpecId::LATEST).unwrap();
 
             let mut stack = ContextStack::new();
             let actual_return = unsafe { f(&mut stack) };
