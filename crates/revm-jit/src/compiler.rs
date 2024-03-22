@@ -1007,6 +1007,8 @@ mod tests {
             run_test_group(&make_backend, cases);
             println!();
         }
+        println!("Running fibonacci tests for backend `{backend_name}`");
+        run_fibonacci_tests(make_backend);
     }
 
     fn run_test_group<B: Backend>(make_backend: impl Fn() -> B, cases: &[TestCase<'_>]) {
@@ -1034,6 +1036,109 @@ mod tests {
                 };
                 assert_eq!(actual, *expected, "stack item {j} does not match");
             }
+        }
+    }
+
+    fn run_fibonacci_tests<B: Backend>(make_backend: impl Fn() -> B) {
+        for i in 0..=10 {
+            run_fibonacci_test(&make_backend, i);
+        }
+        run_fibonacci_test(make_backend, 100);
+
+        fn run_fibonacci_test<B: Backend>(make_backend: impl Fn() -> B, input: u16) {
+            println!("  Running fibonacci({input})");
+            run_fibonacci_static(make_backend, input);
+            // TODO: dynamic fibonacci
+        }
+
+        fn run_fibonacci_static<B: Backend>(make_backend: impl Fn() -> B, input: u16) {
+            let code = mk_static_fibonacci_code(input);
+            let mut jit = JitEvm::new(make_backend());
+            let f = jit.compile(&code, SpecId::LATEST).unwrap();
+            let mut stack = ContextStack::new();
+            let r = unsafe { f(&mut stack) };
+            assert_eq!(r, InstructionResult::Stop);
+            // Apparently the code does `fibonacci(input + 1)`.
+            assert_eq!(stack.word(0), fibonacci_rust(input + 1));
+        }
+
+        #[rustfmt::skip]
+        fn mk_static_fibonacci_code(input: u16) -> Vec<u8> {
+            let input = input.to_be_bytes();
+            [[op::PUSH2].as_slice(), input.as_slice(), FIBONACCI_CODE].concat()
+        }
+
+        // Modified from jitevm: https://github.com/paradigmxyz/jitevm/blob/5ab9260774a44d63e2a43b9fc5db14afe74684a0/src/test_data.rs#L3
+        #[rustfmt::skip]
+        const FIBONACCI_CODE: &[u8] = &[
+            // 1st/2nd fib number
+            op::PUSH1, 0,
+            op::PUSH1, 1,
+            // 7
+
+            // MAINLOOP:
+            op::JUMPDEST,
+            op::DUP3,
+            op::ISZERO,
+            op::PUSH1, 28, // cleanup
+            op::JUMPI,
+
+            // fib step
+            op::DUP2,
+            op::DUP2,
+            op::ADD,
+            op::SWAP2,
+            op::POP,
+            op::SWAP1,
+            // 19
+
+            // decrement fib step counter
+            op::SWAP2,
+            op::PUSH1, 1,
+            op::SWAP1,
+            op::SUB,
+            op::SWAP2,
+            op::PUSH1, 7, // goto MAINLOOP
+            op::JUMP,
+            // 28
+
+            // CLEANUP:
+            op::JUMPDEST,
+            op::SWAP2,
+            op::POP,
+            op::POP,
+            // done: requested fib number is the only element on the stack!
+            op::STOP,
+        ];
+    }
+
+    fn fibonacci_rust(n: u16) -> U256 {
+        let mut a = U256::from(0);
+        let mut b = U256::from(1);
+        for _ in 0..n {
+            let tmp = a;
+            a = b;
+            b = b.wrapping_add(tmp);
+        }
+        a
+    }
+
+    #[test]
+    fn test_fibonacci_rust() {
+        uint! {
+            assert_eq!(fibonacci_rust(0), 0_U256);
+            assert_eq!(fibonacci_rust(1), 1_U256);
+            assert_eq!(fibonacci_rust(2), 1_U256);
+            assert_eq!(fibonacci_rust(3), 2_U256);
+            assert_eq!(fibonacci_rust(4), 3_U256);
+            assert_eq!(fibonacci_rust(5), 5_U256);
+            assert_eq!(fibonacci_rust(6), 8_U256);
+            assert_eq!(fibonacci_rust(7), 13_U256);
+            assert_eq!(fibonacci_rust(8), 21_U256);
+            assert_eq!(fibonacci_rust(9), 34_U256);
+            assert_eq!(fibonacci_rust(10), 55_U256);
+            assert_eq!(fibonacci_rust(100), 354224848179261915075_U256);
+            assert_eq!(fibonacci_rust(1000), 0x2e3510283c1d60b00930b7e8803c312b4c8e6d5286805fc70b594dc75cc0604b_U256);
         }
     }
 }
