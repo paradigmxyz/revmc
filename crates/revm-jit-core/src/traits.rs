@@ -74,14 +74,6 @@ pub trait Backend: BackendTypes + TypeMethods {
     fn get_function(&mut self, name: &str) -> Result<RawJitEvmFn>;
     unsafe fn free_function(&mut self, name: &str) -> Result<()>;
     unsafe fn free_all_functions(&mut self) -> Result<()>;
-
-    fn add_callback_function(
-        &mut self,
-        name: &str,
-        ret: Option<Self::Type>,
-        params: &[Self::Type],
-        address: usize,
-    ) -> Self::Function;
 }
 
 pub trait TypeMethods: BackendTypes {
@@ -106,6 +98,7 @@ pub trait Builder: BackendTypes + TypeMethods {
     fn bool_const(&mut self, value: bool) -> Self::Value;
     fn iconst(&mut self, ty: Self::Type, value: i64) -> Self::Value;
     fn iconst_256(&mut self, value: U256) -> Self::Value;
+    fn str_const(&mut self, value: &str) -> Self::Value;
 
     fn new_stack_slot(&mut self, ty: Self::Type, name: &str) -> Self::StackSlot;
     fn stack_load(&mut self, ty: Self::Type, slot: Self::StackSlot, name: &str) -> Self::Value;
@@ -150,7 +143,6 @@ pub trait Builder: BackendTypes + TypeMethods {
     fn sdiv(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
     fn urem(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
     fn srem(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
-    fn ipow(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
 
     fn iadd_imm(&mut self, lhs: Self::Value, rhs: i64) -> Self::Value;
     fn isub_imm(&mut self, lhs: Self::Value, rhs: i64) -> Self::Value;
@@ -170,5 +162,15 @@ pub trait Builder: BackendTypes + TypeMethods {
 
     fn gep(&mut self, ty: Self::Type, ptr: Self::Value, offset: Self::Value) -> Self::Value;
 
-    fn panic(&mut self, msg: &str);
+    fn call(&mut self, function: Self::Function, args: &[Self::Value]) -> Option<Self::Value>;
+
+    fn unreachable(&mut self);
+
+    fn add_callback_function(
+        &mut self,
+        name: &str,
+        ret: Option<Self::Type>,
+        params: &[Self::Type],
+        address: usize,
+    ) -> Self::Function;
 }

@@ -12,8 +12,8 @@ use pretty_clif::CommentWriter;
 use revm_jit_core::{
     Backend, BackendTypes, Builder, Error, OptimizationLevel, Result, TypeMethods,
 };
-use revm_primitives::U256;
-use std::{io::Write, path::Path};
+use revm_primitives::{HashMap, U256};
+use std::{cell::RefCell, io::Write, path::Path, rc::Rc};
 
 mod pretty_clif;
 
@@ -37,6 +37,8 @@ pub struct JitEvmCraneliftBackend {
     /// The module, with the jit backend, which manages the JIT'd functions.
     module: JITModule,
 
+    symbols: Symbols,
+
     opt_level: OptimizationLevel,
     comments: CommentWriter,
 }
@@ -57,11 +59,13 @@ impl JitEvmCraneliftBackend {
     /// [`is_supported`](Self::is_supported).
     #[track_caller]
     pub fn new(opt_level: OptimizationLevel) -> Self {
-        let module = mk_jit_module(opt_level);
+        let symbols = Symbols::new();
+        let module = mk_jit_module(opt_level, symbols.clone());
         Self {
             builder_context: FunctionBuilderContext::new(),
             ctx: module.make_context(),
             module,
+            symbols,
             opt_level,
             comments: CommentWriter::new(),
         }
@@ -150,7 +154,13 @@ impl Backend for JitEvmCraneliftBackend {
         self.ctx.func.signature.returns.push(AbiParam::new(types::I8));
         let _id = self.module.declare_function(name, Linkage::Export, &self.ctx.func.signature)?;
         let bcx = FunctionBuilder::new(&mut self.ctx.func, &mut self.builder_context);
-        Ok(JitEvmCraneliftBuilder { comments: &mut self.comments, bcx, ptr_type })
+        Ok(JitEvmCraneliftBuilder {
+            module: &mut self.module,
+            comments: &mut self.comments,
+            bcx,
+            ptr_type,
+            symbols: self.symbols.clone(),
+        })
     }
 
     fn verify_function(&mut self, name: &str) -> Result<()> {
@@ -194,36 +204,22 @@ impl Backend for JitEvmCraneliftBackend {
 
     unsafe fn free_all_functions(&mut self) -> Result<()> {
         // TODO: Can `free_memory` take `&mut self` pls?
-        let new = mk_jit_module(self.opt_level);
+        let new = mk_jit_module(self.opt_level, self.symbols.clone());
         let old = std::mem::replace(&mut self.module, new);
         unsafe { old.free_memory() };
         self.ctx = self.module.make_context();
         Ok(())
-    }
-
-    fn add_callback_function(
-        &mut self,
-        name: &str,
-        ty: Option<Self::Type>,
-        params: &[Self::Type],
-        address: usize,
-    ) -> Self::Function {
-        let _ = name;
-        let _ = ty;
-        let _ = params;
-        let _ = address;
-        // let _id = self.module.declare_function(name, Linkage::Import, &Signature::new(&[],
-        // &[])).unwrap(); FuncRef::from_raw(0)
-        todo!()
     }
 }
 
 /// The Cranelift-based EVM JIT function builder.
 #[allow(missing_debug_implementations)]
 pub struct JitEvmCraneliftBuilder<'a> {
+    module: &'a mut JITModule,
     comments: &'a mut CommentWriter,
     bcx: FunctionBuilder<'a>,
     ptr_type: Type,
+    symbols: Symbols,
 }
 
 impl<'a> BackendTypes for JitEvmCraneliftBuilder<'a> {
@@ -308,6 +304,11 @@ impl<'a> Builder for JitEvmCraneliftBuilder<'a> {
     fn iconst_256(&mut self, value: U256) -> Self::Value {
         let _ = value;
         unimplemented!("no i256 :(")
+    }
+
+    fn str_const(&mut self, value: &str) -> Self::Value {
+        let _ = value;
+        todo!("str_const")
     }
 
     fn new_stack_slot(&mut self, ty: Self::Type, name: &str) -> Self::StackSlot {
@@ -458,12 +459,6 @@ impl<'a> Builder for JitEvmCraneliftBuilder<'a> {
         self.bcx.ins().srem(lhs, rhs)
     }
 
-    fn ipow(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
-        let _ = lhs;
-        let _ = rhs;
-        todo!("ipow")
-    }
-
     fn iadd_imm(&mut self, lhs: Self::Value, rhs: i64) -> Self::Value {
         self.bcx.ins().iadd_imm(lhs, rhs)
     }
@@ -517,25 +512,65 @@ impl<'a> Builder for JitEvmCraneliftBuilder<'a> {
         self.bcx.ins().iadd(ptr, offset)
     }
 
-    fn panic(&mut self, msg: &str) {
-        // let func = self.bcx.import_function(ExtFuncData{});
-        // self.bcx.ins().call(, args)
-        todo!("panic {msg:?}")
+    fn call(&mut self, function: Self::Function, args: &[Self::Value]) -> Option<Self::Value> {
+        let ins = self.bcx.ins().call(function, args);
+        self.bcx.inst_results(ins).first().copied()
+    }
+
+    fn unreachable(&mut self) {
+        self.bcx.ins().trap(TrapCode::UnreachableCodeReached);
+    }
+
+    fn add_callback_function(
+        &mut self,
+        name: &str,
+        ret: Option<Self::Type>,
+        params: &[Self::Type],
+        address: usize,
+    ) -> Self::Function {
+        let mut sig = self.module.make_signature();
+        for ret in &ret {
+            sig.returns.push(AbiParam::new(*ret));
+        }
+        for param in params {
+            sig.params.push(AbiParam::new(*param));
+        }
+        self.symbols.insert(name.to_string(), address as *const u8);
+        let id = self.module.declare_function(name, Linkage::Import, &sig).unwrap();
+        self.module.declare_func_in_func(id, self.bcx.func)
     }
 }
 
-fn mk_jit_module(opt_level: OptimizationLevel) -> JITModule {
+#[derive(Clone, Debug, Default)]
+struct Symbols(Rc<RefCell<HashMap<String, *const u8>>>);
+
+impl Symbols {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn get(&self, name: &str) -> Option<*const u8> {
+        self.0.borrow().get(name).copied()
+    }
+
+    fn insert(&self, name: String, ptr: *const u8) -> Option<*const u8> {
+        self.0.borrow_mut().insert(name, ptr)
+    }
+}
+
+fn mk_jit_module(opt_level: OptimizationLevel, symbols: Symbols) -> JITModule {
     let opt_level: &str = match opt_level {
         OptimizationLevel::None => "none",
         OptimizationLevel::Less | OptimizationLevel::Default | OptimizationLevel::Aggressive => {
             "speed"
         }
     };
-    let builder = JITBuilder::with_flags(
+    let mut builder = JITBuilder::with_flags(
         &[("opt_level", opt_level)],
         cranelift_module::default_libcall_names(),
     )
     .unwrap();
+    builder.symbol_lookup_fn(Box::new(move |s| symbols.get(s)));
     JITModule::new(builder)
 }
 

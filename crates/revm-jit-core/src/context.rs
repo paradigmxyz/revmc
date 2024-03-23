@@ -140,7 +140,10 @@ impl EvmStack {
     }
 }
 
-/// A native 256-bit unsigned integer. This is aligned to 32 bytes.
+/// A native-endian 256-bit unsigned integer, aligned to 32 bytes.
+///
+/// This ends up being a simple no-op wrapper around `U256` on little-endian targets, modulo the
+/// stricter alignment requirement, thanks to the `U256` representation being identical.
 #[repr(C, align(32))]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct EvmWord([u8; 32]);
@@ -190,9 +193,9 @@ impl EvmWord {
     /// The zero value.
     pub const ZERO: Self = Self([0; 32]);
 
-    /// Creates a new value.
+    /// Creates a new value from native-endian bytes.
     #[inline]
-    pub const fn new(x: [u8; 32]) -> Self {
+    pub const fn from_ne_bytes(x: [u8; 32]) -> Self {
         Self(x)
     }
 
@@ -219,6 +222,51 @@ impl EvmWord {
         unsafe { &mut *(value as *mut U256 as *mut Self) }
     }
 
+    /// Return the memory representation of this integer as a byte array in big-endian (network)
+    /// byte order.
+    #[inline]
+    pub fn to_be_bytes(self) -> [u8; 32] {
+        self.to_be().to_ne_bytes()
+    }
+
+    /// Return the memory representation of this integer as a byte array in little-endian byte
+    /// order.
+    #[inline]
+    pub fn to_le_bytes(self) -> [u8; 32] {
+        self.to_le().to_ne_bytes()
+    }
+
+    /// Return the memory representation of this integer as a byte array in native byte order.
+    #[inline]
+    pub const fn to_ne_bytes(self) -> [u8; 32] {
+        self.0
+    }
+
+    /// Converts `self` to big endian from the target's endianness.
+    #[inline]
+    pub fn to_be(self) -> Self {
+        #[cfg(target_endian = "little")]
+        return self.swap_bytes();
+        #[cfg(target_endian = "big")]
+        return self;
+    }
+
+    /// Converts `self` to little endian from the target's endianness.
+    #[inline]
+    pub fn to_le(self) -> Self {
+        #[cfg(target_endian = "little")]
+        return self;
+        #[cfg(target_endian = "big")]
+        return self.swap_bytes();
+    }
+
+    /// Reverses the byte order of the integer.
+    #[inline]
+    pub fn swap_bytes(mut self) -> Self {
+        self.0.reverse();
+        self
+    }
+
     /// Casts this value to a [`U256`]. This is a no-op on little-endian systems.
     #[cfg(target_endian = "little")]
     #[inline]
@@ -238,6 +286,15 @@ impl EvmWord {
     pub const fn to_u256(&self) -> U256 {
         #[cfg(target_endian = "little")]
         return *self.as_u256();
+        #[cfg(target_endian = "big")]
+        return U256::from_be_bytes(self.0);
+    }
+
+    /// Converts this value to a [`U256`]. This is a no-op on little-endian systems.
+    #[inline]
+    pub const fn into_u256(self) -> U256 {
+        #[cfg(target_endian = "little")]
+        return unsafe { std::mem::transmute(self) };
         #[cfg(target_endian = "big")]
         return U256::from_be_bytes(self.0);
     }

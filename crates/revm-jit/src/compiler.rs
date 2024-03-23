@@ -2,7 +2,7 @@
 
 use crate::{Backend, Builder, Bytecode, IntCC, OpcodeData, OpcodeFlags, Result};
 use revm_interpreter::{opcode as op, InstructionResult};
-use revm_jit_core::{JitEvmFn, OptimizationLevel};
+use revm_jit_core::{JitEvmFn, OptimizationLevel, TypeMethods};
 use revm_primitives::{SpecId, U256};
 use std::path::PathBuf;
 
@@ -15,12 +15,13 @@ type Opcode = usize;
 // TODO: cannot find function if `compile` is called a second time
 
 /// JIT compiler for EVM bytecode.
-#[derive(Debug)]
-pub struct JitEvm<B> {
+#[allow(missing_debug_implementations)]
+pub struct JitEvm<B: Backend> {
     backend: B,
     out_dir: Option<PathBuf>,
     config: FcxConfig,
     function_counter: usize,
+    callbacks: Callbacks<B>,
 }
 
 impl<B: Backend + Default> Default for JitEvm<B> {
@@ -32,7 +33,13 @@ impl<B: Backend + Default> Default for JitEvm<B> {
 impl<B: Backend> JitEvm<B> {
     /// Creates a new instance of the JIT compiler with the given backend.
     pub fn new(backend: B) -> Self {
-        Self { backend, out_dir: None, config: FcxConfig::default(), function_counter: 0 }
+        Self {
+            backend,
+            out_dir: None,
+            config: FcxConfig::default(),
+            function_counter: 0,
+            callbacks: Callbacks::new(),
+        }
     }
 
     /// Dumps the IR and potential to the given directory after compilation.
@@ -139,6 +146,8 @@ impl<B: Backend> JitEvm<B> {
     /// should only be used when none of the functions from that module are currently executing and
     /// none of the `fn` pointers are called afterwards.
     pub unsafe fn free_all_functions(&mut self) -> Result<()> {
+        self.callbacks.clear();
+        self.function_counter = 0;
         self.backend.free_all_functions()
     }
 
@@ -150,20 +159,15 @@ impl<B: Backend> JitEvm<B> {
     }
 
     fn compile_bytecode(&mut self, bytecode: &Bytecode<'_>) -> Result<JitEvmFn> {
-        if self.config.debug_assertions {
-            let params = &[self.backend.type_ptr(), self.backend.type_ptr_sized_int()];
-            self.backend.add_callback_function(
-                "__callback_panic",
-                None,
-                params,
-                __callback_panic as usize,
-            );
-        }
-
         let name = &self.new_name()[..];
         let bcx = self.backend.build_function(name)?;
 
-        trace_time!("translate", || FunctionCx::translate(bcx, bytecode, &self.config))?;
+        trace_time!("translate", || FunctionCx::translate(
+            bcx,
+            &self.config,
+            &mut self.callbacks,
+            bytecode
+        ))?;
 
         let verify = |b: &mut B| trace_time!("verify", || b.verify_function(name));
         if let Some(dir) = &self.out_dir {
@@ -232,17 +236,17 @@ impl Default for FcxConfig {
     }
 }
 
-struct FunctionCx<'a, B: Builder> {
+struct FunctionCx<'a, B: Backend> {
     disable_gas: bool,
     comments_enabled: bool,
 
     /// The backend's function builder.
-    bcx: B,
+    bcx: B::Builder<'a>,
 
     // Common types.
     isize_type: B::Type,
     word_type: B::Type,
-    return_type: B::Type,
+    i8_type: B::Type,
 
     /// The stack length pointer. `isize`.
     stack_len: B::Value,
@@ -264,13 +268,20 @@ struct FunctionCx<'a, B: Builder> {
     /// Note that `self.op_blocks[current_opcode]` does not necessarily equal the builder's current
     /// block.
     current_opcode: Opcode,
+
+    callbacks: &'a mut Callbacks<B>,
 }
 
-impl<'a, B: Builder> FunctionCx<'a, B> {
-    fn translate(mut bcx: B, bytecode: &'a Bytecode<'a>, config: &FcxConfig) -> Result<()> {
+impl<'a, B: Backend> FunctionCx<'a, B> {
+    fn translate(
+        mut bcx: B::Builder<'a>,
+        config: &FcxConfig,
+        callbacks: &'a mut Callbacks<B>,
+        bytecode: &'a Bytecode<'a>,
+    ) -> Result<()> {
         // Get common types.
         let isize_type = bcx.type_ptr_sized_int();
-        let return_type = bcx.type_int(8);
+        let i8_type = bcx.type_int(8);
         let word_type = bcx.type_int(256);
 
         let zero = bcx.iconst(isize_type, 0);
@@ -278,15 +289,6 @@ impl<'a, B: Builder> FunctionCx<'a, B> {
         // Set up entry block.
         let gas_ty = isize_type;
         let gas_ptr = bcx.fn_param(0);
-        if config.debug_assertions {
-            pointer_panic_with_bool(
-                &mut bcx,
-                !config.gas_disabled || config.store_gas_used || config.static_gas_limit.is_none(),
-                gas_ptr,
-                "gas pointer",
-            );
-        }
-
         let gas_used = if config.store_gas_used {
             let one = bcx.iconst(isize_type, 1);
             bcx.gep(gas_ty, gas_ptr, one)
@@ -309,10 +311,6 @@ impl<'a, B: Builder> FunctionCx<'a, B> {
             let stack_slot = bcx.new_stack_slot(stack_type, "stack.addr");
             bcx.stack_addr(stack_slot)
         };
-        if config.debug_assertions {
-            pointer_panic_with_bool(&mut bcx, config.stack_through_args, sp_arg, "stack pointer");
-        }
-
         let stack_len_arg = bcx.fn_param(2);
         let stack_len = if config.pass_stack_len_through_args {
             stack_len_arg
@@ -321,14 +319,6 @@ impl<'a, B: Builder> FunctionCx<'a, B> {
             bcx.stack_store(zero, stack_len);
             bcx.stack_addr(stack_len)
         };
-        if config.debug_assertions {
-            pointer_panic_with_bool(
-                &mut bcx,
-                config.pass_stack_len_through_args,
-                stack_len_arg,
-                "stack length pointer",
-            );
-        }
 
         // Create all opcode entry blocks.
         let op_blocks: Vec<_> = bytecode
@@ -337,10 +327,7 @@ impl<'a, B: Builder> FunctionCx<'a, B> {
             .enumerate()
             .map(|(i, opcode)| bcx.create_block(&op_block_name_with(i, *opcode, "")))
             .collect();
-
-        // Branch to the first opcode. The bytecode is guaranteed to have at least one opcode.
         assert!(!op_blocks.is_empty(), "translating empty bytecode");
-        bcx.br(op_blocks[0]);
 
         let op_infos = op::spec_opcode_gas(bytecode.spec);
 
@@ -351,7 +338,7 @@ impl<'a, B: Builder> FunctionCx<'a, B> {
             bcx,
             isize_type,
             word_type,
-            return_type,
+            i8_type,
             stack_len,
             sp,
             gas_used,
@@ -359,8 +346,25 @@ impl<'a, B: Builder> FunctionCx<'a, B> {
             bytecode,
             op_blocks,
             op_infos,
-            current_opcode: 0,
+            current_opcode: usize::MAX,
+
+            callbacks,
         };
+
+        // Add debug assertions for the parameters.
+        if config.debug_assertions {
+            fx.pointer_panic_with_bool(!config.gas_disabled, gas_ptr, "gas pointer");
+            fx.pointer_panic_with_bool(config.stack_through_args, sp_arg, "stack pointer");
+            fx.pointer_panic_with_bool(
+                config.pass_stack_len_through_args,
+                stack_len_arg,
+                "stack length pointer",
+            );
+        }
+
+        // Branch to the first opcode. The bytecode is guaranteed to have at least one opcode.
+        fx.bcx.br(fx.op_blocks[0]);
+
         for i in 0..bytecode.opcodes.len() {
             fx.current_opcode = i;
             fx.translate_opcode()?;
@@ -422,7 +426,7 @@ impl<'a, B: Builder> FunctionCx<'a, B> {
 
         macro_rules! unop {
             ($op:ident) => {{
-                let mut a = self.pop();
+                let mut a = self.pop(true);
                 a = self.bcx.$op(a);
                 self.push_unchecked(a);
             }};
@@ -430,12 +434,12 @@ impl<'a, B: Builder> FunctionCx<'a, B> {
 
         macro_rules! binop {
             ($op:ident) => {{
-                let [a, b] = self.popn();
+                let [a, b] = self.popn(true);
                 let r = self.bcx.$op(a, b);
                 self.push_unchecked(r);
             }};
             (@if_not_zero $op:ident $(, $extra_cond:expr)?) => {{
-                let [a, b] = self.popn();
+                let [a, b] = self.popn(true);
                 let cond = self.bcx.icmp_imm(IntCC::Equal, b, 0);
                 let r = self.bcx.lazy_select(
                     cond,
@@ -482,18 +486,27 @@ impl<'a, B: Builder> FunctionCx<'a, B> {
             op::MOD => binop!(@if_not_zero urem),
             op::SMOD => binop!(@if_not_zero srem),
             op::ADDMOD => {
-                // TODO
-                // let [a, b, c] = self.popn();
+                let len = self.load_len_at_least(3);
+                let subtracted = self.bcx.isub_imm(len, 2);
+                self.store_len(subtracted);
+                let sp = self.sp_at(len);
+                let _ = self.callback(Callback::AddMod, &[sp]);
             }
             op::MULMOD => {
-                // TODO
-                // let [a, b, c] = self.popn();
+                let len = self.load_len_at_least(3);
+                let subtracted = self.bcx.isub_imm(len, 2);
+                self.store_len(subtracted);
+                let sp = self.sp_at(len);
+                let _ = self.callback(Callback::MulMod, &[sp]);
             }
             op::EXP => {
-                // TODO
-                // let [base, exponent] = self.popn();
-                // let r = self.bcx.ipow(base, exponent);
-                // self.push_unchecked(r);
+                let len = self.load_len_at_least(2);
+                let subtracted = self.bcx.isub_imm(len, 1);
+                self.store_len(subtracted);
+                let sp = self.sp_at(len);
+                let spec = self.bcx.iconst(self.i8_type, self.bytecode.spec as i64);
+                let gas_cost = self.callback(Callback::Exp, &[sp, spec]).unwrap();
+                self.gas_cost(gas_cost);
             }
             op::SIGNEXTEND => {
                 // TODO
@@ -512,13 +525,13 @@ impl<'a, B: Builder> FunctionCx<'a, B> {
                     _ => unreachable!(),
                 };
 
-                let [a, b] = self.popn();
+                let [a, b] = self.popn(true);
                 let r = self.bcx.icmp(cond, a, b);
                 let r = self.bcx.zext(self.word_type, r);
                 self.push_unchecked(r);
             }
             op::ISZERO => {
-                let a = self.pop();
+                let a = self.pop(true);
                 let r = self.bcx.icmp_imm(IntCC::Equal, a, 0);
                 let r = self.bcx.zext(self.word_type, r);
                 self.push_unchecked(r);
@@ -528,12 +541,18 @@ impl<'a, B: Builder> FunctionCx<'a, B> {
             op::XOR => binop!(bitxor),
             op::NOT => unop!(bitnot),
             op::BYTE => {
-                // TODO
-                // let [index, value] = self.popn();
-                // let cond = self.bcx.icmp_imm(IntCC::UnsignedLessThan, value, 32);
-                // let zero = self.bcx.iconst_256(U256::ZERO);
-                // let r = self.bcx.select(cond, cond, zero);
-                // self.push_unchecked(r);
+                let [index, value] = self.popn(true);
+                let cond = self.bcx.icmp_imm(IntCC::UnsignedLessThan, index, 32);
+                let byte = {
+                    // (x >> (8 * index)) & 0xFF
+                    let mask = self.bcx.iconst_256(U256::from(0xFF));
+                    let shift = self.bcx.imul_imm(index, 8);
+                    let shifted = self.bcx.ushr(value, shift);
+                    self.bcx.bitand(shifted, mask)
+                };
+                let zero = self.bcx.iconst_256(U256::ZERO);
+                let r = self.bcx.select(cond, byte, zero);
+                self.push_unchecked(r);
             }
             op::SHL => binop!(ishl),
             op::SHR => binop!(ushr),
@@ -571,7 +590,7 @@ impl<'a, B: Builder> FunctionCx<'a, B> {
             op::BLOBBASEFEE => {}
 
             op::POP => {
-                self.pop();
+                let _ = self.pop(false);
             }
             op::MLOAD => {}
             op::MSTORE => {}
@@ -592,7 +611,7 @@ impl<'a, B: Builder> FunctionCx<'a, B> {
 
                     let target = self.op_blocks[target_opcode];
                     if op_byte == op::JUMPI {
-                        let cond_word = self.pop();
+                        let cond_word = self.pop(true);
                         let cond = self.bcx.icmp_imm(IntCC::NotEqual, cond_word, 0);
                         let next = self.op_blocks[opcode + 1];
                         self.bcx.brif(cond, target, next);
@@ -688,27 +707,38 @@ impl<'a, B: Builder> FunctionCx<'a, B> {
     }
 
     /// Removes the topmost element from the stack and returns it.
-    fn pop(&mut self) -> B::Value {
-        self.popn::<1>()[0]
+    fn pop(&mut self, load: bool) -> B::Value {
+        self.popn::<1>(load)[0]
     }
 
     /// Removes the topmost `N` elements from the stack and returns them.
-    fn popn<const N: usize>(&mut self) -> [B::Value; N] {
+    ///
+    /// If `load` is `false`, returns just the pointers.
+    fn popn<const N: usize>(&mut self, load: bool) -> [B::Value; N] {
         debug_assert_ne!(N, 0);
         debug_assert!(N < 26, "too many pops");
 
-        let mut len = self.load_len();
-        let failure_cond = self.bcx.icmp_imm(IntCC::UnsignedLessThan, len, N as i64);
-        self.build_failure(failure_cond, InstructionResult::StackUnderflow);
-
+        let mut len = self.load_len_at_least(N);
         let ret = std::array::from_fn(|i| {
             len = self.bcx.isub_imm(len, 1);
             let sp = self.sp_at(len);
-            let name = b'a' + i as u8;
-            self.load_word(sp, core::str::from_utf8(&[name]).unwrap())
+            if load {
+                let name = b'a' + i as u8;
+                self.load_word(sp, core::str::from_utf8(&[name]).unwrap())
+            } else {
+                sp
+            }
         });
         self.store_len(len);
         ret
+    }
+
+    /// Checks if the stack has at least `n` elements and returns the stack length.
+    fn load_len_at_least(&mut self, n: usize) -> B::Value {
+        let len = self.load_len();
+        let failure_cond = self.bcx.icmp_imm(IntCC::UnsignedLessThan, len, n as i64);
+        self.build_failure(failure_cond, InstructionResult::StackUnderflow);
+        len
     }
 
     /// Duplicates the `n`th value from the top of the stack.
@@ -813,7 +843,7 @@ impl<'a, B: Builder> FunctionCx<'a, B> {
     /// Builds `return ret`.
     fn build_return(&mut self, ret: InstructionResult) {
         let old_block = self.bcx.current_block();
-        let ret = self.bcx.iconst(self.return_type, ret as i64);
+        let ret = self.bcx.iconst(self.i8_type, ret as i64);
         self.bcx.ret(&[ret]);
         if self.comments_enabled {
             self.add_comment(&format!("return {ret:?}"));
@@ -823,17 +853,58 @@ impl<'a, B: Builder> FunctionCx<'a, B> {
         }
     }
 
+    // Pointer must not be null if `set` is true, else it must be null.
+    fn pointer_panic_with_bool(&mut self, must_be_set: bool, ptr: B::Value, name: &str) {
+        let panic_cond =
+            if must_be_set { self.bcx.is_null(ptr) } else { self.bcx.is_not_null(ptr) };
+        let msg = format!(
+            "revm_jit panic: {name} must {not}be null due to configuration",
+            not = if must_be_set { "not " } else { "" }
+        );
+        self.build_panic_cond(panic_cond, &msg);
+    }
+
+    fn build_panic_cond(&mut self, cond: B::Value, msg: &str) {
+        let failure = self.create_block_after_current("panic");
+        let target = self.create_block_after(failure, "contd");
+        self.bcx.brif(cond, failure, target);
+
+        self.bcx.set_cold_block(failure);
+        self.bcx.switch_to_block(failure);
+        self.call_panic(msg);
+
+        self.bcx.switch_to_block(target);
+    }
+
+    fn call_panic(&mut self, msg: &str) {
+        let function = self.callback_function(Callback::Panic);
+        let ptr = self.bcx.str_const(msg);
+        let len = self.bcx.iconst(self.isize_type, msg.len() as i64);
+        let _callsite = self.bcx.call(function, &[ptr, len]);
+        self.bcx.unreachable();
+    }
+
+    fn callback(&mut self, callback: Callback, args: &[B::Value]) -> Option<B::Value> {
+        let function = self.callback_function(callback);
+        self.bcx.call(function, args)
+    }
+
+    fn callback_function(&mut self, callback: Callback) -> B::Function {
+        self.callbacks.get(callback, &mut self.bcx)
+    }
+
     /// Adds a comment to the current instruction.
     fn add_comment(&mut self, comment: &str) {
         self.bcx.add_comment_to_current_inst(comment);
     }
 
+    /*
     /// Creates a named block.
-    #[allow(dead_code)]
     fn create_block(&mut self, name: &str) -> B::BasicBlock {
         let name = self.op_block_name(name);
         self.bcx.create_block(&name)
     }
+    */
 
     /// Creates a named block after the given block.
     fn create_block_after(&mut self, after: B::BasicBlock, name: &str) -> B::BasicBlock {
@@ -857,7 +928,36 @@ impl<'a, B: Builder> FunctionCx<'a, B> {
 
     /// Returns the block name for the current opcode with the given suffix.
     fn op_block_name(&self, name: &str) -> String {
+        if self.current_opcode == usize::MAX {
+            return format!("entry.{name}");
+        }
         op_block_name_with(self.current_opcode, self.bytecode.opcodes[self.current_opcode], name)
+    }
+}
+
+/// Callback cache.
+struct Callbacks<B: Backend>([Option<B::Function>; Callback::COUNT]);
+
+impl<B: Backend> Callbacks<B> {
+    fn new() -> Self {
+        Self([None; Callback::COUNT])
+    }
+
+    fn clear(&mut self) {
+        *self = Self::new();
+    }
+
+    fn get(&mut self, cb: Callback, bcx: &mut B::Builder<'_>) -> B::Function {
+        *self.0[cb as usize].get_or_insert_with(
+            #[cold]
+            || {
+                let name = cb.name();
+                let ret = cb.ret(bcx);
+                let params = cb.params(bcx);
+                let address = cb.addr();
+                bcx.add_callback_function(name, ret, &params, address)
+            },
+        )
     }
 }
 
@@ -870,37 +970,121 @@ fn op_block_name_with(op: Opcode, data: OpcodeData, with: &str) -> String {
     }
 }
 
-// Pointer must not be null if `set` is true, else it must be null.
-fn pointer_panic_with_bool<B: Builder>(bcx: &mut B, must_be_set: bool, ptr: B::Value, name: &str) {
-    let panic_cond = if must_be_set { bcx.is_null(ptr) } else { bcx.is_not_null(ptr) };
-    let msg = format!(
-        "revm_jit panic: {name} must {not}be null due to configuration",
-        not = if must_be_set { "not " } else { "" }
-    );
-    build_panic(bcx, panic_cond, &msg);
-}
-
-fn build_panic<B: Builder>(bcx: &mut B, cond: B::Value, msg: &str) {
-    let failure = bcx.create_block("panic");
-    let target = bcx.create_block("contd");
-    bcx.brif(cond, failure, target);
-
-    bcx.set_cold_block(failure);
-    bcx.switch_to_block(failure);
-    bcx.panic(msg);
-
-    bcx.switch_to_block(target);
-}
-
 /* ------------------------------------------ Callbacks ----------------------------------------- */
 
-extern "C" fn __callback_panic(ptr: *const u8, len: usize) -> ! {
-    let msg = unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(ptr, len)) };
-    panic!("{msg}");
+macro_rules! callbacks {
+    (@count) => { 0 };
+    (@count $first:tt $(, $rest:tt)*) => { 1 + callbacks!(@count $($rest),*) };
+
+    ($bcx:ident; $ptr:ident; $usize:ident;
+     $($ident:ident = $name:ident($($params:expr),* $(,)?) $ret:expr),* $(,)?
+    ) => {
+        /// Callbacks that can be called by the JIT-compiled functions.
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+        enum Callback {
+            $($ident,)*
+        }
+
+        #[allow(unused_variables)]
+        impl Callback {
+            const COUNT: usize = callbacks!(@count $($ident),*);
+
+            const fn name(self) -> &'static str {
+                match self {
+                    $(Self::$ident => stringify!($name),)*
+                }
+            }
+
+            fn addr(self) -> usize {
+                match self {
+                    $(Self::$ident => callbacks::$name as usize,)*
+                }
+            }
+
+            fn ret<B: TypeMethods>(self, $bcx: &mut B) -> Option<B::Type> {
+                let $ptr = $bcx.type_ptr();
+                let $usize = $bcx.type_ptr_sized_int();
+                match self {
+                    $(Self::$ident => $ret,)*
+                }
+            }
+
+            fn params<B: TypeMethods>(self, $bcx: &mut B) -> Vec<B::Type> {
+                let $ptr = $bcx.type_ptr();
+                let $usize = $bcx.type_ptr_sized_int();
+                match self {
+                    $(Self::$ident => vec![$($params),*],)*
+                }
+            }
+        }
+    };
+}
+
+callbacks! { bcx; ptr; usize;
+    Panic = panic(ptr, usize) None,
+    AddMod = addmod(ptr) None,
+    MulMod = mulmod(ptr) None,
+    Exp = exp(ptr, usize) Some(bcx.type_int(64)),
+}
+
+// NOTE: All functions MUST be `extern "C"`.
+mod callbacks {
+    use super::*;
+    use revm_interpreter::gas;
+    use revm_jit_core::EvmWord;
+    use revm_primitives::{FrontierSpec, SpuriousDragonSpec};
+
+    pub(super) unsafe extern "C" fn panic(ptr: *const u8, len: usize) -> ! {
+        let msg = std::str::from_utf8_unchecked(std::slice::from_raw_parts(ptr, len));
+        panic!("{msg}");
+    }
+
+    // Functions with `sp` are called with the length of the stack already checked and substracted.
+    // All they have to do is read from `sp` and write the result to the **last** pointer.
+    // This represents "pushing" the result onto the stack.
+
+    pub(super) unsafe extern "C" fn addmod(sp: *mut EvmWord) {
+        let [a, b, c] = read_words(sp);
+        *c = a.to_u256().add_mod(b.to_u256(), c.to_u256()).into();
+    }
+
+    pub(super) unsafe extern "C" fn mulmod(sp: *mut EvmWord) {
+        let [a, b, c] = read_words(sp);
+        *c = a.to_u256().mul_mod(b.to_u256(), c.to_u256()).into();
+    }
+
+    pub(super) unsafe extern "C" fn exp(sp: *mut EvmWord, spec: SpecId) -> u64 {
+        let [base, exponent_ptr] = read_words(sp);
+        let exponent = exponent_ptr.to_u256();
+        let gas = if SpecId::enabled(spec, SpecId::SPURIOUS_DRAGON) {
+            gas::exp_cost::<SpuriousDragonSpec>(exponent)
+        } else {
+            gas::exp_cost::<FrontierSpec>(exponent)
+        };
+        if let Some(gas) = gas {
+            *exponent_ptr = base.to_u256().pow(exponent).into();
+            gas
+        } else {
+            u64::MAX
+        }
+    }
+
+    /// Splits the stack pointer into `N` elements by casting it to an array.
+    /// This has the same effect as popping `N` elements from the stack since the JIT function
+    /// has already modified the length.
+    ///
+    /// The returned lifetime is valid for the entire duration of the callback.
+    ///
+    /// # Safety
+    ///
+    /// Caller must ensure that `N` matches the number of elements popped in JIT code.
+    #[inline(always)]
+    unsafe fn read_words<'a, const N: usize>(sp: *mut EvmWord) -> &'a mut [EvmWord; N] {
+        &mut *sp.sub(N).cast::<[EvmWord; N]>()
+    }
 }
 
 #[cfg(test)]
-#[allow(dead_code, unused_imports)]
 mod tests {
     use super::*;
     use crate::*;
@@ -1230,10 +1414,14 @@ mod tests {
         not2(op::NOT, U256::MAX => 0_U256),
         not3(op::NOT, 1_U256 => U256::MAX.wrapping_sub(1_U256)),
 
-        // TODO
-        // byte1(op::BYTE, 0_U256, 0_U256 => 0_U256),
-        // byte2(op::BYTE, 0_U256, 1_U256 => 0_U256),
-        // byte3(op::BYTE, 0_U256, 2_U256 => 0_U256),
+        byte1(op::BYTE, 0_U256, 0x12345678_U256 => 0x78_U256),
+        byte2(op::BYTE, 1_U256, 0x12345678_U256 => 0x56_U256),
+        byte3(op::BYTE, 2_U256, 0x12345678_U256 => 0x34_U256),
+        byte4(op::BYTE, 3_U256, 0x12345678_U256 => 0x12_U256),
+        byte5(op::BYTE, 4_U256, 0x12345678_U256 => 0_U256),
+        byte_oob0(op::BYTE, 31_U256, U256::MAX => 0xFF_U256),
+        byte_oob1(op::BYTE, 32_U256, U256::MAX => 0_U256),
+        byte_oob2(op::BYTE, 33_U256, U256::MAX => 0_U256),
 
         shl1(op::SHL, 1_U256, 0_U256 => 1_U256),
         shl2(op::SHL, 1_U256, 1_U256 => 2_U256),

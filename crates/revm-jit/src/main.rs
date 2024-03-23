@@ -22,19 +22,21 @@ fn main() -> color_eyre::Result<()> {
     // jit.set_debug_assertions(false);
     jit.set_pass_stack_through_args(true);
     jit.set_pass_stack_len_through_args(true);
-    // jit.set_disable_gas(true);
+    jit.set_disable_gas(true);
 
-    // #[rustfmt::skip]
-    // let code: &[u8] = &[
-    //     op::PUSH1, 3, op::JUMP, op::JUMPDEST
-    // ];
+    #[rustfmt::skip]
+    let code: &[u8] = &[
+        op::PUSH0, op::PUSH0, op::ADDMOD
+    ];
 
-    // let mut stack_buf = EvmStack::new_heap();
-    // let stack = EvmStack::from_mut_vec(&mut stack_buf);
+    let mut stack_buf = EvmStack::new_heap();
+    let stack = EvmStack::from_mut_vec(&mut stack_buf);
+    stack.as_mut_slice()[0] = U256::from(0xab).into();
     // let mut gas = Gas::new(100_000);
-    // let f = jit.compile(code, SpecId::LATEST)?;
-    // unsafe { f.call(Some(&mut gas), Some(stack), None) };
-    fibonacci(jit)?;
+    let f = jit.compile(code, SpecId::LATEST)?;
+    unsafe { f.call(None, Some(stack), Some(&mut 1)) };
+    // assert_eq!(stack.as_slice()[0], U256::from(0xab).into());
+    // fibonacci(jit)?;
 
     Ok(())
 }

@@ -284,23 +284,6 @@ impl<'ctx> Backend for JitEvmLlvmBackend<'ctx> {
             self.module.create_jit_execution_engine(self.opt_level).map_err(error_msg)?;
         Ok(())
     }
-
-    fn add_callback_function(
-        &mut self,
-        name: &str,
-        ret: Option<Self::Type>,
-        params: &[Self::Type],
-        address: usize,
-    ) -> Self::Function {
-        let params = params.iter().copied().map(Into::into).collect::<Vec<_>>();
-        let ty = match ret {
-            Some(ret) => ret.fn_type(&params, false),
-            None => self.ty_void.fn_type(&params, false),
-        };
-        let function = self.module.add_function(name, ty, None);
-        self.exec_engine.add_global_mapping(&function, address);
-        function
-    }
 }
 
 /// The LLVM-based EVM JIT builder.
@@ -441,6 +424,10 @@ impl<'a, 'ctx> Builder for JitEvmLlvmBuilder<'a, 'ctx> {
         }
 
         self.ty_i256.const_int_from_string(&value.to_string(), StringRadix::Decimal).unwrap().into()
+    }
+
+    fn str_const(&mut self, value: &str) -> Self::Value {
+        self.bcx.build_global_string_ptr(value, "").unwrap().as_pointer_value().into()
     }
 
     fn new_stack_slot(&mut self, ty: Self::Type, name: &str) -> Self::StackSlot {
@@ -589,12 +576,6 @@ impl<'a, 'ctx> Builder for JitEvmLlvmBuilder<'a, 'ctx> {
             .into()
     }
 
-    fn ipow(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
-        let _ = lhs;
-        let _ = rhs;
-        todo!("ipow")
-    }
-
     fn iadd_imm(&mut self, lhs: Self::Value, rhs: i64) -> Self::Value {
         let rhs = self.iconst(lhs.get_type(), rhs);
         self.iadd(lhs, rhs)
@@ -659,13 +640,31 @@ impl<'a, 'ctx> Builder for JitEvmLlvmBuilder<'a, 'ctx> {
             .into()
     }
 
-    fn panic(&mut self, msg: &str) {
-        let panic = self.module.get_function("__callback_panic").unwrap();
-        let ptr =
-            self.bcx.build_global_string_ptr(msg, "panic_msg_ptr").unwrap().as_pointer_value();
-        let len = self.ty_isize.const_int(msg.len() as u64, false);
-        let _callsite = self.bcx.build_call(panic, &[ptr.into(), len.into()], "").unwrap();
+    fn call(&mut self, function: Self::Function, args: &[Self::Value]) -> Option<Self::Value> {
+        let args = args.iter().copied().map(Into::into).collect::<Vec<_>>();
+        let callsite = self.bcx.build_call(function, &args, "").unwrap();
+        callsite.try_as_basic_value().left()
+    }
+
+    fn unreachable(&mut self) {
         self.bcx.build_unreachable().unwrap();
+    }
+
+    fn add_callback_function(
+        &mut self,
+        name: &str,
+        ret: Option<Self::Type>,
+        params: &[Self::Type],
+        address: usize,
+    ) -> Self::Function {
+        let params = params.iter().copied().map(Into::into).collect::<Vec<_>>();
+        let ty = match ret {
+            Some(ret) => ret.fn_type(&params, false),
+            None => self.ty_void.fn_type(&params, false),
+        };
+        let function = self.module.add_function(name, ty, None);
+        self.exec_engine.add_global_mapping(&function, address);
+        function
     }
 }
 
