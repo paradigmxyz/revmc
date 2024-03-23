@@ -31,12 +31,14 @@ impl JitEvmFn {
     /// Calls the function.
     ///
     /// Arguments:
+    /// - `gas`: Pointer to the gas object. Must be `Some` if `disable_gas` is set to `false` (the
+    ///   default).
     /// - `stack`: Pointer to the stack. Must be `Some` if `pass_stack_through_args` is set to
     ///   `true`.
     /// - `stack_len`: Pointer to the stack length. Must be `Some` if `pass_stack_len_through_args`
     ///   is set to `true`.
-    /// - `gas`: Pointer to the gas object. Must be `Some` if `disable_gas` is set to `false` (the
-    ///   default).
+    ///
+    /// These conditions are enforced at runtime if `debug_assertions` is set to `true`.
     ///
     /// # Safety
     ///
@@ -67,7 +69,7 @@ impl EvmStack {
 
     /// Creates a new EVM stack, allocated on the stack.
     ///
-    /// Use [`EvmStack::create_vec`] to create a stack on the heap.
+    /// Use [`EvmStack::new_heap`] to create a stack on the heap.
     #[inline]
     pub fn new() -> Self {
         Self(unsafe { MaybeUninit::uninit().assume_init() })

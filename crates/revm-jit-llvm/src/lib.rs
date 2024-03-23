@@ -2,6 +2,7 @@
 #![cfg_attr(not(test), warn(unused_extern_crates))]
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
 
+use color_eyre::eyre::eyre;
 use inkwell::{
     attributes::{Attribute, AttributeLoc},
     basic_block::BasicBlock,
@@ -16,7 +17,7 @@ use inkwell::{
 };
 use revm_interpreter::Gas;
 use revm_jit_core::{
-    Backend, Builder, BuilderTypes, Error, EvmStack, IntCC, RawJitEvmFn, Result, TypeMethods,
+    Backend, BackendTypes, Builder, Error, EvmStack, IntCC, RawJitEvmFn, Result, TypeMethods,
 };
 use revm_primitives::U256;
 use std::{mem, path::Path};
@@ -69,25 +70,24 @@ impl<'ctx> JitEvmLlvmBackend<'ctx> {
         let triple = TargetMachine::get_default_triple();
         let cpu = TargetMachine::get_host_cpu_name();
         let features = TargetMachine::get_host_cpu_features();
-        let target = Target::from_triple(&triple).unwrap();
+        let target = Target::from_triple(&triple).map_err(error_msg)?;
         let machine = target
             .create_target_machine(
                 &triple,
                 &cpu.to_string_lossy(),
                 &features.to_string_lossy(),
                 opt_level,
-                RelocMode::PIC,
-                CodeModel::Default,
+                RelocMode::Default,
+                CodeModel::JITDefault,
             )
-            .unwrap();
+            .ok_or_else(|| eyre!("failed to create target machine"))?;
         machine.set_asm_verbosity(true);
 
         let module = cx.create_module("evm");
         module.set_data_layout(&machine.get_target_data().get_data_layout());
         module.set_triple(&machine.get_triple());
 
-        let exec_engine =
-            module.create_jit_execution_engine(OptimizationLevel::Aggressive).map_err(error_msg)?;
+        let exec_engine = module.create_jit_execution_engine(opt_level).map_err(error_msg)?;
 
         let bcx = cx.create_builder();
 
@@ -125,7 +125,7 @@ impl<'ctx> JitEvmLlvmBackend<'ctx> {
     }
 }
 
-impl<'ctx> BuilderTypes for JitEvmLlvmBackend<'ctx> {
+impl<'ctx> BackendTypes for JitEvmLlvmBackend<'ctx> {
     type Type = BasicTypeEnum<'ctx>;
     type Value = BasicValueEnum<'ctx>;
     type StackSlot = PointerValue<'ctx>;
@@ -219,12 +219,12 @@ impl<'ctx> Backend for JitEvmLlvmBackend<'ctx> {
         }
 
         // Pointer argument attributes.
-        for (i, align, dereferenceable) in [
-            (0, mem::align_of::<Gas>(), mem::size_of::<Gas>() as _),
-            (1, mem::align_of::<EvmStack>(), mem::size_of::<EvmStack>()),
-            (2, mem::align_of::<usize>(), mem::size_of::<usize>() as _),
-        ] {
-            if !self.debug_assertions {
+        if !self.debug_assertions {
+            for (i, align, dereferenceable) in [
+                (0, mem::align_of::<Gas>(), mem::size_of::<Gas>() as _),
+                (1, mem::align_of::<EvmStack>(), mem::size_of::<EvmStack>()),
+                (2, mem::align_of::<usize>(), mem::size_of::<usize>() as _),
+            ] {
                 for (name, value) in [
                     ("noalias", 1),
                     ("nocapture", 1),
@@ -267,17 +267,38 @@ impl<'ctx> Backend for JitEvmLlvmBackend<'ctx> {
             .map_err(Into::into)
     }
 
+    unsafe fn free_function(&mut self, name: &str) -> Result<()> {
+        let function = self.exec_engine.get_function_value(name)?;
+        self.exec_engine.free_fn_machine_code(function);
+        Ok(())
+    }
+
+    unsafe fn free_all_functions(&mut self) -> Result<()> {
+        self.exec_engine.remove_module(&self.module).map_err(|e| Error::msg(e.to_string()))?;
+
+        self.module = self.cx.create_module("evm");
+        self.module.set_data_layout(&self.machine.get_target_data().get_data_layout());
+        self.module.set_triple(&self.machine.get_triple());
+
+        self.exec_engine =
+            self.module.create_jit_execution_engine(self.opt_level).map_err(error_msg)?;
+        Ok(())
+    }
+
     fn add_callback_function(
         &mut self,
         name: &str,
-        ret: Self::Type,
+        ret: Option<Self::Type>,
         params: &[Self::Type],
         address: usize,
     ) -> Self::Function {
         let params = params.iter().copied().map(Into::into).collect::<Vec<_>>();
-        let ty = ret.fn_type(&params, false);
+        let ty = match ret {
+            Some(ret) => ret.fn_type(&params, false),
+            None => self.ty_void.fn_type(&params, false),
+        };
         let function = self.module.add_function(name, ty, None);
-        self.exec_engine.add_global_mapping(&function, address as _);
+        self.exec_engine.add_global_mapping(&function, address);
         function
     }
 }
@@ -328,7 +349,7 @@ impl<'a, 'ctx> JitEvmLlvmBuilder<'a, 'ctx> {
     }
 }
 
-impl<'a, 'ctx> BuilderTypes for JitEvmLlvmBuilder<'a, 'ctx> {
+impl<'a, 'ctx> BackendTypes for JitEvmLlvmBuilder<'a, 'ctx> {
     type Type = BasicTypeEnum<'ctx>;
     type Value = BasicValueEnum<'ctx>;
     type StackSlot = PointerValue<'ctx>;

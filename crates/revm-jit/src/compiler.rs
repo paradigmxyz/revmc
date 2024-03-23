@@ -109,7 +109,7 @@ impl<B: Backend> JitEvm<B> {
     ///
     /// Defaults to `true`.
     pub fn set_store_gas_used(&mut self, yes: bool) {
-        self.config.no_store_gas_used = !yes;
+        self.config.store_gas_used = yes;
     }
 
     /// Sets the static gas limit.
@@ -131,6 +131,17 @@ impl<B: Backend> JitEvm<B> {
         debug_time!("compile", || self.compile_bytecode(&bytecode))
     }
 
+    /// Frees all functions compiled by this JIT compiler.
+    ///
+    /// # Safety
+    ///
+    /// Because this function invalidates any pointers retrived from the corresponding module, it
+    /// should only be used when none of the functions from that module are currently executing and
+    /// none of the `fn` pointers are called afterwards.
+    pub unsafe fn free_all_functions(&mut self) -> Result<()> {
+        self.backend.free_all_functions()
+    }
+
     fn parse_bytecode<'a>(&mut self, bytecode: &'a [u8], spec: SpecId) -> Result<Bytecode<'a>> {
         trace!(bytecode = revm_primitives::hex::encode(bytecode));
         let mut bytecode = trace_time!("new bytecode", || Bytecode::new(bytecode, spec));
@@ -140,11 +151,10 @@ impl<B: Backend> JitEvm<B> {
 
     fn compile_bytecode(&mut self, bytecode: &Bytecode<'_>) -> Result<JitEvmFn> {
         if self.config.debug_assertions {
-            let void = self.backend.type_int(8);
             let params = &[self.backend.type_ptr(), self.backend.type_ptr_sized_int()];
             self.backend.add_callback_function(
                 "__callback_panic",
-                void,
+                None,
                 params,
                 __callback_panic as usize,
             );
@@ -173,7 +183,7 @@ impl<B: Backend> JitEvm<B> {
             verify(&mut self.backend)?;
         }
 
-        trace_time!("optimize", || self.backend.optimize_function(name)?);
+        trace_time!("optimize", || self.backend.optimize_function(name))?;
 
         if let Some(dir) = &self.out_dir {
             trace_time!("dump opt IR", || {
@@ -187,7 +197,7 @@ impl<B: Backend> JitEvm<B> {
             })?;
         }
 
-        self.backend.get_function(name).map(JitEvmFn::new)
+        trace_time!("finalize", || self.backend.get_function(name).map(JitEvmFn::new))
     }
 
     fn new_name(&mut self) -> String {
@@ -204,7 +214,7 @@ struct FcxConfig {
     stack_through_args: bool,
     pass_stack_len_through_args: bool,
     gas_disabled: bool,
-    no_store_gas_used: bool,
+    store_gas_used: bool,
     static_gas_limit: Option<u64>,
 }
 
@@ -216,7 +226,7 @@ impl Default for FcxConfig {
             stack_through_args: false,
             pass_stack_len_through_args: false,
             gas_disabled: false,
-            no_store_gas_used: false,
+            store_gas_used: true,
             static_gas_limit: None,
         }
     }
@@ -271,21 +281,19 @@ impl<'a, B: Builder> FunctionCx<'a, B> {
         if config.debug_assertions {
             pointer_panic_with_bool(
                 &mut bcx,
-                !config.gas_disabled
-                    || !config.no_store_gas_used
-                    || config.static_gas_limit.is_none(),
+                !config.gas_disabled || config.store_gas_used || config.static_gas_limit.is_none(),
                 gas_ptr,
                 "gas pointer",
             );
         }
 
-        let gas_used = if config.no_store_gas_used {
+        let gas_used = if config.store_gas_used {
+            let one = bcx.iconst(isize_type, 1);
+            bcx.gep(gas_ty, gas_ptr, one)
+        } else {
             let gas_used = bcx.new_stack_slot(isize_type, "gas_used.addr");
             bcx.stack_store(zero, gas_used);
             bcx.stack_addr(gas_used)
-        } else {
-            let one = bcx.iconst(isize_type, 1);
-            bcx.gep(gas_ty, gas_ptr, one)
         };
         let gas_limit = if let Some(static_gas_limit) = config.static_gas_limit {
             bcx.iconst(isize_type, static_gas_limit as i64)
@@ -856,9 +864,9 @@ impl<'a, B: Builder> FunctionCx<'a, B> {
 fn op_block_name_with(op: Opcode, data: OpcodeData, with: &str) -> String {
     let data = data.to_raw();
     if with.is_empty() {
-        format!("_{op}_{data}")
+        format!("op.{op}.{data}")
     } else {
-        format!("_{op}_{data}_{with}")
+        format!("op.{op}.{data}.{with}")
     }
 }
 
@@ -1283,7 +1291,7 @@ mod tests {
             assert_eq!(gas.spend(), expected_gas);
 
             let actual_stack =
-                stack.as_slice().iter().take(stack_len).map(|x| *x.as_u256()).collect::<Vec<_>>();
+                stack.as_slice().iter().take(stack_len).map(|x| x.to_u256()).collect::<Vec<_>>();
             assert_eq!(actual_stack, *expected_stack);
         }
     }
@@ -1295,21 +1303,31 @@ mod tests {
         run_fibonacci_test(make_backend, 100);
 
         fn run_fibonacci_test<B: Backend>(make_backend: impl Fn() -> B, input: u16) {
-            println!("  Running fibonacci({input})");
-            run_fibonacci_static(make_backend, input);
-            // TODO: dynamic fibonacci
+            println!("  Running fibonacci({input}) statically");
+            run_fibonacci(&make_backend, input, false);
+            println!("  Running fibonacci({input}) dynamically");
+            run_fibonacci(make_backend, input, true);
         }
 
-        fn run_fibonacci_static<B: Backend>(make_backend: impl Fn() -> B, input: u16) {
-            let code = mk_static_fibonacci_code(input);
+        fn run_fibonacci<B: Backend>(make_backend: impl Fn() -> B, input: u16, dynamic: bool) {
+            let code = mk_fibonacci_code(input, dynamic);
+
             let mut jit = JitEvm::new(make_backend());
             jit.set_pass_stack_through_args(true);
             jit.set_pass_stack_len_through_args(true);
             let f = jit.compile(&code, DEFAULT_SPEC).unwrap();
+
+            let mut gas = Gas::new(10000);
             let mut stack_buf = EvmStack::new_heap();
             let stack = EvmStack::from_mut_vec(&mut stack_buf);
+            if dynamic {
+                stack.as_mut_slice()[0] = U256::from(input).into();
+            }
             let mut stack_len = 0;
-            let mut gas = Gas::new(10000);
+            if dynamic {
+                stack_len = 1;
+            }
+
             let r = unsafe { f.call(Some(&mut gas), Some(stack), Some(&mut stack_len)) };
             assert_eq!(r, InstructionResult::Stop);
             // Apparently the code does `fibonacci(input - 1)`.
@@ -1318,9 +1336,13 @@ mod tests {
         }
 
         #[rustfmt::skip]
-        fn mk_static_fibonacci_code(input: u16) -> Vec<u8> {
-            let input = input.to_be_bytes();
-            [[op::PUSH2].as_slice(), input.as_slice(), FIBONACCI_CODE].concat()
+        fn mk_fibonacci_code(input: u16, dynamic: bool) -> Vec<u8> {
+            if dynamic {
+                [&[op::JUMPDEST; 3][..], FIBONACCI_CODE].concat()
+            } else {
+                let input = input.to_be_bytes();
+                [[op::PUSH2].as_slice(), input.as_slice(), FIBONACCI_CODE].concat()
+            }
         }
 
         // Modified from jitevm: https://github.com/paradigmxyz/jitevm/blob/f82261fc8a1a6c1a3d40025a910ba0ce3fcaed71/src/test_data.rs#L3

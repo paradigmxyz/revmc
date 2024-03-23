@@ -30,6 +30,9 @@ color-eyre.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
+[dev-dependencies]
+criterion = "0.5"
+
 [features]
 default = ["llvm"]
 llvm = ["dep:revm-jit-llvm"]
@@ -40,3 +43,9 @@ name = "revm-jit"
 path = "src/main.rs"
 required-features = ["llvm"]
 doc = false
+
+[[bench]]
+name = "bench"
+path = "benches/bench.rs"
+required-features = ["llvm"]
+harness = false

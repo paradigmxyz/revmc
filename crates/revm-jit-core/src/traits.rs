@@ -40,7 +40,7 @@ pub enum OptimizationLevel {
     Aggressive,
 }
 
-pub trait BuilderTypes {
+pub trait BackendTypes {
     type Type: Copy + Eq + fmt::Debug;
     type Value: Copy + Eq + fmt::Debug;
     type StackSlot: Copy + Eq + fmt::Debug;
@@ -48,14 +48,50 @@ pub trait BuilderTypes {
     type Function: Copy + Eq + fmt::Debug;
 }
 
-pub trait TypeMethods: BuilderTypes {
+#[allow(clippy::missing_safety_doc)]
+pub trait Backend: BackendTypes + TypeMethods {
+    type Builder<'a>: Builder<
+        Type = Self::Type,
+        Value = Self::Value,
+        StackSlot = Self::StackSlot,
+        BasicBlock = Self::BasicBlock,
+        Function = Self::Function,
+    >
+    where
+        Self: 'a;
+
+    fn ir_extension(&self) -> &'static str;
+
+    fn set_is_dumping(&mut self, yes: bool);
+    fn set_debug_assertions(&mut self, yes: bool);
+    fn set_opt_level(&mut self, level: OptimizationLevel);
+    fn dump_ir(&mut self, path: &Path) -> Result<()>;
+    fn dump_disasm(&mut self, path: &Path) -> Result<()>;
+
+    fn build_function(&mut self, name: &str) -> Result<Self::Builder<'_>>;
+    fn verify_function(&mut self, name: &str) -> Result<()>;
+    fn optimize_function(&mut self, name: &str) -> Result<()>;
+    fn get_function(&mut self, name: &str) -> Result<RawJitEvmFn>;
+    unsafe fn free_function(&mut self, name: &str) -> Result<()>;
+    unsafe fn free_all_functions(&mut self) -> Result<()>;
+
+    fn add_callback_function(
+        &mut self,
+        name: &str,
+        ret: Option<Self::Type>,
+        params: &[Self::Type],
+        address: usize,
+    ) -> Self::Function;
+}
+
+pub trait TypeMethods: BackendTypes {
     fn type_ptr(&self) -> Self::Type;
     fn type_ptr_sized_int(&self) -> Self::Type;
     fn type_int(&self, bits: u32) -> Self::Type;
     fn type_array(&self, ty: Self::Type, size: u32) -> Self::Type;
 }
 
-pub trait Builder: BuilderTypes + TypeMethods {
+pub trait Builder: BackendTypes + TypeMethods {
     fn create_block(&mut self, name: &str) -> Self::BasicBlock;
     fn create_block_after(&mut self, after: Self::BasicBlock, name: &str) -> Self::BasicBlock;
     fn switch_to_block(&mut self, block: Self::BasicBlock);
@@ -135,37 +171,4 @@ pub trait Builder: BuilderTypes + TypeMethods {
     fn gep(&mut self, ty: Self::Type, ptr: Self::Value, offset: Self::Value) -> Self::Value;
 
     fn panic(&mut self, msg: &str);
-}
-
-pub trait Backend: BuilderTypes + TypeMethods {
-    type Builder<'a>: Builder<
-        Type = Self::Type,
-        Value = Self::Value,
-        StackSlot = Self::StackSlot,
-        BasicBlock = Self::BasicBlock,
-        Function = Self::Function,
-    >
-    where
-        Self: 'a;
-
-    fn ir_extension(&self) -> &'static str;
-
-    fn set_is_dumping(&mut self, yes: bool);
-    fn set_debug_assertions(&mut self, yes: bool);
-    fn set_opt_level(&mut self, level: OptimizationLevel);
-    fn dump_ir(&mut self, path: &Path) -> Result<()>;
-    fn dump_disasm(&mut self, path: &Path) -> Result<()>;
-
-    fn build_function(&mut self, name: &str) -> Result<Self::Builder<'_>>;
-    fn verify_function(&mut self, name: &str) -> Result<()>;
-    fn optimize_function(&mut self, name: &str) -> Result<()>;
-    fn get_function(&mut self, name: &str) -> Result<RawJitEvmFn>;
-
-    fn add_callback_function(
-        &mut self,
-        name: &str,
-        ret: Self::Type,
-        params: &[Self::Type],
-        address: usize,
-    ) -> Self::Function;
 }

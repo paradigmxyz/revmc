@@ -10,7 +10,7 @@ use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{FuncId, FuncOrDataId, Linkage, Module};
 use pretty_clif::CommentWriter;
 use revm_jit_core::{
-    Backend, Builder, BuilderTypes, Error, OptimizationLevel, Result, TypeMethods,
+    Backend, BackendTypes, Builder, Error, OptimizationLevel, Result, TypeMethods,
 };
 use revm_primitives::U256;
 use std::{io::Write, path::Path};
@@ -37,6 +37,7 @@ pub struct JitEvmCraneliftBackend {
     /// The module, with the jit backend, which manages the JIT'd functions.
     module: JITModule,
 
+    opt_level: OptimizationLevel,
     comments: CommentWriter,
 }
 
@@ -56,22 +57,12 @@ impl JitEvmCraneliftBackend {
     /// [`is_supported`](Self::is_supported).
     #[track_caller]
     pub fn new(opt_level: OptimizationLevel) -> Self {
-        let opt_level: &str = match opt_level {
-            OptimizationLevel::None => "none",
-            OptimizationLevel::Less
-            | OptimizationLevel::Default
-            | OptimizationLevel::Aggressive => "speed",
-        };
-        let builder = JITBuilder::with_flags(
-            &[("opt_level", opt_level)],
-            cranelift_module::default_libcall_names(),
-        )
-        .unwrap();
-        let module = JITModule::new(builder);
+        let module = mk_jit_module(opt_level);
         Self {
             builder_context: FunctionBuilderContext::new(),
             ctx: module.make_context(),
             module,
+            opt_level,
             comments: CommentWriter::new(),
         }
     }
@@ -84,7 +75,7 @@ impl JitEvmCraneliftBackend {
     }
 }
 
-impl BuilderTypes for JitEvmCraneliftBackend {
+impl BackendTypes for JitEvmCraneliftBackend {
     type Type = Type;
     type Value = Value;
     type StackSlot = StackSlot;
@@ -98,7 +89,7 @@ impl TypeMethods for JitEvmCraneliftBackend {
     }
 
     fn type_ptr_sized_int(&self) -> Self::Type {
-        self.module.target_config().pointer_type()
+        self.type_ptr()
     }
 
     fn type_int(&self, bits: u32) -> Self::Type {
@@ -129,8 +120,9 @@ impl Backend for JitEvmCraneliftBackend {
     }
 
     fn set_opt_level(&mut self, level: OptimizationLevel) {
-        // TODO: Cannot set this after initialization.
-        let _ = level;
+        // Note that this will only affect new functions after a new module is created in
+        // `free_all_functions`.
+        self.opt_level = level;
     }
 
     fn dump_ir(&mut self, path: &Path) -> Result<()> {
@@ -194,10 +186,25 @@ impl Backend for JitEvmCraneliftBackend {
         Ok(unsafe { std::mem::transmute(ptr) })
     }
 
+    unsafe fn free_function(&mut self, name: &str) -> Result<()> {
+        // This doesn't exist yet.
+        let _ = name;
+        Ok(())
+    }
+
+    unsafe fn free_all_functions(&mut self) -> Result<()> {
+        // TODO: Can `free_memory` take `&mut self` pls?
+        let new = mk_jit_module(self.opt_level);
+        let old = std::mem::replace(&mut self.module, new);
+        unsafe { old.free_memory() };
+        self.ctx = self.module.make_context();
+        Ok(())
+    }
+
     fn add_callback_function(
         &mut self,
         name: &str,
-        ty: Self::Type,
+        ty: Option<Self::Type>,
         params: &[Self::Type],
         address: usize,
     ) -> Self::Function {
@@ -219,7 +226,7 @@ pub struct JitEvmCraneliftBuilder<'a> {
     ptr_type: Type,
 }
 
-impl<'a> BuilderTypes for JitEvmCraneliftBuilder<'a> {
+impl<'a> BackendTypes for JitEvmCraneliftBuilder<'a> {
     type Type = Type;
     type Value = Value;
     type StackSlot = StackSlot;
@@ -515,6 +522,21 @@ impl<'a> Builder for JitEvmCraneliftBuilder<'a> {
         // self.bcx.ins().call(, args)
         todo!("panic {msg:?}")
     }
+}
+
+fn mk_jit_module(opt_level: OptimizationLevel) -> JITModule {
+    let opt_level: &str = match opt_level {
+        OptimizationLevel::None => "none",
+        OptimizationLevel::Less | OptimizationLevel::Default | OptimizationLevel::Aggressive => {
+            "speed"
+        }
+    };
+    let builder = JITBuilder::with_flags(
+        &[("opt_level", opt_level)],
+        cranelift_module::default_libcall_names(),
+    )
+    .unwrap();
+    JITModule::new(builder)
 }
 
 fn convert_intcc(cond: revm_jit_core::IntCC) -> IntCC {

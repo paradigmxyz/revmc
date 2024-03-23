@@ -2,14 +2,16 @@
 #[macro_export]
 macro_rules! time {
     ($level:expr, $what:literal, || $e:expr) => {{
-        let timer = if $crate::private::tracing::enabled!($level) {
-            Some(std::time::Instant::now())
+        let res;
+        let mut e = || $e;
+        if $crate::private::tracing::enabled!($level) {
+            let timer = std::time::Instant::now();
+            res = e();
+            // $crate::private::tracing::event!($level, elapsed=?timer.elapsed(), $what);
+            $crate::private::tracing::event!($level, "{:<16} {:?}", $what, timer.elapsed());
         } else {
-            None
-        };
-        let res = $e;
-        // $crate::private::tracing::event!($level, elapsed=?timer.unwrap().elapsed(), $what);
-        $crate::private::tracing::event!($level, "{:>10?} - {}", timer.unwrap().elapsed(), $what);
+            res = e();
+        }
         res
     }};
 }
