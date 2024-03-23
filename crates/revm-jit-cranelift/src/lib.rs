@@ -2,11 +2,16 @@
 #![cfg_attr(not(test), warn(unused_extern_crates))]
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
 
-use cranelift::{codegen::ir::StackSlot, prelude::*};
+use cranelift::{
+    codegen::ir::{FuncRef, StackSlot},
+    prelude::*,
+};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{FuncId, FuncOrDataId, Linkage, Module};
 use pretty_clif::CommentWriter;
-use revm_jit_core::{Backend, Builder, Error, OptimizationLevel, Result};
+use revm_jit_core::{
+    Backend, Builder, BuilderTypes, Error, OptimizationLevel, Result, TypeMethods,
+};
 use revm_primitives::U256;
 use std::{io::Write, path::Path};
 
@@ -79,6 +84,35 @@ impl JitEvmCraneliftBackend {
     }
 }
 
+impl BuilderTypes for JitEvmCraneliftBackend {
+    type Type = Type;
+    type Value = Value;
+    type StackSlot = StackSlot;
+    type BasicBlock = Block;
+    type Function = FuncRef;
+}
+
+impl TypeMethods for JitEvmCraneliftBackend {
+    fn type_ptr(&self) -> Self::Type {
+        self.module.target_config().pointer_type()
+    }
+
+    fn type_ptr_sized_int(&self) -> Self::Type {
+        self.module.target_config().pointer_type()
+    }
+
+    fn type_int(&self, bits: u32) -> Self::Type {
+        bits.try_into()
+            .ok()
+            .and_then(Type::int)
+            .unwrap_or_else(|| panic!("unsupported int type with {bits} bits"))
+    }
+
+    fn type_array(&self, ty: Self::Type, size: u32) -> Self::Type {
+        unimplemented!("type: {size} x {ty}")
+    }
+}
+
 impl Backend for JitEvmCraneliftBackend {
     type Builder<'a> = JitEvmCraneliftBuilder<'a>;
 
@@ -88,6 +122,10 @@ impl Backend for JitEvmCraneliftBackend {
 
     fn set_is_dumping(&mut self, yes: bool) {
         self.ctx.set_disasm(yes);
+    }
+
+    fn set_debug_assertions(&mut self, yes: bool) {
+        let _ = yes;
     }
 
     fn set_opt_level(&mut self, level: OptimizationLevel) {
@@ -116,7 +154,8 @@ impl Backend for JitEvmCraneliftBackend {
         let ptr_type = self.module.target_config().pointer_type();
         self.ctx.func.signature.params.push(AbiParam::new(ptr_type));
         self.ctx.func.signature.params.push(AbiParam::new(ptr_type));
-        self.ctx.func.signature.returns.push(AbiParam::new(types::I32));
+        self.ctx.func.signature.params.push(AbiParam::new(ptr_type));
+        self.ctx.func.signature.returns.push(AbiParam::new(types::I8));
         let _id = self.module.declare_function(name, Linkage::Export, &self.ctx.func.signature)?;
         let bcx = FunctionBuilder::new(&mut self.ctx.func, &mut self.builder_context);
         Ok(JitEvmCraneliftBuilder { comments: &mut self.comments, bcx, ptr_type })
@@ -149,10 +188,26 @@ impl Backend for JitEvmCraneliftBackend {
         Ok(())
     }
 
-    fn get_function(&mut self, name: &str) -> Result<revm_jit_core::JitEvmFn> {
+    fn get_function(&mut self, name: &str) -> Result<revm_jit_core::RawJitEvmFn> {
         let id = self.name_to_id(name)?;
         let ptr = self.module.get_finalized_function(id);
         Ok(unsafe { std::mem::transmute(ptr) })
+    }
+
+    fn add_callback_function(
+        &mut self,
+        name: &str,
+        ty: Self::Type,
+        params: &[Self::Type],
+        address: usize,
+    ) -> Self::Function {
+        let _ = name;
+        let _ = ty;
+        let _ = params;
+        let _ = address;
+        // let _id = self.module.declare_function(name, Linkage::Import, &Signature::new(&[],
+        // &[])).unwrap(); FuncRef::from_raw(0)
+        todo!()
     }
 }
 
@@ -164,12 +219,15 @@ pub struct JitEvmCraneliftBuilder<'a> {
     ptr_type: Type,
 }
 
-impl<'a> Builder for JitEvmCraneliftBuilder<'a> {
+impl<'a> BuilderTypes for JitEvmCraneliftBuilder<'a> {
     type Type = Type;
     type Value = Value;
     type StackSlot = StackSlot;
     type BasicBlock = Block;
+    type Function = FuncRef;
+}
 
+impl<'a> TypeMethods for JitEvmCraneliftBuilder<'a> {
     fn type_ptr(&self) -> Self::Type {
         self.ptr_type
     }
@@ -188,7 +246,9 @@ impl<'a> Builder for JitEvmCraneliftBuilder<'a> {
     fn type_array(&self, ty: Self::Type, size: u32) -> Self::Type {
         unimplemented!("type: {size} x {ty}")
     }
+}
 
+impl<'a> Builder for JitEvmCraneliftBuilder<'a> {
     fn create_block(&mut self, name: &str) -> Self::BasicBlock {
         let block = self.bcx.create_block();
         if !name.is_empty() && self.comments.enabled() {
@@ -264,6 +324,12 @@ impl<'a> Builder for JitEvmCraneliftBuilder<'a> {
         self.bcx.ins().stack_store(value, slot, 0);
     }
 
+    fn stack_addr(&mut self, stack_slot: Self::StackSlot) -> Self::Value {
+        // self.bcx.ins().stack_addr(self., stack_slot, 0)
+        let _ = stack_slot;
+        todo!("stack_addr")
+    }
+
     fn load(&mut self, ty: Self::Type, ptr: Self::Value, name: &str) -> Self::Value {
         let value = self.bcx.ins().load(ty, MemFlags::trusted(), ptr, 0);
         let _ = name;
@@ -296,6 +362,14 @@ impl<'a> Builder for JitEvmCraneliftBuilder<'a> {
 
     fn icmp_imm(&mut self, cond: revm_jit_core::IntCC, lhs: Self::Value, rhs: i64) -> Self::Value {
         self.bcx.ins().icmp_imm(convert_intcc(cond), lhs, rhs)
+    }
+
+    fn is_null(&mut self, ptr: Self::Value) -> Self::Value {
+        self.bcx.ins().icmp_imm(IntCC::Equal, ptr, 0)
+    }
+
+    fn is_not_null(&mut self, ptr: Self::Value) -> Self::Value {
+        self.bcx.ins().icmp_imm(IntCC::NotEqual, ptr, 0)
     }
 
     fn br(&mut self, dest: Self::BasicBlock) {
@@ -434,6 +508,12 @@ impl<'a> Builder for JitEvmCraneliftBuilder<'a> {
     fn gep(&mut self, ty: Self::Type, ptr: Self::Value, offset: Self::Value) -> Self::Value {
         let offset = self.bcx.ins().imul_imm(offset, ty.bytes() as i64);
         self.bcx.ins().iadd(ptr, offset)
+    }
+
+    fn panic(&mut self, msg: &str) {
+        // let func = self.bcx.import_function(ExtFuncData{});
+        // self.bcx.ins().call(, args)
+        todo!("panic {msg:?}")
     }
 }
 

@@ -1,8 +1,8 @@
 //! JIT compiler implementation.
 
-use crate::{Backend, Builder, Bytecode, IntCC, JitEvmFn, OpcodeData, OpcodeFlags, Result};
+use crate::{Backend, Builder, Bytecode, IntCC, OpcodeData, OpcodeFlags, Result};
 use revm_interpreter::{opcode as op, InstructionResult};
-use revm_jit_core::OptimizationLevel;
+use revm_jit_core::{JitEvmFn, OptimizationLevel};
 use revm_primitives::{SpecId, U256};
 use std::path::PathBuf;
 
@@ -42,7 +42,7 @@ impl<B: Backend> JitEvm<B> {
     /// Creates a subdirectory with the name of the backend in the given directory.
     pub fn set_dump_to(&mut self, output_dir: Option<PathBuf>) {
         self.backend.set_is_dumping(output_dir.is_some());
-        self.config.comments_enabled = self.out_dir.is_some();
+        self.config.comments_enabled = output_dir.is_some();
         self.out_dir = output_dir;
     }
 
@@ -55,6 +55,42 @@ impl<B: Backend> JitEvm<B> {
         self.backend.set_opt_level(level);
     }
 
+    /// Sets whether to enable debug assertions.
+    ///
+    /// These are useful for debugging, but they do incur a small performance penalty.
+    ///
+    /// Defaults to `cfg!(debug_assertions)`.
+    pub fn set_debug_assertions(&mut self, yes: bool) {
+        self.backend.set_debug_assertions(yes);
+        self.config.debug_assertions = yes;
+    }
+
+    /// Sets whether to pass the stack length through the arguments.
+    ///
+    /// If this is set to `true`, the EVM stack will be passed in the arguments rather than
+    /// allocated in the function locally.
+    ///
+    /// This is useful to inspect the stack after the function has been executed, but it does
+    /// incur a performance penalty as the pointer might not be able to be fully optimized.
+    ///
+    /// Defaults to `false`.
+    pub fn set_pass_stack_through_args(&mut self, yes: bool) {
+        self.config.stack_through_args = yes;
+    }
+
+    /// Sets whether to pass the stack length through the arguments.
+    ///
+    /// If this is set to `true`, the EVM stack length will be passed in the arguments rather than
+    /// allocated in the function locally.
+    ///
+    /// This is useful to inspect the stack length after the function has been executed, but it does
+    /// incur a performance penalty as the pointer might not be able to be fully optimized.
+    ///
+    /// Defaults to `false`.
+    pub fn set_pass_stack_len_through_args(&mut self, yes: bool) {
+        self.config.pass_stack_len_through_args = yes;
+    }
+
     /// Sets whether to disable gas accounting.
     ///
     /// Greatly improves compilation speed and performance, at the cost of not being able to check
@@ -64,7 +100,16 @@ impl<B: Backend> JitEvm<B> {
     ///
     /// Defaults to `false`.
     pub fn set_disable_gas(&mut self, disable_gas: bool) {
-        self.config.disable_gas = disable_gas;
+        self.config.gas_disabled = disable_gas;
+    }
+
+    /// Sets whether to store the amount of gas used to the `gas` object.
+    ///
+    /// Disabling this improves performance by being able to skip some loads/stores.
+    ///
+    /// Defaults to `true`.
+    pub fn set_store_gas_used(&mut self, yes: bool) {
+        self.config.no_store_gas_used = !yes;
     }
 
     /// Sets the static gas limit.
@@ -77,12 +122,6 @@ impl<B: Backend> JitEvm<B> {
     /// Defaults to `None`.
     pub fn set_static_gas_limit(&mut self, static_gas_limit: Option<u64>) {
         self.config.static_gas_limit = static_gas_limit;
-    }
-
-    fn new_name(&mut self) -> String {
-        let name = format!("__evm_bytecode_{}", self.function_counter);
-        self.function_counter += 1;
-        name
     }
 
     /// Compiles the given EVM bytecode into a JIT function.
@@ -100,6 +139,17 @@ impl<B: Backend> JitEvm<B> {
     }
 
     fn compile_bytecode(&mut self, bytecode: &Bytecode<'_>) -> Result<JitEvmFn> {
+        if self.config.debug_assertions {
+            let void = self.backend.type_int(8);
+            let params = &[self.backend.type_ptr(), self.backend.type_ptr_sized_int()];
+            self.backend.add_callback_function(
+                "__callback_panic",
+                void,
+                params,
+                __callback_panic as usize,
+            );
+        }
+
         let name = &self.new_name()[..];
         let bcx = self.backend.build_function(name)?;
 
@@ -137,15 +187,39 @@ impl<B: Backend> JitEvm<B> {
             })?;
         }
 
-        self.backend.get_function(name)
+        self.backend.get_function(name).map(JitEvmFn::new)
+    }
+
+    fn new_name(&mut self) -> String {
+        let name = format!("__evm_bytecode_{}", self.function_counter);
+        self.function_counter += 1;
+        name
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 struct FcxConfig {
+    debug_assertions: bool,
     comments_enabled: bool,
-    disable_gas: bool,
+    stack_through_args: bool,
+    pass_stack_len_through_args: bool,
+    gas_disabled: bool,
+    no_store_gas_used: bool,
     static_gas_limit: Option<u64>,
+}
+
+impl Default for FcxConfig {
+    fn default() -> Self {
+        Self {
+            debug_assertions: cfg!(debug_assertions),
+            comments_enabled: false,
+            stack_through_args: false,
+            pass_stack_len_through_args: false,
+            gas_disabled: false,
+            no_store_gas_used: false,
+            static_gas_limit: None,
+        }
+    }
 }
 
 struct FunctionCx<'a, B: Builder> {
@@ -160,12 +234,12 @@ struct FunctionCx<'a, B: Builder> {
     word_type: B::Type,
     return_type: B::Type,
 
-    /// The stack length slot. `isize`.
-    stack_len: B::StackSlot,
+    /// The stack length pointer. `isize`.
+    stack_len: B::Value,
     /// The stack pointer. Constant throughout the function, passed in the arguments.
     sp: B::Value,
     /// The amount of gas used. `isize`.
-    gas_used: B::StackSlot,
+    gas_used: B::Value,
     /// The gas limit. Constant throughout the function, passed in the arguments or set statically.
     gas_limit: B::Value,
 
@@ -186,24 +260,67 @@ impl<'a, B: Builder> FunctionCx<'a, B> {
     fn translate(mut bcx: B, bytecode: &'a Bytecode<'a>, config: &FcxConfig) -> Result<()> {
         // Get common types.
         let isize_type = bcx.type_ptr_sized_int();
-        let return_type = bcx.type_int(32);
+        let return_type = bcx.type_int(8);
         let word_type = bcx.type_int(256);
-        // let stack_type = bcx.type_array(word_type, STACK_CAP as _);
+
+        let zero = bcx.iconst(isize_type, 0);
 
         // Set up entry block.
-        let stack_len = bcx.new_stack_slot(isize_type, "len.addr");
-        let zero = bcx.iconst(isize_type, 0);
-        bcx.stack_store(zero, stack_len);
+        let gas_ty = isize_type;
+        let gas_ptr = bcx.fn_param(0);
+        if config.debug_assertions {
+            pointer_panic_with_bool(
+                &mut bcx,
+                !config.gas_disabled
+                    || !config.no_store_gas_used
+                    || config.static_gas_limit.is_none(),
+                gas_ptr,
+                "gas pointer",
+            );
+        }
 
-        let sp = bcx.fn_param(0);
-
-        let gas_used = bcx.new_stack_slot(isize_type, "gas_used.addr");
-        bcx.stack_store(zero, gas_used);
+        let gas_used = if config.no_store_gas_used {
+            let gas_used = bcx.new_stack_slot(isize_type, "gas_used.addr");
+            bcx.stack_store(zero, gas_used);
+            bcx.stack_addr(gas_used)
+        } else {
+            let one = bcx.iconst(isize_type, 1);
+            bcx.gep(gas_ty, gas_ptr, one)
+        };
         let gas_limit = if let Some(static_gas_limit) = config.static_gas_limit {
             bcx.iconst(isize_type, static_gas_limit as i64)
         } else {
-            bcx.fn_param(1)
+            bcx.load(isize_type, gas_ptr, "gas_limit")
         };
+
+        let sp_arg = bcx.fn_param(1);
+        let sp = if config.stack_through_args {
+            sp_arg
+        } else {
+            let stack_type = bcx.type_array(word_type, STACK_CAP as _);
+            let stack_slot = bcx.new_stack_slot(stack_type, "stack.addr");
+            bcx.stack_addr(stack_slot)
+        };
+        if config.debug_assertions {
+            pointer_panic_with_bool(&mut bcx, config.stack_through_args, sp_arg, "stack pointer");
+        }
+
+        let stack_len_arg = bcx.fn_param(2);
+        let stack_len = if config.pass_stack_len_through_args {
+            stack_len_arg
+        } else {
+            let stack_len = bcx.new_stack_slot(isize_type, "len.addr");
+            bcx.stack_store(zero, stack_len);
+            bcx.stack_addr(stack_len)
+        };
+        if config.debug_assertions {
+            pointer_panic_with_bool(
+                &mut bcx,
+                config.pass_stack_len_through_args,
+                stack_len_arg,
+                "stack length pointer",
+            );
+        }
 
         // Create all opcode entry blocks.
         let op_blocks: Vec<_> = bytecode
@@ -221,7 +338,7 @@ impl<'a, B: Builder> FunctionCx<'a, B> {
 
         let mut fx = FunctionCx {
             comments_enabled: config.comments_enabled,
-            disable_gas: config.disable_gas,
+            disable_gas: config.gas_disabled,
 
             bcx,
             isize_type,
@@ -285,7 +402,9 @@ impl<'a, B: Builder> FunctionCx<'a, B> {
         }
 
         if !self.disable_gas && !data.flags.contains(OpcodeFlags::SKIP_GAS) {
-            let gas = self.op_infos[op_byte as usize].get_gas();
+            // TODO: JUMPDEST in gas map is 0 for some reason
+            let gas =
+                if op_byte == op::JUMPDEST { 1 } else { self.op_infos[op_byte as usize].get_gas() };
             self.gas_cost_imm(gas);
         }
 
@@ -628,12 +747,12 @@ impl<'a, B: Builder> FunctionCx<'a, B> {
 
     /// Loads the stack length.
     fn load_len(&mut self) -> B::Value {
-        self.bcx.stack_load(self.isize_type, self.stack_len, "len")
+        self.bcx.load(self.isize_type, self.stack_len, "len")
     }
 
     /// Stores the stack length.
     fn store_len(&mut self, value: B::Value) {
-        self.bcx.stack_store(value, self.stack_len);
+        self.bcx.store(value, self.stack_len);
     }
 
     /// Returns the stack pointer at `len` (`&stack[len]`).
@@ -663,11 +782,11 @@ impl<'a, B: Builder> FunctionCx<'a, B> {
             return;
         }
 
-        let gas_used = self.bcx.stack_load(self.isize_type, self.gas_used, "gas_used");
+        let gas_used = self.bcx.load(self.isize_type, self.gas_used, "gas_used");
         let added = self.bcx.iadd(gas_used, cost);
         let failure_cond = self.bcx.icmp(IntCC::UnsignedLessThan, self.gas_limit, added);
         self.build_failure(failure_cond, InstructionResult::OutOfGas);
-        self.bcx.stack_store(added, self.gas_used);
+        self.bcx.store(added, self.gas_used);
     }
 
     /// `if failure_cond { return ret } else { ... }`
@@ -743,13 +862,52 @@ fn op_block_name_with(op: Opcode, data: OpcodeData, with: &str) -> String {
     }
 }
 
+// Pointer must not be null if `set` is true, else it must be null.
+fn pointer_panic_with_bool<B: Builder>(bcx: &mut B, must_be_set: bool, ptr: B::Value, name: &str) {
+    let panic_cond = if must_be_set { bcx.is_null(ptr) } else { bcx.is_not_null(ptr) };
+    let msg = format!(
+        "revm_jit panic: {name} must {not}be null due to configuration",
+        not = if must_be_set { "not " } else { "" }
+    );
+    build_panic(bcx, panic_cond, &msg);
+}
+
+fn build_panic<B: Builder>(bcx: &mut B, cond: B::Value, msg: &str) {
+    let failure = bcx.create_block("panic");
+    let target = bcx.create_block("contd");
+    bcx.brif(cond, failure, target);
+
+    bcx.set_cold_block(failure);
+    bcx.switch_to_block(failure);
+    bcx.panic(msg);
+
+    bcx.switch_to_block(target);
+}
+
+/* ------------------------------------------ Callbacks ----------------------------------------- */
+
+extern "C" fn __callback_panic(ptr: *const u8, len: usize) -> ! {
+    let msg = unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(ptr, len)) };
+    panic!("{msg}");
+}
+
 #[cfg(test)]
 #[allow(dead_code, unused_imports)]
 mod tests {
     use super::*;
     use crate::*;
+    use interpreter::{opcode::OpInfo, Gas};
     use revm_interpreter::opcode as op;
     use revm_primitives::ruint::uint;
+
+    const DEFAULT_SPEC: SpecId = SpecId::CANCUN;
+    const DEFAULT_SPEC_OP_INFO: &[OpInfo; 256] = op::spec_opcode_gas(DEFAULT_SPEC);
+    const GAS_MASK: u32 = 0x1FFFFFFF;
+
+    #[inline]
+    const fn get_gas(op_info: OpInfo) -> u64 {
+        (unsafe { std::mem::transmute::<OpInfo, u32>(op_info) } & GAS_MASK) as u64
+    }
 
     #[cfg(feature = "llvm")]
     #[test]
@@ -775,6 +933,7 @@ mod tests {
 
         expected_return: InstructionResult,
         expected_stack: &'a [U256],
+        expected_gas: u64,
     }
 
     const fn bytecode_unop(op: u8, a: U256) -> [u8; 36] {
@@ -838,15 +997,19 @@ mod tests {
     }
 
     macro_rules! testcases {
-        (@op $op:expr, $a:expr) => { bytecode_unop($op, $a) };
-        (@op $op:expr, $a:expr, $b:expr) => { bytecode_binop($op, $a, $b) };
+        (@bytecode $op:expr, $a:expr) => { bytecode_unop($op, $a) };
+        (@bytecode $op:expr, $a:expr, $b:expr) => { bytecode_binop($op, $a, $b) };
+
+        (@gas $op:expr, $a:expr) => { 3 };
+        (@gas $op:expr, $a:expr, $b:expr) => { 6 };
 
         ($($name:ident($op:expr, $a:expr $(, $b:expr)? => $ret:expr)),* $(,)?) => {
             uint!([$(TestCase {
                 name: stringify!($name),
-                bytecode: &testcases!(@op $op, $a $(, $b)?),
+                bytecode: &testcases!(@bytecode $op, $a $(, $b)?),
                 expected_return: InstructionResult::Stop,
                 expected_stack: &[$ret],
+                expected_gas: testcases!(@gas $op, $a $(, $b)?) + get_gas(DEFAULT_SPEC_OP_INFO[$op as usize]),
             }),*])
         };
     }
@@ -857,42 +1020,49 @@ mod tests {
             bytecode: &[],
             expected_return: InstructionResult::Stop,
             expected_stack: &[],
+            expected_gas: 0,
         },
         TestCase {
             name: "no stop",
             bytecode: &[op::PUSH0],
             expected_return: InstructionResult::Stop,
-            expected_stack: &[],
+            expected_stack: &[U256::ZERO],
+            expected_gas: 2,
         },
         TestCase {
             name: "stop",
             bytecode: &[op::STOP],
             expected_return: InstructionResult::Stop,
             expected_stack: &[],
+            expected_gas: 0,
         },
         TestCase {
             name: "invalid",
             bytecode: &[op::INVALID],
             expected_return: InstructionResult::InvalidFEOpcode,
             expected_stack: &[],
+            expected_gas: 0,
         },
         TestCase {
             name: "unknown",
             bytecode: &[0x21],
             expected_return: InstructionResult::OpcodeNotFound,
             expected_stack: &[],
+            expected_gas: 0,
         },
         TestCase {
             name: "underflow1",
             bytecode: &[op::ADD],
             expected_return: InstructionResult::StackUnderflow,
             expected_stack: &[],
+            expected_gas: 3,
         },
         TestCase {
             name: "underflow2",
             bytecode: &[op::PUSH0, op::ADD],
             expected_return: InstructionResult::StackUnderflow,
             expected_stack: &[U256::ZERO],
+            expected_gas: 5,
         },
     ];
 
@@ -902,24 +1072,28 @@ mod tests {
             bytecode: &[op::PUSH1, 3, op::JUMP, op::JUMPDEST],
             expected_return: InstructionResult::Stop,
             expected_stack: &[],
+            expected_gas: 3 + 8 + 1,
         },
         TestCase {
             name: "unmodified stack after push-jump",
             bytecode: &[op::PUSH1, 3, op::JUMP, op::JUMPDEST, op::PUSH0, op::ADD],
             expected_return: InstructionResult::StackUnderflow,
-            expected_stack: &[],
+            expected_stack: &[U256::ZERO],
+            expected_gas: 3 + 8 + 1 + 2 + 3,
         },
         TestCase {
             name: "basic jump if",
-            bytecode: &[op::PUSH1, 1, op::PUSH1, 5, op::JUMP, op::JUMPDEST],
+            bytecode: &[op::PUSH1, 1, op::PUSH1, 5, op::JUMPI, op::JUMPDEST],
             expected_return: InstructionResult::Stop,
             expected_stack: &[],
+            expected_gas: 3 + 3 + 10 + 1,
         },
         TestCase {
             name: "unmodified stack after push-jumpif",
             bytecode: &[op::PUSH1, 1, op::PUSH1, 5, op::JUMPI, op::JUMPDEST, op::PUSH0, op::ADD],
             expected_return: InstructionResult::StackUnderflow,
-            expected_stack: &[],
+            expected_stack: &[U256::ZERO],
+            expected_gas: 3 + 3 + 10 + 1 + 2 + 3,
         },
         TestCase {
             name: "basic loop",
@@ -938,6 +1112,7 @@ mod tests {
             ],
             expected_return: InstructionResult::Stop,
             expected_stack: &[uint!(69_U256)],
+            expected_gas: 3 + (1 + 3 + 3 + 3 + 3 + 3 + 10) * 3 + 2 + 3,
         },
     ];
 
@@ -1088,30 +1263,28 @@ mod tests {
     }
 
     fn run_test_group<B: Backend>(make_backend: impl Fn() -> B, cases: &[TestCase<'_>]) {
-        for (i, &TestCase { name, bytecode, expected_return, expected_stack }) in
+        for (i, &TestCase { name, bytecode, expected_return, expected_stack, expected_gas }) in
             cases.iter().enumerate()
         {
             let mut jit = JitEvm::new(make_backend());
+            jit.set_pass_stack_through_args(true);
+            jit.set_pass_stack_len_through_args(true);
 
             println!("Running test case {i:2}: {name}");
             println!("  bytecode: {}", format_bytecode(bytecode));
-            let f = jit.compile(bytecode, SpecId::LATEST).unwrap();
+            let f = jit.compile(bytecode, DEFAULT_SPEC).unwrap();
 
-            let mut stack = ContextStack::new();
-            let actual_return = unsafe { f(&mut stack, 10000) };
+            let mut stack = EvmStack::new();
+            let mut stack_len = 0;
+            let mut gas = Gas::new(10000);
+            let actual_return =
+                unsafe { f.call(Some(&mut gas), Some(&mut stack), Some(&mut stack_len)) };
             assert_eq!(actual_return, expected_return);
+            assert_eq!(gas.spend(), expected_gas);
 
-            for (j, (chunk, expected)) in
-                stack.as_slice().chunks_exact(32).zip(expected_stack).enumerate()
-            {
-                let bytes: [u8; 32] = chunk.try_into().unwrap();
-                let actual = if cfg!(target_endian = "big") {
-                    U256::from_be_bytes(bytes)
-                } else {
-                    U256::from_le_bytes(bytes)
-                };
-                assert_eq!(actual, *expected, "stack item {j} does not match");
-            }
+            let actual_stack =
+                stack.as_slice().iter().take(stack_len).map(|x| *x.as_u256()).collect::<Vec<_>>();
+            assert_eq!(actual_stack, *expected_stack);
         }
     }
 
@@ -1130,12 +1303,18 @@ mod tests {
         fn run_fibonacci_static<B: Backend>(make_backend: impl Fn() -> B, input: u16) {
             let code = mk_static_fibonacci_code(input);
             let mut jit = JitEvm::new(make_backend());
-            let f = jit.compile(&code, SpecId::LATEST).unwrap();
-            let mut stack = ContextStack::new();
-            let r = unsafe { f(&mut stack, 10000) };
+            jit.set_pass_stack_through_args(true);
+            jit.set_pass_stack_len_through_args(true);
+            let f = jit.compile(&code, DEFAULT_SPEC).unwrap();
+            let mut stack_buf = EvmStack::new_heap();
+            let stack = EvmStack::from_mut_vec(&mut stack_buf);
+            let mut stack_len = 0;
+            let mut gas = Gas::new(10000);
+            let r = unsafe { f.call(Some(&mut gas), Some(stack), Some(&mut stack_len)) };
             assert_eq!(r, InstructionResult::Stop);
-            // Apparently the code does `fibonacci(input + 1)`.
-            assert_eq!(stack.word(0), fibonacci_rust(input + 1));
+            // Apparently the code does `fibonacci(input - 1)`.
+            assert_eq!(stack.as_slice()[0].to_u256(), fibonacci_rust(input + 1));
+            assert_eq!(stack_len, 1);
         }
 
         #[rustfmt::skip]

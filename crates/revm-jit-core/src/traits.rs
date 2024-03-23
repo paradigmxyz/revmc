@@ -1,4 +1,4 @@
-use crate::{JitEvmFn, Result};
+use crate::{RawJitEvmFn, Result};
 use revm_primitives::U256;
 use std::{fmt, path::Path};
 
@@ -40,17 +40,22 @@ pub enum OptimizationLevel {
     Aggressive,
 }
 
-pub trait Builder {
+pub trait BuilderTypes {
     type Type: Copy + Eq + fmt::Debug;
     type Value: Copy + Eq + fmt::Debug;
     type StackSlot: Copy + Eq + fmt::Debug;
     type BasicBlock: Copy + Eq + fmt::Debug;
+    type Function: Copy + Eq + fmt::Debug;
+}
 
+pub trait TypeMethods: BuilderTypes {
     fn type_ptr(&self) -> Self::Type;
     fn type_ptr_sized_int(&self) -> Self::Type;
     fn type_int(&self, bits: u32) -> Self::Type;
     fn type_array(&self, ty: Self::Type, size: u32) -> Self::Type;
+}
 
+pub trait Builder: BuilderTypes + TypeMethods {
     fn create_block(&mut self, name: &str) -> Self::BasicBlock;
     fn create_block_after(&mut self, after: Self::BasicBlock, name: &str) -> Self::BasicBlock;
     fn switch_to_block(&mut self, block: Self::BasicBlock);
@@ -69,6 +74,7 @@ pub trait Builder {
     fn new_stack_slot(&mut self, ty: Self::Type, name: &str) -> Self::StackSlot;
     fn stack_load(&mut self, ty: Self::Type, slot: Self::StackSlot, name: &str) -> Self::Value;
     fn stack_store(&mut self, value: Self::Value, slot: Self::StackSlot);
+    fn stack_addr(&mut self, stack_slot: Self::StackSlot) -> Self::Value;
 
     fn load(&mut self, ty: Self::Type, ptr: Self::Value, name: &str) -> Self::Value;
     fn store(&mut self, value: Self::Value, ptr: Self::Value);
@@ -78,6 +84,8 @@ pub trait Builder {
 
     fn icmp(&mut self, cond: IntCC, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
     fn icmp_imm(&mut self, cond: IntCC, lhs: Self::Value, rhs: i64) -> Self::Value;
+    fn is_null(&mut self, ptr: Self::Value) -> Self::Value;
+    fn is_not_null(&mut self, ptr: Self::Value) -> Self::Value;
     fn br(&mut self, dest: Self::BasicBlock);
     fn brif(
         &mut self,
@@ -125,16 +133,25 @@ pub trait Builder {
     fn sext(&mut self, ty: Self::Type, value: Self::Value) -> Self::Value;
 
     fn gep(&mut self, ty: Self::Type, ptr: Self::Value, offset: Self::Value) -> Self::Value;
+
+    fn panic(&mut self, msg: &str);
 }
 
-pub trait Backend {
-    type Builder<'a>: Builder
+pub trait Backend: BuilderTypes + TypeMethods {
+    type Builder<'a>: Builder<
+        Type = Self::Type,
+        Value = Self::Value,
+        StackSlot = Self::StackSlot,
+        BasicBlock = Self::BasicBlock,
+        Function = Self::Function,
+    >
     where
         Self: 'a;
 
     fn ir_extension(&self) -> &'static str;
 
     fn set_is_dumping(&mut self, yes: bool);
+    fn set_debug_assertions(&mut self, yes: bool);
     fn set_opt_level(&mut self, level: OptimizationLevel);
     fn dump_ir(&mut self, path: &Path) -> Result<()>;
     fn dump_disasm(&mut self, path: &Path) -> Result<()>;
@@ -142,5 +159,13 @@ pub trait Backend {
     fn build_function(&mut self, name: &str) -> Result<Self::Builder<'_>>;
     fn verify_function(&mut self, name: &str) -> Result<()>;
     fn optimize_function(&mut self, name: &str) -> Result<()>;
-    fn get_function(&mut self, name: &str) -> Result<JitEvmFn>;
+    fn get_function(&mut self, name: &str) -> Result<RawJitEvmFn>;
+
+    fn add_callback_function(
+        &mut self,
+        name: &str,
+        ret: Self::Type,
+        params: &[Self::Type],
+        address: usize,
+    ) -> Self::Function;
 }

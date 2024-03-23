@@ -14,9 +14,12 @@ use inkwell::{
     values::{BasicValueEnum, FunctionValue, PointerValue},
     AddressSpace, IntPredicate, OptimizationLevel,
 };
-use revm_jit_core::{Backend, Builder, ContextStack, Error, IntCC, JitEvmFn, Result};
+use revm_interpreter::Gas;
+use revm_jit_core::{
+    Backend, Builder, BuilderTypes, Error, EvmStack, IntCC, RawJitEvmFn, Result, TypeMethods,
+};
 use revm_primitives::U256;
-use std::path::Path;
+use std::{mem, path::Path};
 
 pub use inkwell;
 
@@ -35,9 +38,11 @@ pub struct JitEvmLlvmBackend<'ctx> {
     ty_i1: IntType<'ctx>,
     ty_i8: IntType<'ctx>,
     ty_i32: IntType<'ctx>,
+    ty_i64: IntType<'ctx>,
     ty_i256: IntType<'ctx>,
     ty_isize: IntType<'ctx>,
 
+    debug_assertions: bool,
     opt_level: OptimizationLevel,
 }
 
@@ -90,6 +95,7 @@ impl<'ctx> JitEvmLlvmBackend<'ctx> {
         let ty_i1 = cx.bool_type();
         let ty_i8 = cx.i8_type();
         let ty_i32 = cx.i32_type();
+        let ty_i64 = cx.i64_type();
         let ty_i256 = cx.custom_width_int_type(256);
         let ty_isize = cx.ptr_sized_int_type(&machine.get_target_data(), None);
         let ty_ptr = ty_i8.ptr_type(AddressSpace::default());
@@ -103,9 +109,11 @@ impl<'ctx> JitEvmLlvmBackend<'ctx> {
             ty_i1,
             ty_i8,
             ty_i32,
+            ty_i64,
             ty_i256,
             ty_isize,
             ty_ptr,
+            debug_assertions: cfg!(debug_assertions),
             opt_level,
         })
     }
@@ -117,8 +125,44 @@ impl<'ctx> JitEvmLlvmBackend<'ctx> {
     }
 }
 
+impl<'ctx> BuilderTypes for JitEvmLlvmBackend<'ctx> {
+    type Type = BasicTypeEnum<'ctx>;
+    type Value = BasicValueEnum<'ctx>;
+    type StackSlot = PointerValue<'ctx>;
+    type BasicBlock = BasicBlock<'ctx>;
+    type Function = FunctionValue<'ctx>;
+}
+
+impl<'ctx> TypeMethods for JitEvmLlvmBackend<'ctx> {
+    fn type_ptr(&self) -> Self::Type {
+        self.ty_ptr.into()
+    }
+
+    fn type_ptr_sized_int(&self) -> Self::Type {
+        self.ty_isize.into()
+    }
+
+    fn type_int(&self, bits: u32) -> Self::Type {
+        match bits {
+            1 => self.ty_i1,
+            8 => self.ty_i8,
+            16 => self.cx.i16_type(),
+            32 => self.ty_i32,
+            64 => self.ty_i64,
+            128 => self.cx.i128_type(),
+            256 => self.ty_i256,
+            bits => self.cx.custom_width_int_type(bits),
+        }
+        .into()
+    }
+
+    fn type_array(&self, ty: Self::Type, size: u32) -> Self::Type {
+        ty.array_type(size).into()
+    }
+}
+
 impl<'ctx> Backend for JitEvmLlvmBackend<'ctx> {
-    type Builder<'a> = JitEvmLlvmBuilder<'a, 'ctx> where Self:'a;
+    type Builder<'a> = JitEvmLlvmBuilder<'a, 'ctx> where Self: 'a;
 
     fn ir_extension(&self) -> &'static str {
         "ll"
@@ -126,6 +170,10 @@ impl<'ctx> Backend for JitEvmLlvmBackend<'ctx> {
 
     fn set_is_dumping(&mut self, yes: bool) {
         let _ = yes;
+    }
+
+    fn set_debug_assertions(&mut self, yes: bool) {
+        self.debug_assertions = yes;
     }
 
     fn set_opt_level(&mut self, level: revm_jit_core::OptimizationLevel) {
@@ -141,9 +189,14 @@ impl<'ctx> Backend for JitEvmLlvmBackend<'ctx> {
     }
 
     fn build_function(&mut self, name: &str) -> Result<Self::Builder<'_>> {
-        let params = &[self.ty_ptr.into(), self.ty_isize.into()];
-        let fn_type = self.ty_i32.fn_type(params, false);
+        let params = &[self.ty_ptr.into(), self.ty_ptr.into(), self.ty_ptr.into()];
+        let fn_type = self.ty_i8.fn_type(params, false);
         let function = self.module.add_function(name, fn_type, None);
+        for (i, &name) in
+            ["arg.gas.addr", "arg.stack.addr", "arg.stack_len.addr"].iter().enumerate()
+        {
+            function.get_nth_param(i as u32).expect(name).set_name(name);
+        }
 
         // Function attributes.
         for attr in [
@@ -166,17 +219,23 @@ impl<'ctx> Backend for JitEvmLlvmBackend<'ctx> {
         }
 
         // Pointer argument attributes.
-        for (i, align, dereferenceable) in [(0u32, 32u64, ContextStack::SIZE as u64)] {
-            for (name, value) in [
-                ("noalias", 1),
-                ("nocapture", 1),
-                ("noundef", 1),
-                ("align", align),
-                ("dereferenceable", dereferenceable),
-            ] {
-                let id = Attribute::get_named_enum_kind_id(name);
-                let attr = self.cx.create_enum_attribute(id, value);
-                function.add_attribute(AttributeLoc::Param(i as _), attr);
+        for (i, align, dereferenceable) in [
+            (0, mem::align_of::<Gas>(), mem::size_of::<Gas>() as _),
+            (1, mem::align_of::<EvmStack>(), mem::size_of::<EvmStack>()),
+            (2, mem::align_of::<usize>(), mem::size_of::<usize>() as _),
+        ] {
+            if !self.debug_assertions {
+                for (name, value) in [
+                    ("noalias", 1),
+                    ("nocapture", 1),
+                    ("noundef", 1),
+                    ("align", align),
+                    ("dereferenceable", dereferenceable),
+                ] {
+                    let id = Attribute::get_named_enum_kind_id(name);
+                    let attr = self.cx.create_enum_attribute(id, value as u64);
+                    function.add_attribute(AttributeLoc::Param(i as _), attr);
+                }
             }
         }
 
@@ -202,10 +261,24 @@ impl<'ctx> Backend for JitEvmLlvmBackend<'ctx> {
         self.module.run_passes(passes, &self.machine, opts).map_err(error_msg)
     }
 
-    fn get_function(&mut self, name: &str) -> Result<JitEvmFn> {
+    fn get_function(&mut self, name: &str) -> Result<RawJitEvmFn> {
         unsafe { self.exec_engine.get_function(name) }
             .map(|f| unsafe { f.into_raw() })
             .map_err(Into::into)
+    }
+
+    fn add_callback_function(
+        &mut self,
+        name: &str,
+        ret: Self::Type,
+        params: &[Self::Type],
+        address: usize,
+    ) -> Self::Function {
+        let params = params.iter().copied().map(Into::into).collect::<Vec<_>>();
+        let ty = ret.fn_type(&params, false);
+        let function = self.module.add_function(name, ty, None);
+        self.exec_engine.add_global_mapping(&function, address as _);
+        function
     }
 }
 
@@ -255,38 +328,33 @@ impl<'a, 'ctx> JitEvmLlvmBuilder<'a, 'ctx> {
     }
 }
 
-impl<'a, 'ctx> Builder for JitEvmLlvmBuilder<'a, 'ctx> {
+impl<'a, 'ctx> BuilderTypes for JitEvmLlvmBuilder<'a, 'ctx> {
     type Type = BasicTypeEnum<'ctx>;
     type Value = BasicValueEnum<'ctx>;
     type StackSlot = PointerValue<'ctx>;
     type BasicBlock = BasicBlock<'ctx>;
+    type Function = FunctionValue<'ctx>;
+}
 
+impl<'a, 'ctx> TypeMethods for JitEvmLlvmBuilder<'a, 'ctx> {
     fn type_ptr(&self) -> Self::Type {
-        self.ty_ptr.into()
+        self.backend.type_ptr()
     }
 
     fn type_ptr_sized_int(&self) -> Self::Type {
-        self.ty_isize.into()
+        self.backend.type_ptr_sized_int()
     }
 
     fn type_int(&self, bits: u32) -> Self::Type {
-        match bits {
-            1 => self.cx.bool_type(),
-            8 => self.ty_i8,
-            16 => self.cx.i16_type(),
-            32 => self.ty_i32,
-            64 => self.cx.i64_type(),
-            128 => self.cx.i128_type(),
-            256 => self.ty_i256,
-            bits => self.cx.custom_width_int_type(bits),
-        }
-        .into()
+        self.backend.type_int(bits)
     }
 
     fn type_array(&self, ty: Self::Type, size: u32) -> Self::Type {
-        ty.array_type(size).into()
+        self.backend.type_array(ty, size)
     }
+}
 
+impl<'a, 'ctx> Builder for JitEvmLlvmBuilder<'a, 'ctx> {
     fn create_block(&mut self, name: &str) -> Self::BasicBlock {
         self.cx.append_basic_block(self.function, name)
     }
@@ -366,6 +434,10 @@ impl<'a, 'ctx> Builder for JitEvmLlvmBuilder<'a, 'ctx> {
         self.store(value, slot.into())
     }
 
+    fn stack_addr(&mut self, stack_slot: Self::StackSlot) -> Self::Value {
+        stack_slot.into()
+    }
+
     fn load(&mut self, ty: Self::Type, ptr: Self::Value, name: &str) -> Self::Value {
         self.bcx.build_load(ty, ptr.into_pointer_value(), name).unwrap()
     }
@@ -397,6 +469,14 @@ impl<'a, 'ctx> Builder for JitEvmLlvmBuilder<'a, 'ctx> {
     fn icmp_imm(&mut self, cond: IntCC, lhs: Self::Value, rhs: i64) -> Self::Value {
         let rhs = self.iconst(lhs.get_type(), rhs);
         self.icmp(cond, lhs, rhs)
+    }
+
+    fn is_null(&mut self, ptr: Self::Value) -> Self::Value {
+        self.bcx.build_is_null(ptr.into_pointer_value(), "").unwrap().into()
+    }
+
+    fn is_not_null(&mut self, ptr: Self::Value) -> Self::Value {
+        self.bcx.build_is_not_null(ptr.into_pointer_value(), "").unwrap().into()
     }
 
     fn br(&mut self, dest: Self::BasicBlock) {
@@ -556,6 +636,15 @@ impl<'a, 'ctx> Builder for JitEvmLlvmBuilder<'a, 'ctx> {
         unsafe { self.bcx.build_in_bounds_gep(elem_ty, ptr.into_pointer_value(), &[offset], "") }
             .unwrap()
             .into()
+    }
+
+    fn panic(&mut self, msg: &str) {
+        let panic = self.module.get_function("__callback_panic").unwrap();
+        let ptr =
+            self.bcx.build_global_string_ptr(msg, "panic_msg_ptr").unwrap().as_pointer_value();
+        let len = self.ty_isize.const_int(msg.len() as u64, false);
+        let _callsite = self.bcx.build_call(panic, &[ptr.into(), len.into()], "").unwrap();
+        self.bcx.build_unreachable().unwrap();
     }
 }
 

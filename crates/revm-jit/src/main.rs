@@ -1,7 +1,7 @@
 #![allow(missing_docs)]
 
-use revm_interpreter::opcode as op;
-use revm_jit::{ContextStack, InstructionResult, JitEvm, OptimizationLevel};
+use revm_interpreter::{opcode as op, Gas};
+use revm_jit::{Backend, EvmStack, JitEvm, OptimizationLevel};
 use revm_primitives::SpecId;
 use std::path::PathBuf;
 
@@ -18,9 +18,30 @@ fn main() -> color_eyre::Result<()> {
         revm_jit::llvm::JitEvmLlvmBackend::new(&context, OptimizationLevel::Aggressive).unwrap();
     let mut jit = JitEvm::new(backend);
     jit.set_dump_to(Some(PathBuf::from("./target/")));
+    jit.set_pass_stack_through_args(true);
+    // jit.set_disable_gas(true);
+
+    // #[rustfmt::skip]
+    // let code: &[u8] = &[
+    //     op::PUSH1, 3, op::JUMP, op::JUMPDEST
+    // ];
+
+    // let mut stack_buf = EvmStack::new_heap();
+    // let stack = EvmStack::from_mut_vec(&mut stack_buf);
+    // let mut gas = Gas::new(100_000);
+    // let f = jit.compile(code, SpecId::LATEST)?;
+    // unsafe { f.call(Some(&mut gas), Some(stack), None) };
+    fibonacci(jit)?;
+
+    Ok(())
+}
+
+#[allow(dead_code)]
+fn fibonacci<B: Backend>(mut jit: JitEvm<B>) -> color_eyre::Result<()> {
+    let gas_limit = 100_000;
 
     // Compile the bytecode.
-    let input: u16 = 100;
+    let input: u16 = 69;
     let input = input.to_be_bytes();
     #[rustfmt::skip]
     let bytecode: &[u8] = &[
@@ -68,11 +89,40 @@ fn main() -> color_eyre::Result<()> {
     ];
     let f = jit.compile(bytecode, SpecId::LATEST)?;
 
-    // Run the compiled function.
-    let mut stack = ContextStack::new();
-    let ret = unsafe { f(&mut stack, 100000) };
-    assert_eq!(ret, InstructionResult::Stop);
-    println!("{}", stack.word(0));
+    let n_iters: u64 = std::env::args().nth(1).expect("expected n_iters").parse().expect("not u64");
+
+    let mut gas = Gas::new(gas_limit);
+    let mut stack_buf = EvmStack::new_heap();
+    let stack = EvmStack::from_mut_vec(&mut stack_buf);
+    let t = std::time::Instant::now();
+    for _ in 0..n_iters {
+        std::hint::black_box(unsafe { f.call(Some(&mut gas), Some(stack), None) });
+        gas = Gas::new(gas_limit);
+    }
+    let d = t.elapsed();
+    eprintln!(" JIT: {:>8?} ({d:?}/{n_iters})", d / n_iters as u32);
+
+    let contract = Box::new(revm_interpreter::Contract {
+        bytecode: revm_interpreter::analysis::to_analysed(revm_primitives::Bytecode::new_raw(
+            revm_primitives::Bytes::copy_from_slice(bytecode),
+        ))
+        .try_into()
+        .unwrap(),
+        ..Default::default()
+    });
+    let table = revm_interpreter::opcode::make_instruction_table::<
+        revm_interpreter::DummyHost,
+        revm_primitives::LatestSpec,
+    >();
+    let mut host = revm_interpreter::DummyHost::new(Default::default());
+
+    let t = std::time::Instant::now();
+    for _ in 0..n_iters {
+        let mut int = revm_interpreter::Interpreter::new(contract.clone(), gas_limit, false);
+        std::hint::black_box(int.run(Default::default(), &table, &mut host));
+    }
+    let d = t.elapsed();
+    eprintln!("REVM: {:>8?} ({d:?}/{n_iters})", d / n_iters as u32);
 
     Ok(())
 }
