@@ -12,6 +12,9 @@ use revm_primitives::U256;
 mod compiler;
 pub use compiler::JitEvm;
 
+mod gas;
+pub use gas::*;
+
 mod bytecode;
 pub use bytecode::*;
 
@@ -48,3 +51,13 @@ const I256_MAX: U256 = U256::from_limbs([
     0xFFFFFFFFFFFFFFFF,
     0x7FFFFFFFFFFFFFFF,
 ]);
+
+// Enable for `cargo-asm`.
+#[cfg(any())]
+pub fn generate_all_assembly() -> JitEvm<JitEvmLlvmBackend<'static>> {
+    let cx = Box::leak(Box::new(llvm::inkwell::context::Context::create()));
+    let mut jit = JitEvm::new(JitEvmLlvmBackend::new(cx, OptimizationLevel::Aggressive).unwrap());
+    let _ = jit.compile(&[], primitives::SpecId::ARROW_GLACIER).unwrap();
+    unsafe { jit.free_all_functions().unwrap() };
+    jit
+}

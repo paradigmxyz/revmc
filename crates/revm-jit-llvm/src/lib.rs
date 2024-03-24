@@ -693,5 +693,5 @@ fn convert_opt_level(level: revm_jit_core::OptimizationLevel) -> OptimizationLev
 }
 
 fn error_msg(msg: inkwell::support::LLVMString) -> revm_jit_core::Error {
-    revm_jit_core::Error::msg(msg.to_string())
+    revm_jit_core::Error::msg(msg.to_string_lossy().trim_end().to_string())
 }

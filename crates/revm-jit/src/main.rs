@@ -1,7 +1,7 @@
 #![allow(missing_docs)]
 
 use revm_interpreter::{opcode as op, Gas};
-use revm_jit::{Backend, EvmStack, JitEvm, OptimizationLevel};
+use revm_jit::{Backend, EvmStack, InstructionResult, JitEvm, OptimizationLevel};
 use revm_primitives::{SpecId, U256};
 use std::{hint::black_box, path::PathBuf};
 
@@ -19,14 +19,14 @@ fn main() -> color_eyre::Result<()> {
     let backend = revm_jit::llvm::JitEvmLlvmBackend::new(&context, opt_level).unwrap();
     let mut jit = JitEvm::new(backend);
     jit.set_dump_to(Some(PathBuf::from("./target/")));
-    // jit.set_debug_assertions(false);
+    jit.set_debug_assertions(false);
     jit.set_pass_stack_through_args(true);
     jit.set_pass_stack_len_through_args(true);
     jit.set_disable_gas(true);
 
     #[rustfmt::skip]
     let code: &[u8] = &[
-        op::PUSH0, op::PUSH0, op::ADDMOD
+        op::PUSH1, 0x20, op::PUSH1, 0x20, op::SDIV
     ];
 
     let mut stack_buf = EvmStack::new_heap();
@@ -34,7 +34,8 @@ fn main() -> color_eyre::Result<()> {
     stack.as_mut_slice()[0] = U256::from(0xab).into();
     // let mut gas = Gas::new(100_000);
     let f = jit.compile(code, SpecId::LATEST)?;
-    unsafe { f.call(None, Some(stack), Some(&mut 1)) };
+    let ret = unsafe { f.call(None, Some(stack), Some(&mut 1)) };
+    assert_eq!(ret, InstructionResult::Stop);
     // assert_eq!(stack.as_slice()[0], U256::from(0xab).into());
     // fibonacci(jit)?;
 

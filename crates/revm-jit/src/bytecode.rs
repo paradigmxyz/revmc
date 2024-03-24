@@ -37,12 +37,7 @@ impl<'a> Bytecode<'a> {
                 }
             }
 
-            let mut flags = OpcodeFlags::NORMAL;
-            if !op_enabled_in(opcode, spec) {
-                flags |= OpcodeFlags::DISABLED;
-            }
-
-            opcodes.push(OpcodeData { opcode, flags, data });
+            opcodes.push(OpcodeData { opcode, flags: OpcodeFlags::NORMAL, data });
         }
 
         // Pad code to ensure there is at least one diverging opcode.
@@ -199,10 +194,6 @@ bitflags::bitflags! {
         const SKIP_GAS = 1 << 3;
         /// Skip generating code.
         const SKIP_LOGIC = 1 << 4;
-
-        /// The opcode is not enabled in the current EVM version.
-        /// Always returns `NotActivated`.
-        const DISABLED = 1 << 5;
     }
 }
 
@@ -389,31 +380,6 @@ pub fn format_bytecode(bytecode: &[u8]) -> String {
     RawBytecodeIter::new(bytecode).to_string()
 }
 
-/// Returns `true` if the opcode is enabled in the given [`SpecId`].
-pub fn op_enabled_in(opcode: u8, spec: SpecId) -> bool {
-    const FT: SpecId = SpecId::FRONTIER;
-    // TODO
-    #[rustfmt::skip]
-    static SPEC_ID_MAP: [SpecId; 256] = [
-        FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT,
-        FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT,
-        FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT,
-        FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT,
-        FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT,
-        FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT,
-        FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT,
-        FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT,
-        FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT,
-        FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT,
-        FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT,
-        FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT,
-        FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT,
-        FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT,
-        FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT,
-        FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT, FT,
-    ];
-    spec == SpecId::LATEST || SpecId::enabled(spec, SPEC_ID_MAP[opcode as usize])
-}
 #[cfg(test)]
 mod tests {
     use super::*;

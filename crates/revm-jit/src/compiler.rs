@@ -1,6 +1,9 @@
 //! JIT compiler implementation.
 
-use crate::{Backend, Builder, Bytecode, IntCC, OpcodeData, OpcodeFlags, Result};
+use crate::{
+    static_gas_map, Backend, Builder, Bytecode, IntCC, OpInfo, OpcodeData, OpcodeFlags, Result,
+    I256_MIN,
+};
 use revm_interpreter::{opcode as op, InstructionResult};
 use revm_jit_core::{JitEvmFn, OptimizationLevel, TypeMethods};
 use revm_primitives::{SpecId, U256};
@@ -262,7 +265,7 @@ struct FunctionCx<'a, B: Backend> {
     /// All entry blocks for each opcode.
     op_blocks: Vec<B::BasicBlock>,
     /// Opcode information.
-    op_infos: &'static [op::OpInfo],
+    op_infos: &'static [OpInfo; 256],
     /// The current opcode being translated.
     ///
     /// Note that `self.op_blocks[current_opcode]` does not necessarily equal the builder's current
@@ -329,7 +332,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             .collect();
         assert!(!op_blocks.is_empty(), "translating empty bytecode");
 
-        let op_infos = op::spec_opcode_gas(bytecode.spec);
+        let gas_infos = static_gas_map(bytecode.spec);
 
         let mut fx = FunctionCx {
             comments_enabled: config.comments_enabled,
@@ -345,7 +348,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             gas_limit,
             bytecode,
             op_blocks,
-            op_infos,
+            op_infos: gas_infos,
             current_opcode: usize::MAX,
 
             callbacks,
@@ -409,15 +412,15 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             }};
         }
 
-        if data.flags.contains(OpcodeFlags::DISABLED) {
+        // Disabled opcodes don't pay gas.
+        let info = self.op_infos[op_byte as usize];
+        if info.is_disabled() {
             goto_return!(build InstructionResult::NotActivated);
         }
 
-        if !self.disable_gas && !data.flags.contains(OpcodeFlags::SKIP_GAS) {
-            // TODO: JUMPDEST in gas map is 0 for some reason
-            let gas =
-                if op_byte == op::JUMPDEST { 1 } else { self.op_infos[op_byte as usize].get_gas() };
-            self.gas_cost_imm(gas);
+        // Pay static gas.
+        if !self.disable_gas && !data.flags.contains(OpcodeFlags::SKIP_GAS) && !info.is_dynamic() {
+            self.gas_cost_imm(info.gas() as u64);
         }
 
         if data.flags.contains(OpcodeFlags::SKIP_LOGIC) {
@@ -438,34 +441,13 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 let r = self.bcx.$op(a, b);
                 self.push_unchecked(r);
             }};
-            (@if_not_zero $op:ident $(, $extra_cond:expr)?) => {{
+            (@if_not_zero $op:ident) => {{
+                // TODO: `select` might not have the same semantics in all backends.
                 let [a, b] = self.popn(true);
-                let cond = self.bcx.icmp_imm(IntCC::Equal, b, 0);
-                let r = self.bcx.lazy_select(
-                    cond,
-                    self.word_type,
-                    |bcx, block| {
-                        bcx.set_cold_block(block);
-                        bcx.iconst_256(U256::ZERO)
-                    },
-                    |bcx, _op_block| {
-                        // TODO: segfault ??
-                        // $(
-                        //     let cond = $extra_cond(bcx, a, b);
-                        //     return bcx.lazy_select(
-                        //         cond,
-                        //         self.word_type,
-                        //         |bcx, block| {
-                        //             bcx.set_cold_block(block);
-                        //             bcx.iconst_256(U256::ZERO)
-                        //         },
-                        //         |bcx, _block| bcx.$op(a, b),
-                        //     );
-                        //     #[allow(unreachable_code)]
-                        // )?
-                        bcx.$op(a, b)
-                    },
-                );
+                let b_is_zero = self.bcx.icmp_imm(IntCC::Equal, b, 0);
+                let zero = self.bcx.iconst_256(U256::ZERO);
+                let op_result = self.bcx.$op(a, b);
+                let r = self.bcx.select(b_is_zero, zero, op_result);
                 self.push_unchecked(r);
             }};
         }
@@ -477,12 +459,29 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             op::MUL => binop!(imul),
             op::SUB => binop!(isub),
             op::DIV => binop!(@if_not_zero udiv),
-            op::SDIV => binop!(@if_not_zero sdiv, |bcx: &mut B, a, b| {
-                let min = bcx.iconst_256(I256_MIN);
-                let a_is_min = bcx.icmp(IntCC::Equal, a, min);
-                let b_is_neg1 = bcx.icmp_imm(IntCC::Equal, b, -1);
-                bcx.bitand(a_is_min, b_is_neg1)
-            }),
+            op::SDIV => {
+                let [a, b] = self.popn(true);
+                let b_is_zero = self.bcx.icmp_imm(IntCC::Equal, b, 0);
+                let r = self.bcx.lazy_select(
+                    b_is_zero,
+                    self.word_type,
+                    |bcx, block| {
+                        bcx.set_cold_block(block);
+                        bcx.iconst_256(U256::ZERO)
+                    },
+                    |bcx, _op_block| {
+                        let min = bcx.iconst_256(I256_MIN);
+                        let is_weird_sdiv_edge_case = {
+                            let a_is_min = bcx.icmp(IntCC::Equal, a, min);
+                            let b_is_neg1 = bcx.icmp_imm(IntCC::Equal, b, -1);
+                            bcx.bitand(a_is_min, b_is_neg1)
+                        };
+                        let sdiv_result = bcx.sdiv(a, b);
+                        bcx.select(is_weird_sdiv_edge_case, min, sdiv_result)
+                    },
+                );
+                self.push_unchecked(r);
+            }
             op::MOD => binop!(@if_not_zero urem),
             op::SMOD => binop!(@if_not_zero srem),
             op::ADDMOD => {
@@ -806,7 +805,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     }
 
     /// Builds a gas cost deduction for an immediate value.
-    fn gas_cost_imm(&mut self, cost: u32) {
+    fn gas_cost_imm(&mut self, cost: u64) {
         if self.disable_gas || cost == 0 {
             return;
         }
@@ -1088,18 +1087,12 @@ mod callbacks {
 mod tests {
     use super::*;
     use crate::*;
-    use interpreter::{opcode::OpInfo, Gas};
+    use interpreter::Gas;
     use revm_interpreter::opcode as op;
     use revm_primitives::ruint::uint;
 
     const DEFAULT_SPEC: SpecId = SpecId::CANCUN;
-    const DEFAULT_SPEC_OP_INFO: &[OpInfo; 256] = op::spec_opcode_gas(DEFAULT_SPEC);
-    const GAS_MASK: u32 = 0x1FFFFFFF;
-
-    #[inline]
-    const fn get_gas(op_info: OpInfo) -> u64 {
-        (unsafe { std::mem::transmute::<OpInfo, u32>(op_info) } & GAS_MASK) as u64
-    }
+    const DEFAULT_SPEC_OP_INFO: &[OpInfo; 256] = static_gas_map(DEFAULT_SPEC);
 
     #[cfg(feature = "llvm")]
     #[test]
@@ -1116,7 +1109,11 @@ mod tests {
     #[cfg(feature = "llvm")]
     fn test_llvm(opt_level: OptimizationLevel) {
         let context = revm_jit_llvm::inkwell::context::Context::create();
-        run_tests_with_backend(|| crate::JitEvmLlvmBackend::new(&context, opt_level).unwrap());
+        let backend = crate::JitEvmLlvmBackend::new(&context, opt_level).unwrap();
+        let mut jit = JitEvm::new(backend);
+        jit.set_pass_stack_through_args(true);
+        jit.set_pass_stack_len_through_args(true);
+        run_tests_with_backend(&mut jit);
     }
 
     struct TestCase<'a> {
@@ -1128,80 +1125,64 @@ mod tests {
         expected_gas: u64,
     }
 
-    const fn bytecode_unop(op: u8, a: U256) -> [u8; 36] {
-        let mut code = [0; 36];
+    macro_rules! build_push32 {
+        ($code:ident[$i:ident], $x:expr) => {{
+            $code[$i] = op::PUSH32;
+            $i += 1;
 
-        let mut i = 0;
-
-        code[i] = op::PUSH32;
-        i += 1;
-        {
             let mut j = 0;
-            let bytes = a.to_be_bytes::<32>();
+            let bytes = $x.to_be_bytes::<32>();
             while j < 32 {
-                code[i] = bytes[j];
-                i += 1;
+                $code[$i] = bytes[j];
+                $i += 1;
                 j += 1;
             }
-        }
+        }};
+    }
 
+    const fn bytecode_unop(op: u8, a: U256) -> [u8; 34] {
+        let mut code = [0; 34];
+        let mut i = 0;
+        build_push32!(code[i], a);
         code[i] = op;
-        // i += 1;
-
         code
     }
 
-    const fn bytecode_binop(op: u8, a: U256, b: U256) -> [u8; 68] {
-        // NOTE: push `b` first.
-
-        let mut code = [0; 68];
-
+    const fn bytecode_binop(op: u8, a: U256, b: U256) -> [u8; 67] {
+        let mut code = [0; 67];
         let mut i = 0;
-
-        code[i] = op::PUSH32;
-        i += 1;
-        {
-            let mut j = 0;
-            let bytes = b.to_be_bytes::<32>();
-            while j < 32 {
-                code[i] = bytes[j];
-                i += 1;
-                j += 1;
-            }
-        }
-
-        code[i] = op::PUSH32;
-        i += 1;
-        {
-            let mut j = 0;
-            let bytes = a.to_be_bytes::<32>();
-            while j < 32 {
-                code[i] = bytes[j];
-                i += 1;
-                j += 1;
-            }
-        }
-
+        build_push32!(code[i], b);
+        build_push32!(code[i], a);
         code[i] = op;
-        // i += 1;
+        code
+    }
 
+    const fn bytecode_ternop(op: u8, a: U256, b: U256, c: U256) -> [u8; 100] {
+        let mut code = [0; 100];
+        let mut i = 0;
+        build_push32!(code[i], c);
+        build_push32!(code[i], b);
+        build_push32!(code[i], a);
+        code[i] = op;
         code
     }
 
     macro_rules! testcases {
         (@bytecode $op:expr, $a:expr) => { bytecode_unop($op, $a) };
         (@bytecode $op:expr, $a:expr, $b:expr) => { bytecode_binop($op, $a, $b) };
+        (@bytecode $op:expr, $a:expr, $b:expr, $c:expr) => { bytecode_ternop($op, $a, $b, $c) };
 
-        (@gas $op:expr, $a:expr) => { 3 };
-        (@gas $op:expr, $a:expr, $b:expr) => { 6 };
+        (@gas $a:expr) => { 3 };
+        (@gas $a:expr, $b:expr) => { 6 };
+        (@gas $a:expr, $b:expr, $c:expr) => { 9 };
 
-        ($($name:ident($op:expr, $a:expr $(, $b:expr)? => $ret:expr)),* $(,)?) => {
+        ($($name:ident($op:expr, $a:expr $(, $b:expr)* => $ret:expr)),* $(,)?) => {
             uint!([$(TestCase {
                 name: stringify!($name),
-                bytecode: &testcases!(@bytecode $op, $a $(, $b)?),
+                bytecode: &testcases!(@bytecode $op, $a $(, $b)*),
                 expected_return: InstructionResult::Stop,
                 expected_stack: &[$ret],
-                expected_gas: testcases!(@gas $op, $a $(, $b)?) + get_gas(DEFAULT_SPEC_OP_INFO[$op as usize]),
+                expected_gas: testcases!(@gas $a $(, $b)*) + DEFAULT_SPEC_OP_INFO[$op as usize].gas() as u64,
             }),*])
         };
     }
@@ -1329,24 +1310,26 @@ mod tests {
         div3(op::DIV, 2_U256, 2_U256 => 1_U256),
         div4(op::DIV, 3_U256, 2_U256 => 1_U256),
         div5(op::DIV, 4_U256, 2_U256 => 2_U256),
-        div_by_zero(op::DIV, 32_U256, 0_U256 => 0_U256),
+        div_by_zero1(op::DIV, 0_U256, 0_U256 => 0_U256),
+        div_by_zero2(op::DIV, 32_U256, 0_U256 => 0_U256),
 
         rem1(op::MOD, 32_U256, 32_U256 => 0_U256),
         rem2(op::MOD, 1_U256, 2_U256 => 1_U256),
         rem3(op::MOD, 2_U256, 2_U256 => 0_U256),
         rem4(op::MOD, 3_U256, 2_U256 => 1_U256),
         rem5(op::MOD, 4_U256, 2_U256 => 0_U256),
-        rem_by_zero(op::MOD, 32_U256, 0_U256 => 0_U256),
+        rem_by_zero1(op::MOD, 0_U256, 0_U256 => 0_U256),
+        rem_by_zero2(op::MOD, 32_U256, 0_U256 => 0_U256),
 
         sdiv1(op::SDIV, 32_U256, 32_U256 => 1_U256),
         sdiv2(op::SDIV, 1_U256, 2_U256 => 0_U256),
         sdiv3(op::SDIV, 2_U256, 2_U256 => 1_U256),
         sdiv4(op::SDIV, 3_U256, 2_U256 => 1_U256),
         sdiv5(op::SDIV, 4_U256, 2_U256 => 2_U256),
-        sdiv_by_zero(op::SDIV, 32_U256, 0_U256 => 0_U256),
+        sdiv_by_zero1(op::SDIV, 0_U256, 0_U256 => 0_U256),
+        sdiv_by_zero2(op::SDIV, 32_U256, 0_U256 => 0_U256),
         sdiv_min_by_1(op::SDIV, I256_MIN, 1_U256 => I256_MIN.wrapping_neg()),
-        // TODO:
-        // sdiv_min_by_minus_1(op::SDIV, I256_MIN, MINUS_1 => I256_MIN),
+        sdiv_min_by_minus_1(op::SDIV, I256_MIN, MINUS_1 => I256_MIN),
         sdiv_max1(op::SDIV, I256_MAX, 1_U256 => I256_MAX),
         sdiv_max2(op::SDIV, I256_MAX, MINUS_1 => I256_MAX.wrapping_neg()),
 
@@ -1355,10 +1338,14 @@ mod tests {
         srem3(op::SMOD, 2_U256, 2_U256 => 0_U256),
         srem4(op::SMOD, 3_U256, 2_U256 => 1_U256),
         srem5(op::SMOD, 4_U256, 2_U256 => 0_U256),
-        srem_by_zero(op::SMOD, 32_U256, 0_U256 => 0_U256),
+        srem_by_zero1(op::SMOD, 0_U256, 0_U256 => 0_U256),
+        srem_by_zero2(op::SMOD, 32_U256, 0_U256 => 0_U256),
+
+        addmod1(op::ADDMOD, 1_U256, 2_U256, 3_U256 => 3_U256),
+        addmod2(op::ADDMOD, 1_U256, 2_U256, 2_U256 => 2_U256),
+        addmod3(op::ADDMOD, 32_U256, 32_U256, 32_U256 => 32_U256),
 
         // TODO:
-        // ADDMOD
         // MULMOD
         // EXP
         // SIGNEXTEND
@@ -1447,27 +1434,47 @@ mod tests {
     ];
 
     // TODO: Have to create a new backend per call for now
-    fn run_tests_with_backend<B: Backend>(make_backend: impl Fn() -> B) {
+    fn run_tests_with_backend<B: Backend>(jit: &mut JitEvm<B>) {
         let backend_name = std::any::type_name::<B>().split("::").last().unwrap();
         for &(group_name, cases) in ALL_TEST_CASES {
             println!("Running test group `{group_name}` for backend `{backend_name}`");
-            run_test_group(&make_backend, cases);
+            run_test_group(jit, cases);
             println!();
         }
+
+        println!("Running spec tests for backend `{backend_name}`");
+        run_spec_tests(jit);
+
         println!("Running fibonacci tests for backend `{backend_name}`");
-        run_fibonacci_tests(make_backend);
+        run_fibonacci_tests(jit);
     }
 
-    fn run_test_group<B: Backend>(make_backend: impl Fn() -> B, cases: &[TestCase<'_>]) {
+    fn run_spec_tests<B: Backend>(jit: &mut JitEvm<B>) {
+        let cases: &[(&str, &[u8], SpecId, InstructionResult, u64)] = &[
+            ("push0 merge", &[op::PUSH0], SpecId::MERGE, InstructionResult::NotActivated, 0),
+            ("push0 shanghai", &[op::PUSH0], SpecId::SHANGHAI, InstructionResult::Stop, 2),
+            ("push0 cancun", &[op::PUSH0], SpecId::CANCUN, InstructionResult::Stop, 2),
+        ];
+
+        for (i, &(name, bytecode, spec, expected_result, expected_gas)) in cases.iter().enumerate()
+        {
+            println!("Running test case {i:2}: {name}");
+            unsafe { jit.free_all_functions() }.unwrap();
+            let f = jit.compile(bytecode, spec).unwrap();
+            let mut gas = Gas::new(100000);
+            let r = unsafe { f.call(Some(&mut gas), Some(&mut EvmStack::new()), Some(&mut 0)) };
+            assert_eq!(r, expected_result);
+            assert_eq!(gas.spend(), expected_gas);
+        }
+    }
+
+    fn run_test_group<B: Backend>(jit: &mut JitEvm<B>, cases: &[TestCase<'_>]) {
         for (i, &TestCase { name, bytecode, expected_return, expected_stack, expected_gas }) in
             cases.iter().enumerate()
         {
-            let mut jit = JitEvm::new(make_backend());
-            jit.set_pass_stack_through_args(true);
-            jit.set_pass_stack_len_through_args(true);
-
             println!("Running test case {i:2}: {name}");
             println!("  bytecode: {}", format_bytecode(bytecode));
+            unsafe { jit.free_all_functions() }.unwrap();
             let f = jit.compile(bytecode, DEFAULT_SPEC).unwrap();
 
             let mut stack = EvmStack::new();
@@ -1484,25 +1491,23 @@ mod tests {
         }
     }
 
-    fn run_fibonacci_tests<B: Backend>(make_backend: impl Fn() -> B) {
+    fn run_fibonacci_tests<B: Backend>(jit: &mut JitEvm<B>) {
         for i in 0..=10 {
-            run_fibonacci_test(&make_backend, i);
+            run_fibonacci_test(jit, i);
         }
-        run_fibonacci_test(make_backend, 100);
+        run_fibonacci_test(jit, 100);
 
-        fn run_fibonacci_test<B: Backend>(make_backend: impl Fn() -> B, input: u16) {
+        fn run_fibonacci_test<B: Backend>(jit: &mut JitEvm<B>, input: u16) {
             println!("  Running fibonacci({input}) statically");
-            run_fibonacci(&make_backend, input, false);
+            run_fibonacci(jit, input, false);
             println!("  Running fibonacci({input}) dynamically");
-            run_fibonacci(make_backend, input, true);
+            run_fibonacci(jit, input, true);
         }
 
-        fn run_fibonacci<B: Backend>(make_backend: impl Fn() -> B, input: u16, dynamic: bool) {
+        fn run_fibonacci<B: Backend>(jit: &mut JitEvm<B>, input: u16, dynamic: bool) {
             let code = mk_fibonacci_code(input, dynamic);
 
-            let mut jit = JitEvm::new(make_backend());
-            jit.set_pass_stack_through_args(true);
-            jit.set_pass_stack_len_through_args(true);
+            unsafe { jit.free_all_functions() }.unwrap();
             let f = jit.compile(&code, DEFAULT_SPEC).unwrap();
 
             let mut gas = Gas::new(10000);
