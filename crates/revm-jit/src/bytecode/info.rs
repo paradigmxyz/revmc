@@ -80,7 +80,7 @@ impl OpcodeInfo {
     }
 }
 
-/// Returns the static gas map for the given spec ID.
+/// Returns the static gas map for the given spec_id ID.
 ///
 /// The map will contain the gas costs for each opcode if it is known statically, or `0` if the
 /// opcode is not known or its gas cost is dynamic.
@@ -97,11 +97,11 @@ const fn make_map(spec_id: SpecId) -> [OpcodeInfo; 256] {
 
     let mut map = [OpcodeInfo(OpcodeInfo::UNKNOWN); 256];
     macro_rules! set {
-        ($($op:ident = $gas:expr $(, if $spec:ident)? ;)*) => {
+        ($($op:ident = $gas:expr $(, if $spec_id:ident)? ;)*) => {
             $(
                 let mut g = $gas;
                 $(
-                    if (spec_id as u8) < SpecId::$spec as u8 {
+                    if (spec_id as u8) < SpecId::$spec_id as u8 {
                         g |= OpcodeInfo::DISABLED;
                     }
                 )?

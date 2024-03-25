@@ -39,7 +39,7 @@ const I256_MIN: U256 = U256::from_limbs([
     0x8000000000000000,
 ]);
 
-// Enable for `cargo-asm`.
+/// Enable for `cargo asm -p revm-jit --lib`.
 #[cfg(any())]
 pub fn generate_all_assembly() -> JitEvm<JitEvmLlvmBackend<'static>> {
     let cx = Box::leak(Box::new(llvm::inkwell::context::Context::create()));

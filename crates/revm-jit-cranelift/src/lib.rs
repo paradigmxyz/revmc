@@ -274,6 +274,10 @@ impl<'a> Builder for JitEvmCraneliftBuilder<'a> {
         self.bcx.seal_block(block);
     }
 
+    fn seal_all_blocks(&mut self) {
+        self.bcx.seal_all_blocks();
+    }
+
     fn set_cold_block(&mut self, block: Self::BasicBlock) {
         self.bcx.set_cold_block(block);
     }
@@ -526,6 +530,14 @@ impl<'a> Builder for JitEvmCraneliftBuilder<'a> {
     fn gep(&mut self, ty: Self::Type, ptr: Self::Value, offset: Self::Value) -> Self::Value {
         let offset = self.bcx.ins().imul_imm(offset, ty.bytes() as i64);
         self.bcx.ins().iadd(ptr, offset)
+    }
+
+    fn extract_value(&mut self, value: Self::Value, index: u32) -> Self::Value {
+        // let offset = self.bcx.func.dfg.value_type(value).bytes() as i64 * index as i64;
+        // self.bcx.ins().iadd_imm(value, offset)
+        let _ = value;
+        let _ = index;
+        todo!()
     }
 
     fn call(&mut self, function: Self::Function, args: &[Self::Value]) -> Option<Self::Value> {

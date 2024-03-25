@@ -376,6 +376,10 @@ impl<'a, 'ctx> Builder for JitEvmLlvmBuilder<'a, 'ctx> {
         // Nothing to do.
     }
 
+    fn seal_all_blocks(&mut self) {
+        // Nothing to do.
+    }
+
     fn set_cold_block(&mut self, block: Self::BasicBlock) {
         let prev = self.current_block();
         self.switch_to_block(block);
@@ -657,6 +661,10 @@ impl<'a, 'ctx> Builder for JitEvmLlvmBuilder<'a, 'ctx> {
         unsafe { self.bcx.build_in_bounds_gep(elem_ty, ptr.into_pointer_value(), &[offset], "") }
             .unwrap()
             .into()
+    }
+
+    fn extract_value(&mut self, value: Self::Value, index: u32) -> Self::Value {
+        self.bcx.build_extract_value(value.into_struct_value(), index, "").unwrap()
     }
 
     fn call(&mut self, function: Self::Function, args: &[Self::Value]) -> Option<Self::Value> {

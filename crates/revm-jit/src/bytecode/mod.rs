@@ -22,7 +22,7 @@ pub(crate) struct Bytecode<'a> {
     /// `JUMPDEST` map.
     pub(crate) jumpdests: BitVec,
     /// The [`SpecId`].
-    pub(crate) spec: SpecId,
+    pub(crate) spec_id: SpecId,
 }
 
 impl<'a> Bytecode<'a> {
@@ -56,12 +56,15 @@ impl<'a> Bytecode<'a> {
             opcodes.push(OpcodeData { opcode, flags, static_gas, data });
         }
 
+        let mut bytecode = Self { code, opcodes, jumpdests, spec_id };
+
         // Pad code to ensure there is at least one diverging opcode.
-        if opcodes.last().map_or(true, |last| !last.is_diverging(false)) {
-            opcodes.push(OpcodeData::new(op::STOP));
+        let is_eof = bytecode.is_eof();
+        if bytecode.opcodes.last().map_or(true, |last| !last.is_diverging(is_eof)) {
+            bytecode.opcodes.push(OpcodeData::new(op::STOP));
         }
 
-        Self { code, opcodes, jumpdests, spec: spec_id }
+        bytecode
     }
 
     /// Returns the opcode at the given instruction counter.
@@ -88,13 +91,17 @@ impl<'a> Bytecode<'a> {
     }
 
     /// Runs a list of analysis passes on the opcodes.
+    #[instrument(level = "debug", skip_all)]
     pub(crate) fn analyze(&mut self) -> Result<()> {
-        self.static_jump_analysis();
-        self.mark_dead_code();
+        trace_time!("static_jump_analysis", || self.static_jump_analysis());
+        // NOTE: `mark_dead_code` must run after `static_jump_analysis` as it can mark unreachable
+        // `JUMPDEST`s as dead code.
+        trace_time!("mark_dead_code", || self.mark_dead_code());
         self.no_dynamic_jumps()
     }
 
     /// Mark `PUSH<N>` followed by `JUMP[I]` as `STATIC_JUMP` and resolve the target.
+    #[instrument(name = "sj", level = "debug", skip_all)]
     fn static_jump_analysis(&mut self) {
         for ic in 0..self.opcodes.len() {
             let jic = ic + 1;
@@ -146,21 +153,6 @@ impl<'a> Bytecode<'a> {
         }
     }
 
-    /// Ensure that there are no dynamic jumps.
-    fn no_dynamic_jumps(&mut self) -> Result<()> {
-        for (ic, data) in self.opcodes.iter().enumerate() {
-            if matches!(data.opcode, op::JUMP | op::JUMPI)
-                && !data.flags.contains(OpcodeFlags::STATIC_JUMP)
-            {
-                bail!(
-                    "dynamic jumps are not yet implemented; ic={ic} opcode={}",
-                    data.to_raw_in(self)
-                );
-            }
-        }
-        Ok(())
-    }
-
     /// Mark unreachable opcodes as `DEAD_CODE` to not generate any code for them.
     ///
     /// This pass is technically unnecessary as the backend will very likely optimize any
@@ -171,6 +163,7 @@ impl<'a> Bytecode<'a> {
     /// `JUMPDEST`s.
     ///
     /// After EOF, TODO.
+    #[instrument(name = "dce", level = "debug", skip_all)]
     fn mark_dead_code(&mut self) {
         let is_eof = self.is_eof();
         let mut iter = self.opcodes.iter_mut().enumerate();
@@ -184,9 +177,28 @@ impl<'a> Bytecode<'a> {
                     }
                     data.flags |= OpcodeFlags::DEAD_CODE;
                 }
-                debug!("found dead code: {start}..{end}", start = i + 1);
+                let start = i + 1;
+                if end > start {
+                    debug!("found dead code: {start}..{end}");
+                }
             }
         }
+    }
+
+    /// Ensure that there are no dynamic jumps.
+    fn no_dynamic_jumps(&mut self) -> Result<()> {
+        let mut ics = Vec::new();
+        for (ic, data) in self.opcodes.iter().enumerate() {
+            if matches!(data.opcode, op::JUMP | op::JUMPI)
+                && !data.flags.contains(OpcodeFlags::STATIC_JUMP)
+            {
+                ics.push(ic);
+            }
+        }
+        if !ics.is_empty() {
+            bail!("dynamic jumps are not yet implemented; ics={ics:?}");
+        }
+        Ok(())
     }
 
     pub(crate) fn get_imm_of(&self, opcode: OpcodeData) -> Option<&'a [u8]> {
@@ -235,7 +247,7 @@ pub(crate) struct OpcodeData {
     static_gas: u16,
     /// Opcode-specific data:
     /// - if the opcode has immediate data, this is a packed offset+length into the bytecode;
-    /// - `JUMP[I] && STATIC_JUMP in kind`: the jump target, already converted to an index into
+    /// - `JUMP{,I} && STATIC_JUMP in kind`: the jump target, already converted to an index into
     ///   `opcodes`;
     /// - `JUMPDEST`: `1` if the jump destination is reachable, `0` otherwise;
     /// - `PC`: the program counter, meaning `self.code[pc]` is the opcode;

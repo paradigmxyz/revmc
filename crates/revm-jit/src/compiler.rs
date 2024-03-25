@@ -132,7 +132,6 @@ impl<B: Backend> JitEvm<B> {
     }
 
     /// Compiles the given EVM bytecode into a JIT function.
-    #[instrument(level = "debug", skip_all, ret)]
     pub fn compile(&mut self, bytecode: &[u8], spec_id: SpecId) -> Result<JitEvmFn> {
         let bytecode = debug_time!("parse", || self.parse_bytecode(bytecode, spec_id))?;
         debug_time!("compile", || self.compile_bytecode(&bytecode))
@@ -152,7 +151,7 @@ impl<B: Backend> JitEvm<B> {
     }
 
     fn parse_bytecode<'a>(&mut self, bytecode: &'a [u8], spec_id: SpecId) -> Result<Bytecode<'a>> {
-        trace!(bytecode = revm_primitives::hex::encode(bytecode));
+        // trace!(bytecode = revm_primitives::hex::encode(bytecode));
         let mut bytecode = trace_time!("new bytecode", || Bytecode::new(bytecode, spec_id));
         trace_time!("analyze", || bytecode.analyze())?;
         Ok(bytecode)
@@ -248,14 +247,16 @@ struct FunctionCx<'a, B: Backend> {
     word_type: B::Type,
     i8_type: B::Type,
 
-    /// The stack length pointer. `isize`.
-    stack_len: B::Value,
-    /// The stack pointer. Constant throughout the function, passed in the arguments.
-    sp: B::Value,
-    /// The amount of gas used. `isize`.
-    gas_used: B::Value,
+    /// The stack length. Either passed in the arguments as a pointer or allocated locally.
+    stack_len: Pointer<B>,
+    /// The stack value. Constant throughout the function, either passed in the arguments as a
+    /// pointer or allocated locally.
+    stack: Pointer<B>,
+    /// The amount of gas used. `isize`. Either passed in the arguments as a pointer or allocated
+    /// locally.
+    gas_used: Pointer<B>,
     /// The gas limit. Constant throughout the function, passed in the arguments or set statically.
-    gas_limit: B::Value,
+    gas_limit: Option<B::Value>,
 
     /// The bytecode being translated.
     bytecode: &'a Bytecode<'a>,
@@ -267,6 +268,7 @@ struct FunctionCx<'a, B: Backend> {
     /// block.
     current_opcode: Opcode,
 
+    /// Callbacks.
     callbacks: &'a mut Callbacks<B>,
 }
 
@@ -280,6 +282,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         // Get common types.
         let isize_type = bcx.type_ptr_sized_int();
         let i8_type = bcx.type_int(8);
+        let i64_type = bcx.type_int(64);
         let word_type = bcx.type_int(256);
 
         let zero = bcx.iconst(isize_type, 0);
@@ -289,34 +292,33 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let gas_used = if config.store_gas_used {
             // TODO: Don't use `revm_interpreter::Gas` since its fields are not public.
             let one = bcx.iconst(isize_type, 1);
-            bcx.gep(isize_type, gas_ptr, one)
+            PointerBase::Address(bcx.gep(isize_type, gas_ptr, one))
         } else {
             let gas_used = bcx.new_stack_slot(isize_type, "gas_used.addr");
             bcx.stack_store(zero, gas_used);
-            bcx.stack_addr(gas_used)
+            PointerBase::StackSlot(gas_used)
         };
-        let gas_limit = if let Some(static_gas_limit) = config.static_gas_limit {
-            bcx.iconst(isize_type, static_gas_limit as i64)
-        } else {
-            bcx.load(isize_type, gas_ptr, "gas_limit")
-        };
+        let gas_used = Pointer { ty: isize_type, base: gas_used };
 
         let sp_arg = bcx.fn_param(1);
-        let sp = if config.stack_through_args {
-            sp_arg
+        let stack = if config.stack_through_args {
+            PointerBase::Address(sp_arg)
         } else {
             let stack_type = bcx.type_array(word_type, STACK_CAP as _);
             let stack_slot = bcx.new_stack_slot(stack_type, "stack.addr");
-            bcx.stack_addr(stack_slot)
+            PointerBase::StackSlot(stack_slot)
         };
+        let stack = Pointer { ty: word_type, base: stack };
+
         let stack_len_arg = bcx.fn_param(2);
         let stack_len = if config.pass_stack_len_through_args {
-            stack_len_arg
+            PointerBase::Address(stack_len_arg)
         } else {
             let stack_len = bcx.new_stack_slot(isize_type, "len.addr");
             bcx.stack_store(zero, stack_len);
-            bcx.stack_addr(stack_len)
+            PointerBase::StackSlot(stack_len)
         };
+        let stack_len = Pointer { ty: isize_type, base: stack_len };
 
         // Create all opcode entry blocks.
         let op_blocks: Vec<_> = bytecode
@@ -334,9 +336,9 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             word_type,
             i8_type,
             stack_len,
-            sp,
+            stack,
             gas_used,
-            gas_limit,
+            gas_limit: None,
             bytecode,
             op_blocks,
             current_opcode: usize::MAX,
@@ -354,6 +356,13 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 "stack length pointer",
             );
         }
+
+        // Load the gas limit after generating debug assertions.
+        fx.gas_limit = Some(if let Some(static_gas_limit) = config.static_gas_limit {
+            fx.bcx.iconst(i64_type, static_gas_limit as i64)
+        } else {
+            fx.bcx.load(i64_type, gas_ptr, "gas_limit")
+        });
 
         // Branch to the first opcode. The bytecode is guaranteed to have at least one opcode.
         fx.bcx.br(fx.op_blocks[0]);
@@ -500,8 +509,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 let subtracted = self.bcx.isub_imm(len, 1);
                 self.store_len(subtracted);
                 let sp = self.sp_at(len);
-                let spec = self.bcx.iconst(self.i8_type, self.bytecode.spec as i64);
-                let gas_cost = self.callback(Callback::Exp, &[sp, spec]).unwrap();
+                let spec_id = self.bcx.iconst(self.i8_type, self.bytecode.spec_id as i64);
+                let gas_cost = self.callback(Callback::Exp, &[sp, spec_id]).unwrap();
                 self.gas_cost(gas_cost);
             }
             op::SIGNEXTEND => {
@@ -594,45 +603,111 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             op::SHR => binop!(ushr),
             op::SAR => binop!(sshr),
 
-            op::KECCAK256 => {}
+            op::KECCAK256 => {
+                // TODO
+            }
 
-            op::ADDRESS => {}
-            op::BALANCE => {}
-            op::ORIGIN => {}
-            op::CALLER => {}
-            op::CALLVALUE => {}
-            op::CALLDATALOAD => {}
-            op::CALLDATASIZE => {}
-            op::CALLDATACOPY => {}
-            op::CODESIZE => {}
-            op::CODECOPY => {}
+            op::ADDRESS => {
+                // TODO
+            }
+            op::BALANCE => {
+                // TODO
+            }
+            op::ORIGIN => {
+                // TODO
+            }
+            op::CALLER => {
+                // TODO
+            }
+            op::CALLVALUE => {
+                // TODO
+            }
+            op::CALLDATALOAD => {
+                // TODO
+            }
+            op::CALLDATASIZE => {
+                // TODO
+            }
+            op::CALLDATACOPY => {
+                // TODO
+            }
+            op::CODESIZE => {
+                // TODO
+            }
+            op::CODECOPY => {
+                // TODO
+            }
 
-            op::GASPRICE => {}
-            op::EXTCODESIZE => {}
-            op::EXTCODECOPY => {}
-            op::RETURNDATASIZE => {}
-            op::RETURNDATACOPY => {}
-            op::EXTCODEHASH => {}
-            op::BLOCKHASH => {}
-            op::COINBASE => {}
-            op::TIMESTAMP => {}
-            op::NUMBER => {}
-            op::DIFFICULTY => {}
-            op::GASLIMIT => {}
-            op::CHAINID => {}
-            op::SELFBALANCE => {}
-            op::BASEFEE => {}
-            op::BLOBHASH => {}
-            op::BLOBBASEFEE => {}
+            op::GASPRICE => {
+                // TODO
+            }
+            op::EXTCODESIZE => {
+                // TODO
+            }
+            op::EXTCODECOPY => {
+                // TODO
+            }
+            op::RETURNDATASIZE => {
+                // TODO
+            }
+            op::RETURNDATACOPY => {
+                // TODO
+            }
+            op::EXTCODEHASH => {
+                // TODO
+            }
+            op::BLOCKHASH => {
+                // TODO
+            }
+            op::COINBASE => {
+                // TODO
+            }
+            op::TIMESTAMP => {
+                // TODO
+            }
+            op::NUMBER => {
+                // TODO
+            }
+            op::DIFFICULTY => {
+                // TODO
+            }
+            op::GASLIMIT => {
+                // TODO
+            }
+            op::CHAINID => {
+                // TODO
+            }
+            op::SELFBALANCE => {
+                // TODO
+            }
+            op::BASEFEE => {
+                // TODO
+            }
+            op::BLOBHASH => {
+                // TODO
+            }
+            op::BLOBBASEFEE => {
+                // TODO
+            }
 
             op::POP => {
                 let _ = self.pop(false);
             }
-            op::MLOAD => {}
-            op::MSTORE => {}
-            op::MSTORE8 => {}
-            op::SLOAD => {}
-            op::SSTORE => {}
+            op::MLOAD => {
+                // TODO
+            }
+            op::MSTORE => {
+                // TODO
+            }
+            op::MSTORE8 => {
+                // TODO
+            }
+            op::SLOAD => {
+                // TODO
+            }
+            op::SSTORE => {
+                // TODO
+            }
             op::JUMP | op::JUMPI => {
                 if data.flags.contains(OpcodeFlags::INVALID_JUMP) {
                     self.build_return(InstructionResult::InvalidJump);
@@ -641,7 +716,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                     debug_assert_eq!(
                         self.bytecode.opcode(target_opcode).opcode,
                         op::JUMPDEST,
-                        "is_valid_jump returned true for non-JUMPDEST: ic={target_opcode} -> {}",
+                        "jumping to non-JUMPDEST: ic={target_opcode} -> {}",
                         self.bytecode.opcode(target_opcode).to_raw()
                     );
 
@@ -664,13 +739,23 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 let pc = self.bcx.iconst_256(U256::from(data.data));
                 self.push(pc);
             }
-            op::MSIZE => {}
-            op::GAS => {}
+            op::MSIZE => {
+                // TODO
+            }
+            op::GAS => {
+                let remaining = self.get_gas_remaining();
+                let remaining = self.bcx.zext(self.word_type, remaining);
+                self.push(remaining);
+            }
             op::JUMPDEST => {
                 self.bcx.nop();
             }
-            op::TLOAD => {}
-            op::TSTORE => {}
+            op::TLOAD => {
+                // TODO
+            }
+            op::TSTORE => {
+                // TODO
+            }
 
             op::PUSH0 => {
                 let value = self.bcx.iconst_256(U256::ZERO);
@@ -690,20 +775,41 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
             op::LOG0..=op::LOG4 => {
                 let _n = op_byte - op::LOG0;
+                // TODO
             }
 
-            op::CREATE => {}
-            op::CALL => {}
-            op::CALLCODE => {}
-            op::RETURN => {}
-            op::DELEGATECALL => {}
-            op::CREATE2 => {}
-            op::STATICCALL => {}
-            op::REVERT => {}
-            op::INVALID => goto_return!(build InstructionResult::InvalidFEOpcode),
-            op::SELFDESTRUCT => {}
+            op::CREATE => {
+                // TODO
+            }
+            op::CALL => {
+                // TODO
+            }
+            op::CALLCODE => {
+                // TODO
+            }
+            op::RETURN => {
+                // TODO
+            }
+            op::DELEGATECALL => {
+                // TODO
+            }
+            op::CREATE2 => {
+                // TODO
+            }
 
-            _ => unreachable!("unimplemented opcode: {op_byte}, {}", data.to_raw_in(self.bytecode)),
+            op::STATICCALL => {
+                // TODO
+            }
+
+            op::REVERT => {
+                // TODO
+            }
+            op::INVALID => goto_return!(build InstructionResult::InvalidFEOpcode),
+            op::SELFDESTRUCT => {
+                // TODO
+            }
+
+            _ => unreachable!("unimplemented opcode: {}", data.to_raw_in(self.bytecode)),
         }
 
         goto_return!("normal exit");
@@ -821,17 +927,35 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
     /// Loads the stack length.
     fn load_len(&mut self) -> B::Value {
-        self.bcx.load(self.isize_type, self.stack_len, "len")
+        self.stack_len.load(&mut self.bcx, "len")
     }
 
     /// Stores the stack length.
     fn store_len(&mut self, value: B::Value) {
-        self.bcx.store(value, self.stack_len);
+        self.stack_len.store(&mut self.bcx, value);
+    }
+
+    /// Loads the gas used.
+    fn load_gas_used(&mut self) -> B::Value {
+        self.gas_used.load(&mut self.bcx, "gas_used")
+    }
+
+    /// Stores the gas used.
+    fn store_gas_used(&mut self, value: B::Value) {
+        self.gas_used.store(&mut self.bcx, value);
+    }
+
+    /// Returns the remaining gas.
+    fn get_gas_remaining(&mut self) -> B::Value {
+        let gas_used = self.load_gas_used();
+        let gas_limit = self.gas_limit.unwrap();
+        self.bcx.isub(gas_limit, gas_used)
     }
 
     /// Returns the stack pointer at `len` (`&stack[len]`).
     fn sp_at(&mut self, len: B::Value) -> B::Value {
-        self.bcx.gep(self.word_type, self.sp, len)
+        let ptr = self.stack.addr(&mut self.bcx);
+        self.bcx.gep(self.word_type, ptr, len)
     }
 
     /// Returns the stack pointer at `len` from the top (`&stack[CAPACITY - len]`).
@@ -856,11 +980,11 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             return;
         }
 
-        let gas_used = self.bcx.load(self.isize_type, self.gas_used, "gas_used");
+        let gas_used = self.load_gas_used();
         let added = self.bcx.iadd(gas_used, cost);
-        let failure_cond = self.bcx.icmp(IntCC::UnsignedLessThan, self.gas_limit, added);
+        let failure_cond = self.bcx.icmp(IntCC::UnsignedLessThan, self.gas_limit.unwrap(), added);
         self.build_failure(failure_cond, InstructionResult::OutOfGas);
-        self.bcx.store(added, self.gas_used);
+        self.store_gas_used(added);
     }
 
     /// `if failure_cond { return ret } else { ... }`
@@ -878,14 +1002,10 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
     /// Builds `return ret`.
     fn build_return(&mut self, ret: InstructionResult) {
-        let old_block = self.bcx.current_block();
         let ret = self.bcx.iconst(self.i8_type, ret as i64);
         self.bcx.ret(&[ret]);
         if self.comments_enabled {
             self.add_comment(&format!("return {ret:?}"));
-        }
-        if let Some(old_block) = old_block {
-            self.bcx.seal_block(old_block);
         }
     }
 
@@ -934,6 +1054,12 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         self.bcx.add_comment_to_current_inst(comment);
     }
 
+    /// Returns the current block.
+    fn current_block(&mut self) -> B::BasicBlock {
+        // There always is a block present.
+        self.bcx.current_block().expect("no blocks")
+    }
+
     /*
     /// Creates a named block.
     fn create_block(&mut self, name: &str) -> B::BasicBlock {
@@ -950,7 +1076,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
     /// Creates a named block after the current block.
     fn create_block_after_current(&mut self, name: &str) -> B::BasicBlock {
-        let after = self.bcx.current_block().unwrap();
+        let after = self.current_block();
         self.create_block_after(after, name)
     }
 
@@ -969,6 +1095,46 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         }
         op_block_name_with(self.current_opcode, self.bytecode.opcode(self.current_opcode), name)
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Pointer<B: Backend> {
+    /// The type of the pointee.
+    ty: B::Type,
+    /// The base of the pointer. Either an address or a stack slot.
+    base: PointerBase<B>,
+}
+
+impl<B: Backend> Pointer<B> {
+    /// Loads the value from the pointer.
+    fn load(&self, bcx: &mut B::Builder<'_>, name: &str) -> B::Value {
+        match self.base {
+            PointerBase::Address(ptr) => bcx.load(self.ty, ptr, name),
+            PointerBase::StackSlot(slot) => bcx.stack_load(self.ty, slot, name),
+        }
+    }
+
+    /// Stores the value to the pointer.
+    fn store(&self, bcx: &mut B::Builder<'_>, value: B::Value) {
+        match self.base {
+            PointerBase::Address(ptr) => bcx.store(value, ptr),
+            PointerBase::StackSlot(slot) => bcx.stack_store(value, slot),
+        }
+    }
+
+    /// Gets the address of the pointer.
+    fn addr(&self, bcx: &mut B::Builder<'_>) -> B::Value {
+        match self.base {
+            PointerBase::Address(ptr) => ptr,
+            PointerBase::StackSlot(slot) => bcx.stack_addr(slot),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum PointerBase<B: Backend> {
+    Address(B::Value),
+    StackSlot(B::StackSlot),
 }
 
 /// Callback cache.
@@ -1063,7 +1229,7 @@ callbacks! { bcx; ptr; usize;
     Exp = exp(ptr, bcx.type_int(8)) Some(bcx.type_int(64)),
 }
 
-// NOTE: All functions MUST be `extern "C"`.
+// NOTE: All functions MUST be `extern "C"` and their parameters must match the ones declared above.
 mod callbacks {
     use super::*;
     use revm_interpreter::gas;
@@ -1089,10 +1255,10 @@ mod callbacks {
         *c = a.to_u256().mul_mod(b.to_u256(), c.to_u256()).into();
     }
 
-    pub(super) unsafe extern "C" fn exp(sp: *mut EvmWord, spec: SpecId) -> u64 {
+    pub(super) unsafe extern "C" fn exp(sp: *mut EvmWord, spec_id: SpecId) -> u64 {
         let [exponent_ptr, base] = read_words_rev(sp);
         let exponent = exponent_ptr.to_u256();
-        let gas = if SpecId::enabled(spec, SpecId::SPURIOUS_DRAGON) {
+        let gas = if SpecId::enabled(spec_id, SpecId::SPURIOUS_DRAGON) {
             gas::exp_cost::<SpuriousDragonSpec>(exponent)
         } else {
             gas::exp_cost::<FrontierSpec>(exponent)
@@ -1104,6 +1270,8 @@ mod callbacks {
             u64::MAX
         }
     }
+
+    // --- utils ---
 
     /// Splits the stack pointer into `N` elements by casting it to an array.
     /// This has the same effect as popping `N` elements from the stack since the JIT function
@@ -1145,6 +1313,9 @@ mod tests {
         0x7FFFFFFFFFFFFFFF,
     ]);
 
+    const GAS_LIMIT: u64 = 100_000;
+    const GAS_LIMIT_U256: U256 = U256::from_le_slice(&GAS_LIMIT.to_le_bytes());
+
     macro_rules! build_push32 {
         ($code:ident[$i:ident], $x:expr) => {{
             $code[$i] = op::PUSH32;
@@ -1185,6 +1356,7 @@ mod tests {
         ($($group:ident { $($t:tt)* })*) => { uint! {
             $(
                 mod $group {
+                    #[allow(unused_imports)]
                     use super::*;
 
                     tests!(@cases $($t)*);
@@ -1206,10 +1378,9 @@ mod tests {
         (@case $op:expr $(, $args:expr)* $(,)? => $($ret:expr),* $(,)? $(; op_gas($op_gas:expr))?) => {
             &TestCase {
                 bytecode: &tests!(@bytecode $op, $($args),*),
-                spec: DEFAULT_SPEC,
-                expected_return: InstructionResult::Stop,
                 expected_stack: &[$($ret),*],
                 expected_gas: tests!(@gas $op $(, $op_gas)?; $($args),*),
+                ..Default::default()
             }
         };
 
@@ -1237,19 +1408,16 @@ mod tests {
         ret {
             empty(@raw {
                 bytecode: &[],
-                expected_return: InstructionResult::Stop,
                 expected_stack: &[],
                 expected_gas: 0,
             }),
             no_stop(@raw {
                 bytecode: &[op::PUSH0],
-                expected_return: InstructionResult::Stop,
                 expected_stack: &[U256::ZERO],
                 expected_gas: 2,
             }),
             stop(@raw {
                 bytecode: &[op::STOP],
-                expected_return: InstructionResult::Stop,
                 expected_stack: &[],
                 expected_gas: 0,
             }),
@@ -1277,27 +1445,37 @@ mod tests {
                 expected_stack: &[U256::ZERO],
                 expected_gas: 5,
             }),
+            underflow3(@raw {
+                bytecode: &[op::PUSH0, op::POP, op::ADD],
+                expected_return: InstructionResult::StackUnderflow,
+                expected_stack: &[],
+                expected_gas: 7,
+            }),
+            underflow4(@raw {
+                bytecode: &[op::PUSH0, op::ADD, op::POP],
+                expected_return: InstructionResult::StackUnderflow,
+                expected_stack: &[U256::ZERO],
+                expected_gas: 5,
+            }),
         }
 
-        spec {
+        spec_id {
             push0_merge(@raw {
                 bytecode: &[op::PUSH0],
-                spec: SpecId::MERGE,
+                spec_id: SpecId::MERGE,
                 expected_return: InstructionResult::NotActivated,
                 expected_stack: &[],
                 expected_gas: 0,
             }),
             push0_shanghai(@raw {
                 bytecode: &[op::PUSH0],
-                spec: SpecId::SHANGHAI,
-                expected_return: InstructionResult::Stop,
+                spec_id: SpecId::SHANGHAI,
                 expected_stack: &[U256::ZERO],
                 expected_gas: 2,
             }),
             push0_cancun(@raw {
                 bytecode: &[op::PUSH0],
-                spec: SpecId::CANCUN,
-                expected_return: InstructionResult::Stop,
+                spec_id: SpecId::CANCUN,
                 expected_stack: &[U256::ZERO],
                 expected_gas: 2,
             }),
@@ -1306,7 +1484,6 @@ mod tests {
         control_flow {
             basic_jump(@raw {
                 bytecode: &[op::PUSH1, 3, op::JUMP, op::JUMPDEST],
-                expected_return: InstructionResult::Stop,
                 expected_stack: &[],
                 expected_gas: 3 + 8 + 1,
             }),
@@ -1318,7 +1495,6 @@ mod tests {
             }),
             basic_jump_if(@raw {
                 bytecode: &[op::PUSH1, 1, op::PUSH1, 5, op::JUMPI, op::JUMPDEST],
-                expected_return: InstructionResult::Stop,
                 expected_stack: &[],
                 expected_gas: 3 + 3 + 10 + 1,
             }),
@@ -1329,7 +1505,6 @@ mod tests {
                 expected_gas: 3 + 3 + 10 + 1 + 2 + 3,
             }),
             basic_loop(@raw {
-                #[rustfmt::skip]
                 bytecode: &[
                     op::PUSH1, 3,  // i=3
                     op::JUMPDEST,  // i
@@ -1342,9 +1517,13 @@ mod tests {
                     op::POP,       //
                     op::PUSH1, 69, // 69
                 ],
-                expected_return: InstructionResult::Stop,
-                expected_stack: &[uint!(69_U256)],
+                expected_stack: &[69_U256],
                 expected_gas: 3 + (1 + 3 + 3 + 3 + 3 + 3 + 10) * 3 + 2 + 3,
+            }),
+            pc(@raw {
+                bytecode: &[op::PC, op::PC, op::PUSH1, 69, op::PC, op::PUSH0, op::PC],
+                expected_stack: &[0_U256, 1_U256, 69_U256, 4_U256, 0_U256, 6_U256],
+                expected_gas: 2 + 2 + 3 + 2 + 2 + 2,
             }),
         }
 
@@ -1507,11 +1686,19 @@ mod tests {
             sar4(op::SAR, -1_U256, 1_U256 => -1_U256),
             sar5(op::SAR, -1_U256, 2_U256 => -1_U256),
         }
+
+        system {
+            gas(@raw {
+                bytecode: &[op::GAS, op::GAS, op::JUMPDEST, op::GAS],
+                expected_stack: &[GAS_LIMIT_U256 - 2_U256, GAS_LIMIT_U256 - 4_U256, GAS_LIMIT_U256 - 7_U256],
+                expected_gas: 2 + 2 + 1 + 2,
+            })
+        }
     }
 
     struct TestCase<'a> {
         bytecode: &'a [u8],
-        spec: SpecId,
+        spec_id: SpecId,
 
         expected_return: InstructionResult,
         expected_stack: &'a [U256],
@@ -1522,7 +1709,7 @@ mod tests {
         fn default() -> Self {
             Self {
                 bytecode: &[],
-                spec: DEFAULT_SPEC,
+                spec_id: DEFAULT_SPEC,
                 expected_return: InstructionResult::Stop,
                 expected_stack: &[],
                 expected_gas: 0,
@@ -1534,7 +1721,7 @@ mod tests {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             f.debug_struct("TestCase")
                 .field("bytecode", &format_bytecode(self.bytecode))
-                .field("spec", &self.spec)
+                .field("spec_id", &self.spec_id)
                 .field("expected_return", &self.expected_return)
                 .field("expected_stack", &self.expected_stack)
                 .field("expected_gas", &self.expected_gas)
@@ -1549,7 +1736,6 @@ mod tests {
         }
 
         TLS_LLVM_CONTEXT.with(f);
-        // f(&LlvmContext::create());
     }
 
     fn run_case(test_case: &TestCase<'_>) {
@@ -1583,17 +1769,18 @@ mod tests {
     fn run_case_built<B: Backend>(test_case: &TestCase<'_>, jit: &mut JitEvm<B>) {
         println!("Running {test_case:#?}\n");
 
-        let TestCase { bytecode, spec, expected_return, expected_stack, expected_gas } = *test_case;
+        let TestCase { bytecode, spec_id, expected_return, expected_stack, expected_gas } =
+            *test_case;
 
         jit.set_pass_stack_through_args(true);
         jit.set_pass_stack_len_through_args(true);
         jit.set_disable_gas(false);
         jit.set_store_gas_used(true);
-        let f = jit.compile(bytecode, spec).unwrap();
+        let f = jit.compile(bytecode, spec_id).unwrap();
 
         let mut stack = EvmStack::new();
         let mut stack_len = 0;
-        let mut gas = Gas::new(100_000);
+        let mut gas = Gas::new(GAS_LIMIT);
         let actual_return =
             unsafe { f.call(Some(&mut gas), Some(&mut stack), Some(&mut stack_len)) };
         assert_eq!(actual_return, expected_return, "return value mismatch");
@@ -1665,7 +1852,6 @@ mod tests {
             assert_eq!(stack_len, 1);
         }
 
-        #[rustfmt::skip]
         fn mk_fibonacci_code(input: u16, dynamic: bool) -> Vec<u8> {
             if dynamic {
                 [&[op::JUMPDEST; 3][..], FIBONACCI_CODE].concat()

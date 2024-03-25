@@ -88,6 +88,7 @@ pub trait Builder: BackendTypes + TypeMethods {
     fn create_block_after(&mut self, after: Self::BasicBlock, name: &str) -> Self::BasicBlock;
     fn switch_to_block(&mut self, block: Self::BasicBlock);
     fn seal_block(&mut self, block: Self::BasicBlock);
+    fn seal_all_blocks(&mut self);
     fn set_cold_block(&mut self, block: Self::BasicBlock);
     fn current_block(&mut self) -> Option<Self::BasicBlock>;
 
@@ -165,6 +166,7 @@ pub trait Builder: BackendTypes + TypeMethods {
     fn sext(&mut self, ty: Self::Type, value: Self::Value) -> Self::Value;
 
     fn gep(&mut self, ty: Self::Type, ptr: Self::Value, offset: Self::Value) -> Self::Value;
+    fn extract_value(&mut self, value: Self::Value, index: u32) -> Self::Value;
 
     fn call(&mut self, function: Self::Function, args: &[Self::Value]) -> Option<Self::Value>;
 

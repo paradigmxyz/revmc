@@ -81,25 +81,25 @@ impl EvmStack {
         Vec::with_capacity(1024)
     }
 
-    /// Creates a stack from a mutable vector.
+    /// Creates a stack from a vector's buffer.
     ///
     /// # Panics
     ///
-    /// Panics if the vector's capacity is less than the stack size.
+    /// Panics if the vector's capacity is less than the required stack capacity.
     #[inline]
     pub fn from_vec(vec: &Vec<EvmWord>) -> &Self {
         assert!(vec.capacity() >= Self::CAPACITY);
-        unsafe { &*vec.as_ptr().cast() }
+        unsafe { Self::from_ptr(vec.as_ptr()) }
     }
 
-    /// Creates a stack from a mutable vector.
+    /// Creates a stack from a mutable vector's buffer.
     ///
     /// The JIT'd function will overwrite the internal contents of the vector, and will not
     /// set the length. This is simply to have the stack allocated on the heap.
     ///
     /// # Panics
     ///
-    /// Panics if the vector's capacity is less than the stack size.
+    /// Panics if the vector's capacity is less than the required stack capacity.
     ///
     /// # Examples
     ///
@@ -112,7 +112,51 @@ impl EvmStack {
     #[inline]
     pub fn from_mut_vec(vec: &mut Vec<EvmWord>) -> &mut Self {
         assert!(vec.capacity() >= Self::CAPACITY);
-        unsafe { &mut *vec.as_mut_ptr().cast() }
+        unsafe { Self::from_mut_ptr(vec.as_mut_ptr()) }
+    }
+
+    /// Creates a stack from a slice.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the slice's length is less than the required stack capacity.
+    #[inline]
+    pub const fn from_slice(slice: &[EvmWord]) -> &Self {
+        assert!(slice.len() >= Self::CAPACITY);
+        unsafe { Self::from_ptr(slice.as_ptr()) }
+    }
+
+    /// Creates a stack from a mutable slice.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the slice's length is less than the required stack capacity.
+    #[inline]
+    pub fn from_mut_slice(slice: &mut [EvmWord]) -> &mut Self {
+        assert!(slice.len() >= Self::CAPACITY);
+        unsafe { Self::from_mut_ptr(slice.as_mut_ptr()) }
+    }
+
+    /// Creates a stack from a pointer.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that the pointer is valid and points to at least [`EvmStack::SIZE`]
+    /// bytes.
+    #[inline]
+    pub const unsafe fn from_ptr<'a>(ptr: *const EvmWord) -> &'a Self {
+        &*ptr.cast()
+    }
+
+    /// Creates a stack from a mutable pointer.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that the pointer is valid and points to at least [`EvmStack::SIZE`]
+    /// bytes.
+    #[inline]
+    pub unsafe fn from_mut_ptr<'a>(ptr: *mut EvmWord) -> &'a mut Self {
+        &mut *ptr.cast()
     }
 
     /// Returns the stack as a byte array.
@@ -168,10 +212,7 @@ fmt_impl!(Binary);
 impl From<U256> for EvmWord {
     #[inline]
     fn from(value: U256) -> Self {
-        #[cfg(target_endian = "little")]
-        return unsafe { std::mem::transmute(value) };
-        #[cfg(target_endian = "big")]
-        return Self(value.to_be_bytes());
+        Self::from_u256(value)
     }
 }
 

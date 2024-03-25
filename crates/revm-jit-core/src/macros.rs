@@ -1,19 +1,17 @@
 /// Log the time it takes to execute the given expression.
 #[macro_export]
 macro_rules! time {
-    ($level:expr, $what:literal, || $e:expr) => {{
-        let res;
-        let mut e = || $e;
+    ($level:expr, $what:literal, || $e:expr) => {
         if $crate::private::tracing::enabled!($level) {
             let timer = std::time::Instant::now();
-            res = e();
+            let res = $e;
             // $crate::private::tracing::event!($level, elapsed=?timer.elapsed(), $what);
-            $crate::private::tracing::event!($level, "{:<16} {:?}", $what, timer.elapsed());
+            $crate::private::tracing::event!($level, "{:<30} {:?}", $what, timer.elapsed());
+            res
         } else {
-            res = e();
+            $e
         }
-        res
-    }};
+    };
 }
 
 /// Log the time it takes to execute the given expression at `debug` level.
