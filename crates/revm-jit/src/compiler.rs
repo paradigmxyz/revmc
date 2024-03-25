@@ -1,9 +1,6 @@
 //! JIT compiler implementation.
 
-use crate::{
-    op_info_map, Backend, Builder, Bytecode, IntCC, OpInfo, OpcodeData, OpcodeFlags, Result,
-    I256_MIN,
-};
+use crate::{Backend, Builder, Bytecode, IntCC, OpcodeData, OpcodeFlags, Result, I256_MIN};
 use revm_interpreter::{opcode as op, InstructionResult};
 use revm_jit_core::{JitEvmFn, OptimizationLevel, TypeMethods};
 use revm_primitives::{SpecId, U256};
@@ -136,8 +133,8 @@ impl<B: Backend> JitEvm<B> {
 
     /// Compiles the given EVM bytecode into a JIT function.
     #[instrument(level = "debug", skip_all, ret)]
-    pub fn compile(&mut self, bytecode: &[u8], spec: SpecId) -> Result<JitEvmFn> {
-        let bytecode = debug_time!("parse", || self.parse_bytecode(bytecode, spec))?;
+    pub fn compile(&mut self, bytecode: &[u8], spec_id: SpecId) -> Result<JitEvmFn> {
+        let bytecode = debug_time!("parse", || self.parse_bytecode(bytecode, spec_id))?;
         debug_time!("compile", || self.compile_bytecode(&bytecode))
     }
 
@@ -154,9 +151,9 @@ impl<B: Backend> JitEvm<B> {
         self.backend.free_all_functions()
     }
 
-    fn parse_bytecode<'a>(&mut self, bytecode: &'a [u8], spec: SpecId) -> Result<Bytecode<'a>> {
+    fn parse_bytecode<'a>(&mut self, bytecode: &'a [u8], spec_id: SpecId) -> Result<Bytecode<'a>> {
         trace!(bytecode = revm_primitives::hex::encode(bytecode));
-        let mut bytecode = trace_time!("new bytecode", || Bytecode::new(bytecode, spec));
+        let mut bytecode = trace_time!("new bytecode", || Bytecode::new(bytecode, spec_id));
         trace_time!("analyze", || bytecode.analyze())?;
         Ok(bytecode)
     }
@@ -264,8 +261,6 @@ struct FunctionCx<'a, B: Backend> {
     bytecode: &'a Bytecode<'a>,
     /// All entry blocks for each opcode.
     op_blocks: Vec<B::BasicBlock>,
-    /// Opcode information.
-    op_infos: &'static [OpInfo; 256],
     /// The current opcode being translated.
     ///
     /// Note that `self.op_blocks[current_opcode]` does not necessarily equal the builder's current
@@ -325,14 +320,10 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
         // Create all opcode entry blocks.
         let op_blocks: Vec<_> = bytecode
-            .opcodes
-            .iter()
-            .enumerate()
-            .map(|(i, opcode)| bcx.create_block(&op_block_name_with(i, *opcode, "")))
+            .iter_opcodes()
+            .map(|(i, data)| bcx.create_block(&op_block_name_with(i, data, "")))
             .collect();
         assert!(!op_blocks.is_empty(), "translating empty bytecode");
-
-        let op_infos = op_info_map(bytecode.spec);
 
         let mut fx = FunctionCx {
             comments_enabled: config.comments_enabled,
@@ -348,7 +339,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             gas_limit,
             bytecode,
             op_blocks,
-            op_infos,
             current_opcode: usize::MAX,
 
             callbacks,
@@ -368,7 +358,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         // Branch to the first opcode. The bytecode is guaranteed to have at least one opcode.
         fx.bcx.br(fx.op_blocks[0]);
 
-        for i in 0..bytecode.opcodes.len() {
+        for (i, _) in bytecode.iter_opcodes() {
             fx.current_opcode = i;
             fx.translate_opcode()?;
         }
@@ -378,7 +368,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
     fn translate_opcode(&mut self) -> Result<()> {
         let opcode = self.current_opcode;
-        let data = self.bytecode.opcodes[opcode];
+        let data = self.bytecode.opcode(opcode);
         let op_block = self.op_blocks[opcode];
         self.bcx.switch_to_block(op_block);
 
@@ -395,32 +385,39 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
         // Make sure to run the epilogue before returning.
         macro_rules! goto_return {
-            ($comment:literal) => {
+            ($comment:expr) => {
                 branch_to_next_opcode(self);
+                goto_return!(no_branch $comment);
+            };
+            (no_branch $comment:expr) => {
                 if self.comments_enabled {
                     self.add_comment($comment);
                 }
-                goto_return!(no_branch);
-            };
-            (no_branch) => {
                 epilogue(self);
                 return Ok(());
             };
             (build $ret:expr) => {{
                 self.build_return($ret);
-                goto_return!(no_branch);
+                goto_return!(no_branch "");
             }};
         }
 
+        // Assert that we already skipped the block.
+        debug_assert!(!data.flags.contains(OpcodeFlags::DEAD_CODE));
+
         // Disabled opcodes don't pay gas.
-        let info = self.op_infos[op_byte as usize];
-        if info.is_disabled() {
+        if data.flags.contains(OpcodeFlags::DISABLED) {
             goto_return!(build InstructionResult::NotActivated);
+        }
+        if data.flags.contains(OpcodeFlags::UNKNOWN) {
+            goto_return!(build InstructionResult::OpcodeNotFound);
         }
 
         // Pay static gas.
-        if !self.disable_gas && !data.flags.contains(OpcodeFlags::SKIP_GAS) && !info.is_dynamic() {
-            self.gas_cost_imm(info.gas() as u64);
+        if !self.disable_gas {
+            if let Some(static_gas) = data.static_gas() {
+                self.gas_cost_imm(static_gas as u64);
+            }
         }
 
         if data.flags.contains(OpcodeFlags::SKIP_LOGIC) {
@@ -642,10 +639,10 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 } else if data.flags.contains(OpcodeFlags::STATIC_JUMP) {
                     let target_opcode = data.data as usize;
                     debug_assert_eq!(
-                        self.bytecode.opcodes[target_opcode].opcode,
+                        self.bytecode.opcode(target_opcode).opcode,
                         op::JUMPDEST,
                         "is_valid_jump returned true for non-JUMPDEST: ic={target_opcode} -> {}",
-                        self.bytecode.opcodes[target_opcode].to_raw()
+                        self.bytecode.opcode(target_opcode).to_raw()
                     );
 
                     let target = self.op_blocks[target_opcode];
@@ -661,7 +658,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                     todo!("dynamic jumps");
                 }
 
-                goto_return!(no_branch);
+                goto_return!(no_branch "");
             }
             op::PC => {
                 let pc = self.bcx.iconst_256(U256::from(data.data));
@@ -706,7 +703,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             op::INVALID => goto_return!(build InstructionResult::InvalidFEOpcode),
             op::SELFDESTRUCT => {}
 
-            _ => goto_return!(build InstructionResult::OpcodeNotFound),
+            _ => unreachable!("unimplemented opcode: {op_byte}, {}", data.to_raw_in(self.bytecode)),
         }
 
         goto_return!("normal exit");
@@ -970,7 +967,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         if self.current_opcode == usize::MAX {
             return format!("entry.{name}");
         }
-        op_block_name_with(self.current_opcode, self.bytecode.opcodes[self.current_opcode], name)
+        op_block_name_with(self.current_opcode, self.bytecode.opcode(self.current_opcode), name)
     }
 }
 
@@ -1126,6 +1123,7 @@ mod callbacks {
 }
 
 #[cfg(test)]
+#[allow(clippy::needless_update)]
 mod tests {
     use super::*;
     use crate::*;
@@ -1138,9 +1136,8 @@ mod tests {
     use llvm::inkwell::context::Context as LlvmContext;
 
     const DEFAULT_SPEC: SpecId = SpecId::CANCUN;
-    const DEFAULT_SPEC_OP_INFO: &[OpInfo; 256] = op_info_map(DEFAULT_SPEC);
+    const DEFAULT_SPEC_OP_INFO: &[OpcodeInfo; 256] = op_info_map(DEFAULT_SPEC);
 
-    const MINUS_1: U256 = U256::MAX;
     const I256_MAX: U256 = U256::from_limbs([
         0xFFFFFFFFFFFFFFFF,
         0xFFFFFFFFFFFFFFFF,
@@ -1221,7 +1218,12 @@ mod tests {
         (@bytecode $op:expr, $a:expr, $b:expr, $c:expr) => { bytecode_ternop($op, $a, $b, $c) };
 
         (@gas $op:expr; $($args:expr),+) => {
-            tests!(@gas $op, DEFAULT_SPEC_OP_INFO[$op as usize].gas() as u64; $($args),+)
+            tests!(@gas
+                $op,
+                DEFAULT_SPEC_OP_INFO[$op as usize].static_gas()
+                    .unwrap_or_else(|| panic!("opcode {} does not have static gas", $op)) as u64;
+                $($args),+
+            )
         };
         (@gas $op:expr, $op_gas:expr; $($args:expr),+) => {
             $op_gas + tests!(@gas_base $($args),+)
@@ -1354,8 +1356,8 @@ mod tests {
             add5(op::ADD, U256::MAX, 2_U256 => 1_U256),
 
             sub1(op::SUB, 3_U256, 2_U256 => 1_U256),
-            sub2(op::SUB, 1_U256, 2_U256 => MINUS_1),
-            sub3(op::SUB, 1_U256, 3_U256 => MINUS_1.wrapping_sub(1_U256)),
+            sub2(op::SUB, 1_U256, 2_U256 => -1_U256),
+            sub3(op::SUB, 1_U256, 3_U256 => (-1_U256).wrapping_sub(1_U256)),
             sub4(op::SUB, 255_U256, 255_U256 => 0_U256),
 
             mul1(op::MUL, 1_U256, 2_U256 => 2_U256),
@@ -1385,10 +1387,10 @@ mod tests {
             sdiv5(op::SDIV, 4_U256, 2_U256 => 2_U256),
             sdiv_by_zero1(op::SDIV, 0_U256, 0_U256 => 0_U256),
             sdiv_by_zero2(op::SDIV, 32_U256, 0_U256 => 0_U256),
-            sdiv_min_by_1(op::SDIV, I256_MIN, 1_U256 => I256_MIN.wrapping_neg()),
-            sdiv_min_by_minus_1(op::SDIV, I256_MIN, MINUS_1 => I256_MIN),
+            sdiv_min_by_1(op::SDIV, I256_MIN, 1_U256 => -I256_MIN),
+            sdiv_min_by_minus_1(op::SDIV, I256_MIN, -1_U256 => I256_MIN),
             sdiv_max1(op::SDIV, I256_MAX, 1_U256 => I256_MAX),
-            sdiv_max2(op::SDIV, I256_MAX, MINUS_1 => I256_MAX.wrapping_neg()),
+            sdiv_max2(op::SDIV, I256_MAX, -1_U256 => -I256_MAX),
 
             srem1(op::SMOD, 32_U256, 32_U256 => 0_U256),
             srem2(op::SMOD, 1_U256, 2_U256 => 1_U256),
@@ -1420,15 +1422,15 @@ mod tests {
 
             signextend1(op::SIGNEXTEND, 0_U256, 0_U256 => 0_U256),
             signextend2(op::SIGNEXTEND, 1_U256, 0_U256 => 0_U256),
-            signextend3(op::SIGNEXTEND, 0_U256, MINUS_1 => MINUS_1),
-            signextend4(op::SIGNEXTEND, 1_U256, MINUS_1 => MINUS_1),
+            signextend3(op::SIGNEXTEND, 0_U256, -1_U256 => -1_U256),
+            signextend4(op::SIGNEXTEND, 1_U256, -1_U256 => -1_U256),
             signextend5(op::SIGNEXTEND, 0_U256, 0x7f_U256 => 0x7f_U256),
-            signextend6(op::SIGNEXTEND, 0_U256, 0x80_U256 => 0x80_U256.wrapping_neg()),
+            signextend6(op::SIGNEXTEND, 0_U256, 0x80_U256 => -0x80_U256),
             signextend7(op::SIGNEXTEND, 0_U256, 0xff_U256 => U256::MAX),
             signextend8(op::SIGNEXTEND, 1_U256, 0x7fff_U256 => 0x7fff_U256),
             signextend8_extra(op::SIGNEXTEND, 1_U256, 0xff7fff_U256 => 0x7fff_U256),
-            signextend9(op::SIGNEXTEND, 1_U256, 0x8000_U256 => 0x8000_U256.wrapping_neg()),
-            signextend9_extra(op::SIGNEXTEND, 1_U256, 0x118000_U256 => 0x8000_U256.wrapping_neg()),
+            signextend9(op::SIGNEXTEND, 1_U256, 0x8000_U256 => -0x8000_U256),
+            signextend9_extra(op::SIGNEXTEND, 1_U256, 0x118000_U256 => -0x8000_U256),
             signextend10(op::SIGNEXTEND, 1_U256, 0xffff_U256 => U256::MAX),
         }
 
@@ -1436,22 +1438,22 @@ mod tests {
             lt1(op::LT, 1_U256, 2_U256 => 1_U256),
             lt2(op::LT, 2_U256, 1_U256 => 0_U256),
             lt3(op::LT, 1_U256, 1_U256 => 0_U256),
-            lt4(op::LT, MINUS_1, 1_U256 => 0_U256),
+            lt4(op::LT, -1_U256, 1_U256 => 0_U256),
 
             gt1(op::GT, 1_U256, 2_U256 => 0_U256),
             gt2(op::GT, 2_U256, 1_U256 => 1_U256),
             gt3(op::GT, 1_U256, 1_U256 => 0_U256),
-            gt4(op::GT, MINUS_1, 1_U256 => 1_U256),
+            gt4(op::GT, -1_U256, 1_U256 => 1_U256),
 
             slt1(op::SLT, 1_U256, 2_U256 => 1_U256),
             slt2(op::SLT, 2_U256, 1_U256 => 0_U256),
             slt3(op::SLT, 1_U256, 1_U256 => 0_U256),
-            slt4(op::SLT, MINUS_1, 1_U256 => 1_U256),
+            slt4(op::SLT, -1_U256, 1_U256 => 1_U256),
 
             sgt1(op::SGT, 1_U256, 2_U256 => 0_U256),
             sgt2(op::SGT, 2_U256, 1_U256 => 1_U256),
             sgt3(op::SGT, 1_U256, 1_U256 => 0_U256),
-            sgt4(op::SGT, MINUS_1, 1_U256 => 0_U256),
+            sgt4(op::SGT, -1_U256, 1_U256 => 0_U256),
 
             eq1(op::EQ, 1_U256, 2_U256 => 0_U256),
             eq2(op::EQ, 2_U256, 1_U256 => 0_U256),
@@ -1502,8 +1504,8 @@ mod tests {
             sar1(op::SAR, 1_U256, 0_U256 => 1_U256),
             sar2(op::SAR, 2_U256, 1_U256 => 1_U256),
             sar3(op::SAR, 4_U256, 2_U256 => 1_U256),
-            sar4(op::SAR, MINUS_1, 1_U256 => MINUS_1),
-            sar5(op::SAR, MINUS_1, 2_U256 => MINUS_1),
+            sar4(op::SAR, -1_U256, 1_U256 => -1_U256),
+            sar5(op::SAR, -1_U256, 2_U256 => -1_U256),
         }
     }
 

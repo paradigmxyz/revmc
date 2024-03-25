@@ -3,20 +3,28 @@ use revm_primitives::{spec_to_generic, SpecId};
 
 /// Opcode information.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct OpInfo(u16);
+pub struct OpcodeInfo(u16);
 
-impl OpInfo {
+impl OpcodeInfo {
+    /// The unknown flag.
+    pub const UNKNOWN: u16 = 0b1000_0000_0000_0000;
     /// The dynamic flag.
-    pub const DYNAMIC: u16 = 0b1000_0000_0000_0000;
+    pub const DYNAMIC: u16 = 0b0100_0000_0000_0000;
     /// The disabled flag.
-    pub const DISABLED: u16 = 0b0100_0000_0000_0000;
+    pub const DISABLED: u16 = 0b0010_0000_0000_0000;
     /// The mask for the gas cost.
-    pub const MASK: u16 = 0b0011_1111_1111_1111;
+    pub const MASK: u16 = 0b0001_1111_1111_1111;
 
     /// Creates a new gas info with the given gas cost.
     #[inline]
     pub const fn new(gas: u16) -> Self {
         Self(gas)
+    }
+
+    /// Returns `true` if the opcode is unknown.
+    #[inline]
+    pub const fn is_unknown(self) -> bool {
+        self.0 == Self::UNKNOWN
     }
 
     /// Returns `true` if the gas cost is dynamic.
@@ -25,7 +33,7 @@ impl OpInfo {
         self.0 & Self::DYNAMIC != 0
     }
 
-    /// Returns `true` if the opcode is disabled.
+    /// Returns `true` if the opcode is known, but disabled in the current EVM version.
     #[inline]
     pub const fn is_disabled(self) -> bool {
         self.0 & Self::DISABLED != 0
@@ -33,8 +41,18 @@ impl OpInfo {
 
     /// Returns the gas cost of the opcode.
     #[inline]
-    pub const fn gas(self) -> u16 {
-        self.0 & Self::MASK
+    pub const fn static_gas(self) -> Option<u16> {
+        if self.is_dynamic() {
+            None
+        } else {
+            Some(self.0 & Self::MASK)
+        }
+    }
+
+    /// Sets the unknown flag.
+    #[inline]
+    pub fn set_unknown(&mut self) {
+        self.0 = Self::UNKNOWN;
     }
 
     /// Sets the dynamic flag.
@@ -66,29 +84,28 @@ impl OpInfo {
 ///
 /// The map will contain the gas costs for each opcode if it is known statically, or `0` if the
 /// opcode is not known or its gas cost is dynamic.
-pub const fn op_info_map(spec_id: SpecId) -> &'static [OpInfo; 256] {
+pub const fn op_info_map(spec_id: SpecId) -> &'static [OpcodeInfo; 256] {
     spec_to_generic!(spec_id, {
-        const MAP: &[OpInfo; 256] = &make_map(<SPEC as revm_primitives::Spec>::SPEC_ID);
+        const MAP: &[OpcodeInfo; 256] = &make_map(<SPEC as revm_primitives::Spec>::SPEC_ID);
         MAP
     })
 }
 
 #[allow(unused_mut)]
-const fn make_map(spec_id: SpecId) -> [OpInfo; 256] {
-    const DYNAMIC: u16 = OpInfo::DYNAMIC;
-    const DISABLED: u16 = OpInfo::DISABLED;
+const fn make_map(spec_id: SpecId) -> [OpcodeInfo; 256] {
+    const DYNAMIC: u16 = OpcodeInfo::DYNAMIC;
 
-    let mut map = [OpInfo(0); 256];
+    let mut map = [OpcodeInfo(OpcodeInfo::UNKNOWN); 256];
     macro_rules! set {
         ($($op:ident = $gas:expr $(, if $spec:ident)? ;)*) => {
             $(
                 let mut g = $gas;
                 $(
                     if (spec_id as u8) < SpecId::$spec as u8 {
-                        g |= DISABLED;
+                        g |= OpcodeInfo::DISABLED;
                     }
                 )?
-                map[op::$op as usize] = OpInfo::new(g);
+                map[op::$op as usize] = OpcodeInfo::new(g);
             )*
         };
     }
@@ -362,7 +379,7 @@ const fn make_map(spec_id: SpecId) -> [OpInfo; 256] {
 /// [`gas::sload_cost`]
 const fn sload_cost(spec_id: SpecId) -> u16 {
     if enabled(spec_id, SpecId::BERLIN) {
-        OpInfo::DYNAMIC
+        OpcodeInfo::DYNAMIC
         // if is_cold {
         //     COLD_SLOAD_COST
         // } else {
