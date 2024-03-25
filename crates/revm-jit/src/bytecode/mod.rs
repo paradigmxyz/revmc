@@ -57,7 +57,7 @@ impl<'a> Bytecode<'a> {
         }
 
         // Pad code to ensure there is at least one diverging opcode.
-        if opcodes.last().map_or(true, |last| !last.is_diverging()) {
+        if opcodes.last().map_or(true, |last| !last.is_diverging(false)) {
             opcodes.push(OpcodeData::new(op::STOP));
         }
 
@@ -96,9 +96,10 @@ impl<'a> Bytecode<'a> {
 
     /// Mark `PUSH<N>` followed by `JUMP[I]` as `STATIC_JUMP` and resolve the target.
     fn static_jump_analysis(&mut self) {
-        for i in 0..self.opcodes.len() {
-            let Some(next) = self.opcodes.get(i + 1) else { continue };
-            let opcode = &self.opcodes[i];
+        for ic in 0..self.opcodes.len() {
+            let jic = ic + 1;
+            let Some(next) = self.opcodes.get(jic) else { continue };
+            let opcode = &self.opcodes[ic];
             if !(matches!(opcode.opcode, op::PUSH1..=op::PUSH32)
                 && matches!(next.opcode, op::JUMP | op::JUMPI))
             {
@@ -107,11 +108,12 @@ impl<'a> Bytecode<'a> {
 
             let imm_data = opcode.data;
             let imm = self.get_imm(imm_data);
-            self.opcodes[i + 1].flags |= OpcodeFlags::STATIC_JUMP;
+            self.opcodes[jic].flags |= OpcodeFlags::STATIC_JUMP;
 
             const USIZE_SIZE: usize = std::mem::size_of::<usize>();
             if imm.len() > USIZE_SIZE {
-                self.opcodes[i + 1].flags |= OpcodeFlags::INVALID_JUMP;
+                debug!(jic, "jump target too large");
+                self.opcodes[jic].flags |= OpcodeFlags::INVALID_JUMP;
                 continue;
             }
 
@@ -119,18 +121,28 @@ impl<'a> Bytecode<'a> {
             padded[USIZE_SIZE - imm.len()..].copy_from_slice(imm);
             let target = usize::from_be_bytes(padded);
             if !self.is_valid_jump(target) {
-                self.opcodes[i + 1].flags |= OpcodeFlags::INVALID_JUMP;
+                debug!(jic, target, "invalid jump target");
+                self.opcodes[jic].flags |= OpcodeFlags::INVALID_JUMP;
                 continue;
             }
 
-            self.opcodes[i].flags |= OpcodeFlags::SKIP_LOGIC;
-            let ic = self.pc_to_ic(target);
-            debug_assert_eq!(
-                self.opcodes[ic],
-                op::JUMPDEST,
-                "is_valid_jump returned true for non-JUMPDEST: target={target} ic={ic}",
-            );
-            self.opcodes[i + 1].data = ic as u32;
+            self.opcodes[ic].flags |= OpcodeFlags::SKIP_LOGIC;
+            let target_ic = self.pc_to_ic(target);
+
+            // Mark the `JUMPDEST` as reachable.
+            if !self.is_eof() {
+                debug_assert_eq!(
+                    self.opcodes[target_ic],
+                    op::JUMPDEST,
+                    "is_valid_jump returned true for non-JUMPDEST: \
+                     jic={jic} target={target} target_ic={target_ic}",
+                );
+                self.opcodes[target_ic].data = 1;
+            }
+
+            // Set the target on the `JUMP` opcode.
+            debug!(jic, target_ic, "resolved jump target");
+            self.opcodes[jic].data = target_ic as u32;
         }
     }
 
@@ -160,13 +172,14 @@ impl<'a> Bytecode<'a> {
     ///
     /// After EOF, TODO.
     fn mark_dead_code(&mut self) {
+        let is_eof = self.is_eof();
         let mut iter = self.opcodes.iter_mut().enumerate();
         while let Some((i, data)) = iter.next() {
-            if data.is_diverging() {
+            if data.is_diverging(is_eof) {
                 let mut end = i;
                 for (j, data) in &mut iter {
                     end = j;
-                    if data.opcode == op::JUMPDEST {
+                    if data.is_reachable_jumpdest() {
                         break;
                     }
                     data.flags |= OpcodeFlags::DEAD_CODE;
@@ -185,20 +198,28 @@ impl<'a> Bytecode<'a> {
         &self.code[offset..offset + len]
     }
 
+    /// Returns `true` if the given program counter is a valid jump destination.
     fn is_valid_jump(&self, pc: usize) -> bool {
         self.jumpdests.get(pc).as_deref().copied() == Some(true)
     }
 
+    /// Returns `true` if the bytecode is EOF.
+    fn is_eof(&self) -> bool {
+        false
+    }
+
     // TODO: is it worth it to make this a map?
+    /// Converts a program counter (`self.code[ic]`) to an instruction counter (`self.opcode(pc)`).
     fn pc_to_ic(&self, pc: usize) -> usize {
+        debug_assert!(pc < self.code.len(), "pc out of bounds: {pc}");
         let (ic, (_, op)) = RawBytecodeIter::new(self.code)
-            .with_pc()
-            .enumerate()
+            .with_pc() // pc
+            .enumerate() // ic
             // Don't go until the end because we know it's sorted.
             .take_while(|(_ic, (pc2, _))| *pc2 <= pc)
             .find(|(_ic, (pc2, _))| *pc2 == pc)
-            .unwrap();
-        debug_assert_eq!(self.opcodes[ic].to_raw_in(self), op, "pc {pc}, ic {ic}");
+            .unwrap_or_else(|| panic!("pc to ic conversion failed; pc={pc}"));
+        debug_assert_eq!(self.opcodes[ic].to_raw_in(self), op, "pc={pc} ic={ic}");
         ic
     }
 }
@@ -214,8 +235,10 @@ pub(crate) struct OpcodeData {
     static_gas: u16,
     /// Opcode-specific data:
     /// - if the opcode has immediate data, this is a packed offset+length into the bytecode;
-    /// - `STATIC_JUMP in kind`: the jump target, already converted to an index into `opcodes`;
-    /// - `opcode == op::PC`: the program counter, meaning `self.code[pc]` is the opcode;
+    /// - `JUMP[I] && STATIC_JUMP in kind`: the jump target, already converted to an index into
+    ///   `opcodes`;
+    /// - `JUMPDEST`: `1` if the jump destination is reachable, `0` otherwise;
+    /// - `PC`: the program counter, meaning `self.code[pc]` is the opcode;
     /// - otherwise: no meaning.
     pub(crate) data: u32,
 }
@@ -269,9 +292,15 @@ impl OpcodeData {
         RawOpcode { opcode: self.opcode, immediate: bytecode.get_imm_of(self) }
     }
 
+    /// Returns the static gas for this opcode, if any.
+    #[inline]
+    pub(crate) fn static_gas(&self) -> Option<u16> {
+        (self.static_gas != u16::MAX).then_some(self.static_gas)
+    }
+
     /// Returns `true` if we know that this opcode will stop execution.
     #[inline]
-    pub(crate) const fn is_diverging(self) -> bool {
+    pub(crate) const fn is_diverging(self, is_eof: bool) -> bool {
         // TODO: SELFDESTRUCT will not be diverging in the future.
         self.flags.contains(OpcodeFlags::INVALID_JUMP)
             || self.flags.contains(OpcodeFlags::DISABLED)
@@ -280,12 +309,13 @@ impl OpcodeData {
                 self.opcode,
                 op::STOP | op::RETURN | op::REVERT | op::INVALID | op::SELFDESTRUCT
             )
+            || (self.opcode == op::SELFDESTRUCT && !is_eof)
     }
 
-    /// Returns the static gas for this opcode, if any.
+    /// Returns `true` if this opcode is a reachable `JUMPDEST`.
     #[inline]
-    pub(crate) fn static_gas(&self) -> Option<u16> {
-        (self.static_gas != u16::MAX).then_some(self.static_gas)
+    pub(crate) const fn is_reachable_jumpdest(self) -> bool {
+        self.opcode == op::JUMPDEST && self.data == 1
     }
 }
 
