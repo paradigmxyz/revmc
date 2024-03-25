@@ -409,9 +409,13 @@ impl<'a> Builder for JitEvmCraneliftBuilder<'a> {
         then_value: impl FnOnce(&mut Self, Self::BasicBlock) -> Self::Value,
         else_value: impl FnOnce(&mut Self, Self::BasicBlock) -> Self::Value,
     ) -> Self::Value {
-        let then_block = self.bcx.create_block();
-        let else_block = self.bcx.create_block();
-        let done_block = self.bcx.create_block();
+        let then_block = if let Some(current) = self.current_block() {
+            self.create_block_after(current, "then")
+        } else {
+            self.create_block("then")
+        };
+        let else_block = self.create_block_after(then_block, "else");
+        let done_block = self.create_block_after(else_block, "contd");
         let done_value = self.bcx.append_block_param(done_block, ty);
 
         self.brif(cond, then_block, else_block);
@@ -485,6 +489,18 @@ impl<'a> Builder for JitEvmCraneliftBuilder<'a> {
 
     fn bitnot(&mut self, value: Self::Value) -> Self::Value {
         self.bcx.ins().bnot(value)
+    }
+
+    fn bitor_imm(&mut self, lhs: Self::Value, rhs: i64) -> Self::Value {
+        self.bcx.ins().bor_imm(lhs, rhs)
+    }
+
+    fn bitand_imm(&mut self, lhs: Self::Value, rhs: i64) -> Self::Value {
+        self.bcx.ins().band_imm(lhs, rhs)
+    }
+
+    fn bitxor_imm(&mut self, lhs: Self::Value, rhs: i64) -> Self::Value {
+        self.bcx.ins().bxor_imm(lhs, rhs)
     }
 
     fn ishl(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {

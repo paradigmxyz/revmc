@@ -1,7 +1,7 @@
 //! JIT compiler implementation.
 
 use crate::{
-    static_gas_map, Backend, Builder, Bytecode, IntCC, OpInfo, OpcodeData, OpcodeFlags, Result,
+    op_info_map, Backend, Builder, Bytecode, IntCC, OpInfo, OpcodeData, OpcodeFlags, Result,
     I256_MIN,
 };
 use revm_interpreter::{opcode as op, InstructionResult};
@@ -290,11 +290,11 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let zero = bcx.iconst(isize_type, 0);
 
         // Set up entry block.
-        let gas_ty = isize_type;
         let gas_ptr = bcx.fn_param(0);
         let gas_used = if config.store_gas_used {
+            // TODO: Don't use `revm_interpreter::Gas` since its fields are not public.
             let one = bcx.iconst(isize_type, 1);
-            bcx.gep(gas_ty, gas_ptr, one)
+            bcx.gep(isize_type, gas_ptr, one)
         } else {
             let gas_used = bcx.new_stack_slot(isize_type, "gas_used.addr");
             bcx.stack_store(zero, gas_used);
@@ -332,7 +332,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             .collect();
         assert!(!op_blocks.is_empty(), "translating empty bytecode");
 
-        let gas_infos = static_gas_map(bytecode.spec);
+        let op_infos = op_info_map(bytecode.spec);
 
         let mut fx = FunctionCx {
             comments_enabled: config.comments_enabled,
@@ -348,7 +348,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             gas_limit,
             bytecode,
             op_blocks,
-            op_infos: gas_infos,
+            op_infos,
             current_opcode: usize::MAX,
 
             callbacks,
@@ -508,10 +508,50 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 self.gas_cost(gas_cost);
             }
             op::SIGNEXTEND => {
-                // TODO
-                // let [a, b] = self.popn();
-                // let r = self.bcx.sign_extend(a, b);
-                // self.push_unchecked(r);
+                // From the yellow paper:
+                /*
+                let [ext, x] = stack.pop();
+                let t = 256 - 8 * (ext + 1);
+                let mut result = x;
+                result[..t] = [x[t]; t]; // Index by bits.
+                */
+
+                let [ext, x] = self.popn(true);
+                // For 31 we also don't need to do anything.
+                let might_do_something = self.bcx.icmp_imm(IntCC::UnsignedLessThan, ext, 31);
+                let r = self.bcx.lazy_select(
+                    might_do_something,
+                    self.word_type,
+                    |bcx, _block| {
+                        // Adapted from revm: https://github.com/bluealloy/revm/blob/fda371f73aba2c30a83c639608be78145fd1123b/crates/interpreter/src/instructions/arithmetic.rs#L89
+                        // let bit_index = 8 * ext + 7;
+                        // let bit = (x >> bit_index) & 1 != 0;
+                        // let mask = (1 << bit_index) - 1;
+                        // let r = if bit { x | !mask } else { *x & mask };
+
+                        // let bit_index = 8 * ext + 7;
+                        let bit_index = bcx.imul_imm(ext, 8);
+                        let bit_index = bcx.iadd_imm(bit_index, 7);
+
+                        // let bit = (x >> bit_index) & 1 != 0;
+                        let one = bcx.iconst_256(U256::from(1));
+                        let bit = bcx.ushr(x, bit_index);
+                        let bit = bcx.bitand(bit, one);
+                        let bit = bcx.icmp_imm(IntCC::NotEqual, bit, 0);
+
+                        // let mask = (1 << bit_index) - 1;
+                        let mask = bcx.ishl(one, bit_index);
+                        let mask = bcx.isub_imm(mask, 1);
+
+                        // let r = if bit { x | !mask } else { *x & mask };
+                        let not_mask = bcx.bitnot(mask);
+                        let sext = bcx.bitor(x, not_mask);
+                        let zext = bcx.bitand(x, mask);
+                        bcx.select(bit, sext, zext)
+                    },
+                    |_bcx, _block| x,
+                );
+                self.push_unchecked(r);
             }
 
             op::LT | op::GT | op::SLT | op::SGT | op::EQ => {
@@ -1023,7 +1063,7 @@ callbacks! { bcx; ptr; usize;
     Panic = panic(ptr, usize) None,
     AddMod = addmod(ptr) None,
     MulMod = mulmod(ptr) None,
-    Exp = exp(ptr, usize) Some(bcx.type_int(64)),
+    Exp = exp(ptr, bcx.type_int(8)) Some(bcx.type_int(64)),
 }
 
 // NOTE: All functions MUST be `extern "C"`.
@@ -1039,21 +1079,21 @@ mod callbacks {
     }
 
     // Functions with `sp` are called with the length of the stack already checked and substracted.
-    // All they have to do is read from `sp` and write the result to the **last** pointer.
+    // All they have to do is read from `sp` and write the result to the **first** returned pointer.
     // This represents "pushing" the result onto the stack.
 
     pub(super) unsafe extern "C" fn addmod(sp: *mut EvmWord) {
-        let [a, b, c] = read_words(sp);
+        let [c, b, a] = read_words_rev(sp);
         *c = a.to_u256().add_mod(b.to_u256(), c.to_u256()).into();
     }
 
     pub(super) unsafe extern "C" fn mulmod(sp: *mut EvmWord) {
-        let [a, b, c] = read_words(sp);
+        let [c, b, a] = read_words_rev(sp);
         *c = a.to_u256().mul_mod(b.to_u256(), c.to_u256()).into();
     }
 
     pub(super) unsafe extern "C" fn exp(sp: *mut EvmWord, spec: SpecId) -> u64 {
-        let [base, exponent_ptr] = read_words(sp);
+        let [exponent_ptr, base] = read_words_rev(sp);
         let exponent = exponent_ptr.to_u256();
         let gas = if SpecId::enabled(spec, SpecId::SPURIOUS_DRAGON) {
             gas::exp_cost::<SpuriousDragonSpec>(exponent)
@@ -1072,13 +1112,15 @@ mod callbacks {
     /// This has the same effect as popping `N` elements from the stack since the JIT function
     /// has already modified the length.
     ///
+    /// NOTE: this returns the arguments in **reverse order**.
+    ///
     /// The returned lifetime is valid for the entire duration of the callback.
     ///
     /// # Safety
     ///
     /// Caller must ensure that `N` matches the number of elements popped in JIT code.
     #[inline(always)]
-    unsafe fn read_words<'a, const N: usize>(sp: *mut EvmWord) -> &'a mut [EvmWord; N] {
+    unsafe fn read_words_rev<'a, const N: usize>(sp: *mut EvmWord) -> &'a mut [EvmWord; N] {
         &mut *sp.sub(N).cast::<[EvmWord; N]>()
     }
 }
@@ -1090,57 +1132,32 @@ mod tests {
     use interpreter::Gas;
     use revm_interpreter::opcode as op;
     use revm_primitives::ruint::uint;
+    use std::fmt;
+
+    #[cfg(feature = "llvm")]
+    use llvm::inkwell::context::Context as LlvmContext;
 
     const DEFAULT_SPEC: SpecId = SpecId::CANCUN;
-    const DEFAULT_SPEC_OP_INFO: &[OpInfo; 256] = static_gas_map(DEFAULT_SPEC);
+    const DEFAULT_SPEC_OP_INFO: &[OpInfo; 256] = op_info_map(DEFAULT_SPEC);
 
-    #[cfg(feature = "llvm")]
-    #[test]
-    fn test_llvm_unopt() {
-        test_llvm(OptimizationLevel::None)
-    }
-
-    #[cfg(feature = "llvm")]
-    #[test]
-    fn test_llvm_opt() {
-        test_llvm(OptimizationLevel::Aggressive)
-    }
-
-    #[cfg(feature = "llvm")]
-    fn test_llvm(opt_level: OptimizationLevel) {
-        let context = revm_jit_llvm::inkwell::context::Context::create();
-        let backend = crate::JitEvmLlvmBackend::new(&context, opt_level).unwrap();
-        let mut jit = JitEvm::new(backend);
-        jit.set_pass_stack_through_args(true);
-        jit.set_pass_stack_len_through_args(true);
-        run_tests_with_backend(&mut jit);
-    }
-
-    struct TestCase<'a> {
-        name: &'a str,
-        bytecode: &'a [u8],
-
-        expected_return: InstructionResult,
-        expected_stack: &'a [U256],
-        expected_gas: u64,
-    }
+    const MINUS_1: U256 = U256::MAX;
+    const I256_MAX: U256 = U256::from_limbs([
+        0xFFFFFFFFFFFFFFFF,
+        0xFFFFFFFFFFFFFFFF,
+        0xFFFFFFFFFFFFFFFF,
+        0x7FFFFFFFFFFFFFFF,
+    ]);
 
     macro_rules! build_push32 {
         ($code:ident[$i:ident], $x:expr) => {{
             $code[$i] = op::PUSH32;
             $i += 1;
-
-            let mut j = 0;
-            let bytes = $x.to_be_bytes::<32>();
-            while j < 32 {
-                $code[$i] = bytes[j];
-                $i += 1;
-                j += 1;
-            }
+            $code[$i..$i + 32].copy_from_slice(&$x.to_be_bytes::<32>());
+            $i += 32;
         }};
     }
 
-    const fn bytecode_unop(op: u8, a: U256) -> [u8; 34] {
+    fn bytecode_unop(op: u8, a: U256) -> [u8; 34] {
         let mut code = [0; 34];
         let mut i = 0;
         build_push32!(code[i], a);
@@ -1148,7 +1165,7 @@ mod tests {
         code
     }
 
-    const fn bytecode_binop(op: u8, a: U256, b: U256) -> [u8; 67] {
+    fn bytecode_binop(op: u8, a: U256, b: U256) -> [u8; 67] {
         let mut code = [0; 67];
         let mut i = 0;
         build_push32!(code[i], b);
@@ -1157,7 +1174,7 @@ mod tests {
         code
     }
 
-    const fn bytecode_ternop(op: u8, a: U256, b: U256, c: U256) -> [u8; 100] {
+    fn bytecode_ternop(op: u8, a: U256, b: U256, c: U256) -> [u8; 100] {
         let mut code = [0; 100];
         let mut i = 0;
         build_push32!(code[i], c);
@@ -1167,331 +1184,449 @@ mod tests {
         code
     }
 
-    macro_rules! testcases {
+    macro_rules! tests {
+        ($($group:ident { $($t:tt)* })*) => { uint! {
+            $(
+                mod $group {
+                    use super::*;
+
+                    tests!(@cases $($t)*);
+                }
+            )*
+        }};
+
+        (@cases $( $name:ident($($t:tt)*) ),* $(,)?) => {
+            $(
+                #[test]
+                fn $name() {
+                    run_case(tests!(@case $($t)*));
+                }
+            )*
+        };
+
+        (@case @raw { $($fields:tt)* }) => { &TestCase { $($fields)* ..Default::default() } };
+
+        (@case $op:expr $(, $args:expr)* $(,)? => $($ret:expr),* $(,)? $(; op_gas($op_gas:expr))?) => {
+            &TestCase {
+                bytecode: &tests!(@bytecode $op, $($args),*),
+                spec: DEFAULT_SPEC,
+                expected_return: InstructionResult::Stop,
+                expected_stack: &[$($ret),*],
+                expected_gas: tests!(@gas $op $(, $op_gas)?; $($args),*),
+            }
+        };
+
         (@bytecode $op:expr, $a:expr) => { bytecode_unop($op, $a) };
         (@bytecode $op:expr, $a:expr, $b:expr) => { bytecode_binop($op, $a, $b) };
         (@bytecode $op:expr, $a:expr, $b:expr, $c:expr) => { bytecode_ternop($op, $a, $b, $c) };
 
-        (@gas $a:expr) => { 3 };
-        (@gas $a:expr, $b:expr) => { 6 };
-        (@gas $a:expr, $b:expr, $c:expr) => { 9 };
-
-        ($($name:ident($op:expr, $a:expr $(, $b:expr)* => $ret:expr)),* $(,)?) => {
-            uint!([$(TestCase {
-                name: stringify!($name),
-                bytecode: &testcases!(@bytecode $op, $a $(, $b)*),
-                expected_return: InstructionResult::Stop,
-                expected_stack: &[$ret],
-                expected_gas: testcases!(@gas $a $(, $b)*) + DEFAULT_SPEC_OP_INFO[$op as usize].gas() as u64,
-            }),*])
+        (@gas $op:expr; $($args:expr),+) => {
+            tests!(@gas $op, DEFAULT_SPEC_OP_INFO[$op as usize].gas() as u64; $($args),+)
         };
+        (@gas $op:expr, $op_gas:expr; $($args:expr),+) => {
+            $op_gas + tests!(@gas_base $($args),+)
+        };
+        (@gas_base $a:expr) => { 3 };
+        (@gas_base $a:expr, $b:expr) => { 6 };
+        (@gas_base $a:expr, $b:expr, $c:expr) => { 9 };
     }
 
-    static RETURN_CASES: &[TestCase<'static>] = &[
-        TestCase {
-            name: "empty",
-            bytecode: &[],
-            expected_return: InstructionResult::Stop,
-            expected_stack: &[],
-            expected_gas: 0,
-        },
-        TestCase {
-            name: "no stop",
-            bytecode: &[op::PUSH0],
-            expected_return: InstructionResult::Stop,
-            expected_stack: &[U256::ZERO],
-            expected_gas: 2,
-        },
-        TestCase {
-            name: "stop",
-            bytecode: &[op::STOP],
-            expected_return: InstructionResult::Stop,
-            expected_stack: &[],
-            expected_gas: 0,
-        },
-        TestCase {
-            name: "invalid",
-            bytecode: &[op::INVALID],
-            expected_return: InstructionResult::InvalidFEOpcode,
-            expected_stack: &[],
-            expected_gas: 0,
-        },
-        TestCase {
-            name: "unknown",
-            bytecode: &[0x21],
-            expected_return: InstructionResult::OpcodeNotFound,
-            expected_stack: &[],
-            expected_gas: 0,
-        },
-        TestCase {
-            name: "underflow1",
-            bytecode: &[op::ADD],
-            expected_return: InstructionResult::StackUnderflow,
-            expected_stack: &[],
-            expected_gas: 3,
-        },
-        TestCase {
-            name: "underflow2",
-            bytecode: &[op::PUSH0, op::ADD],
-            expected_return: InstructionResult::StackUnderflow,
-            expected_stack: &[U256::ZERO],
-            expected_gas: 5,
-        },
-    ];
-
-    static CF_CASES: &[TestCase<'static>] = &[
-        TestCase {
-            name: "basic jump",
-            bytecode: &[op::PUSH1, 3, op::JUMP, op::JUMPDEST],
-            expected_return: InstructionResult::Stop,
-            expected_stack: &[],
-            expected_gas: 3 + 8 + 1,
-        },
-        TestCase {
-            name: "unmodified stack after push-jump",
-            bytecode: &[op::PUSH1, 3, op::JUMP, op::JUMPDEST, op::PUSH0, op::ADD],
-            expected_return: InstructionResult::StackUnderflow,
-            expected_stack: &[U256::ZERO],
-            expected_gas: 3 + 8 + 1 + 2 + 3,
-        },
-        TestCase {
-            name: "basic jump if",
-            bytecode: &[op::PUSH1, 1, op::PUSH1, 5, op::JUMPI, op::JUMPDEST],
-            expected_return: InstructionResult::Stop,
-            expected_stack: &[],
-            expected_gas: 3 + 3 + 10 + 1,
-        },
-        TestCase {
-            name: "unmodified stack after push-jumpif",
-            bytecode: &[op::PUSH1, 1, op::PUSH1, 5, op::JUMPI, op::JUMPDEST, op::PUSH0, op::ADD],
-            expected_return: InstructionResult::StackUnderflow,
-            expected_stack: &[U256::ZERO],
-            expected_gas: 3 + 3 + 10 + 1 + 2 + 3,
-        },
-        TestCase {
-            name: "basic loop",
-            #[rustfmt::skip]
-            bytecode: &[
-                op::PUSH1, 3,  // i=3
-                op::JUMPDEST,  // i
-                op::PUSH1, 1,  // 1, i
-                op::SWAP1,     // i, 1
-                op::SUB,       // i-1
-                op::DUP1,      // i-1, i-1
-                op::PUSH1, 2,  // dst, i-1, i-1
-                op::JUMPI,     // i=i-1
-                op::POP,       //
-                op::PUSH1, 69, // 69
-            ],
-            expected_return: InstructionResult::Stop,
-            expected_stack: &[uint!(69_U256)],
-            expected_gas: 3 + (1 + 3 + 3 + 3 + 3 + 3 + 10) * 3 + 2 + 3,
-        },
-    ];
-
-    static ARITH_CASES: &[TestCase<'static>] = &testcases![
-        add1(op::ADD, 0_U256, 0_U256 => 0_U256),
-        add2(op::ADD, 1_U256, 2_U256 => 3_U256),
-        add3(op::ADD, 255_U256, 255_U256 => 510_U256),
-        add4(op::ADD, U256::MAX, 1_U256 => 0_U256),
-        add5(op::ADD, U256::MAX, 2_U256 => 1_U256),
-
-        sub1(op::SUB, 3_U256, 2_U256 => 1_U256),
-        sub2(op::SUB, 1_U256, 2_U256 => MINUS_1),
-        sub2(op::SUB, 1_U256, 3_U256 => MINUS_1.wrapping_sub(1_U256)),
-        sub3(op::SUB, 255_U256, 255_U256 => 0_U256),
-
-        mul1(op::MUL, 1_U256, 2_U256 => 2_U256),
-        mul2(op::MUL, 32_U256, 32_U256 => 1024_U256),
-        mul3(op::MUL, U256::MAX, 2_U256 => U256::MAX.wrapping_sub(1_U256)),
-
-        div1(op::DIV, 32_U256, 32_U256 => 1_U256),
-        div2(op::DIV, 1_U256, 2_U256 => 0_U256),
-        div3(op::DIV, 2_U256, 2_U256 => 1_U256),
-        div4(op::DIV, 3_U256, 2_U256 => 1_U256),
-        div5(op::DIV, 4_U256, 2_U256 => 2_U256),
-        div_by_zero1(op::DIV, 0_U256, 0_U256 => 0_U256),
-        div_by_zero2(op::DIV, 32_U256, 0_U256 => 0_U256),
-
-        rem1(op::MOD, 32_U256, 32_U256 => 0_U256),
-        rem2(op::MOD, 1_U256, 2_U256 => 1_U256),
-        rem3(op::MOD, 2_U256, 2_U256 => 0_U256),
-        rem4(op::MOD, 3_U256, 2_U256 => 1_U256),
-        rem5(op::MOD, 4_U256, 2_U256 => 0_U256),
-        rem_by_zero1(op::MOD, 0_U256, 0_U256 => 0_U256),
-        rem_by_zero2(op::MOD, 32_U256, 0_U256 => 0_U256),
-
-        sdiv1(op::SDIV, 32_U256, 32_U256 => 1_U256),
-        sdiv2(op::SDIV, 1_U256, 2_U256 => 0_U256),
-        sdiv3(op::SDIV, 2_U256, 2_U256 => 1_U256),
-        sdiv4(op::SDIV, 3_U256, 2_U256 => 1_U256),
-        sdiv5(op::SDIV, 4_U256, 2_U256 => 2_U256),
-        sdiv_by_zero1(op::SDIV, 0_U256, 0_U256 => 0_U256),
-        sdiv_by_zero2(op::SDIV, 32_U256, 0_U256 => 0_U256),
-        sdiv_min_by_1(op::SDIV, I256_MIN, 1_U256 => I256_MIN.wrapping_neg()),
-        sdiv_min_by_minus_1(op::SDIV, I256_MIN, MINUS_1 => I256_MIN),
-        sdiv_max1(op::SDIV, I256_MAX, 1_U256 => I256_MAX),
-        sdiv_max2(op::SDIV, I256_MAX, MINUS_1 => I256_MAX.wrapping_neg()),
-
-        srem1(op::SMOD, 32_U256, 32_U256 => 0_U256),
-        srem2(op::SMOD, 1_U256, 2_U256 => 1_U256),
-        srem3(op::SMOD, 2_U256, 2_U256 => 0_U256),
-        srem4(op::SMOD, 3_U256, 2_U256 => 1_U256),
-        srem5(op::SMOD, 4_U256, 2_U256 => 0_U256),
-        srem_by_zero1(op::SMOD, 0_U256, 0_U256 => 0_U256),
-        srem_by_zero2(op::SMOD, 32_U256, 0_U256 => 0_U256),
-
-        addmod1(op::ADDMOD, 1_U256, 2_U256, 3_U256 => 3_U256),
-        addmod2(op::ADDMOD, 1_U256, 2_U256, 2_U256 => 2_U256),
-        addmod3(op::ADDMOD, 32_U256, 32_U256, 32_U256 => 32_U256),
-
-        // TODO:
-        // MULMOD
-        // EXP
-        // SIGNEXTEND
-    ];
-
-    static CMP_CASES: &[TestCase<'static>] = &testcases![
-        lt1(op::LT, 1_U256, 2_U256 => 1_U256),
-        lt2(op::LT, 2_U256, 1_U256 => 0_U256),
-        lt3(op::LT, 1_U256, 1_U256 => 0_U256),
-        lt4(op::LT, MINUS_1, 1_U256 => 0_U256),
-
-        gt1(op::GT, 1_U256, 2_U256 => 0_U256),
-        gt2(op::GT, 2_U256, 1_U256 => 1_U256),
-        gt3(op::GT, 1_U256, 1_U256 => 0_U256),
-        gt4(op::GT, MINUS_1, 1_U256 => 1_U256),
-
-        slt1(op::SLT, 1_U256, 2_U256 => 1_U256),
-        slt2(op::SLT, 2_U256, 1_U256 => 0_U256),
-        slt3(op::SLT, 1_U256, 1_U256 => 0_U256),
-        slt4(op::SLT, MINUS_1, 1_U256 => 1_U256),
-
-        sgt1(op::SGT, 1_U256, 2_U256 => 0_U256),
-        sgt2(op::SGT, 2_U256, 1_U256 => 1_U256),
-        sgt3(op::SGT, 1_U256, 1_U256 => 0_U256),
-        sgt4(op::SGT, MINUS_1, 1_U256 => 0_U256),
-
-        eq1(op::EQ, 1_U256, 2_U256 => 0_U256),
-        eq2(op::EQ, 2_U256, 1_U256 => 0_U256),
-        eq3(op::EQ, 1_U256, 1_U256 => 1_U256),
-
-        iszero1(op::ISZERO, 0_U256 => 1_U256),
-        iszero2(op::ISZERO, 1_U256 => 0_U256),
-        iszero3(op::ISZERO, 2_U256 => 0_U256),
-    ];
-
-    static BITWISE_CASES: &[TestCase<'static>] = &testcases![
-        and1(op::AND, 0_U256, 0_U256 => 0_U256),
-        and2(op::AND, 1_U256, 1_U256 => 1_U256),
-        and3(op::AND, 1_U256, 2_U256 => 0_U256),
-        and4(op::AND, 255_U256, 255_U256 => 255_U256),
-
-        or1(op::OR, 0_U256, 0_U256 => 0_U256),
-        or2(op::OR, 1_U256, 2_U256 => 3_U256),
-        or3(op::OR, 1_U256, 3_U256 => 3_U256),
-        or4(op::OR, 2_U256, 2_U256 => 2_U256),
-
-        xor1(op::XOR, 0_U256, 0_U256 => 0_U256),
-        xor2(op::XOR, 1_U256, 2_U256 => 3_U256),
-        xor3(op::XOR, 1_U256, 3_U256 => 2_U256),
-        xor4(op::XOR, 2_U256, 2_U256 => 0_U256),
-
-        not1(op::NOT, 0_U256 => U256::MAX),
-        not2(op::NOT, U256::MAX => 0_U256),
-        not3(op::NOT, 1_U256 => U256::MAX.wrapping_sub(1_U256)),
-
-        byte1(op::BYTE, 0_U256, 0x12345678_U256 => 0x78_U256),
-        byte2(op::BYTE, 1_U256, 0x12345678_U256 => 0x56_U256),
-        byte3(op::BYTE, 2_U256, 0x12345678_U256 => 0x34_U256),
-        byte4(op::BYTE, 3_U256, 0x12345678_U256 => 0x12_U256),
-        byte5(op::BYTE, 4_U256, 0x12345678_U256 => 0_U256),
-        byte_oob0(op::BYTE, 31_U256, U256::MAX => 0xFF_U256),
-        byte_oob1(op::BYTE, 32_U256, U256::MAX => 0_U256),
-        byte_oob2(op::BYTE, 33_U256, U256::MAX => 0_U256),
-
-        shl1(op::SHL, 1_U256, 0_U256 => 1_U256),
-        shl2(op::SHL, 1_U256, 1_U256 => 2_U256),
-        shl3(op::SHL, 1_U256, 2_U256 => 4_U256),
-
-        shr1(op::SHR, 1_U256, 0_U256 => 1_U256),
-        shr2(op::SHR, 2_U256, 1_U256 => 1_U256),
-        shr3(op::SHR, 4_U256, 2_U256 => 1_U256),
-
-        sar1(op::SAR, 1_U256, 0_U256 => 1_U256),
-        sar2(op::SAR, 2_U256, 1_U256 => 1_U256),
-        sar3(op::SAR, 4_U256, 2_U256 => 1_U256),
-        sar4(op::SAR, MINUS_1, 1_U256 => MINUS_1),
-        sar5(op::SAR, MINUS_1, 2_U256 => MINUS_1),
-    ];
-
-    static ALL_TEST_CASES: &[(&str, &[TestCase<'static>])] = &[
-        ("return_values", RETURN_CASES),
-        ("control_flow", CF_CASES),
-        ("arithmetic", ARITH_CASES),
-        ("comparison", CMP_CASES),
-        ("bitwise", BITWISE_CASES),
-    ];
-
-    // TODO: Have to create a new backend per call for now
-    fn run_tests_with_backend<B: Backend>(jit: &mut JitEvm<B>) {
-        let backend_name = std::any::type_name::<B>().split("::").last().unwrap();
-        for &(group_name, cases) in ALL_TEST_CASES {
-            println!("Running test group `{group_name}` for backend `{backend_name}`");
-            run_test_group(jit, cases);
-            println!();
+    tests! {
+        ret {
+            empty(@raw {
+                bytecode: &[],
+                expected_return: InstructionResult::Stop,
+                expected_stack: &[],
+                expected_gas: 0,
+            }),
+            no_stop(@raw {
+                bytecode: &[op::PUSH0],
+                expected_return: InstructionResult::Stop,
+                expected_stack: &[U256::ZERO],
+                expected_gas: 2,
+            }),
+            stop(@raw {
+                bytecode: &[op::STOP],
+                expected_return: InstructionResult::Stop,
+                expected_stack: &[],
+                expected_gas: 0,
+            }),
+            invalid(@raw {
+                bytecode: &[op::INVALID],
+                expected_return: InstructionResult::InvalidFEOpcode,
+                expected_stack: &[],
+                expected_gas: 0,
+            }),
+            unknown(@raw {
+                bytecode: &[0x21],
+                expected_return: InstructionResult::OpcodeNotFound,
+                expected_stack: &[],
+                expected_gas: 0,
+            }),
+            underflow1(@raw {
+                bytecode: &[op::ADD],
+                expected_return: InstructionResult::StackUnderflow,
+                expected_stack: &[],
+                expected_gas: 3,
+            }),
+            underflow2(@raw {
+                bytecode: &[op::PUSH0, op::ADD],
+                expected_return: InstructionResult::StackUnderflow,
+                expected_stack: &[U256::ZERO],
+                expected_gas: 5,
+            }),
         }
 
-        println!("Running spec tests for backend `{backend_name}`");
-        run_spec_tests(jit);
+        spec {
+            push0_merge(@raw {
+                bytecode: &[op::PUSH0],
+                spec: SpecId::MERGE,
+                expected_return: InstructionResult::NotActivated,
+                expected_stack: &[],
+                expected_gas: 0,
+            }),
+            push0_shanghai(@raw {
+                bytecode: &[op::PUSH0],
+                spec: SpecId::SHANGHAI,
+                expected_return: InstructionResult::Stop,
+                expected_stack: &[U256::ZERO],
+                expected_gas: 2,
+            }),
+            push0_cancun(@raw {
+                bytecode: &[op::PUSH0],
+                spec: SpecId::CANCUN,
+                expected_return: InstructionResult::Stop,
+                expected_stack: &[U256::ZERO],
+                expected_gas: 2,
+            }),
+        }
 
-        println!("Running fibonacci tests for backend `{backend_name}`");
-        run_fibonacci_tests(jit);
-    }
+        control_flow {
+            basic_jump(@raw {
+                bytecode: &[op::PUSH1, 3, op::JUMP, op::JUMPDEST],
+                expected_return: InstructionResult::Stop,
+                expected_stack: &[],
+                expected_gas: 3 + 8 + 1,
+            }),
+            unmodified_stack_after_push_jump(@raw {
+                bytecode: &[op::PUSH1, 3, op::JUMP, op::JUMPDEST, op::PUSH0, op::ADD],
+                expected_return: InstructionResult::StackUnderflow,
+                expected_stack: &[U256::ZERO],
+                expected_gas: 3 + 8 + 1 + 2 + 3,
+            }),
+            basic_jump_if(@raw {
+                bytecode: &[op::PUSH1, 1, op::PUSH1, 5, op::JUMPI, op::JUMPDEST],
+                expected_return: InstructionResult::Stop,
+                expected_stack: &[],
+                expected_gas: 3 + 3 + 10 + 1,
+            }),
+            unmodified_stack_after_push_jumpif(@raw {
+                bytecode: &[op::PUSH1, 1, op::PUSH1, 5, op::JUMPI, op::JUMPDEST, op::PUSH0, op::ADD],
+                expected_return: InstructionResult::StackUnderflow,
+                expected_stack: &[U256::ZERO],
+                expected_gas: 3 + 3 + 10 + 1 + 2 + 3,
+            }),
+            basic_loop(@raw {
+                #[rustfmt::skip]
+                bytecode: &[
+                    op::PUSH1, 3,  // i=3
+                    op::JUMPDEST,  // i
+                    op::PUSH1, 1,  // 1, i
+                    op::SWAP1,     // i, 1
+                    op::SUB,       // i-1
+                    op::DUP1,      // i-1, i-1
+                    op::PUSH1, 2,  // dst, i-1, i-1
+                    op::JUMPI,     // i=i-1
+                    op::POP,       //
+                    op::PUSH1, 69, // 69
+                ],
+                expected_return: InstructionResult::Stop,
+                expected_stack: &[uint!(69_U256)],
+                expected_gas: 3 + (1 + 3 + 3 + 3 + 3 + 3 + 10) * 3 + 2 + 3,
+            }),
+        }
 
-    fn run_spec_tests<B: Backend>(jit: &mut JitEvm<B>) {
-        let cases: &[(&str, &[u8], SpecId, InstructionResult, u64)] = &[
-            ("push0 merge", &[op::PUSH0], SpecId::MERGE, InstructionResult::NotActivated, 0),
-            ("push0 shanghai", &[op::PUSH0], SpecId::SHANGHAI, InstructionResult::Stop, 2),
-            ("push0 cancun", &[op::PUSH0], SpecId::CANCUN, InstructionResult::Stop, 2),
-        ];
+        arith {
+            add1(op::ADD, 0_U256, 0_U256 => 0_U256),
+            add2(op::ADD, 1_U256, 2_U256 => 3_U256),
+            add3(op::ADD, 255_U256, 255_U256 => 510_U256),
+            add4(op::ADD, U256::MAX, 1_U256 => 0_U256),
+            add5(op::ADD, U256::MAX, 2_U256 => 1_U256),
 
-        for (i, &(name, bytecode, spec, expected_result, expected_gas)) in cases.iter().enumerate()
-        {
-            println!("Running test case {i:2}: {name}");
-            unsafe { jit.free_all_functions() }.unwrap();
-            let f = jit.compile(bytecode, spec).unwrap();
-            let mut gas = Gas::new(100000);
-            let r = unsafe { f.call(Some(&mut gas), Some(&mut EvmStack::new()), Some(&mut 0)) };
-            assert_eq!(r, expected_result);
-            assert_eq!(gas.spend(), expected_gas);
+            sub1(op::SUB, 3_U256, 2_U256 => 1_U256),
+            sub2(op::SUB, 1_U256, 2_U256 => MINUS_1),
+            sub3(op::SUB, 1_U256, 3_U256 => MINUS_1.wrapping_sub(1_U256)),
+            sub4(op::SUB, 255_U256, 255_U256 => 0_U256),
+
+            mul1(op::MUL, 1_U256, 2_U256 => 2_U256),
+            mul2(op::MUL, 32_U256, 32_U256 => 1024_U256),
+            mul3(op::MUL, U256::MAX, 2_U256 => U256::MAX.wrapping_sub(1_U256)),
+
+            div1(op::DIV, 32_U256, 32_U256 => 1_U256),
+            div2(op::DIV, 1_U256, 2_U256 => 0_U256),
+            div3(op::DIV, 2_U256, 2_U256 => 1_U256),
+            div4(op::DIV, 3_U256, 2_U256 => 1_U256),
+            div5(op::DIV, 4_U256, 2_U256 => 2_U256),
+            div_by_zero1(op::DIV, 0_U256, 0_U256 => 0_U256),
+            div_by_zero2(op::DIV, 32_U256, 0_U256 => 0_U256),
+
+            rem1(op::MOD, 32_U256, 32_U256 => 0_U256),
+            rem2(op::MOD, 1_U256, 2_U256 => 1_U256),
+            rem3(op::MOD, 2_U256, 2_U256 => 0_U256),
+            rem4(op::MOD, 3_U256, 2_U256 => 1_U256),
+            rem5(op::MOD, 4_U256, 2_U256 => 0_U256),
+            rem_by_zero1(op::MOD, 0_U256, 0_U256 => 0_U256),
+            rem_by_zero2(op::MOD, 32_U256, 0_U256 => 0_U256),
+
+            sdiv1(op::SDIV, 32_U256, 32_U256 => 1_U256),
+            sdiv2(op::SDIV, 1_U256, 2_U256 => 0_U256),
+            sdiv3(op::SDIV, 2_U256, 2_U256 => 1_U256),
+            sdiv4(op::SDIV, 3_U256, 2_U256 => 1_U256),
+            sdiv5(op::SDIV, 4_U256, 2_U256 => 2_U256),
+            sdiv_by_zero1(op::SDIV, 0_U256, 0_U256 => 0_U256),
+            sdiv_by_zero2(op::SDIV, 32_U256, 0_U256 => 0_U256),
+            sdiv_min_by_1(op::SDIV, I256_MIN, 1_U256 => I256_MIN.wrapping_neg()),
+            sdiv_min_by_minus_1(op::SDIV, I256_MIN, MINUS_1 => I256_MIN),
+            sdiv_max1(op::SDIV, I256_MAX, 1_U256 => I256_MAX),
+            sdiv_max2(op::SDIV, I256_MAX, MINUS_1 => I256_MAX.wrapping_neg()),
+
+            srem1(op::SMOD, 32_U256, 32_U256 => 0_U256),
+            srem2(op::SMOD, 1_U256, 2_U256 => 1_U256),
+            srem3(op::SMOD, 2_U256, 2_U256 => 0_U256),
+            srem4(op::SMOD, 3_U256, 2_U256 => 1_U256),
+            srem5(op::SMOD, 4_U256, 2_U256 => 0_U256),
+            srem_by_zero1(op::SMOD, 0_U256, 0_U256 => 0_U256),
+            srem_by_zero2(op::SMOD, 32_U256, 0_U256 => 0_U256),
+
+            addmod1(op::ADDMOD, 1_U256, 2_U256, 3_U256 => 0_U256),
+            addmod2(op::ADDMOD, 1_U256, 2_U256, 4_U256 => 3_U256),
+            addmod3(op::ADDMOD, 1_U256, 2_U256, 2_U256 => 1_U256),
+            addmod4(op::ADDMOD, 32_U256, 32_U256, 69_U256 => 64_U256),
+
+            mulmod1(op::MULMOD, 0_U256, 0_U256, 1_U256 => 0_U256),
+            mulmod2(op::MULMOD, 69_U256, 0_U256, 1_U256 => 0_U256),
+            mulmod3(op::MULMOD, 0_U256, 1_U256, 2_U256 => 0_U256),
+            mulmod4(op::MULMOD, 69_U256, 1_U256, 2_U256 => 1_U256),
+            mulmod5(op::MULMOD, 69_U256, 1_U256, 30_U256 => 9_U256),
+            mulmod6(op::MULMOD, 69_U256, 2_U256, 100_U256 => 38_U256),
+
+            exp1(op::EXP, 0_U256, 0_U256 => 1_U256; op_gas(10)),
+            exp2(op::EXP, 2_U256, 0_U256 => 1_U256; op_gas(10)),
+            exp3(op::EXP, 2_U256, 1_U256 => 2_U256; op_gas(60)),
+            exp4(op::EXP, 2_U256, 2_U256 => 4_U256; op_gas(60)),
+            exp5(op::EXP, 2_U256, 3_U256 => 8_U256; op_gas(60)),
+            exp6(op::EXP, 2_U256, 4_U256 => 16_U256; op_gas(60)),
+            exp_overflow(op::EXP, 2_U256, 256_U256 => 0_U256; op_gas(110)),
+
+            signextend1(op::SIGNEXTEND, 0_U256, 0_U256 => 0_U256),
+            signextend2(op::SIGNEXTEND, 1_U256, 0_U256 => 0_U256),
+            signextend3(op::SIGNEXTEND, 0_U256, MINUS_1 => MINUS_1),
+            signextend4(op::SIGNEXTEND, 1_U256, MINUS_1 => MINUS_1),
+            signextend5(op::SIGNEXTEND, 0_U256, 0x7f_U256 => 0x7f_U256),
+            signextend6(op::SIGNEXTEND, 0_U256, 0x80_U256 => 0x80_U256.wrapping_neg()),
+            signextend7(op::SIGNEXTEND, 0_U256, 0xff_U256 => U256::MAX),
+            signextend8(op::SIGNEXTEND, 1_U256, 0x7fff_U256 => 0x7fff_U256),
+            signextend8_extra(op::SIGNEXTEND, 1_U256, 0xff7fff_U256 => 0x7fff_U256),
+            signextend9(op::SIGNEXTEND, 1_U256, 0x8000_U256 => 0x8000_U256.wrapping_neg()),
+            signextend9_extra(op::SIGNEXTEND, 1_U256, 0x118000_U256 => 0x8000_U256.wrapping_neg()),
+            signextend10(op::SIGNEXTEND, 1_U256, 0xffff_U256 => U256::MAX),
+        }
+
+        cmp {
+            lt1(op::LT, 1_U256, 2_U256 => 1_U256),
+            lt2(op::LT, 2_U256, 1_U256 => 0_U256),
+            lt3(op::LT, 1_U256, 1_U256 => 0_U256),
+            lt4(op::LT, MINUS_1, 1_U256 => 0_U256),
+
+            gt1(op::GT, 1_U256, 2_U256 => 0_U256),
+            gt2(op::GT, 2_U256, 1_U256 => 1_U256),
+            gt3(op::GT, 1_U256, 1_U256 => 0_U256),
+            gt4(op::GT, MINUS_1, 1_U256 => 1_U256),
+
+            slt1(op::SLT, 1_U256, 2_U256 => 1_U256),
+            slt2(op::SLT, 2_U256, 1_U256 => 0_U256),
+            slt3(op::SLT, 1_U256, 1_U256 => 0_U256),
+            slt4(op::SLT, MINUS_1, 1_U256 => 1_U256),
+
+            sgt1(op::SGT, 1_U256, 2_U256 => 0_U256),
+            sgt2(op::SGT, 2_U256, 1_U256 => 1_U256),
+            sgt3(op::SGT, 1_U256, 1_U256 => 0_U256),
+            sgt4(op::SGT, MINUS_1, 1_U256 => 0_U256),
+
+            eq1(op::EQ, 1_U256, 2_U256 => 0_U256),
+            eq2(op::EQ, 2_U256, 1_U256 => 0_U256),
+            eq3(op::EQ, 1_U256, 1_U256 => 1_U256),
+
+            iszero1(op::ISZERO, 0_U256 => 1_U256),
+            iszero2(op::ISZERO, 1_U256 => 0_U256),
+            iszero3(op::ISZERO, 2_U256 => 0_U256),
+        }
+
+        bitwise {
+            and1(op::AND, 0_U256, 0_U256 => 0_U256),
+            and2(op::AND, 1_U256, 1_U256 => 1_U256),
+            and3(op::AND, 1_U256, 2_U256 => 0_U256),
+            and4(op::AND, 255_U256, 255_U256 => 255_U256),
+
+            or1(op::OR, 0_U256, 0_U256 => 0_U256),
+            or2(op::OR, 1_U256, 2_U256 => 3_U256),
+            or3(op::OR, 1_U256, 3_U256 => 3_U256),
+            or4(op::OR, 2_U256, 2_U256 => 2_U256),
+
+            xor1(op::XOR, 0_U256, 0_U256 => 0_U256),
+            xor2(op::XOR, 1_U256, 2_U256 => 3_U256),
+            xor3(op::XOR, 1_U256, 3_U256 => 2_U256),
+            xor4(op::XOR, 2_U256, 2_U256 => 0_U256),
+
+            not1(op::NOT, 0_U256 => U256::MAX),
+            not2(op::NOT, U256::MAX => 0_U256),
+            not3(op::NOT, 1_U256 => U256::MAX.wrapping_sub(1_U256)),
+
+            byte1(op::BYTE, 0_U256, 0x12345678_U256 => 0x78_U256),
+            byte2(op::BYTE, 1_U256, 0x12345678_U256 => 0x56_U256),
+            byte3(op::BYTE, 2_U256, 0x12345678_U256 => 0x34_U256),
+            byte4(op::BYTE, 3_U256, 0x12345678_U256 => 0x12_U256),
+            byte5(op::BYTE, 4_U256, 0x12345678_U256 => 0_U256),
+            byte_oob0(op::BYTE, 31_U256, U256::MAX => 0xFF_U256),
+            byte_oob1(op::BYTE, 32_U256, U256::MAX => 0_U256),
+            byte_oob2(op::BYTE, 33_U256, U256::MAX => 0_U256),
+
+            shl1(op::SHL, 1_U256, 0_U256 => 1_U256),
+            shl2(op::SHL, 1_U256, 1_U256 => 2_U256),
+            shl3(op::SHL, 1_U256, 2_U256 => 4_U256),
+
+            shr1(op::SHR, 1_U256, 0_U256 => 1_U256),
+            shr2(op::SHR, 2_U256, 1_U256 => 1_U256),
+            shr3(op::SHR, 4_U256, 2_U256 => 1_U256),
+
+            sar1(op::SAR, 1_U256, 0_U256 => 1_U256),
+            sar2(op::SAR, 2_U256, 1_U256 => 1_U256),
+            sar3(op::SAR, 4_U256, 2_U256 => 1_U256),
+            sar4(op::SAR, MINUS_1, 1_U256 => MINUS_1),
+            sar5(op::SAR, MINUS_1, 2_U256 => MINUS_1),
         }
     }
 
-    fn run_test_group<B: Backend>(jit: &mut JitEvm<B>, cases: &[TestCase<'_>]) {
-        for (i, &TestCase { name, bytecode, expected_return, expected_stack, expected_gas }) in
-            cases.iter().enumerate()
-        {
-            println!("Running test case {i:2}: {name}");
-            println!("  bytecode: {}", format_bytecode(bytecode));
-            unsafe { jit.free_all_functions() }.unwrap();
-            let f = jit.compile(bytecode, DEFAULT_SPEC).unwrap();
+    struct TestCase<'a> {
+        bytecode: &'a [u8],
+        spec: SpecId,
 
-            let mut stack = EvmStack::new();
-            let mut stack_len = 0;
-            let mut gas = Gas::new(10000);
-            let actual_return =
-                unsafe { f.call(Some(&mut gas), Some(&mut stack), Some(&mut stack_len)) };
-            assert_eq!(actual_return, expected_return);
-            assert_eq!(gas.spend(), expected_gas);
+        expected_return: InstructionResult,
+        expected_stack: &'a [U256],
+        expected_gas: u64,
+    }
 
-            let actual_stack =
-                stack.as_slice().iter().take(stack_len).map(|x| x.to_u256()).collect::<Vec<_>>();
-            assert_eq!(actual_stack, *expected_stack);
+    impl Default for TestCase<'_> {
+        fn default() -> Self {
+            Self {
+                bytecode: &[],
+                spec: DEFAULT_SPEC,
+                expected_return: InstructionResult::Stop,
+                expected_stack: &[],
+                expected_gas: 0,
+            }
         }
+    }
+
+    impl fmt::Debug for TestCase<'_> {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.debug_struct("TestCase")
+                .field("bytecode", &format_bytecode(self.bytecode))
+                .field("spec", &self.spec)
+                .field("expected_return", &self.expected_return)
+                .field("expected_stack", &self.expected_stack)
+                .field("expected_gas", &self.expected_gas)
+                .finish()
+        }
+    }
+
+    #[cfg(feature = "llvm")]
+    fn with_llvm_context(f: impl FnOnce(&LlvmContext)) {
+        thread_local! {
+            static TLS_LLVM_CONTEXT: LlvmContext = LlvmContext::create();
+        }
+
+        TLS_LLVM_CONTEXT.with(f);
+        // f(&LlvmContext::create());
+    }
+
+    fn run_case(test_case: &TestCase<'_>) {
+        #[cfg(feature = "llvm")]
+        run_case_llvm(test_case);
+        #[cfg(not(feature = "llvm"))]
+        let _ = test_case;
+    }
+
+    #[cfg(feature = "llvm")]
+    fn run_case_llvm(test_case: &TestCase<'_>) {
+        with_llvm_context(|context| {
+            let make_backend = |opt_level| JitEvmLlvmBackend::new(context, opt_level).unwrap();
+            run_case_generic(test_case, make_backend);
+        });
+    }
+
+    fn run_case_generic<B: Backend>(
+        test_case: &TestCase<'_>,
+        make_backend: impl Fn(OptimizationLevel) -> B,
+    ) {
+        println!("--- not optimized ---");
+        let mut jit = JitEvm::new(make_backend(OptimizationLevel::None));
+        run_case_built(test_case, &mut jit);
+
+        println!("--- optimized ---");
+        let mut jit = JitEvm::new(make_backend(OptimizationLevel::Aggressive));
+        run_case_built(test_case, &mut jit);
+    }
+
+    fn run_case_built<B: Backend>(test_case: &TestCase<'_>, jit: &mut JitEvm<B>) {
+        println!("Running {test_case:#?}\n");
+
+        let TestCase { bytecode, spec, expected_return, expected_stack, expected_gas } = *test_case;
+
+        jit.set_pass_stack_through_args(true);
+        jit.set_pass_stack_len_through_args(true);
+        jit.set_disable_gas(false);
+        jit.set_store_gas_used(true);
+        let f = jit.compile(bytecode, spec).unwrap();
+
+        let mut stack = EvmStack::new();
+        let mut stack_len = 0;
+        let mut gas = Gas::new(100_000);
+        let actual_return =
+            unsafe { f.call(Some(&mut gas), Some(&mut stack), Some(&mut stack_len)) };
+        assert_eq!(actual_return, expected_return, "return value mismatch");
+        assert_eq!(gas.spend(), expected_gas, "gas mismatch");
+
+        let actual_stack =
+            stack.as_slice().iter().take(stack_len).map(|x| x.to_u256()).collect::<Vec<_>>();
+        assert_eq!(actual_stack, *expected_stack, "stack mismatch");
+    }
+
+    // ---
+
+    #[test]
+    fn fibonacci() {
+        #[cfg(feature = "llvm")]
+        with_llvm_context(|context| {
+            let make_backend = |opt_level| JitEvmLlvmBackend::new(context, opt_level).unwrap();
+            fibonacci_generic(make_backend);
+        });
+    }
+
+    fn fibonacci_generic<B: Backend>(make_backend: impl Fn(OptimizationLevel) -> B) {
+        println!("--- not optimized ---");
+        let mut jit = JitEvm::new(make_backend(OptimizationLevel::None));
+        run_fibonacci_tests(&mut jit);
+
+        println!("--- optimized ---");
+        let mut jit = JitEvm::new(make_backend(OptimizationLevel::Aggressive));
+        run_fibonacci_tests(&mut jit);
     }
 
     fn run_fibonacci_tests<B: Backend>(jit: &mut JitEvm<B>) {
+        jit.set_pass_stack_through_args(true);
+        jit.set_pass_stack_len_through_args(true);
+
         for i in 0..=10 {
             run_fibonacci_test(jit, i);
         }

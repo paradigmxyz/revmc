@@ -9,14 +9,14 @@ extern crate revm_jit_core;
 
 use revm_primitives::U256;
 
+mod bytecode;
+pub use bytecode::*;
+
 mod compiler;
 pub use compiler::JitEvm;
 
-mod gas;
-pub use gas::*;
-
-mod bytecode;
-pub use bytecode::*;
+mod info;
+pub use info::*;
 
 #[doc(inline)]
 pub use revm_jit_core::*;
@@ -35,21 +35,11 @@ pub use cranelift::JitEvmCraneliftBackend;
 #[doc(inline)]
 pub use revm_jit_cranelift as cranelift;
 
-#[allow(dead_code)]
-const MINUS_1: U256 = U256::MAX;
-#[allow(dead_code)]
 const I256_MIN: U256 = U256::from_limbs([
     0x0000000000000000,
     0x0000000000000000,
     0x0000000000000000,
     0x8000000000000000,
-]);
-#[allow(dead_code)]
-const I256_MAX: U256 = U256::from_limbs([
-    0xFFFFFFFFFFFFFFFF,
-    0xFFFFFFFFFFFFFFFF,
-    0xFFFFFFFFFFFFFFFF,
-    0x7FFFFFFFFFFFFFFF,
 ]);
 
 // Enable for `cargo-asm`.

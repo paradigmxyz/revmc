@@ -153,6 +153,10 @@ pub trait Builder: BackendTypes + TypeMethods {
     fn bitxor(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
     fn bitnot(&mut self, value: Self::Value) -> Self::Value;
 
+    fn bitor_imm(&mut self, lhs: Self::Value, rhs: i64) -> Self::Value;
+    fn bitand_imm(&mut self, lhs: Self::Value, rhs: i64) -> Self::Value;
+    fn bitxor_imm(&mut self, lhs: Self::Value, rhs: i64) -> Self::Value;
+
     fn ishl(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
     fn ushr(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
     fn sshr(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;

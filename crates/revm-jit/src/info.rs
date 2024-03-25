@@ -1,13 +1,13 @@
 use revm_interpreter::{gas, opcode as op};
 use revm_primitives::{spec_to_generic, SpecId};
 
-/// Opcode gas information.
+/// Opcode information.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OpInfo(u16);
 
 impl OpInfo {
     /// The dynamic flag.
-    pub const DYN: u16 = 0b1000_0000_0000_0000;
+    pub const DYNAMIC: u16 = 0b1000_0000_0000_0000;
     /// The disabled flag.
     pub const DISABLED: u16 = 0b0100_0000_0000_0000;
     /// The mask for the gas cost.
@@ -22,7 +22,7 @@ impl OpInfo {
     /// Returns `true` if the gas cost is dynamic.
     #[inline]
     pub const fn is_dynamic(self) -> bool {
-        self.0 & Self::DYN != 0
+        self.0 & Self::DYNAMIC != 0
     }
 
     /// Returns `true` if the opcode is disabled.
@@ -40,7 +40,7 @@ impl OpInfo {
     /// Sets the dynamic flag.
     #[inline]
     pub fn set_dynamic(&mut self) {
-        self.0 |= Self::DYN;
+        self.0 |= Self::DYNAMIC;
     }
 
     /// Sets the disabled flag.
@@ -50,8 +50,14 @@ impl OpInfo {
     }
 
     /// Sets the gas cost.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the gas cost is greater than [`Self::MASK`].
     #[inline]
+    #[track_caller]
     pub fn set_gas(&mut self, gas: u16) {
+        assert!(gas <= Self::MASK);
         self.0 = (self.0 & !Self::MASK) | (gas & Self::MASK);
     }
 }
@@ -60,7 +66,7 @@ impl OpInfo {
 ///
 /// The map will contain the gas costs for each opcode if it is known statically, or `0` if the
 /// opcode is not known or its gas cost is dynamic.
-pub const fn static_gas_map(spec_id: SpecId) -> &'static [OpInfo; 256] {
+pub const fn op_info_map(spec_id: SpecId) -> &'static [OpInfo; 256] {
     spec_to_generic!(spec_id, {
         const MAP: &[OpInfo; 256] = &make_map(<SPEC as revm_primitives::Spec>::SPEC_ID);
         MAP
@@ -69,7 +75,7 @@ pub const fn static_gas_map(spec_id: SpecId) -> &'static [OpInfo; 256] {
 
 #[allow(unused_mut)]
 const fn make_map(spec_id: SpecId) -> [OpInfo; 256] {
-    const DYN: u16 = OpInfo::DYN;
+    const DYNAMIC: u16 = OpInfo::DYNAMIC;
     const DISABLED: u16 = OpInfo::DISABLED;
 
     let mut map = [OpInfo(0); 256];
@@ -98,7 +104,7 @@ const fn make_map(spec_id: SpecId) -> [OpInfo; 256] {
         SMOD       = 5;
         ADDMOD     = 8;
         MULMOD     = 8;
-        EXP        = DYN;
+        EXP        = DYNAMIC;
         SIGNEXTEND = 5;
         // 0x0C
         // 0x0D
@@ -120,7 +126,7 @@ const fn make_map(spec_id: SpecId) -> [OpInfo; 256] {
         SAR    = 3, if CONSTANTINOPLE;
         // 0x1E
         // 0x1F
-        KECCAK256 = DYN;
+        KECCAK256 = DYNAMIC;
         // 0x21
         // 0x22
         // 0x23
@@ -143,16 +149,16 @@ const fn make_map(spec_id: SpecId) -> [OpInfo; 256] {
         CALLVALUE    = 2;
         CALLDATALOAD = 3;
         CALLDATASIZE = 2;
-        CALLDATACOPY = DYN;
+        CALLDATACOPY = DYNAMIC;
         CODESIZE     = 2;
-        CODECOPY     = DYN;
+        CODECOPY     = DYNAMIC;
 
         GASPRICE       = 2;
         EXTCODESIZE    = 20;
-        EXTCODECOPY    = DYN;
+        EXTCODECOPY    = DYNAMIC;
         RETURNDATASIZE = 2, if BYZANTIUM;
-        RETURNDATACOPY = DYN, if BYZANTIUM;
-        EXTCODEHASH    = DYN, if BERLIN;
+        RETURNDATACOPY = DYNAMIC, if BYZANTIUM;
+        EXTCODEHASH    = DYNAMIC, if BERLIN;
         BLOCKHASH      = 20;
         COINBASE       = 2;
         TIMESTAMP      = 2;
@@ -170,11 +176,11 @@ const fn make_map(spec_id: SpecId) -> [OpInfo; 256] {
         // 0x4E
         // 0x4F
         POP      = 2;
-        MLOAD    = DYN;
-        MSTORE   = DYN;
-        MSTORE8  = DYN;
+        MLOAD    = DYNAMIC;
+        MSTORE   = DYNAMIC;
+        MSTORE8  = DYNAMIC;
         SLOAD    = sload_cost(spec_id);
-        SSTORE   = DYN;
+        SSTORE   = DYNAMIC;
         JUMP     = 8;
         JUMPI    = 10;
         PC       = 2;
@@ -183,7 +189,7 @@ const fn make_map(spec_id: SpecId) -> [OpInfo; 256] {
         JUMPDEST = 1;
         TLOAD    = 100, if CANCUN;
         TSTORE   = 100, if CANCUN;
-        MCOPY    = DYN, if CANCUN;
+        MCOPY    = DYNAMIC, if CANCUN;
 
         PUSH0  = 2, if SHANGHAI;
         PUSH1  = 3;
@@ -253,11 +259,11 @@ const fn make_map(spec_id: SpecId) -> [OpInfo; 256] {
         SWAP15 = 3;
         SWAP16 = 3;
 
-        LOG0 = DYN;
-        LOG1 = DYN;
-        LOG2 = DYN;
-        LOG3 = DYN;
-        LOG4 = DYN;
+        LOG0 = DYNAMIC;
+        LOG1 = DYNAMIC;
+        LOG2 = DYNAMIC;
+        LOG3 = DYNAMIC;
+        LOG4 = DYNAMIC;
         // 0xA5
         // 0xA6
         // 0xA7
@@ -333,17 +339,17 @@ const fn make_map(spec_id: SpecId) -> [OpInfo; 256] {
         // 0xED
         // 0xEE
         // 0xEF
-        CREATE       = DYN;
-        CALL         = DYN;
-        CALLCODE     = DYN;
-        RETURN       = DYN;
-        DELEGATECALL = DYN;
-        CREATE2      = DYN;
+        CREATE       = DYNAMIC;
+        CALL         = DYNAMIC;
+        CALLCODE     = DYNAMIC;
+        RETURN       = DYNAMIC;
+        DELEGATECALL = DYNAMIC;
+        CREATE2      = DYNAMIC;
         // 0xF6
         // 0xF7
         // 0xF8
         // 0xF9
-        STATICCALL   = DYN;
+        STATICCALL   = DYNAMIC;
         // 0xFB
         // 0xFC
         REVERT       = 0;
@@ -356,7 +362,7 @@ const fn make_map(spec_id: SpecId) -> [OpInfo; 256] {
 /// [`gas::sload_cost`]
 const fn sload_cost(spec_id: SpecId) -> u16 {
     if enabled(spec_id, SpecId::BERLIN) {
-        OpInfo::DYN
+        OpInfo::DYNAMIC
         // if is_cold {
         //     COLD_SLOAD_COST
         // } else {

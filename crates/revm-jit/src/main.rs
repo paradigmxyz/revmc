@@ -26,7 +26,7 @@ fn main() -> color_eyre::Result<()> {
 
     #[rustfmt::skip]
     let code: &[u8] = &[
-        op::PUSH1, 0x20, op::PUSH1, 0x20, op::SDIV
+        op::PUSH1, 0x20, op::SIGNEXTEND
     ];
 
     let mut stack_buf = EvmStack::new_heap();
