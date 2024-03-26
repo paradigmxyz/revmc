@@ -145,12 +145,21 @@ impl Backend for JitEvmCraneliftBackend {
         Ok(())
     }
 
-    fn build_function(&mut self, name: &str) -> Result<Self::Builder<'_>> {
-        let ptr_type = self.module.target_config().pointer_type();
-        self.ctx.func.signature.params.push(AbiParam::new(ptr_type));
-        self.ctx.func.signature.params.push(AbiParam::new(ptr_type));
-        self.ctx.func.signature.params.push(AbiParam::new(ptr_type));
-        self.ctx.func.signature.returns.push(AbiParam::new(types::I8));
+    fn build_function(
+        &mut self,
+        name: &str,
+        ret: Option<Self::Type>,
+        params: &[Self::Type],
+        param_names: &[&str],
+    ) -> Result<Self::Builder<'_>> {
+        if let Some(ret) = ret {
+            self.ctx.func.signature.returns.push(AbiParam::new(ret));
+        }
+        for param in params {
+            self.ctx.func.signature.params.push(AbiParam::new(*param));
+        }
+        let _ = param_names;
+        let ptr_type = self.type_ptr();
         let _id = self.module.declare_function(name, Linkage::Export, &self.ctx.func.signature)?;
         let bcx = FunctionBuilder::new(&mut self.ctx.func, &mut self.builder_context);
         Ok(JitEvmCraneliftBuilder {
@@ -569,6 +578,18 @@ impl<'a> Builder for JitEvmCraneliftBuilder<'a> {
         self.symbols.insert(name.to_string(), address as *const u8);
         let id = self.module.declare_function(name, Linkage::Import, &sig).unwrap();
         self.module.declare_func_in_func(id, self.bcx.func)
+    }
+
+    fn add_function_attribute(
+        &mut self,
+        function: Option<Self::Function>,
+        attribute: revm_jit_backend::Attribute,
+        loc: revm_jit_backend::FunctionAttributeLocation,
+    ) {
+        let _ = function;
+        let _ = attribute;
+        let _ = loc;
+        // TODO
     }
 }
 

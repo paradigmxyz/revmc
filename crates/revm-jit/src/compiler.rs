@@ -1,12 +1,13 @@
 //! JIT compiler implementation.
 
 use crate::{
-    Backend, Builder, Bytecode, IntCC, JitEvmFn, OpcodeData, OpcodeFlags, Result, I256_MIN,
+    Backend, Builder, Bytecode, EvmStack, IntCC, JitEvmFn, OpcodeData, OpcodeFlags, Result,
+    I256_MIN,
 };
-use revm_interpreter::{opcode as op, InstructionResult};
-use revm_jit_backend::{OptimizationLevel, TypeMethods};
+use revm_interpreter::{opcode as op, Gas, InstructionResult};
+use revm_jit_backend::{Attribute, FunctionAttributeLocation, OptimizationLevel, TypeMethods};
 use revm_primitives::{SpecId, U256};
-use std::path::PathBuf;
+use std::{mem, path::PathBuf};
 
 const STACK_CAP: usize = 1024;
 // const WORD_SIZE: usize = 32;
@@ -161,7 +162,53 @@ impl<B: Backend> JitEvm<B> {
 
     fn compile_bytecode(&mut self, bytecode: &Bytecode<'_>) -> Result<JitEvmFn> {
         let name = &self.new_name()[..];
-        let bcx = self.backend.build_function(name)?;
+
+        let i8 = self.backend.type_int(8);
+        let ptr = self.backend.type_ptr();
+        let (ret, params, param_names, ptr_attrs) = (
+            Some(i8),
+            &[ptr, ptr, ptr],
+            &["arg.gas.addr", "arg.stack.addr", "arg.stack_len.addr"],
+            &[
+                // (idx, align, dereferenceable)
+                (0, mem::align_of::<Gas>(), mem::size_of::<Gas>()),
+                (1, mem::align_of::<EvmStack>(), mem::size_of::<EvmStack>()),
+                (2, mem::align_of::<usize>(), mem::size_of::<usize>()),
+            ],
+        );
+        let mut bcx = self.backend.build_function(name, ret, params, param_names)?;
+
+        // Function attributes.
+        let function_attributes = [
+            Attribute::WillReturn, // Always returns.
+            Attribute::NoFree,     // No memory deallocation.
+            // Attribute::NoRecurse, // We can't know this.
+            Attribute::NoSync, // No thread synchronization.
+            // TODO: Config value?
+            Attribute::AllFramePointers,
+            Attribute::NativeTargetCpu,
+        ]
+        .into_iter()
+        // We can unwind in panics, which are present only in debug assertions.
+        .chain((!self.config.debug_assertions).then_some(Attribute::NoUnwind));
+        for attr in function_attributes {
+            bcx.add_function_attribute(None, attr, FunctionAttributeLocation::Function);
+        }
+
+        // Pointer argument attributes.
+        if !self.config.debug_assertions {
+            for &(i, align, dereferenceable) in ptr_attrs {
+                for attr in [
+                    Attribute::NoAlias,
+                    Attribute::NoCapture,
+                    Attribute::NoUndef,
+                    Attribute::Align(align as u64),
+                    Attribute::Dereferenceable(dereferenceable as u64),
+                ] {
+                    bcx.add_function_attribute(None, attr, FunctionAttributeLocation::Param(i));
+                }
+            }
+        }
 
         trace_time!("translate", || FunctionCx::translate(
             bcx,
@@ -1028,7 +1075,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let target = self.create_block_after(failure, "contd");
         self.bcx.brif(cond, failure, target);
 
-        self.bcx.set_cold_block(failure);
+        // `panic` is already marked as a cold function call.
+        // self.bcx.set_cold_block(failure);
         self.bcx.switch_to_block(failure);
         self.call_panic(msg);
 
@@ -1160,7 +1208,18 @@ impl<B: Backend> Callbacks<B> {
                 let ret = cb.ret(bcx);
                 let params = cb.params(bcx);
                 let address = cb.addr();
-                bcx.add_callback_function(name, ret, &params, address)
+                let f = bcx.add_callback_function(name, ret, &params, address);
+                const DEFAULT_ATTRS: &[Attribute] = &[
+                    Attribute::WillReturn,
+                    Attribute::NoFree,
+                    Attribute::NoRecurse,
+                    Attribute::NoSync,
+                    // Attribute::NoUnwind,
+                ];
+                for attr in DEFAULT_ATTRS.iter().chain(cb.attrs()) {
+                    bcx.add_function_attribute(Some(f), *attr, FunctionAttributeLocation::Function);
+                }
+                f
             },
         )
     }
@@ -1182,7 +1241,7 @@ macro_rules! callbacks {
     (@count $first:tt $(, $rest:tt)*) => { 1 + callbacks!(@count $($rest),*) };
 
     ($bcx:ident; $ptr:ident; $usize:ident;
-     $($ident:ident = $name:ident($($params:expr),* $(,)?) $ret:expr),* $(,)?
+     $($ident:ident = $(#[$attr:expr])* $name:ident($($params:expr),* $(,)?) $ret:expr),* $(,)?
     ) => {
         /// Callbacks that can be called by the JIT-compiled functions.
         #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -1221,15 +1280,22 @@ macro_rules! callbacks {
                     $(Self::$ident => vec![$($params),*],)*
                 }
             }
+
+            fn attrs(self) -> &'static [Attribute] {
+                use Attribute::*;
+                match self {
+                    $(Self::$ident => &[$($attr)*]),*
+                }
+            }
         }
     };
 }
 
 callbacks! { bcx; ptr; usize;
-    Panic = panic(ptr, usize) None,
-    AddMod = addmod(ptr) None,
-    MulMod = mulmod(ptr) None,
-    Exp = exp(ptr, bcx.type_int(8)) Some(bcx.type_int(64)),
+    Panic  = #[Cold] panic(ptr, usize) None,
+    AddMod = #[NoUnwind] addmod(ptr) None,
+    MulMod = #[NoUnwind] mulmod(ptr) None,
+    Exp    = #[NoUnwind] exp(ptr, bcx.type_int(8)) Some(bcx.type_int(64)),
 }
 
 // NOTE: All functions MUST be `extern "C"` and their parameters must match the ones declared above.
@@ -1298,7 +1364,7 @@ mod callbacks {
 mod tests {
     use super::*;
     use crate::*;
-    use revm_interpreter::{opcode as op, Gas};
+    use revm_interpreter::opcode as op;
     use revm_primitives::ruint::uint;
     use std::fmt;
 

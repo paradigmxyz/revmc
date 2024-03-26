@@ -17,7 +17,7 @@ use inkwell::{
 use revm_jit_backend::{
     eyre, Backend, BackendTypes, Builder, Error, IntCC, Result, TypeMethods, U256,
 };
-use std::{mem, path::Path};
+use std::path::Path;
 
 pub use inkwell;
 
@@ -123,6 +123,18 @@ impl<'ctx> JitEvmLlvmBackend<'ctx> {
     pub fn cx(&self) -> &'ctx Context {
         self.cx
     }
+
+    fn fn_type(
+        &self,
+        ret: Option<BasicTypeEnum<'ctx>>,
+        params: &[BasicTypeEnum<'ctx>],
+    ) -> FunctionType<'ctx> {
+        let params = params.iter().copied().map(Into::into).collect::<Vec<_>>();
+        match ret {
+            Some(ret) => ret.fn_type(&params, false),
+            None => self.ty_void.fn_type(&params, false),
+        }
+    }
 }
 
 impl<'ctx> BackendTypes for JitEvmLlvmBackend<'ctx> {
@@ -188,63 +200,17 @@ impl<'ctx> Backend for JitEvmLlvmBackend<'ctx> {
         self.machine.write_to_file(&self.module, FileType::Assembly, path).map_err(error_msg)
     }
 
-    fn build_function(&mut self, name: &str) -> Result<Self::Builder<'_>> {
-        let params = &[self.ty_ptr.into(), self.ty_ptr.into(), self.ty_ptr.into()];
-        let fn_type = self.ty_i8.fn_type(params, false);
+    fn build_function(
+        &mut self,
+        name: &str,
+        ret: Option<Self::Type>,
+        params: &[Self::Type],
+        param_names: &[&str],
+    ) -> Result<Self::Builder<'_>> {
+        let fn_type = self.fn_type(ret, params);
         let function = self.module.add_function(name, fn_type, None);
-        for (i, &name) in
-            ["arg.gas.addr", "arg.stack.addr", "arg.stack_len.addr"].iter().enumerate()
-        {
+        for (i, &name) in param_names.iter().enumerate() {
             function.get_nth_param(i as u32).expect(name).set_name(name);
-        }
-
-        // Function attributes.
-        let add_enum_attr = |loc, name, value| {
-            let id = Attribute::get_named_enum_kind_id(name);
-            let attr = self.cx.create_enum_attribute(id, value);
-            function.add_attribute(loc, attr);
-        };
-        let add_string_attr = |loc, name, value| {
-            let attr = self.cx.create_string_attribute(name, value);
-            function.add_attribute(loc, attr);
-        };
-        for attr in [
-            "willreturn",   // Always returns.
-            "mustprogress", // Implied by `willreturn`.
-            "nofree",       // Does not deallocate memory.
-            // "norecurse", // Does not call itself directly or indirectly; we can't know this.
-            "nosync", // Does not communicate with other threads.
-        ] {
-            add_enum_attr(AttributeLoc::Function, attr, 1);
-        }
-        if !self.debug_assertions {
-            // We unwind in debug panics.
-            add_enum_attr(AttributeLoc::Function, "nounwind", 1);
-        }
-        // TODO: Config value?
-        add_string_attr(AttributeLoc::Function, "frame-pointer", "all");
-        let cpu = self.machine.get_cpu();
-        add_string_attr(AttributeLoc::Function, "target-cpu", cpu.to_str().unwrap());
-
-        // Pointer argument attributes.
-        if !self.debug_assertions {
-            for (i, align, dereferenceable) in [
-                // (0, mem::align_of::<Gas>(), mem::size_of::<Gas>()),
-                (0, 8, 32),
-                // (1, mem::align_of::<EvmStack>(), mem::size_of::<EvmStack>()),
-                (1, 32, 32 * 1024),
-                (2, mem::align_of::<usize>(), mem::size_of::<usize>()),
-            ] {
-                for (name, value) in [
-                    ("noalias", 1),
-                    ("nocapture", 1),
-                    ("noundef", 1),
-                    ("align", align),
-                    ("dereferenceable", dereferenceable),
-                ] {
-                    add_enum_attr(AttributeLoc::Param(i), name, value as u64);
-                }
-            }
         }
 
         let entry = self.cx.append_basic_block(function, "entry");
@@ -690,14 +656,21 @@ impl<'a, 'ctx> Builder for JitEvmLlvmBuilder<'a, 'ctx> {
         params: &[Self::Type],
         address: usize,
     ) -> Self::Function {
-        let params = params.iter().copied().map(Into::into).collect::<Vec<_>>();
-        let ty = match ret {
-            Some(ret) => ret.fn_type(&params, false),
-            None => self.ty_void.fn_type(&params, false),
-        };
-        let function = self.module.add_function(name, ty, None);
+        let func_ty = self.fn_type(ret, params);
+        let function = self.module.add_function(name, func_ty, None);
         self.exec_engine.add_global_mapping(&function, address);
         function
+    }
+
+    fn add_function_attribute(
+        &mut self,
+        function: Option<Self::Function>,
+        attribute: revm_jit_backend::Attribute,
+        loc: revm_jit_backend::FunctionAttributeLocation,
+    ) {
+        let loc = convert_attribute_loc(loc);
+        let attr = convert_attribute(self, attribute);
+        function.unwrap_or(self.function).add_attribute(loc, attr);
     }
 }
 
@@ -722,6 +695,68 @@ fn convert_opt_level(level: revm_jit_backend::OptimizationLevel) -> Optimization
         revm_jit_backend::OptimizationLevel::Less => OptimizationLevel::Less,
         revm_jit_backend::OptimizationLevel::Default => OptimizationLevel::Default,
         revm_jit_backend::OptimizationLevel::Aggressive => OptimizationLevel::Aggressive,
+    }
+}
+
+fn convert_attribute(
+    bcx: &JitEvmLlvmBuilder<'_, '_>,
+    attr: revm_jit_backend::Attribute,
+) -> Attribute {
+    use revm_jit_backend::Attribute as OurAttr;
+
+    enum AttrValue<'a> {
+        String(&'a str),
+        Enum(u64),
+    }
+
+    let cpu;
+    let (key, value) = match attr {
+        OurAttr::WillReturn => ("willreturn", AttrValue::Enum(1)),
+        OurAttr::NoFree => ("nofree", AttrValue::Enum(1)),
+        OurAttr::NoRecurse => ("norecurse", AttrValue::Enum(1)),
+        OurAttr::NoSync => ("nosync", AttrValue::Enum(1)),
+        OurAttr::NoUnwind => ("nounwind", AttrValue::Enum(1)),
+        OurAttr::AllFramePointers => ("frame-pointer", AttrValue::String("all")),
+        OurAttr::NativeTargetCpu => (
+            "target-cpu",
+            AttrValue::String({
+                cpu = bcx.machine.get_cpu();
+                cpu.to_str().unwrap()
+            }),
+        ),
+        OurAttr::Cold => ("cold", AttrValue::Enum(1)),
+        OurAttr::Hot => ("hot", AttrValue::Enum(1)),
+        OurAttr::HintInline => ("inlinehint", AttrValue::Enum(1)),
+        OurAttr::AlwaysInline => ("alwaysinline", AttrValue::Enum(1)),
+        OurAttr::NoInline => ("noinline", AttrValue::Enum(1)),
+
+        OurAttr::NoAlias => ("noalias", AttrValue::Enum(1)),
+        OurAttr::NoCapture => ("nocapture", AttrValue::Enum(1)),
+        OurAttr::NoUndef => ("noundef", AttrValue::Enum(1)),
+        OurAttr::Align(n) => ("align", AttrValue::Enum(n)),
+        OurAttr::NonNull => ("nonnull", AttrValue::Enum(1)),
+        OurAttr::Dereferenceable(n) => ("dereferenceable", AttrValue::Enum(n)),
+        OurAttr::ReadNone => ("readnone", AttrValue::Enum(1)),
+        OurAttr::ReadOnly => ("readonly", AttrValue::Enum(1)),
+        OurAttr::WriteOnly => ("writeonly", AttrValue::Enum(1)),
+        OurAttr::Writeable => ("writeable", AttrValue::Enum(1)),
+
+        attr => todo!("{attr:?}"),
+    };
+    match value {
+        AttrValue::String(value) => bcx.cx.create_string_attribute(key, value),
+        AttrValue::Enum(value) => {
+            let id = Attribute::get_named_enum_kind_id(key);
+            bcx.cx.create_enum_attribute(id, value as u64)
+        }
+    }
+}
+
+fn convert_attribute_loc(loc: revm_jit_backend::FunctionAttributeLocation) -> AttributeLoc {
+    match loc {
+        revm_jit_backend::FunctionAttributeLocation::Return => AttributeLoc::Return,
+        revm_jit_backend::FunctionAttributeLocation::Param(i) => AttributeLoc::Param(i),
+        revm_jit_backend::FunctionAttributeLocation::Function => AttributeLoc::Function,
     }
 }
 

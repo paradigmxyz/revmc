@@ -2,6 +2,19 @@ use crate::Result;
 use ruint::aliases::U256;
 use std::{fmt, path::Path};
 
+/// Optimization level.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum OptimizationLevel {
+    /// No optimizations.
+    None,
+    /// Less optimizations.
+    Less,
+    /// Default optimizations.
+    Default,
+    /// Aggressive optimizations.
+    Aggressive,
+}
+
 /// Integer comparison condition.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum IntCC {
@@ -27,17 +40,49 @@ pub enum IntCC {
     UnsignedLessThanOrEqual,
 }
 
-/// Optimization level.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum OptimizationLevel {
-    /// No optimizations.
-    None,
-    /// Less optimizations.
-    Less,
-    /// Default optimizations.
-    Default,
-    /// Aggressive optimizations.
-    Aggressive,
+/// Function or parameter attribute.
+///
+/// Mostly copied from [LLVM](https://llvm.org/docs/LangRef.html).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Attribute {
+    // Function attributes.
+    WillReturn,
+    NoFree,
+    NoRecurse,
+    NoSync,
+    NoUnwind,
+    AllFramePointers,
+    NativeTargetCpu,
+    Cold,
+    Hot,
+    HintInline,
+    AlwaysInline,
+    NoInline,
+
+    // Parameter attributes.
+    NoAlias,
+    NoCapture,
+    NoUndef,
+    Align(u64),
+    NonNull,
+    Dereferenceable(u64),
+    ReadNone,
+    ReadOnly,
+    WriteOnly,
+    Writeable,
+    // TODO: Range?
+}
+
+/// Determines where on a function an attribute is assigned to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FunctionAttributeLocation {
+    /// Assign to the function's return type.
+    Return,
+    /// Assign to one of the function's params (0-indexed).
+    Param(u32),
+    /// Assign to the function itself.
+    Function,
 }
 
 pub trait BackendTypes {
@@ -68,7 +113,13 @@ pub trait Backend: BackendTypes + TypeMethods {
     fn dump_ir(&mut self, path: &Path) -> Result<()>;
     fn dump_disasm(&mut self, path: &Path) -> Result<()>;
 
-    fn build_function(&mut self, name: &str) -> Result<Self::Builder<'_>>;
+    fn build_function(
+        &mut self,
+        name: &str,
+        ret: Option<Self::Type>,
+        params: &[Self::Type],
+        param_names: &[&str],
+    ) -> Result<Self::Builder<'_>>;
     fn verify_function(&mut self, name: &str) -> Result<()>;
     fn optimize_function(&mut self, name: &str) -> Result<()>;
     fn get_function(&mut self, name: &str) -> Result<usize>;
@@ -172,6 +223,7 @@ pub trait Builder: BackendTypes + TypeMethods {
 
     fn unreachable(&mut self);
 
+    /// Adds a callback function to the IR that's located at `address`.
     fn add_callback_function(
         &mut self,
         name: &str,
@@ -179,4 +231,14 @@ pub trait Builder: BackendTypes + TypeMethods {
         params: &[Self::Type],
         address: usize,
     ) -> Self::Function;
+
+    /// Adds an attribute to a function, one of its parameters, or its return value.
+    ///
+    /// If `function` is `None`, the attribute is added to the current function.
+    fn add_function_attribute(
+        &mut self,
+        function: Option<Self::Function>,
+        attribute: Attribute,
+        loc: FunctionAttributeLocation,
+    );
 }
