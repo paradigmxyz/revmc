@@ -1,8 +1,8 @@
 #![allow(missing_docs, unused)]
 
 use color_eyre::Result;
-use revm_interpreter::{opcode as op, Gas};
-use revm_jit::{Backend, EvmStack, InstructionResult, JitEvm, OptimizationLevel};
+use revm_interpreter::{opcode as op, Gas, InstructionResult};
+use revm_jit::{Backend, EvmStack, JitEvm, OptimizationLevel};
 use revm_primitives::{SpecId, U256};
 use std::{hint::black_box, path::PathBuf};
 
@@ -20,14 +20,14 @@ fn main() -> Result<()> {
     let backend = revm_jit::llvm::JitEvmLlvmBackend::new(&context, opt_level).unwrap();
     let mut jit = JitEvm::new(backend);
     jit.set_dump_to(Some(PathBuf::from("./target/")));
-    jit.set_debug_assertions(false);
-    jit.set_pass_stack_through_args(true);
+    jit.set_debug_assertions(true);
+    // jit.set_pass_stack_through_args(true);
     jit.set_pass_stack_len_through_args(true);
     jit.set_disable_gas(true);
 
-    // custom(jit)?;
+    custom(jit)?;
     // fibonacci(jit)?;
-    weth(jit)?;
+    // weth(jit)?;
 
     Ok(())
 }

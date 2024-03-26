@@ -1,7 +1,7 @@
 [package]
-name = "revm-jit-core"
-description = "REVM JIT - core backend abstraction"
-homepage = "https://github.com/danipopes/revm-jit/tree/main/crates/revm-jit-core"
+name = "revm-jit-backend"
+description = "REVM JIT - backend abstraction"
+homepage = "https://github.com/danipopes/revm-jit/tree/main/crates/revm-jit-backend"
 
 version.workspace = true
 authors.workspace = true
@@ -17,8 +17,6 @@ exclude.workspace = true
 workspace = true
 
 [dependencies]
-revm-primitives.workspace = true
-revm-interpreter.workspace = true
-
-color-eyre.workspace = true
+ruint.workspace = true
+eyre.workspace = true
 tracing.workspace = true

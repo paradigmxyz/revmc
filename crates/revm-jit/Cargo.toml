@@ -17,7 +17,7 @@ exclude.workspace = true
 workspace = true
 
 [dependencies]
-revm-jit-core.workspace = true
+revm-jit-backend.workspace = true
 revm-jit-llvm = { workspace = true, optional = true }
 revm-jit-cranelift = { workspace = true, optional = true }
 
@@ -29,7 +29,7 @@ bitvec = "1"
 color-eyre.workspace = true
 tracing.workspace = true
 tracing-error.workspace = true
-tracing-subscriber = { workspace = true, features = ["fmt", "env-filter"]}
+tracing-subscriber = { workspace = true, features = ["fmt", "env-filter"] }
 
 [dev-dependencies]
 criterion = "0.5"

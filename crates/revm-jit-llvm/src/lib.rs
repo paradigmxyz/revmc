@@ -2,7 +2,6 @@
 #![cfg_attr(not(test), warn(unused_extern_crates))]
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
 
-use color_eyre::eyre::eyre;
 use inkwell::{
     attributes::{Attribute, AttributeLoc},
     basic_block::BasicBlock,
@@ -15,11 +14,9 @@ use inkwell::{
     values::{BasicValueEnum, FunctionValue, PointerValue},
     AddressSpace, IntPredicate, OptimizationLevel,
 };
-use revm_interpreter::Gas;
-use revm_jit_core::{
-    Backend, BackendTypes, Builder, Error, EvmStack, IntCC, RawJitEvmFn, Result, TypeMethods,
+use revm_jit_backend::{
+    eyre, Backend, BackendTypes, Builder, Error, IntCC, Result, TypeMethods, U256,
 };
-use revm_primitives::U256;
 use std::{mem, path::Path};
 
 pub use inkwell;
@@ -50,11 +47,14 @@ pub struct JitEvmLlvmBackend<'ctx> {
 impl<'ctx> JitEvmLlvmBackend<'ctx> {
     /// Creates a new LLVM-based EVM JIT backend.
     #[inline]
-    pub fn new(cx: &'ctx Context, opt_level: revm_jit_core::OptimizationLevel) -> Result<Self> {
-        revm_jit_core::debug_time!("new LLVM backend", || Self::new_inner(cx, opt_level))
+    pub fn new(cx: &'ctx Context, opt_level: revm_jit_backend::OptimizationLevel) -> Result<Self> {
+        revm_jit_backend::debug_time!("new LLVM backend", || Self::new_inner(cx, opt_level))
     }
 
-    fn new_inner(cx: &'ctx Context, opt_level: revm_jit_core::OptimizationLevel) -> Result<Self> {
+    fn new_inner(
+        cx: &'ctx Context,
+        opt_level: revm_jit_backend::OptimizationLevel,
+    ) -> Result<Self> {
         let opt_level = convert_opt_level(opt_level);
 
         let config = InitializationConfig {
@@ -80,7 +80,7 @@ impl<'ctx> JitEvmLlvmBackend<'ctx> {
                 RelocMode::Default,
                 CodeModel::JITDefault,
             )
-            .ok_or_else(|| eyre!("failed to create target machine"))?;
+            .ok_or_else(|| eyre::eyre!("failed to create target machine"))?;
         machine.set_asm_verbosity(true);
 
         let module = cx.create_module("evm");
@@ -176,7 +176,7 @@ impl<'ctx> Backend for JitEvmLlvmBackend<'ctx> {
         self.debug_assertions = yes;
     }
 
-    fn set_opt_level(&mut self, level: revm_jit_core::OptimizationLevel) {
+    fn set_opt_level(&mut self, level: revm_jit_backend::OptimizationLevel) {
         self.opt_level = convert_opt_level(level);
     }
 
@@ -199,31 +199,41 @@ impl<'ctx> Backend for JitEvmLlvmBackend<'ctx> {
         }
 
         // Function attributes.
+        let add_enum_attr = |loc, name, value| {
+            let id = Attribute::get_named_enum_kind_id(name);
+            let attr = self.cx.create_enum_attribute(id, value);
+            function.add_attribute(loc, attr);
+        };
+        let add_string_attr = |loc, name, value| {
+            let attr = self.cx.create_string_attribute(name, value);
+            function.add_attribute(loc, attr);
+        };
         for attr in [
-            "mustprogress",
-            "nofree",
-            "norecurse",
-            "nosync",
-            "nounwind",
-            "nonlazybind",
-            "willreturn",
+            "willreturn",   // Always returns.
+            "mustprogress", // Implied by `willreturn`.
+            "nofree",       // Does not deallocate memory.
+            // "norecurse", // Does not call itself directly or indirectly; we can't know this.
+            "nosync", // Does not communicate with other threads.
         ] {
-            let id = Attribute::get_named_enum_kind_id(attr);
-            let attr = self.cx.create_enum_attribute(id, 1);
-            function.add_attribute(AttributeLoc::Function, attr);
+            add_enum_attr(AttributeLoc::Function, attr, 1);
         }
-        {
-            let cpu = self.machine.get_cpu();
-            let attr = self.cx.create_string_attribute("target-cpu", cpu.to_str().unwrap());
-            function.add_attribute(AttributeLoc::Function, attr);
+        if !self.debug_assertions {
+            // We unwind in debug panics.
+            add_enum_attr(AttributeLoc::Function, "nounwind", 1);
         }
+        // TODO: Config value?
+        add_string_attr(AttributeLoc::Function, "frame-pointer", "all");
+        let cpu = self.machine.get_cpu();
+        add_string_attr(AttributeLoc::Function, "target-cpu", cpu.to_str().unwrap());
 
         // Pointer argument attributes.
         if !self.debug_assertions {
             for (i, align, dereferenceable) in [
-                (0, mem::align_of::<Gas>(), mem::size_of::<Gas>() as _),
-                (1, mem::align_of::<EvmStack>(), mem::size_of::<EvmStack>()),
-                (2, mem::align_of::<usize>(), mem::size_of::<usize>() as _),
+                // (0, mem::align_of::<Gas>(), mem::size_of::<Gas>()),
+                (0, 8, 32),
+                // (1, mem::align_of::<EvmStack>(), mem::size_of::<EvmStack>()),
+                (1, 32, 32 * 1024),
+                (2, mem::align_of::<usize>(), mem::size_of::<usize>()),
             ] {
                 for (name, value) in [
                     ("noalias", 1),
@@ -232,9 +242,7 @@ impl<'ctx> Backend for JitEvmLlvmBackend<'ctx> {
                     ("align", align),
                     ("dereferenceable", dereferenceable),
                 ] {
-                    let id = Attribute::get_named_enum_kind_id(name);
-                    let attr = self.cx.create_enum_attribute(id, value as u64);
-                    function.add_attribute(AttributeLoc::Param(i as _), attr);
+                    add_enum_attr(AttributeLoc::Param(i), name, value as u64);
                 }
             }
         }
@@ -261,10 +269,8 @@ impl<'ctx> Backend for JitEvmLlvmBackend<'ctx> {
         self.module.run_passes(passes, &self.machine, opts).map_err(error_msg)
     }
 
-    fn get_function(&mut self, name: &str) -> Result<RawJitEvmFn> {
-        unsafe { self.exec_engine.get_function(name) }
-            .map(|f| unsafe { f.into_raw() })
-            .map_err(Into::into)
+    fn get_function(&mut self, name: &str) -> Result<usize> {
+        self.exec_engine.get_function_address(name).map_err(Into::into)
     }
 
     unsafe fn free_function(&mut self, name: &str) -> Result<()> {
@@ -710,15 +716,15 @@ fn convert_intcc(cond: IntCC) -> IntPredicate {
     }
 }
 
-fn convert_opt_level(level: revm_jit_core::OptimizationLevel) -> OptimizationLevel {
+fn convert_opt_level(level: revm_jit_backend::OptimizationLevel) -> OptimizationLevel {
     match level {
-        revm_jit_core::OptimizationLevel::None => OptimizationLevel::None,
-        revm_jit_core::OptimizationLevel::Less => OptimizationLevel::Less,
-        revm_jit_core::OptimizationLevel::Default => OptimizationLevel::Default,
-        revm_jit_core::OptimizationLevel::Aggressive => OptimizationLevel::Aggressive,
+        revm_jit_backend::OptimizationLevel::None => OptimizationLevel::None,
+        revm_jit_backend::OptimizationLevel::Less => OptimizationLevel::Less,
+        revm_jit_backend::OptimizationLevel::Default => OptimizationLevel::Default,
+        revm_jit_backend::OptimizationLevel::Aggressive => OptimizationLevel::Aggressive,
     }
 }
 
-fn error_msg(msg: inkwell::support::LLVMString) -> revm_jit_core::Error {
-    revm_jit_core::Error::msg(msg.to_string_lossy().trim_end().to_string())
+fn error_msg(msg: inkwell::support::LLVMString) -> revm_jit_backend::Error {
+    revm_jit_backend::Error::msg(msg.to_string_lossy().trim_end().to_string())
 }

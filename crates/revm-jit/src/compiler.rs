@@ -1,8 +1,10 @@
 //! JIT compiler implementation.
 
-use crate::{Backend, Builder, Bytecode, IntCC, OpcodeData, OpcodeFlags, Result, I256_MIN};
+use crate::{
+    Backend, Builder, Bytecode, IntCC, JitEvmFn, OpcodeData, OpcodeFlags, Result, I256_MIN,
+};
 use revm_interpreter::{opcode as op, InstructionResult};
-use revm_jit_core::{JitEvmFn, OptimizationLevel, TypeMethods};
+use revm_jit_backend::{OptimizationLevel, TypeMethods};
 use revm_primitives::{SpecId, U256};
 use std::path::PathBuf;
 
@@ -200,7 +202,8 @@ impl<B: Backend> JitEvm<B> {
             })?;
         }
 
-        trace_time!("finalize", || self.backend.get_function(name).map(JitEvmFn::new))
+        let addr = trace_time!("finalize", || self.backend.get_function(name))?;
+        Ok(JitEvmFn::new(unsafe { std::mem::transmute(addr) }))
     }
 
     fn new_name(&mut self) -> String {
@@ -1232,8 +1235,8 @@ callbacks! { bcx; ptr; usize;
 // NOTE: All functions MUST be `extern "C"` and their parameters must match the ones declared above.
 mod callbacks {
     use super::*;
+    use crate::EvmWord;
     use revm_interpreter::gas;
-    use revm_jit_core::EvmWord;
     use revm_primitives::{FrontierSpec, SpuriousDragonSpec};
 
     pub(super) unsafe extern "C" fn panic(ptr: *const u8, len: usize) -> ! {
@@ -1295,8 +1298,7 @@ mod callbacks {
 mod tests {
     use super::*;
     use crate::*;
-    use interpreter::Gas;
-    use revm_interpreter::opcode as op;
+    use revm_interpreter::{opcode as op, Gas};
     use revm_primitives::ruint::uint;
     use std::fmt;
 

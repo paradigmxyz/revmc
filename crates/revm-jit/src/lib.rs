@@ -5,18 +5,19 @@
 #[macro_use]
 extern crate tracing;
 #[macro_use]
-extern crate revm_jit_core;
-
-use revm_primitives::U256;
+extern crate revm_jit_backend;
 
 mod bytecode;
 pub use bytecode::*;
+
+mod context;
+pub use context::*;
 
 mod compiler;
 pub use compiler::JitEvm;
 
 #[doc(inline)]
-pub use revm_jit_core::*;
+pub use revm_jit_backend::*;
 
 #[cfg(feature = "llvm")]
 #[doc(no_inline)]
@@ -31,6 +32,9 @@ pub use cranelift::JitEvmCraneliftBackend;
 #[cfg(feature = "cranelift")]
 #[doc(inline)]
 pub use revm_jit_cranelift as cranelift;
+
+#[doc(no_inline)]
+pub use revm_interpreter::{self as interpreter, primitives};
 
 const I256_MIN: U256 = U256::from_limbs([
     0x0000000000000000,

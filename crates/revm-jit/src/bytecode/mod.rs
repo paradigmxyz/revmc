@@ -27,7 +27,7 @@ pub(crate) struct Bytecode<'a> {
 
 impl<'a> Bytecode<'a> {
     pub(crate) fn new(code: &'a [u8], spec_id: SpecId) -> Self {
-        let mut opcodes = Vec::with_capacity(code.len());
+        let mut opcodes = Vec::with_capacity(code.len() + 1);
         let mut jumpdests = BitVec::repeat(false, code.len());
         let op_infos = op_info_map(spec_id);
         for (pc, RawOpcode { opcode, immediate }) in RawBytecodeIter::new(code).with_pc() {

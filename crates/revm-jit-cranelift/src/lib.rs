@@ -9,11 +9,10 @@ use cranelift::{
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{FuncId, FuncOrDataId, Linkage, Module};
 use pretty_clif::CommentWriter;
-use revm_jit_core::{
-    Backend, BackendTypes, Builder, Error, OptimizationLevel, Result, TypeMethods,
+use revm_jit_backend::{
+    Backend, BackendTypes, Builder, Error, OptimizationLevel, Result, TypeMethods, U256,
 };
-use revm_primitives::{HashMap, U256};
-use std::{cell::RefCell, io::Write, path::Path, rc::Rc};
+use std::{cell::RefCell, collections::HashMap, io::Write, path::Path, rc::Rc};
 
 mod pretty_clif;
 
@@ -190,10 +189,9 @@ impl Backend for JitEvmCraneliftBackend {
         Ok(())
     }
 
-    fn get_function(&mut self, name: &str) -> Result<revm_jit_core::RawJitEvmFn> {
+    fn get_function(&mut self, name: &str) -> Result<usize> {
         let id = self.name_to_id(name)?;
-        let ptr = self.module.get_finalized_function(id);
-        Ok(unsafe { std::mem::transmute(ptr) })
+        Ok(self.module.get_finalized_function(id) as usize)
     }
 
     unsafe fn free_function(&mut self, name: &str) -> Result<()> {
@@ -365,14 +363,19 @@ impl<'a> Builder for JitEvmCraneliftBuilder<'a> {
 
     fn icmp(
         &mut self,
-        cond: revm_jit_core::IntCC,
+        cond: revm_jit_backend::IntCC,
         lhs: Self::Value,
         rhs: Self::Value,
     ) -> Self::Value {
         self.bcx.ins().icmp(convert_intcc(cond), lhs, rhs)
     }
 
-    fn icmp_imm(&mut self, cond: revm_jit_core::IntCC, lhs: Self::Value, rhs: i64) -> Self::Value {
+    fn icmp_imm(
+        &mut self,
+        cond: revm_jit_backend::IntCC,
+        lhs: Self::Value,
+        rhs: i64,
+    ) -> Self::Value {
         self.bcx.ins().icmp_imm(convert_intcc(cond), lhs, rhs)
     }
 
@@ -602,17 +605,17 @@ fn mk_jit_module(opt_level: OptimizationLevel, symbols: Symbols) -> JITModule {
     JITModule::new(builder)
 }
 
-fn convert_intcc(cond: revm_jit_core::IntCC) -> IntCC {
+fn convert_intcc(cond: revm_jit_backend::IntCC) -> IntCC {
     match cond {
-        revm_jit_core::IntCC::Equal => IntCC::Equal,
-        revm_jit_core::IntCC::NotEqual => IntCC::NotEqual,
-        revm_jit_core::IntCC::SignedLessThan => IntCC::SignedLessThan,
-        revm_jit_core::IntCC::SignedGreaterThanOrEqual => IntCC::SignedGreaterThanOrEqual,
-        revm_jit_core::IntCC::SignedGreaterThan => IntCC::SignedGreaterThan,
-        revm_jit_core::IntCC::SignedLessThanOrEqual => IntCC::SignedLessThanOrEqual,
-        revm_jit_core::IntCC::UnsignedLessThan => IntCC::UnsignedLessThan,
-        revm_jit_core::IntCC::UnsignedGreaterThanOrEqual => IntCC::UnsignedGreaterThanOrEqual,
-        revm_jit_core::IntCC::UnsignedGreaterThan => IntCC::UnsignedGreaterThan,
-        revm_jit_core::IntCC::UnsignedLessThanOrEqual => IntCC::UnsignedLessThanOrEqual,
+        revm_jit_backend::IntCC::Equal => IntCC::Equal,
+        revm_jit_backend::IntCC::NotEqual => IntCC::NotEqual,
+        revm_jit_backend::IntCC::SignedLessThan => IntCC::SignedLessThan,
+        revm_jit_backend::IntCC::SignedGreaterThanOrEqual => IntCC::SignedGreaterThanOrEqual,
+        revm_jit_backend::IntCC::SignedGreaterThan => IntCC::SignedGreaterThan,
+        revm_jit_backend::IntCC::SignedLessThanOrEqual => IntCC::SignedLessThanOrEqual,
+        revm_jit_backend::IntCC::UnsignedLessThan => IntCC::UnsignedLessThan,
+        revm_jit_backend::IntCC::UnsignedGreaterThanOrEqual => IntCC::UnsignedGreaterThanOrEqual,
+        revm_jit_backend::IntCC::UnsignedGreaterThan => IntCC::UnsignedGreaterThan,
+        revm_jit_backend::IntCC::UnsignedLessThanOrEqual => IntCC::UnsignedLessThanOrEqual,
     }
 }

@@ -1618,7 +1618,7 @@ dependencies = [
  "color-eyre",
  "criterion",
  "revm-interpreter",
- "revm-jit-core",
+ "revm-jit-backend",
  "revm-jit-cranelift",
  "revm-jit-llvm",
  "revm-primitives",
@@ -1628,12 +1628,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "revm-jit-core"
+name = "revm-jit-backend"
 version = "0.1.0"
 dependencies = [
- "color-eyre",
- "revm-interpreter",
- "revm-primitives",
+ "eyre",
+ "ruint",
  "tracing",
 ]
 
@@ -1641,24 +1640,19 @@ dependencies = [
 name = "revm-jit-cranelift"
 version = "0.1.0"
 dependencies = [
- "color-eyre",
  "cranelift",
  "cranelift-jit",
  "cranelift-module",
  "cranelift-native",
- "revm-jit-core",
- "revm-primitives",
+ "revm-jit-backend",
 ]
 
 [[package]]
 name = "revm-jit-llvm"
 version = "0.1.0"
 dependencies = [
- "color-eyre",
  "inkwell",
- "revm-interpreter",
- "revm-jit-core",
- "revm-primitives",
+ "revm-jit-backend",
 ]
 
 [[package]]

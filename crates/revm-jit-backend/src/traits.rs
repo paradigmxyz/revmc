@@ -1,5 +1,5 @@
-use crate::{RawJitEvmFn, Result};
-use revm_primitives::U256;
+use crate::Result;
+use ruint::aliases::U256;
 use std::{fmt, path::Path};
 
 /// Integer comparison condition.
@@ -71,7 +71,7 @@ pub trait Backend: BackendTypes + TypeMethods {
     fn build_function(&mut self, name: &str) -> Result<Self::Builder<'_>>;
     fn verify_function(&mut self, name: &str) -> Result<()>;
     fn optimize_function(&mut self, name: &str) -> Result<()>;
-    fn get_function(&mut self, name: &str) -> Result<RawJitEvmFn>;
+    fn get_function(&mut self, name: &str) -> Result<usize>;
     unsafe fn free_function(&mut self, name: &str) -> Result<()>;
     unsafe fn free_all_functions(&mut self) -> Result<()>;
 }

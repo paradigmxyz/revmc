@@ -43,7 +43,7 @@ impl JitEvmFn {
     /// # Safety
     ///
     /// The caller must ensure that the arguments are valid.
-    #[inline(always)]
+    #[inline]
     pub unsafe fn call(
         self,
         gas: Option<&mut Gas>,
@@ -104,7 +104,7 @@ impl EvmStack {
     /// # Examples
     ///
     /// ```rust
-    /// use revm_jit_core::EvmStack;
+    /// use revm_jit::EvmStack;
     /// let mut stack_buf = EvmStack::new_heap();
     /// let stack = EvmStack::from_mut_vec(&mut stack_buf);
     /// assert_eq!(stack.as_slice().len(), EvmStack::CAPACITY);
