@@ -20,10 +20,7 @@ fn main() -> Result<()> {
     let backend = revm_jit::llvm::JitEvmLlvmBackend::new(&context, opt_level).unwrap();
     let mut jit = JitEvm::new(backend);
     jit.set_dump_to(Some(PathBuf::from("./target/")));
-    jit.set_debug_assertions(true);
-    // jit.set_pass_stack_through_args(true);
-    jit.set_pass_stack_len_through_args(true);
-    jit.set_disable_gas(true);
+    // jit.set_debug_assertions(true);
 
     custom(jit)?;
     // fibonacci(jit)?;
@@ -33,9 +30,13 @@ fn main() -> Result<()> {
 }
 
 fn custom<B: Backend>(mut jit: JitEvm<B>) -> Result<()> {
+    jit.set_pass_stack_through_args(true);
+    jit.set_pass_stack_len_through_args(true);
+    jit.set_disable_gas(true);
+
     #[rustfmt::skip]
     let code: &[u8] = &[
-        op::PUSH1, 0x20, op::STOP, op::PUSH0, op::PUSH0, op::ADD, op::STOP, op::ADDRESS,
+        op::PUSH0, op::SWAP1, op::SWAP1,
     ];
 
     let mut stack_buf = EvmStack::new_heap();
@@ -51,6 +52,9 @@ fn custom<B: Backend>(mut jit: JitEvm<B>) -> Result<()> {
 }
 
 fn fibonacci<B: Backend>(mut jit: JitEvm<B>) -> Result<()> {
+    jit.set_pass_stack_through_args(true);
+    jit.set_pass_stack_len_through_args(true);
+
     let gas_limit = 100_000;
 
     let input_u16: u16 = 69;

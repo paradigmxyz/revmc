@@ -955,19 +955,15 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let failure_cond = self.bcx.icmp_imm(IntCC::UnsignedLessThan, len, n as i64);
         self.build_failure(failure_cond, InstructionResult::StackUnderflow);
 
-        // let tmp;
-        let tmp = self.bcx.new_stack_slot(self.word_type, "tmp.addr");
-        // tmp = a;
+        // Load a.
         let a_sp = self.sp_from_top(len, n as usize + 1);
-        let a = self.load_word(a_sp, "a");
-        self.bcx.stack_store(a, tmp);
-        // a = b;
+        let a = self.load_word(a_sp, "swap.a");
+        // Load b.
         let b_sp = self.sp_from_top(len, 1);
-        let b = self.load_word(b_sp, "b");
+        let b = self.load_word(b_sp, "swap.top");
+        // Store.
+        self.bcx.store(a, b_sp);
         self.bcx.store(b, a_sp);
-        // b = tmp;
-        let tmp = self.bcx.stack_load(self.word_type, tmp, "tmp");
-        self.bcx.store(tmp, b_sp);
     }
 
     /// Loads the word at the given pointer.
