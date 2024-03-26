@@ -10,6 +10,8 @@ extern crate revm_jit_backend;
 mod bytecode;
 pub use bytecode::*;
 
+mod callbacks;
+
 mod context;
 pub use context::*;
 

@@ -1,5 +1,5 @@
-use revm_interpreter::{Gas, InstructionResult};
-use revm_primitives::U256;
+use revm_interpreter::{DummyHost, Gas, Host, InstructionResult, SharedMemory};
+use revm_primitives::{Env, U256};
 use std::{fmt, mem::MaybeUninit, ptr};
 
 /// The raw function signature of a JIT'd EVM bytecode.
@@ -9,6 +9,8 @@ pub type RawJitEvmFn = unsafe extern "C" fn(
     gas: *mut Gas,
     stack: *mut EvmStack,
     stack_len: *mut usize,
+    env: *mut Env,
+    ecx: *mut EvmContext<'_>,
 ) -> InstructionResult;
 
 /// A JIT'd EVM bytecode function.
@@ -37,6 +39,7 @@ impl JitEvmFn {
     ///   `true`.
     /// - `stack_len`: Pointer to the stack length. Must be `Some` if `pass_stack_len_through_args`
     ///   is set to `true`.
+    /// - `ecx`: The context object.
     ///
     /// These conditions are enforced at runtime if `debug_assertions` is set to `true`.
     ///
@@ -49,8 +52,15 @@ impl JitEvmFn {
         gas: Option<&mut Gas>,
         stack: Option<&mut EvmStack>,
         stack_len: Option<&mut usize>,
+        ecx: &mut EvmContext<'_>,
     ) -> InstructionResult {
-        (self.0)(option_as_mut_ptr(gas), option_as_mut_ptr(stack), option_as_mut_ptr(stack_len))
+        (self.0)(
+            option_as_mut_ptr(gas),
+            option_as_mut_ptr(stack),
+            option_as_mut_ptr(stack_len),
+            ecx.host.env_mut(),
+            ecx,
+        )
     }
 }
 
@@ -192,22 +202,76 @@ impl EvmStack {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct EvmWord([u8; 32]);
 
-macro_rules! fmt_impl {
-    ($trait:ident) => {
-        impl fmt::$trait for EvmWord {
-            #[inline]
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                self.to_u256().fmt(f)
+macro_rules! impl_fmt {
+    ($($trait:ident),* $(,)?) => {
+        $(
+            impl fmt::$trait for EvmWord {
+                #[inline]
+                fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                    self.to_u256().fmt(f)
+                }
             }
-        }
+        )*
     };
 }
 
-fmt_impl!(Debug);
-fmt_impl!(Display);
-fmt_impl!(LowerHex);
-fmt_impl!(UpperHex);
-fmt_impl!(Binary);
+impl_fmt!(Debug, Display, Binary, Octal, LowerHex, UpperHex);
+
+macro_rules! impl_conversions_through_u256 {
+    ($($ty:ty),*) => {
+        $(
+            impl From<$ty> for EvmWord {
+                #[inline]
+                fn from(value: $ty) -> Self {
+                    Self::from_u256(U256::from(value))
+                }
+            }
+
+            impl From<&$ty> for EvmWord {
+                #[inline]
+                fn from(value: &$ty) -> Self {
+                    Self::from(*value)
+                }
+            }
+
+            impl From<&mut $ty> for EvmWord {
+                #[inline]
+                fn from(value: &mut $ty) -> Self {
+                    Self::from(*value)
+                }
+            }
+
+            impl TryFrom<EvmWord> for $ty {
+                type Error = ();
+
+                #[inline]
+                fn try_from(value: EvmWord) -> Result<Self, Self::Error> {
+                    value.to_u256().try_into().map_err(|_| ())
+                }
+            }
+
+            impl TryFrom<&EvmWord> for $ty {
+                type Error = ();
+
+                #[inline]
+                fn try_from(value: &EvmWord) -> Result<Self, Self::Error> {
+                    (*value).try_into()
+                }
+            }
+
+            impl TryFrom<&mut EvmWord> for $ty {
+                type Error = ();
+
+                #[inline]
+                fn try_from(value: &mut EvmWord) -> Result<Self, Self::Error> {
+                    (*value).try_into()
+                }
+            }
+        )*
+    };
+}
+
+impl_conversions_through_u256!(bool, u8, u16, u32, u64, usize, u128);
 
 impl From<U256> for EvmWord {
     #[inline]
@@ -238,6 +302,36 @@ impl EvmWord {
     #[inline]
     pub const fn from_ne_bytes(x: [u8; 32]) -> Self {
         Self(x)
+    }
+
+    /// Creates a new value from big-endian bytes.
+    #[inline]
+    pub fn from_be_bytes(x: [u8; 32]) -> Self {
+        Self::from_be(Self(x))
+    }
+
+    /// Creates a new value from little-endian bytes.
+    #[inline]
+    pub fn from_le_bytes(x: [u8; 32]) -> Self {
+        Self::from_le(Self(x))
+    }
+
+    /// Converts an integer from big endian to the target's endianness.
+    #[inline]
+    pub fn from_be(x: Self) -> Self {
+        #[cfg(target_endian = "little")]
+        return x.swap_bytes();
+        #[cfg(target_endian = "big")]
+        return x;
+    }
+
+    /// Converts an integer from little endian to the target's endianness.
+    #[inline]
+    pub fn from_le(x: Self) -> Self {
+        #[cfg(target_endian = "little")]
+        return x;
+        #[cfg(target_endian = "big")]
+        return x.swap_bytes();
     }
 
     /// Converts a [`U256`].
@@ -338,6 +432,58 @@ impl EvmWord {
         return unsafe { std::mem::transmute(self) };
         #[cfg(target_endian = "big")]
         return U256::from_be_bytes(self.0);
+    }
+}
+
+/// The JIT EVM context.
+///
+/// Currently contains and handler memory and the host.
+pub struct EvmContext<'a> {
+    /// The memory.
+    pub memory: &'a mut SharedMemory,
+    /// The host.
+    pub host: &'a mut dyn Host,
+}
+
+impl fmt::Debug for EvmContext<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EvmContext").field("memory", &self.memory).finish_non_exhaustive()
+    }
+}
+
+impl<'a> EvmContext<'a> {
+    /// Creates a new JIT EVM context.
+    pub fn new(memory: &'a mut SharedMemory, host: &'a mut dyn Host) -> Self {
+        Self { memory, host }
+    }
+
+    #[doc(hidden)]
+    pub fn dummy_do_not_use() -> impl std::ops::DerefMut<Target = Self> {
+        struct Dropper<'a>(EvmContext<'a>);
+        impl Drop for Dropper<'_> {
+            fn drop(&mut self) {
+                let Self(EvmContext { memory, host }) = self;
+                unsafe {
+                    drop(Box::from_raw(*memory));
+                    drop(Box::from_raw(*host));
+                }
+            }
+        }
+        impl<'a> std::ops::Deref for Dropper<'a> {
+            type Target = EvmContext<'a>;
+            fn deref(&self) -> &Self::Target {
+                &self.0
+            }
+        }
+        impl std::ops::DerefMut for Dropper<'_> {
+            fn deref_mut(&mut self) -> &mut Self::Target {
+                &mut self.0
+            }
+        }
+        Dropper(Self {
+            memory: Box::leak(Box::new(SharedMemory::new())),
+            host: Box::leak(Box::<DummyHost>::default()),
+        })
     }
 }
 

@@ -105,6 +105,10 @@ impl TypeMethods for JitEvmCraneliftBackend {
     fn type_array(&self, ty: Self::Type, size: u32) -> Self::Type {
         unimplemented!("type: {size} x {ty}")
     }
+
+    fn type_bit_width(&self, ty: Self::Type) -> u32 {
+        ty.bits()
+    }
 }
 
 impl Backend for JitEvmCraneliftBackend {
@@ -255,6 +259,10 @@ impl<'a> TypeMethods for JitEvmCraneliftBuilder<'a> {
 
     fn type_array(&self, ty: Self::Type, size: u32) -> Self::Type {
         unimplemented!("type: {size} x {ty}")
+    }
+
+    fn type_bit_width(&self, ty: Self::Type) -> u32 {
+        ty.bits()
     }
 }
 
@@ -491,6 +499,10 @@ impl<'a> Builder for JitEvmCraneliftBuilder<'a> {
         self.bcx.ins().imul_imm(lhs, rhs)
     }
 
+    fn bswap(&mut self, value: Self::Value) -> Self::Value {
+        self.bcx.ins().bswap(value)
+    }
+
     fn bitor(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
         self.bcx.ins().bor(lhs, rhs)
     }
@@ -539,8 +551,8 @@ impl<'a> Builder for JitEvmCraneliftBuilder<'a> {
         self.bcx.ins().sextend(ty, value)
     }
 
-    fn gep(&mut self, ty: Self::Type, ptr: Self::Value, offset: Self::Value) -> Self::Value {
-        let offset = self.bcx.ins().imul_imm(offset, ty.bytes() as i64);
+    fn gep(&mut self, ty: Self::Type, ptr: Self::Value, indexes: &[Self::Value]) -> Self::Value {
+        let offset = self.bcx.ins().imul_imm(*indexes.first().unwrap(), ty.bytes() as i64);
         self.bcx.ins().iadd(ptr, offset)
     }
 

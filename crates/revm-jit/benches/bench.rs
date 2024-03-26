@@ -2,7 +2,7 @@
 
 use criterion::{criterion_group, criterion_main, Criterion};
 use revm_interpreter::{opcode as op, Gas, EMPTY_SHARED_MEMORY};
-use revm_jit::{llvm, EvmStack, JitEvm, JitEvmFn};
+use revm_jit::{llvm, EvmContext, EvmStack, JitEvm, JitEvmFn};
 use revm_primitives::{SpecId, U256};
 use std::{hint::black_box, time::Duration};
 
@@ -37,11 +37,12 @@ fn bench(c: &mut Criterion) {
     stack_buf.push(input_u256.into());
     let stack = EvmStack::from_mut_vec(&mut stack_buf);
     let mut stack_len = 1;
+    let mut cx = EvmContext::dummy_do_not_use();
     let mut call_jit = |f: JitEvmFn| {
         stack.as_mut_slice()[0] = input_u256.into();
         gas = Gas::new(gas_limit);
         stack_len = 1;
-        unsafe { f.call(Some(&mut gas), Some(stack), Some(&mut stack_len)) }
+        unsafe { f.call(Some(&mut gas), Some(stack), Some(&mut stack_len), &mut cx) }
     };
 
     g.bench_function("revm-jit/no_gas", |b| b.iter(|| call_jit(jit_no_gas)));

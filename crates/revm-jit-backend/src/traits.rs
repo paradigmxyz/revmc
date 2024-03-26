@@ -48,6 +48,7 @@ pub enum IntCC {
 pub enum Attribute {
     // Function attributes.
     WillReturn,
+    NoReturn,
     NoFree,
     NoRecurse,
     NoSync,
@@ -59,6 +60,7 @@ pub enum Attribute {
     HintInline,
     AlwaysInline,
     NoInline,
+    Speculatable,
 
     // Parameter attributes.
     NoAlias,
@@ -70,7 +72,7 @@ pub enum Attribute {
     ReadNone,
     ReadOnly,
     WriteOnly,
-    Writeable,
+    Writable,
     // TODO: Range?
 }
 
@@ -132,6 +134,7 @@ pub trait TypeMethods: BackendTypes {
     fn type_ptr_sized_int(&self) -> Self::Type;
     fn type_int(&self, bits: u32) -> Self::Type;
     fn type_array(&self, ty: Self::Type, size: u32) -> Self::Type;
+    fn type_bit_width(&self, ty: Self::Type) -> u32;
 }
 
 pub trait Builder: BackendTypes + TypeMethods {
@@ -200,6 +203,8 @@ pub trait Builder: BackendTypes + TypeMethods {
     fn isub_imm(&mut self, lhs: Self::Value, rhs: i64) -> Self::Value;
     fn imul_imm(&mut self, lhs: Self::Value, rhs: i64) -> Self::Value;
 
+    fn bswap(&mut self, value: Self::Value) -> Self::Value;
+
     fn bitor(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
     fn bitand(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
     fn bitxor(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
@@ -216,7 +221,7 @@ pub trait Builder: BackendTypes + TypeMethods {
     fn zext(&mut self, ty: Self::Type, value: Self::Value) -> Self::Value;
     fn sext(&mut self, ty: Self::Type, value: Self::Value) -> Self::Value;
 
-    fn gep(&mut self, ty: Self::Type, ptr: Self::Value, offset: Self::Value) -> Self::Value;
+    fn gep(&mut self, ty: Self::Type, ptr: Self::Value, indexes: &[Self::Value]) -> Self::Value;
     fn extract_value(&mut self, value: Self::Value, index: u32) -> Self::Value;
 
     fn call(&mut self, function: Self::Function, args: &[Self::Value]) -> Option<Self::Value>;

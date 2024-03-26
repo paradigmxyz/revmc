@@ -201,6 +201,11 @@ impl<'a> Bytecode<'a> {
         Ok(())
     }
 
+    /// Returns the raw opcode.
+    pub(crate) fn raw_opcode(&self, ic: usize) -> RawOpcode<'a> {
+        self.opcodes[ic].to_raw_in(self)
+    }
+
     pub(crate) fn get_imm_of(&self, opcode: OpcodeData) -> Option<&'a [u8]> {
         (opcode.imm_len() > 0).then(|| self.get_imm(opcode.data))
     }
@@ -216,8 +221,13 @@ impl<'a> Bytecode<'a> {
     }
 
     /// Returns `true` if the bytecode is EOF.
-    fn is_eof(&self) -> bool {
+    pub(crate) fn is_eof(&self) -> bool {
         false
+    }
+
+    /// Returns `true` if the opcode at the given instruction counter is diverging.
+    pub(crate) fn is_opcode_diverging(&self, ic: usize) -> bool {
+        self.opcodes[ic].is_diverging(self.is_eof())
     }
 
     // TODO: is it worth it to make this a map?

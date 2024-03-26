@@ -171,6 +171,10 @@ impl<'ctx> TypeMethods for JitEvmLlvmBackend<'ctx> {
     fn type_array(&self, ty: Self::Type, size: u32) -> Self::Type {
         ty.array_type(size).into()
     }
+
+    fn type_bit_width(&self, ty: Self::Type) -> u32 {
+        ty.into_int_type().get_bit_width()
+    }
 }
 
 impl<'ctx> Backend for JitEvmLlvmBackend<'ctx> {
@@ -327,6 +331,10 @@ impl<'a, 'ctx> TypeMethods for JitEvmLlvmBuilder<'a, 'ctx> {
 
     fn type_array(&self, ty: Self::Type, size: u32) -> Self::Type {
         self.backend.type_array(ty, size)
+    }
+
+    fn type_bit_width(&self, ty: Self::Type) -> u32 {
+        self.backend.type_bit_width(ty)
     }
 }
 
@@ -571,6 +579,15 @@ impl<'a, 'ctx> Builder for JitEvmLlvmBuilder<'a, 'ctx> {
         self.imul(lhs, rhs)
     }
 
+    fn bswap(&mut self, value: Self::Value) -> Self::Value {
+        let ty = value.get_type();
+        let bits = ty.into_int_type().get_bit_width();
+        assert!(bits % 16 == 0);
+        let name = format!("llvm.bswap.i{bits}");
+        let bswap = self.get_function_or(&name, |this| this.fn_type(Some(ty), &[ty]));
+        self.call(bswap, &[value.into()]).unwrap()
+    }
+
     fn bitor(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
         self.bcx.build_or(lhs.into_int_value(), rhs.into_int_value(), "").unwrap().into()
     }
@@ -628,9 +645,14 @@ impl<'a, 'ctx> Builder for JitEvmLlvmBuilder<'a, 'ctx> {
         self.bcx.build_int_s_extend(value.into_int_value(), ty.into_int_type(), "").unwrap().into()
     }
 
-    fn gep(&mut self, elem_ty: Self::Type, ptr: Self::Value, offset: Self::Value) -> Self::Value {
-        let offset = offset.into_int_value();
-        unsafe { self.bcx.build_in_bounds_gep(elem_ty, ptr.into_pointer_value(), &[offset], "") }
+    fn gep(
+        &mut self,
+        elem_ty: Self::Type,
+        ptr: Self::Value,
+        indexes: &[Self::Value],
+    ) -> Self::Value {
+        let indexes = indexes.iter().map(|idx| idx.into_int_value()).collect::<Vec<_>>();
+        unsafe { self.bcx.build_in_bounds_gep(elem_ty, ptr.into_pointer_value(), &indexes, "") }
             .unwrap()
             .into()
     }
@@ -712,6 +734,7 @@ fn convert_attribute(
     let cpu;
     let (key, value) = match attr {
         OurAttr::WillReturn => ("willreturn", AttrValue::Enum(1)),
+        OurAttr::NoReturn => ("noreturn", AttrValue::Enum(1)),
         OurAttr::NoFree => ("nofree", AttrValue::Enum(1)),
         OurAttr::NoRecurse => ("norecurse", AttrValue::Enum(1)),
         OurAttr::NoSync => ("nosync", AttrValue::Enum(1)),
@@ -729,6 +752,7 @@ fn convert_attribute(
         OurAttr::HintInline => ("inlinehint", AttrValue::Enum(1)),
         OurAttr::AlwaysInline => ("alwaysinline", AttrValue::Enum(1)),
         OurAttr::NoInline => ("noinline", AttrValue::Enum(1)),
+        OurAttr::Speculatable => ("speculatable", AttrValue::Enum(1)),
 
         OurAttr::NoAlias => ("noalias", AttrValue::Enum(1)),
         OurAttr::NoCapture => ("nocapture", AttrValue::Enum(1)),
@@ -739,7 +763,7 @@ fn convert_attribute(
         OurAttr::ReadNone => ("readnone", AttrValue::Enum(1)),
         OurAttr::ReadOnly => ("readonly", AttrValue::Enum(1)),
         OurAttr::WriteOnly => ("writeonly", AttrValue::Enum(1)),
-        OurAttr::Writeable => ("writeable", AttrValue::Enum(1)),
+        OurAttr::Writable => ("writable", AttrValue::Enum(1)),
 
         attr => todo!("{attr:?}"),
     };
@@ -747,7 +771,7 @@ fn convert_attribute(
         AttrValue::String(value) => bcx.cx.create_string_attribute(key, value),
         AttrValue::Enum(value) => {
             let id = Attribute::get_named_enum_kind_id(key);
-            bcx.cx.create_enum_attribute(id, value as u64)
+            bcx.cx.create_enum_attribute(id, value)
         }
     }
 }

@@ -1,8 +1,8 @@
 #![allow(missing_docs, unused)]
 
 use color_eyre::Result;
-use revm_interpreter::{opcode as op, Gas, InstructionResult};
-use revm_jit::{Backend, EvmStack, JitEvm, OptimizationLevel};
+use revm_interpreter::{opcode as op, DummyHost, Gas, InstructionResult};
+use revm_jit::{Backend, EvmContext, EvmStack, JitEvm, OptimizationLevel};
 use revm_primitives::{SpecId, U256};
 use std::{hint::black_box, path::PathBuf};
 
@@ -31,20 +31,23 @@ fn main() -> Result<()> {
 
 fn custom<B: Backend>(mut jit: JitEvm<B>) -> Result<()> {
     jit.set_pass_stack_through_args(true);
-    jit.set_pass_stack_len_through_args(true);
+    // jit.set_pass_stack_len_through_args(true);
     jit.set_disable_gas(true);
 
     #[rustfmt::skip]
     let code: &[u8] = &[
-        op::PUSH0, op::SWAP1, op::SWAP1,
+        op::COINBASE,
+        op::PUSH20, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        op::AND,
     ];
 
     let mut stack_buf = EvmStack::new_heap();
     let stack = EvmStack::from_mut_vec(&mut stack_buf);
     stack.as_mut_slice()[0] = U256::from(0xab).into();
     // let mut gas = Gas::new(100_000);
+    let mut cx = EvmContext::dummy_do_not_use();
     let f = jit.compile(code, SpecId::LATEST)?;
-    let ret = unsafe { f.call(None, Some(stack), Some(&mut 1)) };
+    let ret = unsafe { f.call(None, Some(stack), Some(&mut 1), &mut cx) };
     assert_eq!(ret, InstructionResult::Stop);
     // assert_eq!(stack.as_slice()[0], U256::from(0xab).into());
 
@@ -117,12 +120,13 @@ fn fibonacci<B: Backend>(mut jit: JitEvm<B>) -> Result<()> {
     stack_buf.push(input.into());
     let stack = EvmStack::from_mut_vec(&mut stack_buf);
     let mut stack_len = 1;
+    let mut cx = EvmContext::dummy_do_not_use();
 
     bench(n_iters, " JIT", || {
         stack.as_mut_slice()[0] = input.into();
         gas = Gas::new(gas_limit);
         stack_len = 1;
-        unsafe { f.call(Some(&mut gas), Some(stack), Some(&mut stack_len)) }
+        unsafe { f.call(Some(&mut gas), Some(stack), Some(&mut stack_len), &mut cx) }
     });
 
     let contract = Box::new(revm_interpreter::Contract {
