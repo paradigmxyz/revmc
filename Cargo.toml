@@ -40,3 +40,7 @@ color-eyre = "0.6"
 tracing = "0.1"
 tracing-error = "0.2"
 tracing-subscriber = "0.3"
+
+[patch.crates-io]
+revm-primitives = { git = "https://github.com/bluealloy/revm" }
+revm-interpreter = { git = "https://github.com/bluealloy/revm" }

@@ -20,7 +20,7 @@ pub(crate) struct Bytecode<'a> {
     /// The parsed opcodes.
     opcodes: Vec<OpcodeData>,
     /// `JUMPDEST` map.
-    pub(crate) jumpdests: BitVec,
+    jumpdests: BitVec,
     /// The [`SpecId`].
     pub(crate) spec_id: SpecId,
 }
@@ -59,8 +59,7 @@ impl<'a> Bytecode<'a> {
         let mut bytecode = Self { code, opcodes, jumpdests, spec_id };
 
         // Pad code to ensure there is at least one diverging opcode.
-        let is_eof = bytecode.is_eof();
-        if bytecode.opcodes.last().map_or(true, |last| !last.is_diverging(is_eof)) {
+        if bytecode.opcodes.last().map_or(true, |last| !last.is_diverging(bytecode.is_eof())) {
             bytecode.opcodes.push(OpcodeData::new(op::STOP));
         }
 
@@ -156,8 +155,8 @@ impl<'a> Bytecode<'a> {
     /// Mark unreachable opcodes as `DEAD_CODE` to not generate any code for them.
     ///
     /// This pass is technically unnecessary as the backend will very likely optimize any
-    /// unreachable code that we generate, but we might as well not generate it in the first place
-    /// since it's trivial for us to do so.
+    /// unreachable code that we generate, but this is trivial for us to do and significantly speeds
+    /// up code generation.
     ///
     /// Before EOF, we can simply mark all opcodes that are between diverging opcodes and
     /// `JUMPDEST`s.

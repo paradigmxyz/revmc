@@ -1,5 +1,7 @@
-use revm_interpreter::{DummyHost, Gas, Host, InstructionResult, SharedMemory};
-use revm_primitives::{Env, U256};
+use revm_interpreter::{
+    Contract, DummyHost, Gas, Host, InstructionResult, Interpreter, InterpreterAction, SharedMemory,
+};
+use revm_primitives::{Address, Env, U256};
 use std::{fmt, mem::MaybeUninit, ptr};
 
 /// The raw function signature of a JIT'd EVM bytecode.
@@ -10,6 +12,7 @@ pub type RawJitEvmFn = unsafe extern "C" fn(
     stack: *mut EvmStack,
     stack_len: *mut usize,
     env: *mut Env,
+    contract: *const Contract,
     ecx: *mut EvmContext<'_>,
 ) -> InstructionResult;
 
@@ -30,11 +33,32 @@ impl JitEvmFn {
         self.0
     }
 
+    /// Calls the function by re-using the interpreter's resources.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that the function is safe to call.
+    #[inline]
+    pub unsafe fn call_with_interpreter(self, interpreter: &mut Interpreter, host: &mut dyn Host) {
+        let mut ecx;
+        let res = (self.0)(
+            &mut interpreter.gas,
+            EvmStack::from_interpreter_stack(&mut interpreter.stack),
+            // TODO: Use `data_mut`.
+            &mut *interpreter.stack.data().as_ptr().cast_mut().cast::<usize>().add(1),
+            host.env_mut(),
+            interpreter.contract(),
+            {
+                ecx = EvmContext::from_interpreter(interpreter, host);
+                &mut ecx
+            },
+        );
+        interpreter.instruction_result = res;
+    }
+
     /// Calls the function.
     ///
     /// Arguments:
-    /// - `gas`: Pointer to the gas object. Must be `Some` if `disable_gas` is set to `false` (the
-    ///   default).
     /// - `stack`: Pointer to the stack. Must be `Some` if `pass_stack_through_args` is set to
     ///   `true`.
     /// - `stack_len`: Pointer to the stack length. Must be `Some` if `pass_stack_len_through_args`
@@ -45,20 +69,20 @@ impl JitEvmFn {
     ///
     /// # Safety
     ///
-    /// The caller must ensure that the arguments are valid.
+    /// The caller must ensure that the arguments are valid and that the function is safe to call.
     #[inline]
     pub unsafe fn call(
         self,
-        gas: Option<&mut Gas>,
         stack: Option<&mut EvmStack>,
         stack_len: Option<&mut usize>,
         ecx: &mut EvmContext<'_>,
     ) -> InstructionResult {
         (self.0)(
-            option_as_mut_ptr(gas),
+            ecx.gas,
             option_as_mut_ptr(stack),
             option_as_mut_ptr(stack_len),
             ecx.host.env_mut(),
+            ecx.contract,
             ecx,
         )
     }
@@ -89,6 +113,14 @@ impl EvmStack {
     #[inline]
     pub fn new_heap() -> Vec<EvmWord> {
         Vec::with_capacity(1024)
+    }
+
+    /// Creates a stack from the interpreter's stack. Assumes that the stack is large enough.
+    #[inline]
+    pub fn from_interpreter_stack(stack: &mut revm_interpreter::Stack) -> &mut Self {
+        debug_assert!(stack.data().capacity() >= Self::CAPACITY);
+        // TODO: Use `data_mut`.
+        unsafe { Self::from_mut_ptr(stack.data().as_ptr().cast_mut().cast()) }
     }
 
     /// Creates a stack from a vector's buffer.
@@ -433,6 +465,12 @@ impl EvmWord {
         #[cfg(target_endian = "big")]
         return U256::from_be_bytes(self.0);
     }
+
+    /// Converts this value to an [`Address`].
+    #[inline]
+    pub fn to_address(self) -> Address {
+        Address::from_word(self.to_be_bytes().into())
+    }
 }
 
 /// The JIT EVM context.
@@ -441,8 +479,18 @@ impl EvmWord {
 pub struct EvmContext<'a> {
     /// The memory.
     pub memory: &'a mut SharedMemory,
+    /// Contract information and call data.
+    pub contract: &'a mut Contract,
+    /// The gas.
+    pub gas: &'a mut Gas,
     /// The host.
     pub host: &'a mut dyn Host,
+    /// The return action.
+    pub next_action: &'a mut InterpreterAction,
+    /// The return data.
+    pub return_data: &'a [u8],
+    /// Whether the context is static.
+    pub is_static: bool,
 }
 
 impl fmt::Debug for EvmContext<'_> {
@@ -452,9 +500,19 @@ impl fmt::Debug for EvmContext<'_> {
 }
 
 impl<'a> EvmContext<'a> {
-    /// Creates a new JIT EVM context.
-    pub fn new(memory: &'a mut SharedMemory, host: &'a mut dyn Host) -> Self {
-        Self { memory, host }
+    /// Creates a new JIT EVM context from an interpreter.
+    #[inline]
+    pub fn from_interpreter(interpreter: &'a mut Interpreter, host: &'a mut dyn Host) -> Self {
+        interpreter.instruction_result = InstructionResult::Continue;
+        Self {
+            memory: &mut interpreter.shared_memory,
+            contract: &mut interpreter.contract,
+            gas: &mut interpreter.gas,
+            host,
+            next_action: &mut interpreter.next_action,
+            return_data: &interpreter.return_data_buffer,
+            is_static: interpreter.is_static,
+        }
     }
 
     #[doc(hidden)]
@@ -462,10 +520,21 @@ impl<'a> EvmContext<'a> {
         struct Dropper<'a>(EvmContext<'a>);
         impl Drop for Dropper<'_> {
             fn drop(&mut self) {
-                let Self(EvmContext { memory, host }) = self;
+                let EvmContext {
+                    memory,
+                    contract,
+                    gas,
+                    host,
+                    next_action,
+                    return_data: _,
+                    is_static: _,
+                } = &mut self.0;
                 unsafe {
                     drop(Box::from_raw(*memory));
+                    drop(Box::from_raw(*contract));
+                    drop(Box::from_raw(*gas));
                     drop(Box::from_raw(*host));
+                    drop(Box::from_raw(*next_action));
                 }
             }
         }
@@ -481,8 +550,13 @@ impl<'a> EvmContext<'a> {
             }
         }
         Dropper(Self {
-            memory: Box::leak(Box::new(SharedMemory::new())),
-            host: Box::leak(Box::<DummyHost>::default()),
+            memory: Box::leak(Box::<SharedMemory>::default()),
+            contract: Box::leak(Box::<Contract>::default()),
+            gas: Box::leak(Box::new(Gas::new(100_000))),
+            host: Box::leak(Box::<DummyHost>::default() as Box<dyn Host>),
+            next_action: Box::leak(Box::<InterpreterAction>::default()),
+            return_data: &[],
+            is_static: false,
         })
     }
 }

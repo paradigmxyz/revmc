@@ -499,6 +499,22 @@ impl<'a> Builder for JitEvmCraneliftBuilder<'a> {
         self.bcx.ins().imul_imm(lhs, rhs)
     }
 
+    fn uadd_overflow(&mut self, lhs: Self::Value, rhs: Self::Value) -> (Self::Value, Self::Value) {
+        self.bcx.ins().uadd_overflow(lhs, rhs)
+    }
+
+    fn usub_overflow(&mut self, lhs: Self::Value, rhs: Self::Value) -> (Self::Value, Self::Value) {
+        self.bcx.ins().usub_overflow(lhs, rhs)
+    }
+
+    fn umax(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
+        self.bcx.ins().umax(lhs, rhs)
+    }
+
+    fn umin(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
+        self.bcx.ins().umin(lhs, rhs)
+    }
+
     fn bswap(&mut self, value: Self::Value) -> Self::Value {
         self.bcx.ins().bswap(value)
     }
@@ -551,22 +567,32 @@ impl<'a> Builder for JitEvmCraneliftBuilder<'a> {
         self.bcx.ins().sextend(ty, value)
     }
 
+    fn ireduce(&mut self, to: Self::Type, value: Self::Value) -> Self::Value {
+        self.bcx.ins().ireduce(to, value)
+    }
+
     fn gep(&mut self, ty: Self::Type, ptr: Self::Value, indexes: &[Self::Value]) -> Self::Value {
         let offset = self.bcx.ins().imul_imm(*indexes.first().unwrap(), ty.bytes() as i64);
         self.bcx.ins().iadd(ptr, offset)
     }
 
-    fn extract_value(&mut self, value: Self::Value, index: u32) -> Self::Value {
+    fn extract_value(&mut self, value: Self::Value, index: u32, name: &str) -> Self::Value {
         // let offset = self.bcx.func.dfg.value_type(value).bytes() as i64 * index as i64;
         // self.bcx.ins().iadd_imm(value, offset)
         let _ = value;
         let _ = index;
+        let _ = name;
         todo!()
     }
 
     fn call(&mut self, function: Self::Function, args: &[Self::Value]) -> Option<Self::Value> {
         let ins = self.bcx.ins().call(function, args);
         self.bcx.inst_results(ins).first().copied()
+    }
+
+    fn memcpy(&mut self, dst: Self::Value, src: Self::Value, len: Self::Value) {
+        let config = self.module.target_config();
+        self.bcx.call_memcpy(config, dst, src, len)
     }
 
     fn unreachable(&mut self) {

@@ -288,12 +288,62 @@ impl<'a, 'ctx> std::ops::DerefMut for JitEvmLlvmBuilder<'a, 'ctx> {
 
 impl<'a, 'ctx> JitEvmLlvmBuilder<'a, 'ctx> {
     fn assume_function(&mut self) -> FunctionValue<'ctx> {
-        self.get_function_or("llvm.assume", |this| {
+        self.get_or_add_function("llvm.assume", |this| {
             this.ty_void.fn_type(&[this.ty_i1.into()], false)
         })
     }
 
-    fn get_function_or(
+    fn memcpy_inner(
+        &mut self,
+        dst: BasicValueEnum<'ctx>,
+        src: BasicValueEnum<'ctx>,
+        len: BasicValueEnum<'ctx>,
+        inline: bool,
+    ) {
+        let dst = dst.into_pointer_value();
+        let src = src.into_pointer_value();
+        let len = len.into_int_value();
+        let volatile = self.bool_const(false);
+        let len_bits = len.get_type().get_bit_width();
+        let name = format!("llvm.memcpy{}.p0.p0.i{len_bits}", if inline { ".inline" } else { "" });
+        let memcpy = self.get_or_add_function(&name, |this| {
+            this.ty_void.fn_type(
+                &[this.ty_ptr.into(), this.ty_ptr.into(), this.ty_i64.into(), this.ty_i1.into()],
+                false,
+            )
+        });
+        self.bcx
+            .build_call(memcpy, &[dst.into(), src.into(), len.into(), volatile.into()], "")
+            .unwrap();
+    }
+
+    fn call_overflow_function(
+        &mut self,
+        name: &str,
+        lhs: BasicValueEnum<'ctx>,
+        rhs: BasicValueEnum<'ctx>,
+    ) -> (BasicValueEnum<'ctx>, BasicValueEnum<'ctx>) {
+        let f = self.get_overflow_function(name, lhs.get_type());
+        let result = self.call(f, &[lhs, rhs]).unwrap();
+        (self.extract_value(result, 0, "result"), self.extract_value(result, 1, "overflow"))
+    }
+
+    fn get_overflow_function(
+        &mut self,
+        name: &str,
+        ty: BasicTypeEnum<'ctx>,
+    ) -> FunctionValue<'ctx> {
+        let bits = ty.into_int_type().get_bit_width();
+        let name = format!("llvm.{name}.with.overflow.i{bits}");
+        self.get_or_add_function(&name, |this| {
+            this.fn_type(
+                Some(this.cx.struct_type(&[ty, this.ty_i1.into()], false).into()),
+                &[ty, ty],
+            )
+        })
+    }
+
+    fn get_or_add_function(
         &mut self,
         name: &str,
         mk_ty: impl FnOnce(&mut Self) -> FunctionType<'ctx>,
@@ -579,13 +629,37 @@ impl<'a, 'ctx> Builder for JitEvmLlvmBuilder<'a, 'ctx> {
         self.imul(lhs, rhs)
     }
 
+    fn uadd_overflow(&mut self, lhs: Self::Value, rhs: Self::Value) -> (Self::Value, Self::Value) {
+        self.call_overflow_function("uadd", lhs, rhs)
+    }
+
+    fn usub_overflow(&mut self, lhs: Self::Value, rhs: Self::Value) -> (Self::Value, Self::Value) {
+        self.call_overflow_function("usub", lhs, rhs)
+    }
+
+    fn umax(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
+        let ty = lhs.get_type();
+        let bits = ty.into_int_type().get_bit_width();
+        let name = format!("llvm.umax.i{bits}");
+        let max = self.get_or_add_function(&name, |this| this.fn_type(Some(ty), &[ty, ty]));
+        self.call(max, &[lhs, rhs]).unwrap()
+    }
+
+    fn umin(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
+        let ty = lhs.get_type();
+        let bits = ty.into_int_type().get_bit_width();
+        let name = format!("llvm.umin.i{bits}");
+        let max = self.get_or_add_function(&name, |this| this.fn_type(Some(ty), &[ty, ty]));
+        self.call(max, &[lhs, rhs]).unwrap()
+    }
+
     fn bswap(&mut self, value: Self::Value) -> Self::Value {
         let ty = value.get_type();
         let bits = ty.into_int_type().get_bit_width();
         assert!(bits % 16 == 0);
         let name = format!("llvm.bswap.i{bits}");
-        let bswap = self.get_function_or(&name, |this| this.fn_type(Some(ty), &[ty]));
-        self.call(bswap, &[value.into()]).unwrap()
+        let bswap = self.get_or_add_function(&name, |this| this.fn_type(Some(ty), &[ty]));
+        self.call(bswap, &[value]).unwrap()
     }
 
     fn bitor(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
@@ -645,6 +719,10 @@ impl<'a, 'ctx> Builder for JitEvmLlvmBuilder<'a, 'ctx> {
         self.bcx.build_int_s_extend(value.into_int_value(), ty.into_int_type(), "").unwrap().into()
     }
 
+    fn ireduce(&mut self, to: Self::Type, value: Self::Value) -> Self::Value {
+        self.bcx.build_int_truncate(value.into_int_value(), to.into_int_type(), "").unwrap().into()
+    }
+
     fn gep(
         &mut self,
         elem_ty: Self::Type,
@@ -657,14 +735,23 @@ impl<'a, 'ctx> Builder for JitEvmLlvmBuilder<'a, 'ctx> {
             .into()
     }
 
-    fn extract_value(&mut self, value: Self::Value, index: u32) -> Self::Value {
-        self.bcx.build_extract_value(value.into_struct_value(), index, "").unwrap()
+    fn extract_value(&mut self, value: Self::Value, index: u32, name: &str) -> Self::Value {
+        self.bcx.build_extract_value(value.into_struct_value(), index, name).unwrap()
     }
 
     fn call(&mut self, function: Self::Function, args: &[Self::Value]) -> Option<Self::Value> {
         let args = args.iter().copied().map(Into::into).collect::<Vec<_>>();
         let callsite = self.bcx.build_call(function, &args, "").unwrap();
         callsite.try_as_basic_value().left()
+    }
+
+    fn memcpy(&mut self, dst: Self::Value, src: Self::Value, len: Self::Value) {
+        self.memcpy_inner(dst, src, len, false);
+    }
+
+    fn memcpy_inline(&mut self, dst: Self::Value, src: Self::Value, len: i64) {
+        let len = self.iconst(self.ty_i64.into(), len);
+        self.memcpy_inner(dst, src, len, true);
     }
 
     fn unreachable(&mut self) {

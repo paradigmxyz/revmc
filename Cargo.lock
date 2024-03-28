@@ -1602,8 +1602,7 @@ dependencies = [
 [[package]]
 name = "revm-interpreter"
 version = "3.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9f0a1818f8c876b0d71a0714217c34da7df8a42c0462750768779d55680e4554"
+source = "git+https://github.com/bluealloy/revm#fa84c300b65257e56bff99f9dee34addd6b3ef5c"
 dependencies = [
  "revm-primitives",
  "serde",
@@ -1658,8 +1657,7 @@ dependencies = [
 [[package]]
 name = "revm-primitives"
 version = "3.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "323ad597cf75ac9cb1d161be29fcc3562426f0278a1d04741697fca556e1ceea"
+source = "git+https://github.com/bluealloy/revm#fa84c300b65257e56bff99f9dee34addd6b3ef5c"
 dependencies = [
  "alloy-primitives",
  "auto_impl",

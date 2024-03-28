@@ -1,23 +1,34 @@
 //! JIT compiler implementation.
 
-// TODO: generate less redundant stack length manip code, e.g. pop + push
-
 use crate::{
     callbacks::Callback, Backend, Builder, Bytecode, EvmContext, EvmStack, IntCC, JitEvmFn,
     OpcodeData, OpcodeFlags, Result, I256_MIN,
 };
-use revm_interpreter::{opcode as op, Gas, InstructionResult};
+use revm_interpreter::{opcode as op, Contract, Gas, InstructionResult};
 use revm_jit_backend::{Attribute, FunctionAttributeLocation, OptimizationLevel, TypeMethods};
-use revm_primitives::{BlockEnv, CfgEnv, Env, SpecId, TxEnv, U256};
-use std::{mem, path::PathBuf};
+use revm_primitives::{BlockEnv, CfgEnv, Env, SpecId, TxEnv, BLOCK_HASH_HISTORY, U256};
+use std::{mem, path::PathBuf, sync::atomic::AtomicPtr};
 
 const STACK_CAP: usize = 1024;
 // const WORD_SIZE: usize = 32;
 
-// TODO: indexvec or something
+// TODO: Use `indexvec` or something.
 type Opcode = usize;
 
-// TODO: cannot find function if `compile` is called a second time
+// TODO: Cannot find function if `compile` is called a second time.
+
+// TODO: Generate less redundant stack length manip code, e.g. pop + push
+// TODO: We can emit the length check by adding a params in/out opcode flag; can be re-used for EOF
+
+// TODO: Unify `callback` opcodes after above.
+
+// TODO: Somehow have a config to tell the backend to assume that stack stores are unobservable,
+// making it eliminate redundant stores for values outside the stack length when optimized away.
+// E.g. `PUSH0 POP` gets fully optimized away, but the `store i256 0, ptr %stack` will still get
+// emitted.
+// Use this when `stack` is passed in arguments.
+
+// TODO: Test on big-endian hardware.
 
 /// JIT compiler for EVM bytecode.
 #[allow(missing_debug_implementations)]
@@ -110,7 +121,7 @@ impl<B: Backend> JitEvm<B> {
     ///
     /// Defaults to `false`.
     pub fn set_pass_stack_len_through_args(&mut self, yes: bool) {
-        self.config.pass_stack_len_through_args = yes;
+        self.config.stack_len_through_args = yes;
     }
 
     /// Sets whether to disable gas accounting.
@@ -123,15 +134,6 @@ impl<B: Backend> JitEvm<B> {
     /// Defaults to `false`.
     pub fn set_disable_gas(&mut self, disable_gas: bool) {
         self.config.gas_disabled = disable_gas;
-    }
-
-    /// Sets whether to store the amount of gas used to the `gas` object.
-    ///
-    /// Disabling this improves performance by being able to skip some loads/stores.
-    ///
-    /// Defaults to `true`.
-    pub fn set_store_gas_used(&mut self, yes: bool) {
-        self.config.store_gas_used = yes;
     }
 
     /// Sets the static gas limit.
@@ -173,31 +175,32 @@ impl<B: Backend> JitEvm<B> {
     }
 
     fn compile_bytecode(&mut self, bytecode: &Bytecode<'_>) -> Result<JitEvmFn> {
+        fn align_size<T>(i: usize) -> (usize, usize, usize) {
+            (i, mem::align_of::<T>(), mem::size_of::<T>())
+        }
+
         let name = &self.new_name()[..];
 
         let i8 = self.backend.type_int(8);
         let ptr = self.backend.type_ptr();
         let (ret, params, param_names, ptr_attrs) = (
             Some(i8),
-            &[ptr, ptr, ptr, ptr, ptr],
+            &[ptr, ptr, ptr, ptr, ptr, ptr],
             &[
                 "arg.gas.addr",
                 "arg.stack.addr",
                 "arg.stack_len.addr",
                 "arg.env.addr",
+                "arg.contract.addr",
                 "arg.ecx.addr",
             ],
             &[
-                // (idx, align, dereferenceable)
-                (0, Some(mem::align_of::<Gas>()), Some(mem::size_of::<Gas>())),
-                (1, Some(mem::align_of::<EvmStack>()), Some(mem::size_of::<EvmStack>())),
-                (2, Some(mem::align_of::<usize>()), Some(mem::size_of::<usize>())),
-                (3, Some(mem::align_of::<Env>()), Some(mem::size_of::<Env>())),
-                (
-                    4,
-                    Some(mem::align_of::<EvmContext<'_>>()),
-                    Some(mem::size_of::<EvmContext<'_>>()),
-                ),
+                align_size::<Gas>(0),
+                align_size::<EvmStack>(1),
+                align_size::<usize>(2),
+                align_size::<Env>(3),
+                align_size::<Contract>(4),
+                align_size::<EvmContext<'_>>(5),
             ],
         );
         debug_assert_eq!(params.len(), param_names.len());
@@ -210,6 +213,7 @@ impl<B: Backend> JitEvm<B> {
             Attribute::NoSync,          // No thread synchronization.
             Attribute::NativeTargetCpu, // Optimization.
             Attribute::Speculatable,    // No undefined behavior.
+            Attribute::NoRecurse,       // Revm is not recursive.
         ]
         .into_iter()
         .chain(self.config.frame_pointers.then_some(Attribute::AllFramePointers))
@@ -223,16 +227,14 @@ impl<B: Backend> JitEvm<B> {
         if !self.config.debug_assertions {
             for &(i, align, dereferenceable) in ptr_attrs {
                 for attr in [
-                    Some(Attribute::NoAlias),
-                    Some(Attribute::NoCapture),
-                    Some(Attribute::NoUndef),
-                    align.map(|n| Attribute::Align(n as u64)),
-                    dereferenceable.map(|n| Attribute::Dereferenceable(n as u64)),
-                ]
-                .into_iter()
-                .flatten()
-                {
-                    bcx.add_function_attribute(None, attr, FunctionAttributeLocation::Param(i));
+                    Attribute::NoAlias,
+                    Attribute::NoCapture,
+                    Attribute::NoUndef,
+                    Attribute::Align(align as u64),
+                    Attribute::Dereferenceable(dereferenceable as u64),
+                ] {
+                    let loc = FunctionAttributeLocation::Param(i as _);
+                    bcx.add_function_attribute(None, attr, loc);
                 }
             }
         }
@@ -281,7 +283,7 @@ impl<B: Backend> JitEvm<B> {
     }
 
     fn new_name(&mut self) -> String {
-        let name = format!("__evm_bytecode_{}", self.function_counter);
+        let name = format!("evm_bytecode_{}", self.function_counter);
         self.function_counter += 1;
         name
     }
@@ -294,9 +296,8 @@ struct FcxConfig {
     frame_pointers: bool,
 
     stack_through_args: bool,
-    pass_stack_len_through_args: bool,
+    stack_len_through_args: bool,
     gas_disabled: bool,
-    store_gas_used: bool,
     static_gas_limit: Option<u64>,
 }
 
@@ -307,9 +308,8 @@ impl Default for FcxConfig {
             comments_enabled: false,
             frame_pointers: cfg!(debug_assertions),
             stack_through_args: false,
-            pass_stack_len_through_args: false,
+            stack_len_through_args: false,
             gas_disabled: false,
-            store_gas_used: true,
             static_gas_limit: None,
         }
     }
@@ -327,6 +327,7 @@ struct FunctionCx<'a, B: Backend> {
     // Common types.
     isize_type: B::Type,
     word_type: B::Type,
+    address_type: B::Type,
     i8_type: B::Type,
 
     /// The stack length. Either passed in the arguments as a pointer or allocated locally.
@@ -336,14 +337,15 @@ struct FunctionCx<'a, B: Backend> {
     stack: Pointer<B>,
     /// The amount of gas used. `isize`. Either passed in the arguments as a pointer or allocated
     /// locally.
-    gas_used: Pointer<B>,
+    gas_remaining: Pointer<B>,
+    gas_remaining_nomem: Pointer<B>,
     /// The gas limit. Constant throughout the function, passed in the arguments or set statically.
     gas_limit: Option<B::Value>,
     /// The environment. Constant throughout the function.
-    #[allow(dead_code)]
     env: B::Value,
+    /// The contract. Constant throughout the function.
+    contract: B::Value,
     /// The EVM context. Opaque pointer, only passed to callbacks.
-    #[allow(dead_code)]
     ecx: B::Value,
 
     /// The bytecode being translated.
@@ -371,22 +373,23 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let isize_type = bcx.type_ptr_sized_int();
         let i8_type = bcx.type_int(8);
         let i64_type = bcx.type_int(64);
+        let address_type = bcx.type_int(160);
         let word_type = bcx.type_int(256);
 
         let zero = bcx.iconst(isize_type, 0);
 
         // Set up entry block.
         let gas_ptr = bcx.fn_param(0);
-        let gas_used = if config.store_gas_used {
-            // TODO: Don't use `revm_interpreter::Gas` since its fields are not public.
-            let one = bcx.iconst(isize_type, 1);
-            PointerBase::Address(bcx.gep(isize_type, gas_ptr, &[one]))
-        } else {
-            let gas_used = bcx.new_stack_slot(isize_type, "gas_used.addr");
-            bcx.stack_store(zero, gas_used);
-            PointerBase::StackSlot(gas_used)
+        let gas_remaining = {
+            let offset = bcx.iconst(isize_type, mem::offset_of!(pf::Gas, remaining) as i64);
+            let base = PointerBase::Address(bcx.gep(i8_type, gas_ptr, &[offset]));
+            Pointer { ty: isize_type, base }
         };
-        let gas_used = Pointer { ty: isize_type, base: gas_used };
+        let gas_remaining_nomem = {
+            let offset = bcx.iconst(isize_type, mem::offset_of!(pf::Gas, remaining_nomem) as i64);
+            let base = PointerBase::Address(bcx.gep(i8_type, gas_ptr, &[offset]));
+            Pointer { ty: i64_type, base }
+        };
 
         let sp_arg = bcx.fn_param(1);
         let stack = if config.stack_through_args {
@@ -399,7 +402,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let stack = Pointer { ty: word_type, base: stack };
 
         let stack_len_arg = bcx.fn_param(2);
-        let stack_len = if config.pass_stack_len_through_args {
+        let stack_len = if config.stack_len_through_args {
             PointerBase::Address(stack_len_arg)
         } else {
             let stack_len = bcx.new_stack_slot(isize_type, "len.addr");
@@ -409,7 +412,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let stack_len = Pointer { ty: isize_type, base: stack_len };
 
         let env = bcx.fn_param(3);
-        let ecx = bcx.fn_param(4);
+        let contract = bcx.fn_param(4);
+        let ecx = bcx.fn_param(5);
 
         // Create all opcode entry blocks.
         let op_blocks: Vec<_> = bytecode
@@ -425,13 +429,16 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
             bcx,
             isize_type,
+            address_type,
             word_type,
             i8_type,
             stack_len,
             stack,
-            gas_used,
+            gas_remaining,
+            gas_remaining_nomem,
             gas_limit: None,
             env,
+            contract,
             ecx,
 
             bytecode,
@@ -446,11 +453,12 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             fx.pointer_panic_with_bool(!config.gas_disabled, gas_ptr, "gas pointer");
             fx.pointer_panic_with_bool(config.stack_through_args, sp_arg, "stack pointer");
             fx.pointer_panic_with_bool(
-                config.pass_stack_len_through_args,
+                config.stack_len_through_args,
                 stack_len_arg,
                 "stack length pointer",
             );
             fx.pointer_panic_with_bool(true, env, "env pointer");
+            fx.pointer_panic_with_bool(true, contract, "contract pointer");
             fx.pointer_panic_with_bool(true, ecx, "EVM context pointer");
         }
 
@@ -464,6 +472,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         // Branch to the first opcode. The bytecode is guaranteed to have at least one opcode.
         fx.bcx.br(fx.op_blocks[0]);
 
+        // Translate individual opcodes into their respective blocks.
         for (i, _) in bytecode.iter_opcodes() {
             fx.current_opcode = i;
             fx.translate_opcode()?;
@@ -535,6 +544,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             goto_return!("skipped");
         }
 
+        // TODO: Stack length manip go here.
+
         macro_rules! unop {
             ($op:ident) => {{
                 let mut a = self.pop(true);
@@ -560,18 +571,18 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             }};
         }
 
-        macro_rules! env_field {
-            // Gets the pointer to an `env` field.
-            (@get $($paths:path),*; $($spec:ident).*) => {
-                self.env_field(0 $(+ mem::offset_of!($paths, $spec))*)
+        macro_rules! field {
+            // Gets the pointer to a field.
+            ($field:ident; @get $($paths:path),*; $($spec:tt).*) => {
+                self.get_field(self.$field, 0 $(+ mem::offset_of!($paths, $spec))*)
             };
-            // Gets and loads the pointer to an `env` field.
+            // Gets and loads the pointer to a field.
             // The value is loaded as a native-endian 256-bit integer.
             // `@[endian]` is the endianness of the value. If native, omit it.
-            (@load $(@[endian = $endian:tt])? $ty:expr, $($paths:path),*; $($spec:ident).*) => {{
-                let ptr = env_field!(@get $($paths),*; $($spec).*);
+            ($field:ident; @load $(@[endian = $endian:tt])? $ty:expr, $($paths:path),*; $($spec:tt).*) => {{
+                let ptr = field!($field; @get $($paths),*; $($spec).*);
                 #[allow(unused_mut)]
-                let mut value = self.bcx.load($ty, ptr, stringify!(env.$($spec).*));
+                let mut value = self.bcx.load($ty, ptr, stringify!($field.$($spec).*));
                 $(
                     if !cfg!(target_endian = $endian) {
                         value = self.bcx.bswap(value);
@@ -579,15 +590,21 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 )?
                 value
             }};
-            // Gets, loads, extends (if necessary), and pushes the value of an `env` field to the stack.
+            // Gets, loads, extends (if necessary), and pushes the value of a field to the stack.
             // `@[endian]` is the endianness of the value. If native, omit it.
-            (@push $(@[endian = $endian:tt])? $ty:expr, $($spec:tt)*) => {{
-                let mut value = env_field!(@load $(@[endian = $endian])? $ty, $($spec)*);
+            ($field:ident; @push $(@[endian = $endian:tt])? $ty:expr, $($rest:tt)*) => {{
+                let mut value = field!($field; @load $(@[endian = $endian])? $ty, $($rest)*);
                 if self.bcx.type_bit_width($ty) < 256 {
                     value = self.bcx.zext(self.word_type, value);
                 }
                 self.push(value);
             }};
+        }
+        macro_rules! env_field {
+            ($($tt:tt)*) => { field!(env; $($tt)*) };
+        }
+        macro_rules! contract_field {
+            ($($tt:tt)*) => { field!(contract; $($tt)*) };
         }
 
         match data.opcode {
@@ -632,9 +649,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             }
             op::EXP => {
                 let sp = self.pop_top_sp(2);
-                let spec_id = self.bcx.iconst(self.i8_type, self.bytecode.spec_id as i64);
-                let gas_cost = self.callback(Callback::Exp, &[sp, spec_id]).unwrap();
-                self.gas_cost(gas_cost);
+                let spec_id = self.const_spec_id();
+                self.callback_ir(Callback::Exp, &[self.ecx, sp, spec_id]);
             }
             op::SIGNEXTEND => {
                 // From the yellow paper:
@@ -728,81 +744,152 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
             op::KECCAK256 => {
                 let sp = self.pop_top_sp(2);
-                // TODO: Can probably do some stuff inline here instead of in the callback.
-                // let len = {
-                //     let m1 = self.bcx.iconst(self.isize_type, -1);
-                //     let ptr = self.bcx.gep(self.isize_type, sp, m1);
-                //     self.load_word(ptr, "len")
-                // };
-                // let is_zero = self.bcx.icmp_imm(IntCC::Equal, len, 0);
-                // let hash_zero = self.bcx.iconst_256(KECCAK_EMPTY.into());
-                // self.bcx.lazy_select(is_zero, self.word_type, |_, _| hash_zero, |bcx, _| {
-
-                // })
-                let gas = self.callback(Callback::Keccak256, &[self.ecx, sp]).unwrap();
-                self.gas_cost(gas);
+                self.callback_ir(Callback::Keccak256, &[self.ecx, sp]);
             }
 
             op::ADDRESS => {
-                // TODO: `Contract`
+                contract_field!(@push @[endian = "big"] self.address_type, Contract; address)
             }
             op::BALANCE => {
-                // TODO: host
+                let sp = self.pop_top_sp(1);
+                let spec_id = self.const_spec_id();
+                self.callback_ir(Callback::Balance, &[self.ecx, spec_id, sp]);
             }
             op::ORIGIN => {
-                env_field!(@push @[endian = "big"] self.bcx.type_int(160), Env, TxEnv; tx.caller)
+                env_field!(@push @[endian = "big"] self.address_type, Env, TxEnv; tx.caller)
             }
             op::CALLER => {
-                // TODO: `Contract`
+                contract_field!(@push @[endian = "big"] self.address_type, Contract; caller)
             }
             op::CALLVALUE => {
-                // TODO: `Contract`
+                contract_field!(@push @[endian = "little"] self.word_type, Contract; value)
             }
             op::CALLDATALOAD => {
-                // TODO: `Contract`
+                let index = self.pop(true);
+                let len_ptr = contract_field!(@get Contract, pf::Bytes; input.len);
+                let len = self.bcx.load(self.isize_type, len_ptr, "input.len");
+                let len = self.bcx.zext(self.word_type, len);
+                let in_bounds = self.bcx.icmp(IntCC::UnsignedLessThan, index, len);
+
+                let ptr = contract_field!(@get Contract, pf::Bytes; input.ptr);
+                let value = self.lazy_select(
+                    in_bounds,
+                    self.word_type,
+                    |this, _| {
+                        let ptr = this.bcx.load(this.bcx.type_ptr(), ptr, "contract.input.ptr");
+                        let calldata = this.bcx.gep(this.i8_type, ptr, &[index]);
+
+                        let max = this.bcx.iconst(this.word_type, 32);
+                        let slice_len = this.bcx.umin(index, max);
+                        let slice_len = this.bcx.ireduce(this.isize_type, slice_len);
+
+                        let tmp = this.bcx.new_stack_slot(this.word_type, "calldata.addr");
+                        let tmp_addr = this.bcx.stack_addr(tmp);
+                        this.bcx.memcpy(tmp_addr, calldata, slice_len);
+                        let mut value = this.bcx.stack_load(this.word_type, tmp, "calldata.i256");
+                        if cfg!(target_endian = "little") {
+                            value = this.bcx.bswap(value);
+                        }
+                        value
+                    },
+                    |this, _| this.bcx.iconst_256(U256::ZERO),
+                );
+                self.push_unchecked(value);
             }
             op::CALLDATASIZE => {
-                // TODO: `Contract`
+                contract_field!(@push self.isize_type, Contract, pf::Bytes; input.len)
             }
             op::CALLDATACOPY => {
-                // TODO: `Contract`, callback memory
+                let sp = self.pop_top_sp(4);
+                self.callback_ir(Callback::CallDataCopy, &[self.ecx, sp]);
             }
             op::CODESIZE => {
-                // TODO: `Contract`
+                contract_field!(@push self.isize_type, Contract, pf::BytecodeLocked; bytecode.original_len)
             }
             op::CODECOPY => {
-                // TODO: `Contract`, callback memory
+                let sp = self.pop_top_sp(3);
+                self.callback_ir(Callback::CodeCopy, &[self.ecx, sp]);
             }
 
             op::GASPRICE => {
                 env_field!(@push @[endian = "little"] self.word_type, Env, TxEnv; tx.gas_price)
             }
             op::EXTCODESIZE => {
-                // TODO: host
+                let sp = self.pop_top_sp(1);
+                let spec_id = self.const_spec_id();
+                self.callback_ir(Callback::ExtCodeSize, &[self.ecx, spec_id, sp]);
             }
             op::EXTCODECOPY => {
-                // TODO: host
+                let sp = self.pop_top_sp(4);
+                let spec_id = self.const_spec_id();
+                self.callback_ir(Callback::ExtCodeCopy, &[self.ecx, spec_id, sp]);
             }
             op::RETURNDATASIZE => {
-                // TODO: return_data_buffer
+                field!(ecx; @push self.isize_type, EvmContext<'_>, pf::Slice; return_data.len)
             }
             op::RETURNDATACOPY => {
-                // TODO: return_data_buffer + callback
+                let sp = self.pop_top_sp(3);
+                self.callback_ir(Callback::ReturnDataCopy, &[self.ecx, sp]);
             }
             op::EXTCODEHASH => {
-                // TODO: host
+                let sp = self.pop_top_sp(1);
+                let spec_id = self.const_spec_id();
+                self.callback_ir(Callback::ExtCodeHash, &[self.ecx, spec_id, sp]);
             }
             op::BLOCKHASH => {
-                // TODO: host
+                let requested_number = self.pop(true);
+                let actual_number = env_field!(
+                    @load @[endian = "little"] self.word_type, Env, BlockEnv; block.number
+                );
+
+                let block_hash = self.bcx.new_stack_slot(self.word_type, "block_hash.addr");
+
+                // Only call host if `1 <= diff <= 256`. CFG:
+                // current -> in_range -> call_host -> contd
+                //         \           |            /
+                //          \------ default -------/
+                let in_range = self.create_block_after_current("in_range");
+                let call_host = self.create_block_after(in_range, "call_host");
+                let default = self.create_block_after(call_host, "default");
+                let target = self.create_block_after(default, "contd");
+
+                // Not GE to skip `diff == 0`.
+                let is_valid =
+                    self.bcx.icmp(IntCC::UnsignedGreaterThan, actual_number, requested_number);
+                self.bcx.brif(is_valid, in_range, default);
+
+                self.bcx.switch_to_block(in_range);
+                let diff = self.bcx.isub(actual_number, requested_number);
+                let diff_in_range = self.bcx.icmp_imm(
+                    IntCC::UnsignedLessThanOrEqual,
+                    diff,
+                    BLOCK_HASH_HISTORY as i64,
+                );
+                self.bcx.brif(diff_in_range, call_host, default);
+
+                self.bcx.switch_to_block(call_host);
+                let diff = self.bcx.ireduce(self.isize_type, diff);
+                let block_hash_ptr = self.bcx.stack_addr(block_hash);
+                self.callback_ir(Callback::BlockHash, &[self.ecx, diff, block_hash_ptr]);
+                self.bcx.br(target);
+
+                self.bcx.switch_to_block(default);
+                let zero = self.bcx.iconst_256(U256::ZERO);
+                self.bcx.stack_store(zero, block_hash);
+                self.bcx.br(target);
+
+                self.bcx.switch_to_block(target);
+                let block_hash = self.bcx.stack_load(self.word_type, block_hash, "block_hash");
+                self.push_unchecked(block_hash);
             }
             op::COINBASE => {
-                env_field!(@push @[endian = "little"] self.bcx.type_int(160), Env, BlockEnv; block.coinbase)
+                env_field!(@push @[endian = "big"] self.address_type, Env, BlockEnv; block.coinbase)
             }
             op::TIMESTAMP => {
-                env_field!(@push @[endian = "big"] self.word_type, Env, BlockEnv; block.timestamp)
+                env_field!(@push @[endian = "little"] self.word_type, Env, BlockEnv; block.timestamp)
             }
             op::NUMBER => {
-                env_field!(@push @[endian = "big"] self.word_type, Env, BlockEnv; block.number)
+                env_field!(@push @[endian = "little"] self.word_type, Env, BlockEnv; block.number)
             }
             op::DIFFICULTY => {
                 let value = if self.bytecode.spec_id.is_enabled_in(SpecId::MERGE) {
@@ -816,24 +903,29 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                     let some = {
                         let one = self.bcx.iconst(self.isize_type, 1);
                         let ptr = self.bcx.gep(self.i8_type, opt, &[one]);
-                        self.bcx.load(self.word_type, ptr, "env.block.prevrandao")
+                        let mut v = self.bcx.load(self.word_type, ptr, "env.block.prevrandao");
+                        if !cfg!(target_endian = "big") {
+                            v = self.bcx.bswap(v);
+                        }
+                        v
                     };
                     let none = self.bcx.iconst_256(U256::ZERO);
                     self.bcx.select(is_some, some, none)
                 } else {
-                    env_field!(@load @[endian = "big"] self.word_type, Env, BlockEnv; block.difficulty)
+                    env_field!(@load @[endian = "little"] self.word_type, Env, BlockEnv; block.difficulty)
                 };
                 self.push(value);
             }
             op::GASLIMIT => {
-                env_field!(@push @[endian = "big"] self.word_type, Env, BlockEnv; block.gas_limit)
+                env_field!(@push @[endian = "little"] self.word_type, Env, BlockEnv; block.gas_limit)
             }
             op::CHAINID => env_field!(@push self.bcx.type_int(64), Env, CfgEnv; cfg.chain_id),
             op::SELFBALANCE => {
-                // TODO: host
+                let sp = self.pop_top_sp(1);
+                self.callback_ir(Callback::SelfBalance, &[self.ecx, sp]);
             }
             op::BASEFEE => {
-                env_field!(@push @[endian = "big"] self.word_type, Env, BlockEnv; block.basefee)
+                env_field!(@push @[endian = "little"] self.word_type, Env, BlockEnv; block.basefee)
             }
             op::BLOBHASH => {
                 let index = self.pop(true);
@@ -855,8 +947,11 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                     |bcx, _block| {
                         let ptr = bcx.load(type_ptr, blob_hashes, "blob_hashes.ptr");
                         let ptr = bcx.gep(word_type, ptr, &[index]);
-                        let hash = bcx.load(word_type, ptr, "blob_hashes[index]");
-                        bcx.bswap(hash)
+                        let mut hash = bcx.load(word_type, ptr, "blob_hashes[index]");
+                        if !cfg!(target_endian = "big") {
+                            hash = bcx.bswap(hash);
+                        }
+                        hash
                     },
                     |bcx, _block| bcx.iconst_256(U256::ZERO),
                 );
@@ -871,22 +966,30 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             }
 
             op::POP => {
-                let _ = self.pop(false);
+                let len = self.load_len_at_least(1);
+                let len = self.bcx.isub_imm(len, 1);
+                self.store_len(len);
             }
             op::MLOAD => {
-                // TODO: callback memory
+                let sp = self.pop_top_sp(1);
+                self.callback_ir(Callback::Mload, &[self.ecx, sp]);
             }
             op::MSTORE => {
-                // TODO: callback memory
+                let sp = self.pop_sp(2);
+                self.callback_ir(Callback::Mstore, &[self.ecx, sp]);
             }
             op::MSTORE8 => {
-                // TODO: callback memory
+                let sp = self.pop_sp(2);
+                self.callback_ir(Callback::Mstore8, &[self.ecx, sp]);
             }
             op::SLOAD => {
-                // TODO: host
+                let sp = self.pop_top_sp(1);
+                self.callback_ir(Callback::Sload, &[self.ecx, sp]);
             }
             op::SSTORE => {
-                // TODO: host
+                self.fail_if_staticcall(InstructionResult::StateChangeDuringStaticCall);
+                let sp = self.pop_sp(2);
+                self.callback_ir(Callback::Sstore, &[self.ecx, sp]);
             }
             op::JUMP | op::JUMPI => {
                 if data.flags.contains(OpcodeFlags::INVALID_JUMP) {
@@ -920,10 +1023,11 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 self.push(pc);
             }
             op::MSIZE => {
-                // TODO: callback memory
+                let msize = self.callback(Callback::Msize, &[self.ecx]).unwrap();
+                self.push(msize);
             }
             op::GAS => {
-                let remaining = self.get_gas_remaining();
+                let remaining = self.load_gas_remaining();
                 let remaining = self.bcx.zext(self.word_type, remaining);
                 self.push(remaining);
             }
@@ -931,10 +1035,13 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 self.bcx.nop();
             }
             op::TLOAD => {
-                // TODO: host
+                let sp = self.pop_top_sp(1);
+                self.callback(Callback::Tload, &[self.ecx, sp]).unwrap();
             }
             op::TSTORE => {
-                // TODO: host
+                self.fail_if_staticcall(InstructionResult::StateChangeDuringStaticCall);
+                let sp = self.pop_sp(2);
+                self.callback(Callback::Tstore, &[self.ecx, sp]).unwrap();
             }
 
             op::PUSH0 => {
@@ -954,12 +1061,14 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             op::SWAP1..=op::SWAP16 => self.swap(op_byte - op::SWAP1 + 1),
 
             op::LOG0..=op::LOG4 => {
+                self.fail_if_staticcall(InstructionResult::StateChangeDuringStaticCall);
                 let _n = op_byte - op::LOG0;
                 // TODO: host
             }
 
             op::CREATE => {
-                // TODO: host
+                self.create_common(false);
+                goto_return!(build InstructionResult::CallOrCreate);
             }
             op::CALL => {
                 // TODO: host
@@ -968,13 +1077,15 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 // TODO: host
             }
             op::RETURN => {
-                // TODO: host
+                self.return_common();
+                goto_return!(build InstructionResult::Return);
             }
             op::DELEGATECALL => {
                 // TODO: host
             }
             op::CREATE2 => {
-                // TODO: host
+                self.create_common(true);
+                goto_return!(build InstructionResult::CallOrCreate);
             }
 
             op::STATICCALL => {
@@ -982,10 +1093,12 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             }
 
             op::REVERT => {
-                // TODO: callback memory
+                self.return_common();
+                goto_return!(build InstructionResult::Revert);
             }
             op::INVALID => goto_return!(build InstructionResult::InvalidFEOpcode),
             op::SELFDESTRUCT => {
+                self.fail_if_staticcall(InstructionResult::StateChangeDuringStaticCall);
                 // TODO: host
             }
 
@@ -1055,12 +1168,23 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         ret
     }
 
+    /// Check length for `n`, decrement `n`, and return the stack pointer at the initial length.
+    fn pop_sp(&mut self, n: usize) -> B::Value {
+        debug_assert_ne!(n, 0);
+        let len = self.load_len_at_least(n);
+        let subtracted = self.bcx.isub_imm(len, n as i64);
+        self.store_len(subtracted);
+        self.sp_at(len)
+    }
+
     /// Check length for `n`, decrement `n - 1`, and return the stack pointer at the initial length.
     fn pop_top_sp(&mut self, n: usize) -> B::Value {
         debug_assert_ne!(n, 0);
         let len = self.load_len_at_least(n);
-        let subtracted = self.bcx.isub_imm(len, (n - 1) as i64);
-        self.store_len(subtracted);
+        if n > 1 {
+            let subtracted = self.bcx.isub_imm(len, (n - 1) as i64);
+            self.store_len(subtracted);
+        }
         self.sp_at(len)
     }
 
@@ -1070,6 +1194,14 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let failure_cond = self.bcx.icmp_imm(IntCC::UnsignedLessThan, len, n as i64);
         self.build_failure(failure_cond, InstructionResult::StackUnderflow);
         len
+    }
+
+    /// Returns an error if the current context is a static call.
+    fn fail_if_staticcall(&mut self, ret: InstructionResult) {
+        let ptr = self.get_field(self.ecx, mem::offset_of!(EvmContext<'_>, is_static));
+        let bool = self.bcx.type_int(1);
+        let is_static = self.bcx.load(bool, ptr, "is_static");
+        self.build_failure(is_static, ret)
     }
 
     /// Duplicates the `n`th value from the top of the stack.
@@ -1105,6 +1237,20 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         self.bcx.store(b, a_sp);
     }
 
+    /// `RETURN` or `REVERT` instruction.
+    fn return_common(&mut self) {
+        let sp = self.pop_sp(2);
+        self.callback_ir(Callback::DoReturn, &[self.ecx, sp]);
+    }
+
+    fn create_common(&mut self, is_create2: bool) {
+        self.fail_if_staticcall(InstructionResult::StateChangeDuringStaticCall);
+        let sp = self.pop_sp(3 + is_create2 as usize);
+        let is_create2 = self.bcx.iconst(self.bcx.type_int(1), is_create2 as i64);
+        self.callback_ir(Callback::Create, &[self.ecx, sp, is_create2]);
+        self.build_return(InstructionResult::CallOrCreate);
+    }
+
     /// Loads the word at the given pointer.
     fn load_word(&mut self, ptr: B::Value, name: &str) -> B::Value {
         self.bcx.load(self.word_type, ptr, name)
@@ -1115,10 +1261,15 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         self.stack_len.load(&mut self.bcx, "len")
     }
 
+    /// Returns the spec ID as a value.
+    fn const_spec_id(&mut self) -> B::Value {
+        self.bcx.iconst(self.i8_type, self.bytecode.spec_id as i64)
+    }
+
     /// Gets the environment field at the given offset.
-    fn env_field(&mut self, offset: usize) -> B::Value {
+    fn get_field(&mut self, ptr: B::Value, offset: usize) -> B::Value {
         let offset = self.bcx.iconst(self.isize_type, offset as i64);
-        self.bcx.gep(self.i8_type, self.env, &[offset])
+        self.bcx.gep(self.i8_type, ptr, &[offset])
     }
 
     /// Stores the stack length.
@@ -1127,20 +1278,13 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     }
 
     /// Loads the gas used.
-    fn load_gas_used(&mut self) -> B::Value {
-        self.gas_used.load(&mut self.bcx, "gas_used")
+    fn load_gas_remaining(&mut self) -> B::Value {
+        self.gas_remaining.load(&mut self.bcx, "gas_remaining")
     }
 
     /// Stores the gas used.
-    fn store_gas_used(&mut self, value: B::Value) {
-        self.gas_used.store(&mut self.bcx, value);
-    }
-
-    /// Returns the remaining gas.
-    fn get_gas_remaining(&mut self) -> B::Value {
-        let gas_used = self.load_gas_used();
-        let gas_limit = self.gas_limit.unwrap();
-        self.bcx.isub(gas_limit, gas_used)
+    fn store_gas_remaining(&mut self, value: B::Value) {
+        self.gas_remaining.store(&mut self.bcx, value);
     }
 
     /// Returns the stack pointer at `len` (`&stack[len]`).
@@ -1171,22 +1315,52 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             return;
         }
 
-        let gas_used = self.load_gas_used();
-        let added = self.bcx.iadd(gas_used, cost);
-        let failure_cond = self.bcx.icmp(IntCC::UnsignedLessThan, self.gas_limit.unwrap(), added);
-        self.build_failure(failure_cond, InstructionResult::OutOfGas);
-        self.store_gas_used(added);
+        // `Gas::record_cost`
+        let gas_remaining = self.load_gas_remaining();
+        let (res, overflow) = self.bcx.usub_overflow(gas_remaining, cost);
+        self.build_failure(overflow, InstructionResult::OutOfGas);
+
+        let nomem = self.gas_remaining_nomem.load(&mut self.bcx, "gas_remaining_nomem");
+        let nomem = self.bcx.isub(nomem, cost);
+        self.gas_remaining_nomem.store(&mut self.bcx, nomem);
+
+        self.store_gas_remaining(res);
     }
+
+    /*
+    /// `if success_cond { ... } else { return ret }`
+    fn build_failure_inv(&mut self, success_cond: B::Value, ret: InstructionResult) {
+        self.build_failure_imm_inner(false, success_cond, ret);
+    }
+    */
 
     /// `if failure_cond { return ret } else { ... }`
     fn build_failure(&mut self, failure_cond: B::Value, ret: InstructionResult) {
+        self.build_failure_imm_inner(true, failure_cond, ret);
+    }
+
+    fn build_failure_imm_inner(
+        &mut self,
+        is_failure: bool,
+        cond: B::Value,
+        ret: InstructionResult,
+    ) {
+        let ret = self.bcx.iconst(self.i8_type, ret as i64);
+        self.build_failure_inner(is_failure, cond, ret);
+    }
+
+    fn build_failure_inner(&mut self, is_failure: bool, cond: B::Value, ret: B::Value) {
         let failure = self.create_block_after_current("fail");
         let target = self.create_block_after(failure, "contd");
-        self.bcx.brif(failure_cond, failure, target);
+        if is_failure {
+            self.bcx.brif(cond, failure, target);
+        } else {
+            self.bcx.brif(cond, target, failure);
+        }
 
         self.bcx.set_cold_block(failure);
         self.bcx.switch_to_block(failure);
-        self.build_return(ret);
+        self.bcx.ret(&[ret]);
 
         self.bcx.switch_to_block(target);
     }
@@ -1200,14 +1374,13 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         }
     }
 
-    // Pointer must not be null if `set` is true, else it must be null.
+    // Pointer must not be null if `must_be_set` is true.
     fn pointer_panic_with_bool(&mut self, must_be_set: bool, ptr: B::Value, name: &str) {
-        let panic_cond =
-            if must_be_set { self.bcx.is_null(ptr) } else { self.bcx.is_not_null(ptr) };
-        let msg = format!(
-            "revm_jit panic: {name} must {not}be null due to configuration",
-            not = if must_be_set { "not " } else { "" }
-        );
+        if !must_be_set {
+            return;
+        }
+        let panic_cond = self.bcx.is_null(ptr);
+        let msg = format!("revm_jit panic: {name} must not be null");
         self.build_panic_cond(panic_cond, &msg);
     }
 
@@ -1232,6 +1405,15 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         self.bcx.unreachable();
     }
 
+    /// Build a call to a callback that returns an [`InstructionResult`].
+    fn callback_ir(&mut self, callback: Callback, args: &[B::Value]) {
+        let ret = self.callback(callback, args).expect("callback does not return a value");
+        let failure = self.bcx.icmp_imm(IntCC::NotEqual, ret, InstructionResult::Continue as i64);
+        self.build_failure_inner(true, failure, ret);
+    }
+
+    /// Build a call to a callback.
+    #[must_use]
     fn callback(&mut self, callback: Callback, args: &[B::Value]) -> Option<B::Value> {
         let function = self.callback_function(callback);
         self.bcx.call(function, args)
@@ -1243,6 +1425,9 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
     /// Adds a comment to the current instruction.
     fn add_comment(&mut self, comment: &str) {
+        if comment.is_empty() {
+            return;
+        }
         self.bcx.add_comment_to_current_inst(comment);
     }
 
@@ -1287,6 +1472,26 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         }
         op_block_name_with(self.current_opcode, self.bytecode.opcode(self.current_opcode), name)
     }
+
+    #[inline]
+    fn lazy_select(
+        &mut self,
+        cond: B::Value,
+        ty: B::Type,
+        then_value: impl FnOnce(&mut Self, B::BasicBlock) -> B::Value,
+        else_value: impl FnOnce(&mut Self, B::BasicBlock) -> B::Value,
+    ) -> B::Value {
+        let this1 = unsafe { std::mem::transmute::<&mut Self, &mut Self>(self) };
+        let this2 = unsafe { std::mem::transmute::<&mut Self, &mut Self>(self) };
+        self.bcx.lazy_select(
+            cond,
+            ty,
+            #[inline]
+            move |_bcx, block| then_value(this1, block),
+            #[inline]
+            move |_bcx, block| else_value(this2, block),
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1295,6 +1500,12 @@ struct Pointer<B: Backend> {
     ty: B::Type,
     /// The base of the pointer. Either an address or a stack slot.
     base: PointerBase<B>,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum PointerBase<B: Backend> {
+    Address(B::Value),
+    StackSlot(B::StackSlot),
 }
 
 impl<B: Backend> Pointer<B> {
@@ -1321,12 +1532,6 @@ impl<B: Backend> Pointer<B> {
             PointerBase::StackSlot(slot) => bcx.stack_addr(slot),
         }
     }
-}
-
-#[derive(Clone, Copy, Debug)]
-enum PointerBase<B: Backend> {
-    Address(B::Value),
-    StackSlot(B::StackSlot),
 }
 
 /// Callback cache.
@@ -1383,6 +1588,60 @@ fn op_block_name_with(op: Opcode, data: OpcodeData, with: &str) -> String {
         format!("op.{op}.{data}")
     } else {
         format!("op.{op}.{data}.{with}")
+    }
+}
+
+// HACK: Need these structs' fields to be public for `offset_of!`.
+// `private_fields`
+mod pf {
+    use super::*;
+    use revm_primitives::JumpMap;
+
+    #[allow(dead_code)]
+    pub(super) struct Bytes {
+        pub(super) ptr: *const u8,
+        pub(super) len: usize,
+        // inlined "trait object"
+        data: AtomicPtr<()>,
+        vtable: &'static Vtable,
+    }
+    #[allow(dead_code)]
+    struct Vtable {
+        /// fn(data, ptr, len)
+        clone: unsafe fn(&AtomicPtr<()>, *const u8, usize) -> Bytes,
+        /// fn(data, ptr, len)
+        ///
+        /// takes `Bytes` to value
+        to_vec: unsafe fn(&AtomicPtr<()>, *const u8, usize) -> Vec<u8>,
+        /// fn(data, ptr, len)
+        drop: unsafe fn(&mut AtomicPtr<()>, *const u8, usize),
+    }
+
+    #[allow(dead_code)]
+    pub(super) struct BytecodeLocked {
+        pub(super) bytecode: Bytes,
+        pub(super) original_len: usize,
+        jump_map: JumpMap,
+    }
+
+    #[allow(dead_code)]
+    pub(super) struct Slice {
+        pub(super) ptr: *const u8,
+        pub(super) len: usize,
+    }
+
+    #[allow(dead_code)]
+    pub(super) struct Gas {
+        /// The initial gas limit. This is constant throughout execution.
+        pub(super) limit: u64,
+        /// The remaining gas.
+        pub(super) remaining: u64,
+        /// The remaining gas, without memory expansion.
+        pub(super) remaining_nomem: u64,
+        /// The **last** memory expansion cost.
+        memory: u64,
+        /// Refunded gas. This is used only at the end of execution.
+        refunded: i64,
     }
 }
 
@@ -1884,17 +2143,14 @@ mod tests {
         jit.set_pass_stack_through_args(true);
         jit.set_pass_stack_len_through_args(true);
         jit.set_disable_gas(false);
-        jit.set_store_gas_used(true);
         let f = jit.compile(bytecode, spec_id).unwrap();
 
         let mut stack = EvmStack::new();
         let mut stack_len = 0;
-        let mut gas = Gas::new(GAS_LIMIT);
         let mut cx = EvmContext::dummy_do_not_use();
-        let actual_return =
-            unsafe { f.call(Some(&mut gas), Some(&mut stack), Some(&mut stack_len), &mut cx) };
+        let actual_return = unsafe { f.call(Some(&mut stack), Some(&mut stack_len), &mut cx) };
         assert_eq!(actual_return, expected_return, "return value mismatch");
-        assert_eq!(gas.spend(), expected_gas, "gas mismatch");
+        assert_eq!(cx.gas.spent(), expected_gas, "gas mismatch");
 
         let actual_stack =
             stack.as_slice().iter().take(stack_len).map(|x| x.to_u256()).collect::<Vec<_>>();
@@ -1944,7 +2200,6 @@ mod tests {
             unsafe { jit.free_all_functions() }.unwrap();
             let f = jit.compile(&code, DEFAULT_SPEC).unwrap();
 
-            let mut gas = Gas::new(10000);
             let mut stack_buf = EvmStack::new_heap();
             let stack = EvmStack::from_mut_vec(&mut stack_buf);
             if dynamic {
@@ -1956,7 +2211,7 @@ mod tests {
             }
             let mut cx = EvmContext::dummy_do_not_use();
 
-            let r = unsafe { f.call(Some(&mut gas), Some(stack), Some(&mut stack_len), &mut cx) };
+            let r = unsafe { f.call(Some(stack), Some(&mut stack_len), &mut cx) };
             assert_eq!(r, InstructionResult::Stop);
             // Apparently the code does `fibonacci(input - 1)`.
             assert_eq!(stack.as_slice()[0].to_u256(), fibonacci_rust(input + 1));

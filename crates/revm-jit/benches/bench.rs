@@ -1,7 +1,7 @@
 #![allow(missing_docs)]
 
 use criterion::{criterion_group, criterion_main, Criterion};
-use revm_interpreter::{opcode as op, Gas, EMPTY_SHARED_MEMORY};
+use revm_interpreter::{opcode as op, EMPTY_SHARED_MEMORY};
 use revm_jit::{llvm, EvmContext, EvmStack, JitEvm, JitEvmFn};
 use revm_primitives::{SpecId, U256};
 use std::{hint::black_box, time::Duration};
@@ -32,17 +32,16 @@ fn bench(c: &mut Criterion) {
     let input_adj = input + 1;
     g.bench_function("rust", |b| b.iter(|| fibonacci_rust(input_adj)));
 
-    let mut gas = Gas::new(gas_limit);
     let mut stack_buf = EvmStack::new_heap();
     stack_buf.push(input_u256.into());
     let stack = EvmStack::from_mut_vec(&mut stack_buf);
     let mut stack_len = 1;
-    let mut cx = EvmContext::dummy_do_not_use();
+    let mut ecx = EvmContext::dummy_do_not_use();
     let mut call_jit = |f: JitEvmFn| {
         stack.as_mut_slice()[0] = input_u256.into();
-        gas = Gas::new(gas_limit);
         stack_len = 1;
-        unsafe { f.call(Some(&mut gas), Some(stack), Some(&mut stack_len), &mut cx) }
+        ecx = EvmContext::dummy_do_not_use();
+        unsafe { f.call(Some(stack), Some(&mut stack_len), &mut ecx) }
     };
 
     g.bench_function("revm-jit/no_gas", |b| b.iter(|| call_jit(jit_no_gas)));
@@ -53,14 +52,14 @@ fn bench(c: &mut Criterion) {
 
     g.bench_function("revm-jit/gas", |b| b.iter(|| call_jit(jit_gas)));
 
-    let contract = Box::new(revm_interpreter::Contract {
+    let contract = revm_interpreter::Contract {
         bytecode: revm_interpreter::analysis::to_analysed(revm_primitives::Bytecode::new_raw(
             revm_primitives::Bytes::from_static(bytecode),
         ))
         .try_into()
         .unwrap(),
         ..Default::default()
-    });
+    };
     let table = revm_interpreter::opcode::make_instruction_table::<
         revm_interpreter::DummyHost,
         revm_primitives::LatestSpec,

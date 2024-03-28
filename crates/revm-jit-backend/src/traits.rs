@@ -203,6 +203,12 @@ pub trait Builder: BackendTypes + TypeMethods {
     fn isub_imm(&mut self, lhs: Self::Value, rhs: i64) -> Self::Value;
     fn imul_imm(&mut self, lhs: Self::Value, rhs: i64) -> Self::Value;
 
+    // `(result, overflow)`
+    fn uadd_overflow(&mut self, lhs: Self::Value, rhs: Self::Value) -> (Self::Value, Self::Value);
+    fn usub_overflow(&mut self, lhs: Self::Value, rhs: Self::Value) -> (Self::Value, Self::Value);
+
+    fn umax(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
+    fn umin(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
     fn bswap(&mut self, value: Self::Value) -> Self::Value;
 
     fn bitor(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
@@ -220,11 +226,19 @@ pub trait Builder: BackendTypes + TypeMethods {
 
     fn zext(&mut self, ty: Self::Type, value: Self::Value) -> Self::Value;
     fn sext(&mut self, ty: Self::Type, value: Self::Value) -> Self::Value;
+    #[doc(alias = "trunc")]
+    fn ireduce(&mut self, to: Self::Type, value: Self::Value) -> Self::Value;
 
     fn gep(&mut self, ty: Self::Type, ptr: Self::Value, indexes: &[Self::Value]) -> Self::Value;
-    fn extract_value(&mut self, value: Self::Value, index: u32) -> Self::Value;
+    fn extract_value(&mut self, value: Self::Value, index: u32, name: &str) -> Self::Value;
 
     fn call(&mut self, function: Self::Function, args: &[Self::Value]) -> Option<Self::Value>;
+
+    fn memcpy(&mut self, dst: Self::Value, src: Self::Value, len: Self::Value);
+    fn memcpy_inline(&mut self, dst: Self::Value, src: Self::Value, len: i64) {
+        let len = self.iconst(self.type_int(64), len);
+        self.memcpy(dst, src, len);
+    }
 
     fn unreachable(&mut self);
 

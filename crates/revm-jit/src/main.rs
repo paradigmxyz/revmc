@@ -31,24 +31,30 @@ fn main() -> Result<()> {
 
 fn custom<B: Backend>(mut jit: JitEvm<B>) -> Result<()> {
     jit.set_pass_stack_through_args(true);
-    // jit.set_pass_stack_len_through_args(true);
-    jit.set_disable_gas(true);
+    jit.set_pass_stack_len_through_args(true);
+    // jit.set_disable_gas(true);
 
-    #[rustfmt::skip]
-    let code: &[u8] = &[
-        op::COINBASE,
-        op::PUSH20, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-        op::AND,
-    ];
+    // #[rustfmt::skip]
+    // let code: &[u8] = &[
+    //     op::CALLDATALOAD
+    // ];
+    // PUSH0 minimal proxy https://eips.ethereum.org/EIPS/eip-7511
+    /*
+    let code = "365f5f375f5f365f73bebebebebebebebebebebebebebebebebebebebe5af43d5f5f3e5f3d91602a57fd5bf3";
+    */
+    // Counter
+    /*
+     */
+    let code = "0x60808060405234610019575f8055610143908161001e8239f35b5f80fdfe60806040526004361015610011575f80fd5b5f3560e01c80632baeceb7146100c357806361bc221a146100a75763d09de08a1461003a575f80fd5b346100a3575f3660031901126100a3575f5460018101905f60018312911290801582169115161761008f57805f55337ff6d1d8d205b41f9fb9549900a8dba5d669d68117a3a2b88c1ebc61163e8117ba5f80a3005b634e487b7160e01b5f52601160045260245ffd5b5f80fd5b346100a3575f3660031901126100a35760205f54604051908152f35b346100a3575f3660031901126100a3575f545f19810190811360011661008f57805f55337fdc69c403b972fc566a14058b3b18e1513da476de6ac475716e489fae0cbe4a265f80a300fea2646970667358221220c045c027059726f9175a4abd427eb3f7a3fe8e27108bc19e4ae46055e7c1842c64736f6c63430008180033";
+    let code = &revm_primitives::hex::decode(code).unwrap();
 
     let mut stack_buf = EvmStack::new_heap();
     let stack = EvmStack::from_mut_vec(&mut stack_buf);
     stack.as_mut_slice()[0] = U256::from(0xab).into();
-    // let mut gas = Gas::new(100_000);
     let mut cx = EvmContext::dummy_do_not_use();
     let f = jit.compile(code, SpecId::LATEST)?;
-    let ret = unsafe { f.call(None, Some(stack), Some(&mut 1), &mut cx) };
-    assert_eq!(ret, InstructionResult::Stop);
+    let ret = unsafe { f.call(Some(stack), Some(&mut 1), &mut cx) };
+    // assert_eq!(ret, InstructionResult::Stop);
     // assert_eq!(stack.as_slice()[0], U256::from(0xab).into());
 
     Ok(())
@@ -57,6 +63,7 @@ fn custom<B: Backend>(mut jit: JitEvm<B>) -> Result<()> {
 fn fibonacci<B: Backend>(mut jit: JitEvm<B>) -> Result<()> {
     jit.set_pass_stack_through_args(true);
     jit.set_pass_stack_len_through_args(true);
+    // jit.set_disable_gas(true);
 
     let gas_limit = 100_000;
 
@@ -115,28 +122,27 @@ fn fibonacci<B: Backend>(mut jit: JitEvm<B>) -> Result<()> {
 
     bench(n_iters, "RUST", || fibonacci_rust(input_u16 + 1));
 
-    let mut gas = Gas::new(gas_limit);
     let mut stack_buf = EvmStack::new_heap();
     stack_buf.push(input.into());
     let stack = EvmStack::from_mut_vec(&mut stack_buf);
     let mut stack_len = 1;
-    let mut cx = EvmContext::dummy_do_not_use();
+    let mut ecx = EvmContext::dummy_do_not_use();
 
     bench(n_iters, " JIT", || {
         stack.as_mut_slice()[0] = input.into();
-        gas = Gas::new(gas_limit);
         stack_len = 1;
-        unsafe { f.call(Some(&mut gas), Some(stack), Some(&mut stack_len), &mut cx) }
+        ecx = EvmContext::dummy_do_not_use();
+        unsafe { f.call(Some(stack), Some(&mut stack_len), &mut ecx) }
     });
 
-    let contract = Box::new(revm_interpreter::Contract {
+    let contract = revm_interpreter::Contract {
         bytecode: revm_interpreter::analysis::to_analysed(revm_primitives::Bytecode::new_raw(
             revm_primitives::Bytes::copy_from_slice(bytecode),
         ))
         .try_into()
         .unwrap(),
         ..Default::default()
-    });
+    };
     let table = revm_interpreter::opcode::make_instruction_table::<
         revm_interpreter::DummyHost,
         revm_primitives::LatestSpec,
