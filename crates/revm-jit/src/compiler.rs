@@ -562,6 +562,11 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 let r = self.bcx.$op(a, b);
                 self.push_unchecked(r);
             }};
+            (@rev $op:ident) => {{
+                let [a, b] = self.popn(true);
+                let r = self.bcx.$op(b, a);
+                self.push_unchecked(r);
+            }};
             (@if_not_zero $op:ident) => {{
                 // TODO: `select` might not have the same semantics in all backends.
                 let [a, b] = self.popn(true);
@@ -730,19 +735,21 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 let [index, value] = self.popn(true);
                 let cond = self.bcx.icmp_imm(IntCC::UnsignedLessThan, index, 32);
                 let byte = {
-                    // (x >> (8 * index)) & 0xFF
-                    let mask = self.bcx.iconst_256(U256::from(0xFF));
-                    let shift = self.bcx.imul_imm(index, 8);
+                    // (value >> (31 - index) * 8) & 0xFF
+                    let thirty_one = self.bcx.iconst_256(U256::from(31));
+                    let shift = self.bcx.isub(thirty_one, index);
+                    let shift = self.bcx.imul_imm(shift, 8);
                     let shifted = self.bcx.ushr(value, shift);
+                    let mask = self.bcx.iconst_256(U256::from(0xFF));
                     self.bcx.bitand(shifted, mask)
                 };
                 let zero = self.bcx.iconst_256(U256::ZERO);
                 let r = self.bcx.select(cond, byte, zero);
                 self.push_unchecked(r);
             }
-            op::SHL => binop!(ishl),
-            op::SHR => binop!(ushr),
-            op::SAR => binop!(sshr),
+            op::SHL => binop!(@rev ishl),
+            op::SHR => binop!(@rev ushr),
+            op::SAR => binop!(@rev sshr),
 
             op::KECCAK256 => {
                 let sp = self.pop_top_sp(2);
@@ -1644,16 +1651,13 @@ mod pf {
 mod tests {
     use super::*;
     use crate::*;
-    use primitives::KECCAK_EMPTY;
-    use revm_interpreter::opcode as op;
+    use primitives::{address, keccak256, spec_to_generic, Address, Bytes, KECCAK_EMPTY};
+    use revm_interpreter::{gas, opcode as op};
     use revm_primitives::ruint::uint;
     use std::fmt;
 
     #[cfg(feature = "llvm")]
     use llvm::inkwell::context::Context as LlvmContext;
-
-    const DEFAULT_SPEC: SpecId = SpecId::CANCUN;
-    const DEFAULT_SPEC_OP_INFO: &[OpcodeInfo; 256] = op_info_map(DEFAULT_SPEC);
 
     const I256_MAX: U256 = U256::from_limbs([
         0xFFFFFFFFFFFFFFFF,
@@ -1662,8 +1666,47 @@ mod tests {
         0x7FFFFFFFFFFFFFFF,
     ]);
 
-    const GAS_LIMIT: u64 = 100_000;
-    const GAS_LIMIT_U256: U256 = U256::from_le_slice(&GAS_LIMIT.to_le_bytes());
+    // Default values.
+    const DEF_SPEC: SpecId = SpecId::CANCUN;
+    const DEF_OPINFOS: &[OpcodeInfo; 256] = op_info_map(DEF_SPEC);
+
+    const DEF_GAS_LIMIT: u64 = 100_000;
+    const DEF_GAS_LIMIT_U256: U256 = U256::from_le_slice(&DEF_GAS_LIMIT.to_le_bytes());
+
+    /// Default code address.
+    const DEF_ADDR: Address = address!("babababababababababababababababababababa");
+    const DEF_CALLER: Address = address!("cacacacacacacacacacacacacacacacacacacaca");
+    static DEF_CD: &[u8] = &[0xaa; 64];
+    static DEF_RD: &[u8] = &[0xbb; 64];
+    const DEF_VALUE: U256 = uint!(123_456_789_U256);
+
+    fn with_evm_context<F: FnOnce(&mut EvmContext<'_>) -> R, R>(bytecode: &[u8], f: F) -> R {
+        let contract = Contract {
+            input: Bytes::from_static(DEF_CD),
+            bytecode: revm_interpreter::analysis::to_analysed(revm_primitives::Bytecode::new_raw(
+                Bytes::copy_from_slice(bytecode),
+            ))
+            .try_into()
+            .unwrap(),
+            hash: keccak256(bytecode),
+            address: DEF_ADDR,
+            caller: DEF_CALLER,
+            value: DEF_VALUE,
+        };
+
+        let mut interpreter = revm_interpreter::Interpreter::new(contract, DEF_GAS_LIMIT, false);
+        interpreter.return_data_buffer = Bytes::from_static(DEF_RD);
+        // interpreter.shared_memory = {
+        //     let cap = 64;
+        //     let mut mem = revm_interpreter::SharedMemory::with_capacity(cap);
+        //     unsafe { mem.context_memory_mut().as_mut_ptr().write_bytes(0xcc, cap) };
+        //     mem
+        // };
+
+        let mut host = revm_interpreter::DummyHost::default();
+
+        f(&mut EvmContext::from_interpreter(&mut interpreter, &mut host))
+    }
 
     macro_rules! build_push32 {
         ($code:ident[$i:ident], $x:expr) => {{
@@ -1740,8 +1783,7 @@ mod tests {
         (@gas $op:expr; $($args:expr),+) => {
             tests!(@gas
                 $op,
-                DEFAULT_SPEC_OP_INFO[$op as usize].static_gas()
-                    .unwrap_or_else(|| panic!("opcode {} does not have static gas", $op)) as u64;
+                DEF_OPINFOS[$op as usize].static_gas().expect(stringify!($op)) as u64;
                 $($args),+
             )
         };
@@ -2012,40 +2054,57 @@ mod tests {
             not2(op::NOT, U256::MAX => 0_U256),
             not3(op::NOT, 1_U256 => U256::MAX.wrapping_sub(1_U256)),
 
-            byte1(op::BYTE, 0_U256, 0x12345678_U256 => 0x78_U256),
-            byte2(op::BYTE, 1_U256, 0x12345678_U256 => 0x56_U256),
-            byte3(op::BYTE, 2_U256, 0x12345678_U256 => 0x34_U256),
-            byte4(op::BYTE, 3_U256, 0x12345678_U256 => 0x12_U256),
-            byte5(op::BYTE, 4_U256, 0x12345678_U256 => 0_U256),
+            byte1(op::BYTE, 0_U256, 0x1122334400000000000000000000000000000000000000000000000000000000_U256 => 0x11_U256),
+            byte2(op::BYTE, 1_U256, 0x1122334400000000000000000000000000000000000000000000000000000000_U256 => 0x22_U256),
+            byte3(op::BYTE, 2_U256, 0x1122334400000000000000000000000000000000000000000000000000000000_U256 => 0x33_U256),
+            byte4(op::BYTE, 3_U256, 0x1122334400000000000000000000000000000000000000000000000000000000_U256 => 0x44_U256),
+            byte5(op::BYTE, 4_U256, 0x1122334400000000000000000000000000000000000000000000000000000000_U256 => 0x00_U256),
             byte_oob0(op::BYTE, 31_U256, U256::MAX => 0xFF_U256),
             byte_oob1(op::BYTE, 32_U256, U256::MAX => 0_U256),
             byte_oob2(op::BYTE, 33_U256, U256::MAX => 0_U256),
 
-            shl1(op::SHL, 1_U256, 0_U256 => 1_U256),
+            // shift operand order is reversed for some reason:
+            // shift, x
+            shl1(op::SHL, 0_U256, 1_U256 => 1_U256),
             shl2(op::SHL, 1_U256, 1_U256 => 2_U256),
-            shl3(op::SHL, 1_U256, 2_U256 => 4_U256),
+            shl3(op::SHL, 2_U256, 1_U256 => 4_U256),
 
-            shr1(op::SHR, 1_U256, 0_U256 => 1_U256),
-            shr2(op::SHR, 2_U256, 1_U256 => 1_U256),
-            shr3(op::SHR, 4_U256, 2_U256 => 1_U256),
+            shr1(op::SHR, 0_U256, 1_U256 => 1_U256),
+            shr2(op::SHR, 1_U256, 2_U256 => 1_U256),
+            shr3(op::SHR, 2_U256, 4_U256 => 1_U256),
 
-            sar1(op::SAR, 1_U256, 0_U256 => 1_U256),
-            sar2(op::SAR, 2_U256, 1_U256 => 1_U256),
-            sar3(op::SAR, 4_U256, 2_U256 => 1_U256),
-            sar4(op::SAR, -1_U256, 1_U256 => -1_U256),
-            sar5(op::SAR, -1_U256, 2_U256 => -1_U256),
+            sar1(op::SAR, 0_U256, 1_U256 => 1_U256),
+            sar2(op::SAR, 1_U256, 2_U256 => 1_U256),
+            sar3(op::SAR, 2_U256, 4_U256 => 1_U256),
+            sar4(op::SAR, 1_U256, -1_U256 => -1_U256),
+            sar5(op::SAR, 2_U256, -1_U256 => -1_U256),
         }
 
         system {
             gas(@raw {
                 bytecode: &[op::GAS, op::GAS, op::JUMPDEST, op::GAS],
-                expected_stack: &[GAS_LIMIT_U256 - 2_U256, GAS_LIMIT_U256 - 4_U256, GAS_LIMIT_U256 - 7_U256],
+                expected_stack: &[DEF_GAS_LIMIT_U256 - 2_U256, DEF_GAS_LIMIT_U256 - 4_U256, DEF_GAS_LIMIT_U256 - 7_U256],
                 expected_gas: 2 + 2 + 1 + 2,
             }),
-            keccak256_empty(@raw {
+            keccak256_empty1(@raw {
                 bytecode: &[op::PUSH0, op::PUSH0, op::KECCAK256],
                 expected_stack: &[KECCAK_EMPTY.into()],
-                expected_gas: 2 + 2 + 30,
+                expected_gas: 2 + 2 + gas::KECCAK256,
+            }),
+            keccak256_empty2(@raw {
+                bytecode: &[op::PUSH0, op::PUSH1, 32, op::KECCAK256],
+                expected_stack: &[KECCAK_EMPTY.into()],
+                expected_gas: 2 + 3 + gas::KECCAK256,
+            }),
+            keccak256_1(@raw {
+                bytecode: &[op::PUSH1, 32, op::PUSH0, op::KECCAK256],
+                expected_stack: &[keccak256([0; 32]).into()],
+                expected_gas: 3 + 2 + (gas::keccak256_cost(32).unwrap() + 3),
+            }),
+            keccak256_2(@raw {
+                bytecode: &[op::PUSH2, 0x69, 0x42, op::PUSH0, op::MSTORE, op::PUSH1, 0x20, op::PUSH0, op::KECCAK256],
+                expected_stack: &[keccak256(0x6942_U256.to_be_bytes::<32>()).into()],
+                expected_gas: 3 + 2 + (3 + 3) + 3 + 2 + gas::keccak256_cost(32).unwrap(),
             }),
         }
 
@@ -2071,7 +2130,7 @@ mod tests {
         fn default() -> Self {
             Self {
                 bytecode: &[],
-                spec_id: DEFAULT_SPEC,
+                spec_id: DEF_SPEC,
                 expected_return: InstructionResult::Stop,
                 expected_stack: &[],
                 expected_gas: 0,
@@ -2119,18 +2178,16 @@ mod tests {
         test_case: &TestCase<'_>,
         make_backend: impl Fn(OptimizationLevel) -> B,
     ) {
+        println!("Running {test_case:#?}\n");
+
         println!("--- not optimized ---");
-        let mut jit = JitEvm::new(make_backend(OptimizationLevel::None));
-        run_case_built(test_case, &mut jit);
+        run_case_built(test_case, &mut JitEvm::new(make_backend(OptimizationLevel::None)));
 
         println!("--- optimized ---");
-        let mut jit = JitEvm::new(make_backend(OptimizationLevel::Aggressive));
-        run_case_built(test_case, &mut jit);
+        run_case_built(test_case, &mut JitEvm::new(make_backend(OptimizationLevel::Aggressive)));
     }
 
     fn run_case_built<B: Backend>(test_case: &TestCase<'_>, jit: &mut JitEvm<B>) {
-        println!("Running {test_case:#?}\n");
-
         let TestCase { bytecode, spec_id, expected_return, expected_stack, expected_gas } =
             *test_case;
 
@@ -2141,14 +2198,26 @@ mod tests {
 
         let mut stack = EvmStack::new();
         let mut stack_len = 0;
-        let mut cx = EvmContext::dummy_do_not_use();
-        let actual_return = unsafe { f.call(Some(&mut stack), Some(&mut stack_len), &mut cx) };
-        assert_eq!(actual_return, expected_return, "return value mismatch");
-        assert_eq!(cx.gas.spent(), expected_gas, "gas mismatch");
+        with_evm_context(bytecode, |ecx| {
+            let table =
+                spec_to_generic!(test_case.spec_id, op::make_instruction_table::<_, SPEC>());
+            let mut interpreter = ecx.to_interpreter(Default::default());
+            let memory = interpreter.take_memory();
+            interpreter.run(memory, &table, &mut interpreter::DummyHost::default());
+            assert_eq!(
+                interpreter.instruction_result, expected_return,
+                "interpreter return value mismatch"
+            );
+            assert_eq!(interpreter.stack.data(), expected_stack, "interpreter stack mismatch");
+            assert_eq!(interpreter.gas.spent(), expected_gas, "interpreter gas mismatch");
 
-        let actual_stack =
-            stack.as_slice().iter().take(stack_len).map(|x| x.to_u256()).collect::<Vec<_>>();
-        assert_eq!(actual_stack, *expected_stack, "stack mismatch");
+            let actual_return = unsafe { f.call(Some(&mut stack), Some(&mut stack_len), ecx) };
+            assert_eq!(actual_return, expected_return, "return value mismatch");
+            let actual_stack =
+                stack.as_slice().iter().take(stack_len).map(|x| x.to_u256()).collect::<Vec<_>>();
+            assert_eq!(actual_stack, *expected_stack, "stack mismatch");
+            assert_eq!(ecx.gas.spent(), expected_gas, "gas mismatch");
+        });
     }
 
     // ---
@@ -2192,7 +2261,7 @@ mod tests {
             let code = mk_fibonacci_code(input, dynamic);
 
             unsafe { jit.free_all_functions() }.unwrap();
-            let f = jit.compile(&code, DEFAULT_SPEC).unwrap();
+            let f = jit.compile(&code, DEF_SPEC).unwrap();
 
             let mut stack_buf = EvmStack::new_heap();
             let stack = EvmStack::from_mut_vec(&mut stack_buf);
@@ -2203,13 +2272,13 @@ mod tests {
             if dynamic {
                 stack_len = 1;
             }
-            let mut cx = EvmContext::dummy_do_not_use();
-
-            let r = unsafe { f.call(Some(stack), Some(&mut stack_len), &mut cx) };
-            assert_eq!(r, InstructionResult::Stop);
-            // Apparently the code does `fibonacci(input - 1)`.
-            assert_eq!(stack.as_slice()[0].to_u256(), fibonacci_rust(input + 1));
-            assert_eq!(stack_len, 1);
+            with_evm_context(&code, |ecx| {
+                let r = unsafe { f.call(Some(stack), Some(&mut stack_len), ecx) };
+                assert_eq!(r, InstructionResult::Stop);
+                // Apparently the code does `fibonacci(input - 1)`.
+                assert_eq!(stack.as_slice()[0].to_u256(), fibonacci_rust(input + 1));
+                assert_eq!(stack_len, 1);
+            });
         }
 
         fn mk_fibonacci_code(input: u16, dynamic: bool) -> Vec<u8> {

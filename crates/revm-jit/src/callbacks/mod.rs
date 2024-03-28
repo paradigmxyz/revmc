@@ -261,6 +261,7 @@ pub(crate) unsafe extern "C" fn mload(
     ecx: &mut EvmContext<'_>,
     sp: *mut EvmWord,
 ) -> InstructionResult {
+    gas!(ecx, rgas::VERYLOW);
     read_words!(sp, offset_ptr);
     let offset = tri!(offset_ptr.try_into());
     resize_memory!(ecx, offset, 32);
@@ -272,6 +273,7 @@ pub(crate) unsafe extern "C" fn mstore(
     ecx: &mut EvmContext<'_>,
     sp: *mut EvmWord,
 ) -> InstructionResult {
+    gas!(ecx, rgas::VERYLOW);
     read_words!(sp, offset, value);
     let offset = tri!(offset.try_into());
     resize_memory!(ecx, offset, 32);
@@ -283,6 +285,7 @@ pub(crate) unsafe extern "C" fn mstore8(
     ecx: &mut EvmContext<'_>,
     sp: *mut EvmWord,
 ) -> InstructionResult {
+    gas!(ecx, rgas::VERYLOW);
     read_words!(sp, offset, value);
     let offset = tri!(offset.try_into());
     resize_memory!(ecx, offset, 1);
@@ -448,7 +451,9 @@ fn resize_memory(ecx: &mut EvmContext<'_>, offset: usize, len: usize) -> Instruc
         // TODO: Memory limit
 
         // TODO: try_resize
-        gas!(ecx, rgas::memory_gas(rounded_size / 32));
+        dbg!(ecx.gas.spent());
+        gas!(ecx, dbg!(rgas::memory_gas(rounded_size / 32)));
+        dbg!(ecx.gas.spent());
         ecx.memory.resize(rounded_size);
     }
     InstructionResult::Continue

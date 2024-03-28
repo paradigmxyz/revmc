@@ -516,6 +516,21 @@ impl<'a> EvmContext<'a> {
         }
     }
 
+    /// Creates a new interpreter by cloning the context.
+    pub fn to_interpreter(&self, stack: revm_interpreter::Stack) -> Interpreter {
+        Interpreter {
+            instruction_pointer: self.contract.bytecode.as_ptr(),
+            contract: self.contract.clone(),
+            instruction_result: InstructionResult::Continue,
+            gas: *self.gas,
+            shared_memory: self.memory.clone(),
+            stack,
+            return_data_buffer: self.return_data.to_vec().into(),
+            is_static: self.is_static,
+            next_action: self.next_action.clone(),
+        }
+    }
+
     #[doc(hidden)]
     pub fn dummy_do_not_use() -> impl std::ops::DerefMut<Target = Self> {
         struct Dropper<'a>(EvmContext<'a>);
