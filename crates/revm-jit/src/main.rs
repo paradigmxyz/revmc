@@ -30,8 +30,6 @@ fn main() -> Result<()> {
 }
 
 fn custom<B: Backend>(mut jit: JitEvm<B>) -> Result<()> {
-    jit.set_pass_stack_through_args(true);
-    jit.set_pass_stack_len_through_args(true);
     // jit.set_disable_gas(true);
 
     // #[rustfmt::skip]
@@ -61,8 +59,6 @@ fn custom<B: Backend>(mut jit: JitEvm<B>) -> Result<()> {
 }
 
 fn fibonacci<B: Backend>(mut jit: JitEvm<B>) -> Result<()> {
-    jit.set_pass_stack_through_args(true);
-    jit.set_pass_stack_len_through_args(true);
     // jit.set_disable_gas(true);
 
     let gas_limit = 100_000;

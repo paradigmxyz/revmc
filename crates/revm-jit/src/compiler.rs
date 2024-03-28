@@ -89,7 +89,7 @@ impl<B: Backend> JitEvm<B> {
 
     /// Sets whether to enable frame pointers.
     ///
-    /// This is useful for profiling and debugging, but it does incur a performance penalty.
+    /// This is useful for profiling and debugging, but it incurs a very slight performance penalty.
     ///
     /// Defaults to `cfg!(debug_assertions)`.
     pub fn set_frame_pointers(&mut self, yes: bool) {
@@ -101,10 +101,13 @@ impl<B: Backend> JitEvm<B> {
     /// If this is set to `true`, the EVM stack will be passed in the arguments rather than
     /// allocated in the function locally.
     ///
+    /// This is required if the executing with in an Evm and the bytecode contains `CALL` or
+    /// `CREATE`-like instructions, as execution will need to be restored after the call.
+    ///
     /// This is useful to inspect the stack after the function has been executed, but it does
     /// incur a performance penalty as the pointer might not be able to be fully optimized.
     ///
-    /// Defaults to `false`.
+    /// Defaults to `true`.
     pub fn set_pass_stack_through_args(&mut self, yes: bool) {
         self.config.stack_through_args = yes;
     }
@@ -114,10 +117,13 @@ impl<B: Backend> JitEvm<B> {
     /// If this is set to `true`, the EVM stack length will be passed in the arguments rather than
     /// allocated in the function locally.
     ///
+    /// This is required if the executing with in an Evm and the bytecode contains `CALL` or
+    /// `CREATE`-like instructions, as execution will need to be restored after the call.
+    ///
     /// This is useful to inspect the stack length after the function has been executed, but it does
     /// incur a performance penalty as the pointer might not be able to be fully optimized.
     ///
-    /// Defaults to `false`.
+    /// Defaults to `true`.
     pub fn set_pass_stack_len_through_args(&mut self, yes: bool) {
         self.config.stack_len_through_args = yes;
     }
@@ -305,8 +311,8 @@ impl Default for FcxConfig {
             debug_assertions: cfg!(debug_assertions),
             comments_enabled: false,
             frame_pointers: cfg!(debug_assertions),
-            stack_through_args: false,
-            stack_len_through_args: false,
+            stack_through_args: true,
+            stack_len_through_args: true,
             gas_disabled: false,
             static_gas_limit: None,
         }
@@ -2190,9 +2196,6 @@ mod tests {
     fn run_case_built<B: Backend>(test_case: &TestCase<'_>, jit: &mut JitEvm<B>) {
         let TestCase { bytecode, spec_id, expected_return, expected_stack, expected_gas } =
             *test_case;
-
-        jit.set_pass_stack_through_args(true);
-        jit.set_pass_stack_len_through_args(true);
         jit.set_disable_gas(false);
         let f = jit.compile(bytecode, spec_id).unwrap();
 
@@ -2242,9 +2245,6 @@ mod tests {
     }
 
     fn run_fibonacci_tests<B: Backend>(jit: &mut JitEvm<B>) {
-        jit.set_pass_stack_through_args(true);
-        jit.set_pass_stack_len_through_args(true);
-
         for i in 0..=10 {
             run_fibonacci_test(jit, i);
         }

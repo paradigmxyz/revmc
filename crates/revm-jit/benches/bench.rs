@@ -20,8 +20,6 @@ fn bench(c: &mut Criterion) {
     let context = llvm::inkwell::context::Context::create();
     let backend = llvm::JitEvmLlvmBackend::new(&context, opt_level).unwrap();
     let mut jit = JitEvm::new(backend);
-    jit.set_pass_stack_through_args(true);
-    jit.set_pass_stack_len_through_args(true);
     jit.set_disable_gas(true);
     let jit_no_gas = jit.compile(bytecode, SPEC_ID).unwrap();
 
