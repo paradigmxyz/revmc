@@ -7,6 +7,7 @@ use std::{fmt, mem::MaybeUninit, ptr};
 /// The raw function signature of a JIT'd EVM bytecode.
 ///
 /// Prefer using [`JitEvmFn`] instead of this type. See [`JitEvmFn::call`] for more information.
+// When changing the signature, also update the corresponding declarations in `fn translate`.
 pub type RawJitEvmFn = unsafe extern "C" fn(
     gas: *mut Gas,
     stack: *mut EvmStack,

@@ -1,8 +1,8 @@
 //! JIT compiler implementation.
 
 use crate::{
-    callbacks::Callback, Backend, Builder, Bytecode, EvmContext, EvmStack, IntCC, JitEvmFn,
-    OpcodeData, OpcodeFlags, Result, I256_MIN,
+    callbacks::Callback, Backend, Builder, Bytecode, EvmContext, EvmStack, Instr, InstrData,
+    InstrFlags, IntCC, JitEvmFn, Result, I256_MIN,
 };
 use revm_interpreter::{opcode as op, Contract, Gas, InstructionResult};
 use revm_jit_backend::{Attribute, FunctionAttributeLocation, OptimizationLevel, TypeMethods};
@@ -12,15 +12,12 @@ use std::{mem, path::PathBuf, sync::atomic::AtomicPtr};
 const STACK_CAP: usize = 1024;
 // const WORD_SIZE: usize = 32;
 
-// TODO: Use `indexvec` or something.
-type Opcode = usize;
-
 // TODO: Cannot find function if `compile` is called a second time.
 
 // TODO: Generate less redundant stack length manip code, e.g. pop + push
-// TODO: We can emit the length check by adding a params in/out opcode flag; can be re-used for EOF
+// TODO: We can emit the length check by adding a params in/out instr flag; can be re-used for EOF
 
-// TODO: Unify `callback` opcodes after above.
+// TODO: Unify `callback` instructions after above.
 
 // TODO: Somehow have a config to tell the backend to assume that stack stores are unobservable,
 // making it eliminate redundant stores for values outside the stack length when optimized away.
@@ -29,6 +26,7 @@ type Opcode = usize;
 // Use this when `stack` is passed in arguments.
 
 // TODO: Test on big-endian hardware.
+// It probably doesn't work when loading Rust U256 into native endianness.
 
 /// JIT compiler for EVM bytecode.
 #[allow(missing_debug_implementations)]
@@ -350,13 +348,13 @@ struct FunctionCx<'a, B: Backend> {
 
     /// The bytecode being translated.
     bytecode: &'a Bytecode<'a>,
-    /// All entry blocks for each opcode.
-    op_blocks: Vec<B::BasicBlock>,
-    /// The current opcode being translated.
+    /// All entry blocks for each instruction.
+    instr_blocks: Vec<B::BasicBlock>,
+    /// The current instruction being translated.
     ///
     /// Note that `self.op_blocks[current_opcode]` does not necessarily equal the builder's current
     /// block.
-    current_opcode: Opcode,
+    current_opcode: Instr,
 
     /// Callbacks.
     callbacks: &'a mut Callbacks<B>,
@@ -392,32 +390,36 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         };
 
         let sp_arg = bcx.fn_param(1);
-        let stack = if config.stack_through_args {
-            PointerBase::Address(sp_arg)
-        } else {
-            let stack_type = bcx.type_array(word_type, STACK_CAP as _);
-            let stack_slot = bcx.new_stack_slot(stack_type, "stack.addr");
-            PointerBase::StackSlot(stack_slot)
+        let stack = {
+            let base = if config.stack_through_args {
+                PointerBase::Address(sp_arg)
+            } else {
+                let stack_type = bcx.type_array(word_type, STACK_CAP as _);
+                let stack_slot = bcx.new_stack_slot(stack_type, "stack.addr");
+                PointerBase::StackSlot(stack_slot)
+            };
+            Pointer { ty: word_type, base }
         };
-        let stack = Pointer { ty: word_type, base: stack };
 
         let stack_len_arg = bcx.fn_param(2);
-        let stack_len = if config.stack_len_through_args {
-            PointerBase::Address(stack_len_arg)
-        } else {
-            let stack_len = bcx.new_stack_slot(isize_type, "len.addr");
-            bcx.stack_store(zero, stack_len);
-            PointerBase::StackSlot(stack_len)
+        let stack_len = {
+            let base = if config.stack_len_through_args {
+                PointerBase::Address(stack_len_arg)
+            } else {
+                let stack_len = bcx.new_stack_slot(isize_type, "len.addr");
+                bcx.stack_store(zero, stack_len);
+                PointerBase::StackSlot(stack_len)
+            };
+            Pointer { ty: isize_type, base }
         };
-        let stack_len = Pointer { ty: isize_type, base: stack_len };
 
         let env = bcx.fn_param(3);
         let contract = bcx.fn_param(4);
         let ecx = bcx.fn_param(5);
 
-        // Create all opcode entry blocks.
+        // Create all instruction entry blocks.
         let op_blocks: Vec<_> = bytecode
-            .iter_opcodes()
+            .iter_instrs()
             .map(|(i, data)| bcx.create_block(&op_block_name_with(i, data, "")))
             .collect();
         assert!(!op_blocks.is_empty(), "translating empty bytecode");
@@ -442,7 +444,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             ecx,
 
             bytecode,
-            op_blocks,
+            instr_blocks: op_blocks,
             current_opcode: usize::MAX,
 
             callbacks,
@@ -469,38 +471,38 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             fx.bcx.load(i64_type, gas_ptr, "gas_limit")
         });
 
-        // Branch to the first opcode. The bytecode is guaranteed to have at least one opcode.
-        fx.bcx.br(fx.op_blocks[0]);
+        // Branch to the first instruction.
+        // The bytecode is guaranteed to have at least one instruction.
+        fx.bcx.br(fx.instr_blocks[0]);
 
-        // Translate individual opcodes into their respective blocks.
-        for (i, _) in bytecode.iter_opcodes() {
-            fx.current_opcode = i;
-            fx.translate_opcode()?;
+        // Translate individual instructions into their respective blocks.
+        for (instr, _) in bytecode.iter_instrs() {
+            fx.translate_instr(instr)?;
         }
 
         Ok(())
     }
 
-    fn translate_opcode(&mut self) -> Result<()> {
-        let opcode = self.current_opcode;
-        let data = self.bytecode.opcode(opcode);
-        let op_block = self.op_blocks[opcode];
-        self.bcx.switch_to_block(op_block);
+    fn translate_instr(&mut self, instr: Instr) -> Result<()> {
+        self.current_opcode = instr;
+        let data = self.bytecode.instr(instr);
+        let instr_block = self.instr_blocks[instr];
+        self.bcx.switch_to_block(instr_block);
 
-        let op_byte = data.opcode;
+        let opcode = data.opcode;
 
         let branch_to_next_opcode = |this: &mut Self| {
             debug_assert!(
-                !this.bytecode.is_opcode_diverging(opcode),
-                "attempted to branch to next opcode in diverging opcode: {}",
-                this.bytecode.raw_opcode(opcode),
+                !this.bytecode.is_instr_diverging(instr),
+                "attempted to branch to next instruction in a diverging instruction: {}",
+                this.bytecode.raw_opcode(instr),
             );
-            if let Some(next) = this.op_blocks.get(opcode + 1) {
+            if let Some(next) = this.instr_blocks.get(instr + 1) {
                 this.bcx.br(*next);
             }
         };
         let epilogue = |this: &mut Self| {
-            this.bcx.seal_block(op_block);
+            this.bcx.seal_block(instr_block);
         };
 
         // Make sure to run the epilogue before returning.
@@ -523,13 +525,13 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         }
 
         // Assert that we already skipped the block.
-        debug_assert!(!data.flags.contains(OpcodeFlags::DEAD_CODE));
+        debug_assert!(!data.flags.contains(InstrFlags::DEAD_CODE));
 
-        // Disabled opcodes don't pay gas.
-        if data.flags.contains(OpcodeFlags::DISABLED) {
+        // Disabled instructions don't pay gas.
+        if data.flags.contains(InstrFlags::DISABLED) {
             goto_return!(build InstructionResult::NotActivated);
         }
-        if data.flags.contains(OpcodeFlags::UNKNOWN) {
+        if data.flags.contains(InstrFlags::UNKNOWN) {
             goto_return!(build InstructionResult::OpcodeNotFound);
         }
 
@@ -540,7 +542,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             }
         }
 
-        if data.flags.contains(OpcodeFlags::SKIP_LOGIC) {
+        if data.flags.contains(InstrFlags::SKIP_LOGIC) {
             goto_return!("skipped");
         }
 
@@ -700,7 +702,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             }
 
             op::LT | op::GT | op::SLT | op::SGT | op::EQ => {
-                let cond = match op_byte {
+                let cond = match opcode {
                     op::LT => IntCC::UnsignedLessThan,
                     op::GT => IntCC::UnsignedGreaterThan,
                     op::SLT => IntCC::SignedLessThan,
@@ -992,22 +994,22 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 self.callback_ir(Callback::Sstore, &[self.ecx, sp]);
             }
             op::JUMP | op::JUMPI => {
-                if data.flags.contains(OpcodeFlags::INVALID_JUMP) {
+                if data.flags.contains(InstrFlags::INVALID_JUMP) {
                     self.build_return(InstructionResult::InvalidJump);
-                } else if data.flags.contains(OpcodeFlags::STATIC_JUMP) {
+                } else if data.flags.contains(InstrFlags::STATIC_JUMP) {
                     let target_opcode = data.data as usize;
                     debug_assert_eq!(
-                        self.bytecode.opcode(target_opcode).opcode,
+                        self.bytecode.instr(target_opcode).opcode,
                         op::JUMPDEST,
                         "jumping to non-JUMPDEST: ic={target_opcode} -> {}",
-                        self.bytecode.opcode(target_opcode).to_raw()
+                        self.bytecode.instr(target_opcode).to_op()
                     );
 
-                    let target = self.op_blocks[target_opcode];
-                    if op_byte == op::JUMPI {
+                    let target = self.instr_blocks[target_opcode];
+                    if opcode == op::JUMPI {
                         let cond_word = self.pop(true);
                         let cond = self.bcx.icmp_imm(IntCC::NotEqual, cond_word, 0);
-                        let next = self.op_blocks[opcode + 1];
+                        let next = self.instr_blocks[instr + 1];
                         self.bcx.brif(cond, target, next);
                     } else {
                         self.bcx.br(target);
@@ -1056,13 +1058,13 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 self.push(value);
             }
 
-            op::DUP1..=op::DUP16 => self.dup(op_byte - op::DUP1 + 1),
+            op::DUP1..=op::DUP16 => self.dup(opcode - op::DUP1 + 1),
 
-            op::SWAP1..=op::SWAP16 => self.swap(op_byte - op::SWAP1 + 1),
+            op::SWAP1..=op::SWAP16 => self.swap(opcode - op::SWAP1 + 1),
 
             op::LOG0..=op::LOG4 => {
                 self.fail_if_staticcall(InstructionResult::StateChangeDuringStaticCall);
-                let _n = op_byte - op::LOG0;
+                let _n = opcode - op::LOG0;
                 // TODO: host
             }
 
@@ -1102,7 +1104,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 // TODO: host
             }
 
-            _ => unreachable!("unimplemented opcode: {}", data.to_raw_in(self.bytecode)),
+            _ => unreachable!("unimplemented instructions: {}", data.to_op_in(self.bytecode)),
         }
 
         goto_return!("normal exit");
@@ -1457,20 +1459,12 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         self.create_block_after(after, name)
     }
 
-    /*
-    /// Creates a named block after the current opcode's opcode.
-    fn create_block_after_op(&mut self, name: &str) -> B::BasicBlock {
-        let after = self.op_blocks[self.current_opcode];
-        self.create_block_after(after, name)
-    }
-    */
-
     /// Returns the block name for the current opcode with the given suffix.
     fn op_block_name(&self, name: &str) -> String {
         if self.current_opcode == usize::MAX {
             return format!("entry.{name}");
         }
-        op_block_name_with(self.current_opcode, self.bytecode.opcode(self.current_opcode), name)
+        op_block_name_with(self.current_opcode, self.bytecode.instr(self.current_opcode), name)
     }
 
     #[inline]
@@ -1582,8 +1576,8 @@ impl<B: Backend> Callbacks<B> {
     }
 }
 
-fn op_block_name_with(op: Opcode, data: OpcodeData, with: &str) -> String {
-    let data = data.to_raw();
+fn op_block_name_with(op: Instr, data: InstrData, with: &str) -> String {
+    let data = data.to_op();
     if with.is_empty() {
         format!("op.{op}.{data}")
     } else {

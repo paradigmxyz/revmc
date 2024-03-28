@@ -9,16 +9,24 @@ use std::fmt;
 mod info;
 pub use info::*;
 
-mod raw;
-pub use raw::*;
+mod opcode;
+pub use opcode::*;
+
+// TODO: Use `indexvec`.
+/// An EVM instruction is a high level internal representation of an EVM opcode.
+///
+/// This is an index into [`Bytecode`] instructions.
+///
+/// Also known as `ic`, or instruction counter; not to be confused with SSA `instr`s.
+pub(crate) type Instr = usize;
 
 /// EVM bytecode.
 #[derive(Debug)]
 pub(crate) struct Bytecode<'a> {
     /// The original bytecode slice.
     pub(crate) code: &'a [u8],
-    /// The parsed opcodes.
-    opcodes: Vec<OpcodeData>,
+    /// The instructions.
+    instrs: Vec<InstrData>,
     /// `JUMPDEST` map.
     jumpdests: BitVec,
     /// The [`SpecId`].
@@ -27,10 +35,10 @@ pub(crate) struct Bytecode<'a> {
 
 impl<'a> Bytecode<'a> {
     pub(crate) fn new(code: &'a [u8], spec_id: SpecId) -> Self {
-        let mut opcodes = Vec::with_capacity(code.len() + 1);
+        let mut instrs = Vec::with_capacity(code.len() + 1);
         let mut jumpdests = BitVec::repeat(false, code.len());
         let op_infos = op_info_map(spec_id);
-        for (pc, RawOpcode { opcode, immediate }) in RawBytecodeIter::new(code).with_pc() {
+        for (pc, Opcode { opcode, immediate }) in OpcodesIter::new(code).with_pc() {
             let mut data = 0;
             match opcode {
                 op::JUMPDEST => jumpdests.set(pc, true),
@@ -43,53 +51,53 @@ impl<'a> Bytecode<'a> {
                 }
             }
 
-            let mut flags = OpcodeFlags::empty();
+            let mut flags = InstrFlags::empty();
             let info = op_infos[opcode as usize];
             if info.is_unknown() {
-                flags |= OpcodeFlags::UNKNOWN;
+                flags |= InstrFlags::UNKNOWN;
             }
             if info.is_disabled() {
-                flags |= OpcodeFlags::DISABLED;
+                flags |= InstrFlags::DISABLED;
             }
             let static_gas = info.static_gas().unwrap_or(u16::MAX);
 
-            opcodes.push(OpcodeData { opcode, flags, static_gas, data });
+            instrs.push(InstrData { opcode, flags, static_gas, data });
         }
 
-        let mut bytecode = Self { code, opcodes, jumpdests, spec_id };
+        let mut bytecode = Self { code, instrs, jumpdests, spec_id };
 
-        // Pad code to ensure there is at least one diverging opcode.
-        if bytecode.opcodes.last().map_or(true, |last| !last.is_diverging(bytecode.is_eof())) {
-            bytecode.opcodes.push(OpcodeData::new(op::STOP));
+        // Pad code to ensure there is at least one diverging instruction.
+        if bytecode.instrs.last().map_or(true, |last| !last.is_diverging(bytecode.is_eof())) {
+            bytecode.instrs.push(InstrData::new(op::STOP));
         }
 
         bytecode
     }
 
-    /// Returns the opcode at the given instruction counter.
+    /// Returns the instruction at the given instruction counter.
     #[inline]
-    pub(crate) fn opcode(&self, ic: usize) -> OpcodeData {
-        self.opcodes[ic]
+    pub(crate) fn instr(&self, instr: Instr) -> InstrData {
+        self.instrs[instr]
     }
 
-    /// Returns a mutable reference the opcode at the given instruction counter.
+    /// Returns a mutable reference the instruction at the given instruction counter.
     #[inline]
     #[allow(dead_code)]
-    pub(crate) fn opcode_mut(&mut self, ic: usize) -> &mut OpcodeData {
-        &mut self.opcodes[ic]
+    pub(crate) fn instr_mut(&mut self, instr: Instr) -> &mut InstrData {
+        &mut self.instrs[instr]
     }
 
-    /// Returns an iterator over the opcodes with their instruction counters.
+    /// Returns an iterator over the instructions.
     #[inline]
-    pub(crate) fn iter_opcodes(&self) -> impl Iterator<Item = (usize, OpcodeData)> + '_ {
-        self.opcodes
+    pub(crate) fn iter_instrs(&self) -> impl Iterator<Item = (usize, InstrData)> + '_ {
+        self.instrs
             .iter()
             .copied()
             .enumerate()
-            .filter(|(_, data)| !data.flags.contains(OpcodeFlags::DEAD_CODE))
+            .filter(|(_, data)| !data.flags.contains(InstrFlags::DEAD_CODE))
     }
 
-    /// Runs a list of analysis passes on the opcodes.
+    /// Runs a list of analysis passes on the instructions.
     #[instrument(level = "debug", skip_all)]
     pub(crate) fn analyze(&mut self) -> Result<()> {
         trace_time!("static_jump_analysis", || self.static_jump_analysis());
@@ -102,70 +110,70 @@ impl<'a> Bytecode<'a> {
     /// Mark `PUSH<N>` followed by `JUMP[I]` as `STATIC_JUMP` and resolve the target.
     #[instrument(name = "sj", level = "debug", skip_all)]
     fn static_jump_analysis(&mut self) {
-        for ic in 0..self.opcodes.len() {
-            let jic = ic + 1;
-            let Some(next) = self.opcodes.get(jic) else { continue };
-            let opcode = &self.opcodes[ic];
-            if !(matches!(opcode.opcode, op::PUSH1..=op::PUSH32)
+        for instr in 0..self.instrs.len() {
+            let jump_instr = instr + 1;
+            let Some(next) = self.instrs.get(jump_instr) else { continue };
+            let data = &self.instrs[instr];
+            if !(matches!(data.opcode, op::PUSH1..=op::PUSH32)
                 && matches!(next.opcode, op::JUMP | op::JUMPI))
             {
                 continue;
             }
 
-            let imm_data = opcode.data;
+            let imm_data = data.data;
             let imm = self.get_imm(imm_data);
-            self.opcodes[jic].flags |= OpcodeFlags::STATIC_JUMP;
+            self.instrs[jump_instr].flags |= InstrFlags::STATIC_JUMP;
 
             const USIZE_SIZE: usize = std::mem::size_of::<usize>();
             if imm.len() > USIZE_SIZE {
-                debug!(jic, "jump target too large");
-                self.opcodes[jic].flags |= OpcodeFlags::INVALID_JUMP;
+                debug!(jump_instr, "jump target too large");
+                self.instrs[jump_instr].flags |= InstrFlags::INVALID_JUMP;
                 continue;
             }
 
             let mut padded = [0; USIZE_SIZE];
             padded[USIZE_SIZE - imm.len()..].copy_from_slice(imm);
-            let target = usize::from_be_bytes(padded);
-            if !self.is_valid_jump(target) {
-                debug!(jic, target, "invalid jump target");
-                self.opcodes[jic].flags |= OpcodeFlags::INVALID_JUMP;
+            let target_pc = usize::from_be_bytes(padded);
+            if !self.is_valid_jump(target_pc) {
+                debug!(jump_instr, target_pc, "invalid jump target");
+                self.instrs[jump_instr].flags |= InstrFlags::INVALID_JUMP;
                 continue;
             }
 
-            self.opcodes[ic].flags |= OpcodeFlags::SKIP_LOGIC;
-            let target_ic = self.pc_to_ic(target);
+            self.instrs[instr].flags |= InstrFlags::SKIP_LOGIC;
+            let target = self.pc_to_instr(target_pc);
 
             // Mark the `JUMPDEST` as reachable.
             if !self.is_eof() {
                 debug_assert_eq!(
-                    self.opcodes[target_ic],
+                    self.instrs[target],
                     op::JUMPDEST,
                     "is_valid_jump returned true for non-JUMPDEST: \
-                     jic={jic} target={target} target_ic={target_ic}",
+                     jump_instr={jump_instr} target_pc={target_pc} target={target}",
                 );
-                self.opcodes[target_ic].data = 1;
+                self.instrs[target].data = 1;
             }
 
-            // Set the target on the `JUMP` opcode.
-            debug!(jic, target_ic, "resolved jump target");
-            self.opcodes[jic].data = target_ic as u32;
+            // Set the target on the `JUMP` instruction.
+            debug!(jump_instr, target, "resolved jump target");
+            self.instrs[jump_instr].data = target as u32;
         }
     }
 
-    /// Mark unreachable opcodes as `DEAD_CODE` to not generate any code for them.
+    /// Mark unreachable instructions as `DEAD_CODE` to not generate any code for them.
     ///
     /// This pass is technically unnecessary as the backend will very likely optimize any
     /// unreachable code that we generate, but this is trivial for us to do and significantly speeds
     /// up code generation.
     ///
-    /// Before EOF, we can simply mark all opcodes that are between diverging opcodes and
+    /// Before EOF, we can simply mark all instructions that are between diverging instructions and
     /// `JUMPDEST`s.
     ///
     /// After EOF, TODO.
     #[instrument(name = "dce", level = "debug", skip_all)]
     fn mark_dead_code(&mut self) {
         let is_eof = self.is_eof();
-        let mut iter = self.opcodes.iter_mut().enumerate();
+        let mut iter = self.instrs.iter_mut().enumerate();
         while let Some((i, data)) = iter.next() {
             if data.is_diverging(is_eof) {
                 let mut end = i;
@@ -174,7 +182,7 @@ impl<'a> Bytecode<'a> {
                     if data.is_reachable_jumpdest() {
                         break;
                     }
-                    data.flags |= OpcodeFlags::DEAD_CODE;
+                    data.flags |= InstrFlags::DEAD_CODE;
                 }
                 let start = i + 1;
                 if end > start {
@@ -186,27 +194,27 @@ impl<'a> Bytecode<'a> {
 
     /// Ensure that there are no dynamic jumps.
     fn no_dynamic_jumps(&mut self) -> Result<()> {
-        let mut ics = Vec::new();
-        for (ic, data) in self.opcodes.iter().enumerate() {
+        let mut instrs = Vec::new();
+        for (instr, data) in self.instrs.iter().enumerate() {
             if matches!(data.opcode, op::JUMP | op::JUMPI)
-                && !data.flags.contains(OpcodeFlags::STATIC_JUMP)
+                && !data.flags.contains(InstrFlags::STATIC_JUMP)
             {
-                ics.push(ic);
+                instrs.push(instr);
             }
         }
-        if !ics.is_empty() {
-            bail!("dynamic jumps are not yet implemented; ics={ics:?}");
+        if !instrs.is_empty() {
+            bail!("dynamic jumps are not yet implemented; instrs={instrs:?}");
         }
         Ok(())
     }
 
     /// Returns the raw opcode.
-    pub(crate) fn raw_opcode(&self, ic: usize) -> RawOpcode<'a> {
-        self.opcodes[ic].to_raw_in(self)
+    pub(crate) fn raw_opcode(&self, instr: Instr) -> Opcode<'a> {
+        self.instrs[instr].to_op_in(self)
     }
 
-    pub(crate) fn get_imm_of(&self, opcode: OpcodeData) -> Option<&'a [u8]> {
-        (opcode.imm_len() > 0).then(|| self.get_imm(opcode.data))
+    pub(crate) fn get_imm_of(&self, instr_data: InstrData) -> Option<&'a [u8]> {
+        (instr_data.imm_len() > 0).then(|| self.get_imm(instr_data.data))
     }
 
     fn get_imm(&self, data: u32) -> &'a [u8] {
@@ -224,116 +232,113 @@ impl<'a> Bytecode<'a> {
         false
     }
 
-    /// Returns `true` if the opcode at the given instruction counter is diverging.
-    pub(crate) fn is_opcode_diverging(&self, ic: usize) -> bool {
-        self.opcodes[ic].is_diverging(self.is_eof())
+    /// Returns `true` if the instruction is diverging.
+    pub(crate) fn is_instr_diverging(&self, instr: Instr) -> bool {
+        self.instrs[instr].is_diverging(self.is_eof())
     }
 
     // TODO: is it worth it to make this a map?
-    /// Converts a program counter (`self.code[ic]`) to an instruction counter (`self.opcode(pc)`).
-    fn pc_to_ic(&self, pc: usize) -> usize {
+    /// Converts a program counter (`self.code[ic]`) to an instruction (`self.instr(pc)`).
+    fn pc_to_instr(&self, pc: usize) -> usize {
         debug_assert!(pc < self.code.len(), "pc out of bounds: {pc}");
-        let (ic, (_, op)) = RawBytecodeIter::new(self.code)
+        let (instr, (_, op)) = OpcodesIter::new(self.code)
             .with_pc() // pc
-            .enumerate() // ic
-            // Don't go until the end because we know it's sorted.
+            .enumerate() // instr
+            // Don't go until the end because we know `pc` are yielded in order.
             .take_while(|(_ic, (pc2, _))| *pc2 <= pc)
             .find(|(_ic, (pc2, _))| *pc2 == pc)
-            .unwrap_or_else(|| panic!("pc to ic conversion failed; pc={pc}"));
-        debug_assert_eq!(self.opcodes[ic].to_raw_in(self), op, "pc={pc} ic={ic}");
-        ic
+            .unwrap_or_else(|| panic!("pc to instr conversion failed; pc={pc}"));
+        debug_assert_eq!(self.instrs[instr].to_op_in(self), op, "pc={pc} instr={instr}");
+        instr
     }
 }
 
 /// A single instruction in the bytecode.
 #[derive(Clone, Copy)]
-pub(crate) struct OpcodeData {
+pub(crate) struct InstrData {
     /// The opcode byte.
     pub(crate) opcode: u8,
-    /// Opcode flags.
-    pub(crate) flags: OpcodeFlags,
-    /// Opcode static gas. Stored as `u16::MAX` if the gas is dynamic.
+    /// Flags.
+    pub(crate) flags: InstrFlags,
+    /// Static gas. Stored as `u16::MAX` if the gas is dynamic.
     static_gas: u16,
-    /// Opcode-specific data:
-    /// - if the opcode has immediate data, this is a packed offset+length into the bytecode;
-    /// - `JUMP{,I} && STATIC_JUMP in kind`: the jump target, already converted to an index into
-    ///   `opcodes`;
+    /// Instruction-specific data:
+    /// - if the instruction has immediate data, this is a packed offset+length into the bytecode;
+    /// - `JUMP{,I} && STATIC_JUMP in kind`: the jump target, `Instr`;
     /// - `JUMPDEST`: `1` if the jump destination is reachable, `0` otherwise;
     /// - `PC`: the program counter, meaning `self.code[pc]` is the opcode;
     /// - otherwise: no meaning.
     pub(crate) data: u32,
 }
 
-impl PartialEq<u8> for OpcodeData {
+impl PartialEq<u8> for InstrData {
     #[inline]
     fn eq(&self, other: &u8) -> bool {
         self.opcode == *other
     }
 }
 
-impl PartialEq<OpcodeData> for u8 {
+impl PartialEq<InstrData> for u8 {
     #[inline]
-    fn eq(&self, other: &OpcodeData) -> bool {
+    fn eq(&self, other: &InstrData) -> bool {
         *self == other.opcode
     }
 }
 
-impl fmt::Debug for OpcodeData {
+impl fmt::Debug for InstrData {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("OpcodeData")
-            .field("opcode", &RawOpcode { opcode: self.opcode, immediate: None })
+            .field("opcode", &self.to_op())
             .field("flags", &self.flags)
             .field("data", &self.data)
             .finish()
     }
 }
 
-impl OpcodeData {
-    /// Creates a new opcode data with the given byte. Note that this may not be a valid opcode.
+impl InstrData {
+    /// Creates a new instruction data with the given opcode byte.
+    /// Note that this may not be a valid instruction.
     #[inline]
     const fn new(opcode: u8) -> Self {
-        Self { opcode, flags: OpcodeFlags::empty(), static_gas: 0, data: 0 }
+        Self { opcode, flags: InstrFlags::empty(), static_gas: 0, data: 0 }
     }
 
-    /// Returns the length of the immediate data for this opcode.
+    /// Returns the length of the immediate data of this instruction.
     #[inline]
     pub(crate) const fn imm_len(self) -> usize {
         imm_len(self.opcode)
     }
 
-    /// Converts this opcode to a raw opcode. Note that the immediate data is not resolved.
+    /// Converts this instruction to a raw opcode. Note that the immediate data is not resolved.
     #[inline]
-    pub(crate) const fn to_raw(self) -> RawOpcode<'static> {
-        RawOpcode { opcode: self.opcode, immediate: None }
+    pub(crate) const fn to_op(self) -> Opcode<'static> {
+        Opcode { opcode: self.opcode, immediate: None }
     }
 
-    /// Converts this opcode to a raw opcode in the given bytecode.
+    /// Converts this instruction to a raw opcode in the given bytecode.
     #[inline]
-    pub(crate) fn to_raw_in<'a>(self, bytecode: &Bytecode<'a>) -> RawOpcode<'a> {
-        RawOpcode { opcode: self.opcode, immediate: bytecode.get_imm_of(self) }
+    pub(crate) fn to_op_in<'a>(self, bytecode: &Bytecode<'a>) -> Opcode<'a> {
+        Opcode { opcode: self.opcode, immediate: bytecode.get_imm_of(self) }
     }
 
-    /// Returns the static gas for this opcode, if any.
+    /// Returns the static gas for this instruction, if any.
     #[inline]
     pub(crate) fn static_gas(&self) -> Option<u16> {
         (self.static_gas != u16::MAX).then_some(self.static_gas)
     }
 
-    /// Returns `true` if we know that this opcode will stop execution.
+    /// Returns `true` if we know that this instruction will stop execution.
     #[inline]
     pub(crate) const fn is_diverging(self, is_eof: bool) -> bool {
         // TODO: SELFDESTRUCT will not be diverging in the future.
-        self.flags.contains(OpcodeFlags::INVALID_JUMP)
-            || self.flags.contains(OpcodeFlags::DISABLED)
-            || self.flags.contains(OpcodeFlags::UNKNOWN)
-            || matches!(
-                self.opcode,
-                op::STOP | op::RETURN | op::REVERT | op::INVALID | op::SELFDESTRUCT
-            )
+        self.flags.contains(InstrFlags::INVALID_JUMP)
+            || self.flags.contains(InstrFlags::DISABLED)
+            || self.flags.contains(InstrFlags::UNKNOWN)
+            || matches!(self.opcode, op::STOP | op::RETURN | op::REVERT | op::INVALID)
             || (self.opcode == op::SELFDESTRUCT && !is_eof)
     }
 
-    /// Returns `true` if this opcode is a reachable `JUMPDEST`.
+    /// Returns `true` if this instruction is a reachable `JUMPDEST`.
     #[inline]
     pub(crate) const fn is_reachable_jumpdest(self) -> bool {
         self.opcode == op::JUMPDEST && self.data == 1
@@ -341,9 +346,9 @@ impl OpcodeData {
 }
 
 bitflags::bitflags! {
-    /// [`OpcodeData`] flags.
+    /// [`InstrData`] flags.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    pub(crate) struct OpcodeFlags: u8 {
+    pub(crate) struct InstrFlags: u8 {
         /// The `JUMP`/`JUMPI` target is known at compile time.
         /// This is implied for other jump instructions which are always static.
         const STATIC_JUMP = 1 << 0;
@@ -351,14 +356,14 @@ bitflags::bitflags! {
         /// Always returns [`InstructionResult::InvalidJump`] at runtime.
         const INVALID_JUMP = 1 << 1;
 
-        /// The opcode is disabled in this EVM version.
+        /// The instruction is disabled in this EVM version.
         /// Always returns [`InstructionResult::NotActivated`] at runtime.
         const DISABLED = 1 << 2;
-        /// The opcode is unknown.
+        /// The instruction is unknown.
         /// Always returns [`InstructionResult::NotFound`] at runtime.
         const UNKNOWN = 1 << 3;
 
-        /// Skip generating opcode logic, but keep the gas calculation.
+        /// Skip generating instruction logic, but keep the gas calculation.
         const SKIP_LOGIC = 1 << 4;
         /// Don't generate any code.
         const DEAD_CODE = 1 << 5;

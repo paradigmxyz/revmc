@@ -3,15 +3,15 @@ use std::{fmt, slice};
 
 /// A bytecode iterator that yields opcodes and their immediate data, alongside the program counter.
 ///
-/// Created by calling [`RawBytecodeIter::with_pc`].
+/// Created by calling [`OpcodesIter::with_pc`].
 #[derive(Debug)]
-pub struct RawBytecodeIterWithPc<'a> {
-    iter: RawBytecodeIter<'a>,
+pub struct OpcodesIterWithPc<'a> {
+    iter: OpcodesIter<'a>,
     pc: usize,
 }
 
-impl<'a> Iterator for RawBytecodeIterWithPc<'a> {
-    type Item = (usize, RawOpcode<'a>);
+impl<'a> Iterator for OpcodesIterWithPc<'a> {
+    type Item = (usize, Opcode<'a>);
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
@@ -31,19 +31,19 @@ impl<'a> Iterator for RawBytecodeIterWithPc<'a> {
     }
 }
 
-impl std::iter::FusedIterator for RawBytecodeIterWithPc<'_> {}
+impl std::iter::FusedIterator for OpcodesIterWithPc<'_> {}
 
-/// A bytecode iterator that yields opcodes and their immediate data.
+/// An iterator that yields opcodes and their immediate data.
 ///
 /// If the bytecode is not well-formed, the iterator will still yield opcodes, but the immediate
 /// data may be incorrect. For example, if the bytecode is `PUSH2 0x69`, the iterator will yield
 /// `PUSH2, None`.
 #[derive(Clone, Debug)]
-pub struct RawBytecodeIter<'a> {
+pub struct OpcodesIter<'a> {
     iter: slice::Iter<'a, u8>,
 }
 
-impl fmt::Display for RawBytecodeIter<'_> {
+impl fmt::Display for OpcodesIter<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for (i, op) in self.clone().enumerate() {
             if i > 0 {
@@ -55,7 +55,7 @@ impl fmt::Display for RawBytecodeIter<'_> {
     }
 }
 
-impl<'a> RawBytecodeIter<'a> {
+impl<'a> OpcodesIter<'a> {
     /// Create a new iterator over the given bytecode slice.
     #[inline]
     pub fn new(slice: &'a [u8]) -> Self {
@@ -65,8 +65,8 @@ impl<'a> RawBytecodeIter<'a> {
     /// Returns a new iterator that also yields the program counter alongside the opcode and
     /// immediate data.
     #[inline]
-    pub fn with_pc(self) -> RawBytecodeIterWithPc<'a> {
-        RawBytecodeIterWithPc { iter: self, pc: 0 }
+    pub fn with_pc(self) -> OpcodesIterWithPc<'a> {
+        OpcodesIterWithPc { iter: self, pc: 0 }
     }
 
     /// Returns the inner iterator.
@@ -88,8 +88,8 @@ impl<'a> RawBytecodeIter<'a> {
     }
 }
 
-impl<'a> Iterator for RawBytecodeIter<'a> {
-    type Item = RawOpcode<'a>;
+impl<'a> Iterator for OpcodesIter<'a> {
+    type Item = Opcode<'a>;
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
@@ -103,7 +103,7 @@ impl<'a> Iterator for RawBytecodeIter<'a> {
             } else {
                 None
             };
-            RawOpcode { opcode, immediate }
+            Opcode { opcode, immediate }
         })
     }
 
@@ -114,24 +114,24 @@ impl<'a> Iterator for RawBytecodeIter<'a> {
     }
 }
 
-impl std::iter::FusedIterator for RawBytecodeIter<'_> {}
+impl std::iter::FusedIterator for OpcodesIter<'_> {}
 
-/// An opcode and its immediate data. Returned by [`RawBytecodeIter`].
+/// An opcode and its immediate data. Returned by [`OpcodesIter`].
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct RawOpcode<'a> {
+pub struct Opcode<'a> {
     /// The opcode.
     pub opcode: u8,
     /// The immediate data, if any.
     pub immediate: Option<&'a [u8]>,
 }
 
-impl fmt::Debug for RawOpcode<'_> {
+impl fmt::Debug for Opcode<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Display::fmt(self, f)
     }
 }
 
-impl fmt::Display for RawOpcode<'_> {
+impl fmt::Display for Opcode<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match OPCODE_JUMPMAP[self.opcode as usize] {
             Some(s) => f.write_str(s),
@@ -165,7 +165,7 @@ pub const fn imm_len(op: u8) -> usize {
 
 /// Returns a string representation of the given bytecode.
 pub fn format_bytecode(bytecode: &[u8]) -> String {
-    RawBytecodeIter::new(bytecode).to_string()
+    OpcodesIter::new(bytecode).to_string()
 }
 
 #[cfg(test)]
@@ -175,36 +175,33 @@ mod tests {
     #[test]
     fn iter_basic() {
         let bytecode = [0x01, 0x02, 0x03, 0x04, 0x05];
-        let mut iter = RawBytecodeIter::new(&bytecode);
+        let mut iter = OpcodesIter::new(&bytecode);
 
-        assert_eq!(iter.next(), Some(RawOpcode { opcode: 0x01, immediate: None }));
-        assert_eq!(iter.next(), Some(RawOpcode { opcode: 0x02, immediate: None }));
-        assert_eq!(iter.next(), Some(RawOpcode { opcode: 0x03, immediate: None }));
-        assert_eq!(iter.next(), Some(RawOpcode { opcode: 0x04, immediate: None }));
-        assert_eq!(iter.next(), Some(RawOpcode { opcode: 0x05, immediate: None }));
+        assert_eq!(iter.next(), Some(Opcode { opcode: 0x01, immediate: None }));
+        assert_eq!(iter.next(), Some(Opcode { opcode: 0x02, immediate: None }));
+        assert_eq!(iter.next(), Some(Opcode { opcode: 0x03, immediate: None }));
+        assert_eq!(iter.next(), Some(Opcode { opcode: 0x04, immediate: None }));
+        assert_eq!(iter.next(), Some(Opcode { opcode: 0x05, immediate: None }));
         assert_eq!(iter.next(), None);
     }
 
     #[test]
     fn iter_with_imm() {
         let bytecode = [op::PUSH0, op::PUSH1, 0x69, op::PUSH2, 0x01, 0x02];
-        let mut iter = RawBytecodeIter::new(&bytecode);
+        let mut iter = OpcodesIter::new(&bytecode);
 
-        assert_eq!(iter.next(), Some(RawOpcode { opcode: op::PUSH0, immediate: None }));
-        assert_eq!(iter.next(), Some(RawOpcode { opcode: op::PUSH1, immediate: Some(&[0x69]) }));
-        assert_eq!(
-            iter.next(),
-            Some(RawOpcode { opcode: op::PUSH2, immediate: Some(&[0x01, 0x02]) })
-        );
+        assert_eq!(iter.next(), Some(Opcode { opcode: op::PUSH0, immediate: None }));
+        assert_eq!(iter.next(), Some(Opcode { opcode: op::PUSH1, immediate: Some(&[0x69]) }));
+        assert_eq!(iter.next(), Some(Opcode { opcode: op::PUSH2, immediate: Some(&[0x01, 0x02]) }));
         assert_eq!(iter.next(), None);
     }
 
     #[test]
     fn iter_with_imm_too_short() {
         let bytecode = [op::PUSH2, 0x69];
-        let mut iter = RawBytecodeIter::new(&bytecode);
+        let mut iter = OpcodesIter::new(&bytecode);
 
-        assert_eq!(iter.next(), Some(RawOpcode { opcode: op::PUSH2, immediate: None }));
+        assert_eq!(iter.next(), Some(Opcode { opcode: op::PUSH2, immediate: None }));
         assert_eq!(iter.next(), None);
     }
 
