@@ -6,7 +6,7 @@ use crate::{
 };
 use revm_interpreter::{opcode as op, Contract, Gas, InstructionResult};
 use revm_jit_backend::{Attribute, FunctionAttributeLocation, OptimizationLevel, TypeMethods};
-use revm_primitives::{BlockEnv, CfgEnv, Env, SpecId, TxEnv, BLOCK_HASH_HISTORY, U256};
+use revm_primitives::{BlockEnv, CfgEnv, Env, SpecId, TxEnv, U256};
 use std::{mem, path::PathBuf, sync::atomic::AtomicPtr};
 
 const STACK_CAP: usize = 1024;
@@ -511,7 +511,9 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             this.bcx.seal_block(instr_block);
         };
 
-        // Make sure to run the epilogue before returning.
+        /// Makes sure to run cleanup code and return.
+        /// Use `no_branch` to skip the branch to the next opcode.
+        /// Use `build` to build the return instruction and skip the branch.
         macro_rules! goto_return {
             ($comment:expr) => {
                 branch_to_next_opcode(self);
@@ -787,6 +789,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 let in_bounds = self.bcx.icmp(IntCC::UnsignedLessThan, index, len);
 
                 let ptr = contract_field!(@get Contract, pf::Bytes; input.ptr);
+                let zero = self.bcx.iconst_256(U256::ZERO);
                 let value = self.lazy_select(
                     in_bounds,
                     self.word_type,
@@ -794,11 +797,16 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                         let ptr = this.bcx.load(this.bcx.type_ptr(), ptr, "contract.input.ptr");
                         let calldata = this.bcx.gep(this.i8_type, ptr, &[index]);
 
-                        let max = this.bcx.iconst(this.word_type, 32);
-                        let slice_len = this.bcx.umin(index, max);
-                        let slice_len = this.bcx.ireduce(this.isize_type, slice_len);
+                        // `32.min(contract.input.len() - index)`
+                        let slice_len = {
+                            let diff = this.bcx.isub(len, index);
+                            let max = this.bcx.iconst(this.word_type, 32);
+                            let slice_len = this.bcx.umin(diff, max);
+                            this.bcx.ireduce(this.isize_type, slice_len)
+                        };
 
                         let tmp = this.bcx.new_stack_slot(this.word_type, "calldata.addr");
+                        this.bcx.stack_store(zero, tmp);
                         let tmp_addr = this.bcx.stack_addr(tmp);
                         this.bcx.memcpy(tmp_addr, calldata, slice_len);
                         let mut value = this.bcx.stack_load(this.word_type, tmp, "calldata.i256");
@@ -807,7 +815,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                         }
                         value
                     },
-                    |this, _| this.bcx.iconst_256(U256::ZERO),
+                    |_, _| zero,
                 );
                 self.push_unchecked(value);
             }
@@ -815,14 +823,14 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 contract_field!(@push self.isize_type, Contract, pf::Bytes; input.len)
             }
             op::CALLDATACOPY => {
-                let sp = self.pop_top_sp(4);
+                let sp = self.pop_sp(3);
                 self.callback_ir(Callback::CallDataCopy, &[self.ecx, sp]);
             }
             op::CODESIZE => {
                 contract_field!(@push self.isize_type, Contract, pf::BytecodeLocked; bytecode.original_len)
             }
             op::CODECOPY => {
-                let sp = self.pop_top_sp(3);
+                let sp = self.pop_sp(3);
                 self.callback_ir(Callback::CodeCopy, &[self.ecx, sp]);
             }
 
@@ -835,7 +843,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 self.callback_ir(Callback::ExtCodeSize, &[self.ecx, spec_id, sp]);
             }
             op::EXTCODECOPY => {
-                let sp = self.pop_top_sp(4);
+                let sp = self.pop_sp(4);
                 let spec_id = self.const_spec_id();
                 self.callback_ir(Callback::ExtCodeCopy, &[self.ecx, spec_id, sp]);
             }
@@ -843,7 +851,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 field!(ecx; @push self.isize_type, EvmContext<'_>, pf::Slice; return_data.len)
             }
             op::RETURNDATACOPY => {
-                let sp = self.pop_top_sp(3);
+                let sp = self.pop_sp(3);
                 self.callback_ir(Callback::ReturnDataCopy, &[self.ecx, sp]);
             }
             op::EXTCODEHASH => {
@@ -852,50 +860,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 self.callback_ir(Callback::ExtCodeHash, &[self.ecx, spec_id, sp]);
             }
             op::BLOCKHASH => {
-                let requested_number = self.pop(true);
-                let actual_number = env_field!(
-                    @load @[endian = "little"] self.word_type, Env, BlockEnv; block.number
-                );
-
-                let block_hash = self.bcx.new_stack_slot(self.word_type, "block_hash.addr");
-
-                // Only call host if `1 <= diff <= 256`. CFG:
-                // current -> in_range -> call_host -> contd
-                //         \           |            /
-                //          \------ default -------/
-                let in_range = self.create_block_after_current("in_range");
-                let call_host = self.create_block_after(in_range, "call_host");
-                let default = self.create_block_after(call_host, "default");
-                let target = self.create_block_after(default, "contd");
-
-                // Not GE to skip `diff == 0`.
-                let is_valid =
-                    self.bcx.icmp(IntCC::UnsignedGreaterThan, actual_number, requested_number);
-                self.bcx.brif(is_valid, in_range, default);
-
-                self.bcx.switch_to_block(in_range);
-                let diff = self.bcx.isub(actual_number, requested_number);
-                let diff_in_range = self.bcx.icmp_imm(
-                    IntCC::UnsignedLessThanOrEqual,
-                    diff,
-                    BLOCK_HASH_HISTORY as i64,
-                );
-                self.bcx.brif(diff_in_range, call_host, default);
-
-                self.bcx.switch_to_block(call_host);
-                let diff = self.bcx.ireduce(self.isize_type, diff);
-                let block_hash_ptr = self.bcx.stack_addr(block_hash);
-                self.callback_ir(Callback::BlockHash, &[self.ecx, diff, block_hash_ptr]);
-                self.bcx.br(target);
-
-                self.bcx.switch_to_block(default);
-                let zero = self.bcx.iconst_256(U256::ZERO);
-                self.bcx.stack_store(zero, block_hash);
-                self.bcx.br(target);
-
-                self.bcx.switch_to_block(target);
-                let block_hash = self.bcx.stack_load(self.word_type, block_hash, "block_hash");
-                self.push_unchecked(block_hash);
+                let sp = self.pop_top_sp(1);
+                self.callback_ir(Callback::BlockHash, &[self.ecx, sp]);
             }
             op::COINBASE => {
                 env_field!(@push @[endian = "big"] self.address_type, Env, BlockEnv; block.coinbase)
@@ -936,48 +902,25 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             }
             op::CHAINID => env_field!(@push self.bcx.type_int(64), Env, CfgEnv; cfg.chain_id),
             op::SELFBALANCE => {
-                let sp = self.pop_top_sp(1);
-                self.callback_ir(Callback::SelfBalance, &[self.ecx, sp]);
+                let len = self.load_len_for_push(1);
+                let slot = self.sp_at(len);
+                let len = self.bcx.iadd_imm(len, 1);
+                self.store_len(len);
+                self.callback_ir(Callback::SelfBalance, &[self.ecx, slot]);
             }
             op::BASEFEE => {
                 env_field!(@push @[endian = "little"] self.word_type, Env, BlockEnv; block.basefee)
             }
             op::BLOBHASH => {
-                let index = self.pop(true);
-                let blob_hashes = env_field!(@get Env, TxEnv; tx.blob_hashes);
-                // Manual `<[_]>::get` :/
-                // Vec<T> == { ptr, len: u64, capacity: u64 }
-                let type_ptr = self.bcx.type_ptr();
-                let len = {
-                    let one = self.bcx.iconst(self.isize_type, 1);
-                    let len = self.bcx.gep(self.isize_type, blob_hashes, &[one]);
-                    let len = self.bcx.load(self.isize_type, len, "blob_hashes.len");
-                    self.bcx.zext(self.word_type, len)
-                };
-                let in_bounds = self.bcx.icmp(IntCC::UnsignedLessThan, index, len);
-                let word_type = self.word_type;
-                let result = self.bcx.lazy_select(
-                    in_bounds,
-                    word_type,
-                    |bcx, _block| {
-                        let ptr = bcx.load(type_ptr, blob_hashes, "blob_hashes.ptr");
-                        let ptr = bcx.gep(word_type, ptr, &[index]);
-                        let mut hash = bcx.load(word_type, ptr, "blob_hashes[index]");
-                        if !cfg!(target_endian = "big") {
-                            hash = bcx.bswap(hash);
-                        }
-                        hash
-                    },
-                    |bcx, _block| bcx.iconst_256(U256::ZERO),
-                );
-                self.push_unchecked(result);
+                let sp = self.pop_top_sp(1);
+                let _ = self.callback(Callback::BlobHash, &[self.ecx, sp]);
             }
             op::BLOBBASEFEE => {
-                // TODO
-                // Option<{ u128, u64 }> (48 bytes) =>
-                // { bool, pad([u8; 15]), u128, u64, pad([u8; 8]) }
-                let ptr = env_field!(@get Env, BlockEnv; block.blob_excess_gas_and_price);
-                let _ = ptr;
+                let len = self.load_len_for_push(1);
+                let slot = self.sp_at(len);
+                let len = self.bcx.iadd_imm(len, 1);
+                self.store_len(len);
+                let _ = self.callback(Callback::BlobBaseFee, &[self.ecx, slot]);
             }
 
             op::POP => {
@@ -999,12 +942,14 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             }
             op::SLOAD => {
                 let sp = self.pop_top_sp(1);
-                self.callback_ir(Callback::Sload, &[self.ecx, sp]);
+                let spec_id = self.const_spec_id();
+                self.callback_ir(Callback::Sload, &[self.ecx, sp, spec_id]);
             }
             op::SSTORE => {
                 self.fail_if_staticcall(InstructionResult::StateChangeDuringStaticCall);
                 let sp = self.pop_sp(2);
-                self.callback_ir(Callback::Sstore, &[self.ecx, sp]);
+                let spec_id = self.const_spec_id();
+                self.callback_ir(Callback::Sstore, &[self.ecx, sp, spec_id]);
             }
             op::JUMP | op::JUMPI => {
                 if data.flags.contains(InstrFlags::INVALID_JUMP) {
@@ -1039,6 +984,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             }
             op::MSIZE => {
                 let msize = self.callback(Callback::Msize, &[self.ecx]).unwrap();
+                let msize = self.bcx.zext(self.word_type, msize);
                 self.push(msize);
             }
             op::GAS => {
@@ -1077,34 +1023,40 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
             op::LOG0..=op::LOG4 => {
                 self.fail_if_staticcall(InstructionResult::StateChangeDuringStaticCall);
-                let _n = opcode - op::LOG0;
-                // TODO: host
+                let n = opcode - op::LOG0 + 1;
+                let sp = self.pop_sp(2 + n as usize);
+                let n = self.bcx.iconst(self.isize_type, n as i64);
+                self.callback_ir(Callback::Log, &[self.ecx, sp, n]);
             }
 
             op::CREATE => {
                 self.create_common(false);
-                goto_return!(build InstructionResult::CallOrCreate);
+                goto_return!(no_branch "");
             }
             op::CALL => {
-                // TODO: host
+                self.call_common(CallKind::Call);
+                goto_return!(no_branch "");
             }
             op::CALLCODE => {
-                // TODO: host
+                self.call_common(CallKind::CallCode);
+                goto_return!(no_branch "");
             }
             op::RETURN => {
                 self.return_common();
                 goto_return!(build InstructionResult::Return);
             }
             op::DELEGATECALL => {
-                // TODO: host
+                self.call_common(CallKind::DelegateCall);
+                goto_return!(no_branch "");
             }
             op::CREATE2 => {
                 self.create_common(true);
-                goto_return!(build InstructionResult::CallOrCreate);
+                goto_return!(no_branch "");
             }
 
             op::STATICCALL => {
-                // TODO: host
+                self.call_common(CallKind::StaticCall);
+                goto_return!(no_branch "");
             }
 
             op::REVERT => {
@@ -1114,7 +1066,10 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             op::INVALID => goto_return!(build InstructionResult::InvalidFEOpcode),
             op::SELFDESTRUCT => {
                 self.fail_if_staticcall(InstructionResult::StateChangeDuringStaticCall);
-                // TODO: host
+                let sp = self.pop_sp(1);
+                let spec_id = self.const_spec_id();
+                self.callback_ir(Callback::SelfDestruct, &[self.ecx, sp, spec_id]);
+                goto_return!(build InstructionResult::SelfDestruct);
             }
 
             _ => unreachable!("unimplemented instructions: {}", data.to_op_in(self.bytecode)),
@@ -1130,14 +1085,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
     /// Pushes 256-bit values onto the stack, checking for stack overflow.
     fn pushn(&mut self, values: &[B::Value]) {
-        debug_assert!(values.len() <= STACK_CAP);
-
-        let len = self.load_len();
-        let failure_cond =
-            self.bcx.icmp_imm(IntCC::UnsignedGreaterThan, len, (STACK_CAP - values.len()) as i64);
-        self.build_failure(failure_cond, InstructionResult::StackOverflow);
-
-        self.pushn_unchecked(values);
+        let len = self.load_len_for_push(values.len());
+        self.pushn_unchecked_len(len, values);
     }
 
     /// Pushes a 256-bit value onto the stack, without checking for stack overflow.
@@ -1147,13 +1096,25 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
     /// Pushes 256-bit values onto the stack, without checking for stack overflow.
     fn pushn_unchecked(&mut self, values: &[B::Value]) {
-        let mut len = self.load_len();
+        let len = self.load_len();
+        self.pushn_unchecked_len(len, values);
+    }
+
+    fn pushn_unchecked_len(&mut self, mut len: B::Value, values: &[B::Value]) {
         for &value in values {
             let sp = self.sp_at(len);
             self.bcx.store(value, sp);
             len = self.bcx.iadd_imm(len, 1);
         }
         self.store_len(len);
+    }
+
+    fn load_len_for_push(&mut self, n: usize) -> B::Value {
+        let len = self.load_len();
+        let failure_cond =
+            self.bcx.icmp_imm(IntCC::UnsignedGreaterThan, len, (STACK_CAP - n) as i64);
+        self.build_failure(failure_cond, InstructionResult::StackOverflow);
+        len
     }
 
     /// Removes the topmost element from the stack and returns it.
@@ -1183,18 +1144,20 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         ret
     }
 
-    /// Check length for `n`, decrement `n`, and return the stack pointer at the initial length.
+    /// Check length for `n`, decrement by `n`, and return the stack pointer at the initial length.
     fn pop_sp(&mut self, n: usize) -> B::Value {
         debug_assert_ne!(n, 0);
         let len = self.load_len_at_least(n);
-        let subtracted = self.bcx.isub_imm(len, n as i64);
-        self.store_len(subtracted);
+        if n > 0 {
+            let subtracted = self.bcx.isub_imm(len, n as i64);
+            self.store_len(subtracted);
+        }
         self.sp_at(len)
     }
 
-    /// Check length for `n`, decrement `n - 1`, and return the stack pointer at the initial length.
+    /// Check length for `n`, decrement by `n - 1` if `n > 0`, and return the stack pointer at the
+    /// initial length.
     fn pop_top_sp(&mut self, n: usize) -> B::Value {
-        debug_assert_ne!(n, 0);
         let len = self.load_len_at_least(n);
         if n > 1 {
             let subtracted = self.bcx.isub_imm(len, (n - 1) as i64);
@@ -1206,8 +1169,10 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     /// Checks if the stack has at least `n` elements and returns the stack length.
     fn load_len_at_least(&mut self, n: usize) -> B::Value {
         let len = self.load_len();
-        let failure_cond = self.bcx.icmp_imm(IntCC::UnsignedLessThan, len, n as i64);
-        self.build_failure(failure_cond, InstructionResult::StackUnderflow);
+        if n > 0 {
+            let failure_cond = self.bcx.icmp_imm(IntCC::UnsignedLessThan, len, n as i64);
+            self.build_failure(failure_cond, InstructionResult::StackUnderflow);
+        }
         len
     }
 
@@ -1264,6 +1229,11 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let is_create2 = self.bcx.iconst(self.bcx.type_int(1), is_create2 as i64);
         self.callback_ir(Callback::Create, &[self.ecx, sp, is_create2]);
         self.build_return(InstructionResult::CallOrCreate);
+    }
+
+    fn call_common(&mut self, call_kind: CallKind) {
+        let _ = call_kind;
+        // TODO
     }
 
     /// Loads the word at the given pointer.
@@ -1589,17 +1559,15 @@ impl<B: Backend> Callbacks<B> {
     }
 }
 
-fn op_block_name_with(op: Instr, data: InstrData, with: &str) -> String {
-    let data = data.to_op();
-    if with.is_empty() {
-        format!("op.{op}.{data}")
-    } else {
-        format!("op.{op}.{data}.{with}")
-    }
+enum CallKind {
+    Call,
+    CallCode,
+    DelegateCall,
+    StaticCall,
 }
 
 // HACK: Need these structs' fields to be public for `offset_of!`.
-// `private_fields`
+// `pf == private_fields`.
 mod pf {
     use super::*;
     use revm_primitives::JumpMap;
@@ -1631,6 +1599,7 @@ mod pf {
         jump_map: JumpMap,
     }
 
+    #[repr(C)] // See core::ptr::metadata::PtrComponents
     #[allow(dead_code)]
     pub(super) struct Slice {
         pub(super) ptr: *const u8,
@@ -1652,15 +1621,25 @@ mod pf {
     }
 }
 
+fn op_block_name_with(op: Instr, data: InstrData, with: &str) -> String {
+    let data = data.to_op();
+    if with.is_empty() {
+        format!("op.{op}.{data}")
+    } else {
+        format!("op.{op}.{data}.{with}")
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::needless_update)]
 mod tests {
     use super::*;
     use crate::*;
-    use primitives::{address, keccak256, spec_to_generic, Address, Bytes, KECCAK_EMPTY};
+    use interpreter::{DummyHost, Host};
+    use primitives::{BlobExcessGasAndPrice, HashMap, B256};
     use revm_interpreter::{gas, opcode as op};
-    use revm_primitives::ruint::uint;
-    use std::fmt;
+    use revm_primitives::{hex, keccak256, spec_to_generic, Address, Bytes, KECCAK_EMPTY};
+    use std::{fmt, sync::OnceLock};
 
     #[cfg(feature = "llvm")]
     use llvm::inkwell::context::Context as LlvmContext;
@@ -1671,48 +1650,6 @@ mod tests {
         0xFFFFFFFFFFFFFFFF,
         0x7FFFFFFFFFFFFFFF,
     ]);
-
-    // Default values.
-    const DEF_SPEC: SpecId = SpecId::CANCUN;
-    const DEF_OPINFOS: &[OpcodeInfo; 256] = op_info_map(DEF_SPEC);
-
-    const DEF_GAS_LIMIT: u64 = 100_000;
-    const DEF_GAS_LIMIT_U256: U256 = U256::from_le_slice(&DEF_GAS_LIMIT.to_le_bytes());
-
-    /// Default code address.
-    const DEF_ADDR: Address = address!("babababababababababababababababababababa");
-    const DEF_CALLER: Address = address!("cacacacacacacacacacacacacacacacacacacaca");
-    static DEF_CD: &[u8] = &[0xaa; 64];
-    static DEF_RD: &[u8] = &[0xbb; 64];
-    const DEF_VALUE: U256 = uint!(123_456_789_U256);
-
-    fn with_evm_context<F: FnOnce(&mut EvmContext<'_>) -> R, R>(bytecode: &[u8], f: F) -> R {
-        let contract = Contract {
-            input: Bytes::from_static(DEF_CD),
-            bytecode: revm_interpreter::analysis::to_analysed(revm_primitives::Bytecode::new_raw(
-                Bytes::copy_from_slice(bytecode),
-            ))
-            .try_into()
-            .unwrap(),
-            hash: keccak256(bytecode),
-            address: DEF_ADDR,
-            caller: DEF_CALLER,
-            value: DEF_VALUE,
-        };
-
-        let mut interpreter = revm_interpreter::Interpreter::new(contract, DEF_GAS_LIMIT, false);
-        interpreter.return_data_buffer = Bytes::from_static(DEF_RD);
-        // interpreter.shared_memory = {
-        //     let cap = 64;
-        //     let mut mem = revm_interpreter::SharedMemory::with_capacity(cap);
-        //     unsafe { mem.context_memory_mut().as_mut_ptr().write_bytes(0xcc, cap) };
-        //     mem
-        // };
-
-        let mut host = revm_interpreter::DummyHost::default();
-
-        f(&mut EvmContext::from_interpreter(&mut interpreter, &mut host))
-    }
 
     macro_rules! build_push32 {
         ($code:ident[$i:ident], $x:expr) => {{
@@ -2105,22 +2042,463 @@ mod tests {
             keccak256_1(@raw {
                 bytecode: &[op::PUSH1, 32, op::PUSH0, op::KECCAK256],
                 expected_stack: &[keccak256([0; 32]).into()],
+                expected_memory: &[0; 32],
                 expected_gas: 3 + 2 + (gas::keccak256_cost(32).unwrap() + 3),
             }),
             keccak256_2(@raw {
                 bytecode: &[op::PUSH2, 0x69, 0x42, op::PUSH0, op::MSTORE, op::PUSH1, 0x20, op::PUSH0, op::KECCAK256],
                 expected_stack: &[keccak256(0x6942_U256.to_be_bytes::<32>()).into()],
+                expected_memory: &0x6942_U256.to_be_bytes::<32>(),
                 expected_gas: 3 + 2 + (3 + 3) + 3 + 2 + gas::keccak256_cost(32).unwrap(),
+            }),
+
+            address(@raw {
+                bytecode: &[op::ADDRESS, op::ADDRESS],
+                expected_stack: &[DEF_ADDR.into_word().into(), DEF_ADDR.into_word().into()],
+                expected_gas: 4,
+            }),
+            caller(@raw {
+                bytecode: &[op::CALLER, op::CALLER],
+                expected_stack: &[DEF_CALLER.into_word().into(), DEF_CALLER.into_word().into()],
+                expected_gas: 4,
+            }),
+            callvalue(@raw {
+                bytecode: &[op::CALLVALUE, op::CALLVALUE],
+                expected_stack: &[DEF_VALUE, DEF_VALUE],
+                expected_gas: 4,
+            }),
+        }
+
+        calldata {
+            calldataload1(@raw {
+                bytecode: &[op::PUSH0, op::CALLDATALOAD],
+                expected_stack: &[U256::from_be_slice(&DEF_CD[..32])],
+                expected_gas: 2 + 3,
+            }),
+            calldataload2(@raw {
+                bytecode: &[op::PUSH1, 63, op::CALLDATALOAD],
+                expected_stack: &[0xaa00000000000000000000000000000000000000000000000000000000000000_U256],
+                expected_gas: 3 + 3,
+            }),
+            calldatasize(@raw {
+                bytecode: &[op::CALLDATASIZE, op::CALLDATASIZE],
+                expected_stack: &[U256::from(DEF_CD.len()), U256::from(DEF_CD.len())],
+                expected_gas: 2 + 2,
+            }),
+            calldatacopy(@raw {
+                bytecode: &[op::PUSH1, 32, op::PUSH0, op::PUSH0, op::CALLDATACOPY],
+                expected_stack: &[],
+                expected_memory: &DEF_CD[..32],
+                expected_gas: 3 + 2 + 2 + (gas::verylowcopy_cost(32).unwrap() + 3),
+            }),
+        }
+
+        code {
+            codesize(@raw {
+                bytecode: &[op::CODESIZE, op::CODESIZE],
+                expected_stack: &[2_U256, 2_U256],
+                expected_gas: 2 + 2,
+            }),
+            codecopy(@raw {
+                bytecode: &[op::PUSH1, 5, op::PUSH0, op::PUSH0, op::CODECOPY],
+                expected_stack: &[],
+                expected_memory: &hex!("60055f5f39000000000000000000000000000000000000000000000000000000"),
+                expected_gas: 3 + 2 + 2 + (gas::verylowcopy_cost(32).unwrap() + gas::memory_gas(1)),
+            }),
+        }
+
+        returndata {
+            returndatasize(@raw {
+                bytecode: &[op::RETURNDATASIZE, op::RETURNDATASIZE],
+                expected_stack: &[64_U256, 64_U256],
+                expected_gas: 2 + 2,
+            }),
+            returndatacopy(@raw {
+                bytecode: &[op::PUSH1, 32, op::PUSH0, op::PUSH0, op::RETURNDATACOPY],
+                expected_stack: &[],
+                expected_memory: &DEF_RD[..32],
+                expected_gas: 3 + 2 + 2 + (gas::verylowcopy_cost(32).unwrap() + gas::memory_gas(1)),
+            }),
+        }
+
+        extcode {
+            extcodesize1(op::EXTCODESIZE, DEF_ADDR.into_word().into() => 0_U256;
+                op_gas(100)),
+            extcodesize2(op::EXTCODESIZE, OTHER_ADDR.into_word().into() => U256::from(def_codemap()[&OTHER_ADDR].len());
+                op_gas(100)),
+            extcodecopy1(@raw {
+                bytecode: &[op::PUSH0, op::PUSH0, op::PUSH0, op::PUSH0, op::EXTCODECOPY],
+                expected_stack: &[],
+                expected_memory: &[],
+                expected_gas: 2 + 2 + 2 + 2 + 100,
+            }),
+            extcodecopy2(@raw {
+                // bytecode: &[op::PUSH1, 64, op::PUSH0, op::PUSH0, op::PUSH20, OTHER_ADDR, op::EXTCODECOPY],
+                bytecode: &hex!("6040 5f 5f 736969696969696969696969696969696969696969 3c"),
+                expected_stack: &[],
+                expected_memory: &{
+                    let mut mem = vec![0; 64];
+                    let code = def_codemap()[&OTHER_ADDR].original_bytes();
+                    mem[..code.len()].copy_from_slice(&code);
+                    mem
+                },
+                expected_gas: 3 + 2 + 2 + 3 + (100 + 12),
+            }),
+            extcodehash1(op::EXTCODEHASH, DEF_ADDR.into_word().into() => KECCAK_EMPTY.into();
+                op_gas(100)),
+            extcodehash2(op::EXTCODEHASH, OTHER_ADDR.into_word().into() => def_codemap()[&OTHER_ADDR].hash_slow().into();
+                op_gas(100)),
+        }
+
+        env {
+            gas_price(@raw {
+                bytecode: &[op::GASPRICE],
+                expected_stack: &[def_env().tx.gas_price],
+                expected_gas: 2,
+            }),
+            blockhash0(op::BLOCKHASH, DEF_BN - 0_U256 => 0_U256),
+            blockhash1(op::BLOCKHASH, DEF_BN - 1_U256 => DEF_BN - 1_U256),
+            blockhash2(op::BLOCKHASH, DEF_BN - 255_U256 => DEF_BN - 255_U256),
+            blockhash3(op::BLOCKHASH, DEF_BN - 256_U256 => DEF_BN - 256_U256),
+            blockhash4(op::BLOCKHASH, DEF_BN - 257_U256 => 0_U256),
+            timestamp(@raw {
+                bytecode: &[op::TIMESTAMP, op::TIMESTAMP],
+                expected_stack: &[def_env().block.timestamp, def_env().block.timestamp],
+                expected_gas: 4,
+            }),
+            number(@raw {
+                bytecode: &[op::NUMBER, op::NUMBER],
+                expected_stack: &[def_env().block.number, def_env().block.number],
+                expected_gas: 4,
+            }),
+            difficulty(@raw {
+                bytecode: &[op::DIFFICULTY, op::DIFFICULTY],
+                spec_id: SpecId::GRAY_GLACIER,
+                expected_stack: &[def_env().block.difficulty, def_env().block.difficulty],
+                expected_gas: 4,
+            }),
+            difficulty_prevrandao(@raw {
+                bytecode: &[op::DIFFICULTY, op::DIFFICULTY],
+                spec_id: SpecId::MERGE,
+                expected_stack: &[def_env().block.prevrandao.unwrap().into(), def_env().block.prevrandao.unwrap().into()],
+                expected_gas: 4,
+            }),
+            gaslimit(@raw {
+                bytecode: &[op::GASLIMIT, op::GASLIMIT],
+                expected_stack: &[def_env().block.gas_limit, def_env().block.gas_limit],
+                expected_gas: 4,
+            }),
+            chainid(@raw {
+                bytecode: &[op::CHAINID, op::CHAINID],
+                expected_stack: &[U256::from(def_env().cfg.chain_id), U256::from(def_env().cfg.chain_id)],
+                expected_gas: 4,
+            }),
+            selfbalance(@raw {
+                bytecode: &[op::SELFBALANCE, op::SELFBALANCE],
+                expected_stack: &[0xba_U256, 0xba_U256],
+                expected_gas: 10,
+            }),
+            basefee(@raw {
+                bytecode: &[op::BASEFEE, op::BASEFEE],
+                expected_stack: &[def_env().block.basefee, def_env().block.basefee],
+                expected_gas: 4,
+            }),
+            blobhash0(@raw {
+                bytecode: &[op::PUSH0, op::BLOBHASH],
+                expected_stack: &[def_env().tx.blob_hashes[0].into()],
+                expected_gas: 2 + 3,
+            }),
+            blobhash1(@raw {
+                bytecode: &[op::PUSH1, 1, op::BLOBHASH],
+                expected_stack: &[def_env().tx.blob_hashes[1].into()],
+                expected_gas: 3 + 3,
+            }),
+            blobhash2(@raw {
+                bytecode: &[op::PUSH1, 2, op::BLOBHASH],
+                expected_stack: &[0_U256],
+                expected_gas: 3 + 3,
+            }),
+            blobbasefee(@raw {
+                bytecode: &[op::BLOBBASEFEE, op::BLOBBASEFEE],
+                expected_stack: &[U256::from(def_env().block.get_blob_gasprice().unwrap()), U256::from(def_env().block.get_blob_gasprice().unwrap())],
+                expected_gas: 4,
+            }),
+        }
+
+        memory {
+            mload1(@raw {
+                bytecode: &[op::PUSH0, op::MLOAD],
+                expected_stack: &[0_U256],
+                expected_memory: &[0; 32],
+                expected_gas: 2 + (3 + gas::memory_gas(1)),
+            }),
+            mload2(@raw {
+                bytecode: &[op::PUSH1, 1, op::MLOAD],
+                expected_stack: &[0_U256],
+                expected_memory: &[0; 64],
+                expected_gas: 3 + (3 + gas::memory_gas(2)),
+            }),
+            mload3(@raw {
+                bytecode: &[op::PUSH1, 32, op::MLOAD],
+                expected_stack: &[0_U256],
+                expected_memory: &[0; 64],
+                expected_gas: 3 + (3 + gas::memory_gas(2)),
+            }),
+            mload4(@raw {
+                bytecode: &[op::PUSH1, 33, op::MLOAD],
+                expected_stack: &[0_U256],
+                expected_memory: &[0; 96],
+                expected_gas: 3 + (3 + gas::memory_gas(3)),
+            }),
+            mstore1(@raw {
+                bytecode: &[op::PUSH0, op::PUSH0, op::MSTORE],
+                expected_stack: &[],
+                expected_memory: &[0; 32],
+                expected_gas: 2 + 2 + (3 + gas::memory_gas(1)),
+            }),
+            msize1(@raw {
+                bytecode: &[op::MSIZE, op::MSIZE],
+                expected_stack: &[0_U256, 0_U256],
+                expected_gas: 2 + 2,
+            }),
+            msize2(@raw {
+                bytecode: &[op::MSIZE, op::PUSH0, op::MLOAD, op::POP, op::MSIZE, op::PUSH1, 1, op::MLOAD, op::POP, op::MSIZE],
+                expected_stack: &[0_U256, 32_U256, 64_U256],
+                expected_memory: &[0; 64],
+                expected_gas: 2 + 2 + (3 + gas::memory_gas(1)) + 2 + 2 + 3 + (3 + (gas::memory_gas(2) - gas::memory_gas(1))) + 2 + 2,
             }),
         }
 
         host {
-            gas_price(@raw {
-                bytecode: &[op::GASPRICE],
-                expected_stack: &[U256::ZERO],
-                expected_gas: 2,
-            }),
+            // TODO: sload
+            // TODO: sstore
+            // TODO: tload
+            // TODO: tstore
+            // TODO: log
+            // TODO: create
+            // TODO: call
+            // TODO: callcode
+            // TODO: return
+            // TODO: delegatecall
+            // TODO: create2
+            // TODO: staticcall
+            // TODO: revert
+            // TODO: selfdestruct
         }
+    }
+
+    /* ----------------------------------------- runner ----------------------------------------- */
+
+    // Default values.
+    const DEF_SPEC: SpecId = SpecId::CANCUN;
+    const DEF_OPINFOS: &[OpcodeInfo; 256] = op_info_map(DEF_SPEC);
+
+    const DEF_GAS_LIMIT: u64 = 100_000;
+    const DEF_GAS_LIMIT_U256: U256 = U256::from_le_slice(&DEF_GAS_LIMIT.to_le_bytes());
+
+    /// Default code address.
+    const DEF_ADDR: Address = Address::repeat_byte(0xba);
+    const DEF_CALLER: Address = Address::repeat_byte(0xca);
+    static DEF_CD: &[u8] = &[0xaa; 64];
+    static DEF_RD: &[u8] = &[0xbb; 64];
+    const DEF_VALUE: U256 = uint!(123_456_789_U256);
+    static DEF_ENV: OnceLock<Env> = OnceLock::new();
+    static DEF_STORAGE: OnceLock<HashMap<U256, U256>> = OnceLock::new();
+    static DEF_CODEMAP: OnceLock<HashMap<Address, primitives::Bytecode>> = OnceLock::new();
+    const OTHER_ADDR: Address = Address::repeat_byte(0x69);
+    const DEF_BN: U256 = uint!(500_U256);
+
+    fn def_env() -> &'static Env {
+        DEF_ENV.get_or_init(|| Env {
+            cfg: {
+                let mut cfg = CfgEnv::default();
+                cfg.chain_id = 69;
+                cfg
+            },
+            block: BlockEnv {
+                number: DEF_BN,
+                coinbase: Address::repeat_byte(0xcb),
+                timestamp: U256::from(2),
+                gas_limit: U256::from(3),
+                basefee: U256::from(4),
+                difficulty: U256::from(5),
+                prevrandao: Some(U256::from(6).into()),
+                blob_excess_gas_and_price: Some(BlobExcessGasAndPrice::new(50)),
+            },
+            tx: TxEnv {
+                caller: Address::repeat_byte(0xcc),
+                gas_limit: DEF_GAS_LIMIT,
+                gas_price: U256::from(7),
+                transact_to: primitives::TransactTo::Call(DEF_ADDR),
+                value: DEF_VALUE,
+                data: DEF_CD.into(),
+                nonce: None,
+                chain_id: Some(420), // Different from `cfg.chain_id`.
+                access_list: vec![],
+                gas_priority_fee: None,
+                blob_hashes: vec![B256::repeat_byte(0xb7), B256::repeat_byte(0xb8)],
+                max_fee_per_blob_gas: None,
+            },
+        })
+    }
+
+    fn def_storage() -> &'static HashMap<U256, U256> {
+        DEF_STORAGE.get_or_init(|| {
+            HashMap::from([
+                (U256::from(0), U256::from(1)),
+                (U256::from(1), U256::from(2)),
+                (U256::from(69), U256::from(42)),
+            ])
+        })
+    }
+
+    fn def_codemap() -> &'static HashMap<Address, primitives::Bytecode> {
+        DEF_CODEMAP.get_or_init(|| {
+            HashMap::from([
+                //
+                (
+                    OTHER_ADDR,
+                    primitives::Bytecode::new_raw(Bytes::from_static(&[
+                        op::PUSH1,
+                        0x69,
+                        op::PUSH1,
+                        0x42,
+                        op::ADD,
+                        op::STOP,
+                    ])),
+                ),
+            ])
+        })
+    }
+
+    /// Wrapper around `DummyHost` that provides a stable environment and storage for testing.
+    struct TestHost {
+        host: DummyHost,
+        code_map: &'static HashMap<Address, primitives::Bytecode>,
+    }
+
+    impl TestHost {
+        fn new() -> Self {
+            Self {
+                host: DummyHost {
+                    env: def_env().clone(),
+                    storage: def_storage().clone(),
+                    transient_storage: HashMap::new(),
+                    log: Vec::new(),
+                },
+                code_map: def_codemap(),
+            }
+        }
+    }
+
+    impl std::ops::Deref for TestHost {
+        type Target = DummyHost;
+
+        fn deref(&self) -> &Self::Target {
+            &self.host
+        }
+    }
+
+    impl std::ops::DerefMut for TestHost {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            &mut self.host
+        }
+    }
+
+    impl Host for TestHost {
+        fn env(&self) -> &Env {
+            self.host.env()
+        }
+
+        fn env_mut(&mut self) -> &mut Env {
+            self.host.env_mut()
+        }
+
+        fn load_account(&mut self, address: Address) -> Option<(bool, bool)> {
+            self.host.load_account(address)
+        }
+
+        fn block_hash(&mut self, number: U256) -> Option<B256> {
+            Some(number.into())
+        }
+
+        fn balance(&mut self, address: Address) -> Option<(U256, bool)> {
+            Some((U256::from(*address.last().unwrap()), false))
+        }
+
+        fn code(&mut self, address: Address) -> Option<(primitives::Bytecode, bool)> {
+            self.code_map
+                .get(&address)
+                .map(|b| (b.clone(), false))
+                .or_else(|| Some((primitives::Bytecode::new(), false)))
+        }
+
+        fn code_hash(&mut self, address: Address) -> Option<(B256, bool)> {
+            self.code_map
+                .get(&address)
+                .map(|b| (b.hash_slow(), false))
+                .or_else(|| Some((KECCAK_EMPTY, false)))
+        }
+
+        fn sload(&mut self, address: Address, index: U256) -> Option<(U256, bool)> {
+            self.host.sload(address, index)
+        }
+
+        fn sstore(
+            &mut self,
+            address: Address,
+            index: U256,
+            value: U256,
+        ) -> Option<interpreter::SStoreResult> {
+            self.host.sstore(address, index, value)
+        }
+
+        fn tload(&mut self, address: Address, index: U256) -> U256 {
+            self.host.tload(address, index)
+        }
+
+        fn tstore(&mut self, address: Address, index: U256, value: U256) {
+            self.host.tstore(address, index, value)
+        }
+
+        fn log(&mut self, log: primitives::Log) {
+            self.host.log(log)
+        }
+
+        fn selfdestruct(
+            &mut self,
+            _address: Address,
+            _target: Address,
+        ) -> Option<interpreter::SelfDestructResult> {
+            Some(interpreter::SelfDestructResult {
+                had_value: false,
+                target_exists: true,
+                is_cold: false,
+                previously_destroyed: false,
+            })
+        }
+    }
+
+    fn with_evm_context<F: FnOnce(&mut EvmContext<'_>) -> R, R>(bytecode: &[u8], f: F) -> R {
+        let contract = Contract {
+            input: Bytes::from_static(DEF_CD),
+            bytecode: revm_interpreter::analysis::to_analysed(revm_primitives::Bytecode::new_raw(
+                Bytes::copy_from_slice(bytecode),
+            ))
+            .try_into()
+            .unwrap(),
+            hash: keccak256(bytecode),
+            address: DEF_ADDR,
+            caller: DEF_CALLER,
+            value: DEF_VALUE,
+        };
+
+        let mut interpreter = revm_interpreter::Interpreter::new(contract, DEF_GAS_LIMIT, false);
+        interpreter.return_data_buffer = Bytes::from_static(DEF_RD);
+
+        let mut host = TestHost::new();
+
+        f(&mut EvmContext::from_interpreter(&mut interpreter, &mut host))
     }
 
     struct TestCase<'a> {
@@ -2129,7 +2507,9 @@ mod tests {
 
         expected_return: InstructionResult,
         expected_stack: &'a [U256],
+        expected_memory: &'a [u8],
         expected_gas: u64,
+        assert_host: Option<fn(&mut TestHost)>,
     }
 
     impl Default for TestCase<'_> {
@@ -2139,7 +2519,9 @@ mod tests {
                 spec_id: DEF_SPEC,
                 expected_return: InstructionResult::Stop,
                 expected_stack: &[],
+                expected_memory: &[],
                 expected_gas: 0,
+                assert_host: None,
             }
         }
     }
@@ -2194,33 +2576,64 @@ mod tests {
     }
 
     fn run_case_built<B: Backend>(test_case: &TestCase<'_>, jit: &mut JitEvm<B>) {
-        let TestCase { bytecode, spec_id, expected_return, expected_stack, expected_gas } =
-            *test_case;
+        let TestCase {
+            bytecode,
+            spec_id,
+            expected_return,
+            expected_stack,
+            expected_memory,
+            expected_gas,
+            assert_host,
+        } = *test_case;
         jit.set_disable_gas(false);
         let f = jit.compile(bytecode, spec_id).unwrap();
 
         let mut stack = EvmStack::new();
         let mut stack_len = 0;
         with_evm_context(bytecode, |ecx| {
+            // Interpreter.
             let table =
                 spec_to_generic!(test_case.spec_id, op::make_instruction_table::<_, SPEC>());
             let mut interpreter = ecx.to_interpreter(Default::default());
             let memory = interpreter.take_memory();
-            interpreter.run(memory, &table, &mut interpreter::DummyHost::default());
+            interpreter.run(memory, &table, &mut TestHost::new());
             assert_eq!(
                 interpreter.instruction_result, expected_return,
                 "interpreter return value mismatch"
             );
             assert_eq!(interpreter.stack.data(), expected_stack, "interpreter stack mismatch");
+            assert_eq!(
+                MemDisplay(interpreter.shared_memory.context_memory()),
+                MemDisplay(expected_memory),
+                "interpreter memory mismatch"
+            );
             assert_eq!(interpreter.gas.spent(), expected_gas, "interpreter gas mismatch");
 
+            // JIT.
             let actual_return = unsafe { f.call(Some(&mut stack), Some(&mut stack_len), ecx) };
             assert_eq!(actual_return, expected_return, "return value mismatch");
             let actual_stack =
                 stack.as_slice().iter().take(stack_len).map(|x| x.to_u256()).collect::<Vec<_>>();
             assert_eq!(actual_stack, *expected_stack, "stack mismatch");
+            assert_eq!(
+                MemDisplay(ecx.memory.context_memory()),
+                MemDisplay(expected_memory),
+                "interpreter memory mismatch"
+            );
             assert_eq!(ecx.gas.spent(), expected_gas, "gas mismatch");
+            if let Some(assert_host) = assert_host {
+                assert_host(ecx.host.downcast_mut().unwrap());
+            }
         });
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    struct MemDisplay<'a>(&'a [u8]);
+    impl fmt::Debug for MemDisplay<'_> {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            let chunks = self.0.chunks(32).map(revm_primitives::hex::encode_prefixed);
+            f.debug_list().entries(chunks).finish()
+        }
     }
 
     // ---

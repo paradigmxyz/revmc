@@ -2,7 +2,129 @@ use revm_interpreter::{
     Contract, DummyHost, Gas, Host, InstructionResult, Interpreter, InterpreterAction, SharedMemory,
 };
 use revm_primitives::{Address, Env, U256};
-use std::{fmt, mem::MaybeUninit, ptr};
+use std::{any::Any, fmt, mem::MaybeUninit, ptr};
+
+/// The JIT EVM context.
+///
+/// Currently contains and handler memory and the host.
+pub struct EvmContext<'a> {
+    /// The memory.
+    pub memory: &'a mut SharedMemory,
+    /// Contract information and call data.
+    pub contract: &'a mut Contract,
+    /// The gas.
+    pub gas: &'a mut Gas,
+    /// The host.
+    pub host: &'a mut dyn HostExt,
+    /// The return action.
+    pub next_action: &'a mut InterpreterAction,
+    /// The return data.
+    pub return_data: &'a [u8],
+    /// Whether the context is static.
+    pub is_static: bool,
+}
+
+impl fmt::Debug for EvmContext<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EvmContext").field("memory", &self.memory).finish_non_exhaustive()
+    }
+}
+
+impl<'a> EvmContext<'a> {
+    /// Creates a new JIT EVM context from an interpreter.
+    #[inline]
+    pub fn from_interpreter(interpreter: &'a mut Interpreter, host: &'a mut dyn HostExt) -> Self {
+        interpreter.instruction_result = InstructionResult::Continue;
+        Self {
+            memory: &mut interpreter.shared_memory,
+            contract: &mut interpreter.contract,
+            gas: &mut interpreter.gas,
+            host,
+            next_action: &mut interpreter.next_action,
+            return_data: &interpreter.return_data_buffer,
+            is_static: interpreter.is_static,
+        }
+    }
+
+    /// Creates a new interpreter by cloning the context.
+    pub fn to_interpreter(&self, stack: revm_interpreter::Stack) -> Interpreter {
+        Interpreter {
+            instruction_pointer: self.contract.bytecode.as_ptr(),
+            contract: self.contract.clone(),
+            instruction_result: InstructionResult::Continue,
+            gas: *self.gas,
+            shared_memory: self.memory.clone(),
+            stack,
+            return_data_buffer: self.return_data.to_vec().into(),
+            is_static: self.is_static,
+            next_action: self.next_action.clone(),
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn dummy_do_not_use() -> impl std::ops::DerefMut<Target = Self> {
+        struct Dropper<'a>(EvmContext<'a>);
+        impl Drop for Dropper<'_> {
+            fn drop(&mut self) {
+                let EvmContext {
+                    memory,
+                    contract,
+                    gas,
+                    host,
+                    next_action,
+                    return_data: _,
+                    is_static: _,
+                } = &mut self.0;
+                unsafe {
+                    drop(Box::from_raw(*memory));
+                    drop(Box::from_raw(*contract));
+                    drop(Box::from_raw(*gas));
+                    drop(Box::from_raw(*host));
+                    drop(Box::from_raw(*next_action));
+                }
+            }
+        }
+        impl<'a> std::ops::Deref for Dropper<'a> {
+            type Target = EvmContext<'a>;
+            fn deref(&self) -> &Self::Target {
+                &self.0
+            }
+        }
+        impl std::ops::DerefMut for Dropper<'_> {
+            fn deref_mut(&mut self) -> &mut Self::Target {
+                &mut self.0
+            }
+        }
+        Dropper(Self {
+            memory: Box::leak(Box::<SharedMemory>::default()),
+            contract: Box::leak(Box::<Contract>::default()),
+            gas: Box::leak(Box::new(Gas::new(100_000))),
+            host: Box::leak(Box::<DummyHost>::default() as Box<dyn HostExt>),
+            next_action: Box::leak(Box::<InterpreterAction>::default()),
+            return_data: &[],
+            is_static: false,
+        })
+    }
+}
+
+/// Extension trait for [`Host`].
+pub trait HostExt: Host + Any {
+    #[doc(hidden)]
+    fn as_any_mut(&mut self) -> &mut dyn Any;
+}
+
+impl<T: Host + Any> HostExt for T {
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
+impl dyn HostExt {
+    /// Attempts to downcast the host to a concrete type.
+    pub fn downcast_mut<T: 'static>(&mut self) -> Option<&mut T> {
+        self.as_any_mut().downcast_mut()
+    }
+}
 
 /// The raw function signature of a JIT'd EVM bytecode.
 ///
@@ -40,7 +162,11 @@ impl JitEvmFn {
     ///
     /// The caller must ensure that the function is safe to call.
     #[inline]
-    pub unsafe fn call_with_interpreter(self, interpreter: &mut Interpreter, host: &mut dyn Host) {
+    pub unsafe fn call_with_interpreter(
+        self,
+        interpreter: &mut Interpreter,
+        host: &mut dyn HostExt,
+    ) {
         let mut ecx;
         let res = (self.0)(
             &mut interpreter.gas,
@@ -471,109 +597,6 @@ impl EvmWord {
     #[inline]
     pub fn to_address(self) -> Address {
         Address::from_word(self.to_be_bytes().into())
-    }
-}
-
-/// The JIT EVM context.
-///
-/// Currently contains and handler memory and the host.
-pub struct EvmContext<'a> {
-    /// The memory.
-    pub memory: &'a mut SharedMemory,
-    /// Contract information and call data.
-    pub contract: &'a mut Contract,
-    /// The gas.
-    pub gas: &'a mut Gas,
-    /// The host.
-    pub host: &'a mut dyn Host,
-    /// The return action.
-    pub next_action: &'a mut InterpreterAction,
-    /// The return data.
-    pub return_data: &'a [u8],
-    /// Whether the context is static.
-    pub is_static: bool,
-}
-
-impl fmt::Debug for EvmContext<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("EvmContext").field("memory", &self.memory).finish_non_exhaustive()
-    }
-}
-
-impl<'a> EvmContext<'a> {
-    /// Creates a new JIT EVM context from an interpreter.
-    #[inline]
-    pub fn from_interpreter(interpreter: &'a mut Interpreter, host: &'a mut dyn Host) -> Self {
-        interpreter.instruction_result = InstructionResult::Continue;
-        Self {
-            memory: &mut interpreter.shared_memory,
-            contract: &mut interpreter.contract,
-            gas: &mut interpreter.gas,
-            host,
-            next_action: &mut interpreter.next_action,
-            return_data: &interpreter.return_data_buffer,
-            is_static: interpreter.is_static,
-        }
-    }
-
-    /// Creates a new interpreter by cloning the context.
-    pub fn to_interpreter(&self, stack: revm_interpreter::Stack) -> Interpreter {
-        Interpreter {
-            instruction_pointer: self.contract.bytecode.as_ptr(),
-            contract: self.contract.clone(),
-            instruction_result: InstructionResult::Continue,
-            gas: *self.gas,
-            shared_memory: self.memory.clone(),
-            stack,
-            return_data_buffer: self.return_data.to_vec().into(),
-            is_static: self.is_static,
-            next_action: self.next_action.clone(),
-        }
-    }
-
-    #[doc(hidden)]
-    pub fn dummy_do_not_use() -> impl std::ops::DerefMut<Target = Self> {
-        struct Dropper<'a>(EvmContext<'a>);
-        impl Drop for Dropper<'_> {
-            fn drop(&mut self) {
-                let EvmContext {
-                    memory,
-                    contract,
-                    gas,
-                    host,
-                    next_action,
-                    return_data: _,
-                    is_static: _,
-                } = &mut self.0;
-                unsafe {
-                    drop(Box::from_raw(*memory));
-                    drop(Box::from_raw(*contract));
-                    drop(Box::from_raw(*gas));
-                    drop(Box::from_raw(*host));
-                    drop(Box::from_raw(*next_action));
-                }
-            }
-        }
-        impl<'a> std::ops::Deref for Dropper<'a> {
-            type Target = EvmContext<'a>;
-            fn deref(&self) -> &Self::Target {
-                &self.0
-            }
-        }
-        impl std::ops::DerefMut for Dropper<'_> {
-            fn deref_mut(&mut self) -> &mut Self::Target {
-                &mut self.0
-            }
-        }
-        Dropper(Self {
-            memory: Box::leak(Box::<SharedMemory>::default()),
-            contract: Box::leak(Box::<Contract>::default()),
-            gas: Box::leak(Box::new(Gas::new(100_000))),
-            host: Box::leak(Box::<DummyHost>::default() as Box<dyn Host>),
-            next_action: Box::leak(Box::<InterpreterAction>::default()),
-            return_data: &[],
-            is_static: false,
-        })
     }
 }
 

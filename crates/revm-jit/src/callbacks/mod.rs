@@ -5,20 +5,20 @@ use revm_interpreter::{
 };
 use revm_jit_backend::{Attribute, TypeMethods};
 use revm_primitives::{
-    BerlinSpec, Bytes, CreateScheme, FrontierSpec, IstanbulSpec, SpecId, SpuriousDragonSpec,
-    KECCAK_EMPTY, MAX_INITCODE_SIZE, U256,
+    spec_to_generic, Bytes, CreateScheme, Log, LogData, SpecId, BLOCK_HASH_HISTORY, KECCAK_EMPTY,
+    MAX_INITCODE_SIZE,
 };
 
 #[macro_use]
 mod macros;
 
+// TODO: Parameter attributes, especially `dereferenceable`.
 callbacks! {
     |bcx| {
         let ptr = bcx.type_ptr();
         let usize = bcx.type_ptr_sized_int();
         let bool = bcx.type_int(1);
         let u8 = bcx.type_int(8);
-        // let u64 = bcx.type_int(64);
     }
 
     Panic          = panic(ptr, usize) None,
@@ -33,20 +33,24 @@ callbacks! {
     ExtCodeSize    = extcodesize(ptr, u8, ptr) Some(u8),
     ExtCodeCopy    = extcodecopy(ptr, u8, ptr) Some(u8),
     ReturnDataCopy = returndatacopy(ptr, ptr) Some(u8),
-    ExtCodeHash    = extcodehash(ptr) None,
-    BlockHash      = blockhash(ptr, usize, ptr) Some(u8),
+    ExtCodeHash    = extcodehash(ptr, u8, ptr) Some(u8),
+    BlockHash      = blockhash(ptr, ptr) Some(u8),
     SelfBalance    = self_balance(ptr, ptr) Some(u8),
+    BlobHash       = blob_hash(ptr, ptr) None,
+    BlobBaseFee    = blob_base_fee(ptr, ptr) None,
     Mload          = mload(ptr, ptr) Some(u8),
     Mstore         = mstore(ptr, ptr) Some(u8),
     Mstore8        = mstore8(ptr, ptr) Some(u8),
-    Sload          = sload(ptr, ptr) Some(u8),
-    Sstore         = sstore(ptr, ptr) Some(u8),
+    Sload          = sload(ptr, ptr, u8) Some(u8),
+    Sstore         = sstore(ptr, ptr, u8) Some(u8),
     Msize          = msize(ptr) Some(usize),
     Tstore         = tstore(ptr, ptr) None,
     Tload          = tload(ptr, ptr) None,
+    Log            = log(ptr, ptr, u8) Some(u8),
 
     Create         = create(ptr, u8, ptr, bool) Some(u8),
     DoReturn       = do_return(ptr, ptr) Some(u8),
+    SelfDestruct   = selfdestruct(ptr) Some(u8),
 }
 
 /* ------------------------------------- Callback Functions ------------------------------------- */
@@ -80,12 +84,7 @@ pub(crate) unsafe extern "C" fn exp(
     read_words!(sp, base, exponent_ptr);
     let exponent = exponent_ptr.to_u256();
     // TODO: SpecId
-    let gas = if spec_id.is_enabled_in(SpecId::SPURIOUS_DRAGON) {
-        rgas::exp_cost::<SpuriousDragonSpec>(exponent)
-    } else {
-        rgas::exp_cost::<FrontierSpec>(exponent)
-    };
-    gas_opt!(ecx, gas);
+    gas_opt!(ecx, spec_to_generic!(spec_id, rgas::exp_cost::<SPEC>(exponent)));
     *exponent_ptr = base.to_u256().pow(exponent).into();
     InstructionResult::Continue
 }
@@ -119,10 +118,8 @@ pub(crate) unsafe extern "C" fn balance(
 ) -> InstructionResult {
     let (balance, is_cold) = try_host!(ecx.host.balance(ecx.contract.address));
     *sp.sub(1) = balance.into();
-    let gas = if spec_id.is_enabled_in(SpecId::BERLIN) {
-        rgas::account_access_gas::<BerlinSpec>(is_cold)
-    } else if spec_id.is_enabled_in(SpecId::ISTANBUL) {
-        rgas::account_access_gas::<IstanbulSpec>(is_cold)
+    let gas = if spec_id.is_enabled_in(SpecId::ISTANBUL) {
+        spec_to_generic!(spec_id, rgas::account_access_gas::<SPEC>(is_cold))
     } else if spec_id.is_enabled_in(SpecId::TANGERINE) {
         400
     } else {
@@ -180,9 +177,7 @@ pub(crate) unsafe extern "C" fn extcodecopy(
     let (code, is_cold) = try_host!(ecx.host.code(address.to_address()));
     let len = tri!(usize::try_from(len));
     // TODO: SpecId
-    // let gas = rgas::extcodecopy_cost::<SPEC>(len as u64, is_cold);
-    let _ = spec_id;
-    let _ = is_cold;
+    gas_opt!(ecx, spec_to_generic!(spec_id, rgas::extcodecopy_cost::<SPEC>(len as u64, is_cold)));
     if len != 0 {
         let memory_offset = tri!(memory_offset.try_into());
         let code_offset = code_offset.to_u256();
@@ -239,22 +234,49 @@ pub(crate) unsafe extern "C" fn extcodehash(
 
 pub(crate) unsafe extern "C" fn blockhash(
     ecx: &mut EvmContext<'_>,
-    number: usize,
-    slot: *mut EvmWord,
+    sp: *mut EvmWord,
 ) -> InstructionResult {
-    let hash = try_host!(ecx.host.block_hash(U256::from(number)));
-    *slot = EvmWord::from_be_bytes(hash.0);
+    read_words!(sp, number_ptr);
+    let number = number_ptr.to_u256();
+    if let Some(diff) = ecx.host.env().block.number.checked_sub(number) {
+        let diff = as_usize_saturated!(diff);
+        // blockhash should push zero if number is same as current block number.
+        if diff != 0 && diff <= BLOCK_HASH_HISTORY {
+            let hash = try_host!(ecx.host.block_hash(number));
+            *number_ptr = EvmWord::from_be_bytes(hash.0);
+            return InstructionResult::Continue;
+        }
+    }
+    *number_ptr = EvmWord::ZERO;
     InstructionResult::Continue
 }
 
 pub(crate) unsafe extern "C" fn self_balance(
     ecx: &mut EvmContext<'_>,
-    sp: *mut EvmWord,
+    slot: *mut EvmWord,
 ) -> InstructionResult {
-    read_words!(sp, slot);
     let (balance, _) = try_host!(ecx.host.balance(ecx.contract.address));
     *slot = balance.into();
     InstructionResult::Continue
+}
+
+pub(crate) unsafe extern "C" fn blob_hash(ecx: &mut EvmContext<'_>, sp: *mut EvmWord) {
+    read_words!(sp, index_ptr);
+    let index = index_ptr.to_u256();
+    *index_ptr = EvmWord::from_be_bytes(
+        ecx.host
+            .env()
+            .tx
+            .blob_hashes
+            .get(as_usize_saturated!(index))
+            .copied()
+            .unwrap_or_default()
+            .0,
+    );
+}
+
+pub(crate) unsafe extern "C" fn blob_base_fee(ecx: &mut EvmContext<'_>, slot: *mut EvmWord) {
+    *slot = ecx.host.env().block.get_blob_gasprice().unwrap_or_default().into();
 }
 
 pub(crate) unsafe extern "C" fn mload(
@@ -296,34 +318,35 @@ pub(crate) unsafe extern "C" fn mstore8(
 pub(crate) unsafe extern "C" fn sload(
     ecx: &mut EvmContext<'_>,
     sp: *mut EvmWord,
+    spec_id: SpecId,
 ) -> InstructionResult {
     read_words!(sp, index);
     let address = ecx.contract.address;
     let (res, is_cold) = try_opt!(ecx.host.sload(address, index.to_u256()));
+    gas!(ecx, spec_to_generic!(spec_id, rgas::sload_cost::<SPEC>(is_cold)));
     *index = res.into();
-    // TODO: SpecId
-    let _ = is_cold;
-    // rgas::sload_cost(is_cold)
     InstructionResult::Continue
 }
 
 pub(crate) unsafe extern "C" fn sstore(
     ecx: &mut EvmContext<'_>,
     sp: *mut EvmWord,
+    spec_id: SpecId,
 ) -> InstructionResult {
     read_words!(sp, index, value);
     let SStoreResult { original_value: original, present_value: old, new_value: new, is_cold } =
         try_opt!(ecx.host.sstore(ecx.contract.address, index.to_u256(), value.to_u256()));
 
-    let _ = original;
-    let _ = old;
-    let _ = new;
-    let _ = is_cold;
-
-    // TODO: SpecId, refund
-    // rgas::sstore_refund::<SPEC>(original, old, new)
     // TODO: SpecId
-    // rgas::sstore_cost::<SPEC>(original, old, new, remaining_gas, is_cold)
+    gas_opt!(
+        ecx,
+        spec_to_generic!(
+            spec_id,
+            rgas::sstore_cost::<SPEC>(original, old, new, ecx.gas.remaining(), is_cold)
+        )
+    );
+    ecx.gas
+        .record_refund(spec_to_generic!(spec_id, rgas::sstore_refund::<SPEC>(original, old, new)));
     InstructionResult::Continue
 }
 
@@ -342,6 +365,38 @@ pub(crate) unsafe extern "C" fn tload(ecx: &mut EvmContext<'_>, sp: *mut EvmWord
     *key = ecx.host.tload(ecx.contract.address, key.to_u256()).into();
 }
 
+pub(crate) unsafe extern "C" fn log(
+    ecx: &mut EvmContext<'_>,
+    sp: *mut EvmWord,
+    n: u8,
+) -> InstructionResult {
+    debug_assert!(n <= 4, "invalid log topic count: {n}");
+    read_words!(sp, offset, len);
+    let len = tri!(usize::try_from(len));
+    gas_opt!(ecx, rgas::log_cost(n, len as u64));
+    let data = if len != 0 {
+        let offset = tri!(offset.try_into());
+        resize_memory!(ecx, offset, len);
+        Bytes::copy_from_slice(ecx.memory.slice(offset, len))
+    } else {
+        Bytes::new()
+    };
+
+    let mut topics = Vec::with_capacity(n as usize);
+    let sp = sp.sub(3); // offset, len, t[i]
+    for i in 0..n {
+        topics.push(sp.sub(i as usize).read().to_be_bytes().into());
+    }
+
+    ecx.host.log(Log {
+        address: ecx.contract.address,
+        data: LogData::new(topics, data).expect("too many topics"),
+    });
+    InstructionResult::Continue
+}
+
+// NOTE: Return `InstructionResult::Continue` here to indicate success, not the final result of
+// the execution.
 pub(crate) unsafe extern "C" fn create(
     ecx: &mut EvmContext<'_>,
     spec_id: SpecId,
@@ -424,6 +479,24 @@ pub(crate) unsafe extern "C" fn do_return(
     InstructionResult::Continue
 }
 
+pub(crate) unsafe extern "C" fn selfdestruct(
+    ecx: &mut EvmContext<'_>,
+    sp: *mut EvmWord,
+    spec_id: SpecId,
+) -> InstructionResult {
+    read_words!(sp, target);
+    let res = try_host!(ecx.host.selfdestruct(ecx.contract.address, target.to_address()));
+
+    // EIP-3529: Reduction in refunds
+    if !spec_id.is_enabled_in(SpecId::LONDON) && !res.previously_destroyed {
+        ecx.gas.record_refund(rgas::SELFDESTRUCT);
+    }
+    // TODO: SpecId
+    gas!(ecx, spec_to_generic!(spec_id, rgas::selfdestruct_cost::<SPEC>(res)));
+
+    InstructionResult::Continue
+}
+
 // --- utils ---
 
 /// Splits the stack pointer into `N` elements by casting it to an array.
@@ -451,9 +524,9 @@ fn resize_memory(ecx: &mut EvmContext<'_>, offset: usize, len: usize) -> Instruc
         // TODO: Memory limit
 
         // TODO: try_resize
-        dbg!(ecx.gas.spent());
-        gas!(ecx, dbg!(rgas::memory_gas(rounded_size / 32)));
-        dbg!(ecx.gas.spent());
+        if !ecx.gas.record_memory(rgas::memory_gas(rounded_size / 32)) {
+            return InstructionResult::MemoryLimitOOG;
+        }
         ecx.memory.resize(rounded_size);
     }
     InstructionResult::Continue

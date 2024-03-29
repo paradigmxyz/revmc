@@ -171,11 +171,11 @@ const fn make_map(spec_id: SpecId) -> [OpcodeInfo; 256] {
         CODECOPY     = DYNAMIC;
 
         GASPRICE       = 2;
-        EXTCODESIZE    = 20;
+        EXTCODESIZE    = extcodesize_cost(spec_id);
         EXTCODECOPY    = DYNAMIC;
         RETURNDATASIZE = 2, if BYZANTIUM;
         RETURNDATACOPY = DYNAMIC, if BYZANTIUM;
-        EXTCODEHASH    = DYNAMIC, if BERLIN;
+        EXTCODEHASH    = extcodehash_cost(spec_id), if CONSTANTINOPLE;
         BLOCKHASH      = 20;
         COINBASE       = 2;
         TIMESTAMP      = 2;
@@ -183,9 +183,9 @@ const fn make_map(spec_id: SpecId) -> [OpcodeInfo; 256] {
         DIFFICULTY     = 2;
         GASLIMIT       = 2;
         CHAINID        = 2, if ISTANBUL;
-        SELFBALANCE    = 2, if ISTANBUL;
+        SELFBALANCE    = 5, if ISTANBUL;
         BASEFEE        = 2, if LONDON;
-        BLOBHASH       = 2, if CANCUN;
+        BLOBHASH       = 3, if CANCUN;
         BLOBBASEFEE    = 2, if CANCUN;
         // 0x4B
         // 0x4C
@@ -393,6 +393,36 @@ const fn sload_cost(spec_id: SpecId) -> u16 {
         200
     } else {
         50
+    }
+}
+
+const fn extcodesize_cost(spec_id: SpecId) -> u16 {
+    if SpecId::enabled(spec_id, SpecId::BERLIN) {
+        OpcodeInfo::DYNAMIC
+        // if is_cold {
+        //     COLD_ACCOUNT_ACCESS_COST
+        // } else {
+        //     WARM_STORAGE_READ_COST
+        // }
+    } else if SpecId::enabled(spec_id, SpecId::TANGERINE) {
+        700
+    } else {
+        20
+    }
+}
+
+const fn extcodehash_cost(spec_id: SpecId) -> u16 {
+    if SpecId::enabled(spec_id, SpecId::BERLIN) {
+        OpcodeInfo::DYNAMIC
+        // if is_cold {
+        //     COLD_ACCOUNT_ACCESS_COST
+        // } else {
+        //     WARM_STORAGE_READ_COST
+        // }
+    } else if SpecId::enabled(spec_id, SpecId::ISTANBUL) {
+        700
+    } else {
+        400
     }
 }
 
