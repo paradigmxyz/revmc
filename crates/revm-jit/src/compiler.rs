@@ -997,12 +997,12 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             }
             op::TLOAD => {
                 let sp = self.pop_top_sp(1);
-                self.callback(Callback::Tload, &[self.ecx, sp]).unwrap();
+                let _ = self.callback(Callback::Tload, &[self.ecx, sp]);
             }
             op::TSTORE => {
                 self.fail_if_staticcall(InstructionResult::StateChangeDuringStaticCall);
                 let sp = self.pop_sp(2);
-                self.callback(Callback::Tstore, &[self.ecx, sp]).unwrap();
+                let _ = self.callback(Callback::Tstore, &[self.ecx, sp]);
             }
 
             op::PUSH0 => {
@@ -1023,9 +1023,9 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
             op::LOG0..=op::LOG4 => {
                 self.fail_if_staticcall(InstructionResult::StateChangeDuringStaticCall);
-                let n = opcode - op::LOG0 + 1;
+                let n = opcode - op::LOG0;
                 let sp = self.pop_sp(2 + n as usize);
-                let n = self.bcx.iconst(self.isize_type, n as i64);
+                let n = self.bcx.iconst(self.i8_type, n as i64);
                 self.callback_ir(Callback::Log, &[self.ecx, sp, n]);
             }
 
@@ -1636,7 +1636,7 @@ mod tests {
     use super::*;
     use crate::*;
     use interpreter::{DummyHost, Host};
-    use primitives::{BlobExcessGasAndPrice, HashMap, B256};
+    use primitives::{BlobExcessGasAndPrice, HashMap, LogData, B256};
     use revm_interpreter::{gas, opcode as op};
     use revm_primitives::{hex, keccak256, spec_to_generic, Address, Bytes, KECCAK_EMPTY};
     use std::{fmt, sync::OnceLock};
@@ -1742,7 +1742,6 @@ mod tests {
         ret {
             empty(@raw {
                 bytecode: &[],
-                expected_stack: &[],
                 expected_gas: 0,
             }),
             no_stop(@raw {
@@ -1752,25 +1751,21 @@ mod tests {
             }),
             stop(@raw {
                 bytecode: &[op::STOP],
-                expected_stack: &[],
                 expected_gas: 0,
             }),
             invalid(@raw {
                 bytecode: &[op::INVALID],
                 expected_return: InstructionResult::InvalidFEOpcode,
-                expected_stack: &[],
                 expected_gas: 0,
             }),
             unknown(@raw {
                 bytecode: &[0x21],
                 expected_return: InstructionResult::OpcodeNotFound,
-                expected_stack: &[],
                 expected_gas: 0,
             }),
             underflow1(@raw {
                 bytecode: &[op::ADD],
                 expected_return: InstructionResult::StackUnderflow,
-                expected_stack: &[],
                 expected_gas: 3,
             }),
             underflow2(@raw {
@@ -1782,7 +1777,6 @@ mod tests {
             underflow3(@raw {
                 bytecode: &[op::PUSH0, op::POP, op::ADD],
                 expected_return: InstructionResult::StackUnderflow,
-                expected_stack: &[],
                 expected_gas: 7,
             }),
             underflow4(@raw {
@@ -1798,7 +1792,6 @@ mod tests {
                 bytecode: &[op::PUSH0],
                 spec_id: SpecId::MERGE,
                 expected_return: InstructionResult::NotActivated,
-                expected_stack: &[],
                 expected_gas: 0,
             }),
             push0_shanghai(@raw {
@@ -1818,7 +1811,6 @@ mod tests {
         control_flow {
             basic_jump(@raw {
                 bytecode: &[op::PUSH1, 3, op::JUMP, op::JUMPDEST],
-                expected_stack: &[],
                 expected_gas: 3 + 8 + 1,
             }),
             unmodified_stack_after_push_jump(@raw {
@@ -1829,7 +1821,6 @@ mod tests {
             }),
             basic_jump_if(@raw {
                 bytecode: &[op::PUSH1, 1, op::PUSH1, 5, op::JUMPI, op::JUMPDEST],
-                expected_stack: &[],
                 expected_gas: 3 + 3 + 10 + 1,
             }),
             unmodified_stack_after_push_jumpif(@raw {
@@ -2087,7 +2078,6 @@ mod tests {
             }),
             calldatacopy(@raw {
                 bytecode: &[op::PUSH1, 32, op::PUSH0, op::PUSH0, op::CALLDATACOPY],
-                expected_stack: &[],
                 expected_memory: &DEF_CD[..32],
                 expected_gas: 3 + 2 + 2 + (gas::verylowcopy_cost(32).unwrap() + 3),
             }),
@@ -2101,7 +2091,6 @@ mod tests {
             }),
             codecopy(@raw {
                 bytecode: &[op::PUSH1, 5, op::PUSH0, op::PUSH0, op::CODECOPY],
-                expected_stack: &[],
                 expected_memory: &hex!("60055f5f39000000000000000000000000000000000000000000000000000000"),
                 expected_gas: 3 + 2 + 2 + (gas::verylowcopy_cost(32).unwrap() + gas::memory_gas(1)),
             }),
@@ -2115,7 +2104,6 @@ mod tests {
             }),
             returndatacopy(@raw {
                 bytecode: &[op::PUSH1, 32, op::PUSH0, op::PUSH0, op::RETURNDATACOPY],
-                expected_stack: &[],
                 expected_memory: &DEF_RD[..32],
                 expected_gas: 3 + 2 + 2 + (gas::verylowcopy_cost(32).unwrap() + gas::memory_gas(1)),
             }),
@@ -2128,14 +2116,12 @@ mod tests {
                 op_gas(100)),
             extcodecopy1(@raw {
                 bytecode: &[op::PUSH0, op::PUSH0, op::PUSH0, op::PUSH0, op::EXTCODECOPY],
-                expected_stack: &[],
                 expected_memory: &[],
                 expected_gas: 2 + 2 + 2 + 2 + 100,
             }),
             extcodecopy2(@raw {
                 // bytecode: &[op::PUSH1, 64, op::PUSH0, op::PUSH0, op::PUSH20, OTHER_ADDR, op::EXTCODECOPY],
                 bytecode: &hex!("6040 5f 5f 736969696969696969696969696969696969696969 3c"),
-                expected_stack: &[],
                 expected_memory: &{
                     let mut mem = [0; 64];
                     let code = def_codemap()[&OTHER_ADDR].original_bytes();
@@ -2252,7 +2238,6 @@ mod tests {
             }),
             mstore1(@raw {
                 bytecode: &[op::PUSH0, op::PUSH0, op::MSTORE],
-                expected_stack: &[],
                 expected_memory: &[0; 32],
                 expected_gas: 2 + 2 + (3 + gas::memory_gas(1)),
             }),
@@ -2270,11 +2255,76 @@ mod tests {
         }
 
         host {
-            // TODO: sload
-            // TODO: sstore
-            // TODO: tload
-            // TODO: tstore
-            // TODO: log
+            sload1(@raw {
+                bytecode: &[op::PUSH1, 69, op::SLOAD],
+                expected_stack: &[42_U256],
+                expected_gas: 3 + 100,
+            }),
+            sload2(@raw {
+                bytecode: &[op::PUSH1, 70, op::SLOAD],
+                expected_stack: &[0_U256],
+                expected_gas: 3 + 2100,
+            }),
+            sload3(@raw {
+                bytecode: &[op::PUSH1, 0xff, op::SLOAD],
+                expected_stack: &[0_U256],
+                expected_gas: 3 + 2100,
+            }),
+            sstore1(@raw {
+                bytecode: &[op::PUSH1, 200, op::SLOAD, op::PUSH1, 100, op::PUSH1, 200, op::SSTORE, op::PUSH1, 200, op::SLOAD],
+                expected_stack: &[0_U256, 100_U256],
+                expected_gas: GAS_WHAT_THE_INTERPRETER_SAYS,
+                assert_host: Some(|host| {
+                    assert_eq!(host.storage.get(&200_U256), Some(&100_U256));
+                }),
+            }),
+            tload(@raw {
+                bytecode: &[op::PUSH1, 69, op::TLOAD],
+                expected_stack: &[0_U256],
+                expected_gas: 3 + 100,
+                assert_host: Some(|host| {
+                    assert!(host.transient_storage.is_empty());
+                }),
+            }),
+            tstore(@raw {
+                bytecode: &[op::PUSH1, 69, op::TLOAD, op::PUSH1, 42, op::PUSH1, 69, op::TSTORE, op::PUSH1, 69, op::TLOAD],
+                expected_stack: &[0_U256, 42_U256],
+                expected_gas: 3 + 100 + 3 + 3 + 100 + 3 + 100,
+                assert_host: Some(|host| {
+                    assert_eq!(host.transient_storage.get(&69_U256), Some(&42_U256));
+                }),
+            }),
+            log0(@raw {
+                bytecode: &[op::PUSH0, op::PUSH0, op::LOG0],
+                expected_gas: 2 + 2 + gas::log_cost(0, 0).unwrap(),
+                assert_host: Some(|host| {
+                    assert_eq!(host.log, [primitives::Log {
+                        address: DEF_ADDR,
+                        data: LogData::new(vec![], Bytes::new()).unwrap(),
+                    }]);
+                }),
+            }),
+            log0_data(@raw {
+                bytecode: &[op::PUSH2, 0x69, 0x42, op::PUSH0, op::MSTORE, op::PUSH1, 32, op::PUSH0, op::LOG0],
+                expected_memory: &0x6942_U256.to_be_bytes::<32>(),
+                expected_gas: 3 + 2 + (3 + gas::memory_gas(1)) + 3 + 2 + gas::log_cost(0, 32).unwrap(),
+                assert_host: Some(|host| {
+                    assert_eq!(host.log, [primitives::Log {
+                        address: DEF_ADDR,
+                        data: LogData::new(vec![], Bytes::copy_from_slice(&0x6942_U256.to_be_bytes::<32>())).unwrap(),
+                    }]);
+                }),
+            }),
+            log1(@raw {
+                bytecode: &[op::PUSH0, op::PUSH0, op::PUSH0, op::LOG1],
+                expected_gas: 2 + 2 + 2 + gas::log_cost(1, 0).unwrap(),
+                assert_host: Some(|host| {
+                    assert_eq!(host.log, [primitives::Log {
+                        address: DEF_ADDR,
+                        data: LogData::new(vec![B256::ZERO], Bytes::new()).unwrap(),
+                    }]);
+                }),
+            }),
             // TODO: create
             // TODO: call
             // TODO: callcode
@@ -2284,6 +2334,45 @@ mod tests {
             // TODO: staticcall
             // TODO: revert
             // TODO: selfdestruct
+        }
+    }
+
+    struct TestCase<'a> {
+        bytecode: &'a [u8],
+        spec_id: SpecId,
+
+        expected_return: InstructionResult,
+        expected_stack: &'a [U256],
+        expected_memory: &'a [u8],
+        expected_gas: u64,
+        assert_host: Option<fn(&mut TestHost)>,
+    }
+
+    impl Default for TestCase<'_> {
+        fn default() -> Self {
+            Self {
+                bytecode: &[],
+                spec_id: DEF_SPEC,
+                expected_return: InstructionResult::Stop,
+                expected_stack: &[],
+                expected_memory: &[],
+                expected_gas: 0,
+                assert_host: None,
+            }
+        }
+    }
+
+    impl fmt::Debug for TestCase<'_> {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.debug_struct("TestCase")
+                .field("bytecode", &format_bytecode(self.bytecode))
+                .field("spec_id", &self.spec_id)
+                .field("expected_return", &self.expected_return)
+                .field("expected_stack", &self.expected_stack)
+                .field("expected_memory", &MemDisplay(self.expected_memory))
+                .field("expected_gas", &self.expected_gas)
+                .field("assert_host", &self.assert_host.is_some())
+                .finish()
         }
     }
 
@@ -2307,6 +2396,8 @@ mod tests {
     static DEF_CODEMAP: OnceLock<HashMap<Address, primitives::Bytecode>> = OnceLock::new();
     const OTHER_ADDR: Address = Address::repeat_byte(0x69);
     const DEF_BN: U256 = uint!(500_U256);
+
+    const GAS_WHAT_THE_INTERPRETER_SAYS: u64 = u64::MAX - 1000;
 
     fn def_env() -> &'static Env {
         DEF_ENV.get_or_init(|| Env {
@@ -2430,14 +2521,14 @@ mod tests {
             self.code_map
                 .get(&address)
                 .map(|b| (b.clone(), false))
-                .or_else(|| Some((primitives::Bytecode::new(), false)))
+                .or(Some((primitives::Bytecode::new(), false)))
         }
 
         fn code_hash(&mut self, address: Address) -> Option<(B256, bool)> {
             self.code_map
                 .get(&address)
                 .map(|b| (b.hash_slow(), false))
-                .or_else(|| Some((KECCAK_EMPTY, false)))
+                .or(Some((KECCAK_EMPTY, false)))
         }
 
         fn sload(&mut self, address: Address, index: U256) -> Option<(U256, bool)> {
@@ -2501,43 +2592,6 @@ mod tests {
         f(&mut EvmContext::from_interpreter(&mut interpreter, &mut host))
     }
 
-    struct TestCase<'a> {
-        bytecode: &'a [u8],
-        spec_id: SpecId,
-
-        expected_return: InstructionResult,
-        expected_stack: &'a [U256],
-        expected_memory: &'a [u8],
-        expected_gas: u64,
-        assert_host: Option<fn(&mut TestHost)>,
-    }
-
-    impl Default for TestCase<'_> {
-        fn default() -> Self {
-            Self {
-                bytecode: &[],
-                spec_id: DEF_SPEC,
-                expected_return: InstructionResult::Stop,
-                expected_stack: &[],
-                expected_memory: &[],
-                expected_gas: 0,
-                assert_host: None,
-            }
-        }
-    }
-
-    impl fmt::Debug for TestCase<'_> {
-        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            f.debug_struct("TestCase")
-                .field("bytecode", &format_bytecode(self.bytecode))
-                .field("spec_id", &self.spec_id)
-                .field("expected_return", &self.expected_return)
-                .field("expected_stack", &self.expected_stack)
-                .field("expected_gas", &self.expected_gas)
-                .finish()
-        }
-    }
-
     #[cfg(feature = "llvm")]
     fn with_llvm_context(f: impl FnOnce(&LlvmContext)) {
         thread_local! {
@@ -2596,7 +2650,8 @@ mod tests {
                 spec_to_generic!(test_case.spec_id, op::make_instruction_table::<_, SPEC>());
             let mut interpreter = ecx.to_interpreter(Default::default());
             let memory = interpreter.take_memory();
-            interpreter.run(memory, &table, &mut TestHost::new());
+            let mut int_host = TestHost::new();
+            interpreter.run(memory, &table, &mut int_host);
             assert_eq!(
                 interpreter.instruction_result, expected_return,
                 "interpreter return value mismatch"
@@ -2607,7 +2662,16 @@ mod tests {
                 MemDisplay(expected_memory),
                 "interpreter memory mismatch"
             );
-            assert_eq!(interpreter.gas.spent(), expected_gas, "interpreter gas mismatch");
+            let mut expected_gas = expected_gas;
+            if expected_gas == GAS_WHAT_THE_INTERPRETER_SAYS {
+                println!("asked for interpreter gas: {}", interpreter.gas.spent());
+                expected_gas = interpreter.gas.spent();
+            } else {
+                assert_eq!(interpreter.gas.spent(), expected_gas, "interpreter gas mismatch");
+            }
+            if let Some(assert_host) = assert_host {
+                assert_host(&mut int_host);
+            }
 
             // JIT.
             let actual_return = unsafe { f.call(Some(&mut stack), Some(&mut stack_len), ecx) };

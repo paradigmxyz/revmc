@@ -12,7 +12,7 @@ use revm_primitives::{
 #[macro_use]
 mod macros;
 
-// TODO: Parameter attributes, especially `dereferenceable`.
+// TODO: Parameter attributes, especially `dereferenceable(<size>)` and `sret(<ty>)`.
 callbacks! {
     |bcx| {
         let ptr = bcx.type_ptr();
