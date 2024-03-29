@@ -770,7 +770,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             op::BALANCE => {
                 let sp = self.pop_top_sp(1);
                 let spec_id = self.const_spec_id();
-                self.callback_ir(Callback::Balance, &[self.ecx, spec_id, sp]);
+                self.callback_ir(Callback::Balance, &[self.ecx, sp, spec_id]);
             }
             op::ORIGIN => {
                 env_field!(@push @[endian = "big"] self.address_type, Env, TxEnv; tx.caller)
@@ -840,12 +840,12 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             op::EXTCODESIZE => {
                 let sp = self.pop_top_sp(1);
                 let spec_id = self.const_spec_id();
-                self.callback_ir(Callback::ExtCodeSize, &[self.ecx, spec_id, sp]);
+                self.callback_ir(Callback::ExtCodeSize, &[self.ecx, sp, spec_id]);
             }
             op::EXTCODECOPY => {
                 let sp = self.pop_sp(4);
                 let spec_id = self.const_spec_id();
-                self.callback_ir(Callback::ExtCodeCopy, &[self.ecx, spec_id, sp]);
+                self.callback_ir(Callback::ExtCodeCopy, &[self.ecx, sp, spec_id]);
             }
             op::RETURNDATASIZE => {
                 field!(ecx; @push self.isize_type, EvmContext<'_>, pf::Slice; return_data.len)
@@ -857,7 +857,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             op::EXTCODEHASH => {
                 let sp = self.pop_top_sp(1);
                 let spec_id = self.const_spec_id();
-                self.callback_ir(Callback::ExtCodeHash, &[self.ecx, spec_id, sp]);
+                self.callback_ir(Callback::ExtCodeHash, &[self.ecx, sp, spec_id]);
             }
             op::BLOCKHASH => {
                 let sp = self.pop_top_sp(1);
@@ -2137,7 +2137,7 @@ mod tests {
                 bytecode: &hex!("6040 5f 5f 736969696969696969696969696969696969696969 3c"),
                 expected_stack: &[],
                 expected_memory: &{
-                    let mut mem = vec![0; 64];
+                    let mut mem = [0; 64];
                     let code = def_codemap()[&OTHER_ADDR].original_bytes();
                     mem[..code.len()].copy_from_slice(&code);
                     mem

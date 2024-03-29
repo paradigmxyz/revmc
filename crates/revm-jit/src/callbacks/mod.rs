@@ -27,13 +27,13 @@ callbacks! {
     MulMod         = mulmod(ptr) None,
     Exp            = exp(ptr, ptr, u8) Some(u8),
     Keccak256      = keccak256(ptr, ptr) Some(u8),
-    Balance        = balance(ptr, u8, usize) Some(u8),
+    Balance        = balance(ptr, usize, u8) Some(u8),
     CallDataCopy   = calldatacopy(ptr, ptr) Some(u8),
     CodeCopy       = codecopy(ptr, ptr) Some(u8),
-    ExtCodeSize    = extcodesize(ptr, u8, ptr) Some(u8),
-    ExtCodeCopy    = extcodecopy(ptr, u8, ptr) Some(u8),
+    ExtCodeSize    = extcodesize(ptr, ptr, u8) Some(u8),
+    ExtCodeCopy    = extcodecopy(ptr, ptr, u8) Some(u8),
     ReturnDataCopy = returndatacopy(ptr, ptr) Some(u8),
-    ExtCodeHash    = extcodehash(ptr, u8, ptr) Some(u8),
+    ExtCodeHash    = extcodehash(ptr, ptr, u8) Some(u8),
     BlockHash      = blockhash(ptr, ptr) Some(u8),
     SelfBalance    = self_balance(ptr, ptr) Some(u8),
     BlobHash       = blob_hash(ptr, ptr) None,
@@ -48,7 +48,7 @@ callbacks! {
     Tload          = tload(ptr, ptr) None,
     Log            = log(ptr, ptr, u8) Some(u8),
 
-    Create         = create(ptr, u8, ptr, bool) Some(u8),
+    Create         = create(ptr, ptr, u8, bool) Some(u8),
     DoReturn       = do_return(ptr, ptr) Some(u8),
     SelfDestruct   = selfdestruct(ptr) Some(u8),
 }
@@ -113,8 +113,8 @@ pub(crate) unsafe extern "C" fn keccak256(
 
 pub(crate) unsafe extern "C" fn balance(
     ecx: &mut EvmContext<'_>,
-    spec_id: SpecId,
     sp: *mut EvmWord,
+    spec_id: SpecId,
 ) -> InstructionResult {
     let (balance, is_cold) = try_host!(ecx.host.balance(ecx.contract.address));
     *sp.sub(1) = balance.into();
@@ -147,8 +147,8 @@ pub(crate) unsafe extern "C" fn codecopy(
 
 pub(crate) unsafe extern "C" fn extcodesize(
     ecx: &mut EvmContext<'_>,
-    spec_id: SpecId,
     sp: *mut EvmWord,
+    spec_id: SpecId,
 ) -> InstructionResult {
     read_words!(sp, address);
     let (code, is_cold) = try_host!(ecx.host.code(address.to_address()));
@@ -170,8 +170,8 @@ pub(crate) unsafe extern "C" fn extcodesize(
 
 pub(crate) unsafe extern "C" fn extcodecopy(
     ecx: &mut EvmContext<'_>,
-    spec_id: SpecId,
     sp: *mut EvmWord,
+    spec_id: SpecId,
 ) -> InstructionResult {
     read_words!(sp, address, memory_offset, code_offset, len);
     let (code, is_cold) = try_host!(ecx.host.code(address.to_address()));
@@ -211,8 +211,8 @@ pub(crate) unsafe extern "C" fn returndatacopy(
 
 pub(crate) unsafe extern "C" fn extcodehash(
     ecx: &mut EvmContext<'_>,
-    spec_id: SpecId,
     sp: *mut EvmWord,
+    spec_id: SpecId,
 ) -> InstructionResult {
     read_words!(sp, address);
     let (hash, is_cold) = try_host!(ecx.host.code_hash(address.to_address()));
@@ -399,8 +399,8 @@ pub(crate) unsafe extern "C" fn log(
 // the execution.
 pub(crate) unsafe extern "C" fn create(
     ecx: &mut EvmContext<'_>,
-    spec_id: SpecId,
     sp: *mut EvmWord,
+    spec_id: SpecId,
     is_create2: bool,
 ) -> InstructionResult {
     read_words!(sp, value, code_offset, len, salt);
