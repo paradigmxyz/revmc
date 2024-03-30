@@ -77,11 +77,10 @@ impl<'ctx> JitEvmLlvmBackend<'ctx> {
                 &cpu.to_string_lossy(),
                 &features.to_string_lossy(),
                 opt_level,
-                RelocMode::Default,
+                RelocMode::PIC,
                 CodeModel::JITDefault,
             )
             .ok_or_else(|| eyre::eyre!("failed to create target machine"))?;
-        machine.set_asm_verbosity(true);
 
         let module = cx.create_module("evm");
         module.set_data_layout(&machine.get_target_data().get_data_layout());
@@ -185,7 +184,7 @@ impl<'ctx> Backend for JitEvmLlvmBackend<'ctx> {
     }
 
     fn set_is_dumping(&mut self, yes: bool) {
-        let _ = yes;
+        self.machine.set_asm_verbosity(yes);
     }
 
     fn set_debug_assertions(&mut self, yes: bool) {
@@ -656,6 +655,14 @@ impl<'a, 'ctx> Builder for JitEvmLlvmBuilder<'a, 'ctx> {
 
     fn usub_overflow(&mut self, lhs: Self::Value, rhs: Self::Value) -> (Self::Value, Self::Value) {
         self.call_overflow_function("usub", lhs, rhs)
+
+        // https://llvm.org/docs/Frontend/PerformanceTips.html
+        // > Avoid using arithmetic intrinsics
+        // Rustc also codegens this sequence for `usize::overflowing_sub`.
+
+        // let result = self.isub(lhs, rhs);
+        // let overflow = self.icmp(IntCC::UnsignedLessThan, lhs, rhs);
+        // (result, overflow)
     }
 
     fn umax(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
@@ -749,9 +756,10 @@ impl<'a, 'ctx> Builder for JitEvmLlvmBuilder<'a, 'ctx> {
         elem_ty: Self::Type,
         ptr: Self::Value,
         indexes: &[Self::Value],
+        name: &str,
     ) -> Self::Value {
         let indexes = indexes.iter().map(|idx| idx.into_int_value()).collect::<Vec<_>>();
-        unsafe { self.bcx.build_in_bounds_gep(elem_ty, ptr.into_pointer_value(), &indexes, "") }
+        unsafe { self.bcx.build_in_bounds_gep(elem_ty, ptr.into_pointer_value(), &indexes, name) }
             .unwrap()
             .into()
     }

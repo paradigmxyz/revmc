@@ -604,7 +604,14 @@ impl<'a> Builder for JitEvmCraneliftBuilder<'a> {
         self.bcx.ins().ireduce(to, value)
     }
 
-    fn gep(&mut self, ty: Self::Type, ptr: Self::Value, indexes: &[Self::Value]) -> Self::Value {
+    fn gep(
+        &mut self,
+        ty: Self::Type,
+        ptr: Self::Value,
+        indexes: &[Self::Value],
+        name: &str,
+    ) -> Self::Value {
+        let _ = name;
         let offset = self.bcx.ins().imul_imm(*indexes.first().unwrap(), ty.bytes() as i64);
         self.bcx.ins().iadd(ptr, offset)
     }

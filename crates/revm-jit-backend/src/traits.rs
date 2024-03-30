@@ -15,6 +15,20 @@ pub enum OptimizationLevel {
     Aggressive,
 }
 
+impl std::str::FromStr for OptimizationLevel {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s {
+            "0" | "none" => Self::None,
+            "1" | "less" => Self::Less,
+            "2" | "default" => Self::Default,
+            "3" | "aggressive" => Self::Aggressive,
+            _ => return Err(format!("unknown optimization level: {s}")),
+        })
+    }
+}
+
 /// Integer comparison condition.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum IntCC {
@@ -249,7 +263,13 @@ pub trait Builder: BackendTypes + TypeMethods {
     #[doc(alias = "trunc")]
     fn ireduce(&mut self, to: Self::Type, value: Self::Value) -> Self::Value;
 
-    fn gep(&mut self, ty: Self::Type, ptr: Self::Value, indexes: &[Self::Value]) -> Self::Value;
+    fn gep(
+        &mut self,
+        ty: Self::Type,
+        ptr: Self::Value,
+        indexes: &[Self::Value],
+        name: &str,
+    ) -> Self::Value;
     fn extract_value(&mut self, value: Self::Value, index: u32, name: &str) -> Self::Value;
 
     fn call(&mut self, function: Self::Function, args: &[Self::Value]) -> Option<Self::Value>;

@@ -1,0 +1,46 @@
+[package]
+name = "revm-jit-benches"
+description = "revm-jit benchmarks"
+homepage = "https://github.com/danipopes/revm-jit/tree/main/benches/"
+publish = false
+
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+categories.workspace = true
+keywords.workspace = true
+repository.workspace = true
+exclude.workspace = true
+
+[dependencies]
+revm-jit.workspace = true
+
+revm-interpreter.workspace = true
+revm-primitives.workspace = true
+
+clap = { version = "4", features = ["derive"] }
+color-eyre.workspace = true
+tracing-error.workspace = true
+tracing-subscriber = { workspace = true, features = ["fmt", "env-filter"] }
+
+[dev-dependencies]
+criterion = "0.5"
+
+[features]
+default = ["llvm"]
+llvm = ["revm-jit/llvm"]
+cranelift = ["revm-jit/cranelift"]
+
+[[bin]]
+name = "revm-jit-benches"
+path = "src/main.rs"
+required-features = ["llvm"]
+doc = false
+
+[[bench]]
+name = "bench"
+path = "benches/bench.rs"
+required-features = ["llvm"]
+harness = false

@@ -22,6 +22,10 @@ pub struct EvmContext<'a> {
     pub return_data: &'a [u8],
     /// Whether the context is static.
     pub is_static: bool,
+    /// An index that is used internally to keep track of where execution should resume.
+    /// `0` is the initial state.
+    #[doc(hidden)]
+    pub resume_at: u32,
 }
 
 impl fmt::Debug for EvmContext<'_> {
@@ -43,6 +47,7 @@ impl<'a> EvmContext<'a> {
             next_action: &mut interpreter.next_action,
             return_data: &interpreter.return_data_buffer,
             is_static: interpreter.is_static,
+            resume_at: 0,
         }
     }
 
@@ -74,6 +79,7 @@ impl<'a> EvmContext<'a> {
                     next_action,
                     return_data: _,
                     is_static: _,
+                    resume_at: _,
                 } = &mut self.0;
                 unsafe {
                     drop(Box::from_raw(*memory));
@@ -103,6 +109,7 @@ impl<'a> EvmContext<'a> {
             next_action: Box::leak(Box::<InterpreterAction>::default()),
             return_data: &[],
             is_static: false,
+            resume_at: 0,
         })
     }
 }
@@ -186,10 +193,9 @@ impl JitEvmFn {
     /// Calls the function.
     ///
     /// Arguments:
-    /// - `stack`: Pointer to the stack. Must be `Some` if `pass_stack_through_args` is set to
-    ///   `true`.
-    /// - `stack_len`: Pointer to the stack length. Must be `Some` if `pass_stack_len_through_args`
-    ///   is set to `true`.
+    /// - `stack`: Pointer to the stack. Must be `Some` if `local_stack` is set to `false`.
+    /// - `stack_len`: Pointer to the stack length. Must be `Some` if `inspect_stack_length` is set
+    ///   to `true`.
     /// - `ecx`: The context object.
     ///
     /// These conditions are enforced at runtime if `debug_assertions` is set to `true`.

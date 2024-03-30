@@ -5,9 +5,17 @@ use crate::{
     InstrFlags, IntCC, JitEvmFn, Result, I256_MIN,
 };
 use revm_interpreter::{opcode as op, Contract, Gas, InstructionResult};
-use revm_jit_backend::{Attribute, FunctionAttributeLocation, OptimizationLevel, TypeMethods};
+use revm_jit_backend::{
+    Attribute, BackendTypes, FunctionAttributeLocation, OptimizationLevel, TypeMethods,
+};
 use revm_primitives::{BlockEnv, CfgEnv, Env, SpecId, TxEnv, U256};
-use std::{mem, path::PathBuf, sync::atomic::AtomicPtr};
+use std::{
+    fmt::Write as _,
+    io::Write,
+    mem,
+    path::{Path, PathBuf},
+    sync::atomic::AtomicPtr,
+};
 
 const STACK_CAP: usize = 1024;
 // const WORD_SIZE: usize = 32;
@@ -18,6 +26,8 @@ const STACK_CAP: usize = 1024;
 // TODO: We can emit the length check by adding a params in/out inst flag; can be re-used for EOF
 
 // TODO: Unify `callback` instructions after above.
+
+// TODO: Add `nuw`/`nsw` flags to stack length arithmetic.
 
 // TODO: Somehow have a config to tell the backend to assume that stack stores are unobservable,
 // making it eliminate redundant stores for values outside the stack length when optimized away.
@@ -118,36 +128,32 @@ impl<B: Backend> JitEvm<B> {
         self.config.frame_pointers = yes;
     }
 
-    /// Sets whether to pass the stack length through the arguments.
+    /// Sets whether to allocate the stack locally.
     ///
-    /// If this is set to `true`, the EVM stack will be passed in the arguments rather than
-    /// allocated in the function locally.
+    /// If this is set to `true`, the stack pointer argument will be ignored and the stack will be
+    /// allocated in the function.
     ///
-    /// This is required if the executing with in an Evm and the bytecode contains `CALL` or
-    /// `CREATE`-like instructions, as execution will need to be restored after the call.
+    /// This setting will fail at runtime if the bytecode suspends execution, as it cannot be
+    /// restored afterwards.
     ///
-    /// This is useful to inspect the stack after the function has been executed, but it does
-    /// incur a performance penalty as the pointer might not be able to be fully optimized.
-    ///
-    /// Defaults to `true`.
-    pub fn set_pass_stack_through_args(&mut self, yes: bool) {
-        self.config.stack_through_args = yes;
+    /// Defaults to `false`.
+    pub fn set_local_stack(&mut self, yes: bool) {
+        self.config.local_stack = yes;
     }
 
-    /// Sets whether to pass the stack length through the arguments.
+    /// Sets whether to treat the stack length as observable outside the function.
     ///
-    /// If this is set to `true`, the EVM stack length will be passed in the arguments rather than
-    /// allocated in the function locally.
+    /// This also implies that the length is loaded in the beginning of the function, meaning
+    /// that a function can be executed with an initial stack.
     ///
-    /// This is required if the executing with in an Evm and the bytecode contains `CALL` or
-    /// `CREATE`-like instructions, as execution will need to be restored after the call.
+    /// If this is set to `true`, the stack length must be passed in the arguments.
     ///
     /// This is useful to inspect the stack length after the function has been executed, but it does
-    /// incur a performance penalty as the pointer might not be able to be fully optimized.
+    /// incur a performance penalty as the length will be stored at all return sites.
     ///
-    /// Defaults to `true`.
-    pub fn set_pass_stack_len_through_args(&mut self, yes: bool) {
-        self.config.stack_len_through_args = yes;
+    /// Defaults to `false`.
+    pub fn set_inspect_stack_length(&mut self, yes: bool) {
+        self.config.inspect_stack_length = yes;
     }
 
     /// Sets whether to disable gas accounting.
@@ -162,22 +168,15 @@ impl<B: Backend> JitEvm<B> {
         self.config.gas_disabled = disable_gas;
     }
 
-    /// Sets the static gas limit.
-    ///
-    /// Improves performance by being able to skip most gas checks.
-    ///
-    /// Has no effect if `disable_gas` is set, and will make the compiled function ignore the gas
-    /// limit argument.
-    ///
-    /// Defaults to `None`.
-    pub fn set_static_gas_limit(&mut self, static_gas_limit: Option<u64>) {
-        self.config.static_gas_limit = static_gas_limit;
-    }
-
     /// Compiles the given EVM bytecode into a JIT function.
-    pub fn compile(&mut self, bytecode: &[u8], spec_id: SpecId) -> Result<JitEvmFn> {
+    pub fn compile(
+        &mut self,
+        name: Option<&str>,
+        bytecode: &[u8],
+        spec_id: SpecId,
+    ) -> Result<JitEvmFn> {
         let bytecode = debug_time!("parse", || self.parse_bytecode(bytecode, spec_id))?;
-        debug_time!("compile", || self.compile_bytecode(&bytecode))
+        debug_time!("compile", || self.compile_bytecode(name, &bytecode))
     }
 
     /// Frees all functions compiled by this JIT compiler.
@@ -200,77 +199,28 @@ impl<B: Backend> JitEvm<B> {
         Ok(bytecode)
     }
 
-    fn compile_bytecode(&mut self, bytecode: &Bytecode<'_>) -> Result<JitEvmFn> {
-        fn align_size<T>(i: usize) -> (usize, usize, usize) {
-            (i, mem::align_of::<T>(), mem::size_of::<T>())
+    fn compile_bytecode(
+        &mut self,
+        name: Option<&str>,
+        bytecode: &Bytecode<'_>,
+    ) -> Result<JitEvmFn> {
+        let name = &self.new_name(name, bytecode.spec_id)[..];
+
+        if let Some(dump_dir) = &self.out_dir {
+            trace_time!("dump bytecode", || Self::dump_bytecode(dump_dir, name, bytecode))?;
         }
 
-        let name = &self.new_name()[..];
-
-        let i8 = self.backend.type_int(8);
-        let ptr = self.backend.type_ptr();
-        let (ret, params, param_names, ptr_attrs) = (
-            Some(i8),
-            &[ptr, ptr, ptr, ptr, ptr, ptr],
-            &[
-                "arg.gas.addr",
-                "arg.stack.addr",
-                "arg.stack_len.addr",
-                "arg.env.addr",
-                "arg.contract.addr",
-                "arg.ecx.addr",
-            ],
-            &[
-                align_size::<Gas>(0),
-                align_size::<EvmStack>(1),
-                align_size::<usize>(2),
-                align_size::<Env>(3),
-                align_size::<Contract>(4),
-                align_size::<EvmContext<'_>>(5),
-            ],
-        );
-        debug_assert_eq!(params.len(), param_names.len());
-        let linkage = revm_jit_backend::Linkage::Public;
-        let mut bcx = self.backend.build_function(name, ret, params, param_names, linkage)?;
-
-        // Function attributes.
-        let function_attributes = [
-            Attribute::WillReturn,      // Always returns.
-            Attribute::NoFree,          // No memory deallocation.
-            Attribute::NoSync,          // No thread synchronization.
-            Attribute::NativeTargetCpu, // Optimization.
-            Attribute::Speculatable,    // No undefined behavior.
-            Attribute::NoRecurse,       // Revm is not recursive.
-        ]
-        .into_iter()
-        .chain(self.config.frame_pointers.then_some(Attribute::AllFramePointers))
-        // We can unwind in panics, which are present only in debug assertions.
-        .chain((!self.config.debug_assertions).then_some(Attribute::NoUnwind));
-        for attr in function_attributes {
-            bcx.add_function_attribute(None, attr, FunctionAttributeLocation::Function);
-        }
-
-        // Pointer argument attributes.
-        if !self.config.debug_assertions {
-            for &(i, align, dereferenceable) in ptr_attrs {
-                for attr in [
-                    Attribute::NoAlias,
-                    Attribute::NoCapture,
-                    Attribute::NoUndef,
-                    Attribute::Align(align as u64),
-                    Attribute::Dereferenceable(dereferenceable as u64),
-                ] {
-                    let loc = FunctionAttributeLocation::Param(i as _);
-                    bcx.add_function_attribute(None, attr, loc);
-                }
-            }
-        }
+        let bcx = trace_time!("make builder", || Self::make_builder_function(
+            &mut self.backend,
+            &self.config,
+            name,
+        ))?;
 
         trace_time!("translate", || FunctionCx::translate(
             bcx,
             &self.config,
             &mut self.callbacks,
-            bytecode
+            bytecode,
         ))?;
 
         let verify = |b: &mut B| trace_time!("verify", || b.verify_function(name));
@@ -313,12 +263,114 @@ impl<B: Backend> JitEvm<B> {
         Ok(JitEvmFn::new(unsafe { std::mem::transmute(addr) }))
     }
 
-    fn new_name(&mut self) -> String {
-        let name = format!("evm_bytecode_{}", self.function_counter);
+    fn make_builder_function<'a>(
+        backend: &'a mut B,
+        config: &FcxConfig,
+        name: &str,
+    ) -> Result<B::Builder<'a>> {
+        fn align_size<T>(i: usize) -> (usize, usize, usize) {
+            (i, mem::align_of::<T>(), mem::size_of::<T>())
+        }
+
+        let i8 = backend.type_int(8);
+        let ptr = backend.type_ptr();
+        let (ret, params, param_names, ptr_attrs) = (
+            Some(i8),
+            &[ptr, ptr, ptr, ptr, ptr, ptr],
+            &[
+                "arg.gas.addr",
+                "arg.stack.addr",
+                "arg.stack_len.addr",
+                "arg.env.addr",
+                "arg.contract.addr",
+                "arg.ecx.addr",
+            ],
+            &[
+                align_size::<Gas>(0),
+                align_size::<EvmStack>(1),
+                align_size::<usize>(2),
+                align_size::<Env>(3),
+                align_size::<Contract>(4),
+                align_size::<EvmContext<'_>>(5),
+            ],
+        );
+        debug_assert_eq!(params.len(), param_names.len());
+        let linkage = revm_jit_backend::Linkage::Public;
+        let mut bcx = backend.build_function(name, ret, params, param_names, linkage)?;
+
+        // Function attributes.
+        let function_attributes = [
+            Attribute::WillReturn,      // Always returns.
+            Attribute::NoFree,          // No memory deallocation.
+            Attribute::NoSync,          // No thread synchronization.
+            Attribute::NativeTargetCpu, // Optimization.
+            Attribute::Speculatable,    // No undefined behavior.
+            Attribute::NoRecurse,       // Revm is not recursive.
+        ]
+        .into_iter()
+        .chain(config.frame_pointers.then_some(Attribute::AllFramePointers))
+        // We can unwind in panics, which are present only in debug assertions.
+        .chain((!config.debug_assertions).then_some(Attribute::NoUnwind));
+        for attr in function_attributes {
+            bcx.add_function_attribute(None, attr, FunctionAttributeLocation::Function);
+        }
+
+        // Pointer argument attributes.
+        if !config.debug_assertions {
+            for &(i, align, dereferenceable) in ptr_attrs {
+                for attr in [
+                    Attribute::NoAlias,
+                    Attribute::NoCapture,
+                    Attribute::NoUndef,
+                    Attribute::Align(align as u64),
+                    Attribute::Dereferenceable(dereferenceable as u64),
+                ] {
+                    let loc = FunctionAttributeLocation::Param(i as _);
+                    bcx.add_function_attribute(None, attr, loc);
+                }
+            }
+        }
+
+        Ok(bcx)
+    }
+
+    fn dump_bytecode(dump_dir: &Path, name: &str, bytecode: &Bytecode<'_>) -> Result<()> {
+        std::fs::create_dir_all(dump_dir)?;
+
+        let path = dump_dir.join(format!("{name}.evm.bin"));
+        std::fs::write(&path, bytecode.code)?;
+
+        let path = dump_dir.join(format!("{name}.evm.hex"));
+        std::fs::write(&path, revm_primitives::hex::encode(bytecode.code))?;
+
+        let path = dump_dir.join(format!("{name}.evm.txt"));
+        let file = std::fs::File::create(&path)?;
+        let mut file = std::io::BufWriter::new(file);
+
+        let header = format!("{:^6} | {:^6} | {:^80} | {}", "ic", "pc", "opcode", "instruction");
+        writeln!(file, "{header}")?;
+        writeln!(file, "{}", "-".repeat(header.len()))?;
+        for (inst, (pc, opcode)) in bytecode.opcodes().with_pc().enumerate() {
+            let data = bytecode.inst(inst);
+            let opcode = opcode.to_string();
+            writeln!(file, "{inst:^6} | {pc:^6} | {opcode:<80} | {data:?}")?;
+        }
+
+        file.flush()?;
+
+        Ok(())
+    }
+
+    fn new_name(&mut self, name: Option<&str>, spec_id: SpecId) -> String {
+        let base = name.unwrap_or("evm_bytecode");
+        let name = format!("{base}_{spec_id:?}_{}", self.function_counter);
         self.function_counter += 1;
         name
     }
 }
+
+/// A list of incoming values for a block.
+type Incoming<B> = Vec<(<B as BackendTypes>::Value, <B as BackendTypes>::BasicBlock)>;
 
 #[derive(Clone, Debug)]
 struct FcxConfig {
@@ -326,10 +378,9 @@ struct FcxConfig {
     debug_assertions: bool,
     frame_pointers: bool,
 
-    stack_through_args: bool,
-    stack_len_through_args: bool,
+    local_stack: bool,
+    inspect_stack_length: bool,
     gas_disabled: bool,
-    static_gas_limit: Option<u64>,
 }
 
 impl Default for FcxConfig {
@@ -338,15 +389,15 @@ impl Default for FcxConfig {
             debug_assertions: cfg!(debug_assertions),
             comments_enabled: false,
             frame_pointers: cfg!(debug_assertions),
-            stack_through_args: true,
-            stack_len_through_args: true,
+            local_stack: false,
+            inspect_stack_length: false,
             gas_disabled: false,
-            static_gas_limit: None,
         }
     }
 }
 
 struct FunctionCx<'a, B: Backend> {
+    // Configuration.
     comments_enabled: bool,
     disable_gas: bool,
 
@@ -359,17 +410,16 @@ struct FunctionCx<'a, B: Backend> {
     address_type: B::Type,
     i8_type: B::Type,
 
+    // Locals.
     /// The stack length. Either passed in the arguments as a pointer or allocated locally.
     stack_len: Pointer<B>,
     /// The stack value. Constant throughout the function, either passed in the arguments as a
     /// pointer or allocated locally.
     stack: Pointer<B>,
-    /// The amount of gas used. `isize`. Either passed in the arguments as a pointer or allocated
-    /// locally.
+    /// The amount of gas remaining. `i64`. See [`Gas`].
     gas_remaining: Pointer<B>,
+    /// The amount of gas remaining, without accounting for memory expansion. `i64`. See [`Gas`].
     gas_remaining_nomem: Pointer<B>,
-    /// The gas limit. Constant throughout the function, passed in the arguments or set statically.
-    gas_limit: Option<B::Value>,
     /// The environment. Constant throughout the function.
     env: B::Value,
     /// The contract. Constant throughout the function.
@@ -381,22 +431,86 @@ struct FunctionCx<'a, B: Backend> {
     bytecode: &'a Bytecode<'a>,
     /// All entry blocks for each instruction.
     inst_entries: Vec<B::BasicBlock>,
-    /// A list of dynamic jumps to be resolved after all instructions have been translated.
-    /// `(jump_target, block)`.
-    dynamic_jumps: Vec<(B::Value, B::BasicBlock)>,
+    /// The current instruction being translated.
+    current_inst: Inst,
+
+    /// `dynamic_jump_table` incoming values.
+    incoming_dynamic_jumps: Incoming<B>,
     /// The dynamic jump table block where all dynamic jumps branch to.
     dynamic_jump_table: B::BasicBlock,
-    /// The current instruction being translated.
-    ///
-    /// Note that `self.op_blocks[current_opcode]` does not necessarily equal the builder's current
-    /// block.
-    current_inst: Inst,
+
+    /// `return_block` incoming values.
+    incoming_returns: Incoming<B>,
+    /// The return block that all return instructions branch to.
+    return_block: B::BasicBlock,
+
+    /// `resume_block` switch values.
+    resume_blocks: Incoming<B>,
+    /// `suspend_block` incoming values.
+    suspend_blocks: Incoming<B>,
+    /// The suspend block that all suspend instructions branch to.
+    suspend_block: B::BasicBlock,
 
     /// Callbacks.
     callbacks: &'a mut Callbacks<B>,
 }
 
 impl<'a, B: Backend> FunctionCx<'a, B> {
+    /// Translates an EVM bytecode into a native function.
+    ///
+    /// Example pseudo-code:
+    ///
+    /// ```ignore (pseudo-code)
+    /// // `cfg(will_suspend) = bytecode.will_suspend()`: `true` if it contains a
+    /// // `*CALL*` or `CREATE*` instruction.
+    /// fn evm_bytecode(args: ...) {
+    ///     setup_locals();
+    ///
+    ///     #[cfg(debug_assertions)]
+    ///     if args.<ptr>.is_null() { panic!("...") };
+    ///
+    ///     load_arguments();
+    ///
+    ///     #[cfg(will_suspend)]
+    ///     resume: {
+    ///         goto match ecx.resume_at {
+    ///             0 => inst0,
+    ///             1 => first_call_or_create_inst + 1, // + 1 as in the block after.
+    ///             2 => second_call_or_create_inst + 1,
+    ///             ... => ...,
+    ///             _ => unreachable, // Assumed to be valid.
+    ///         };
+    ///     };
+    ///     
+    ///     op.inst0: { /* ... */ };
+    ///     op.inst1: { /* ... */ };
+    ///     // ...
+    ///     #[cfg(will_suspend)]
+    ///     first_call_or_create_inst: {
+    ///          // ...
+    ///          goto suspend(1);
+    ///     };
+    ///     // ...
+    ///     // There will always be at least one diverging instruction.
+    ///     op.stop: {
+    ///         goto return(InstructionResult::Stop);
+    ///     };
+    ///
+    ///     #[cfg(will_suspend)]
+    ///     suspend(resume_at: u32): {
+    ///         ecx.resume_at = resume_at;
+    ///         goto return(InstructionResult::CallOrCreate);
+    ///     };
+    ///
+    ///     // All paths lead to here.
+    ///     return(ir: InstructionResult): {
+    ///         #[cfg(inspect_stack_length)]
+    ///         *args.stack_len = stack_len;
+    ///         return ir;
+    ///     }
+    /// }
+    /// ```
+    #[allow(rustdoc::invalid_rust_codeblocks)] // Syntax highlighting.
     fn translate(
         mut bcx: B::Builder<'a>,
         config: &FcxConfig,
@@ -410,24 +524,24 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let address_type = bcx.type_int(160);
         let word_type = bcx.type_int(256);
 
-        let zero = bcx.iconst(isize_type, 0);
-
         // Set up entry block.
         let gas_ptr = bcx.fn_param(0);
         let gas_remaining = {
             let offset = bcx.iconst(isize_type, mem::offset_of!(pf::Gas, remaining) as i64);
-            let base = PointerBase::Address(bcx.gep(i8_type, gas_ptr, &[offset]));
+            let name = "gas.remaining.addr";
+            let base = PointerBase::Address(bcx.gep(i8_type, gas_ptr, &[offset], name));
             Pointer { ty: isize_type, base }
         };
         let gas_remaining_nomem = {
             let offset = bcx.iconst(isize_type, mem::offset_of!(pf::Gas, remaining_nomem) as i64);
-            let base = PointerBase::Address(bcx.gep(i8_type, gas_ptr, &[offset]));
+            let name = "gas.remaining_nomem.addr";
+            let base = PointerBase::Address(bcx.gep(i8_type, gas_ptr, &[offset], name));
             Pointer { ty: i64_type, base }
         };
 
         let sp_arg = bcx.fn_param(1);
         let stack = {
-            let base = if config.stack_through_args {
+            let base = if !config.local_stack {
                 PointerBase::Address(sp_arg)
             } else {
                 let stack_type = bcx.type_array(word_type, STACK_CAP as _);
@@ -439,13 +553,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
         let stack_len_arg = bcx.fn_param(2);
         let stack_len = {
-            let base = if config.stack_len_through_args {
-                PointerBase::Address(stack_len_arg)
-            } else {
-                let stack_len = bcx.new_stack_slot(isize_type, "len.addr");
-                bcx.stack_store(zero, stack_len);
-                PointerBase::StackSlot(stack_len)
-            };
+            // This is initialized later in `post_entry_block`.
+            let base = PointerBase::StackSlot(bcx.new_stack_slot(isize_type, "len.addr"));
             Pointer { ty: isize_type, base }
         };
 
@@ -467,8 +576,9 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             .collect();
         assert!(!inst_entries.is_empty(), "translating empty bytecode");
 
-        // Create the dynamic jump table block.
         let dynamic_jump_table = bcx.create_block("dynamic_jump_table");
+        let suspend_block = bcx.create_block("suspend");
+        let return_block = bcx.create_block("return");
 
         let mut fx = FunctionCx {
             comments_enabled: config.comments_enabled,
@@ -483,44 +593,64 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             stack,
             gas_remaining,
             gas_remaining_nomem,
-            gas_limit: None,
             env,
             contract,
             ecx,
 
             bytecode,
             inst_entries,
-            dynamic_jumps: Vec::new(),
-            dynamic_jump_table,
             current_inst: usize::MAX,
+
+            incoming_dynamic_jumps: Vec::new(),
+            dynamic_jump_table,
+            resume_blocks: Vec::new(),
+            suspend_blocks: Vec::new(),
+            suspend_block,
+            incoming_returns: Vec::new(),
+            return_block,
 
             callbacks,
         };
 
         // Add debug assertions for the parameters.
         if config.debug_assertions {
-            fx.pointer_panic_with_bool(!config.gas_disabled, gas_ptr, "gas pointer");
-            fx.pointer_panic_with_bool(config.stack_through_args, sp_arg, "stack pointer");
             fx.pointer_panic_with_bool(
-                config.stack_len_through_args,
+                !config.gas_disabled,
+                gas_ptr,
+                "gas pointer",
+                "gas metering is enabled",
+            );
+            fx.pointer_panic_with_bool(
+                !config.local_stack,
+                sp_arg,
+                "stack pointer",
+                "local stack is disabled",
+            );
+            fx.pointer_panic_with_bool(
+                config.inspect_stack_length || bytecode.will_suspend(),
                 stack_len_arg,
                 "stack length pointer",
+                if config.inspect_stack_length {
+                    "stack length inspection is enabled"
+                } else {
+                    "bytecode suspends execution"
+                },
             );
-            fx.pointer_panic_with_bool(true, env, "env pointer");
-            fx.pointer_panic_with_bool(true, contract, "contract pointer");
-            fx.pointer_panic_with_bool(true, ecx, "EVM context pointer");
+            fx.pointer_panic_with_bool(true, env, "env pointer", "");
+            fx.pointer_panic_with_bool(true, contract, "contract pointer", "");
+            fx.pointer_panic_with_bool(true, ecx, "EVM context pointer", "");
         }
 
-        // Load the gas limit after generating debug assertions.
-        fx.gas_limit = Some(if let Some(static_gas_limit) = config.static_gas_limit {
-            fx.bcx.iconst(i64_type, static_gas_limit as i64)
-        } else {
-            fx.bcx.load(i64_type, gas_ptr, "gas_limit")
-        });
-
-        // Branch to the first instruction.
         // The bytecode is guaranteed to have at least one instruction.
-        fx.bcx.br(fx.inst_entries[0]);
+        let first_inst_block = fx.inst_entries[0];
+        let current_block = fx.current_block();
+        let post_entry_block = fx.bcx.create_block_after(current_block, "entry.post");
+        let resume_block = fx.bcx.create_block_after(post_entry_block, "resume");
+        fx.bcx.br(post_entry_block);
+        // Important: set the first resume target to be the start of the instructions.
+        if fx.bytecode.will_suspend() {
+            fx.add_resume_at(first_inst_block);
+        }
 
         // Translate individual instructions into their respective blocks.
         for (inst, _) in bytecode.iter_insts() {
@@ -528,33 +658,119 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         }
 
         // Finalize the dynamic jump table.
+        let i32_type = fx.bcx.type_int(32);
         if bytecode.has_dynamic_jumps() {
             let default = dynamic_jump_fail;
             fx.bcx.switch_to_block(default);
-            fx.build_return(InstructionResult::InvalidJump);
+            fx.build_return_imm(InstructionResult::InvalidJump);
 
             fx.bcx.switch_to_block(fx.dynamic_jump_table);
-            let u32 = fx.bcx.type_int(32);
-            let index = fx.bcx.phi(fx.word_type, &fx.dynamic_jumps);
-            let index = fx.bcx.ireduce(u32, index);
+            let index = fx.bcx.phi(fx.word_type, &fx.incoming_dynamic_jumps);
+            // TODO: Reduce isn't really right.
+            let index = fx.bcx.ireduce(i32_type, index);
             let targets = fx
                 .bytecode
                 .iter_insts()
                 .filter(|(_, data)| data.opcode == op::JUMPDEST)
                 .map(|(inst, data)| {
-                    let pc = fx.bcx.iconst(u32, data.pc as i64);
+                    let pc = fx.bcx.iconst(i32_type, data.pc as i64);
                     (pc, fx.inst_entries[inst])
                 })
                 .collect::<Vec<_>>();
             fx.bcx.switch(index, default, &targets);
         } else {
             // No dynamic jumps.
-            debug_assert!(fx.dynamic_jumps.is_empty());
+            debug_assert!(fx.incoming_dynamic_jumps.is_empty());
             fx.bcx.switch_to_block(fx.dynamic_jump_table);
             fx.bcx.unreachable();
             fx.bcx.switch_to_block(dynamic_jump_fail);
             fx.bcx.unreachable();
         }
+
+        // Finalize the suspend and resume blocks. Must come before the return block.
+        // Also here is where the stack length is initialized.
+        let init_len = |fx: &mut Self| {
+            if config.inspect_stack_length {
+                let stack_len = fx.bcx.load(fx.isize_type, stack_len_arg, "stack_len");
+                fx.stack_len.store(&mut fx.bcx, stack_len);
+            } else {
+                fx.stack_len.store_imm(&mut fx.bcx, 0);
+            }
+        };
+        if bytecode.will_suspend() {
+            let get_ecx_resume_at = |fx: &mut Self| {
+                let offset =
+                    fx.bcx.iconst(fx.isize_type, mem::offset_of!(EvmContext<'_>, resume_at) as i64);
+                let name = "ecx.resume_at.addr";
+                fx.bcx.gep(fx.i8_type, fx.ecx, &[offset], name)
+            };
+
+            // Resume block: load the `resume_at` value and switch to the corresponding block.
+            // Invalid values are treated as unreachable.
+            {
+                let default = fx.bcx.create_block_after(resume_block, "resume_invalid");
+                fx.bcx.switch_to_block(default);
+                if config.debug_assertions {
+                    fx.call_panic("invalid resume value");
+                } else {
+                    fx.bcx.unreachable();
+                }
+
+                // Special-case the zero block to load 0 into the length if possible.
+                let resume_is_zero_block =
+                    fx.bcx.create_block_after(resume_block, "resume_is_zero");
+
+                fx.bcx.switch_to_block(post_entry_block);
+                let resume_at = get_ecx_resume_at(&mut fx);
+                let resume_at = fx.bcx.load(i32_type, resume_at, "resume_at");
+                let is_resume_zero = fx.bcx.icmp_imm(IntCC::Equal, resume_at, 0);
+                fx.bcx.brif(is_resume_zero, resume_is_zero_block, resume_block);
+
+                fx.bcx.switch_to_block(resume_is_zero_block);
+                init_len(&mut fx);
+                fx.bcx.br(first_inst_block);
+
+                // Dispatch to the resume block.
+                fx.bcx.switch_to_block(resume_block);
+                let stack_len = fx.bcx.load(fx.isize_type, stack_len_arg, "stack_len");
+                fx.stack_len.store(&mut fx.bcx, stack_len);
+                fx.resume_blocks[0].1 = default; // Zero case is handled above.
+                fx.bcx.switch(resume_at, default, &fx.resume_blocks);
+            }
+
+            // Suspend block: store the `resume_at` value and return `CallOrCreate`.
+            {
+                fx.bcx.switch_to_block(fx.suspend_block);
+                let resume_value = fx.bcx.phi(i32_type, &fx.suspend_blocks);
+                let resume_at = get_ecx_resume_at(&mut fx);
+                fx.bcx.store(resume_value, resume_at);
+
+                let ret = fx.bcx.iconst(fx.i8_type, InstructionResult::CallOrCreate as i64);
+                fx.incoming_returns.push((ret, fx.suspend_block));
+                fx.bcx.br(fx.return_block);
+            }
+        } else {
+            debug_assert!(fx.resume_blocks.is_empty());
+            debug_assert!(fx.suspend_blocks.is_empty());
+
+            fx.bcx.switch_to_block(post_entry_block);
+            init_len(&mut fx);
+            fx.bcx.br(first_inst_block);
+
+            fx.bcx.switch_to_block(resume_block);
+            fx.bcx.unreachable();
+            fx.bcx.switch_to_block(fx.suspend_block);
+            fx.bcx.unreachable();
+        }
+
+        // Finalize the return block.
+        fx.bcx.switch_to_block(fx.return_block);
+        let return_value = fx.bcx.phi(fx.i8_type, &fx.incoming_returns);
+        if config.inspect_stack_length {
+            let len = fx.load_len();
+            fx.bcx.store(len, stack_len_arg);
+        }
+        fx.bcx.ret(&[return_value]);
 
         Ok(())
     }
@@ -596,7 +812,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 return Ok(());
             };
             (build $ret:expr) => {{
-                self.build_return($ret);
+                self.build_return_imm($ret);
                 goto_return!(no_branch "");
             }};
         }
@@ -658,7 +874,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         macro_rules! field {
             // Gets the pointer to a field.
             ($field:ident; @get $($paths:path),*; $($spec:tt).*) => {
-                self.get_field(self.$field, 0 $(+ mem::offset_of!($paths, $spec))*)
+                self.get_field(self.$field, 0 $(+ mem::offset_of!($paths, $spec))*, stringify!($field.$($spec).*.addr))
             };
             // Gets and loads the pointer to a field.
             // The value is loaded as a native-endian 256-bit integer.
@@ -864,14 +1080,15 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                     self.word_type,
                     |this, _| {
                         let ptr = this.bcx.load(this.bcx.type_ptr(), ptr, "contract.input.ptr");
-                        let calldata = this.bcx.gep(this.i8_type, ptr, &[index]);
+                        let index = this.bcx.ireduce(this.isize_type, index);
+                        let calldata = this.bcx.gep(this.i8_type, ptr, &[index], "calldata.addr");
 
                         // `32.min(contract.input.len() - index)`
                         let slice_len = {
+                            let len = this.bcx.ireduce(this.isize_type, len);
                             let diff = this.bcx.isub(len, index);
-                            let max = this.bcx.iconst(this.word_type, 32);
-                            let slice_len = this.bcx.umin(diff, max);
-                            this.bcx.ireduce(this.isize_type, slice_len)
+                            let max = this.bcx.iconst(this.isize_type, 32);
+                            this.bcx.umin(diff, max)
                         };
 
                         let tmp = this.bcx.new_stack_slot(this.word_type, "calldata.addr");
@@ -952,7 +1169,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                     };
                     let some = {
                         let one = self.bcx.iconst(self.isize_type, 1);
-                        let ptr = self.bcx.gep(self.i8_type, opt, &[one]);
+                        let ptr =
+                            self.bcx.gep(self.i8_type, opt, &[one], "env.block.prevrandao.ptr");
                         let mut v = self.bcx.load(self.word_type, ptr, "env.block.prevrandao");
                         if !cfg!(target_endian = "big") {
                             v = self.bcx.bswap(v);
@@ -1022,7 +1240,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             }
             op::JUMP | op::JUMPI => {
                 if data.flags.contains(InstrFlags::INVALID_JUMP) {
-                    self.build_return(InstructionResult::InvalidJump);
+                    self.build_return_imm(InstructionResult::InvalidJump);
                 } else {
                     let is_static = data.flags.contains(InstrFlags::STATIC_JUMP);
                     let target = if is_static {
@@ -1037,7 +1255,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                         // Dynamic jump.
                         debug_assert!(self.bytecode.has_dynamic_jumps());
                         let target = self.pop(true);
-                        self.dynamic_jumps.push((target, self.bcx.current_block().unwrap()));
+                        self.incoming_dynamic_jumps
+                            .push((target, self.bcx.current_block().unwrap()));
                         self.dynamic_jump_table
                     };
 
@@ -1045,7 +1264,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                         let cond_word = self.pop(true);
                         if !is_static {
                             // Update the block since we just added one for the length check.
-                            self.dynamic_jumps.last_mut().unwrap().1 =
+                            self.incoming_dynamic_jumps.last_mut().unwrap().1 =
                                 self.bcx.current_block().unwrap();
                         }
                         let cond = self.bcx.icmp_imm(IntCC::NotEqual, cond_word, 0);
@@ -1123,8 +1342,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 goto_return!(no_branch "");
             }
             op::RETURN => {
-                self.return_common();
-                goto_return!(build InstructionResult::Return);
+                self.return_common(InstructionResult::Return);
+                goto_return!(no_branch "");
             }
             op::DELEGATECALL => {
                 self.call_common(CallKind::DelegateCall);
@@ -1141,8 +1360,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             }
 
             op::REVERT => {
-                self.return_common();
-                goto_return!(build InstructionResult::Revert);
+                self.return_common(InstructionResult::Revert);
+                goto_return!(no_branch "");
             }
             op::INVALID => goto_return!(build InstructionResult::InvalidFEOpcode),
             op::SELFDESTRUCT => {
@@ -1259,7 +1478,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
     /// Returns an error if the current context is a static call.
     fn fail_if_staticcall(&mut self, ret: InstructionResult) {
-        let ptr = self.get_field(self.ecx, mem::offset_of!(EvmContext<'_>, is_static));
+        let ptr =
+            self.get_field(self.ecx, mem::offset_of!(EvmContext<'_>, is_static), "ecx.is_static");
         let bool = self.bcx.type_int(1);
         let is_static = self.bcx.load(bool, ptr, "is_static");
         self.build_failure(is_static, ret)
@@ -1299,9 +1519,10 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     }
 
     /// `RETURN` or `REVERT` instruction.
-    fn return_common(&mut self) {
+    fn return_common(&mut self, ir: InstructionResult) {
         let sp = self.pop_sp(2);
         self.callback_ir(Callback::DoReturn, &[self.ecx, sp]);
+        self.build_return_imm(ir);
     }
 
     fn create_common(&mut self, is_create2: bool) {
@@ -1309,12 +1530,34 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let sp = self.pop_sp(3 + is_create2 as usize);
         let is_create2 = self.bcx.iconst(self.bcx.type_int(1), is_create2 as i64);
         self.callback_ir(Callback::Create, &[self.ecx, sp, is_create2]);
-        self.build_return(InstructionResult::CallOrCreate);
+        self.suspend();
     }
 
     fn call_common(&mut self, call_kind: CallKind) {
-        let _ = call_kind;
         // TODO
+        let _ = call_kind;
+        self.suspend();
+    }
+
+    /// Suspend execution, storing the resume point in the context.
+    fn suspend(&mut self) {
+        // Register the next instruction as the resume block.
+        let value = self.add_resume_at(self.inst_entries[self.current_inst + 1]);
+
+        // Register the current block as the suspend block.
+        let value = self.bcx.iconst(self.bcx.type_int(32), value as i64);
+        self.suspend_blocks.push((value, self.bcx.current_block().unwrap()));
+
+        // Branch to the suspend block.
+        self.bcx.br(self.suspend_block);
+    }
+
+    /// Adds a resume point and returns its index.
+    fn add_resume_at(&mut self, block: B::BasicBlock) -> usize {
+        let value = self.resume_blocks.len();
+        let value_ = self.bcx.iconst(self.bcx.type_int(32), value as i64);
+        self.resume_blocks.push((value_, block));
+        value
     }
 
     /// Loads the word at the given pointer.
@@ -1333,9 +1576,9 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     }
 
     /// Gets the environment field at the given offset.
-    fn get_field(&mut self, ptr: B::Value, offset: usize) -> B::Value {
+    fn get_field(&mut self, ptr: B::Value, offset: usize, name: &str) -> B::Value {
         let offset = self.bcx.iconst(self.isize_type, offset as i64);
-        self.bcx.gep(self.i8_type, ptr, &[offset])
+        self.bcx.gep(self.i8_type, ptr, &[offset], name)
     }
 
     /// Stores the stack length.
@@ -1356,7 +1599,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     /// Returns the stack pointer at `len` (`&stack[len]`).
     fn sp_at(&mut self, len: B::Value) -> B::Value {
         let ptr = self.stack.addr(&mut self.bcx);
-        self.bcx.gep(self.word_type, ptr, &[len])
+        self.bcx.gep(self.word_type, ptr, &[len], "sp")
     }
 
     /// Returns the stack pointer at `len` from the top (`&stack[CAPACITY - len]`).
@@ -1426,27 +1669,42 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
         self.bcx.set_cold_block(failure);
         self.bcx.switch_to_block(failure);
-        self.bcx.ret(&[ret]);
+        self.build_return(ret);
 
         self.bcx.switch_to_block(target);
     }
 
-    /// Builds `return ret`.
-    fn build_return(&mut self, ret: InstructionResult) {
-        let ret = self.bcx.iconst(self.i8_type, ret as i64);
-        self.bcx.ret(&[ret]);
+    /// Builds a branch to the return block.
+    fn build_return_imm(&mut self, ret: InstructionResult) {
+        let ret_value = self.bcx.iconst(self.i8_type, ret as i64);
+        self.build_return(ret_value);
         if self.comments_enabled {
             self.add_comment(&format!("return {ret:?}"));
         }
     }
 
+    /// Builds a branch to the return block.
+    fn build_return(&mut self, ret: B::Value) {
+        self.incoming_returns.push((ret, self.bcx.current_block().unwrap()));
+        self.bcx.br(self.return_block);
+    }
+
     // Pointer must not be null if `must_be_set` is true.
-    fn pointer_panic_with_bool(&mut self, must_be_set: bool, ptr: B::Value, name: &str) {
+    fn pointer_panic_with_bool(
+        &mut self,
+        must_be_set: bool,
+        ptr: B::Value,
+        name: &str,
+        extra: &str,
+    ) {
         if !must_be_set {
             return;
         }
         let panic_cond = self.bcx.is_null(ptr);
-        let msg = format!("revm_jit panic: {name} must not be null");
+        let mut msg = format!("revm_jit panic: {name} must not be null");
+        if !extra.is_empty() {
+            write!(msg, " ({extra})").unwrap();
+        }
         self.build_panic_cond(panic_cond, &msg);
     }
 
@@ -1567,6 +1825,18 @@ enum PointerBase<B: Backend> {
 }
 
 impl<B: Backend> Pointer<B> {
+    /// Returns `true` if the pointer is an address.
+    #[allow(dead_code)]
+    fn is_address(&self) -> bool {
+        matches!(self.base, PointerBase::Address(_))
+    }
+
+    /// Returns `true` if the pointer is a stack slot.
+    #[allow(dead_code)]
+    fn is_stack_slot(&self) -> bool {
+        matches!(self.base, PointerBase::StackSlot(_))
+    }
+
     /// Loads the value from the pointer.
     fn load(&self, bcx: &mut B::Builder<'_>, name: &str) -> B::Value {
         match self.base {
@@ -1581,6 +1851,12 @@ impl<B: Backend> Pointer<B> {
             PointerBase::Address(ptr) => bcx.store(value, ptr),
             PointerBase::StackSlot(slot) => bcx.stack_store(value, slot),
         }
+    }
+
+    /// Stores the value to the pointer.
+    fn store_imm(&self, bcx: &mut B::Builder<'_>, value: i64) {
+        let value = bcx.iconst(self.ty, value);
+        self.store(bcx, value)
     }
 
     /// Gets the address of the pointer.
@@ -2721,8 +2997,8 @@ mod tests {
             expected_gas,
             assert_host,
         } = *test_case;
-        jit.set_disable_gas(false);
-        let f = jit.compile(bytecode, spec_id).unwrap();
+        jit.set_inspect_stack_length(true);
+        let f = jit.compile(None, bytecode, spec_id).unwrap();
 
         let mut stack = EvmStack::new();
         let mut stack_len = 0;
@@ -2804,6 +3080,8 @@ mod tests {
     }
 
     fn run_fibonacci_tests<B: Backend>(jit: &mut JitEvm<B>) {
+        jit.set_inspect_stack_length(true);
+
         for i in 0..=10 {
             run_fibonacci_test(jit, i);
         }
@@ -2820,7 +3098,7 @@ mod tests {
             let code = mk_fibonacci_code(input, dynamic);
 
             unsafe { jit.free_all_functions() }.unwrap();
-            let f = jit.compile(&code, DEF_SPEC).unwrap();
+            let f = jit.compile(None, &code, DEF_SPEC).unwrap();
 
             let mut stack_buf = EvmStack::new_heap();
             let stack = EvmStack::from_mut_vec(&mut stack_buf);

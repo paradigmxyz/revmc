@@ -1,8 +1,8 @@
 //! Internal EVM bytecode and opcode representation.
 
 use bitvec::vec::BitVec;
-use color_eyre::Result;
 use revm_interpreter::opcode as op;
+use revm_jit_backend::Result;
 use revm_primitives::SpecId;
 use std::fmt;
 
@@ -33,6 +33,8 @@ pub(crate) struct Bytecode<'a> {
     pub(crate) spec_id: SpecId,
     /// Whether the bytecode contains dynamic jumps.
     has_dynamic_jumps: bool,
+    /// Whether the bytecode will suspend execution.
+    will_suspend: bool,
 }
 
 impl<'a> Bytecode<'a> {
@@ -65,7 +67,8 @@ impl<'a> Bytecode<'a> {
             insts.push(InstData { opcode, flags, static_gas, data, pc: pc as u32 });
         }
 
-        let mut bytecode = Self { code, insts, jumpdests, spec_id, has_dynamic_jumps: false };
+        let mut bytecode =
+            Self { code, insts, jumpdests, spec_id, has_dynamic_jumps: false, will_suspend: false };
 
         // Pad code to ensure there is at least one diverging instruction.
         if bytecode.insts.last().map_or(true, |last| !last.is_diverging(bytecode.is_eof())) {
@@ -73,6 +76,12 @@ impl<'a> Bytecode<'a> {
         }
 
         bytecode
+    }
+
+    /// Returns an iterator over the opcodes.
+    #[inline]
+    pub(crate) fn opcodes(&self) -> OpcodesIter<'a> {
+        OpcodesIter::new(self.code)
     }
 
     /// Returns the instruction at the given instruction counter.
@@ -91,7 +100,7 @@ impl<'a> Bytecode<'a> {
     /// Returns an iterator over the instructions.
     #[inline]
     pub(crate) fn iter_insts(&self) -> impl Iterator<Item = (usize, &InstData)> + '_ {
-        self.iter_all_insts().filter(|(_, data)| !data.flags.contains(InstrFlags::DEAD_CODE))
+        self.iter_all_insts().filter(|(_, data)| !data.is_dead_code())
     }
 
     /// Returns an iterator over all the instructions, including dead code.
@@ -107,6 +116,7 @@ impl<'a> Bytecode<'a> {
         // NOTE: `mark_dead_code` must run after `static_jump_analysis` as it can mark unreachable
         // `JUMPDEST`s as dead code.
         trace_time!("mark_dead_code", || self.mark_dead_code());
+        trace_time!("will_suspend", || self.calc_will_suspend());
 
         Ok(())
     }
@@ -198,6 +208,15 @@ impl<'a> Bytecode<'a> {
         }
     }
 
+    /// Calculates whether the bytecode will suspend execution.
+    ///
+    /// This can only happen if the bytecode contains `*CALL*` or `CREATE*` instructions.
+    #[instrument(name = "suspend", level = "debug", skip_all)]
+    fn calc_will_suspend(&mut self) {
+        let will_suspend = self.iter_insts().any(|(_, data)| data.will_suspend());
+        self.will_suspend = will_suspend;
+    }
+
     /// Returns the immediate value of the given instruction data, if any.
     pub(crate) fn get_imm_of(&self, instr_data: &InstData) -> Option<&'a [u8]> {
         (instr_data.imm_len() > 0).then(|| self.get_imm(instr_data.data))
@@ -216,6 +235,11 @@ impl<'a> Bytecode<'a> {
     /// Returns `true` if the bytecode has dynamic jumps.
     pub(crate) fn has_dynamic_jumps(&self) -> bool {
         self.has_dynamic_jumps
+    }
+
+    /// Returns `true` if the bytecode will suspend execution, to be resumed later.
+    pub(crate) fn will_suspend(&self) -> bool {
+        self.will_suspend
     }
 
     /// Returns `true` if the bytecode is EOF.
@@ -355,6 +379,15 @@ impl InstData {
             || self.flags.contains(InstrFlags::UNKNOWN)
             || matches!(self.opcode, op::STOP | op::RETURN | op::REVERT | op::INVALID)
             || (self.opcode == op::SELFDESTRUCT && !is_eof)
+    }
+
+    /// Returns `true` if this instruction will suspend execution.
+    #[inline]
+    const fn will_suspend(&self) -> bool {
+        matches!(
+            self.opcode,
+            op::CALL | op::CALLCODE | op::DELEGATECALL | op::STATICCALL | op::CREATE | op::CREATE2
+        )
     }
 }
 

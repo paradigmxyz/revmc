@@ -26,24 +26,12 @@ revm-primitives.workspace = true
 
 bitflags = "2.5"
 bitvec = "1"
-color-eyre.workspace = true
 tracing.workspace = true
-tracing-error.workspace = true
-tracing-subscriber = { workspace = true, features = ["fmt", "env-filter"] }
-
-[dev-dependencies]
-criterion = "0.5"
 
 [features]
 default = ["llvm"]
 llvm = ["dep:revm-jit-llvm"]
 cranelift = ["dep:revm-jit-cranelift"]
-
-[[bin]]
-name = "revm-jit"
-path = "src/main.rs"
-required-features = ["llvm"]
-doc = false
 
 [[bench]]
 name = "bench"
