@@ -1,7 +1,7 @@
 //! JIT compiler implementation.
 
 use crate::{
-    callbacks::Callback, Backend, Builder, Bytecode, EvmContext, EvmStack, Instr, InstrData,
+    callbacks::Callback, Backend, Builder, Bytecode, EvmContext, EvmStack, Inst, InstData,
     InstrFlags, IntCC, JitEvmFn, Result, I256_MIN,
 };
 use revm_interpreter::{opcode as op, Contract, Gas, InstructionResult};
@@ -15,7 +15,7 @@ const STACK_CAP: usize = 1024;
 // TODO: Cannot find function if `compile` is called a second time.
 
 // TODO: Generate less redundant stack length manip code, e.g. pop + push
-// TODO: We can emit the length check by adding a params in/out instr flag; can be re-used for EOF
+// TODO: We can emit the length check by adding a params in/out inst flag; can be re-used for EOF
 
 // TODO: Unify `callback` instructions after above.
 
@@ -36,6 +36,8 @@ pub struct JitEvm<B: Backend> {
     config: FcxConfig,
     function_counter: usize,
     callbacks: Callbacks<B>,
+    dump_assembly: bool,
+    dump_unopt_assembly: bool,
 }
 
 impl<B: Backend + Default> Default for JitEvm<B> {
@@ -53,6 +55,8 @@ impl<B: Backend> JitEvm<B> {
             config: FcxConfig::default(),
             function_counter: 0,
             callbacks: Callbacks::new(),
+            dump_assembly: true,
+            dump_unopt_assembly: false,
         }
     }
 
@@ -65,6 +69,24 @@ impl<B: Backend> JitEvm<B> {
         self.backend.set_is_dumping(output_dir.is_some());
         self.config.comments_enabled = output_dir.is_some();
         self.out_dir = output_dir;
+    }
+
+    /// Dumps assembly to the output directory.
+    ///
+    /// This can be quite slow.
+    ///
+    /// Defaults to `true`.
+    pub fn dump_assembly(&mut self, yes: bool) {
+        self.dump_assembly = yes;
+    }
+
+    /// Dumps the unoptimized assembly to the output directory.
+    ///
+    /// This can be quite slow.
+    ///
+    /// Defaults to `false`.
+    pub fn dump_unopt_assembly(&mut self, yes: bool) {
+        self.dump_unopt_assembly = yes;
     }
 
     /// Sets the optimization level.
@@ -208,7 +230,8 @@ impl<B: Backend> JitEvm<B> {
             ],
         );
         debug_assert_eq!(params.len(), param_names.len());
-        let mut bcx = self.backend.build_function(name, ret, params, param_names)?;
+        let linkage = revm_jit_backend::Linkage::Public;
+        let mut bcx = self.backend.build_function(name, ret, params, param_names, linkage)?;
 
         // Function attributes.
         let function_attributes = [
@@ -260,10 +283,12 @@ impl<B: Backend> JitEvm<B> {
             // Dump IR before verifying for better debugging.
             verify(&mut self.backend)?;
 
-            trace_time!("dump unopt disasm", || {
-                let filename = format!("{name}.unopt.s");
-                self.backend.dump_disasm(&dir.join(filename))
-            })?;
+            if self.dump_assembly && self.dump_unopt_assembly {
+                trace_time!("dump unopt disasm", || {
+                    let filename = format!("{name}.unopt.s");
+                    self.backend.dump_disasm(&dir.join(filename))
+                })?;
+            }
         } else {
             verify(&mut self.backend)?;
         }
@@ -276,10 +301,12 @@ impl<B: Backend> JitEvm<B> {
                 self.backend.dump_ir(&dir.join(filename))
             })?;
 
-            trace_time!("dump opt disasm", || {
-                let filename = format!("{name}.opt.s");
-                self.backend.dump_disasm(&dir.join(filename))
-            })?;
+            if self.dump_assembly {
+                trace_time!("dump opt disasm", || {
+                    let filename = format!("{name}.opt.s");
+                    self.backend.dump_disasm(&dir.join(filename))
+                })?;
+            }
         }
 
         let addr = trace_time!("finalize", || self.backend.get_function(name))?;
@@ -321,8 +348,6 @@ impl Default for FcxConfig {
 
 struct FunctionCx<'a, B: Backend> {
     comments_enabled: bool,
-    #[allow(dead_code)]
-    frame_pointers: bool,
     disable_gas: bool,
 
     /// The backend's function builder.
@@ -355,12 +380,17 @@ struct FunctionCx<'a, B: Backend> {
     /// The bytecode being translated.
     bytecode: &'a Bytecode<'a>,
     /// All entry blocks for each instruction.
-    instr_blocks: Vec<B::BasicBlock>,
+    inst_entries: Vec<B::BasicBlock>,
+    /// A list of dynamic jumps to be resolved after all instructions have been translated.
+    /// `(jump_target, block)`.
+    dynamic_jumps: Vec<(B::Value, B::BasicBlock)>,
+    /// The dynamic jump table block where all dynamic jumps branch to.
+    dynamic_jump_table: B::BasicBlock,
     /// The current instruction being translated.
     ///
     /// Note that `self.op_blocks[current_opcode]` does not necessarily equal the builder's current
     /// block.
-    current_opcode: Instr,
+    current_inst: Inst,
 
     /// Callbacks.
     callbacks: &'a mut Callbacks<B>,
@@ -424,15 +454,24 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let ecx = bcx.fn_param(5);
 
         // Create all instruction entry blocks.
-        let op_blocks: Vec<_> = bytecode
-            .iter_instrs()
-            .map(|(i, data)| bcx.create_block(&op_block_name_with(i, data, "")))
+        let dynamic_jump_fail = bcx.create_block("dynamic_jump_fail");
+        let inst_entries: Vec<_> = bytecode
+            .iter_all_insts()
+            .map(|(i, data)| {
+                if data.is_dead_code() {
+                    dynamic_jump_fail
+                } else {
+                    bcx.create_block(&op_block_name_with(i, data, ""))
+                }
+            })
             .collect();
-        assert!(!op_blocks.is_empty(), "translating empty bytecode");
+        assert!(!inst_entries.is_empty(), "translating empty bytecode");
+
+        // Create the dynamic jump table block.
+        let dynamic_jump_table = bcx.create_block("dynamic_jump_table");
 
         let mut fx = FunctionCx {
             comments_enabled: config.comments_enabled,
-            frame_pointers: config.frame_pointers,
             disable_gas: config.gas_disabled,
 
             bcx,
@@ -450,8 +489,10 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             ecx,
 
             bytecode,
-            instr_blocks: op_blocks,
-            current_opcode: usize::MAX,
+            inst_entries,
+            dynamic_jumps: Vec::new(),
+            dynamic_jump_table,
+            current_inst: usize::MAX,
 
             callbacks,
         };
@@ -479,36 +520,64 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
         // Branch to the first instruction.
         // The bytecode is guaranteed to have at least one instruction.
-        fx.bcx.br(fx.instr_blocks[0]);
+        fx.bcx.br(fx.inst_entries[0]);
 
         // Translate individual instructions into their respective blocks.
-        for (instr, _) in bytecode.iter_instrs() {
-            fx.translate_instr(instr)?;
+        for (inst, _) in bytecode.iter_insts() {
+            fx.translate_inst(inst)?;
+        }
+
+        // Finalize the dynamic jump table.
+        if bytecode.has_dynamic_jumps() {
+            let default = dynamic_jump_fail;
+            fx.bcx.switch_to_block(default);
+            fx.build_return(InstructionResult::InvalidJump);
+
+            fx.bcx.switch_to_block(fx.dynamic_jump_table);
+            let u32 = fx.bcx.type_int(32);
+            let index = fx.bcx.phi(fx.word_type, &fx.dynamic_jumps);
+            let index = fx.bcx.ireduce(u32, index);
+            let targets = fx
+                .bytecode
+                .iter_insts()
+                .filter(|(_, data)| data.opcode == op::JUMPDEST)
+                .map(|(inst, data)| {
+                    let pc = fx.bcx.iconst(u32, data.pc as i64);
+                    (pc, fx.inst_entries[inst])
+                })
+                .collect::<Vec<_>>();
+            fx.bcx.switch(index, default, &targets);
+        } else {
+            // No dynamic jumps.
+            debug_assert!(fx.dynamic_jumps.is_empty());
+            fx.bcx.switch_to_block(fx.dynamic_jump_table);
+            fx.bcx.unreachable();
+            fx.bcx.switch_to_block(dynamic_jump_fail);
+            fx.bcx.unreachable();
         }
 
         Ok(())
     }
 
-    fn translate_instr(&mut self, instr: Instr) -> Result<()> {
-        self.current_opcode = instr;
-        let data = self.bytecode.instr(instr);
-        let instr_block = self.instr_blocks[instr];
-        self.bcx.switch_to_block(instr_block);
+    fn translate_inst(&mut self, inst: Inst) -> Result<()> {
+        self.current_inst = inst;
+        let data = self.bytecode.inst(inst);
+        let entry_block = self.inst_entries[inst];
+        self.bcx.switch_to_block(entry_block);
 
         let opcode = data.opcode;
 
         let branch_to_next_opcode = |this: &mut Self| {
             debug_assert!(
-                !this.bytecode.is_instr_diverging(instr),
-                "attempted to branch to next instruction in a diverging instruction: {}",
-                this.bytecode.raw_opcode(instr),
+                !this.bytecode.is_instr_diverging(inst),
+                "attempted to branch to next instruction in a diverging instruction: {data:?}",
             );
-            if let Some(next) = this.instr_blocks.get(instr + 1) {
+            if let Some(next) = this.inst_entries.get(inst + 1) {
                 this.bcx.br(*next);
             }
         };
         let epilogue = |this: &mut Self| {
-            this.bcx.seal_block(instr_block);
+            this.bcx.seal_block(entry_block);
         };
 
         /// Makes sure to run cleanup code and return.
@@ -954,32 +1023,44 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             op::JUMP | op::JUMPI => {
                 if data.flags.contains(InstrFlags::INVALID_JUMP) {
                     self.build_return(InstructionResult::InvalidJump);
-                } else if data.flags.contains(InstrFlags::STATIC_JUMP) {
-                    let target_opcode = data.data as usize;
-                    debug_assert_eq!(
-                        self.bytecode.instr(target_opcode).opcode,
-                        op::JUMPDEST,
-                        "jumping to non-JUMPDEST: ic={target_opcode} -> {}",
-                        self.bytecode.instr(target_opcode).to_op()
-                    );
+                } else {
+                    let is_static = data.flags.contains(InstrFlags::STATIC_JUMP);
+                    let target = if is_static {
+                        let target_inst = data.data as usize;
+                        debug_assert_eq!(
+                            *self.bytecode.inst(target_inst),
+                            op::JUMPDEST,
+                            "jumping to non-JUMPDEST; target_inst={target_inst}",
+                        );
+                        self.inst_entries[target_inst]
+                    } else {
+                        // Dynamic jump.
+                        debug_assert!(self.bytecode.has_dynamic_jumps());
+                        let target = self.pop(true);
+                        self.dynamic_jumps.push((target, self.bcx.current_block().unwrap()));
+                        self.dynamic_jump_table
+                    };
 
-                    let target = self.instr_blocks[target_opcode];
                     if opcode == op::JUMPI {
                         let cond_word = self.pop(true);
+                        if !is_static {
+                            // Update the block since we just added one for the length check.
+                            self.dynamic_jumps.last_mut().unwrap().1 =
+                                self.bcx.current_block().unwrap();
+                        }
                         let cond = self.bcx.icmp_imm(IntCC::NotEqual, cond_word, 0);
-                        let next = self.instr_blocks[instr + 1];
+                        let next = self.inst_entries[inst + 1];
                         self.bcx.brif(cond, target, next);
                     } else {
                         self.bcx.br(target);
                     }
-                } else {
-                    todo!("dynamic jumps");
+                    self.inst_entries[inst] = self.bcx.current_block().unwrap();
                 }
 
                 goto_return!(no_branch "");
             }
             op::PC => {
-                let pc = self.bcx.iconst_256(U256::from(data.data));
+                let pc = self.bcx.iconst_256(U256::from(data.pc));
                 self.push(pc);
             }
             op::MSIZE => {
@@ -1444,10 +1525,10 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
     /// Returns the block name for the current opcode with the given suffix.
     fn op_block_name(&self, name: &str) -> String {
-        if self.current_opcode == usize::MAX {
+        if self.current_inst == usize::MAX {
             return format!("entry.{name}");
         }
-        op_block_name_with(self.current_opcode, self.bytecode.instr(self.current_opcode), name)
+        op_block_name_with(self.current_inst, self.bytecode.inst(self.current_inst), name)
     }
 
     #[inline]
@@ -1531,7 +1612,8 @@ impl<B: Backend> Callbacks<B> {
                 let ret = cb.ret(bcx);
                 let params = cb.params(bcx);
                 let address = cb.addr();
-                let f = bcx.add_callback_function(name, ret, &params, address);
+                let linkage = revm_jit_backend::Linkage::Import;
+                let f = bcx.add_callback_function(name, ret, &params, address, linkage);
                 let default_attrs: &[Attribute] = if cb == Callback::Panic {
                     &[
                         Attribute::Cold,
@@ -1621,7 +1703,7 @@ mod pf {
     }
 }
 
-fn op_block_name_with(op: Instr, data: InstrData, with: &str) -> String {
+fn op_block_name_with(op: Inst, data: &InstData, with: &str) -> String {
     let data = data.to_op();
     if with.is_empty() {
         format!("op.{op}.{data}")

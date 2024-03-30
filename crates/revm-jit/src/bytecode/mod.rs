@@ -1,7 +1,7 @@
 //! Internal EVM bytecode and opcode representation.
 
 use bitvec::vec::BitVec;
-use color_eyre::{eyre::bail, Result};
+use color_eyre::Result;
 use revm_interpreter::opcode as op;
 use revm_primitives::SpecId;
 use std::fmt;
@@ -17,8 +17,8 @@ pub use opcode::*;
 ///
 /// This is an index into [`Bytecode`] instructions.
 ///
-/// Also known as `ic`, or instruction counter; not to be confused with SSA `instr`s.
-pub(crate) type Instr = usize;
+/// Also known as `ic`, or instruction counter; not to be confused with SSA `inst`s.
+pub(crate) type Inst = usize;
 
 /// EVM bytecode.
 #[derive(Debug)]
@@ -26,23 +26,24 @@ pub(crate) struct Bytecode<'a> {
     /// The original bytecode slice.
     pub(crate) code: &'a [u8],
     /// The instructions.
-    instrs: Vec<InstrData>,
-    /// `JUMPDEST` map.
+    insts: Vec<InstData>,
+    /// `JUMPDEST` opcode map. `jumpdests[pc]` is `true` if `code[pc] == op::JUMPDEST`.
     jumpdests: BitVec,
     /// The [`SpecId`].
     pub(crate) spec_id: SpecId,
+    /// Whether the bytecode contains dynamic jumps.
+    has_dynamic_jumps: bool,
 }
 
 impl<'a> Bytecode<'a> {
     pub(crate) fn new(code: &'a [u8], spec_id: SpecId) -> Self {
-        let mut instrs = Vec::with_capacity(code.len() + 1);
+        let mut insts = Vec::with_capacity(code.len() + 1);
         let mut jumpdests = BitVec::repeat(false, code.len());
         let op_infos = op_info_map(spec_id);
         for (pc, Opcode { opcode, immediate }) in OpcodesIter::new(code).with_pc() {
             let mut data = 0;
             match opcode {
                 op::JUMPDEST => jumpdests.set(pc, true),
-                op::PC => data = pc as u32,
                 _ => {
                     if let Some(imm) = immediate {
                         // `pc` is at `opcode` right now, add 1 for the data.
@@ -61,14 +62,14 @@ impl<'a> Bytecode<'a> {
             }
             let static_gas = info.static_gas().unwrap_or(u16::MAX);
 
-            instrs.push(InstrData { opcode, flags, static_gas, data });
+            insts.push(InstData { opcode, flags, static_gas, data, pc: pc as u32 });
         }
 
-        let mut bytecode = Self { code, instrs, jumpdests, spec_id };
+        let mut bytecode = Self { code, insts, jumpdests, spec_id, has_dynamic_jumps: false };
 
         // Pad code to ensure there is at least one diverging instruction.
-        if bytecode.instrs.last().map_or(true, |last| !last.is_diverging(bytecode.is_eof())) {
-            bytecode.instrs.push(InstrData::new(op::STOP));
+        if bytecode.insts.last().map_or(true, |last| !last.is_diverging(bytecode.is_eof())) {
+            bytecode.insts.push(InstData::new(op::STOP));
         }
 
         bytecode
@@ -76,25 +77,27 @@ impl<'a> Bytecode<'a> {
 
     /// Returns the instruction at the given instruction counter.
     #[inline]
-    pub(crate) fn instr(&self, instr: Instr) -> InstrData {
-        self.instrs[instr]
+    pub(crate) fn inst(&self, inst: Inst) -> &InstData {
+        &self.insts[inst]
     }
 
     /// Returns a mutable reference the instruction at the given instruction counter.
     #[inline]
     #[allow(dead_code)]
-    pub(crate) fn instr_mut(&mut self, instr: Instr) -> &mut InstrData {
-        &mut self.instrs[instr]
+    pub(crate) fn instr_mut(&mut self, inst: Inst) -> &mut InstData {
+        &mut self.insts[inst]
     }
 
     /// Returns an iterator over the instructions.
     #[inline]
-    pub(crate) fn iter_instrs(&self) -> impl Iterator<Item = (usize, InstrData)> + '_ {
-        self.instrs
-            .iter()
-            .copied()
-            .enumerate()
-            .filter(|(_, data)| !data.flags.contains(InstrFlags::DEAD_CODE))
+    pub(crate) fn iter_insts(&self) -> impl Iterator<Item = (usize, &InstData)> + '_ {
+        self.iter_all_insts().filter(|(_, data)| !data.flags.contains(InstrFlags::DEAD_CODE))
+    }
+
+    /// Returns an iterator over all the instructions, including dead code.
+    #[inline]
+    pub(crate) fn iter_all_insts(&self) -> impl Iterator<Item = (usize, &InstData)> + '_ {
+        self.insts.iter().enumerate()
     }
 
     /// Runs a list of analysis passes on the instructions.
@@ -104,30 +107,33 @@ impl<'a> Bytecode<'a> {
         // NOTE: `mark_dead_code` must run after `static_jump_analysis` as it can mark unreachable
         // `JUMPDEST`s as dead code.
         trace_time!("mark_dead_code", || self.mark_dead_code());
-        self.no_dynamic_jumps()
+
+        Ok(())
     }
 
     /// Mark `PUSH<N>` followed by `JUMP[I]` as `STATIC_JUMP` and resolve the target.
     #[instrument(name = "sj", level = "debug", skip_all)]
     fn static_jump_analysis(&mut self) {
-        for instr in 0..self.instrs.len() {
-            let jump_instr = instr + 1;
-            let Some(next) = self.instrs.get(jump_instr) else { continue };
-            let data = &self.instrs[instr];
-            if !(matches!(data.opcode, op::PUSH1..=op::PUSH32)
-                && matches!(next.opcode, op::JUMP | op::JUMPI))
-            {
+        for inst in 0..self.insts.len() {
+            let jump_inst = inst + 1;
+            let Some(jump) = self.insts.get(jump_inst) else { continue };
+            let push = &self.insts[inst];
+            if !(push.is_push() && jump.is_jump()) {
+                if jump.is_jump() {
+                    debug!(jump_inst, "found dynamic jump");
+                    self.has_dynamic_jumps = true;
+                }
                 continue;
             }
 
-            let imm_data = data.data;
+            let imm_data = push.data;
             let imm = self.get_imm(imm_data);
-            self.instrs[jump_instr].flags |= InstrFlags::STATIC_JUMP;
+            self.insts[jump_inst].flags |= InstrFlags::STATIC_JUMP;
 
             const USIZE_SIZE: usize = std::mem::size_of::<usize>();
             if imm.len() > USIZE_SIZE {
-                debug!(jump_instr, "jump target too large");
-                self.instrs[jump_instr].flags |= InstrFlags::INVALID_JUMP;
+                debug!(jump_inst, "jump target too large");
+                self.insts[jump_inst].flags |= InstrFlags::INVALID_JUMP;
                 continue;
             }
 
@@ -135,28 +141,28 @@ impl<'a> Bytecode<'a> {
             padded[USIZE_SIZE - imm.len()..].copy_from_slice(imm);
             let target_pc = usize::from_be_bytes(padded);
             if !self.is_valid_jump(target_pc) {
-                debug!(jump_instr, target_pc, "invalid jump target");
-                self.instrs[jump_instr].flags |= InstrFlags::INVALID_JUMP;
+                debug!(jump_inst, target_pc, "invalid jump target");
+                self.insts[jump_inst].flags |= InstrFlags::INVALID_JUMP;
                 continue;
             }
 
-            self.instrs[instr].flags |= InstrFlags::SKIP_LOGIC;
-            let target = self.pc_to_instr(target_pc);
+            self.insts[inst].flags |= InstrFlags::SKIP_LOGIC;
+            let target = self.pc_to_inst(target_pc);
 
             // Mark the `JUMPDEST` as reachable.
             if !self.is_eof() {
                 debug_assert_eq!(
-                    self.instrs[target],
+                    self.insts[target],
                     op::JUMPDEST,
                     "is_valid_jump returned true for non-JUMPDEST: \
-                     jump_instr={jump_instr} target_pc={target_pc} target={target}",
+                     jump_inst={jump_inst} target_pc={target_pc} target={target}",
                 );
-                self.instrs[target].data = 1;
+                self.insts[target].data = 1;
             }
 
             // Set the target on the `JUMP` instruction.
-            debug!(jump_instr, target, "resolved jump target");
-            self.instrs[jump_instr].data = target as u32;
+            debug!(jump_inst, target, "resolved jump target");
+            self.insts[jump_inst].data = target as u32;
         }
     }
 
@@ -173,13 +179,13 @@ impl<'a> Bytecode<'a> {
     #[instrument(name = "dce", level = "debug", skip_all)]
     fn mark_dead_code(&mut self) {
         let is_eof = self.is_eof();
-        let mut iter = self.instrs.iter_mut().enumerate();
+        let mut iter = self.insts.iter_mut().enumerate();
         while let Some((i, data)) = iter.next() {
             if data.is_diverging(is_eof) {
                 let mut end = i;
                 for (j, data) in &mut iter {
                     end = j;
-                    if data.is_reachable_jumpdest() {
+                    if data.is_reachable_jumpdest(self.has_dynamic_jumps) {
                         break;
                     }
                     data.flags |= InstrFlags::DEAD_CODE;
@@ -192,28 +198,8 @@ impl<'a> Bytecode<'a> {
         }
     }
 
-    /// Ensure that there are no dynamic jumps.
-    fn no_dynamic_jumps(&mut self) -> Result<()> {
-        let mut instrs = Vec::new();
-        for (instr, data) in self.instrs.iter().enumerate() {
-            if matches!(data.opcode, op::JUMP | op::JUMPI)
-                && !data.flags.contains(InstrFlags::STATIC_JUMP)
-            {
-                instrs.push(instr);
-            }
-        }
-        if !instrs.is_empty() {
-            bail!("dynamic jumps are not yet implemented; instrs={instrs:?}");
-        }
-        Ok(())
-    }
-
-    /// Returns the raw opcode.
-    pub(crate) fn raw_opcode(&self, instr: Instr) -> Opcode<'a> {
-        self.instrs[instr].to_op_in(self)
-    }
-
-    pub(crate) fn get_imm_of(&self, instr_data: InstrData) -> Option<&'a [u8]> {
+    /// Returns the immediate value of the given instruction data, if any.
+    pub(crate) fn get_imm_of(&self, instr_data: &InstData) -> Option<&'a [u8]> {
         (instr_data.imm_len() > 0).then(|| self.get_imm(instr_data.data))
     }
 
@@ -227,35 +213,40 @@ impl<'a> Bytecode<'a> {
         self.jumpdests.get(pc).as_deref().copied() == Some(true)
     }
 
+    /// Returns `true` if the bytecode has dynamic jumps.
+    pub(crate) fn has_dynamic_jumps(&self) -> bool {
+        self.has_dynamic_jumps
+    }
+
     /// Returns `true` if the bytecode is EOF.
     pub(crate) fn is_eof(&self) -> bool {
         false
     }
 
     /// Returns `true` if the instruction is diverging.
-    pub(crate) fn is_instr_diverging(&self, instr: Instr) -> bool {
-        self.instrs[instr].is_diverging(self.is_eof())
+    pub(crate) fn is_instr_diverging(&self, inst: Inst) -> bool {
+        self.insts[inst].is_diverging(self.is_eof())
     }
 
     // TODO: is it worth it to make this a map?
-    /// Converts a program counter (`self.code[ic]`) to an instruction (`self.instr(pc)`).
-    fn pc_to_instr(&self, pc: usize) -> usize {
+    /// Converts a program counter (`self.code[ic]`) to an instruction (`self.inst(pc)`).
+    fn pc_to_inst(&self, pc: usize) -> usize {
         debug_assert!(pc < self.code.len(), "pc out of bounds: {pc}");
-        let (instr, (_, op)) = OpcodesIter::new(self.code)
+        let (inst, (_, op)) = OpcodesIter::new(self.code)
             .with_pc() // pc
-            .enumerate() // instr
+            .enumerate() // inst
             // Don't go until the end because we know `pc` are yielded in order.
             .take_while(|(_ic, (pc2, _))| *pc2 <= pc)
             .find(|(_ic, (pc2, _))| *pc2 == pc)
-            .unwrap_or_else(|| panic!("pc to instr conversion failed; pc={pc}"));
-        debug_assert_eq!(self.instrs[instr].to_op_in(self), op, "pc={pc} instr={instr}");
-        instr
+            .unwrap_or_else(|| panic!("pc to inst conversion failed; pc={pc}"));
+        debug_assert_eq!(self.insts[inst].to_op_in(self), op, "pc={pc} inst={inst}");
+        inst
     }
 }
 
 /// A single instruction in the bytecode.
-#[derive(Clone, Copy)]
-pub(crate) struct InstrData {
+#[derive(Clone)]
+pub(crate) struct InstData {
     /// The opcode byte.
     pub(crate) opcode: u8,
     /// Flags.
@@ -266,26 +257,27 @@ pub(crate) struct InstrData {
     /// - if the instruction has immediate data, this is a packed offset+length into the bytecode;
     /// - `JUMP{,I} && STATIC_JUMP in kind`: the jump target, `Instr`;
     /// - `JUMPDEST`: `1` if the jump destination is reachable, `0` otherwise;
-    /// - `PC`: the program counter, meaning `self.code[pc]` is the opcode;
     /// - otherwise: no meaning.
     pub(crate) data: u32,
+    /// The program counter, meaning `code[pc]` is this instruction's opcode.
+    pub(crate) pc: u32,
 }
 
-impl PartialEq<u8> for InstrData {
+impl PartialEq<u8> for InstData {
     #[inline]
     fn eq(&self, other: &u8) -> bool {
         self.opcode == *other
     }
 }
 
-impl PartialEq<InstrData> for u8 {
+impl PartialEq<InstData> for u8 {
     #[inline]
-    fn eq(&self, other: &InstrData) -> bool {
+    fn eq(&self, other: &InstData) -> bool {
         *self == other.opcode
     }
 }
 
-impl fmt::Debug for InstrData {
+impl fmt::Debug for InstData {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("OpcodeData")
             .field("opcode", &self.to_op())
@@ -295,29 +287,29 @@ impl fmt::Debug for InstrData {
     }
 }
 
-impl InstrData {
+impl InstData {
     /// Creates a new instruction data with the given opcode byte.
     /// Note that this may not be a valid instruction.
     #[inline]
     const fn new(opcode: u8) -> Self {
-        Self { opcode, flags: InstrFlags::empty(), static_gas: 0, data: 0 }
+        Self { opcode, flags: InstrFlags::empty(), static_gas: 0, data: 0, pc: 0 }
     }
 
     /// Returns the length of the immediate data of this instruction.
     #[inline]
-    pub(crate) const fn imm_len(self) -> usize {
+    pub(crate) const fn imm_len(&self) -> usize {
         imm_len(self.opcode)
     }
 
     /// Converts this instruction to a raw opcode. Note that the immediate data is not resolved.
     #[inline]
-    pub(crate) const fn to_op(self) -> Opcode<'static> {
+    pub(crate) const fn to_op(&self) -> Opcode<'static> {
         Opcode { opcode: self.opcode, immediate: None }
     }
 
     /// Converts this instruction to a raw opcode in the given bytecode.
     #[inline]
-    pub(crate) fn to_op_in<'a>(self, bytecode: &Bytecode<'a>) -> Opcode<'a> {
+    pub(crate) fn to_op_in<'a>(&self, bytecode: &Bytecode<'a>) -> Opcode<'a> {
         Opcode { opcode: self.opcode, immediate: bytecode.get_imm_of(self) }
     }
 
@@ -327,21 +319,42 @@ impl InstrData {
         (self.static_gas != u16::MAX).then_some(self.static_gas)
     }
 
+    /// Returns `true` if this instruction is a push instruction.
+    pub(crate) fn is_push(&self) -> bool {
+        matches!(self.opcode, op::PUSH1..=op::PUSH32)
+    }
+
+    /// Returns `true` if this instruction is a jump instruction.
+    pub(crate) fn is_jump(&self) -> bool {
+        matches!(self.opcode, op::JUMP | op::JUMPI)
+    }
+
+    /// Returns `true` if this instruction is a `JUMPDEST`.
+    #[inline]
+    pub(crate) const fn is_jumpdest(&self) -> bool {
+        self.opcode == op::JUMPDEST
+    }
+
+    /// Returns `true` if this instruction is a reachable `JUMPDEST`.
+    #[inline]
+    pub(crate) const fn is_reachable_jumpdest(&self, has_dynamic_jumps: bool) -> bool {
+        self.is_jumpdest() && (has_dynamic_jumps || self.data == 1)
+    }
+
+    /// Returns `true` if this instruction is dead code.
+    pub(crate) fn is_dead_code(&self) -> bool {
+        self.flags.contains(InstrFlags::DEAD_CODE)
+    }
+
     /// Returns `true` if we know that this instruction will stop execution.
     #[inline]
-    pub(crate) const fn is_diverging(self, is_eof: bool) -> bool {
+    pub(crate) const fn is_diverging(&self, is_eof: bool) -> bool {
         // TODO: SELFDESTRUCT will not be diverging in the future.
         self.flags.contains(InstrFlags::INVALID_JUMP)
             || self.flags.contains(InstrFlags::DISABLED)
             || self.flags.contains(InstrFlags::UNKNOWN)
             || matches!(self.opcode, op::STOP | op::RETURN | op::REVERT | op::INVALID)
             || (self.opcode == op::SELFDESTRUCT && !is_eof)
-    }
-
-    /// Returns `true` if this instruction is a reachable `JUMPDEST`.
-    #[inline]
-    pub(crate) const fn is_reachable_jumpdest(self) -> bool {
-        self.opcode == op::JUMPDEST && self.data == 1
     }
 }
 

@@ -76,6 +76,17 @@ pub enum Attribute {
     // TODO: Range?
 }
 
+/// Linkage type.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Linkage {
+    /// Defined outside of the module.
+    Import,
+    /// Defined in the module and visible outside.
+    Public,
+    /// Defined in the module, but not visible outside.
+    Private,
+}
+
 /// Determines where on a function an attribute is assigned to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FunctionAttributeLocation {
@@ -121,6 +132,7 @@ pub trait Backend: BackendTypes + TypeMethods {
         ret: Option<Self::Type>,
         params: &[Self::Type],
         param_names: &[&str],
+        linkage: Linkage,
     ) -> Result<Self::Builder<'_>>;
     fn verify_function(&mut self, name: &str) -> Result<()>;
     fn optimize_function(&mut self, name: &str) -> Result<()>;
@@ -170,6 +182,7 @@ pub trait Builder: BackendTypes + TypeMethods {
     fn icmp_imm(&mut self, cond: IntCC, lhs: Self::Value, rhs: i64) -> Self::Value;
     fn is_null(&mut self, ptr: Self::Value) -> Self::Value;
     fn is_not_null(&mut self, ptr: Self::Value) -> Self::Value;
+
     fn br(&mut self, dest: Self::BasicBlock);
     fn brif(
         &mut self,
@@ -177,6 +190,13 @@ pub trait Builder: BackendTypes + TypeMethods {
         then_block: Self::BasicBlock,
         else_block: Self::BasicBlock,
     );
+    fn switch(
+        &mut self,
+        index: Self::Value,
+        default: Self::BasicBlock,
+        targets: &[(Self::Value, Self::BasicBlock)],
+    );
+    fn phi(&mut self, ty: Self::Type, incoming: &[(Self::Value, Self::BasicBlock)]) -> Self::Value;
     fn select(
         &mut self,
         cond: Self::Value,
@@ -249,6 +269,7 @@ pub trait Builder: BackendTypes + TypeMethods {
         ret: Option<Self::Type>,
         params: &[Self::Type],
         address: usize,
+        linkage: Linkage,
     ) -> Self::Function;
 
     /// Adds an attribute to a function, one of its parameters, or its return value.

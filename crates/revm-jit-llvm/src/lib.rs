@@ -11,7 +11,7 @@ use inkwell::{
     passes::PassBuilderOptions,
     targets::{CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine},
     types::{BasicType, BasicTypeEnum, FunctionType, IntType, PointerType, StringRadix, VoidType},
-    values::{BasicValueEnum, FunctionValue, PointerValue},
+    values::{BasicValue, BasicValueEnum, FunctionValue, PointerValue},
     AddressSpace, IntPredicate, OptimizationLevel,
 };
 use revm_jit_backend::{
@@ -210,9 +210,10 @@ impl<'ctx> Backend for JitEvmLlvmBackend<'ctx> {
         ret: Option<Self::Type>,
         params: &[Self::Type],
         param_names: &[&str],
+        linkage: revm_jit_backend::Linkage,
     ) -> Result<Self::Builder<'_>> {
         let fn_type = self.fn_type(ret, params);
-        let function = self.module.add_function(name, fn_type, None);
+        let function = self.module.add_function(name, fn_type, convert_linkage(linkage));
         for (i, &name) in param_names.iter().enumerate() {
             function.get_nth_param(i as u32).expect(name).set_name(name);
         }
@@ -534,6 +535,26 @@ impl<'a, 'ctx> Builder for JitEvmLlvmBuilder<'a, 'ctx> {
         self.bcx.build_conditional_branch(cond.into_int_value(), then_block, else_block).unwrap();
     }
 
+    fn switch(
+        &mut self,
+        index: Self::Value,
+        default: Self::BasicBlock,
+        targets: &[(Self::Value, Self::BasicBlock)],
+    ) {
+        let targets = targets.iter().map(|(v, b)| (v.into_int_value(), *b)).collect::<Vec<_>>();
+        self.bcx.build_switch(index.into_int_value(), default, &targets).unwrap();
+    }
+
+    fn phi(&mut self, ty: Self::Type, incoming: &[(Self::Value, Self::BasicBlock)]) -> Self::Value {
+        let incoming = incoming
+            .iter()
+            .map(|(value, block)| (value as &dyn BasicValue<'_>, *block))
+            .collect::<Vec<_>>();
+        let phi = self.bcx.build_phi(ty, "").unwrap();
+        phi.add_incoming(&incoming);
+        phi.as_basic_value()
+    }
+
     fn select(
         &mut self,
         cond: Self::Value,
@@ -764,9 +785,10 @@ impl<'a, 'ctx> Builder for JitEvmLlvmBuilder<'a, 'ctx> {
         ret: Option<Self::Type>,
         params: &[Self::Type],
         address: usize,
+        linkage: revm_jit_backend::Linkage,
     ) -> Self::Function {
         let func_ty = self.fn_type(ret, params);
-        let function = self.module.add_function(name, func_ty, None);
+        let function = self.module.add_function(name, func_ty, convert_linkage(linkage));
         self.exec_engine.add_global_mapping(&function, address);
         function
     }
@@ -868,6 +890,14 @@ fn convert_attribute_loc(loc: revm_jit_backend::FunctionAttributeLocation) -> At
         revm_jit_backend::FunctionAttributeLocation::Return => AttributeLoc::Return,
         revm_jit_backend::FunctionAttributeLocation::Param(i) => AttributeLoc::Param(i),
         revm_jit_backend::FunctionAttributeLocation::Function => AttributeLoc::Function,
+    }
+}
+
+fn convert_linkage(linkage: revm_jit_backend::Linkage) -> Option<inkwell::module::Linkage> {
+    match linkage {
+        revm_jit_backend::Linkage::Public => Some(inkwell::module::Linkage::External),
+        revm_jit_backend::Linkage::Import => None,
+        revm_jit_backend::Linkage::Private => Some(inkwell::module::Linkage::Private),
     }
 }
 

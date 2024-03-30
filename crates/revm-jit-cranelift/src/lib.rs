@@ -155,6 +155,7 @@ impl Backend for JitEvmCraneliftBackend {
         ret: Option<Self::Type>,
         params: &[Self::Type],
         param_names: &[&str],
+        linkage: revm_jit_backend::Linkage,
     ) -> Result<Self::Builder<'_>> {
         if let Some(ret) = ret {
             self.ctx.func.signature.returns.push(AbiParam::new(ret));
@@ -164,7 +165,11 @@ impl Backend for JitEvmCraneliftBackend {
         }
         let _ = param_names;
         let ptr_type = self.type_ptr();
-        let _id = self.module.declare_function(name, Linkage::Export, &self.ctx.func.signature)?;
+        let _id = self.module.declare_function(
+            name,
+            convert_linkage(linkage),
+            &self.ctx.func.signature,
+        )?;
         let bcx = FunctionBuilder::new(&mut self.ctx.func, &mut self.builder_context);
         Ok(JitEvmCraneliftBuilder {
             module: &mut self.module,
@@ -417,6 +422,34 @@ impl<'a> Builder for JitEvmCraneliftBuilder<'a> {
         self.bcx.ins().brif(cond, then_block, &[], else_block, &[]);
     }
 
+    fn switch(
+        &mut self,
+        index: Self::Value,
+        default: Self::BasicBlock,
+        targets: &[(Self::Value, Self::BasicBlock)],
+    ) {
+        let _ = index;
+        let _ = default;
+        let _ = targets;
+        todo!()
+        // let default = self.bcx.func.dfg.block_call(default, &[]);
+        // let jt = self.bcx.create_jump_table(JumpTableData::new(default, &[]));
+        // self.bcx.ins().br_table(index, jt);
+    }
+
+    fn phi(&mut self, ty: Self::Type, incoming: &[(Self::Value, Self::BasicBlock)]) -> Self::Value {
+        let current = self.current_block().unwrap();
+        let param = self.bcx.append_block_param(current, ty);
+        for &(value, block) in incoming {
+            self.bcx.switch_to_block(block);
+            let src = self.bcx.ins().jump(current, &[value]);
+            let dst = self.bcx.func.layout.last_inst(block).unwrap();
+            self.bcx.func.transplant_inst(dst, src)
+        }
+        self.bcx.switch_to_block(current);
+        param
+    }
+
     fn select(
         &mut self,
         cond: Self::Value,
@@ -605,6 +638,7 @@ impl<'a> Builder for JitEvmCraneliftBuilder<'a> {
         ret: Option<Self::Type>,
         params: &[Self::Type],
         address: usize,
+        linkage: revm_jit_backend::Linkage,
     ) -> Self::Function {
         let mut sig = self.module.make_signature();
         for ret in &ret {
@@ -614,7 +648,7 @@ impl<'a> Builder for JitEvmCraneliftBuilder<'a> {
             sig.params.push(AbiParam::new(*param));
         }
         self.symbols.insert(name.to_string(), address as *const u8);
-        let id = self.module.declare_function(name, Linkage::Import, &sig).unwrap();
+        let id = self.module.declare_function(name, convert_linkage(linkage), &sig).unwrap();
         self.module.declare_func_in_func(id, self.bcx.func)
     }
 
@@ -676,5 +710,13 @@ fn convert_intcc(cond: revm_jit_backend::IntCC) -> IntCC {
         revm_jit_backend::IntCC::UnsignedGreaterThanOrEqual => IntCC::UnsignedGreaterThanOrEqual,
         revm_jit_backend::IntCC::UnsignedGreaterThan => IntCC::UnsignedGreaterThan,
         revm_jit_backend::IntCC::UnsignedLessThanOrEqual => IntCC::UnsignedLessThanOrEqual,
+    }
+}
+
+fn convert_linkage(linkage: revm_jit_backend::Linkage) -> Linkage {
+    match linkage {
+        revm_jit_backend::Linkage::Import => Linkage::Import,
+        revm_jit_backend::Linkage::Public => Linkage::Export,
+        revm_jit_backend::Linkage::Private => Linkage::Local,
     }
 }
