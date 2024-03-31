@@ -1,6 +1,5 @@
 use clap::Parser;
 use color_eyre::Result;
-use revm_interpreter::InstructionResult;
 use revm_jit::{debug_time, eyre::eyre, EvmContext, EvmStack, JitEvm, OptimizationLevel};
 use revm_jit_benches::Bench;
 use revm_primitives::{Env, SpecId};
@@ -13,9 +12,13 @@ struct Cli {
     n_iters: u64,
     #[arg(short = 'O', long)]
     opt_level: Option<OptimizationLevel>,
-    // #[arg(short, long)]
+    // #[arg(long)]
     #[arg(skip)]
     spec_id: Option<SpecId>,
+    #[arg(long)]
+    no_gas: bool,
+    #[arg(long, default_value = "1000000000")]
+    gas_limit: u64,
 }
 
 fn main() -> Result<()> {
@@ -33,6 +36,9 @@ fn main() -> Result<()> {
     let backend = revm_jit::llvm::JitEvmLlvmBackend::new(&context, opt_level).unwrap();
     let mut jit = JitEvm::new(backend);
     jit.set_dump_to(Some(PathBuf::from("./tmp/revm-jit")));
+    if cli.no_gas {
+        jit.set_disable_gas(true);
+    }
     // jit.set_debug_assertions(true);
 
     let all_benches = revm_jit_benches::get_benches();
@@ -41,8 +47,11 @@ fn main() -> Result<()> {
         .find(|b| b.name == cli.bench_name)
         .ok_or_else(|| eyre!("unknown benchmark: {}", cli.bench_name))?;
 
+    let gas_limit = cli.gas_limit;
+
     let mut env = Env::default();
     env.tx.data = calldata.clone().into();
+    env.tx.gas_limit = gas_limit;
 
     let bytecode = revm_interpreter::analysis::to_analysed(revm_primitives::Bytecode::new_raw(
         revm_primitives::Bytes::copy_from_slice(bytecode),
@@ -51,7 +60,6 @@ fn main() -> Result<()> {
     let contract = revm_interpreter::Contract::new_env(&env, bytecode, bytecode_hash);
     let mut host = revm_interpreter::DummyHost::new(env);
 
-    let gas_limit = 100_000;
     let bytecode = contract.bytecode.original_bytecode_slice();
 
     // let table = &revm_interpreter::opcode::make_instruction_table::<
@@ -81,7 +89,7 @@ fn main() -> Result<()> {
     };
 
     let ret = debug_time!("run", || run(f));
-    assert!(matches!(ret, InstructionResult::Return | InstructionResult::Stop), "{ret:?}");
+    assert!(ret.is_ok(), "{ret:?}");
 
     bench(cli.n_iters, name, || run(f));
 

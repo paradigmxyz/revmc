@@ -1,7 +1,7 @@
 use criterion::{
     criterion_group, criterion_main, measurement::WallTime, BenchmarkGroup, Criterion,
 };
-use revm_interpreter::EMPTY_SHARED_MEMORY;
+use revm_interpreter::SharedMemory;
 use revm_jit::{llvm, EvmContext, EvmStack, JitEvm, JitEvmFn};
 use revm_jit_benches::Bench;
 use revm_primitives::{Env, SpecId};
@@ -23,8 +23,11 @@ fn run_bench(c: &mut Criterion, bench: &Bench) {
 
     let mut g = mk_group(c, name);
 
+    let gas_limit = 1_000_000_000;
+
     let mut env = Env::default();
     env.tx.data = calldata.clone().into();
+    env.tx.gas_limit = gas_limit;
 
     let bytecode = revm_interpreter::analysis::to_analysed(revm_primitives::Bytecode::new_raw(
         revm_primitives::Bytes::copy_from_slice(bytecode),
@@ -33,7 +36,6 @@ fn run_bench(c: &mut Criterion, bench: &Bench) {
     let contract = revm_interpreter::Contract::new_env(&env, bytecode, bytecode_hash);
     let mut host = revm_interpreter::DummyHost::new(env);
 
-    let gas_limit = 100_000;
     let bytecode = contract.bytecode.original_bytecode_slice();
 
     let table = &revm_interpreter::opcode::make_instruction_table::<
@@ -67,7 +69,9 @@ fn run_bench(c: &mut Criterion, bench: &Bench) {
         host.clear();
         let mut ecx = EvmContext::from_interpreter(&mut interpreter, &mut host);
 
-        unsafe { f.call(Some(&mut stack), Some(&mut stack_len), &mut ecx) }
+        let r = unsafe { f.call(Some(&mut stack), Some(&mut stack_len), &mut ecx) };
+        assert!(r.is_ok(), "JIT failed with {r:?}");
+        r
     };
 
     let jit_no_gas = jit.compile(Some(name), bytecode, SPEC_ID).unwrap();
@@ -85,7 +89,14 @@ fn run_bench(c: &mut Criterion, bench: &Bench) {
 
             int.stack.data_mut().extend_from_slice(stack_input);
 
-            int.run(EMPTY_SHARED_MEMORY, table, &mut host)
+            let action = int.run(SharedMemory::new(), table, &mut host);
+            assert!(
+                int.instruction_result.is_ok(),
+                "Interpreter failed with {:?}",
+                int.instruction_result
+            );
+            assert!(action.is_return(), "Interpreter bad action: {action:?}");
+            action
         })
     });
 
@@ -94,9 +105,9 @@ fn run_bench(c: &mut Criterion, bench: &Bench) {
 
 fn mk_group<'a>(c: &'a mut Criterion, name: &str) -> BenchmarkGroup<'a, WallTime> {
     let mut g = c.benchmark_group(name);
-    g.sample_size(100);
+    g.sample_size(20);
     g.warm_up_time(Duration::from_secs(5));
-    g.measurement_time(Duration::from_secs(10));
+    g.measurement_time(Duration::from_secs(15));
     g
 }
 

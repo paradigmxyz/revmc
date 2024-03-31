@@ -2,6 +2,9 @@
 #![cfg_attr(not(test), warn(unused_extern_crates))]
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
 
+#[macro_use]
+extern crate tracing;
+
 use inkwell::{
     attributes::{Attribute, AttributeLoc},
     basic_block::BasicBlock,
@@ -9,6 +12,7 @@ use inkwell::{
     execution_engine::ExecutionEngine,
     module::Module,
     passes::PassBuilderOptions,
+    support::{enable_llvm_pretty_stack_trace, error_handling::install_fatal_error_handler},
     targets::{CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine},
     types::{BasicType, BasicTypeEnum, FunctionType, IntType, PointerType, StringRadix, VoidType},
     values::{BasicValue, BasicValueEnum, FunctionValue, PointerValue},
@@ -17,9 +21,11 @@ use inkwell::{
 use revm_jit_backend::{
     eyre, Backend, BackendTypes, Builder, Error, IntCC, Result, TypeMethods, U256,
 };
-use std::path::Path;
+use std::{path::Path, sync::Once};
 
 pub use inkwell;
+
+pub mod orc;
 
 /// The LLVM-based EVM JIT backend.
 #[derive(Debug)]
@@ -55,17 +61,31 @@ impl<'ctx> JitEvmLlvmBackend<'ctx> {
         cx: &'ctx Context,
         opt_level: revm_jit_backend::OptimizationLevel,
     ) -> Result<Self> {
-        let opt_level = convert_opt_level(opt_level);
+        let mut init_result = Ok(());
+        static INIT: Once = Once::new();
+        INIT.call_once(|| {
+            enable_llvm_pretty_stack_trace();
+            unsafe {
+                extern "C" fn report_fatal_error(msg: *const std::ffi::c_char) {
+                    let msg = unsafe { std::ffi::CStr::from_ptr(msg) };
+                    error!(msg = %msg.to_string_lossy(), "LLVM fatal error");
+                }
+                install_fatal_error_handler(report_fatal_error)
+            }
 
-        let config = InitializationConfig {
-            asm_parser: false,
-            asm_printer: true,
-            base: true,
-            disassembler: true,
-            info: true,
-            machine_code: true,
-        };
-        Target::initialize_native(&config).map_err(Error::msg)?;
+            let config = InitializationConfig {
+                asm_parser: false,
+                asm_printer: true,
+                base: true,
+                disassembler: true,
+                info: true,
+                machine_code: true,
+            };
+            init_result = Target::initialize_native(&config).map_err(Error::msg);
+        });
+        init_result?;
+
+        let opt_level = convert_opt_level(opt_level);
 
         let triple = TargetMachine::get_default_triple();
         let cpu = TargetMachine::get_host_cpu_name();

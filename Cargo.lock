@@ -1731,6 +1731,7 @@ version = "0.1.0"
 dependencies = [
  "inkwell",
  "revm-jit-backend",
+ "tracing",
 ]
 
 [[package]]

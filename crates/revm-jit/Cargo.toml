@@ -32,9 +32,3 @@ tracing.workspace = true
 default = ["llvm"]
 llvm = ["dep:revm-jit-llvm"]
 cranelift = ["dep:revm-jit-cranelift"]
-
-[[bench]]
-name = "bench"
-path = "benches/bench.rs"
-required-features = ["llvm"]
-harness = false

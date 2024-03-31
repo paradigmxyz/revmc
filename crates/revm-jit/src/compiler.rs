@@ -338,13 +338,13 @@ impl<B: Backend> JitEvm<B> {
         std::fs::create_dir_all(dump_dir)?;
 
         let path = dump_dir.join(format!("{name}.evm.bin"));
-        std::fs::write(&path, bytecode.code)?;
+        std::fs::write(path, bytecode.code)?;
 
         let path = dump_dir.join(format!("{name}.evm.hex"));
-        std::fs::write(&path, revm_primitives::hex::encode(bytecode.code))?;
+        std::fs::write(path, revm_primitives::hex::encode(bytecode.code))?;
 
         let path = dump_dir.join(format!("{name}.evm.txt"));
-        let file = std::fs::File::create(&path)?;
+        let file = std::fs::File::create(path)?;
         let mut file = std::io::BufWriter::new(file);
 
         let header = format!("{:^6} | {:^6} | {:^80} | {}", "ic", "pc", "opcode", "instruction");
@@ -1489,11 +1489,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     /// `n` cannot be `0`.
     fn dup(&mut self, n: u8) {
         debug_assert_ne!(n, 0);
-
-        let len = self.load_len();
-        let failure_cond = self.bcx.icmp_imm(IntCC::UnsignedLessThan, len, n as i64);
-        self.build_failure(failure_cond, InstructionResult::StackUnderflow);
-
+        let len = self.load_len_at_least(n as usize);
         let sp = self.sp_from_top(len, n as usize);
         let value = self.load_word(sp, &format!("dup{n}"));
         self.push(value);
@@ -1502,11 +1498,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     /// Swaps the topmost value with the `n`th value from the top.
     fn swap(&mut self, n: u8) {
         debug_assert_ne!(n, 0);
-
-        let len = self.load_len();
-        let failure_cond = self.bcx.icmp_imm(IntCC::UnsignedLessThan, len, n as i64);
-        self.build_failure(failure_cond, InstructionResult::StackUnderflow);
-
+        let len = self.load_len_at_least(n as usize);
         // Load a.
         let a_sp = self.sp_from_top(len, n as usize + 1);
         let a = self.load_word(a_sp, "swap.a");
