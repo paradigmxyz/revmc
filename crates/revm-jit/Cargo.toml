@@ -18,6 +18,7 @@ workspace = true
 
 [dependencies]
 revm-jit-backend.workspace = true
+revm-jit-callbacks.workspace = true
 revm-jit-context.workspace = true
 revm-jit-cranelift = { workspace = true, optional = true }
 revm-jit-llvm = { workspace = true, optional = true }

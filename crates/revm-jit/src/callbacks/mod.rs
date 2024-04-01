@@ -4,13 +4,68 @@ use revm_interpreter::{
     InterpreterResult, SStoreResult,
 };
 use revm_jit_backend::{Attribute, TypeMethods};
+use revm_jit_callbacks::{utils::*, *};
 use revm_primitives::{
     spec_to_generic, Bytes, CreateScheme, Log, LogData, SpecId, BLOCK_HASH_HISTORY, KECCAK_EMPTY,
     MAX_INITCODE_SIZE,
 };
 
-#[macro_use]
-mod macros;
+mod cache;
+pub(crate) use cache::Callbacks;
+
+macro_rules! callbacks {
+    (@count) => { 0 };
+    (@count $first:tt $(, $rest:tt)*) => { 1 + callbacks!(@count $($rest),*) };
+
+    (|$bcx:ident| { $($init:tt)* }
+     $($ident:ident = $(#[$attr:expr])* $name:ident($($params:expr),* $(,)?) $ret:expr),* $(,)?
+    ) => {
+        /// Callbacks that can be called by the JIT-compiled functions.
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+        pub(crate) enum Callback {
+            $($ident,)*
+        }
+
+        #[allow(unused_variables)]
+        impl Callback {
+            pub(crate) const COUNT: usize = callbacks!(@count $($ident),*);
+
+            pub(crate) const fn name(self) -> &'static str {
+                match self {
+                    $(Self::$ident => stringify!($name),)*
+                }
+            }
+
+            pub(crate) fn addr(self) -> usize {
+                match self {
+                    $(Self::$ident => self::$name as usize,)*
+                }
+            }
+
+            pub(crate) fn ret<B: TypeMethods>(self, $bcx: &mut B) -> Option<B::Type> {
+                $($init)*
+                match self {
+                    $(Self::$ident => $ret,)*
+                }
+            }
+
+            pub(crate) fn params<B: TypeMethods>(self, $bcx: &mut B) -> Vec<B::Type> {
+                $($init)*
+                match self {
+                    $(Self::$ident => vec![$($params),*],)*
+                }
+            }
+
+            pub(crate) fn attrs(self) -> &'static [Attribute] {
+                #[allow(unused_imports)]
+                use Attribute::*;
+                match self {
+                    $(Self::$ident => &[$($attr)*]),*
+                }
+            }
+        }
+    };
+}
 
 // TODO: Parameter attributes, especially `dereferenceable(<size>)` and `sret(<ty>)`.
 callbacks! {
@@ -56,8 +111,7 @@ callbacks! {
 /* ------------------------------------- Callback Functions ------------------------------------- */
 // NOTE: All functions MUST be `extern "C"` and their parameters must match the ones declared above.
 //
-// The `sp` parameter points to the top of the stack.
-// `sp` functions are called with the length of the stack already checked and substracted.
+// The `sp` parameter always points to the last popped stack element.
 // If results are expected to be pushed back onto the stack, they must be written to the read
 // pointers in **reverse order**, meaning the last pointer is the first return value.
 
@@ -496,57 +550,4 @@ pub(crate) unsafe extern "C" fn selfdestruct(
     gas!(ecx, spec_to_generic!(spec_id, rgas::selfdestruct_cost::<SPEC>(res)));
 
     InstructionResult::Continue
-}
-
-// --- utils ---
-
-/// Splits the stack pointer into `N` elements by casting it to an array.
-///
-/// NOTE: this returns the arguments in **reverse order**. Use [`read_words!`] to get them in order.
-///
-/// The returned lifetime is valid for the entire duration of the callback.
-///
-/// # Safety
-///
-/// Caller must ensure that `N` matches the number of elements popped in JIT code.
-#[inline(always)]
-unsafe fn read_words_rev<'a, const N: usize>(sp: *mut EvmWord) -> &'a mut [EvmWord; N] {
-    &mut *sp.cast::<[EvmWord; N]>()
-}
-
-#[inline]
-fn resize_memory(ecx: &mut EvmContext<'_>, offset: usize, len: usize) -> InstructionResult {
-    let size = offset.saturating_add(len);
-    if size > ecx.memory.len() {
-        let rounded_size = revm_interpreter::interpreter::next_multiple_of_32(size);
-
-        // TODO: Memory limit
-
-        // TODO: try_resize
-        if !ecx.gas.record_memory(rgas::memory_gas(rounded_size / 32)) {
-            return InstructionResult::MemoryLimitOOG;
-        }
-        ecx.memory.resize(rounded_size);
-    }
-    InstructionResult::Continue
-}
-
-#[inline]
-fn copy_operation(ecx: &mut EvmContext<'_>, sp: *mut EvmWord, data: &[u8]) -> InstructionResult {
-    read_words!(sp, memory_offset, data_offset, len);
-    let len = tri!(usize::try_from(len));
-    gas_opt!(ecx, rgas::verylowcopy_cost(len as u64));
-    if len == 0 {
-        return InstructionResult::Continue;
-    }
-    let memory_offset = try_into_usize!(memory_offset.as_u256());
-    resize_memory!(ecx, memory_offset, len);
-    let data_offset = data_offset.to_u256();
-    let data_offset = as_usize_saturated!(data_offset);
-    ecx.memory.set_data(memory_offset, data_offset, len, data);
-    InstructionResult::Continue
-}
-
-unsafe fn decouple_lt<'b, T: ?Sized>(x: &T) -> &'b T {
-    std::mem::transmute(x)
 }

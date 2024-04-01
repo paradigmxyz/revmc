@@ -53,7 +53,11 @@ pub fn new_llvm_backend(
     cx: &llvm::inkwell::context::Context,
     opt_level: OptimizationLevel,
 ) -> Result<JitEvmLlvmBackend<'_>> {
-    JitEvmLlvmBackend::new(cx, opt_level, None)
+    #[cfg(llvm_bc)]
+    let bc = Some(&include_bytes!(concat!(env!("OUT_DIR"), "/callbacks.bc"))[..]);
+    #[cfg(not(llvm_bc))]
+    let bc = None;
+    JitEvmLlvmBackend::new(cx, opt_level, bc)
 }
 
 /// Enable for `cargo asm -p revm-jit --lib`.

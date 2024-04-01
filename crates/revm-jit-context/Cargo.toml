@@ -17,5 +17,10 @@ exclude.workspace = true
 workspace = true
 
 [dependencies]
-revm-interpreter.workspace = true
-revm-primitives.workspace = true
+revm-interpreter = { workspace = true, default-features = false }
+revm-primitives = { workspace = true, default-features = false }
+
+[features]
+default = ["std"]
+alloc = []
+std = ["alloc"]

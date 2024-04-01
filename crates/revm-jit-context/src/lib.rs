@@ -1,12 +1,19 @@
 #![doc = include_str!("../README.md")]
 #![cfg_attr(not(test), warn(unused_extern_crates))]
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
+#![no_std]
 
+#[cfg(feature = "alloc")]
+extern crate alloc;
+
+use core::{any::Any, fmt, mem::MaybeUninit, ptr};
 use revm_interpreter::{
-    Contract, DummyHost, Gas, Host, InstructionResult, Interpreter, InterpreterAction, SharedMemory,
+    Contract, Gas, Host, InstructionResult, Interpreter, InterpreterAction, SharedMemory,
 };
 use revm_primitives::{Address, Env, U256};
-use std::{any::Any, fmt, mem::MaybeUninit, ptr};
+
+#[cfg(feature = "alloc")]
+use alloc::vec::Vec;
 
 /// The JIT EVM context.
 ///
@@ -68,53 +75,6 @@ impl<'a> EvmContext<'a> {
             is_static: self.is_static,
             next_action: self.next_action.clone(),
         }
-    }
-
-    #[doc(hidden)]
-    pub fn dummy_do_not_use() -> impl std::ops::DerefMut<Target = Self> {
-        struct Dropper<'a>(EvmContext<'a>);
-        impl Drop for Dropper<'_> {
-            fn drop(&mut self) {
-                let EvmContext {
-                    memory,
-                    contract,
-                    gas,
-                    host,
-                    next_action,
-                    return_data: _,
-                    is_static: _,
-                    resume_at: _,
-                } = &mut self.0;
-                unsafe {
-                    drop(Box::from_raw(*memory));
-                    drop(Box::from_raw(*contract));
-                    drop(Box::from_raw(*gas));
-                    drop(Box::from_raw(*host));
-                    drop(Box::from_raw(*next_action));
-                }
-            }
-        }
-        impl<'a> std::ops::Deref for Dropper<'a> {
-            type Target = EvmContext<'a>;
-            fn deref(&self) -> &Self::Target {
-                &self.0
-            }
-        }
-        impl std::ops::DerefMut for Dropper<'_> {
-            fn deref_mut(&mut self) -> &mut Self::Target {
-                &mut self.0
-            }
-        }
-        Dropper(Self {
-            memory: Box::leak(Box::<SharedMemory>::default()),
-            contract: Box::leak(Box::<Contract>::default()),
-            gas: Box::leak(Box::new(Gas::new(100_000))),
-            host: Box::leak(Box::<DummyHost>::default() as Box<dyn HostExt>),
-            next_action: Box::leak(Box::<InterpreterAction>::default()),
-            return_data: &[],
-            is_static: false,
-            resume_at: 0,
-        })
     }
 }
 
@@ -248,6 +208,7 @@ impl EvmStack {
 
     /// Creates a vector that can be used as a stack.
     #[inline]
+    #[cfg(feature = "alloc")]
     pub fn new_heap() -> Vec<EvmWord> {
         Vec::with_capacity(1024)
     }
@@ -266,6 +227,7 @@ impl EvmStack {
     ///
     /// Panics if the vector's capacity is less than the required stack capacity.
     #[inline]
+    #[cfg(feature = "std")]
     pub fn from_vec(vec: &Vec<EvmWord>) -> &Self {
         assert!(vec.capacity() >= Self::CAPACITY);
         unsafe { Self::from_ptr(vec.as_ptr()) }
@@ -289,6 +251,7 @@ impl EvmStack {
     /// assert_eq!(stack.as_slice().len(), EvmStack::CAPACITY);
     /// ```
     #[inline]
+    #[cfg(feature = "std")]
     pub fn from_mut_vec(vec: &mut Vec<EvmWord>) -> &mut Self {
         assert!(vec.capacity() >= Self::CAPACITY);
         unsafe { Self::from_mut_ptr(vec.as_mut_ptr()) }
@@ -507,7 +470,7 @@ impl EvmWord {
     #[inline]
     pub const fn from_u256(value: U256) -> Self {
         #[cfg(target_endian = "little")]
-        return unsafe { std::mem::transmute(value) };
+        return unsafe { core::mem::transmute(value) };
         #[cfg(target_endian = "big")]
         return Self(value.to_be_bytes());
     }
@@ -598,7 +561,7 @@ impl EvmWord {
     #[inline]
     pub const fn into_u256(self) -> U256 {
         #[cfg(target_endian = "little")]
-        return unsafe { std::mem::transmute(self) };
+        return unsafe { core::mem::transmute(self) };
         #[cfg(target_endian = "big")]
         return U256::from_be_bytes(self.0);
     }

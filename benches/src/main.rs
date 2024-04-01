@@ -90,7 +90,7 @@ fn main() -> Result<()> {
         host.clear();
         let mut cx = EvmContext::from_interpreter(&mut interpreter, &mut host);
 
-        unsafe { f.call(Some(&mut stack), Some(&mut stack_len), &mut cx) }
+        unsafe { f.call(None, Some(&mut stack_len), &mut cx) }
     };
 
     let ret = debug_time!("run", || run(f));

@@ -1,8 +1,9 @@
 //! JIT compiler implementation.
 
 use crate::{
-    callbacks::Callback, Backend, Builder, Bytecode, EvmContext, EvmStack, Inst, InstData,
-    InstFlags, IntCC, JitEvmFn, Result, I256_MIN,
+    callbacks::{Callback, Callbacks},
+    Backend, Builder, Bytecode, EvmContext, EvmStack, Inst, InstData, InstFlags, IntCC, JitEvmFn,
+    Result, I256_MIN,
 };
 use revm_interpreter::{opcode as op, Contract, Gas, InstructionResult};
 use revm_jit_backend::{
@@ -1865,60 +1866,6 @@ impl<B: Backend> Pointer<B> {
             PointerBase::Address(ptr) => ptr,
             PointerBase::StackSlot(slot) => bcx.stack_addr(slot),
         }
-    }
-}
-
-/// Callback cache.
-struct Callbacks<B: Backend>([Option<B::Function>; Callback::COUNT]);
-
-impl<B: Backend> Callbacks<B> {
-    fn new() -> Self {
-        Self([None; Callback::COUNT])
-    }
-
-    fn clear(&mut self) {
-        *self = Self::new();
-    }
-
-    fn get(&mut self, cb: Callback, bcx: &mut B::Builder<'_>) -> B::Function {
-        *self.0[cb as usize].get_or_insert_with(|| {
-            let name = cb.name();
-            bcx.get_function(name).unwrap_or_else(
-                #[cold]
-                || Self::get_slow(name, cb, bcx),
-            )
-        })
-    }
-
-    #[cold]
-    fn get_slow(name: &str, cb: Callback, bcx: &mut B::Builder<'_>) -> B::Function {
-        let ret = cb.ret(bcx);
-        let params = cb.params(bcx);
-        let address = cb.addr();
-        let linkage = revm_jit_backend::Linkage::Import;
-        let f = bcx.add_callback_function(name, ret, &params, address, linkage);
-        let default_attrs: &[Attribute] = if cb == Callback::Panic {
-            &[
-                Attribute::Cold,
-                Attribute::NoReturn,
-                Attribute::NoFree,
-                Attribute::NoRecurse,
-                Attribute::NoSync,
-            ]
-        } else {
-            &[
-                Attribute::WillReturn,
-                Attribute::NoFree,
-                Attribute::NoRecurse,
-                Attribute::NoSync,
-                Attribute::NoUnwind,
-                Attribute::Speculatable,
-            ]
-        };
-        for attr in default_attrs.iter().chain(cb.attrs()).copied() {
-            bcx.add_function_attribute(Some(f), attr, FunctionAttributeLocation::Function);
-        }
-        f
     }
 }
 
