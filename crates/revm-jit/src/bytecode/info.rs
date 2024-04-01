@@ -80,10 +80,7 @@ impl OpcodeInfo {
     }
 }
 
-/// Returns the static gas map for the given spec_id ID.
-///
-/// The map will contain the gas costs for each opcode if it is known statically, or `0` if the
-/// opcode is not known or its gas cost is dynamic.
+/// Returns the static info map for the given `SpecId`.
 pub const fn op_info_map(spec_id: SpecId) -> &'static [OpcodeInfo; 256] {
     spec_to_generic!(spec_id, {
         const MAP: &[OpcodeInfo; 256] = &make_map(<SPEC as revm_primitives::Spec>::SPEC_ID);
@@ -160,7 +157,7 @@ const fn make_map(spec_id: SpecId) -> [OpcodeInfo; 256] {
         // 0x2E
         // 0x2F
         ADDRESS      = 2;
-        BALANCE      = 20;
+        BALANCE      = DYNAMIC;
         ORIGIN       = 2;
         CALLER       = 2;
         CALLVALUE    = 2;

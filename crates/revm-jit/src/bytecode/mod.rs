@@ -12,6 +12,9 @@ pub use info::*;
 mod opcode;
 pub use opcode::*;
 
+mod stack;
+pub use stack::StackIo;
+
 // TODO: Use `indexvec`.
 /// An EVM instruction is a high level internal representation of an EVM opcode.
 ///
@@ -54,13 +57,13 @@ impl<'a> Bytecode<'a> {
                 }
             }
 
-            let mut flags = InstrFlags::empty();
+            let mut flags = InstFlags::empty();
             let info = op_infos[opcode as usize];
             if info.is_unknown() {
-                flags |= InstrFlags::UNKNOWN;
+                flags |= InstFlags::UNKNOWN;
             }
             if info.is_disabled() {
-                flags |= InstrFlags::DISABLED;
+                flags |= InstFlags::DISABLED;
             }
             let static_gas = info.static_gas().unwrap_or(u16::MAX);
 
@@ -128,8 +131,8 @@ impl<'a> Bytecode<'a> {
             let jump_inst = inst + 1;
             let Some(jump) = self.insts.get(jump_inst) else { continue };
             let push = &self.insts[inst];
-            if !(push.is_push() && jump.is_jump()) {
-                if jump.is_jump() {
+            if !(push.is_push() && jump.is_legacy_jump()) {
+                if jump.is_legacy_jump() {
                     debug!(jump_inst, "found dynamic jump");
                     self.has_dynamic_jumps = true;
                 }
@@ -138,12 +141,12 @@ impl<'a> Bytecode<'a> {
 
             let imm_data = push.data;
             let imm = self.get_imm(imm_data);
-            self.insts[jump_inst].flags |= InstrFlags::STATIC_JUMP;
+            self.insts[jump_inst].flags |= InstFlags::STATIC_JUMP;
 
             const USIZE_SIZE: usize = std::mem::size_of::<usize>();
             if imm.len() > USIZE_SIZE {
                 debug!(jump_inst, "jump target too large");
-                self.insts[jump_inst].flags |= InstrFlags::INVALID_JUMP;
+                self.insts[jump_inst].flags |= InstFlags::INVALID_JUMP;
                 continue;
             }
 
@@ -152,11 +155,11 @@ impl<'a> Bytecode<'a> {
             let target_pc = usize::from_be_bytes(padded);
             if !self.is_valid_jump(target_pc) {
                 debug!(jump_inst, target_pc, "invalid jump target");
-                self.insts[jump_inst].flags |= InstrFlags::INVALID_JUMP;
+                self.insts[jump_inst].flags |= InstFlags::INVALID_JUMP;
                 continue;
             }
 
-            self.insts[inst].flags |= InstrFlags::SKIP_LOGIC;
+            self.insts[inst].flags |= InstFlags::SKIP_LOGIC;
             let target = self.pc_to_inst(target_pc);
 
             // Mark the `JUMPDEST` as reachable.
@@ -198,7 +201,7 @@ impl<'a> Bytecode<'a> {
                     if data.is_reachable_jumpdest(self.has_dynamic_jumps) {
                         break;
                     }
-                    data.flags |= InstrFlags::DEAD_CODE;
+                    data.flags |= InstFlags::DEAD_CODE;
                 }
                 let start = i + 1;
                 if end > start {
@@ -274,7 +277,7 @@ pub(crate) struct InstData {
     /// The opcode byte.
     pub(crate) opcode: u8,
     /// Flags.
-    pub(crate) flags: InstrFlags,
+    pub(crate) flags: InstFlags,
     /// Static gas. Stored as `u16::MAX` if the gas is dynamic.
     static_gas: u16,
     /// Instruction-specific data:
@@ -303,7 +306,7 @@ impl PartialEq<InstData> for u8 {
 
 impl fmt::Debug for InstData {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("OpcodeData")
+        f.debug_struct("InstData")
             .field("opcode", &self.to_op())
             .field("flags", &self.flags)
             .field("data", &self.data)
@@ -316,13 +319,19 @@ impl InstData {
     /// Note that this may not be a valid instruction.
     #[inline]
     const fn new(opcode: u8) -> Self {
-        Self { opcode, flags: InstrFlags::empty(), static_gas: 0, data: 0, pc: 0 }
+        Self { opcode, flags: InstFlags::empty(), static_gas: 0, data: 0, pc: 0 }
     }
 
     /// Returns the length of the immediate data of this instruction.
     #[inline]
     pub(crate) const fn imm_len(&self) -> usize {
         imm_len(self.opcode)
+    }
+
+    /// Returns the input and output stack elements of this instruction.
+    #[inline]
+    pub(crate) const fn stack_io(&self) -> StackIo {
+        StackIo::new(self.opcode)
     }
 
     /// Converts this instruction to a raw opcode. Note that the immediate data is not resolved.
@@ -345,12 +354,18 @@ impl InstData {
 
     /// Returns `true` if this instruction is a push instruction.
     pub(crate) fn is_push(&self) -> bool {
-        matches!(self.opcode, op::PUSH1..=op::PUSH32)
+        matches!(self.opcode, op::PUSH0..=op::PUSH32)
     }
 
-    /// Returns `true` if this instruction is a jump instruction.
-    pub(crate) fn is_jump(&self) -> bool {
+    /// Returns `true` if this instruction is a legacy jump instruction (`JUMP`/`JUMPI`).
+    pub(crate) fn is_legacy_jump(&self) -> bool {
         matches!(self.opcode, op::JUMP | op::JUMPI)
+    }
+
+    /// Returns `true` if this instruction is a legacy jump instruction (`JUMP`/`JUMPI`), and the
+    /// target known statically.
+    pub(crate) fn is_legacy_static_jump(&self) -> bool {
+        self.is_legacy_jump() && self.flags.contains(InstFlags::STATIC_JUMP)
     }
 
     /// Returns `true` if this instruction is a `JUMPDEST`.
@@ -367,16 +382,16 @@ impl InstData {
 
     /// Returns `true` if this instruction is dead code.
     pub(crate) fn is_dead_code(&self) -> bool {
-        self.flags.contains(InstrFlags::DEAD_CODE)
+        self.flags.contains(InstFlags::DEAD_CODE)
     }
 
     /// Returns `true` if we know that this instruction will stop execution.
     #[inline]
     pub(crate) const fn is_diverging(&self, is_eof: bool) -> bool {
         // TODO: SELFDESTRUCT will not be diverging in the future.
-        self.flags.contains(InstrFlags::INVALID_JUMP)
-            || self.flags.contains(InstrFlags::DISABLED)
-            || self.flags.contains(InstrFlags::UNKNOWN)
+        self.flags.contains(InstFlags::INVALID_JUMP)
+            || self.flags.contains(InstFlags::DISABLED)
+            || self.flags.contains(InstFlags::UNKNOWN)
             || matches!(self.opcode, op::STOP | op::RETURN | op::REVERT | op::INVALID)
             || (self.opcode == op::SELFDESTRUCT && !is_eof)
     }
@@ -394,7 +409,7 @@ impl InstData {
 bitflags::bitflags! {
     /// [`InstrData`] flags.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    pub(crate) struct InstrFlags: u8 {
+    pub(crate) struct InstFlags: u8 {
         /// The `JUMP`/`JUMPI` target is known at compile time.
         /// This is implied for other jump instructions which are always static.
         const STATIC_JUMP = 1 << 0;

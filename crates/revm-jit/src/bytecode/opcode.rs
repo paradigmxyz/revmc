@@ -168,6 +168,11 @@ pub fn format_bytecode(bytecode: &[u8]) -> String {
     OpcodesIter::new(bytecode).to_string()
 }
 
+/// Formats an EVM bytecode to the given writer.
+pub fn format_bytecode_to<W: fmt::Write + ?Sized>(bytecode: &[u8], w: &mut W) -> fmt::Result {
+    write!(w, "{}", OpcodesIter::new(bytecode))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

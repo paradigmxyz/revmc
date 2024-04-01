@@ -1,5 +1,6 @@
 use clap::Parser;
 use color_eyre::{eyre::eyre, Result};
+use revm_interpreter::opcode as op;
 use revm_jit::{debug_time, EvmContext, EvmStack, JitEvm, OptimizationLevel};
 use revm_jit_benches::Bench;
 use revm_primitives::{Env, SpecId};
@@ -36,13 +37,16 @@ fn main() -> Result<()> {
     let backend = revm_jit::llvm::JitEvmLlvmBackend::new(&context, opt_level).unwrap();
     let mut jit = JitEvm::new(backend);
     jit.set_dump_to(Some(PathBuf::from("./tmp/revm-jit")));
-    if cli.no_gas {
-        jit.set_disable_gas(true);
-    }
+    jit.set_disable_gas(cli.no_gas);
     jit.set_frame_pointers(true);
     // jit.set_debug_assertions(true);
 
-    let all_benches = revm_jit_benches::get_benches();
+    let mut all_benches = revm_jit_benches::get_benches();
+    all_benches.push(Bench {
+        bytecode: vec![op::PUSH0, op::DUP1],
+        name: "custom",
+        ..Default::default()
+    });
     let Bench { name, bytecode, calldata, stack_input, native: _ } = all_benches
         .iter()
         .find(|b| b.name == cli.bench_name)

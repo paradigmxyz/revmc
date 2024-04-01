@@ -27,7 +27,7 @@ callbacks! {
     MulMod         = mulmod(ptr) None,
     Exp            = exp(ptr, ptr, u8) Some(u8),
     Keccak256      = keccak256(ptr, ptr) Some(u8),
-    Balance        = balance(ptr, usize, u8) Some(u8),
+    Balance        = balance(ptr, ptr, u8) Some(u8),
     CallDataCopy   = calldatacopy(ptr, ptr) Some(u8),
     CodeCopy       = codecopy(ptr, ptr) Some(u8),
     ExtCodeSize    = extcodesize(ptr, ptr, u8) Some(u8),
@@ -116,8 +116,9 @@ pub(crate) unsafe extern "C" fn balance(
     sp: *mut EvmWord,
     spec_id: SpecId,
 ) -> InstructionResult {
-    let (balance, is_cold) = try_host!(ecx.host.balance(ecx.contract.address));
-    *sp.sub(1) = balance.into();
+    read_words!(sp, address);
+    let (balance, is_cold) = try_host!(ecx.host.balance(address.to_address()));
+    *address = balance.into();
     let gas = if spec_id.is_enabled_in(SpecId::ISTANBUL) {
         spec_to_generic!(spec_id, rgas::account_access_gas::<SPEC>(is_cold))
     } else if spec_id.is_enabled_in(SpecId::TANGERINE) {
@@ -371,6 +372,7 @@ pub(crate) unsafe extern "C" fn log(
     n: u8,
 ) -> InstructionResult {
     debug_assert!(n <= 4, "invalid log topic count: {n}");
+    let sp = sp.add(n as usize);
     read_words!(sp, offset, len);
     let len = tri!(usize::try_from(len));
     gas_opt!(ecx, rgas::log_cost(n, len as u64));
@@ -383,7 +385,6 @@ pub(crate) unsafe extern "C" fn log(
     };
 
     let mut topics = Vec::with_capacity(n as usize);
-    let sp = sp.sub(3); // offset, len, t[i]
     for i in 0..n {
         topics.push(sp.sub(i as usize).read().to_be_bytes().into());
     }
@@ -500,8 +501,6 @@ pub(crate) unsafe extern "C" fn selfdestruct(
 // --- utils ---
 
 /// Splits the stack pointer into `N` elements by casting it to an array.
-/// This has the same effect as popping `N` elements from the stack since the JIT function
-/// has already modified the length.
 ///
 /// NOTE: this returns the arguments in **reverse order**. Use [`read_words!`] to get them in order.
 ///
@@ -512,7 +511,7 @@ pub(crate) unsafe extern "C" fn selfdestruct(
 /// Caller must ensure that `N` matches the number of elements popped in JIT code.
 #[inline(always)]
 unsafe fn read_words_rev<'a, const N: usize>(sp: *mut EvmWord) -> &'a mut [EvmWord; N] {
-    &mut *sp.sub(N).cast::<[EvmWord; N]>()
+    &mut *sp.cast::<[EvmWord; N]>()
 }
 
 #[inline]
