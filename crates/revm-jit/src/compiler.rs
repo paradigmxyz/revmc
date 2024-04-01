@@ -20,7 +20,9 @@ use std::{
 const STACK_CAP: usize = 1024;
 // const WORD_SIZE: usize = 32;
 
-// TODO: Cannot find function if `compile` is called a second time.
+// TODO: ~~Cannot find function if `compile` is called a second time.~~
+// `get_function` finalizes the module, making it impossible to add more functions.
+// TODO: Refactor the API to allow for multiple functions to be compiled.
 
 // TODO: Generate less redundant stack length manip code, e.g. pop + push
 // TODO: We can emit the length check by adding a params in/out inst flag; can be re-used for EOF
@@ -37,6 +39,9 @@ const STACK_CAP: usize = 1024;
 
 // TODO: Test on big-endian hardware.
 // It probably doesn't work when loading Rust U256 into native endianness.
+
+// TODO: Compile callbacks to bitcode in a `build.rs` that calls `cargo rustc -- -Ccodegen-units=1`,
+// `crate-type = "rlib"`.
 
 /// JIT compiler for EVM bytecode.
 #[allow(missing_debug_implementations)]

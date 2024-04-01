@@ -30,10 +30,10 @@ revm-jit-backend = { version = "0.1.0", path = "crates/revm-jit-backend", defaul
 revm-jit-cranelift = { version = "0.1.0", path = "crates/revm-jit-cranelift", default-features = false }
 revm-jit-llvm = { version = "0.1.0", path = "crates/revm-jit-llvm", default-features = false }
 
-alloy-primitives = "0.6"
+alloy-primitives = "0.7"
 revm-primitives = "3.1.0"
 revm-interpreter = "3.4.0"
-ruint = "1.12"
+ruint = "1.12.1"
 
 eyre = "0.6"
 color-eyre = "0.6"

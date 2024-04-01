@@ -99,9 +99,9 @@ pub(crate) unsafe extern "C" fn keccak256(
         gas!(ecx, rgas::KECCAK256);
         return InstructionResult::Continue;
     }
-    let len = tri!(usize::try_from(*len_ptr));
+    let len = try_into_usize!(len_ptr.as_u256());
     gas_opt!(ecx, rgas::keccak256_cost(len as u64));
-    let offset = tri!(offset.try_into());
+    let offset = try_into_usize!(offset.as_u256());
 
     resize_memory!(ecx, offset, len);
 
@@ -179,7 +179,7 @@ pub(crate) unsafe extern "C" fn extcodecopy(
     // TODO: SpecId
     gas_opt!(ecx, spec_to_generic!(spec_id, rgas::extcodecopy_cost::<SPEC>(len as u64, is_cold)));
     if len != 0 {
-        let memory_offset = tri!(memory_offset.try_into());
+        let memory_offset = try_into_usize!(memory_offset.as_u256());
         let code_offset = code_offset.to_u256();
         let code_offset = as_usize_saturated!(code_offset).min(code.len());
         resize_memory!(ecx, memory_offset, len);
@@ -202,7 +202,7 @@ pub(crate) unsafe extern "C" fn returndatacopy(
         return InstructionResult::OutOfOffset;
     }
     if len != 0 {
-        let memory_offset = tri!(memory_offset.try_into());
+        let memory_offset = try_into_usize!(memory_offset.as_u256());
         resize_memory!(ecx, memory_offset, len);
         ecx.memory.set(memory_offset, &ecx.return_data[data_offset..data_end]);
     }
@@ -285,7 +285,7 @@ pub(crate) unsafe extern "C" fn mload(
 ) -> InstructionResult {
     gas!(ecx, rgas::VERYLOW);
     read_words!(sp, offset_ptr);
-    let offset = tri!(offset_ptr.try_into());
+    let offset = try_into_usize!(offset_ptr.as_u256());
     resize_memory!(ecx, offset, 32);
     *offset_ptr = ecx.memory.get_u256(offset).into();
     InstructionResult::Continue
@@ -297,7 +297,7 @@ pub(crate) unsafe extern "C" fn mstore(
 ) -> InstructionResult {
     gas!(ecx, rgas::VERYLOW);
     read_words!(sp, offset, value);
-    let offset = tri!(offset.try_into());
+    let offset = try_into_usize!(offset.as_u256());
     resize_memory!(ecx, offset, 32);
     ecx.memory.set(offset, &value.to_be_bytes());
     InstructionResult::Continue
@@ -309,7 +309,7 @@ pub(crate) unsafe extern "C" fn mstore8(
 ) -> InstructionResult {
     gas!(ecx, rgas::VERYLOW);
     read_words!(sp, offset, value);
-    let offset = tri!(offset.try_into());
+    let offset = try_into_usize!(offset.as_u256());
     resize_memory!(ecx, offset, 1);
     ecx.memory.set_byte(offset, value.to_u256().byte(0));
     InstructionResult::Continue
@@ -375,7 +375,7 @@ pub(crate) unsafe extern "C" fn log(
     let len = tri!(usize::try_from(len));
     gas_opt!(ecx, rgas::log_cost(n, len as u64));
     let data = if len != 0 {
-        let offset = tri!(offset.try_into());
+        let offset = try_into_usize!(offset.as_u256());
         resize_memory!(ecx, offset, len);
         Bytes::copy_from_slice(ecx.memory.slice(offset, len))
     } else {
@@ -421,7 +421,7 @@ pub(crate) unsafe extern "C" fn create(
             gas!(ecx, rgas::initcode_cost(len as u64));
         }
 
-        let code_offset = tri!(code_offset.try_into());
+        let code_offset = try_into_usize!(code_offset.as_u256());
         resize_memory!(ecx, code_offset, len);
         Bytes::copy_from_slice(ecx.memory.slice(code_offset, len))
     } else {
@@ -461,9 +461,9 @@ pub(crate) unsafe extern "C" fn do_return(
     result: InstructionResult,
 ) -> InstructionResult {
     read_words!(offset, offset, len);
-    let len = tri!(len.try_into());
+    let len = try_into_usize!(len.as_u256());
     let output = if len != 0 {
-        let offset = tri!(offset.try_into());
+        let offset = try_into_usize!(offset.as_u256());
         resize_memory!(ecx, offset, len);
         ecx.memory.slice(offset, len).to_vec().into()
     } else {
@@ -540,7 +540,7 @@ fn copy_operation(ecx: &mut EvmContext<'_>, sp: *mut EvmWord, data: &[u8]) -> In
     if len == 0 {
         return InstructionResult::Continue;
     }
-    let memory_offset = tri!(memory_offset.try_into());
+    let memory_offset = try_into_usize!(memory_offset.as_u256());
     resize_memory!(ecx, memory_offset, len);
     let data_offset = data_offset.to_u256();
     let data_offset = as_usize_saturated!(data_offset);

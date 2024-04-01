@@ -58,6 +58,23 @@ macro_rules! read_words {
     };
 }
 
+macro_rules! try_into_usize {
+    ($x:expr) => {
+        match $x {
+            x => {
+                let x = x.as_limbs();
+                if x[1] != 0 || x[2] != 0 || x[3] != 0 {
+                    return InstructionResult::InvalidOperandOOG;
+                }
+                let Ok(val) = usize::try_from(x[0]) else {
+                    return InstructionResult::InvalidOperandOOG;
+                };
+                val
+            }
+        }
+    };
+}
+
 // Credits: <https://github.com/AuroransSolis/rustconf-2023/blob/665a645d751dfe0e483261e3abca25ab4bb9e13a/reverse-tokens/src/main.rs>
 macro_rules! reverse_tokens {
 	(@rev [$first:tt$(, $rest:tt)*] [$($rev:tt),*]) => {

@@ -249,6 +249,7 @@ impl<'ctx> Backend for JitEvmLlvmBackend<'ctx> {
     }
 
     fn optimize_function(&mut self, _name: &str) -> Result<()> {
+        // From `opt --help`, `-passes`.
         let passes = match self.opt_level {
             OptimizationLevel::None => "default<O0>",
             OptimizationLevel::Less => "default<O1>",

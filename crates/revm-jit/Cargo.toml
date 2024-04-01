@@ -21,6 +21,7 @@ revm-jit-backend.workspace = true
 revm-jit-llvm = { workspace = true, optional = true }
 revm-jit-cranelift = { workspace = true, optional = true }
 
+alloy-primitives.workspace = true
 revm-interpreter.workspace = true
 revm-primitives.workspace = true
 
@@ -32,3 +33,5 @@ tracing.workspace = true
 default = ["llvm"]
 llvm = ["dep:revm-jit-llvm"]
 cranelift = ["dep:revm-jit-cranelift"]
+
+asm-keccak = ["alloy-primitives/asm-keccak"]

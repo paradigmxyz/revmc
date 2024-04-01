@@ -1,6 +1,6 @@
 use clap::Parser;
-use color_eyre::Result;
-use revm_jit::{debug_time, eyre::eyre, EvmContext, EvmStack, JitEvm, OptimizationLevel};
+use color_eyre::{eyre::eyre, Result};
+use revm_jit::{debug_time, EvmContext, EvmStack, JitEvm, OptimizationLevel};
 use revm_jit_benches::Bench;
 use revm_primitives::{Env, SpecId};
 use std::{hint::black_box, path::PathBuf};
@@ -39,6 +39,7 @@ fn main() -> Result<()> {
     if cli.no_gas {
         jit.set_disable_gas(true);
     }
+    jit.set_frame_pointers(true);
     // jit.set_debug_assertions(true);
 
     let all_benches = revm_jit_benches::get_benches();
@@ -97,6 +98,10 @@ fn main() -> Result<()> {
 }
 
 fn bench<T>(n_iters: u64, name: &str, mut f: impl FnMut() -> T) {
+    if n_iters == 0 {
+        return;
+    }
+
     let warmup = (n_iters / 10).max(10);
     for _ in 0..warmup {
         black_box(f());
