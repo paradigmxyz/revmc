@@ -1881,39 +1881,44 @@ impl<B: Backend> Callbacks<B> {
     }
 
     fn get(&mut self, cb: Callback, bcx: &mut B::Builder<'_>) -> B::Function {
-        *self.0[cb as usize].get_or_insert_with(
-            #[cold]
-            || {
-                let name = cb.name();
-                let ret = cb.ret(bcx);
-                let params = cb.params(bcx);
-                let address = cb.addr();
-                let linkage = revm_jit_backend::Linkage::Import;
-                let f = bcx.add_callback_function(name, ret, &params, address, linkage);
-                let default_attrs: &[Attribute] = if cb == Callback::Panic {
-                    &[
-                        Attribute::Cold,
-                        Attribute::NoReturn,
-                        Attribute::NoFree,
-                        Attribute::NoRecurse,
-                        Attribute::NoSync,
-                    ]
-                } else {
-                    &[
-                        Attribute::WillReturn,
-                        Attribute::NoFree,
-                        Attribute::NoRecurse,
-                        Attribute::NoSync,
-                        Attribute::NoUnwind,
-                        Attribute::Speculatable,
-                    ]
-                };
-                for attr in default_attrs.iter().chain(cb.attrs()).copied() {
-                    bcx.add_function_attribute(Some(f), attr, FunctionAttributeLocation::Function);
-                }
-                f
-            },
-        )
+        *self.0[cb as usize].get_or_insert_with(|| {
+            let name = cb.name();
+            bcx.get_function(name).unwrap_or_else(
+                #[cold]
+                || Self::get_slow(name, cb, bcx),
+            )
+        })
+    }
+
+    #[cold]
+    fn get_slow(name: &str, cb: Callback, bcx: &mut B::Builder<'_>) -> B::Function {
+        let ret = cb.ret(bcx);
+        let params = cb.params(bcx);
+        let address = cb.addr();
+        let linkage = revm_jit_backend::Linkage::Import;
+        let f = bcx.add_callback_function(name, ret, &params, address, linkage);
+        let default_attrs: &[Attribute] = if cb == Callback::Panic {
+            &[
+                Attribute::Cold,
+                Attribute::NoReturn,
+                Attribute::NoFree,
+                Attribute::NoRecurse,
+                Attribute::NoSync,
+            ]
+        } else {
+            &[
+                Attribute::WillReturn,
+                Attribute::NoFree,
+                Attribute::NoRecurse,
+                Attribute::NoSync,
+                Attribute::NoUnwind,
+                Attribute::Speculatable,
+            ]
+        };
+        for attr in default_attrs.iter().chain(cb.attrs()).copied() {
+            bcx.add_function_attribute(Some(f), attr, FunctionAttributeLocation::Function);
+        }
+        f
     }
 }
 
@@ -2994,7 +2999,7 @@ mod tests {
     #[cfg(feature = "llvm")]
     fn run_case_llvm(test_case: &TestCase<'_>) {
         with_llvm_context(|context| {
-            let make_backend = |opt_level| JitEvmLlvmBackend::new(context, opt_level).unwrap();
+            let make_backend = |opt_level| new_llvm_backend(context, opt_level).unwrap();
             run_case_generic(test_case, make_backend);
         });
     }
@@ -3089,7 +3094,7 @@ mod tests {
     fn fibonacci() {
         #[cfg(feature = "llvm")]
         with_llvm_context(|context| {
-            let make_backend = |opt_level| JitEvmLlvmBackend::new(context, opt_level).unwrap();
+            let make_backend = |opt_level| new_llvm_backend(context, opt_level).unwrap();
             fibonacci_generic(make_backend);
         });
     }

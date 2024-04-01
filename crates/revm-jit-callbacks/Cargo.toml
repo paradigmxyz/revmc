@@ -1,0 +1,23 @@
+[package]
+name = "revm-jit-callbacks"
+description = "REVM JIT - LLVM bitcode callbacks"
+homepage = "https://github.com/danipopes/revm-jit/tree/main/crates/revm-jit"
+
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+categories.workspace = true
+keywords.workspace = true
+repository.workspace = true
+exclude.workspace = true
+
+[lib]
+crate-type = ["rlib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+revm-jit-context.workspace = true

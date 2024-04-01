@@ -1685,6 +1685,7 @@ dependencies = [
  "bitvec",
  "revm-interpreter",
  "revm-jit-backend",
+ "revm-jit-context",
  "revm-jit-cranelift",
  "revm-jit-llvm",
  "revm-primitives",
@@ -1712,6 +1713,21 @@ dependencies = [
  "revm-primitives",
  "tracing-error",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "revm-jit-callbacks"
+version = "0.1.0"
+dependencies = [
+ "revm-jit-context",
+]
+
+[[package]]
+name = "revm-jit-context"
+version = "0.1.0"
+dependencies = [
+ "revm-interpreter",
+ "revm-primitives",
 ]
 
 [[package]]

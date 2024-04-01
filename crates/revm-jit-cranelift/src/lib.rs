@@ -639,6 +639,16 @@ impl<'a> Builder for JitEvmCraneliftBuilder<'a> {
         self.bcx.ins().trap(TrapCode::UnreachableCodeReached);
     }
 
+    fn get_function(&mut self, name: &str) -> Option<Self::Function> {
+        self.module
+            .get_name(name)
+            .and_then(|id| match id {
+                FuncOrDataId::Func(f) => Some(f),
+                FuncOrDataId::Data(_) => None,
+            })
+            .map(|id| self.module.declare_func_in_func(id, self.bcx.func))
+    }
+
     fn add_callback_function(
         &mut self,
         name: &str,

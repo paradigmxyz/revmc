@@ -10,6 +10,7 @@ use inkwell::{
     basic_block::BasicBlock,
     context::Context,
     execution_engine::ExecutionEngine,
+    memory_buffer::MemoryBuffer,
     module::Module,
     passes::PassBuilderOptions,
     support::{enable_llvm_pretty_stack_trace, error_handling::install_fatal_error_handler},
@@ -48,18 +49,26 @@ pub struct JitEvmLlvmBackend<'ctx> {
 
     debug_assertions: bool,
     opt_level: OptimizationLevel,
+    bc: Option<&'ctx [u8]>,
 }
 
 impl<'ctx> JitEvmLlvmBackend<'ctx> {
     /// Creates a new LLVM-based EVM JIT backend.
+    ///
+    /// `bc` is the optional bitcode to be loaded into the module.
     #[inline]
-    pub fn new(cx: &'ctx Context, opt_level: revm_jit_backend::OptimizationLevel) -> Result<Self> {
-        revm_jit_backend::debug_time!("new LLVM backend", || Self::new_inner(cx, opt_level))
+    pub fn new(
+        cx: &'ctx Context,
+        opt_level: revm_jit_backend::OptimizationLevel,
+        bc: Option<&'ctx [u8]>,
+    ) -> Result<Self> {
+        revm_jit_backend::debug_time!("new LLVM backend", || Self::new_inner(cx, opt_level, bc))
     }
 
     fn new_inner(
         cx: &'ctx Context,
         opt_level: revm_jit_backend::OptimizationLevel,
+        bc: Option<&'ctx [u8]>,
     ) -> Result<Self> {
         let mut init_result = Ok(());
         static INIT: Once = Once::new();
@@ -102,9 +111,7 @@ impl<'ctx> JitEvmLlvmBackend<'ctx> {
             )
             .ok_or_else(|| eyre::eyre!("failed to create target machine"))?;
 
-        let module = cx.create_module("evm");
-        module.set_data_layout(&machine.get_target_data().get_data_layout());
-        module.set_triple(&machine.get_triple());
+        let module = create_module(cx, &machine, bc)?;
 
         let exec_engine = module.create_jit_execution_engine(opt_level).map_err(error_msg)?;
 
@@ -134,6 +141,7 @@ impl<'ctx> JitEvmLlvmBackend<'ctx> {
             ty_ptr,
             debug_assertions: cfg!(debug_assertions),
             opt_level,
+            bc,
         })
     }
 
@@ -272,11 +280,7 @@ impl<'ctx> Backend for JitEvmLlvmBackend<'ctx> {
 
     unsafe fn free_all_functions(&mut self) -> Result<()> {
         self.exec_engine.remove_module(&self.module).map_err(|e| Error::msg(e.to_string()))?;
-
-        self.module = self.cx.create_module("evm");
-        self.module.set_data_layout(&self.machine.get_target_data().get_data_layout());
-        self.module.set_triple(&self.machine.get_triple());
-
+        self.module = create_module(self.cx, &self.machine, self.bc)?;
         self.exec_engine =
             self.module.create_jit_execution_engine(self.opt_level).map_err(error_msg)?;
         Ok(())
@@ -808,6 +812,10 @@ impl<'a, 'ctx> Builder for JitEvmLlvmBuilder<'a, 'ctx> {
         self.bcx.build_unreachable().unwrap();
     }
 
+    fn get_function(&mut self, name: &str) -> Option<Self::Function> {
+        self.module.get_function(name)
+    }
+
     fn add_callback_function(
         &mut self,
         name: &str,
@@ -832,6 +840,23 @@ impl<'a, 'ctx> Builder for JitEvmLlvmBuilder<'a, 'ctx> {
         let attr = convert_attribute(self, attribute);
         function.unwrap_or(self.function).add_attribute(loc, attr);
     }
+}
+
+fn create_module<'ctx>(
+    cx: &'ctx Context,
+    machine: &TargetMachine,
+    bc: Option<&[u8]>,
+) -> Result<Module<'ctx>> {
+    let module_name = "evm";
+    let module = if let Some(bc) = bc {
+        let memory_buffer = MemoryBuffer::create_from_memory_range(bc, module_name);
+        cx.create_module_from_ir(memory_buffer).map_err(error_msg)?
+    } else {
+        cx.create_module(module_name)
+    };
+    module.set_data_layout(&machine.get_target_data().get_data_layout());
+    module.set_triple(&machine.get_triple());
+    Ok(module)
 }
 
 fn convert_intcc(cond: IntCC) -> IntPredicate {

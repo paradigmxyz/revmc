@@ -1,7 +1,7 @@
 use clap::Parser;
 use color_eyre::{eyre::eyre, Result};
 use revm_interpreter::opcode as op;
-use revm_jit::{debug_time, EvmContext, EvmStack, JitEvm, OptimizationLevel};
+use revm_jit::{debug_time, new_llvm_backend, EvmContext, EvmStack, JitEvm, OptimizationLevel};
 use revm_jit_benches::Bench;
 use revm_primitives::{Env, SpecId};
 use std::{hint::black_box, path::PathBuf};
@@ -34,7 +34,7 @@ fn main() -> Result<()> {
     // Build the compiler.
     let opt_level = cli.opt_level.unwrap_or(OptimizationLevel::Aggressive);
     let context = revm_jit::llvm::inkwell::context::Context::create();
-    let backend = revm_jit::llvm::JitEvmLlvmBackend::new(&context, opt_level).unwrap();
+    let backend = new_llvm_backend(&context, opt_level).unwrap();
     let mut jit = JitEvm::new(backend);
     jit.set_dump_to(Some(PathBuf::from("./tmp/revm-jit")));
     jit.set_disable_gas(cli.no_gas);

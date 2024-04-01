@@ -2,7 +2,7 @@ use criterion::{
     criterion_group, criterion_main, measurement::WallTime, BenchmarkGroup, Criterion,
 };
 use revm_interpreter::SharedMemory;
-use revm_jit::{llvm, EvmContext, EvmStack, JitEvm, JitEvmFn};
+use revm_jit::{llvm, new_llvm_backend, EvmContext, EvmStack, JitEvm, JitEvmFn};
 use revm_jit_benches::Bench;
 use revm_primitives::{Env, SpecId};
 use std::time::Duration;
@@ -46,7 +46,7 @@ fn run_bench(c: &mut Criterion, bench: &Bench) {
     // Set up JIT.
     let opt_level = revm_jit::OptimizationLevel::Aggressive;
     let context = llvm::inkwell::context::Context::create();
-    let backend = llvm::JitEvmLlvmBackend::new(&context, opt_level).unwrap();
+    let backend = new_llvm_backend(&context, opt_level).unwrap();
     let mut jit = JitEvm::new(backend);
     if !stack_input.is_empty() {
         jit.set_inspect_stack_length(true);

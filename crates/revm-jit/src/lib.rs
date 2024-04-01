@@ -14,14 +14,13 @@ pub use bytecode::*;
 
 mod callbacks;
 
-mod context;
-pub use context::*;
-
 mod compiler;
 pub use compiler::JitEvm;
 
 #[doc(inline)]
 pub use revm_jit_backend::*;
+#[doc(inline)]
+pub use revm_jit_context::*;
 
 #[cfg(feature = "llvm")]
 #[doc(no_inline)]
@@ -46,6 +45,16 @@ const I256_MIN: U256 = U256::from_limbs([
     0x0000000000000000,
     0x8000000000000000,
 ]);
+
+/// Creates a new LLVM backend with the default builtin functions.
+#[cfg(feature = "llvm")]
+#[inline]
+pub fn new_llvm_backend(
+    cx: &llvm::inkwell::context::Context,
+    opt_level: OptimizationLevel,
+) -> Result<JitEvmLlvmBackend<'_>> {
+    JitEvmLlvmBackend::new(cx, opt_level, None)
+}
 
 /// Enable for `cargo asm -p revm-jit --lib`.
 #[cfg(any())]
