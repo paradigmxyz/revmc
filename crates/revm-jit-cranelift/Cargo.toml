@@ -1,7 +1,7 @@
 [package]
 name = "revm-jit-cranelift"
 description = "REVM JIT - Cranelift backend"
-homepage = "https://github.com/danipopes/revm-jit/tree/main/crates/revm-jit"
+homepage = "https://github.com/danipopes/revm-jit/tree/main/crates/revm-jit-cranelift"
 
 version.workspace = true
 authors.workspace = true

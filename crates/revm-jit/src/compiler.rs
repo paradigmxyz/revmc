@@ -36,9 +36,6 @@ const STACK_CAP: usize = 1024;
 // TODO: Test on big-endian hardware.
 // It probably doesn't work when loading Rust U256 into native endianness.
 
-// TODO: Compile callbacks to bitcode in a `build.rs` that calls `cargo rustc -- -Ccodegen-units=1`,
-// `crate-type = "rlib"`.
-
 /// JIT compiler for EVM bytecode.
 #[allow(missing_debug_implementations)]
 pub struct JitEvm<B: Backend> {
@@ -2946,7 +2943,7 @@ mod tests {
     #[cfg(feature = "llvm")]
     fn run_case_llvm(test_case: &TestCase<'_>) {
         with_llvm_context(|context| {
-            let make_backend = |opt_level| new_llvm_backend(context, opt_level).unwrap();
+            let make_backend = |opt_level| new_llvm_backend(context, opt_level, false).unwrap();
             run_case_generic(test_case, make_backend);
         });
     }
@@ -3041,7 +3038,7 @@ mod tests {
     fn fibonacci() {
         #[cfg(feature = "llvm")]
         with_llvm_context(|context| {
-            let make_backend = |opt_level| new_llvm_backend(context, opt_level).unwrap();
+            let make_backend = |opt_level| new_llvm_backend(context, opt_level, false).unwrap();
             fibonacci_generic(make_backend);
         });
     }

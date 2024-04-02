@@ -47,17 +47,20 @@ const I256_MIN: U256 = U256::from_limbs([
 ]);
 
 /// Creates a new LLVM backend with the default builtin functions.
+///
+/// Set `bc` to `true` to use the pre-compiled callbacks bitcode.
 #[cfg(feature = "llvm")]
 #[inline]
 pub fn new_llvm_backend(
     cx: &llvm::inkwell::context::Context,
     opt_level: OptimizationLevel,
+    bc: bool,
 ) -> Result<JitEvmLlvmBackend<'_>> {
-    #[cfg(llvm_bc)]
-    let bc = Some(&include_bytes!(concat!(env!("OUT_DIR"), "/callbacks.bc"))[..]);
-    #[cfg(not(llvm_bc))]
-    let bc = None;
-    JitEvmLlvmBackend::new(cx, opt_level, bc)
+    JitEvmLlvmBackend::new(
+        cx,
+        opt_level,
+        if bc { revm_jit_callbacks_bc::CALLBACKS_BITCODE } else { None },
+    )
 }
 
 /// Enable for `cargo asm -p revm-jit --lib`.

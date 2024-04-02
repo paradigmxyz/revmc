@@ -15,9 +15,12 @@ concurrency:
 
 jobs:
   test:
-    name: test
+    name: test ${{ matrix.toolchain }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      matrix:
+        toolchain: ["stable", "nightly"]
     steps:
       - uses: actions/checkout@v4
       - uses: KyleMayes/install-llvm-action@v1
@@ -25,7 +28,9 @@ jobs:
           version: ${{ env.LLVM_VERSION }}
       - name: llvm-config
         run: llvm-config --version --bindir --libdir
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.toolchain }}
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true

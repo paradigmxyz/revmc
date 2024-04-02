@@ -26,7 +26,11 @@ impl<B: Backend> Callbacks<B> {
             storage = [mangle_prefix, name].concat();
             name = storage.as_str();
         }
-        bcx.get_function(name).unwrap_or_else(|| Self::build(name, cb, bcx))
+        bcx.get_function(name).inspect(|r| trace!(name, ?r, "pre-existing")).unwrap_or_else(|| {
+            let r = Self::build(name, cb, bcx);
+            trace!(name, ?r, "built");
+            r
+        })
     }
 
     fn build(name: &str, cb: Callback, bcx: &mut B::Builder<'_>) -> B::Function {

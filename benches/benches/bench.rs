@@ -46,7 +46,7 @@ fn run_bench(c: &mut Criterion, bench: &Bench) {
     // Set up JIT.
     let opt_level = revm_jit::OptimizationLevel::Aggressive;
     let context = llvm::inkwell::context::Context::create();
-    let backend = new_llvm_backend(&context, opt_level).unwrap();
+    let backend = new_llvm_backend(&context, opt_level, true).unwrap();
     let mut jit = JitEvm::new(backend);
     if !stack_input.is_empty() {
         jit.set_inspect_stack_length(true);

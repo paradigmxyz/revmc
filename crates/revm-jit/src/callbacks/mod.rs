@@ -4,7 +4,7 @@ use revm_interpreter::{
     InterpreterResult, SStoreResult,
 };
 use revm_jit_backend::{Attribute, TypeMethods};
-use revm_jit_callbacks::{utils::*, *};
+use revm_jit_callbacks::*;
 use revm_primitives::{
     spec_to_generic, Bytes, CreateScheme, Log, LogData, SpecId, BLOCK_HASH_HISTORY, KECCAK_EMPTY,
     MAX_INITCODE_SIZE,
@@ -68,6 +68,7 @@ macro_rules! callbacks {
 }
 
 // TODO: Parameter attributes, especially `dereferenceable(<size>)` and `sret(<ty>)`.
+// TODO: Use `&mut [EvmWord; N]` instead of raw pointer.
 callbacks! {
     |bcx| {
         let ptr = bcx.type_ptr();

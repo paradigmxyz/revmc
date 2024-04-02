@@ -34,7 +34,7 @@ fn main() -> Result<()> {
     // Build the compiler.
     let opt_level = cli.opt_level.unwrap_or(OptimizationLevel::Aggressive);
     let context = revm_jit::llvm::inkwell::context::Context::create();
-    let backend = new_llvm_backend(&context, opt_level).unwrap();
+    let backend = new_llvm_backend(&context, opt_level, true)?;
     let mut jit = JitEvm::new(backend);
     jit.set_dump_to(Some(PathBuf::from("./tmp/revm-jit")));
     jit.set_disable_gas(cli.no_gas);
@@ -43,7 +43,7 @@ fn main() -> Result<()> {
 
     let mut all_benches = revm_jit_benches::get_benches();
     all_benches.push(Bench {
-        bytecode: vec![op::PUSH0, op::DUP1],
+        bytecode: vec![op::PUSH0, op::PUSH0, op::MSTORE],
         name: "custom",
         ..Default::default()
     });
@@ -90,7 +90,7 @@ fn main() -> Result<()> {
         host.clear();
         let mut cx = EvmContext::from_interpreter(&mut interpreter, &mut host);
 
-        unsafe { f.call(None, Some(&mut stack_len), &mut cx) }
+        unsafe { f.call(Some(&mut stack), Some(&mut stack_len), &mut cx) }
     };
 
     let ret = debug_time!("run", || run(f));

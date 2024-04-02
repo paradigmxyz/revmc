@@ -1,7 +1,7 @@
 [package]
 name = "revm-jit-context"
 description = "REVM JIT - runtime context"
-homepage = "https://github.com/danipopes/revm-jit/tree/main/crates/revm-jit"
+homepage = "https://github.com/danipopes/revm-jit/tree/main/crates/revm-jit-context"
 
 version.workspace = true
 authors.workspace = true

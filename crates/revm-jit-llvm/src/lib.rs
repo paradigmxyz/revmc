@@ -13,7 +13,7 @@ use inkwell::{
     memory_buffer::MemoryBuffer,
     module::Module,
     passes::PassBuilderOptions,
-    support::{enable_llvm_pretty_stack_trace, error_handling::install_fatal_error_handler},
+    support::error_handling::install_fatal_error_handler,
     targets::{CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine},
     types::{BasicType, BasicTypeEnum, FunctionType, IntType, PointerType, StringRadix, VoidType},
     values::{BasicValue, BasicValueEnum, FunctionValue, PointerValue},
@@ -73,13 +73,17 @@ impl<'ctx> JitEvmLlvmBackend<'ctx> {
         let mut init_result = Ok(());
         static INIT: Once = Once::new();
         INIT.call_once(|| {
-            enable_llvm_pretty_stack_trace();
+            // TODO: This also reports "PLEASE submit a bug report to..." when the segfault is
+            // outside of LLVM.
+            // enable_llvm_pretty_stack_trace();
+
+            extern "C" fn report_fatal_error(msg: *const std::ffi::c_char) {
+                let msg = unsafe { std::ffi::CStr::from_ptr(msg) };
+                error!(msg = %msg.to_string_lossy(), "LLVM fatal error");
+            }
+
             unsafe {
-                extern "C" fn report_fatal_error(msg: *const std::ffi::c_char) {
-                    let msg = unsafe { std::ffi::CStr::from_ptr(msg) };
-                    error!(msg = %msg.to_string_lossy(), "LLVM fatal error");
-                }
-                install_fatal_error_handler(report_fatal_error)
+                install_fatal_error_handler(report_fatal_error);
             }
 
             let config = InitializationConfig {
@@ -114,6 +118,7 @@ impl<'ctx> JitEvmLlvmBackend<'ctx> {
         let module = create_module(cx, &machine, bc)?;
 
         let exec_engine = module.create_jit_execution_engine(opt_level).map_err(error_msg)?;
+        add_symbols(&module, &exec_engine);
 
         let bcx = cx.create_builder();
 
@@ -240,7 +245,7 @@ impl<'ctx> Backend for JitEvmLlvmBackend<'ctx> {
         linkage: revm_jit_backend::Linkage,
     ) -> Result<Self::Builder<'_>> {
         let fn_type = self.fn_type(ret, params);
-        let function = self.module.add_function(name, fn_type, convert_linkage(linkage));
+        let function = self.module.add_function(name, fn_type, Some(convert_linkage(linkage)));
         for (i, &name) in param_names.iter().enumerate() {
             function.get_nth_param(i as u32).expect(name).set_name(name);
         }
@@ -283,6 +288,7 @@ impl<'ctx> Backend for JitEvmLlvmBackend<'ctx> {
         self.module = create_module(self.cx, &self.machine, self.bc)?;
         self.exec_engine =
             self.module.create_jit_execution_engine(self.opt_level).map_err(error_msg)?;
+        add_symbols(&self.module, &self.exec_engine);
         Ok(())
     }
 }
@@ -825,7 +831,7 @@ impl<'a, 'ctx> Builder for JitEvmLlvmBuilder<'a, 'ctx> {
         linkage: revm_jit_backend::Linkage,
     ) -> Self::Function {
         let func_ty = self.fn_type(ret, params);
-        let function = self.module.add_function(name, func_ty, convert_linkage(linkage));
+        let function = self.module.add_function(name, func_ty, Some(convert_linkage(linkage)));
         self.exec_engine.add_global_mapping(&function, address);
         function
     }
@@ -854,9 +860,77 @@ fn create_module<'ctx>(
     } else {
         cx.create_module(module_name)
     };
+    module.set_source_file_name(module_name);
     module.set_data_layout(&machine.get_target_data().get_data_layout());
     module.set_triple(&machine.get_triple());
+
+    // Mark Rust standard library functions as private and run DCE.
+    if bc.is_some() {
+        let functions = module.get_functions().map(FunctionValue::as_global_value);
+        let globals = module.get_globals();
+        for value in functions.chain(globals) {
+            let cname = value.get_name();
+            let name = cname.to_bytes();
+            if name.starts_with(b"_ZN") {
+                trace!(name=?cname, "setting private linkage");
+                value.set_linkage(inkwell::module::Linkage::Private);
+            }
+        }
+        // TODO: This looks like it does nothing.
+        // let options = PassBuilderOptions::create();
+        // module.run_passes("dce,adce,bdce", machine, options).map_err(error_msg)?;
+    }
+
     Ok(module)
+}
+
+fn add_symbols<'ctx>(module: &Module<'ctx>, exec_engine: &ExecutionEngine<'ctx>) {
+    macro_rules! add_symbols {
+        ($([$kw:ident $s:ident $($rest:tt)*]),* $(,)?) => {
+            $(
+                let sym = stringify!($s);
+                if let Some(f) = add_symbols!(@get_value $kw sym module) {
+                    extern "C" {
+                        $kw $s $($rest)*;
+                    }
+                    let addr = add_symbols!(@get_addr $kw $s);
+                    debug!(%sym, addr=%format!("0x{addr:016x}"), "adding symbol");
+                    trace!(?f);
+                    exec_engine.add_global_mapping(&f, addr);
+                } else {
+                    debug!(%sym, "symbol not found");
+                }
+            )*
+        };
+
+        (@get_value fn $sym:ident $module:ident) => {
+            $module.get_function($sym)
+        };
+        (@get_value static $sym:ident $module:ident) => {
+            $module.get_global($sym)
+        };
+
+        (@get_addr fn $name:ident) => {
+            $name as usize
+        };
+        (@get_addr static $name:ident) => {
+            unsafe { &$name as *const _ as usize }
+        };
+    }
+
+    add_symbols![
+        // `::alloc::alloc`.
+        [fn __rust_alloc()],
+        [fn __rust_dealloc()],
+        [fn __rust_realloc()],
+        [fn __rust_alloc_zeroed()],
+        [static __rust_no_alloc_shim_is_unstable: u8],
+        [fn __rust_alloc_error_handler()],
+        [static __rust_alloc_error_handler_should_panic: u8],
+        // Other symbols.
+        [fn rust_eh_personality()],
+        [fn rust_begin_unwind()],
+    ];
 }
 
 fn convert_intcc(cond: IntCC) -> IntPredicate {
@@ -947,11 +1021,11 @@ fn convert_attribute_loc(loc: revm_jit_backend::FunctionAttributeLocation) -> At
     }
 }
 
-fn convert_linkage(linkage: revm_jit_backend::Linkage) -> Option<inkwell::module::Linkage> {
+fn convert_linkage(linkage: revm_jit_backend::Linkage) -> inkwell::module::Linkage {
     match linkage {
-        revm_jit_backend::Linkage::Public => Some(inkwell::module::Linkage::External),
-        revm_jit_backend::Linkage::Import => None,
-        revm_jit_backend::Linkage::Private => Some(inkwell::module::Linkage::Private),
+        revm_jit_backend::Linkage::Public => inkwell::module::Linkage::External,
+        revm_jit_backend::Linkage::Import => inkwell::module::Linkage::External,
+        revm_jit_backend::Linkage::Private => inkwell::module::Linkage::Private,
     }
 }
 

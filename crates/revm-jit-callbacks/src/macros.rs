@@ -92,7 +92,7 @@ macro_rules! reverse_tokens {
 		}
 	};
 	(@rev [] [$($rev:tt),*]) => {
-		[$($rev)*]
+		[$($rev)*] // NOTE: Extra `[]` to make this an array pattern.
 	};
 	($($tt:tt)+) => {
 		reverse_tokens! {
