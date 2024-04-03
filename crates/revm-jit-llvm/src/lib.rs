@@ -224,6 +224,10 @@ impl<'ctx> Backend for JitEvmLlvmBackend<'ctx> {
         self.debug_assertions = yes;
     }
 
+    fn opt_level(&self) -> revm_jit_backend::OptimizationLevel {
+        convert_opt_level_rev(self.opt_level)
+    }
+
     fn set_opt_level(&mut self, level: revm_jit_backend::OptimizationLevel) {
         self.opt_level = convert_opt_level(level);
     }
@@ -954,6 +958,15 @@ fn convert_opt_level(level: revm_jit_backend::OptimizationLevel) -> Optimization
         revm_jit_backend::OptimizationLevel::Less => OptimizationLevel::Less,
         revm_jit_backend::OptimizationLevel::Default => OptimizationLevel::Default,
         revm_jit_backend::OptimizationLevel::Aggressive => OptimizationLevel::Aggressive,
+    }
+}
+
+fn convert_opt_level_rev(level: OptimizationLevel) -> revm_jit_backend::OptimizationLevel {
+    match level {
+        OptimizationLevel::None => revm_jit_backend::OptimizationLevel::None,
+        OptimizationLevel::Less => revm_jit_backend::OptimizationLevel::Less,
+        OptimizationLevel::Default => revm_jit_backend::OptimizationLevel::Default,
+        OptimizationLevel::Aggressive => revm_jit_backend::OptimizationLevel::Aggressive,
     }
 }
 

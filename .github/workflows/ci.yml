@@ -15,12 +15,15 @@ concurrency:
 
 jobs:
   test:
-    name: test ${{ matrix.toolchain }}
+    name: test +${{ matrix.toolchain }} ${{ matrix.profile }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
+      fail-fast: false
       matrix:
-        toolchain: ["stable", "nightly"]
+        # toolchain: ["stable", "nightly"]
+        toolchain: ["nightly-2024-02-01"]
+        profile: ["dev", "release"]
     steps:
       - uses: actions/checkout@v4
       - uses: KyleMayes/install-llvm-action@v1
@@ -35,7 +38,7 @@ jobs:
         with:
           cache-on-failure: true
       - name: test
-        run: cargo test --all-features --workspace --verbose
+        run: cargo test --all-features --workspace --verbose --profile ${{ matrix.profile }}
 
   feature-checks:
     runs-on: ubuntu-latest

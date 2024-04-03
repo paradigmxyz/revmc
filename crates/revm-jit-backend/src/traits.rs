@@ -136,6 +136,7 @@ pub trait Backend: BackendTypes + TypeMethods {
 
     fn set_is_dumping(&mut self, yes: bool);
     fn set_debug_assertions(&mut self, yes: bool);
+    fn opt_level(&self) -> OptimizationLevel;
     fn set_opt_level(&mut self, level: OptimizationLevel);
     fn dump_ir(&mut self, path: &Path) -> Result<()>;
     fn dump_disasm(&mut self, path: &Path) -> Result<()>;

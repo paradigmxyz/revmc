@@ -3,7 +3,7 @@
 use crate::{
     callbacks::{Callback, Callbacks},
     Backend, Builder, Bytecode, EvmContext, EvmStack, Inst, InstData, InstFlags, IntCC, JitEvmFn,
-    Result, I256_MIN,
+    Result, I256_MIN, TEST_SUSPEND,
 };
 use revm_interpreter::{opcode as op, Contract, Gas, InstructionResult};
 use revm_jit_backend::{
@@ -95,6 +95,11 @@ impl<B: Backend> JitEvm<B> {
     /// Defaults to `false`.
     pub fn dump_unopt_assembly(&mut self, yes: bool) {
         self.dump_unopt_assembly = yes;
+    }
+
+    /// Returns the optimization level.
+    pub fn opt_level(&self) -> OptimizationLevel {
+        self.backend.opt_level()
     }
 
     /// Sets the optimization level.
@@ -827,6 +832,11 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
         // Assert that we already skipped the block.
         debug_assert!(!data.flags.contains(InstFlags::DEAD_CODE));
+
+        if cfg!(test) && opcode == TEST_SUSPEND {
+            self.suspend();
+            goto_return!(no_branch "");
+        }
 
         // Disabled instructions don't pay gas.
         if data.flags.contains(InstFlags::DISABLED) {
@@ -1994,13 +2004,34 @@ mod tests {
         code
     }
 
+    macro_rules! with_matrix {
+        ($run:ident) => {
+            #[cfg(feature = "llvm")]
+            mod llvm {
+                use super::*;
+
+                fn run_llvm(jit: &mut JitEvm<JitEvmLlvmBackend<'_>>) {
+                    set_test_dump(jit, module_path!());
+                    $run(jit);
+                }
+
+                #[test]
+                fn unopt() {
+                    with_llvm_backend_jit(OptimizationLevel::None, run_llvm);
+                }
+
+                #[test]
+                fn opt() {
+                    with_llvm_backend_jit(OptimizationLevel::Aggressive, run_llvm);
+                }
+            }
+        };
+    }
+
     macro_rules! tests {
         ($($group:ident { $($t:tt)* })*) => { uint! {
             $(
                 mod $group {
-                    #[allow(unused_imports)]
-                    use super::*;
-
                     tests!(@cases $($t)*);
                 }
             )*
@@ -2008,9 +2039,14 @@ mod tests {
 
         (@cases $( $name:ident($($t:tt)*) ),* $(,)?) => {
             $(
-                #[test]
-                fn $name() {
-                    run_case(tests!(@case $($t)*));
+                mod $name {
+                    use super::super::*;
+
+                    fn _run<B: Backend>(jit: &mut JitEvm<B>) {
+                        run_case_built(tests!(@case $($t)*), jit)
+                    }
+
+                    with_matrix!(_run);
                 }
             )*
         };
@@ -2933,32 +2969,30 @@ mod tests {
         TLS_LLVM_CONTEXT.with(f);
     }
 
-    fn run_case(test_case: &TestCase<'_>) {
-        #[cfg(feature = "llvm")]
-        run_case_llvm(test_case);
-        #[cfg(not(feature = "llvm"))]
-        let _ = test_case;
+    #[cfg(feature = "llvm")]
+    fn with_llvm_backend(opt_level: OptimizationLevel, f: impl FnOnce(JitEvmLlvmBackend<'_>)) {
+        with_llvm_context(|cx| f(new_llvm_backend(cx, opt_level, false).unwrap()))
     }
 
     #[cfg(feature = "llvm")]
-    fn run_case_llvm(test_case: &TestCase<'_>) {
-        with_llvm_context(|context| {
-            let make_backend = |opt_level| new_llvm_backend(context, opt_level, false).unwrap();
-            run_case_generic(test_case, make_backend);
-        });
+    fn with_llvm_backend_jit(
+        opt_level: OptimizationLevel,
+        f: fn(&mut JitEvm<JitEvmLlvmBackend<'_>>),
+    ) {
+        with_llvm_backend(opt_level, |backend| f(&mut JitEvm::new(backend)));
     }
 
-    fn run_case_generic<B: Backend>(
-        test_case: &TestCase<'_>,
-        make_backend: impl Fn(OptimizationLevel) -> B,
-    ) {
-        println!("Running {test_case:#?}\n");
-
-        println!("--- not optimized ---");
-        run_case_built(test_case, &mut JitEvm::new(make_backend(OptimizationLevel::None)));
-
-        println!("--- optimized ---");
-        run_case_built(test_case, &mut JitEvm::new(make_backend(OptimizationLevel::Aggressive)));
+    fn set_test_dump<B: Backend>(jit: &mut JitEvm<B>, module_path: &str) {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().parent().unwrap();
+        let mut dump_path = root.to_path_buf();
+        dump_path.push("target");
+        dump_path.push("tests_dump");
+        // Skip `revm_jit::compiler::tests`.
+        for part in module_path.split("::").skip(3) {
+            dump_path.push(part);
+        }
+        dump_path.push(format!("{:?}", jit.opt_level()));
+        jit.set_dump_to(Some(dump_path));
     }
 
     fn run_case_built<B: Backend>(test_case: &TestCase<'_>, jit: &mut JitEvm<B>) {
@@ -3034,23 +3068,10 @@ mod tests {
 
     // ---
 
-    #[test]
-    fn fibonacci() {
-        #[cfg(feature = "llvm")]
-        with_llvm_context(|context| {
-            let make_backend = |opt_level| new_llvm_backend(context, opt_level, false).unwrap();
-            fibonacci_generic(make_backend);
-        });
-    }
+    mod fibonacci {
+        use super::*;
 
-    fn fibonacci_generic<B: Backend>(make_backend: impl Fn(OptimizationLevel) -> B) {
-        println!("--- not optimized ---");
-        let mut jit = JitEvm::new(make_backend(OptimizationLevel::None));
-        run_fibonacci_tests(&mut jit);
-
-        println!("--- optimized ---");
-        let mut jit = JitEvm::new(make_backend(OptimizationLevel::Aggressive));
-        run_fibonacci_tests(&mut jit);
+        with_matrix!(run_fibonacci_tests);
     }
 
     fn run_fibonacci_tests<B: Backend>(jit: &mut JitEvm<B>) {
@@ -3173,5 +3194,119 @@ mod tests {
             assert_eq!(fibonacci_rust(100), 354224848179261915075_U256);
             assert_eq!(fibonacci_rust(1000), 0x2e3510283c1d60b00930b7e8803c312b4c8e6d5286805fc70b594dc75cc0604b_U256);
         }
+    }
+
+    // ---
+
+    mod resume {
+        use super::*;
+
+        with_matrix!(run_resume_tests);
+    }
+
+    fn run_resume_tests<B: Backend>(jit: &mut JitEvm<B>) {
+        #[rustfmt::skip]
+        let code = &[
+            // 0
+            op::PUSH1, 0x42,
+            TEST_SUSPEND,
+            
+            // 1
+            op::PUSH1, 0x69,
+            TEST_SUSPEND,
+            
+            // 2
+            op::ADD,
+            TEST_SUSPEND,
+
+            // 3
+        ][..];
+
+        jit.set_inspect_stack_length(true);
+        let f = jit.compile(None, code, DEF_SPEC).unwrap();
+
+        let stack = &mut EvmStack::new();
+        let mut stack_len = 0;
+        with_evm_context(code, |ecx| {
+            assert_eq!(ecx.resume_at, 0);
+
+            // op::PUSH1, 0x42,
+            let r = unsafe { f.call(Some(stack), Some(&mut stack_len), ecx) };
+            assert_eq!(r, InstructionResult::CallOrCreate);
+            assert_eq!(stack_len, 1);
+            assert_eq!(stack.as_slice()[0].to_u256(), U256::from(0x42));
+            assert_eq!(ecx.resume_at, 1);
+
+            // op::PUSH1, 0x69,
+            let r = unsafe { f.call(Some(stack), Some(&mut stack_len), ecx) };
+            assert_eq!(r, InstructionResult::CallOrCreate);
+            assert_eq!(stack_len, 2);
+            assert_eq!(stack.as_slice()[0].to_u256(), U256::from(0x42));
+            assert_eq!(stack.as_slice()[1].to_u256(), U256::from(0x69));
+            assert_eq!(ecx.resume_at, 2);
+
+            // op::ADD,
+            let r = unsafe { f.call(Some(stack), Some(&mut stack_len), ecx) };
+            assert_eq!(r, InstructionResult::CallOrCreate);
+            assert_eq!(stack_len, 1);
+            assert_eq!(stack.as_slice()[0].to_u256(), U256::from(0x42 + 0x69));
+            assert_eq!(ecx.resume_at, 3);
+
+            // stop
+            let r = unsafe { f.call(Some(stack), Some(&mut stack_len), ecx) };
+            assert_eq!(r, InstructionResult::Stop);
+            assert_eq!(stack_len, 1);
+            assert_eq!(stack.as_slice()[0].to_u256(), U256::from(0x42 + 0x69));
+            assert_eq!(ecx.resume_at, 3);
+
+            // op::ADD,
+            ecx.resume_at = 2;
+            let r = unsafe { f.call(Some(stack), Some(&mut stack_len), ecx) };
+            assert_eq!(r, InstructionResult::StackUnderflow);
+            assert_eq!(stack_len, 1);
+            assert_eq!(stack.as_slice()[0].to_u256(), U256::from(0x42 + 0x69));
+            assert_eq!(ecx.resume_at, 2);
+
+            stack.as_mut_slice()[stack_len] = U256::from(2).into();
+            stack_len += 1;
+
+            // op::ADD,
+            ecx.resume_at = 2;
+            let r = unsafe { f.call(Some(stack), Some(&mut stack_len), ecx) };
+            assert_eq!(r, InstructionResult::CallOrCreate);
+            assert_eq!(stack_len, 1);
+            assert_eq!(stack.as_slice()[0].to_u256(), U256::from(0x42 + 0x69 + 2));
+            assert_eq!(ecx.resume_at, 3);
+
+            // op::PUSH1, 0x69,
+            ecx.resume_at = 1;
+            let r = unsafe { f.call(Some(stack), Some(&mut stack_len), ecx) };
+            assert_eq!(r, InstructionResult::CallOrCreate);
+            assert_eq!(stack_len, 2);
+            assert_eq!(stack.as_slice()[0].to_u256(), U256::from(0x42 + 0x69 + 2));
+            assert_eq!(stack.as_slice()[1].to_u256(), U256::from(0x69));
+            assert_eq!(ecx.resume_at, 2);
+
+            // op::ADD,
+            let r = unsafe { f.call(Some(stack), Some(&mut stack_len), ecx) };
+            assert_eq!(r, InstructionResult::CallOrCreate);
+            assert_eq!(stack_len, 1);
+            assert_eq!(stack.as_slice()[0].to_u256(), U256::from(0x42 + 0x69 + 2 + 0x69));
+            assert_eq!(ecx.resume_at, 3);
+
+            // stop
+            let r = unsafe { f.call(Some(stack), Some(&mut stack_len), ecx) };
+            assert_eq!(r, InstructionResult::Stop);
+            assert_eq!(stack_len, 1);
+            assert_eq!(stack.as_slice()[0].to_u256(), U256::from(0x42 + 0x69 + 2 + 0x69));
+            assert_eq!(ecx.resume_at, 3);
+
+            // stop
+            let r = unsafe { f.call(Some(stack), Some(&mut stack_len), ecx) };
+            assert_eq!(r, InstructionResult::Stop);
+            assert_eq!(stack_len, 1);
+            assert_eq!(stack.as_slice()[0].to_u256(), U256::from(0x42 + 0x69 + 2 + 0x69));
+            assert_eq!(ecx.resume_at, 3);
+        });
     }
 }

@@ -42,7 +42,11 @@ fn main() {
     // NOTE: We need to use `CARGO_ENCODED_RUSTFLAGS` as `RUSTFLAGS` alone is ignored due to
     // `--target`.
     let rustflags = if let Ok(rustflags) = env::var("CARGO_ENCODED_RUSTFLAGS") {
-        rustflags + "\u{1f}"
+        if rustflags.is_empty() {
+            rustflags
+        } else {
+            rustflags + "\u{1f}"
+        }
     } else {
         String::new()
     };

@@ -15,6 +15,9 @@ pub use opcode::*;
 mod stack;
 pub use stack::StackIo;
 
+/// Noop opcode used to test suspend-resume.
+pub(crate) const TEST_SUSPEND: u8 = 0x25;
+
 // TODO: Use `indexvec`.
 /// An EVM instruction is a high level internal representation of an EVM opcode.
 ///
@@ -388,6 +391,10 @@ impl InstData {
     /// Returns `true` if we know that this instruction will stop execution.
     #[inline]
     pub(crate) const fn is_diverging(&self, is_eof: bool) -> bool {
+        if cfg!(test) && self.opcode == TEST_SUSPEND {
+            return false;
+        }
+
         // TODO: SELFDESTRUCT will not be diverging in the future.
         self.flags.contains(InstFlags::INVALID_JUMP)
             || self.flags.contains(InstFlags::DISABLED)
@@ -399,6 +406,10 @@ impl InstData {
     /// Returns `true` if this instruction will suspend execution.
     #[inline]
     const fn will_suspend(&self) -> bool {
+        if cfg!(test) && self.opcode == TEST_SUSPEND {
+            return true;
+        }
+
         matches!(
             self.opcode,
             op::CALL | op::CALLCODE | op::DELEGATECALL | op::STATICCALL | op::CREATE | op::CREATE2

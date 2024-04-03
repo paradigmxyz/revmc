@@ -19,7 +19,7 @@ mod utils;
 pub use utils::*;
 
 #[no_mangle]
-unsafe extern "C" fn __revm_jit_callback_mload(
+pub unsafe extern "C" fn __revm_jit_callback_mload(
     ecx: &mut EvmContext<'_>,
     [offset_ptr]: &mut [EvmWord; 1],
 ) -> InstructionResult {
@@ -31,9 +31,9 @@ unsafe extern "C" fn __revm_jit_callback_mload(
 }
 
 #[no_mangle]
-unsafe extern "C" fn __revm_jit_callback_mstore(
+pub unsafe extern "C" fn __revm_jit_callback_mstore(
     ecx: &mut EvmContext<'_>,
-    reverse_tokens![offset, value]: &mut [EvmWord; 2],
+    rev![offset, value]: &mut [EvmWord; 2],
 ) -> InstructionResult {
     gas!(ecx, rgas::VERYLOW);
     let offset = try_into_usize!(offset.as_u256());
@@ -43,13 +43,19 @@ unsafe extern "C" fn __revm_jit_callback_mstore(
 }
 
 #[no_mangle]
-unsafe extern "C" fn __revm_jit_callback_mstore8(
+pub unsafe extern "C" fn __revm_jit_callback_mstore8(
     ecx: &mut EvmContext<'_>,
-    reverse_tokens![offset, value]: &mut [EvmWord; 2],
+    rev![offset, value]: &mut [EvmWord; 2],
 ) -> InstructionResult {
     gas!(ecx, rgas::VERYLOW);
     let offset = try_into_usize!(offset.as_u256());
     resize_memory!(ecx, offset, 1);
     ecx.memory.set_byte(offset, value.to_u256().byte(0));
     InstructionResult::Continue
+}
+
+#[no_mangle]
+#[inline]
+pub unsafe extern "C" fn __revm_jit_callback_msize(ecx: &mut EvmContext<'_>) -> usize {
+    ecx.memory.len()
 }

@@ -61,7 +61,7 @@ macro_rules! resize_memory {
 #[macro_export]
 macro_rules! read_words {
     ($sp:expr, $($words:ident),+ $(,)?) => {
-        let reverse_tokens!($($words),+) = unsafe { read_words_rev($sp) };
+        let rev![$($words),+] = unsafe { read_words_rev($sp) };
     };
 }
 
@@ -85,9 +85,9 @@ macro_rules! try_into_usize {
 
 // Credits: <https://github.com/AuroransSolis/rustconf-2023/blob/665a645d751dfe0e483261e3abca25ab4bb9e13a/reverse-tokens/src/main.rs>
 #[macro_export]
-macro_rules! reverse_tokens {
+macro_rules! rev {
 	(@rev [$first:tt$(, $rest:tt)*] [$($rev:tt),*]) => {
-		reverse_tokens! {
+		rev! {
 			@rev [$($rest),*][$first $(, $rev)*]
 		}
 	};
@@ -95,7 +95,7 @@ macro_rules! reverse_tokens {
 		[$($rev)*] // NOTE: Extra `[]` to make this an array pattern.
 	};
 	($($tt:tt)+) => {
-		reverse_tokens! {
+		rev! {
 			@rev [$($tt),+] []
 		}
 	};

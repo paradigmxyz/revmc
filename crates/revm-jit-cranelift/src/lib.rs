@@ -126,6 +126,10 @@ impl Backend for JitEvmCraneliftBackend {
         let _ = yes;
     }
 
+    fn opt_level(&self) -> OptimizationLevel {
+        self.opt_level
+    }
+
     fn set_opt_level(&mut self, level: OptimizationLevel) {
         // Note that this will only affect new functions after a new module is created in
         // `free_all_functions`.

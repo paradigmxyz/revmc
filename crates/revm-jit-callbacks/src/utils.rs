@@ -35,10 +35,9 @@ pub fn resize_memory(ecx: &mut EvmContext<'_>, offset: usize, len: usize) -> Ins
 #[inline]
 pub unsafe fn copy_operation(
     ecx: &mut EvmContext<'_>,
-    sp: *mut EvmWord,
+    rev![memory_offset, data_offset, len]: &mut [EvmWord; 3],
     data: &[u8],
 ) -> InstructionResult {
-    read_words!(sp, memory_offset, data_offset, len);
     let len = tri!(usize::try_from(len));
     gas_opt!(ecx, rgas::verylowcopy_cost(len as u64));
     if len == 0 {
