@@ -245,7 +245,7 @@ impl EvmStack {
     /// # Examples
     ///
     /// ```rust
-    /// use revm_jit::EvmStack;
+    /// use revm_jit_context::EvmStack;
     /// let mut stack_buf = EvmStack::new_heap();
     /// let stack = EvmStack::from_mut_vec(&mut stack_buf);
     /// assert_eq!(stack.as_slice().len(), EvmStack::CAPACITY);
