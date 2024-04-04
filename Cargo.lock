@@ -1458,7 +1458,6 @@ dependencies = [
  "revm-interpreter",
  "revm-jit-backend",
  "revm-jit-callbacks",
- "revm-jit-callbacks-bc",
  "revm-jit-context",
  "revm-jit-cranelift",
  "revm-jit-llvm",
@@ -1497,10 +1496,6 @@ dependencies = [
  "revm-jit-context",
  "revm-primitives",
 ]
-
-[[package]]
-name = "revm-jit-callbacks-bc"
-version = "0.1.0"
 
 [[package]]
 name = "revm-jit-context"

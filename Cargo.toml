@@ -35,7 +35,6 @@ codegen-units = 1
 revm-jit = { version = "0.1.0", path = "crates/revm-jit", default-features = false }
 revm-jit-backend = { version = "0.1.0", path = "crates/revm-jit-backend", default-features = false }
 revm-jit-callbacks = { version = "0.1.0", path = "crates/revm-jit-callbacks", default-features = false }
-revm-jit-callbacks-bc = { version = "0.1.0", path = "crates/revm-jit-callbacks-bc", default-features = false }
 revm-jit-context = { version = "0.1.0", path = "crates/revm-jit-context", default-features = false }
 revm-jit-cranelift = { version = "0.1.0", path = "crates/revm-jit-cranelift", default-features = false }
 revm-jit-llvm = { version = "0.1.0", path = "crates/revm-jit-llvm", default-features = false }

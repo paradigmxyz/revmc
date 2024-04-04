@@ -2979,7 +2979,7 @@ mod tests {
 
     #[cfg(feature = "llvm")]
     fn with_llvm_backend(opt_level: OptimizationLevel, f: impl FnOnce(JitEvmLlvmBackend<'_>)) {
-        with_llvm_context(|cx| f(new_llvm_backend(cx, opt_level, false).unwrap()))
+        with_llvm_context(|cx| f(new_llvm_backend(cx, opt_level).unwrap()))
     }
 
     #[cfg(feature = "llvm")]

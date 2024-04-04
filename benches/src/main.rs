@@ -34,7 +34,7 @@ fn main() -> Result<()> {
     // Build the compiler.
     let opt_level = cli.opt_level.unwrap_or(OptimizationLevel::Aggressive);
     let context = revm_jit::llvm::inkwell::context::Context::create();
-    let backend = new_llvm_backend(&context, opt_level, true)?;
+    let backend = new_llvm_backend(&context, opt_level)?;
     let mut jit = JitEvm::new(backend);
     jit.set_dump_to(Some(PathBuf::from("./tmp/revm-jit")));
     jit.set_disable_gas(cli.no_gas);
