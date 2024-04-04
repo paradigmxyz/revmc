@@ -1,6 +1,6 @@
 use crate::{EvmContext, EvmWord};
 use revm_interpreter::{
-    as_usize_saturated, gas as rgas, CreateInputs, Gas, InstructionResult, InterpreterAction,
+    as_usize_saturated, gas as rgas, CreateInputs, InstructionResult, InterpreterAction,
     InterpreterResult, SStoreResult,
 };
 use revm_jit_backend::{Attribute, TypeMethods};
@@ -470,13 +470,8 @@ pub(crate) unsafe extern "C" fn do_return(
     } else {
         Bytes::new()
     };
-    *ecx.next_action = InterpreterAction::Return {
-        result: InterpreterResult {
-            output,
-            gas: Gas::new(0), // TODO
-            result,
-        },
-    };
+    *ecx.next_action =
+        InterpreterAction::Return { result: InterpreterResult { output, gas: *ecx.gas, result } };
     InstructionResult::Continue
 }
 

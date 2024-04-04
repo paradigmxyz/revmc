@@ -1,15 +1,5 @@
 [workspace]
 members = ["benches/", "crates/*"]
-# exclude cranelift as it doesn't work yet
-default-members = [
-    "benches/",
-    "crates/revm-jit/",
-    "crates/revm-jit-backend/",
-    "crates/revm-jit-callbacks/",
-    "crates/revm-jit-callbacks-bc/",
-    "crates/revm-jit-context/",
-    "crates/revm-jit-llvm/",
-]
 resolver = "2"
 
 [workspace.package]

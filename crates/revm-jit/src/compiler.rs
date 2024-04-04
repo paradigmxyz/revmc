@@ -330,13 +330,16 @@ impl<B: Backend> JitEvm<B> {
         // Pointer argument attributes.
         if !config.debug_assertions {
             for &(i, align, dereferenceable) in ptr_attrs {
-                for attr in [
-                    Attribute::NoAlias,
+                let attrs = [
                     Attribute::NoCapture,
                     Attribute::NoUndef,
                     Attribute::Align(align as u64),
                     Attribute::Dereferenceable(dereferenceable as u64),
-                ] {
+                ]
+                .into_iter()
+                // `Gas` is aliased in `EvmContext`.
+                .chain((i != 0).then_some(Attribute::NoAlias));
+                for attr in attrs {
                     let loc = FunctionAttributeLocation::Param(i as _);
                     bcx.add_function_attribute(None, attr, loc);
                 }
@@ -624,6 +627,9 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             callbacks,
         };
 
+        // We store the stack length if requested or necessary due to the bytecode.
+        let store_stack_length = config.inspect_stack_length || bytecode.will_suspend();
+
         // Add debug assertions for the parameters.
         if config.debug_assertions {
             fx.pointer_panic_with_bool(
@@ -639,7 +645,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 "local stack is disabled",
             );
             fx.pointer_panic_with_bool(
-                config.inspect_stack_length || bytecode.will_suspend(),
+                store_stack_length,
                 stack_len_arg,
                 "stack length pointer",
                 if config.inspect_stack_length {
@@ -701,7 +707,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
         // Finalize the suspend and resume blocks. Must come before the return block.
         // Also here is where the stack length is initialized.
-        let init_len = |fx: &mut Self| {
+        let load_len_at_start = |fx: &mut Self| {
+            // Loaded from args only for the config.
             if config.inspect_stack_length {
                 let stack_len = fx.bcx.load(fx.isize_type, stack_len_arg, "stack_len");
                 fx.stack_len.store(&mut fx.bcx, stack_len);
@@ -739,7 +746,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 fx.bcx.brif(is_resume_zero, resume_is_zero_block, resume_block);
 
                 fx.bcx.switch_to_block(resume_is_zero_block);
-                init_len(&mut fx);
+                load_len_at_start(&mut fx);
                 fx.bcx.br(first_inst_block);
 
                 // Dispatch to the resume block.
@@ -766,7 +773,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             debug_assert!(fx.suspend_blocks.is_empty());
 
             fx.bcx.switch_to_block(post_entry_block);
-            init_len(&mut fx);
+            load_len_at_start(&mut fx);
             fx.bcx.br(first_inst_block);
 
             fx.bcx.switch_to_block(resume_block);
@@ -778,7 +785,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         // Finalize the return block.
         fx.bcx.switch_to_block(fx.return_block);
         let return_value = fx.bcx.phi(fx.i8_type, &fx.incoming_returns);
-        if config.inspect_stack_length {
+        if store_stack_length {
             let len = fx.stack_len.load(&mut fx.bcx, "stack_len");
             fx.bcx.store(len, stack_len_arg);
         }
@@ -1512,7 +1519,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     /// `RETURN` or `REVERT` instruction.
     fn return_common(&mut self, ir: InstructionResult) {
         let sp = self.sp_after_input();
-        self.callback_ir(Callback::DoReturn, &[self.ecx, sp]);
+        let ir_const = self.bcx.iconst(self.i8_type, ir as i64);
+        self.callback_ir(Callback::DoReturn, &[self.ecx, sp, ir_const]);
         self.build_return_imm(ir);
     }
 
@@ -3222,7 +3230,6 @@ mod tests {
             // 3
         ][..];
 
-        jit.set_inspect_stack_length(true);
         let f = jit.compile(None, code, DEF_SPEC).unwrap();
 
         let stack = &mut EvmStack::new();
