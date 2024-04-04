@@ -21,8 +21,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # toolchain: ["stable", "nightly"]
-        toolchain: ["nightly-2024-02-01"]
+        toolchain: ["stable", "nightly"]
         profile: ["dev", "release"]
     steps:
       - uses: actions/checkout@v4
