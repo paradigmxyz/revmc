@@ -285,8 +285,8 @@ pub trait Builder: BackendTypes + TypeMethods {
 
     fn get_function(&mut self, name: &str) -> Option<Self::Function>;
 
-    /// Adds a callback function to the IR that's located at `address`.
-    fn add_callback_function(
+    /// Adds a function to the module that's located at `address`.
+    fn add_function(
         &mut self,
         name: &str,
         ret: Option<Self::Type>,

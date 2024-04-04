@@ -653,7 +653,7 @@ impl<'a> Builder for JitEvmCraneliftBuilder<'a> {
             .map(|id| self.module.declare_func_in_func(id, self.bcx.func))
     }
 
-    fn add_callback_function(
+    fn add_function(
         &mut self,
         name: &str,
         ret: Option<Self::Type>,

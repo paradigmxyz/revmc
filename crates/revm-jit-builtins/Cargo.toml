@@ -1,7 +1,7 @@
 [package]
-name = "revm-jit-callbacks"
-description = "REVM JIT - LLVM bitcode callbacks"
-homepage = "https://github.com/danipopes/revm-jit/tree/main/crates/revm-jit-callbacks"
+name = "revm-jit-builtins"
+description = "REVM JIT - builtins"
+homepage = "https://github.com/danipopes/revm-jit/tree/main/crates/revm-jit-builtins"
 
 version.workspace = true
 authors.workspace = true

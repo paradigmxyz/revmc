@@ -8,7 +8,7 @@ use revm_interpreter::{opcode as op, Contract, Gas, InstructionResult};
 use revm_jit_backend::{
     Attribute, BackendTypes, FunctionAttributeLocation, OptimizationLevel, TypeMethods,
 };
-use revm_jit_callbacks::{Callback, Callbacks};
+use revm_jit_builtins::{Builtin, Builtins};
 use revm_primitives::{BlockEnv, CfgEnv, Env, SpecId, TxEnv, U256};
 use std::{
     fmt::Write as _,
@@ -43,7 +43,7 @@ pub struct JitEvm<B: Backend> {
     out_dir: Option<PathBuf>,
     config: FcxConfig,
     function_counter: usize,
-    callbacks: Callbacks<B>,
+    builtins: Builtins<B>,
     dump_assembly: bool,
     dump_unopt_assembly: bool,
 }
@@ -62,7 +62,7 @@ impl<B: Backend> JitEvm<B> {
             out_dir: None,
             config: FcxConfig::default(),
             function_counter: 0,
-            callbacks: Callbacks::new(),
+            builtins: Builtins::new(),
             dump_assembly: true,
             dump_unopt_assembly: false,
         }
@@ -190,7 +190,7 @@ impl<B: Backend> JitEvm<B> {
     /// should only be used when none of the functions from that module are currently executing and
     /// none of the `fn` pointers are called afterwards.
     pub unsafe fn free_all_functions(&mut self) -> Result<()> {
-        self.callbacks.clear();
+        self.builtins.clear();
         self.function_counter = 0;
         self.backend.free_all_functions()
     }
@@ -231,7 +231,7 @@ impl<B: Backend> JitEvm<B> {
         trace_time!("translate", || FunctionCx::translate(
             bcx,
             &self.config,
-            &mut self.callbacks,
+            &mut self.builtins,
             bytecode,
         ))?;
 
@@ -435,7 +435,7 @@ struct FunctionCx<'a, B: Backend> {
     env: B::Value,
     /// The contract. Constant throughout the function.
     contract: B::Value,
-    /// The EVM context. Opaque pointer, only passed to callbacks.
+    /// The EVM context. Opaque pointer, only passed to builtins.
     ecx: B::Value,
     len_before: B::Value,
     len_offset: i8,
@@ -464,8 +464,8 @@ struct FunctionCx<'a, B: Backend> {
     /// The suspend block that all suspend instructions branch to.
     suspend_block: B::BasicBlock,
 
-    /// Callbacks.
-    callbacks: &'a mut Callbacks<B>,
+    /// Builtins.
+    builtins: &'a mut Builtins<B>,
 }
 
 impl<'a, B: Backend> FunctionCx<'a, B> {
@@ -527,7 +527,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     fn translate(
         mut bcx: B::Builder<'a>,
         config: &FcxConfig,
-        callbacks: &'a mut Callbacks<B>,
+        builtins: &'a mut Builtins<B>,
         bytecode: &'a Bytecode<'a>,
     ) -> Result<()> {
         // Get common types.
@@ -624,7 +624,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             incoming_returns: Vec::new(),
             return_block,
 
-            callbacks,
+            builtins,
         };
 
         // We store the stack length if requested or necessary due to the bytecode.
@@ -1022,16 +1022,16 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             op::SMOD => binop!(@if_not_zero srem),
             op::ADDMOD => {
                 let sp = self.sp_after_input();
-                let _ = self.callback(Callback::AddMod, &[sp]);
+                let _ = self.builtin(Builtin::AddMod, &[sp]);
             }
             op::MULMOD => {
                 let sp = self.sp_after_input();
-                let _ = self.callback(Callback::MulMod, &[sp]);
+                let _ = self.builtin(Builtin::MulMod, &[sp]);
             }
             op::EXP => {
                 let sp = self.sp_after_input();
                 let spec_id = self.const_spec_id();
-                self.callback_ir(Callback::Exp, &[self.ecx, sp, spec_id]);
+                self.builtin_ir(Builtin::Exp, &[self.ecx, sp, spec_id]);
             }
             op::SIGNEXTEND => {
                 // From the yellow paper:
@@ -1127,7 +1127,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
             op::KECCAK256 => {
                 let sp = self.sp_after_input();
-                self.callback_ir(Callback::Keccak256, &[self.ecx, sp]);
+                self.builtin_ir(Builtin::Keccak256, &[self.ecx, sp]);
             }
 
             op::ADDRESS => {
@@ -1136,7 +1136,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             op::BALANCE => {
                 let sp = self.sp_after_input();
                 let spec_id = self.const_spec_id();
-                self.callback_ir(Callback::Balance, &[self.ecx, sp, spec_id]);
+                self.builtin_ir(Builtin::Balance, &[self.ecx, sp, spec_id]);
             }
             op::ORIGIN => {
                 env_field!(@push @[endian = "big"] self.address_type, Env, TxEnv; tx.caller)
@@ -1191,14 +1191,14 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             }
             op::CALLDATACOPY => {
                 let sp = self.sp_after_input();
-                self.callback_ir(Callback::CallDataCopy, &[self.ecx, sp]);
+                self.builtin_ir(Builtin::CallDataCopy, &[self.ecx, sp]);
             }
             op::CODESIZE => {
                 contract_field!(@push self.isize_type, Contract, pf::BytecodeLocked; bytecode.original_len)
             }
             op::CODECOPY => {
                 let sp = self.sp_after_input();
-                self.callback_ir(Callback::CodeCopy, &[self.ecx, sp]);
+                self.builtin_ir(Builtin::CodeCopy, &[self.ecx, sp]);
             }
 
             op::GASPRICE => {
@@ -1207,28 +1207,28 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             op::EXTCODESIZE => {
                 let sp = self.sp_after_input();
                 let spec_id = self.const_spec_id();
-                self.callback_ir(Callback::ExtCodeSize, &[self.ecx, sp, spec_id]);
+                self.builtin_ir(Builtin::ExtCodeSize, &[self.ecx, sp, spec_id]);
             }
             op::EXTCODECOPY => {
                 let sp = self.sp_after_input();
                 let spec_id = self.const_spec_id();
-                self.callback_ir(Callback::ExtCodeCopy, &[self.ecx, sp, spec_id]);
+                self.builtin_ir(Builtin::ExtCodeCopy, &[self.ecx, sp, spec_id]);
             }
             op::RETURNDATASIZE => {
                 field!(ecx; @push self.isize_type, EvmContext<'_>, pf::Slice; return_data.len)
             }
             op::RETURNDATACOPY => {
                 let sp = self.sp_after_input();
-                self.callback_ir(Callback::ReturnDataCopy, &[self.ecx, sp]);
+                self.builtin_ir(Builtin::ReturnDataCopy, &[self.ecx, sp]);
             }
             op::EXTCODEHASH => {
                 let sp = self.sp_after_input();
                 let spec_id = self.const_spec_id();
-                self.callback_ir(Callback::ExtCodeHash, &[self.ecx, sp, spec_id]);
+                self.builtin_ir(Builtin::ExtCodeHash, &[self.ecx, sp, spec_id]);
             }
             op::BLOCKHASH => {
                 let sp = self.sp_after_input();
-                self.callback_ir(Callback::BlockHash, &[self.ecx, sp]);
+                self.builtin_ir(Builtin::BlockHash, &[self.ecx, sp]);
             }
             op::COINBASE => {
                 env_field!(@push @[endian = "big"] self.address_type, Env, BlockEnv; block.coinbase)
@@ -1271,44 +1271,44 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             op::CHAINID => env_field!(@push self.bcx.type_int(64), Env, CfgEnv; cfg.chain_id),
             op::SELFBALANCE => {
                 let slot = self.sp_at_top();
-                self.callback_ir(Callback::SelfBalance, &[self.ecx, slot]);
+                self.builtin_ir(Builtin::SelfBalance, &[self.ecx, slot]);
             }
             op::BASEFEE => {
                 env_field!(@push @[endian = "little"] self.word_type, Env, BlockEnv; block.basefee)
             }
             op::BLOBHASH => {
                 let sp = self.sp_after_input();
-                let _ = self.callback(Callback::BlobHash, &[self.ecx, sp]);
+                let _ = self.builtin(Builtin::BlobHash, &[self.ecx, sp]);
             }
             op::BLOBBASEFEE => {
                 let len = self.len_before();
                 let slot = self.sp_at(len);
-                let _ = self.callback(Callback::BlobBaseFee, &[self.ecx, slot]);
+                let _ = self.builtin(Builtin::BlobBaseFee, &[self.ecx, slot]);
             }
 
             op::POP => { /* Already handled in stack_io */ }
             op::MLOAD => {
                 let sp = self.sp_after_input();
-                self.callback_ir(Callback::Mload, &[self.ecx, sp]);
+                self.builtin_ir(Builtin::Mload, &[self.ecx, sp]);
             }
             op::MSTORE => {
                 let sp = self.sp_after_input();
-                self.callback_ir(Callback::Mstore, &[self.ecx, sp]);
+                self.builtin_ir(Builtin::Mstore, &[self.ecx, sp]);
             }
             op::MSTORE8 => {
                 let sp = self.sp_after_input();
-                self.callback_ir(Callback::Mstore8, &[self.ecx, sp]);
+                self.builtin_ir(Builtin::Mstore8, &[self.ecx, sp]);
             }
             op::SLOAD => {
                 let sp = self.sp_after_input();
                 let spec_id = self.const_spec_id();
-                self.callback_ir(Callback::Sload, &[self.ecx, sp, spec_id]);
+                self.builtin_ir(Builtin::Sload, &[self.ecx, sp, spec_id]);
             }
             op::SSTORE => {
                 self.fail_if_staticcall(InstructionResult::StateChangeDuringStaticCall);
                 let sp = self.sp_after_input();
                 let spec_id = self.const_spec_id();
-                self.callback_ir(Callback::Sstore, &[self.ecx, sp, spec_id]);
+                self.builtin_ir(Builtin::Sstore, &[self.ecx, sp, spec_id]);
             }
             op::JUMP | op::JUMPI => {
                 if data.flags.contains(InstFlags::INVALID_JUMP) {
@@ -1350,7 +1350,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 self.push(pc);
             }
             op::MSIZE => {
-                let msize = self.callback(Callback::Msize, &[self.ecx]).unwrap();
+                let msize = self.builtin(Builtin::Msize, &[self.ecx]).unwrap();
                 let msize = self.bcx.zext(self.word_type, msize);
                 self.push(msize);
             }
@@ -1364,12 +1364,12 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             }
             op::TLOAD => {
                 let sp = self.sp_after_input();
-                let _ = self.callback(Callback::Tload, &[self.ecx, sp]);
+                let _ = self.builtin(Builtin::Tload, &[self.ecx, sp]);
             }
             op::TSTORE => {
                 self.fail_if_staticcall(InstructionResult::StateChangeDuringStaticCall);
                 let sp = self.sp_after_input();
-                let _ = self.callback(Callback::Tstore, &[self.ecx, sp]);
+                let _ = self.builtin(Builtin::Tstore, &[self.ecx, sp]);
             }
 
             op::PUSH0 => {
@@ -1393,7 +1393,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 let n = opcode - op::LOG0;
                 let sp = self.sp_after_input();
                 let n = self.bcx.iconst(self.i8_type, n as i64);
-                self.callback_ir(Callback::Log, &[self.ecx, sp, n]);
+                self.builtin_ir(Builtin::Log, &[self.ecx, sp, n]);
             }
 
             op::CREATE => {
@@ -1435,7 +1435,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 self.fail_if_staticcall(InstructionResult::StateChangeDuringStaticCall);
                 let sp = self.sp_after_input();
                 let spec_id = self.const_spec_id();
-                self.callback_ir(Callback::SelfDestruct, &[self.ecx, sp, spec_id]);
+                self.builtin_ir(Builtin::SelfDestruct, &[self.ecx, sp, spec_id]);
                 goto_return!(build InstructionResult::SelfDestruct);
             }
 
@@ -1520,7 +1520,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     fn return_common(&mut self, ir: InstructionResult) {
         let sp = self.sp_after_input();
         let ir_const = self.bcx.iconst(self.i8_type, ir as i64);
-        self.callback_ir(Callback::DoReturn, &[self.ecx, sp, ir_const]);
+        self.builtin_ir(Builtin::DoReturn, &[self.ecx, sp, ir_const]);
         self.build_return_imm(ir);
     }
 
@@ -1528,7 +1528,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         self.fail_if_staticcall(InstructionResult::StateChangeDuringStaticCall);
         let sp = self.sp_after_input();
         let is_create2 = self.bcx.iconst(self.bcx.type_int(1), is_create2 as i64);
-        self.callback_ir(Callback::Create, &[self.ecx, sp, is_create2]);
+        self.builtin_ir(Builtin::Create, &[self.ecx, sp, is_create2]);
         self.suspend();
     }
 
@@ -1733,29 +1733,29 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     }
 
     fn call_panic(&mut self, msg: &str) {
-        let function = self.callback_function(Callback::Panic);
+        let function = self.builtin_function(Builtin::Panic);
         let ptr = self.bcx.str_const(msg);
         let len = self.bcx.iconst(self.isize_type, msg.len() as i64);
         let _ = self.bcx.call(function, &[ptr, len]);
         self.bcx.unreachable();
     }
 
-    /// Build a call to a callback that returns an [`InstructionResult`].
-    fn callback_ir(&mut self, callback: Callback, args: &[B::Value]) {
-        let ret = self.callback(callback, args).expect("callback does not return a value");
+    /// Build a call to a builtin that returns an [`InstructionResult`].
+    fn builtin_ir(&mut self, builtin: Builtin, args: &[B::Value]) {
+        let ret = self.builtin(builtin, args).expect("builtin does not return a value");
         let failure = self.bcx.icmp_imm(IntCC::NotEqual, ret, InstructionResult::Continue as i64);
         self.build_failure_inner(true, failure, ret);
     }
 
-    /// Build a call to a callback.
+    /// Build a call to a builtin.
     #[must_use]
-    fn callback(&mut self, callback: Callback, args: &[B::Value]) -> Option<B::Value> {
-        let function = self.callback_function(callback);
+    fn builtin(&mut self, builtin: Builtin, args: &[B::Value]) -> Option<B::Value> {
+        let function = self.builtin_function(builtin);
         self.bcx.call(function, args)
     }
 
-    fn callback_function(&mut self, callback: Callback) -> B::Function {
-        self.callbacks.get(callback, &mut self.bcx)
+    fn builtin_function(&mut self, builtin: Builtin) -> B::Function {
+        self.builtins.get(builtin, &mut self.bcx)
     }
 
     /// Adds a comment to the current instruction.

@@ -818,7 +818,7 @@ impl<'a, 'ctx> Builder for JitEvmLlvmBuilder<'a, 'ctx> {
         self.module.get_function(name)
     }
 
-    fn add_callback_function(
+    fn add_function(
         &mut self,
         name: &str,
         ret: Option<Self::Type>,

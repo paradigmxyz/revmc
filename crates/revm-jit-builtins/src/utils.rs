@@ -5,7 +5,7 @@ use revm_jit_context::{EvmContext, EvmWord};
 ///
 /// NOTE: this returns the arguments in **reverse order**. Use [`read_words!`] to get them in order.
 ///
-/// The returned lifetime is valid for the entire duration of the callback.
+/// The returned lifetime is valid for the entire duration of the builtin.
 ///
 /// # Safety
 ///

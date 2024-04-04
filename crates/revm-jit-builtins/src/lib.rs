@@ -26,7 +26,7 @@ use revm_primitives::{
 #[cfg(feature = "ir")]
 mod ir;
 #[cfg(feature = "ir")]
-pub use ir::{Callback, Callbacks};
+pub use ir::*;
 
 #[macro_use]
 mod macros;
@@ -34,31 +34,30 @@ mod macros;
 mod utils;
 pub use utils::*;
 
-/* ------------------------------------- Callback Functions ------------------------------------- */
-// NOTE: All functions MUST be `extern "C"` and their parameters must match `Callback` enum.
+// NOTE: All functions MUST be `extern "C"` and their parameters must match `Builtin` enum.
 //
 // The `sp` parameter always points to the last popped stack element.
 // If results are expected to be pushed back onto the stack, they must be written to the read
 // pointers in **reverse order**, meaning the last pointer is the first return value.
 
 #[no_mangle]
-pub unsafe extern "C" fn __revm_jit_panic(ptr: *const u8, len: usize) -> ! {
+pub unsafe extern "C" fn __revm_jit_builtin_panic(ptr: *const u8, len: usize) -> ! {
     let msg = core::str::from_utf8_unchecked(core::slice::from_raw_parts(ptr, len));
     panic!("{msg}");
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn __revm_jit_addmod(rev![a, b, c]: &mut [EvmWord; 3]) {
+pub unsafe extern "C" fn __revm_jit_builtin_addmod(rev![a, b, c]: &mut [EvmWord; 3]) {
     *c = a.to_u256().add_mod(b.to_u256(), c.to_u256()).into();
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn __revm_jit_mulmod(rev![a, b, c]: &mut [EvmWord; 3]) {
+pub unsafe extern "C" fn __revm_jit_builtin_mulmod(rev![a, b, c]: &mut [EvmWord; 3]) {
     *c = a.to_u256().mul_mod(b.to_u256(), c.to_u256()).into();
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn __revm_jit_exp(
+pub unsafe extern "C" fn __revm_jit_builtin_exp(
     ecx: &mut EvmContext<'_>,
     rev![base, exponent_ptr]: &mut [EvmWord; 2],
     spec_id: SpecId,
@@ -71,7 +70,7 @@ pub unsafe extern "C" fn __revm_jit_exp(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn __revm_jit_keccak256(
+pub unsafe extern "C" fn __revm_jit_builtin_keccak256(
     ecx: &mut EvmContext<'_>,
     rev![offset, len_ptr]: &mut [EvmWord; 2],
 ) -> InstructionResult {
@@ -93,7 +92,7 @@ pub unsafe extern "C" fn __revm_jit_keccak256(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn __revm_jit_balance(
+pub unsafe extern "C" fn __revm_jit_builtin_balance(
     ecx: &mut EvmContext<'_>,
     address: &mut EvmWord,
     spec_id: SpecId,
@@ -112,7 +111,7 @@ pub unsafe extern "C" fn __revm_jit_balance(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn __revm_jit_calldatacopy(
+pub unsafe extern "C" fn __revm_jit_builtin_calldatacopy(
     ecx: &mut EvmContext<'_>,
     sp: &mut [EvmWord; 3],
 ) -> InstructionResult {
@@ -121,7 +120,7 @@ pub unsafe extern "C" fn __revm_jit_calldatacopy(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn __revm_jit_codecopy(
+pub unsafe extern "C" fn __revm_jit_builtin_codecopy(
     ecx: &mut EvmContext<'_>,
     sp: &mut [EvmWord; 3],
 ) -> InstructionResult {
@@ -130,7 +129,7 @@ pub unsafe extern "C" fn __revm_jit_codecopy(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn __revm_jit_extcodesize(
+pub unsafe extern "C" fn __revm_jit_builtin_extcodesize(
     ecx: &mut EvmContext<'_>,
     address: &mut EvmWord,
     spec_id: SpecId,
@@ -153,7 +152,7 @@ pub unsafe extern "C" fn __revm_jit_extcodesize(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn __revm_jit_extcodecopy(
+pub unsafe extern "C" fn __revm_jit_builtin_extcodecopy(
     ecx: &mut EvmContext<'_>,
     rev![address, memory_offset, code_offset, len]: &mut [EvmWord; 4],
     spec_id: SpecId,
@@ -173,7 +172,7 @@ pub unsafe extern "C" fn __revm_jit_extcodecopy(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn __revm_jit_returndatacopy(
+pub unsafe extern "C" fn __revm_jit_builtin_returndatacopy(
     ecx: &mut EvmContext<'_>,
     rev![memory_offset, offset, len]: &mut [EvmWord; 3],
 ) -> InstructionResult {
@@ -194,7 +193,7 @@ pub unsafe extern "C" fn __revm_jit_returndatacopy(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn __revm_jit_extcodehash(
+pub unsafe extern "C" fn __revm_jit_builtin_extcodehash(
     ecx: &mut EvmContext<'_>,
     address: &mut EvmWord,
     spec_id: SpecId,
@@ -217,7 +216,7 @@ pub unsafe extern "C" fn __revm_jit_extcodehash(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn __revm_jit_blockhash(
+pub unsafe extern "C" fn __revm_jit_builtin_blockhash(
     ecx: &mut EvmContext<'_>,
     number_ptr: &mut EvmWord,
 ) -> InstructionResult {
@@ -236,7 +235,7 @@ pub unsafe extern "C" fn __revm_jit_blockhash(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn __revm_jit_self_balance(
+pub unsafe extern "C" fn __revm_jit_builtin_self_balance(
     ecx: &mut EvmContext<'_>,
     slot: &mut EvmWord,
 ) -> InstructionResult {
@@ -246,7 +245,10 @@ pub unsafe extern "C" fn __revm_jit_self_balance(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn __revm_jit_blob_hash(ecx: &mut EvmContext<'_>, index_ptr: &mut EvmWord) {
+pub unsafe extern "C" fn __revm_jit_builtin_blob_hash(
+    ecx: &mut EvmContext<'_>,
+    index_ptr: &mut EvmWord,
+) {
     let index = index_ptr.to_u256();
     *index_ptr = EvmWord::from_be_bytes(
         ecx.host
@@ -261,12 +263,15 @@ pub unsafe extern "C" fn __revm_jit_blob_hash(ecx: &mut EvmContext<'_>, index_pt
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn __revm_jit_blob_base_fee(ecx: &mut EvmContext<'_>, slot: &mut EvmWord) {
+pub unsafe extern "C" fn __revm_jit_builtin_blob_base_fee(
+    ecx: &mut EvmContext<'_>,
+    slot: &mut EvmWord,
+) {
     *slot = ecx.host.env().block.get_blob_gasprice().unwrap_or_default().into();
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn __revm_jit_mload(
+pub unsafe extern "C" fn __revm_jit_builtin_mload(
     ecx: &mut EvmContext<'_>,
     [offset_ptr]: &mut [EvmWord; 1],
 ) -> InstructionResult {
@@ -278,7 +283,7 @@ pub unsafe extern "C" fn __revm_jit_mload(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn __revm_jit_mstore(
+pub unsafe extern "C" fn __revm_jit_builtin_mstore(
     ecx: &mut EvmContext<'_>,
     rev![offset, value]: &mut [EvmWord; 2],
 ) -> InstructionResult {
@@ -290,7 +295,7 @@ pub unsafe extern "C" fn __revm_jit_mstore(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn __revm_jit_mstore8(
+pub unsafe extern "C" fn __revm_jit_builtin_mstore8(
     ecx: &mut EvmContext<'_>,
     rev![offset, value]: &mut [EvmWord; 2],
 ) -> InstructionResult {
@@ -302,7 +307,7 @@ pub unsafe extern "C" fn __revm_jit_mstore8(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn __revm_jit_sload(
+pub unsafe extern "C" fn __revm_jit_builtin_sload(
     ecx: &mut EvmContext<'_>,
     index: &mut EvmWord,
     spec_id: SpecId,
@@ -315,7 +320,7 @@ pub unsafe extern "C" fn __revm_jit_sload(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn __revm_jit_sstore(
+pub unsafe extern "C" fn __revm_jit_builtin_sstore(
     ecx: &mut EvmContext<'_>,
     rev![index, value]: &mut [EvmWord; 2],
     spec_id: SpecId,
@@ -338,12 +343,12 @@ pub unsafe extern "C" fn __revm_jit_sstore(
 
 #[inline]
 #[no_mangle]
-pub unsafe extern "C" fn __revm_jit_msize(ecx: &mut EvmContext<'_>) -> usize {
+pub unsafe extern "C" fn __revm_jit_builtin_msize(ecx: &mut EvmContext<'_>) -> usize {
     ecx.memory.len()
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn __revm_jit_tstore(
+pub unsafe extern "C" fn __revm_jit_builtin_tstore(
     ecx: &mut EvmContext<'_>,
     rev![key, value]: &mut [EvmWord; 2],
 ) {
@@ -351,12 +356,12 @@ pub unsafe extern "C" fn __revm_jit_tstore(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn __revm_jit_tload(ecx: &mut EvmContext<'_>, key: &mut EvmWord) {
+pub unsafe extern "C" fn __revm_jit_builtin_tload(ecx: &mut EvmContext<'_>, key: &mut EvmWord) {
     *key = ecx.host.tload(ecx.contract.address, key.to_u256()).into();
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn __revm_jit_log(
+pub unsafe extern "C" fn __revm_jit_builtin_log(
     ecx: &mut EvmContext<'_>,
     sp: *mut EvmWord,
     n: u8,
@@ -389,7 +394,7 @@ pub unsafe extern "C" fn __revm_jit_log(
 // NOTE: Return `InstructionResult::Continue` here to indicate success, not the final result of
 // the execution.
 #[no_mangle]
-pub unsafe extern "C" fn __revm_jit_create(
+pub unsafe extern "C" fn __revm_jit_builtin_create(
     ecx: &mut EvmContext<'_>,
     rev![value, code_offset, len, salt]: &mut [EvmWord; 4],
     spec_id: SpecId,
@@ -447,7 +452,7 @@ pub unsafe extern "C" fn __revm_jit_create(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn __revm_jit_do_return(
+pub unsafe extern "C" fn __revm_jit_builtin_do_return(
     ecx: &mut EvmContext<'_>,
     rev![offset, len]: &mut [EvmWord; 2],
     result: InstructionResult,
@@ -466,7 +471,7 @@ pub unsafe extern "C" fn __revm_jit_do_return(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn __revm_jit_selfdestruct(
+pub unsafe extern "C" fn __revm_jit_builtin_selfdestruct(
     ecx: &mut EvmContext<'_>,
     target: &mut EvmWord,
     spec_id: SpecId,

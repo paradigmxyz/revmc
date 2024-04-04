@@ -80,7 +80,7 @@ impl Drop for ThreadSafeContext {
 /// A thread-safe module.
 ///
 /// See [the ORCv2 docs](https://releases.llvm.org/17.0.1/docs/ORCv2.html).
-// NOTE: A lifetime is not neeeded according to `LLVMOrcCreateNewThreadSafeContext`
+// NOTE: A lifetime is not needed according to `LLVMOrcCreateNewThreadSafeContext`
 // > Ownership of the underlying ThreadSafeContext data is shared: Clients can and should dispose of
 // > their ThreadSafeContext as soon as they no longer need to refer to it directly. Other
 // > references (e.g. from ThreadSafeModules) will keep the data alive as long as it is needed.
@@ -463,7 +463,7 @@ impl MaterializationResponsibility {
          * The length of the array is returned in NumPairs and the caller is responsible
          * for the returned memory and needs to call LLVMOrcDisposeCSymbolFlagsMap.
          *
-         * To use the returned symbols beyond the livetime of the
+         * To use the returned symbols beyond the lifetime of the
          * MaterializationResponsibility requires the caller to retain the symbols
          * explicitly.
          */
@@ -1107,7 +1107,7 @@ fn cvt_cb_res(res: Result<Result<(), String>, Box<dyn std::any::Any + Send>>) ->
     let msg = match res {
         Ok(Ok(())) => return ptr::null_mut(),
         Ok(Err(e)) => e,
-        Err(e) => format!("callback panicked at {:?}", panic_payload(&e)),
+        Err(e) => format!("builtin panicked at {:?}", panic_payload(&e)),
     };
     unsafe { LLVMCreateStringError(CString::new(msg).unwrap_or_default().as_ptr()) }
 }

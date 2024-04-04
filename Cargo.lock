@@ -1457,7 +1457,7 @@ dependencies = [
  "bitvec",
  "revm-interpreter",
  "revm-jit-backend",
- "revm-jit-callbacks",
+ "revm-jit-builtins",
  "revm-jit-context",
  "revm-jit-cranelift",
  "revm-jit-llvm",
@@ -1489,7 +1489,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "revm-jit-callbacks"
+name = "revm-jit-builtins"
 version = "0.1.0"
 dependencies = [
  "revm-interpreter",
