@@ -12,8 +12,6 @@ use alloy_primitives as _;
 mod bytecode;
 pub use bytecode::*;
 
-mod callbacks;
-
 mod compiler;
 pub use compiler::JitEvm;
 

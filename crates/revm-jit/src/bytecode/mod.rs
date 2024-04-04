@@ -266,8 +266,8 @@ impl<'a> Bytecode<'a> {
             .with_pc() // pc
             .enumerate() // inst
             // Don't go until the end because we know `pc` are yielded in order.
-            .take_while(|(_ic, (pc2, _))| *pc2 <= pc)
-            .find(|(_ic, (pc2, _))| *pc2 == pc)
+            .take_while(|(_, (pc2, _))| *pc2 <= pc)
+            .find(|(_, (pc2, _))| *pc2 == pc)
             .unwrap_or_else(|| panic!("pc to inst conversion failed; pc={pc}"));
         debug_assert_eq!(self.insts[inst].to_op_in(self), op, "pc={pc} inst={inst}");
         inst

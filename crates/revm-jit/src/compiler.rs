@@ -1,7 +1,6 @@
 //! JIT compiler implementation.
 
 use crate::{
-    callbacks::{Callback, Callbacks},
     Backend, Builder, Bytecode, EvmContext, EvmStack, Inst, InstData, InstFlags, IntCC, JitEvmFn,
     Result, I256_MIN, TEST_SUSPEND,
 };
@@ -9,6 +8,7 @@ use revm_interpreter::{opcode as op, Contract, Gas, InstructionResult};
 use revm_jit_backend::{
     Attribute, BackendTypes, FunctionAttributeLocation, OptimizationLevel, TypeMethods,
 };
+use revm_jit_callbacks::{Callback, Callbacks};
 use revm_primitives::{BlockEnv, CfgEnv, Env, SpecId, TxEnv, U256};
 use std::{
     fmt::Write as _,

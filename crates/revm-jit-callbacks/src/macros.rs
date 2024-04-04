@@ -1,4 +1,3 @@
-#[macro_export]
 macro_rules! tri {
     ($e:expr) => {
         match $e {
@@ -8,7 +7,6 @@ macro_rules! tri {
     };
 }
 
-#[macro_export]
 macro_rules! try_opt {
     ($e:expr) => {
         match $e {
@@ -18,7 +16,6 @@ macro_rules! try_opt {
     };
 }
 
-#[macro_export]
 macro_rules! try_host {
     ($e:expr) => {
         match $e {
@@ -28,7 +25,6 @@ macro_rules! try_host {
     };
 }
 
-#[macro_export]
 macro_rules! gas {
     ($ecx:expr, $gas:expr) => {
         if !$ecx.gas.record_cost($gas) {
@@ -37,7 +33,6 @@ macro_rules! gas {
     };
 }
 
-#[macro_export]
 macro_rules! gas_opt {
     ($ecx:expr, $gas:expr) => {
         match $gas {
@@ -47,7 +42,6 @@ macro_rules! gas_opt {
     };
 }
 
-#[macro_export]
 macro_rules! resize_memory {
     ($ecx:expr, $offset:expr, $len:expr) => {
         match resize_memory($ecx, $offset, $len) {
@@ -58,14 +52,12 @@ macro_rules! resize_memory {
 }
 
 /// Same as `read_words_rev`, but returns the arguments in the order they were passed.
-#[macro_export]
 macro_rules! read_words {
     ($sp:expr, $($words:ident),+ $(,)?) => {
         let rev![$($words),+] = unsafe { read_words_rev($sp) };
     };
 }
 
-#[macro_export]
 macro_rules! try_into_usize {
     ($x:expr) => {
         match $x {
@@ -84,7 +76,6 @@ macro_rules! try_into_usize {
 }
 
 // Credits: <https://github.com/AuroransSolis/rustconf-2023/blob/665a645d751dfe0e483261e3abca25ab4bb9e13a/reverse-tokens/src/main.rs>
-#[macro_export]
 macro_rules! rev {
 	(@rev [$first:tt$(, $rest:tt)*] [$($rev:tt),*]) => {
 		rev! {

@@ -1493,8 +1493,10 @@ name = "revm-jit-callbacks"
 version = "0.1.0"
 dependencies = [
  "revm-interpreter",
+ "revm-jit-backend",
  "revm-jit-context",
  "revm-primitives",
+ "tracing",
 ]
 
 [[package]]
