@@ -11,12 +11,16 @@ use revm_jit_context::{EvmContext, EvmWord};
 ///
 /// Caller must ensure that `N` matches the number of elements popped in JIT code.
 #[inline(always)]
-pub unsafe fn read_words_rev<'a, const N: usize>(sp: *mut EvmWord) -> &'a mut [EvmWord; N] {
+pub(crate) unsafe fn read_words_rev<'a, const N: usize>(sp: *mut EvmWord) -> &'a mut [EvmWord; N] {
     &mut *sp.cast::<[EvmWord; N]>()
 }
 
 #[inline]
-pub fn resize_memory(ecx: &mut EvmContext<'_>, offset: usize, len: usize) -> InstructionResult {
+pub(crate) fn resize_memory(
+    ecx: &mut EvmContext<'_>,
+    offset: usize,
+    len: usize,
+) -> InstructionResult {
     let size = offset.saturating_add(len);
     if size > ecx.memory.len() {
         let rounded_size = revm_interpreter::interpreter::next_multiple_of_32(size);
@@ -33,7 +37,7 @@ pub fn resize_memory(ecx: &mut EvmContext<'_>, offset: usize, len: usize) -> Ins
 }
 
 #[inline]
-pub unsafe fn copy_operation(
+pub(crate) unsafe fn copy_operation(
     ecx: &mut EvmContext<'_>,
     rev![memory_offset, data_offset, len]: &mut [EvmWord; 3],
     data: &[u8],
@@ -51,6 +55,6 @@ pub unsafe fn copy_operation(
     InstructionResult::Continue
 }
 
-pub unsafe fn decouple_lt<'b, T: ?Sized>(x: &T) -> &'b T {
+pub(crate) unsafe fn decouple_lt<'b, T: ?Sized>(x: &T) -> &'b T {
     core::mem::transmute(x)
 }

@@ -32,7 +32,7 @@ pub use ir::*;
 mod macros;
 
 mod utils;
-pub use utils::*;
+use utils::*;
 
 // NOTE: All functions MUST be `extern "C"` and their parameters must match `Builtin` enum.
 //
