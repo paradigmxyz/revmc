@@ -88,9 +88,9 @@ fn main() -> Result<()> {
         let mut interpreter =
             revm_interpreter::Interpreter::new(contract.clone(), gas_limit, false);
         host.clear();
-        let mut cx = EvmContext::from_interpreter(&mut interpreter, &mut host);
+        let mut ecx = EvmContext::from_interpreter(&mut interpreter, &mut host);
 
-        unsafe { f.call(Some(&mut stack), Some(&mut stack_len), &mut cx) }
+        unsafe { f.call(Some(&mut stack), Some(&mut stack_len), &mut ecx) }
     };
 
     let ret = debug_time!("run", || run(f));

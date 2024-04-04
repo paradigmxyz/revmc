@@ -8,9 +8,10 @@ extern crate alloc;
 
 use core::{any::Any, fmt, mem::MaybeUninit, ptr};
 use revm_interpreter::{
-    Contract, Gas, Host, InstructionResult, Interpreter, InterpreterAction, SharedMemory,
+    Contract, Gas, Host, InstructionResult, Interpreter, InterpreterAction, InterpreterResult,
+    SharedMemory,
 };
-use revm_primitives::{Address, Env, U256};
+use revm_primitives::{Address, Bytes, Env, U256};
 
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
@@ -49,8 +50,17 @@ impl<'a> EvmContext<'a> {
     /// Creates a new JIT EVM context from an interpreter.
     #[inline]
     pub fn from_interpreter(interpreter: &'a mut Interpreter, host: &'a mut dyn HostExt) -> Self {
-        interpreter.instruction_result = InstructionResult::Continue;
-        Self {
+        Self::from_interpreter_with_stack(interpreter, host).0
+    }
+
+    /// Creates a new JIT EVM context from an interpreter.
+    #[inline]
+    pub fn from_interpreter_with_stack<'b: 'a>(
+        interpreter: &'a mut Interpreter,
+        host: &'b mut dyn HostExt,
+    ) -> (Self, &'a mut EvmStack, &'a mut usize) {
+        let (stack, stack_len) = EvmStack::from_interpreter_stack(&mut interpreter.stack);
+        let this = Self {
             memory: &mut interpreter.shared_memory,
             contract: &mut interpreter.contract,
             gas: &mut interpreter.gas,
@@ -59,7 +69,8 @@ impl<'a> EvmContext<'a> {
             return_data: &interpreter.return_data_buffer,
             is_static: interpreter.is_static,
             resume_at: 0,
-        }
+        };
+        (this, stack, stack_len)
     }
 
     /// Creates a new interpreter by cloning the context.
@@ -129,6 +140,10 @@ impl JitEvmFn {
 
     /// Calls the function by re-using the interpreter's resources.
     ///
+    /// This behaves the same as [`Interpreter::run`], returning an [`InstructionResult`] in the
+    /// interpreter's [`instruction_result`](Interpreter::instruction_result) field and the next
+    /// action in the [`next_action`](Interpreter::next_action) field.
+    ///
     /// # Safety
     ///
     /// The caller must ensure that the function is safe to call.
@@ -137,21 +152,21 @@ impl JitEvmFn {
         self,
         interpreter: &mut Interpreter,
         host: &mut dyn HostExt,
-    ) {
-        let mut ecx;
-        let res = (self.0)(
-            &mut interpreter.gas,
-            EvmStack::from_interpreter_stack(&mut interpreter.stack),
-            // TODO: Use `data_mut`.
-            &mut *interpreter.stack.data().as_ptr().cast_mut().cast::<usize>().add(1),
-            host.env_mut(),
-            interpreter.contract(),
-            {
-                ecx = EvmContext::from_interpreter(interpreter, host);
-                &mut ecx
-            },
-        );
-        interpreter.instruction_result = res;
+    ) -> InterpreterAction {
+        let (mut ecx, stack, stack_len) =
+            EvmContext::from_interpreter_with_stack(interpreter, host);
+        interpreter.instruction_result = self.call(Some(stack), Some(stack_len), &mut ecx);
+        if interpreter.next_action.is_some() {
+            core::mem::take(&mut interpreter.next_action)
+        } else {
+            InterpreterAction::Return {
+                result: InterpreterResult {
+                    result: interpreter.instruction_result,
+                    output: Bytes::new(),
+                    gas: interpreter.gas,
+                },
+            }
+        }
     }
 
     /// Calls the function.
@@ -215,10 +230,13 @@ impl EvmStack {
 
     /// Creates a stack from the interpreter's stack. Assumes that the stack is large enough.
     #[inline]
-    pub fn from_interpreter_stack(stack: &mut revm_interpreter::Stack) -> &mut Self {
+    pub fn from_interpreter_stack(stack: &mut revm_interpreter::Stack) -> (&mut Self, &mut usize) {
         debug_assert!(stack.data().capacity() >= Self::CAPACITY);
-        // TODO: Use `data_mut`.
-        unsafe { Self::from_mut_ptr(stack.data().as_ptr().cast_mut().cast()) }
+        unsafe {
+            let data = Self::from_mut_ptr(stack.data_mut().as_mut_ptr().cast());
+            let len = &mut *stack.data_mut().as_mut_ptr().cast::<usize>().add(1);
+            (data, len)
+        }
     }
 
     /// Creates a stack from a vector's buffer.
