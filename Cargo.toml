@@ -40,8 +40,8 @@ revm-jit-cranelift = { version = "0.1.0", path = "crates/revm-jit-cranelift", de
 revm-jit-llvm = { version = "0.1.0", path = "crates/revm-jit-llvm", default-features = false }
 
 alloy-primitives = { version = "0.7.0", default-features = false }
-revm-primitives = { version = "3.1.0", default-features = false }
-revm-interpreter = { version = "3.4.0", default-features = false }
+revm-primitives = { version = "3.1.1", default-features = false }
+revm-interpreter = { version = "4.0.0", default-features = false }
 ruint = { version = "1.12.1", default-features = false }
 
 eyre = "0.6"
@@ -51,5 +51,5 @@ tracing-error = "0.2"
 tracing-subscriber = "0.3"
 
 [patch.crates-io]
-revm-primitives = { git = "https://github.com/bluealloy/revm" }
-revm-interpreter = { git = "https://github.com/bluealloy/revm" }
+revm-primitives = { git = "https://github.com/bluealloy/revm", rev = "4d64bbcd241540f90f3a6ab2285b6fe6f8febb1f" }
+revm-interpreter = { git = "https://github.com/bluealloy/revm", rev = "4d64bbcd241540f90f3a6ab2285b6fe6f8febb1f" }

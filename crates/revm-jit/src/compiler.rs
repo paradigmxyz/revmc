@@ -2715,7 +2715,7 @@ mod tests {
                         scheme: primitives::CreateScheme::Create,
                         value: 0x42_U256,
                         init_code: Bytes::copy_from_slice(&0x69_U256.to_be_bytes::<32>()),
-                        gas_limit: 66921,
+                        gas_limit: 66917,
                     })
                 },
             }),
@@ -2733,7 +2733,7 @@ mod tests {
                         scheme: primitives::CreateScheme::Create2 { salt: 100_U256 },
                         value: 0x42_U256,
                         init_code: Bytes::copy_from_slice(&0x69_U256.to_be_bytes::<32>()),
-                        gas_limit: 66921,
+                        gas_limit: 66908,
                     })
                 },
             }),
@@ -2763,7 +2763,7 @@ mod tests {
                             value: 5_U256,
                         },
                         input: Bytes::copy_from_slice(&[0; 3]),
-                        gas_limit: 7,
+                        gas_limit: gas::CALL_STIPEND + 7,
                         context: CallContext {
                             address: Address::from_word(6_U256.into()),
                             caller: DEF_ADDR,
@@ -2772,7 +2772,7 @@ mod tests {
                             scheme: interpreter::CallScheme::Call,
                         },
                         is_static: false,
-                        return_memory_offset: 1..1+2,
+                        return_memory_offset: 2..2+1,
                     }),
                 },
             }),
@@ -2783,15 +2783,15 @@ mod tests {
                 bytecode: &[op::PUSH1, 0x69, op::PUSH0, op::MSTORE, op::PUSH1, 32, op::PUSH0, op::RETURN],
                 expected_return: InstructionResult::Return,
                 expected_memory: &0x69_U256.to_be_bytes::<32>(),
-                expected_gas: 3 + 2 + (3 + gas::memory_gas(1)) + 3 + 2 + 0,
+                expected_gas: 3 + 2 + (3 + gas::memory_gas(1)) + 3 + 2,
                 expected_next_action: InterpreterAction::Return {
                     result: InterpreterResult {
                         result: InstructionResult::Return,
                         output: Bytes::copy_from_slice(&0x69_U256.to_be_bytes::<32>()),
                         gas: {
                             let mut gas = Gas::new(DEF_GAS_LIMIT);
-                            let cost = 3 + 2 + (3 + gas::memory_gas(1)) + 3 + 2 + 0;
-                            assert!(gas.record_cost(cost));
+                            assert!(gas.record_cost(3 + 2 + 3 + 3 + 2));
+                            assert!(gas.record_memory(gas::memory_gas(1)));
                             gas
                         },
                     },
@@ -2801,15 +2801,15 @@ mod tests {
                 bytecode: &[op::PUSH1, 0x69, op::PUSH0, op::MSTORE, op::PUSH1, 32, op::PUSH0, op::REVERT],
                 expected_return: InstructionResult::Revert,
                 expected_memory: &0x69_U256.to_be_bytes::<32>(),
-                expected_gas: 3 + 2 + (3 + gas::memory_gas(1)) + 3 + 2 + 0,
+                expected_gas: 3 + 2 + (3 + gas::memory_gas(1)) + 3 + 2,
                 expected_next_action: InterpreterAction::Return {
                     result: InterpreterResult {
-                        result: InstructionResult::Return,
+                        result: InstructionResult::Revert,
                         output: Bytes::copy_from_slice(&0x69_U256.to_be_bytes::<32>()),
                         gas: {
                             let mut gas = Gas::new(DEF_GAS_LIMIT);
-                            let cost = 3 + 2 + (3 + gas::memory_gas(1)) + 3 + 2 + 0;
-                            assert!(gas.record_cost(cost));
+                            assert!(gas.record_cost(3 + 2 + 3 + 3 + 2));
+                            assert!(gas.record_memory(gas::memory_gas(1)));
                             gas
                         },
                     },
@@ -3137,7 +3137,7 @@ mod tests {
             stack_does_not_match_interpreter,
             expected_memory,
             expected_gas,
-            expected_next_action: _, // TODO
+            ref expected_next_action,
             assert_host,
             assert_ecx,
         } = *test_case;
@@ -3153,19 +3153,24 @@ mod tests {
             let mut interpreter = ecx.to_interpreter(Default::default());
             let memory = interpreter.take_memory();
             let mut int_host = TestHost::new();
-            interpreter.run(memory, &table, &mut int_host);
+
+            let interpreter_action = interpreter.run(memory, &table, &mut int_host);
+
             assert_eq!(
                 interpreter.instruction_result, expected_return,
                 "interpreter return value mismatch"
             );
+
             if !stack_does_not_match_interpreter {
                 assert_eq!(interpreter.stack.data(), expected_stack, "interpreter stack mismatch");
             }
+
             assert_eq!(
                 MemDisplay(interpreter.shared_memory.context_memory()),
                 MemDisplay(expected_memory),
                 "interpreter memory mismatch"
             );
+
             let mut expected_gas = expected_gas;
             if expected_gas == GAS_WHAT_THE_INTERPRETER_SAYS {
                 println!("asked for interpreter gas: {}", interpreter.gas.spent());
@@ -3173,25 +3178,53 @@ mod tests {
             } else {
                 assert_eq!(interpreter.gas.spent(), expected_gas, "interpreter gas mismatch");
             }
+
+            // Check next action only if it's not the default. This should be `None` but `run`
+            // returns a default value.
+            if !(expected_next_action.is_none()
+                && interpreter_action
+                    == (InterpreterAction::Return {
+                        result: InterpreterResult {
+                            result: interpreter.instruction_result,
+                            output: Bytes::new(),
+                            gas: interpreter.gas,
+                        },
+                    }))
+            {
+                assert_eq!(
+                    interpreter_action, *expected_next_action,
+                    "interpreter next action mismatch"
+                );
+            }
+
             if let Some(assert_host) = assert_host {
                 assert_host(&int_host);
             }
 
             // JIT.
             let actual_return = unsafe { f.call(Some(&mut stack), Some(&mut stack_len), ecx) };
+
             assert_eq!(actual_return, expected_return, "return value mismatch");
+
             let actual_stack =
                 stack.as_slice().iter().take(stack_len).map(|x| x.to_u256()).collect::<Vec<_>>();
+
             assert_eq!(actual_stack, *expected_stack, "stack mismatch");
+
             assert_eq!(
                 MemDisplay(ecx.memory.context_memory()),
                 MemDisplay(expected_memory),
                 "interpreter memory mismatch"
             );
+
             assert_eq!(ecx.gas.spent(), expected_gas, "gas mismatch");
+
+            assert_eq!(*ecx.next_action, *expected_next_action, "next action mismatch");
+
             if let Some(assert_host) = assert_host {
                 assert_host(ecx.host.downcast_mut().unwrap());
             }
+
             if let Some(assert_ecx) = assert_ecx {
                 assert_ecx(ecx);
             }

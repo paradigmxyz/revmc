@@ -58,6 +58,15 @@ macro_rules! read_words {
     };
 }
 
+macro_rules! pop {
+    ($sp:expr; $($x:ident),* $(,)?) => {
+        $(
+            $sp = $sp.sub(1);
+            let $x = &mut *$sp;
+        )*
+    };
+}
+
 macro_rules! try_into_usize {
     ($x:expr) => {
         match $x {

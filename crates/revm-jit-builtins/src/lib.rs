@@ -19,8 +19,8 @@ use revm_interpreter::{
 };
 use revm_jit_context::{EvmContext, EvmWord};
 use revm_primitives::{
-    spec_to_generic, Bytes, CreateScheme, Log, LogData, SpecId, BLOCK_HASH_HISTORY, KECCAK_EMPTY,
-    MAX_INITCODE_SIZE, U256,
+    Bytes, CreateScheme, Log, LogData, SpecId, BLOCK_HASH_HISTORY, KECCAK_EMPTY, MAX_INITCODE_SIZE,
+    U256,
 };
 
 #[cfg(feature = "ir")]
@@ -98,8 +98,7 @@ pub unsafe extern "C" fn __revm_jit_builtin_exp(
     spec_id: SpecId,
 ) -> InstructionResult {
     let exponent = exponent_ptr.to_u256();
-    // TODO: SpecId
-    gas_opt!(ecx, spec_to_generic!(spec_id, rgas::exp_cost::<SPEC>(exponent)));
+    gas_opt!(ecx, rgas::exp_cost(spec_id, exponent));
     *exponent_ptr = base.to_u256().pow(exponent).into();
     InstructionResult::Continue
 }
@@ -135,7 +134,7 @@ pub unsafe extern "C" fn __revm_jit_builtin_balance(
     let (balance, is_cold) = try_host!(ecx.host.balance(address.to_address()));
     *address = balance.into();
     let gas = if spec_id.is_enabled_in(SpecId::ISTANBUL) {
-        spec_to_generic!(spec_id, rgas::account_access_gas::<SPEC>(is_cold))
+        rgas::account_access_gas(spec_id, is_cold)
     } else if spec_id.is_enabled_in(SpecId::TANGERINE) {
         400
     } else {
@@ -194,8 +193,7 @@ pub unsafe extern "C" fn __revm_jit_builtin_extcodecopy(
 ) -> InstructionResult {
     let (code, is_cold) = try_host!(ecx.host.code(address.to_address()));
     let len = tri!(usize::try_from(len));
-    // TODO: SpecId
-    gas_opt!(ecx, spec_to_generic!(spec_id, rgas::extcodecopy_cost::<SPEC>(len as u64, is_cold)));
+    gas_opt!(ecx, rgas::extcodecopy_cost(spec_id, len as u64, is_cold));
     if len != 0 {
         let memory_offset = try_into_usize!(memory_offset.as_u256());
         let code_offset = code_offset.to_u256();
@@ -349,7 +347,7 @@ pub unsafe extern "C" fn __revm_jit_builtin_sload(
 ) -> InstructionResult {
     let address = ecx.contract.address;
     let (res, is_cold) = try_opt!(ecx.host.sload(address, index.to_u256()));
-    gas!(ecx, spec_to_generic!(spec_id, rgas::sload_cost::<SPEC>(is_cold)));
+    gas!(ecx, rgas::sload_cost(spec_id, is_cold));
     *index = res.into();
     InstructionResult::Continue
 }
@@ -363,16 +361,8 @@ pub unsafe extern "C" fn __revm_jit_builtin_sstore(
     let SStoreResult { original_value: original, present_value: old, new_value: new, is_cold } =
         try_opt!(ecx.host.sstore(ecx.contract.address, index.to_u256(), value.to_u256()));
 
-    // TODO: SpecId
-    gas_opt!(
-        ecx,
-        spec_to_generic!(
-            spec_id,
-            rgas::sstore_cost::<SPEC>(original, old, new, ecx.gas.remaining(), is_cold)
-        )
-    );
-    ecx.gas
-        .record_refund(spec_to_generic!(spec_id, rgas::sstore_refund::<SPEC>(original, old, new)));
+    gas_opt!(ecx, rgas::sstore_cost(spec_id, original, old, new, ecx.gas.remaining(), is_cold));
+    ecx.gas.record_refund(rgas::sstore_refund(spec_id, original, old, new));
     InstructionResult::Continue
 }
 
@@ -431,10 +421,17 @@ pub unsafe extern "C" fn __revm_jit_builtin_log(
 #[no_mangle]
 pub unsafe extern "C" fn __revm_jit_builtin_create(
     ecx: &mut EvmContext<'_>,
-    rev![value, code_offset, len, salt]: &mut [EvmWord; 4],
+    sp: *mut EvmWord,
     spec_id: SpecId,
     create_kind: CreateKind,
 ) -> InstructionResult {
+    let len = match create_kind {
+        CreateKind::Create => 3,
+        CreateKind::Create2 => 4,
+    };
+    let mut sp = sp.add(len);
+    pop!(sp; value, code_offset, len);
+
     let len = tri!(usize::try_from(len));
     let code = if len != 0 {
         if spec_id.is_enabled_in(SpecId::SHANGHAI) {
@@ -460,9 +457,10 @@ pub unsafe extern "C" fn __revm_jit_builtin_create(
     };
 
     let is_create2 = create_kind == CreateKind::Create2;
-    gas_opt!(ecx, if is_create2 { rgas::create2_cost(len) } else { Some(rgas::CREATE) });
+    gas_opt!(ecx, if is_create2 { rgas::create2_cost(len as u64) } else { Some(rgas::CREATE) });
 
     let scheme = if is_create2 {
+        pop!(sp; salt);
         CreateScheme::Create2 { salt: salt.to_u256() }
     } else {
         CreateScheme::Create
@@ -499,16 +497,8 @@ pub unsafe extern "C" fn __revm_jit_builtin_call(
         CallKind::DelegateCall | CallKind::StaticCall => 6,
     };
     let mut sp = sp.add(len);
-    macro_rules! pop {
-        ($($x:ident),* $(,)?) => {
-            $(
-                sp = sp.sub(1);
-                let $x = &mut *sp;
-            )*
-        };
-    }
 
-    pop!(local_gas_limit, to);
+    pop!(sp; local_gas_limit, to);
     let local_gas_limit = local_gas_limit.to_u256();
     let to = to.to_address();
 
@@ -519,7 +509,7 @@ pub unsafe extern "C" fn __revm_jit_builtin_call(
 
     let value = match call_kind {
         CallKind::Call | CallKind::CallCode => {
-            pop!(value);
+            pop!(sp; value);
             let value = value.to_u256();
             if matches!(call_kind, CallKind::Call) && ecx.is_static && value != U256::ZERO {
                 return InstructionResult::CallNotAllowedInsideStatic;
@@ -529,7 +519,7 @@ pub unsafe extern "C" fn __revm_jit_builtin_call(
         CallKind::DelegateCall | CallKind::StaticCall => U256::ZERO,
     };
 
-    pop!(in_offset, in_len, out_offset, out_len);
+    pop!(sp; in_offset, in_len, out_offset, out_len);
 
     let in_len = try_into_usize!(in_len.to_u256());
     let input = if in_len != 0 {
@@ -593,18 +583,15 @@ pub unsafe extern "C" fn __revm_jit_builtin_call(
     let (is_cold, exist) = try_host!(ecx.host.load_account(to));
     let is_new = !exist;
 
-    // TODO: SpecId
     gas!(
         ecx,
-        spec_to_generic!(
+        rgas::call_cost(
             spec_id,
-            rgas::call_cost::<SPEC>(
-                value != U256::ZERO,
-                is_new,
-                is_cold,
-                matches!(call_kind, CallKind::Call | CallKind::CallCode),
-                matches!(call_kind, CallKind::Call | CallKind::StaticCall),
-            )
+            value != U256::ZERO,
+            is_new,
+            is_cold,
+            matches!(call_kind, CallKind::Call | CallKind::CallCode),
+            matches!(call_kind, CallKind::Call | CallKind::StaticCall),
         )
     );
 
@@ -671,8 +658,7 @@ pub unsafe extern "C" fn __revm_jit_builtin_selfdestruct(
     if !spec_id.is_enabled_in(SpecId::LONDON) && !res.previously_destroyed {
         ecx.gas.record_refund(rgas::SELFDESTRUCT);
     }
-    // TODO: SpecId
-    gas!(ecx, spec_to_generic!(spec_id, rgas::selfdestruct_cost::<SPEC>(res)));
+    gas!(ecx, rgas::selfdestruct_cost(spec_id, res));
 
     InstructionResult::Continue
 }
