@@ -14,13 +14,13 @@ extern crate tracing;
 
 use alloc::{boxed::Box, vec::Vec};
 use revm_interpreter::{
-    as_usize_saturated, gas as rgas, CreateInputs, InstructionResult, InterpreterAction,
-    InterpreterResult, SStoreResult,
+    as_u64_saturated, as_usize_saturated, gas as rgas, CallContext, CallInputs, CallScheme,
+    CreateInputs, InstructionResult, InterpreterAction, InterpreterResult, SStoreResult, Transfer,
 };
 use revm_jit_context::{EvmContext, EvmWord};
 use revm_primitives::{
     spec_to_generic, Bytes, CreateScheme, Log, LogData, SpecId, BLOCK_HASH_HISTORY, KECCAK_EMPTY,
-    MAX_INITCODE_SIZE,
+    MAX_INITCODE_SIZE, U256,
 };
 
 #[cfg(feature = "ir")]
@@ -34,6 +34,41 @@ mod macros;
 mod utils;
 use utils::*;
 
+/// The kind of a `*CALL*` instruction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum CallKind {
+    /// `CALL`.
+    Call,
+    /// `CALLCODE`.
+    CallCode,
+    /// `DELEGATECALL`.
+    DelegateCall,
+    /// `STATICCALL`.
+    StaticCall,
+}
+
+impl From<CallKind> for CallScheme {
+    fn from(kind: CallKind) -> Self {
+        match kind {
+            CallKind::Call => CallScheme::Call,
+            CallKind::CallCode => CallScheme::CallCode,
+            CallKind::DelegateCall => CallScheme::DelegateCall,
+            CallKind::StaticCall => CallScheme::StaticCall,
+        }
+    }
+}
+
+/// The kind of a `CREATE*` instruction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum CreateKind {
+    /// `CREATE`.
+    Create,
+    /// `CREATE2`.
+    Create2,
+}
+
 // NOTE: All functions MUST be `extern "C"` and their parameters must match `Builtin` enum.
 //
 // The `sp` parameter always points to the last popped stack element.
@@ -41,8 +76,8 @@ use utils::*;
 // pointers in **reverse order**, meaning the last pointer is the first return value.
 
 #[no_mangle]
-pub unsafe extern "C" fn __revm_jit_builtin_panic(ptr: *const u8, len: usize) -> ! {
-    let msg = core::str::from_utf8_unchecked(core::slice::from_raw_parts(ptr, len));
+pub unsafe extern "C-unwind" fn __revm_jit_builtin_panic(data: *const u8, len: usize) -> ! {
+    let msg = core::str::from_utf8_unchecked(core::slice::from_raw_parts(data, len));
     panic!("{msg}");
 }
 
@@ -398,7 +433,7 @@ pub unsafe extern "C" fn __revm_jit_builtin_create(
     ecx: &mut EvmContext<'_>,
     rev![value, code_offset, len, salt]: &mut [EvmWord; 4],
     spec_id: SpecId,
-    is_create2: bool,
+    create_kind: CreateKind,
 ) -> InstructionResult {
     let len = tri!(usize::try_from(len));
     let code = if len != 0 {
@@ -424,6 +459,7 @@ pub unsafe extern "C" fn __revm_jit_builtin_create(
         Bytes::new()
     };
 
+    let is_create2 = create_kind == CreateKind::Create2;
     gas_opt!(ecx, if is_create2 { rgas::create2_cost(len) } else { Some(rgas::CREATE) });
 
     let scheme = if is_create2 {
@@ -445,6 +481,159 @@ pub unsafe extern "C" fn __revm_jit_builtin_create(
             value: value.to_u256(),
             init_code: code,
             gas_limit,
+        }),
+    };
+
+    InstructionResult::Continue
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn __revm_jit_builtin_call(
+    ecx: &mut EvmContext<'_>,
+    sp: *mut EvmWord,
+    spec_id: SpecId,
+    call_kind: CallKind,
+) -> InstructionResult {
+    let len = match call_kind {
+        CallKind::Call | CallKind::CallCode => 7,
+        CallKind::DelegateCall | CallKind::StaticCall => 6,
+    };
+    let mut sp = sp.add(len);
+    macro_rules! pop {
+        ($($x:ident),* $(,)?) => {
+            $(
+                sp = sp.sub(1);
+                let $x = &mut *sp;
+            )*
+        };
+    }
+
+    pop!(local_gas_limit, to);
+    let local_gas_limit = local_gas_limit.to_u256();
+    let to = to.to_address();
+
+    // max gas limit is not possible in real ethereum situation.
+    // But for tests we would not like to fail on this.
+    // Gas limit for subcall is taken as min of this value and current gas limit.
+    let local_gas_limit = as_u64_saturated!(local_gas_limit);
+
+    let value = match call_kind {
+        CallKind::Call | CallKind::CallCode => {
+            pop!(value);
+            let value = value.to_u256();
+            if matches!(call_kind, CallKind::Call) && ecx.is_static && value != U256::ZERO {
+                return InstructionResult::CallNotAllowedInsideStatic;
+            }
+            value
+        }
+        CallKind::DelegateCall | CallKind::StaticCall => U256::ZERO,
+    };
+
+    pop!(in_offset, in_len, out_offset, out_len);
+
+    let in_len = try_into_usize!(in_len.to_u256());
+    let input = if in_len != 0 {
+        let in_offset = try_into_usize!(in_offset.to_u256());
+        resize_memory!(ecx, in_offset, in_len);
+        Bytes::copy_from_slice(ecx.memory.slice(in_offset, in_len))
+    } else {
+        Bytes::new()
+    };
+
+    let out_len = try_into_usize!(out_len.to_u256());
+    let out_offset = if out_len != 0 {
+        let out_offset = try_into_usize!(out_offset.to_u256());
+        resize_memory!(ecx, out_offset, out_len);
+        out_offset
+    } else {
+        usize::MAX // unrealistic value so we are sure it is not used
+    };
+
+    let context = match call_kind {
+        CallKind::Call | CallKind::StaticCall => CallContext {
+            address: to,
+            caller: ecx.contract.address,
+            code_address: to,
+            apparent_value: value,
+            scheme: call_kind.into(),
+        },
+        CallKind::CallCode => CallContext {
+            address: ecx.contract.address,
+            caller: ecx.contract.address,
+            code_address: to,
+            apparent_value: value,
+            scheme: call_kind.into(),
+        },
+        CallKind::DelegateCall => CallContext {
+            address: ecx.contract.address,
+            caller: ecx.contract.caller,
+            code_address: to,
+            apparent_value: ecx.contract.value,
+            scheme: call_kind.into(),
+        },
+    };
+
+    let transfer = match call_kind {
+        CallKind::Call => Transfer { source: ecx.contract.address, target: to, value },
+        CallKind::CallCode => {
+            Transfer { source: ecx.contract.address, target: ecx.contract.address, value }
+        }
+        CallKind::DelegateCall | CallKind::StaticCall => {
+            // This is a dummy `Send` for `StaticCall` and `DelegateCall`, it should do nothing and
+            // not touch anything.
+            Transfer {
+                source: ecx.contract.address,
+                target: ecx.contract.address,
+                value: U256::ZERO,
+            }
+        }
+    };
+
+    // load account and calculate gas cost.
+    let (is_cold, exist) = try_host!(ecx.host.load_account(to));
+    let is_new = !exist;
+
+    // TODO: SpecId
+    gas!(
+        ecx,
+        spec_to_generic!(
+            spec_id,
+            rgas::call_cost::<SPEC>(
+                value != U256::ZERO,
+                is_new,
+                is_cold,
+                matches!(call_kind, CallKind::Call | CallKind::CallCode),
+                matches!(call_kind, CallKind::Call | CallKind::StaticCall),
+            )
+        )
+    );
+
+    // EIP-150: Gas cost changes for IO-heavy operations
+    let mut gas_limit = if spec_id.is_enabled_in(SpecId::TANGERINE) {
+        let gas = ecx.gas.remaining();
+        // take l64 part of gas_limit
+        (gas - gas / 64).min(local_gas_limit)
+    } else {
+        local_gas_limit
+    };
+
+    gas!(ecx, gas_limit);
+
+    // Add call stipend if there is value to be transferred.
+    if matches!(call_kind, CallKind::Call | CallKind::CallCode) && transfer.value != U256::ZERO {
+        gas_limit = gas_limit.saturating_add(rgas::CALL_STIPEND);
+    }
+    let is_static = matches!(call_kind, CallKind::StaticCall) || ecx.is_static;
+
+    *ecx.next_action = InterpreterAction::Call {
+        inputs: Box::new(CallInputs {
+            contract: to,
+            transfer,
+            input,
+            gas_limit,
+            context,
+            is_static,
+            return_memory_offset: out_offset..out_offset + out_len,
         }),
     };
 

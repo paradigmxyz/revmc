@@ -164,7 +164,8 @@ builtins! {
     Tload          = __revm_jit_builtin_tload(ptr, ptr) None,
     Log            = __revm_jit_builtin_log(ptr, ptr, u8) Some(u8),
 
-    Create         = __revm_jit_builtin_create(ptr, ptr, u8, bool) Some(u8),
+    Create         = __revm_jit_builtin_create(ptr, ptr, u8, u8) Some(u8),
+    Call           = __revm_jit_builtin_call(ptr, ptr, u8, u8) Some(u8),
     DoReturn       = __revm_jit_builtin_do_return(ptr, ptr, u8) Some(u8),
     SelfDestruct   = __revm_jit_builtin_selfdestruct(ptr, ptr, u8) Some(u8),
 }

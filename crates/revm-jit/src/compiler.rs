@@ -8,7 +8,7 @@ use revm_interpreter::{opcode as op, Contract, Gas, InstructionResult};
 use revm_jit_backend::{
     Attribute, BackendTypes, FunctionAttributeLocation, OptimizationLevel, TypeMethods,
 };
-use revm_jit_builtins::{Builtin, Builtins};
+use revm_jit_builtins::{Builtin, Builtins, CallKind, CreateKind};
 use revm_primitives::{BlockEnv, CfgEnv, Env, SpecId, TxEnv, U256};
 use std::{
     fmt::Write as _,
@@ -820,21 +820,23 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         /// Use `no_branch` to skip the branch to the next opcode.
         /// Use `build` to build the return instruction and skip the branch.
         macro_rules! goto_return {
-            ($comment:expr) => {
-                branch_to_next_opcode(self);
-                goto_return!(no_branch $comment);
-            };
-            (no_branch $comment:expr) => {
-                if self.comments_enabled {
-                    self.add_comment($comment);
-                }
+            (no_branch $($comment:expr)?) => {
+                $(
+                    if self.comments_enabled {
+                        self.add_comment($comment);
+                    }
+                )?
                 // epilogue(self);
                 return Ok(());
             };
             (build $ret:expr) => {{
                 self.build_return_imm($ret);
-                goto_return!(no_branch "");
+                goto_return!(no_branch);
             }};
+            ($($comment:expr)?) => {
+                branch_to_next_opcode(self);
+                goto_return!(no_branch $($comment)?);
+            };
         }
 
         // Assert that we already skipped the block.
@@ -842,7 +844,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
         if cfg!(test) && opcode == TEST_SUSPEND {
             self.suspend();
-            goto_return!(no_branch "");
+            goto_return!(no_branch);
         }
 
         // Disabled instructions don't pay gas.
@@ -1343,7 +1345,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                     self.inst_entries[inst] = self.bcx.current_block().unwrap();
                 }
 
-                goto_return!(no_branch "");
+                goto_return!(no_branch);
             }
             op::PC => {
                 let pc = self.bcx.iconst_256(U256::from(data.pc));
@@ -1397,38 +1399,38 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             }
 
             op::CREATE => {
-                self.create_common(false);
-                goto_return!(no_branch "");
+                self.create_common(CreateKind::Create);
+                goto_return!(no_branch);
             }
             op::CALL => {
                 self.call_common(CallKind::Call);
-                goto_return!(no_branch "");
+                goto_return!(no_branch);
             }
             op::CALLCODE => {
                 self.call_common(CallKind::CallCode);
-                goto_return!(no_branch "");
+                goto_return!(no_branch);
             }
             op::RETURN => {
                 self.return_common(InstructionResult::Return);
-                goto_return!(no_branch "");
+                goto_return!(no_branch);
             }
             op::DELEGATECALL => {
                 self.call_common(CallKind::DelegateCall);
-                goto_return!(no_branch "");
+                goto_return!(no_branch);
             }
             op::CREATE2 => {
-                self.create_common(true);
-                goto_return!(no_branch "");
+                self.create_common(CreateKind::Create2);
+                goto_return!(no_branch);
             }
 
             op::STATICCALL => {
                 self.call_common(CallKind::StaticCall);
-                goto_return!(no_branch "");
+                goto_return!(no_branch);
             }
 
             op::REVERT => {
                 self.return_common(InstructionResult::Revert);
-                goto_return!(no_branch "");
+                goto_return!(no_branch);
             }
             op::INVALID => goto_return!(build InstructionResult::InvalidFEOpcode),
             op::SELFDESTRUCT => {
@@ -1439,7 +1441,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 goto_return!(build InstructionResult::SelfDestruct);
             }
 
-            _ => unreachable!("unimplemented instructions: {}", data.to_op_in(self.bytecode)),
+            _ => unreachable!("unimplemented instruction: {data:?}"),
         }
 
         goto_return!("normal exit");
@@ -1502,6 +1504,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     }
 
     /// Swaps the topmost value with the `n`th value from the top.
+    /// `n` cannot be `0`.
     fn swap(&mut self, n: u8) {
         debug_assert_ne!(n, 0);
         let len = self.len_before();
@@ -1524,17 +1527,22 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         self.build_return_imm(ir);
     }
 
-    fn create_common(&mut self, is_create2: bool) {
+    /// `CREATE` or `CREATE2` instruction.
+    fn create_common(&mut self, create_kind: CreateKind) {
         self.fail_if_staticcall(InstructionResult::StateChangeDuringStaticCall);
         let sp = self.sp_after_input();
-        let is_create2 = self.bcx.iconst(self.bcx.type_int(1), is_create2 as i64);
-        self.builtin_ir(Builtin::Create, &[self.ecx, sp, is_create2]);
+        let spec_id = self.const_spec_id();
+        let create_kind = self.bcx.iconst(self.i8_type, create_kind as i64);
+        self.builtin_ir(Builtin::Create, &[self.ecx, sp, spec_id, create_kind]);
         self.suspend();
     }
 
+    /// `*CALL*` instruction.
     fn call_common(&mut self, call_kind: CallKind) {
-        // TODO
-        let _ = call_kind;
+        let sp = self.sp_after_input();
+        let spec_id = self.const_spec_id();
+        let call_kind = self.bcx.iconst(self.i8_type, call_kind as i64);
+        self.builtin_ir(Builtin::Call, &[self.ecx, sp, spec_id, call_kind]);
         self.suspend();
     }
 
@@ -1884,13 +1892,6 @@ impl<B: Backend> Pointer<B> {
     }
 }
 
-enum CallKind {
-    Call,
-    CallCode,
-    DelegateCall,
-    StaticCall,
-}
-
 // HACK: Need these structs' fields to be public for `offset_of!`.
 // `pf == private_fields`.
 mod pf {
@@ -1960,10 +1961,12 @@ fn op_block_name_with(op: Inst, data: &InstData, with: &str) -> String {
 mod tests {
     use super::*;
     use crate::*;
-    use interpreter::{DummyHost, Host};
-    use primitives::{BlobExcessGasAndPrice, HashMap, LogData, B256};
-    use revm_interpreter::{gas, opcode as op};
-    use revm_primitives::{hex, keccak256, spec_to_generic, Address, Bytes, KECCAK_EMPTY};
+    use interpreter::{CallContext, CallInputs, CreateInputs, InterpreterResult, Transfer};
+    use revm_interpreter::{gas, opcode as op, DummyHost, Host, InterpreterAction};
+    use revm_primitives::{
+        hex, keccak256, spec_to_generic, Address, BlobExcessGasAndPrice, Bytes, HashMap, LogData,
+        B256, KECCAK_EMPTY,
+    };
     use std::{fmt, sync::OnceLock};
 
     #[cfg(feature = "llvm")]
@@ -2051,7 +2054,7 @@ mod tests {
                     use super::super::*;
 
                     fn _run<B: Backend>(jit: &mut JitEvm<B>) {
-                        run_case_built(tests!(@case $($t)*), jit)
+                        run_test_case(tests!(@case $($t)*), jit);
                     }
 
                     with_matrix!(_run);
@@ -2091,10 +2094,7 @@ mod tests {
 
     tests! {
         ret {
-            empty(@raw {
-                bytecode: &[],
-                expected_gas: 0,
-            }),
+            empty(@raw {}),
             no_stop(@raw {
                 bytecode: &[op::PUSH0],
                 expected_stack: &[U256::ZERO],
@@ -2701,15 +2701,128 @@ mod tests {
                     }]);
                 }),
             }),
-            // TODO: create
-            // TODO: call
+            create(@raw {
+                bytecode: &[op::PUSH1, 0x69, op::PUSH0, op::MSTORE, op::PUSH1, 32, op::PUSH0, op::PUSH1, 0x42, op::CREATE],
+                expected_return: InstructionResult::CallOrCreate,
+                // NOTE: The address must be written by the caller. This is the last popped item.
+                expected_stack: &[32_U256],
+                stack_does_not_match_interpreter: true,
+                expected_memory: &0x69_U256.to_be_bytes::<32>(),
+                expected_gas: GAS_WHAT_THE_INTERPRETER_SAYS,
+                expected_next_action: InterpreterAction::Create {
+                    inputs: Box::new(CreateInputs {
+                        caller: DEF_ADDR,
+                        scheme: primitives::CreateScheme::Create,
+                        value: 0x42_U256,
+                        init_code: Bytes::copy_from_slice(&0x69_U256.to_be_bytes::<32>()),
+                        gas_limit: 66921,
+                    })
+                },
+            }),
+            create2(@raw {
+                bytecode: &[op::PUSH1, 0x69, op::PUSH0, op::MSTORE, op::PUSH1, 100, op::PUSH1, 32, op::PUSH0, op::PUSH1, 0x42, op::CREATE2],
+                expected_return: InstructionResult::CallOrCreate,
+                // NOTE: The address must be written by the caller. This is the last popped item.
+                expected_stack: &[100_U256],
+                stack_does_not_match_interpreter: true,
+                expected_memory: &0x69_U256.to_be_bytes::<32>(),
+                expected_gas: GAS_WHAT_THE_INTERPRETER_SAYS,
+                expected_next_action: InterpreterAction::Create {
+                    inputs: Box::new(CreateInputs {
+                        caller: DEF_ADDR,
+                        scheme: primitives::CreateScheme::Create2 { salt: 100_U256 },
+                        value: 0x42_U256,
+                        init_code: Bytes::copy_from_slice(&0x69_U256.to_be_bytes::<32>()),
+                        gas_limit: 66921,
+                    })
+                },
+            }),
+            call(@raw {
+                bytecode: &[
+                    op::PUSH1, 1, // ret length
+                    op::PUSH1, 2, // ret offset
+                    op::PUSH1, 3, // args length
+                    op::PUSH1, 4, // args offset
+                    op::PUSH1, 5, // value
+                    op::PUSH1, 6, // address
+                    op::PUSH1, 7, // gas
+                    op::CALL,
+                ],
+                expected_return: InstructionResult::CallOrCreate,
+                // NOTE: The return must be written by the caller. This is the last popped item.
+                expected_stack: &[1_U256],
+                stack_does_not_match_interpreter: true,
+                expected_memory: &[0; 32],
+                expected_gas: GAS_WHAT_THE_INTERPRETER_SAYS,
+                expected_next_action: InterpreterAction::Call {
+                    inputs: Box::new(CallInputs {
+                        contract: Address::from_word(6_U256.into()),
+                        transfer: Transfer {
+                            source: DEF_ADDR,
+                            target: Address::from_word(6_U256.into()),
+                            value: 5_U256,
+                        },
+                        input: Bytes::copy_from_slice(&[0; 3]),
+                        gas_limit: 7,
+                        context: CallContext {
+                            address: Address::from_word(6_U256.into()),
+                            caller: DEF_ADDR,
+                            code_address: Address::from_word(6_U256.into()),
+                            apparent_value: 5_U256,
+                            scheme: interpreter::CallScheme::Call,
+                        },
+                        is_static: false,
+                        return_memory_offset: 1..1+2,
+                    }),
+                },
+            }),
             // TODO: callcode
-            // TODO: return
             // TODO: delegatecall
-            // TODO: create2
             // TODO: staticcall
-            // TODO: revert
-            // TODO: selfdestruct
+            ret(@raw {
+                bytecode: &[op::PUSH1, 0x69, op::PUSH0, op::MSTORE, op::PUSH1, 32, op::PUSH0, op::RETURN],
+                expected_return: InstructionResult::Return,
+                expected_memory: &0x69_U256.to_be_bytes::<32>(),
+                expected_gas: 3 + 2 + (3 + gas::memory_gas(1)) + 3 + 2 + 0,
+                expected_next_action: InterpreterAction::Return {
+                    result: InterpreterResult {
+                        result: InstructionResult::Return,
+                        output: Bytes::copy_from_slice(&0x69_U256.to_be_bytes::<32>()),
+                        gas: {
+                            let mut gas = Gas::new(DEF_GAS_LIMIT);
+                            let cost = 3 + 2 + (3 + gas::memory_gas(1)) + 3 + 2 + 0;
+                            assert!(gas.record_cost(cost));
+                            gas
+                        },
+                    },
+                },
+            }),
+            revert(@raw {
+                bytecode: &[op::PUSH1, 0x69, op::PUSH0, op::MSTORE, op::PUSH1, 32, op::PUSH0, op::REVERT],
+                expected_return: InstructionResult::Revert,
+                expected_memory: &0x69_U256.to_be_bytes::<32>(),
+                expected_gas: 3 + 2 + (3 + gas::memory_gas(1)) + 3 + 2 + 0,
+                expected_next_action: InterpreterAction::Return {
+                    result: InterpreterResult {
+                        result: InstructionResult::Return,
+                        output: Bytes::copy_from_slice(&0x69_U256.to_be_bytes::<32>()),
+                        gas: {
+                            let mut gas = Gas::new(DEF_GAS_LIMIT);
+                            let cost = 3 + 2 + (3 + gas::memory_gas(1)) + 3 + 2 + 0;
+                            assert!(gas.record_cost(cost));
+                            gas
+                        },
+                    },
+                },
+            }),
+            selfdestruct(@raw {
+                bytecode: &[op::PUSH1, 0x69, op::SELFDESTRUCT],
+                expected_return: InstructionResult::SelfDestruct,
+                expected_gas: GAS_WHAT_THE_INTERPRETER_SAYS,
+                assert_host: Some(|host| {
+                    assert_eq!(host.selfdestructs, [(DEF_ADDR, Address::with_last_byte(0x69))]);
+                }),
+            }),
         }
     }
 
@@ -2719,9 +2832,12 @@ mod tests {
 
         expected_return: InstructionResult,
         expected_stack: &'a [U256],
+        stack_does_not_match_interpreter: bool,
         expected_memory: &'a [u8],
         expected_gas: u64,
-        assert_host: Option<fn(&mut TestHost)>,
+        expected_next_action: InterpreterAction,
+        assert_host: Option<fn(&TestHost)>,
+        assert_ecx: Option<fn(&EvmContext<'_>)>,
     }
 
     impl Default for TestCase<'_> {
@@ -2731,9 +2847,12 @@ mod tests {
                 spec_id: DEF_SPEC,
                 expected_return: InstructionResult::Stop,
                 expected_stack: &[],
+                stack_does_not_match_interpreter: false,
                 expected_memory: &[],
                 expected_gas: 0,
+                expected_next_action: InterpreterAction::None,
                 assert_host: None,
+                assert_ecx: None,
             }
         }
     }
@@ -2745,9 +2864,12 @@ mod tests {
                 .field("spec_id", &self.spec_id)
                 .field("expected_return", &self.expected_return)
                 .field("expected_stack", &self.expected_stack)
+                .field("stack_does_not_match_interpreter", &self.stack_does_not_match_interpreter)
                 .field("expected_memory", &MemDisplay(self.expected_memory))
                 .field("expected_gas", &self.expected_gas)
+                .field("expected_next_action", &self.expected_next_action)
                 .field("assert_host", &self.assert_host.is_some())
+                .field("assert_ecx", &self.assert_ecx.is_some())
                 .finish()
         }
     }
@@ -2842,6 +2964,7 @@ mod tests {
     struct TestHost {
         host: DummyHost,
         code_map: &'static HashMap<Address, primitives::Bytecode>,
+        selfdestructs: Vec<(Address, Address)>,
     }
 
     impl TestHost {
@@ -2854,6 +2977,7 @@ mod tests {
                     log: Vec::new(),
                 },
                 code_map: def_codemap(),
+                selfdestructs: Vec::new(),
             }
         }
     }
@@ -2934,9 +3058,10 @@ mod tests {
 
         fn selfdestruct(
             &mut self,
-            _address: Address,
-            _target: Address,
+            address: Address,
+            target: Address,
         ) -> Option<interpreter::SelfDestructResult> {
+            self.selfdestructs.push((address, target));
             Some(interpreter::SelfDestructResult {
                 had_value: false,
                 target_exists: true,
@@ -3003,15 +3128,18 @@ mod tests {
         jit.set_dump_to(Some(dump_path));
     }
 
-    fn run_case_built<B: Backend>(test_case: &TestCase<'_>, jit: &mut JitEvm<B>) {
+    fn run_test_case<B: Backend>(test_case: &TestCase<'_>, jit: &mut JitEvm<B>) {
         let TestCase {
             bytecode,
             spec_id,
             expected_return,
             expected_stack,
+            stack_does_not_match_interpreter,
             expected_memory,
             expected_gas,
+            expected_next_action: _, // TODO
             assert_host,
+            assert_ecx,
         } = *test_case;
         jit.set_inspect_stack_length(true);
         let f = jit.compile(None, bytecode, spec_id).unwrap();
@@ -3030,7 +3158,9 @@ mod tests {
                 interpreter.instruction_result, expected_return,
                 "interpreter return value mismatch"
             );
-            assert_eq!(interpreter.stack.data(), expected_stack, "interpreter stack mismatch");
+            if !stack_does_not_match_interpreter {
+                assert_eq!(interpreter.stack.data(), expected_stack, "interpreter stack mismatch");
+            }
             assert_eq!(
                 MemDisplay(interpreter.shared_memory.context_memory()),
                 MemDisplay(expected_memory),
@@ -3044,7 +3174,7 @@ mod tests {
                 assert_eq!(interpreter.gas.spent(), expected_gas, "interpreter gas mismatch");
             }
             if let Some(assert_host) = assert_host {
-                assert_host(&mut int_host);
+                assert_host(&int_host);
             }
 
             // JIT.
@@ -3061,6 +3191,9 @@ mod tests {
             assert_eq!(ecx.gas.spent(), expected_gas, "gas mismatch");
             if let Some(assert_host) = assert_host {
                 assert_host(ecx.host.downcast_mut().unwrap());
+            }
+            if let Some(assert_ecx) = assert_ecx {
+                assert_ecx(ecx);
             }
         });
     }
