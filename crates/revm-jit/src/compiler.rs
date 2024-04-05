@@ -918,6 +918,13 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             }
 
             if diff != 0 {
+                let mut diff = diff;
+                // HACK: For now all opcodes that suspend (minus the test one, which does not reach
+                // here) return exactly one value. This value is pushed onto the stack by the
+                // caller, so we don't account for it here.
+                if data.will_suspend() {
+                    diff -= 1;
+                }
                 let len_changed = self.bcx.iadd_imm(self.len_before, diff);
                 self.stack_len.store(&mut self.bcx, len_changed);
             }
@@ -1894,11 +1901,11 @@ impl<B: Backend> Pointer<B> {
 
 // HACK: Need these structs' fields to be public for `offset_of!`.
 // `pf == private_fields`.
+#[allow(dead_code)]
 mod pf {
     use super::*;
     use revm_primitives::JumpMap;
 
-    #[allow(dead_code)]
     pub(super) struct Bytes {
         pub(super) ptr: *const u8,
         pub(super) len: usize,
@@ -1906,7 +1913,6 @@ mod pf {
         data: AtomicPtr<()>,
         vtable: &'static Vtable,
     }
-    #[allow(dead_code)]
     struct Vtable {
         /// fn(data, ptr, len)
         clone: unsafe fn(&AtomicPtr<()>, *const u8, usize) -> Bytes,
@@ -1918,7 +1924,6 @@ mod pf {
         drop: unsafe fn(&mut AtomicPtr<()>, *const u8, usize),
     }
 
-    #[allow(dead_code)]
     pub(super) struct BytecodeLocked {
         pub(super) bytecode: Bytes,
         pub(super) original_len: usize,
@@ -1926,13 +1931,11 @@ mod pf {
     }
 
     #[repr(C)] // See core::ptr::metadata::PtrComponents
-    #[allow(dead_code)]
     pub(super) struct Slice {
         pub(super) ptr: *const u8,
         pub(super) len: usize,
     }
 
-    #[allow(dead_code)]
     pub(super) struct Gas {
         /// The initial gas limit. This is constant throughout execution.
         pub(super) limit: u64,
@@ -2704,9 +2707,8 @@ mod tests {
             create(@raw {
                 bytecode: &[op::PUSH1, 0x69, op::PUSH0, op::MSTORE, op::PUSH1, 32, op::PUSH0, op::PUSH1, 0x42, op::CREATE],
                 expected_return: InstructionResult::CallOrCreate,
-                // NOTE: The address must be written by the caller. This is the last popped item.
-                expected_stack: &[32_U256],
-                stack_does_not_match_interpreter: true,
+                // NOTE: The address is pushed by the caller.
+                expected_stack: &[],
                 expected_memory: &0x69_U256.to_be_bytes::<32>(),
                 expected_gas: GAS_WHAT_THE_INTERPRETER_SAYS,
                 expected_next_action: InterpreterAction::Create {
@@ -2722,9 +2724,8 @@ mod tests {
             create2(@raw {
                 bytecode: &[op::PUSH1, 0x69, op::PUSH0, op::MSTORE, op::PUSH1, 100, op::PUSH1, 32, op::PUSH0, op::PUSH1, 0x42, op::CREATE2],
                 expected_return: InstructionResult::CallOrCreate,
-                // NOTE: The address must be written by the caller. This is the last popped item.
-                expected_stack: &[100_U256],
-                stack_does_not_match_interpreter: true,
+                // NOTE: The address is pushed by the caller.
+                expected_stack: &[],
                 expected_memory: &0x69_U256.to_be_bytes::<32>(),
                 expected_gas: GAS_WHAT_THE_INTERPRETER_SAYS,
                 expected_next_action: InterpreterAction::Create {
@@ -2749,9 +2750,8 @@ mod tests {
                     op::CALL,
                 ],
                 expected_return: InstructionResult::CallOrCreate,
-                // NOTE: The return must be written by the caller. This is the last popped item.
-                expected_stack: &[1_U256],
-                stack_does_not_match_interpreter: true,
+                // NOTE: The return is pushed by the caller.
+                expected_stack: &[],
                 expected_memory: &[0; 32],
                 expected_gas: GAS_WHAT_THE_INTERPRETER_SAYS,
                 expected_next_action: InterpreterAction::Call {
@@ -2832,7 +2832,6 @@ mod tests {
 
         expected_return: InstructionResult,
         expected_stack: &'a [U256],
-        stack_does_not_match_interpreter: bool,
         expected_memory: &'a [u8],
         expected_gas: u64,
         expected_next_action: InterpreterAction,
@@ -2847,7 +2846,6 @@ mod tests {
                 spec_id: DEF_SPEC,
                 expected_return: InstructionResult::Stop,
                 expected_stack: &[],
-                stack_does_not_match_interpreter: false,
                 expected_memory: &[],
                 expected_gas: 0,
                 expected_next_action: InterpreterAction::None,
@@ -2864,7 +2862,6 @@ mod tests {
                 .field("spec_id", &self.spec_id)
                 .field("expected_return", &self.expected_return)
                 .field("expected_stack", &self.expected_stack)
-                .field("stack_does_not_match_interpreter", &self.stack_does_not_match_interpreter)
                 .field("expected_memory", &MemDisplay(self.expected_memory))
                 .field("expected_gas", &self.expected_gas)
                 .field("expected_next_action", &self.expected_next_action)
@@ -3134,7 +3131,6 @@ mod tests {
             spec_id,
             expected_return,
             expected_stack,
-            stack_does_not_match_interpreter,
             expected_memory,
             expected_gas,
             ref expected_next_action,
@@ -3161,9 +3157,7 @@ mod tests {
                 "interpreter return value mismatch"
             );
 
-            if !stack_does_not_match_interpreter {
-                assert_eq!(interpreter.stack.data(), expected_stack, "interpreter stack mismatch");
-            }
+            assert_eq!(interpreter.stack.data(), expected_stack, "interpreter stack mismatch");
 
             assert_eq!(
                 MemDisplay(interpreter.shared_memory.context_memory()),

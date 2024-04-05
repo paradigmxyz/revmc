@@ -405,7 +405,7 @@ impl InstData {
 
     /// Returns `true` if this instruction will suspend execution.
     #[inline]
-    const fn will_suspend(&self) -> bool {
+    pub(crate) const fn will_suspend(&self) -> bool {
         if cfg!(test) && self.opcode == TEST_SUSPEND {
             return true;
         }
