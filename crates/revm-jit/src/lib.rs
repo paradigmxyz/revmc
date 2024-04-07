@@ -15,6 +15,9 @@ pub use bytecode::*;
 mod compiler;
 pub use compiler::JitEvm;
 
+#[cfg(test)]
+mod tests;
+
 #[doc(inline)]
 pub use revm_jit_backend::*;
 #[doc(inline)]

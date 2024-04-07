@@ -518,7 +518,7 @@ impl EvmWord {
     #[inline]
     pub const fn from_u256(value: U256) -> Self {
         #[cfg(target_endian = "little")]
-        return unsafe { core::mem::transmute(value) };
+        return unsafe { core::mem::transmute::<U256, Self>(value) };
         #[cfg(target_endian = "big")]
         return Self(value.to_be_bytes());
     }
@@ -609,7 +609,7 @@ impl EvmWord {
     #[inline]
     pub const fn into_u256(self) -> U256 {
         #[cfg(target_endian = "little")]
-        return unsafe { core::mem::transmute(self) };
+        return unsafe { core::mem::transmute::<Self, U256>(self) };
         #[cfg(target_endian = "big")]
         return U256::from_be_bytes(self.0);
     }
