@@ -3,7 +3,7 @@
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
 #![cfg_attr(not(feature = "std"), no_std)]
 
-#[cfg(all(feature = "alloc", not(feature = "std")))]
+#[cfg(not(feature = "std"))]
 extern crate alloc;
 
 use core::{fmt, mem::MaybeUninit, ptr};
@@ -13,7 +13,7 @@ use revm_interpreter::{
 };
 use revm_primitives::{Address, Bytes, Env, U256};
 
-#[cfg(all(feature = "alloc", not(feature = "std")))]
+#[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
 #[cfg(feature = "host-ext-any")]

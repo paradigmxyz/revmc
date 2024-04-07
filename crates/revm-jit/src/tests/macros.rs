@@ -4,19 +4,19 @@ macro_rules! matrix_tests {
         mod llvm {
             use super::*;
 
-            fn run_llvm(jit: &mut JitEvm<JitEvmLlvmBackend<'_>>) {
-                set_test_dump(jit, module_path!());
+            fn run_llvm(jit: &mut JitEvm<crate::llvm::JitEvmLlvmBackend<'_>>) {
+                crate::tests::set_test_dump(jit, module_path!());
                 $run(jit);
             }
 
             #[test]
             fn unopt() {
-                with_llvm_backend_jit(OptimizationLevel::None, run_llvm);
+                crate::tests::with_llvm_backend_jit(crate::OptimizationLevel::None, run_llvm);
             }
 
             #[test]
             fn opt() {
-                with_llvm_backend_jit(OptimizationLevel::Aggressive, run_llvm);
+                crate::tests::with_llvm_backend_jit(crate::OptimizationLevel::Aggressive, run_llvm);
             }
         }
     };

@@ -22,6 +22,5 @@ revm-primitives = { workspace = true, default-features = false }
 
 [features]
 default = ["std"]
-alloc = []
-std = ["alloc", "revm-interpreter/std", "revm-primitives/std"]
+std = ["revm-interpreter/std", "revm-primitives/std"]
 host-ext-any = []

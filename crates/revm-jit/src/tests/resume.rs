@@ -1,4 +1,7 @@
-use super::*;
+use super::{with_evm_context, DEF_SPEC};
+use crate::{Backend, JitEvm, TEST_SUSPEND};
+use revm_interpreter::{opcode as op, InstructionResult};
+use revm_primitives::U256;
 
 matrix_tests!(run_resume_tests);
 
