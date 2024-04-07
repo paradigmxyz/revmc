@@ -1,4 +1,4 @@
-use revm_interpreter::{gas, opcode as op};
+use revm_interpreter::opcode as op;
 use revm_primitives::{spec_to_generic, SpecId};
 
 /// Opcode information.
@@ -106,6 +106,7 @@ const fn make_map(spec_id: SpecId) -> [OpcodeInfo; 256] {
             )*
         };
     }
+    // [1]: Not dynamic in all `SpecId`s, but is calculated dynamically in a builtin.
     set! {
         STOP = 0;
 
@@ -157,7 +158,7 @@ const fn make_map(spec_id: SpecId) -> [OpcodeInfo; 256] {
         // 0x2E
         // 0x2F
         ADDRESS      = 2;
-        BALANCE      = DYNAMIC;
+        BALANCE      = DYNAMIC; // [1]
         ORIGIN       = 2;
         CALLER       = 2;
         CALLVALUE    = 2;
@@ -168,11 +169,11 @@ const fn make_map(spec_id: SpecId) -> [OpcodeInfo; 256] {
         CODECOPY     = DYNAMIC;
 
         GASPRICE       = 2;
-        EXTCODESIZE    = extcodesize_cost(spec_id);
+        EXTCODESIZE    = DYNAMIC; // [1]
         EXTCODECOPY    = DYNAMIC;
         RETURNDATASIZE = 2, if BYZANTIUM;
         RETURNDATACOPY = DYNAMIC, if BYZANTIUM;
-        EXTCODEHASH    = extcodehash_cost(spec_id), if CONSTANTINOPLE;
+        EXTCODEHASH    = DYNAMIC, if CONSTANTINOPLE; // [1]
         BLOCKHASH      = 20;
         COINBASE       = 2;
         TIMESTAMP      = 2;
@@ -193,7 +194,7 @@ const fn make_map(spec_id: SpecId) -> [OpcodeInfo; 256] {
         MLOAD    = DYNAMIC;
         MSTORE   = DYNAMIC;
         MSTORE8  = DYNAMIC;
-        SLOAD    = sload_cost(spec_id);
+        SLOAD    = DYNAMIC; // [1]
         SSTORE   = DYNAMIC;
         JUMP     = 8;
         JUMPI    = 10;
@@ -357,72 +358,74 @@ const fn make_map(spec_id: SpecId) -> [OpcodeInfo; 256] {
         CALL         = DYNAMIC;
         CALLCODE     = DYNAMIC;
         RETURN       = DYNAMIC;
-        DELEGATECALL = DYNAMIC;
-        CREATE2      = DYNAMIC;
+        DELEGATECALL = DYNAMIC, if HOMESTEAD;
+        CREATE2      = DYNAMIC, if PETERSBURG;
         // 0xF6
         // 0xF7
         // 0xF8
         // 0xF9
-        STATICCALL   = DYNAMIC;
+        STATICCALL   = DYNAMIC, if BYZANTIUM;
         // 0xFB
         // 0xFC
-        REVERT       = 0;
+        REVERT       = DYNAMIC, if BYZANTIUM;
         INVALID      = 0;
         SELFDESTRUCT = 0;
     }
     map
 }
 
-/// [`gas::sload_cost`]
-const fn sload_cost(spec_id: SpecId) -> u16 {
-    if enabled(spec_id, SpecId::BERLIN) {
+/// [`gas::account_access_gas`]
+#[cfg(any())]
+const fn balance_cost(spec_id: SpecId) -> u16 {
+    let gas = gas::account_access_gas(spec_id, true);
+    if gas == gas::COLD_ACCOUNT_ACCESS_COST {
         OpcodeInfo::DYNAMIC
-        // if is_cold {
-        //     COLD_SLOAD_COST
-        // } else {
-        //     WARM_STORAGE_READ_COST
-        // }
-    } else if enabled(spec_id, SpecId::ISTANBUL) {
-        // EIP-1884: Repricing for trie-size-dependent opcodes
-        gas::INSTANBUL_SLOAD_GAS as _
-    } else if enabled(spec_id, SpecId::TANGERINE) {
-        // EIP-150: Gas cost changes for IO-heavy operations
-        200
     } else {
-        50
+        gas as u16
     }
 }
 
+/// [`gas::sload_cost`]
+#[cfg(any())]
+const fn sload_cost(spec_id: SpecId) -> u16 {
+    let gas = gas::sload_cost(spec_id, true);
+    if gas == gas::COLD_SLOAD_COST {
+        OpcodeInfo::DYNAMIC
+    } else {
+        gas as u16
+    }
+}
+
+/// [`revm_interpreter::instructions::host::extcodesize`]
+#[cfg(any())]
 const fn extcodesize_cost(spec_id: SpecId) -> u16 {
-    if SpecId::enabled(spec_id, SpecId::BERLIN) {
+    if spec_id.is_enabled_in(SpecId::BERLIN) {
         OpcodeInfo::DYNAMIC
         // if is_cold {
         //     COLD_ACCOUNT_ACCESS_COST
         // } else {
         //     WARM_STORAGE_READ_COST
         // }
-    } else if SpecId::enabled(spec_id, SpecId::TANGERINE) {
+    } else if spec_id.is_enabled_in(SpecId::TANGERINE) {
         700
     } else {
         20
     }
 }
 
+/// [`revm_interpreter::instructions::host::extcodehash`]
+#[cfg(any())]
 const fn extcodehash_cost(spec_id: SpecId) -> u16 {
-    if SpecId::enabled(spec_id, SpecId::BERLIN) {
+    if spec_id.is_enabled_in(SpecId::BERLIN) {
         OpcodeInfo::DYNAMIC
         // if is_cold {
         //     COLD_ACCOUNT_ACCESS_COST
         // } else {
         //     WARM_STORAGE_READ_COST
         // }
-    } else if SpecId::enabled(spec_id, SpecId::ISTANBUL) {
+    } else if spec_id.is_enabled_in(SpecId::ISTANBUL) {
         700
     } else {
         400
     }
-}
-
-const fn enabled(spec_id: SpecId, fork: SpecId) -> bool {
-    spec_id as u8 >= fork as u8
 }

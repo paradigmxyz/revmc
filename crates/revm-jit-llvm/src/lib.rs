@@ -111,6 +111,7 @@ impl<'ctx> JitEvmLlvmBackend<'ctx> {
         let module = create_module(cx, &machine)?;
 
         let exec_engine = module.create_jit_execution_engine(opt_level).map_err(error_msg)?;
+        #[cfg(not_needed_anymore)]
         add_symbols(&module, &exec_engine);
 
         let bcx = cx.create_builder();
@@ -284,6 +285,7 @@ impl<'ctx> Backend for JitEvmLlvmBackend<'ctx> {
         self.module = create_module(self.cx, &self.machine)?;
         self.exec_engine =
             self.module.create_jit_execution_engine(self.opt_level).map_err(error_msg)?;
+        #[cfg(not_needed_anymore)]
         add_symbols(&self.module, &self.exec_engine);
         Ok(())
     }
@@ -439,7 +441,9 @@ impl<'a, 'ctx> Builder for JitEvmLlvmBuilder<'a, 'ctx> {
 
     fn set_cold_block(&mut self, block: Self::BasicBlock) {
         let prev = self.current_block();
-        self.switch_to_block(block);
+        if prev != Some(block) {
+            self.switch_to_block(block);
+        }
 
         let function = self.assume_function();
         let true_ = self.bool_const(true);
@@ -448,7 +452,9 @@ impl<'a, 'ctx> Builder for JitEvmLlvmBuilder<'a, 'ctx> {
         callsite.add_attribute(AttributeLoc::Function, cold);
 
         if let Some(prev) = prev {
-            self.switch_to_block(prev);
+            if prev != block {
+                self.switch_to_block(prev);
+            }
         }
     }
 
@@ -853,6 +859,7 @@ fn create_module<'ctx>(cx: &'ctx Context, machine: &TargetMachine) -> Result<Mod
     Ok(module)
 }
 
+#[cfg(not_needed_anymore)]
 fn add_symbols<'ctx>(module: &Module<'ctx>, exec_engine: &ExecutionEngine<'ctx>) {
     macro_rules! add_symbols {
         ($([$kw:ident $s:ident $($rest:tt)*]),* $(,)?) => {

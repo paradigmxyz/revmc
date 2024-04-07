@@ -105,13 +105,17 @@ impl<'a> Bytecode<'a> {
 
     /// Returns an iterator over the instructions.
     #[inline]
-    pub(crate) fn iter_insts(&self) -> impl Iterator<Item = (usize, &InstData)> + '_ {
+    pub(crate) fn iter_insts(
+        &self,
+    ) -> impl DoubleEndedIterator<Item = (usize, &InstData)> + Clone + '_ {
         self.iter_all_insts().filter(|(_, data)| !data.is_dead_code())
     }
 
     /// Returns an iterator over all the instructions, including dead code.
     #[inline]
-    pub(crate) fn iter_all_insts(&self) -> impl Iterator<Item = (usize, &InstData)> + '_ {
+    pub(crate) fn iter_all_insts(
+        &self,
+    ) -> impl DoubleEndedIterator<Item = (usize, &InstData)> + ExactSizeIterator + Clone + '_ {
         self.insts.iter().enumerate()
     }
 
@@ -130,10 +134,17 @@ impl<'a> Bytecode<'a> {
     /// Mark `PUSH<N>` followed by `JUMP[I]` as `STATIC_JUMP` and resolve the target.
     #[instrument(name = "sj", level = "debug", skip_all)]
     fn static_jump_analysis(&mut self) {
-        for inst in 0..self.insts.len() {
-            let jump_inst = inst + 1;
-            let Some(jump) = self.insts.get(jump_inst) else { continue };
-            let push = &self.insts[inst];
+        for jump_inst in 0..self.insts.len() {
+            let jump = &self.insts[jump_inst];
+            let Some(push_inst) = jump_inst.checked_sub(1) else {
+                if jump.is_legacy_jump() {
+                    debug!(jump_inst, "found dynamic jump");
+                    self.has_dynamic_jumps = true;
+                }
+                continue;
+            };
+
+            let push = &self.insts[push_inst];
             if !(push.is_push() && jump.is_legacy_jump()) {
                 if jump.is_legacy_jump() {
                     debug!(jump_inst, "found dynamic jump");
@@ -162,7 +173,7 @@ impl<'a> Bytecode<'a> {
                 continue;
             }
 
-            self.insts[inst].flags |= InstFlags::SKIP_LOGIC;
+            self.insts[push_inst].flags |= InstFlags::SKIP_LOGIC;
             let target = self.pc_to_inst(target_pc);
 
             // Mark the `JUMPDEST` as reachable.
@@ -396,7 +407,7 @@ impl InstData {
         }
 
         // TODO: SELFDESTRUCT will not be diverging in the future.
-        self.flags.contains(InstFlags::INVALID_JUMP)
+        (self.opcode == op::JUMP && self.flags.contains(InstFlags::INVALID_JUMP))
             || self.flags.contains(InstFlags::DISABLED)
             || self.flags.contains(InstFlags::UNKNOWN)
             || matches!(self.opcode, op::STOP | op::RETURN | op::REVERT | op::INVALID)

@@ -1,5 +1,7 @@
-use alloc::vec::Vec;
 use revm_jit_backend::{Attribute, Backend, Builder, FunctionAttributeLocation, TypeMethods};
+
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 
 /// Builtin cache.
 #[derive(Debug)]
@@ -162,6 +164,7 @@ builtins! {
     Msize          = __revm_jit_builtin_msize(ptr) Some(usize),
     Tstore         = __revm_jit_builtin_tstore(ptr, ptr) None,
     Tload          = __revm_jit_builtin_tload(ptr, ptr) None,
+    Mcopy          = __revm_jit_builtin_mcopy(ptr, ptr) Some(u8),
     Log            = __revm_jit_builtin_log(ptr, ptr, u8) Some(u8),
 
     Create         = __revm_jit_builtin_create(ptr, ptr, u8, u8) Some(u8),

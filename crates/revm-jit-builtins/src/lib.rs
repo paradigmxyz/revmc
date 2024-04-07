@@ -2,7 +2,7 @@
 #![allow(missing_docs, clippy::missing_safety_doc)]
 #![cfg_attr(not(test), warn(unused_extern_crates))]
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
-#![no_std]
+#![cfg_attr(not(feature = "std"), no_std)]
 
 #[allow(unused_imports)]
 #[macro_use]
@@ -12,7 +12,6 @@ extern crate alloc;
 #[macro_use]
 extern crate tracing;
 
-use alloc::{boxed::Box, vec::Vec};
 use revm_interpreter::{
     as_u64_saturated, as_usize_saturated, gas as rgas, CallContext, CallInputs, CallScheme,
     CreateInputs, InstructionResult, InterpreterAction, InterpreterResult, SStoreResult, Transfer,
@@ -22,6 +21,9 @@ use revm_primitives::{
     Bytes, CreateScheme, Log, LogData, SpecId, BLOCK_HASH_HISTORY, KECCAK_EMPTY, MAX_INITCODE_SIZE,
     U256,
 };
+
+#[cfg(not(feature = "std"))]
+use alloc::{boxed::Box, vec::Vec};
 
 #[cfg(feature = "ir")]
 mod ir;
@@ -386,6 +388,22 @@ pub unsafe extern "C" fn __revm_jit_builtin_tload(ecx: &mut EvmContext<'_>, key:
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn __revm_jit_builtin_mcopy(
+    ecx: &mut EvmContext<'_>,
+    rev![dst, src, len]: &mut [EvmWord; 3],
+) -> InstructionResult {
+    let len = try_into_usize!(len.to_u256());
+    gas_opt!(ecx, rgas::verylowcopy_cost(len as u64));
+    if len != 0 {
+        let dst = try_into_usize!(dst.to_u256());
+        let src = try_into_usize!(src.to_u256());
+        resize_memory!(ecx, dst.max(src), len);
+        ecx.memory.copy(dst, src, len);
+    }
+    InstructionResult::Continue
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn __revm_jit_builtin_log(
     ecx: &mut EvmContext<'_>,
     sp: *mut EvmWord,
@@ -405,7 +423,7 @@ pub unsafe extern "C" fn __revm_jit_builtin_log(
     };
 
     let mut topics = Vec::with_capacity(n as usize);
-    for i in 0..n {
+    for i in 1..=n {
         topics.push(sp.sub(i as usize).read().to_be_bytes().into());
     }
 

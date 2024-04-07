@@ -36,6 +36,8 @@ const STACK_CAP: usize = 1024;
 // TODO: Test on big-endian hardware.
 // It probably doesn't work when loading Rust U256 into native endianness.
 
+// TODO: Add FileCheck codegen tests.
+
 /// JIT compiler for EVM bytecode.
 #[allow(missing_debug_implementations)]
 pub struct JitEvm<B: Backend> {
@@ -451,6 +453,8 @@ struct FunctionCx<'a, B: Backend> {
     incoming_dynamic_jumps: Incoming<B>,
     /// The dynamic jump table block where all dynamic jumps branch to.
     dynamic_jump_table: B::BasicBlock,
+    /// The block that all jumps branch to if the jump is invalid.
+    jump_fail: B::BasicBlock,
 
     /// `return_block` incoming values.
     incoming_returns: Incoming<B>,
@@ -576,12 +580,12 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let ecx = bcx.fn_param(5);
 
         // Create all instruction entry blocks.
-        let dynamic_jump_fail = bcx.create_block("dynamic_jump_fail");
+        let jump_fail = bcx.create_block("jump_fail");
         let inst_entries: Vec<_> = bytecode
             .iter_all_insts()
             .map(|(i, data)| {
                 if data.is_dead_code() {
-                    dynamic_jump_fail
+                    jump_fail
                 } else {
                     bcx.create_block(&op_block_name_with(i, data, ""))
                 }
@@ -618,6 +622,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
             incoming_dynamic_jumps: Vec::new(),
             dynamic_jump_table,
+            jump_fail,
             resume_blocks: Vec::new(),
             suspend_blocks: Vec::new(),
             suspend_block,
@@ -676,32 +681,36 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         }
 
         // Finalize the dynamic jump table.
+        fx.bcx.switch_to_block(jump_fail);
+        fx.bcx.set_cold_block(jump_fail);
+        fx.build_return_imm(InstructionResult::InvalidJump);
         let i32_type = fx.bcx.type_int(32);
         if bytecode.has_dynamic_jumps() {
-            let default = dynamic_jump_fail;
-            fx.bcx.switch_to_block(default);
-            fx.build_return_imm(InstructionResult::InvalidJump);
-
             fx.bcx.switch_to_block(fx.dynamic_jump_table);
-            let index = fx.bcx.phi(fx.word_type, &fx.incoming_dynamic_jumps);
-            // TODO: Reduce isn't really right.
-            let index = fx.bcx.ireduce(i32_type, index);
-            let targets = fx
-                .bytecode
-                .iter_insts()
-                .filter(|(_, data)| data.opcode == op::JUMPDEST)
+            // TODO: Manually reduce to i32?
+            let jumpdests =
+                fx.bytecode.iter_insts().filter(|(_, data)| data.opcode == op::JUMPDEST);
+            // let max_pc =
+            //     jumpdests.clone().map(|(_, data)| data.pc).next_back().expect("no jumpdests");
+            let targets = jumpdests
                 .map(|(inst, data)| {
-                    let pc = fx.bcx.iconst(i32_type, data.pc as i64);
+                    let pc = fx.bcx.iconst(word_type, data.pc as i64);
                     (pc, fx.inst_entries[inst])
                 })
                 .collect::<Vec<_>>();
-            fx.bcx.switch(index, default, &targets);
+            let index = fx.bcx.phi(fx.word_type, &fx.incoming_dynamic_jumps);
+            // let target =
+            //     fx.bcx.create_block_after(fx.dynamic_jump_table, "dynamic_jump_table.contd");
+            // let overflow = fx.bcx.icmp_imm(IntCC::UnsignedGreaterThan, index, max_pc as i64);
+            // fx.bcx.brif(overflow, default, target);
+
+            // fx.bcx.switch_to_block(target);
+            // let index = fx.bcx.ireduce(i32_type, index);
+            fx.bcx.switch(index, jump_fail, &targets);
         } else {
             // No dynamic jumps.
             debug_assert!(fx.incoming_dynamic_jumps.is_empty());
             fx.bcx.switch_to_block(fx.dynamic_jump_table);
-            fx.bcx.unreachable();
-            fx.bcx.switch_to_block(dynamic_jump_fail);
             fx.bcx.unreachable();
         }
 
@@ -729,11 +738,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             {
                 let default = fx.bcx.create_block_after(resume_block, "resume_invalid");
                 fx.bcx.switch_to_block(default);
-                if config.debug_assertions {
-                    fx.call_panic("invalid resume value");
-                } else {
-                    fx.bcx.unreachable();
-                }
+                fx.call_panic("invalid `resume_at` value");
 
                 // Special-case the zero block to load 0 into the length if possible.
                 let resume_is_zero_block =
@@ -790,6 +795,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             fx.bcx.store(len, stack_len_arg);
         }
         fx.bcx.ret(&[return_value]);
+
+        fx.bcx.seal_all_blocks();
 
         Ok(())
     }
@@ -871,7 +878,9 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         'stack_io: {
             let (mut inp, out) = data.stack_io().both();
 
-            if data.is_legacy_static_jump() {
+            if data.is_legacy_static_jump()
+                && !(opcode == op::JUMPI && data.flags.contains(InstFlags::INVALID_JUMP))
+            {
                 inp -= 1;
             }
 
@@ -945,9 +954,12 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 let r = self.bcx.$op(a, b);
                 self.push(r);
             }};
-            (@rev $op:ident) => {{
-                let [a, b] = self.popn();
-                let r = self.bcx.$op(b, a);
+            (@shift $op:ident, | $value:ident, $shift:ident | $default:expr) => {{
+                let [$shift, $value] = self.popn();
+                let r = self.bcx.$op($value, $shift);
+                let overflow = self.bcx.icmp_imm(IntCC::UnsignedGreaterThan, $shift, 255);
+                let default = $default;
+                let r = self.bcx.select(overflow, default, r);
                 self.push(r);
             }};
             (@if_not_zero $op:ident) => {{
@@ -1130,9 +1142,14 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 let r = self.bcx.select(cond, byte, zero);
                 self.push(r);
             }
-            op::SHL => binop!(@rev ishl),
-            op::SHR => binop!(@rev ushr),
-            op::SAR => binop!(@rev sshr),
+            op::SHL => binop!(@shift ishl, |value, shift| self.bcx.iconst_256(U256::ZERO)),
+            op::SHR => binop!(@shift ushr, |value, shift| self.bcx.iconst_256(U256::ZERO)),
+            op::SAR => binop!(@shift sshr, |value, shift| {
+                let neg = self.bcx.icmp_imm(IntCC::SignedLessThan, value, 0);
+                let max = self.bcx.iconst_256(U256::MAX);
+                let zero = self.bcx.iconst_256(U256::ZERO);
+                self.bcx.select(neg, max, zero)
+            }),
 
             op::KECCAK256 => {
                 let sp = self.sp_after_input();
@@ -1320,11 +1337,18 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 self.builtin_ir(Builtin::Sstore, &[self.ecx, sp, spec_id]);
             }
             op::JUMP | op::JUMPI => {
-                if data.flags.contains(InstFlags::INVALID_JUMP) {
+                let is_invalid = data.flags.contains(InstFlags::INVALID_JUMP);
+                if is_invalid && opcode == op::JUMP {
+                    // NOTE: We can't early return for `JUMPI` since the jump target is evaluated
+                    // lazily.
                     self.build_return_imm(InstructionResult::InvalidJump);
                 } else {
-                    let is_static = data.flags.contains(InstFlags::STATIC_JUMP);
-                    let target = if is_static {
+                    let target = if is_invalid {
+                        debug_assert_eq!(*data, op::JUMPI);
+                        // The jump target is invalid, but we still need to account for the stack.
+                        self.len_offset -= 1;
+                        self.jump_fail
+                    } else if data.flags.contains(InstFlags::STATIC_JUMP) {
                         let target_inst = data.data as usize;
                         debug_assert_eq!(
                             *self.bytecode.inst(target_inst),
@@ -1379,6 +1403,10 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 self.fail_if_staticcall(InstructionResult::StateChangeDuringStaticCall);
                 let sp = self.sp_after_input();
                 let _ = self.builtin(Builtin::Tstore, &[self.ecx, sp]);
+            }
+            op::MCOPY => {
+                let sp = self.sp_after_input();
+                self.builtin_ir(Builtin::Mcopy, &[self.ecx, sp]);
             }
 
             op::PUSH0 => {
@@ -2018,7 +2046,7 @@ mod tests {
         code
     }
 
-    macro_rules! with_matrix {
+    macro_rules! matrix_tests {
         ($run:ident) => {
             #[cfg(feature = "llvm")]
             mod llvm {
@@ -2040,12 +2068,33 @@ mod tests {
                 }
             }
         };
+
+        ($name:ident = | $jit:ident | $e:expr) => {
+            mod $name {
+                use super::*;
+
+                fn run_generic<B: Backend>($jit: &mut JitEvm<B>) {
+                    $e;
+                }
+
+                matrix_tests!(run_generic);
+            }
+        };
+        ($name:ident = $run:ident) => {
+            mod $name {
+                use super::*;
+
+                matrix_tests!($run);
+            }
+        };
     }
 
     macro_rules! tests {
         ($($group:ident { $($t:tt)* })*) => { uint! {
             $(
                 mod $group {
+                    use super::*;
+
                     tests!(@cases $($t)*);
                 }
             )*
@@ -2053,15 +2102,7 @@ mod tests {
 
         (@cases $( $name:ident($($t:tt)*) ),* $(,)?) => {
             $(
-                mod $name {
-                    use super::super::*;
-
-                    fn _run<B: Backend>(jit: &mut JitEvm<B>) {
-                        run_test_case(tests!(@case $($t)*), jit);
-                    }
-
-                    with_matrix!(_run);
-                }
+                matrix_tests!($name = |jit| run_test_case(tests!(@case $($t)*), jit));
             )*
         };
 
@@ -2164,8 +2205,9 @@ mod tests {
 
         control_flow {
             basic_jump(@raw {
-                bytecode: &[op::PUSH1, 3, op::JUMP, op::JUMPDEST],
-                expected_gas: 3 + 8 + 1,
+                bytecode: &[op::PUSH1, 3, op::JUMP, op::JUMPDEST, op::PUSH1, 69],
+                expected_stack: &[69_U256],
+                expected_gas: 3 + 8 + 1 + 3,
             }),
             unmodified_stack_after_push_jump(@raw {
                 bytecode: &[op::PUSH1, 3, op::JUMP, op::JUMPDEST, op::PUSH0, op::ADD],
@@ -2173,16 +2215,58 @@ mod tests {
                 expected_stack: &[U256::ZERO],
                 expected_gas: 3 + 8 + 1 + 2 + 3,
             }),
-            basic_jump_if(@raw {
-                bytecode: &[op::PUSH1, 1, op::PUSH1, 5, op::JUMPI, op::JUMPDEST],
-                expected_gas: 3 + 3 + 10 + 1,
+            bad_jump(@raw {
+                bytecode: &[op::JUMP],
+                expected_return: InstructionResult::StackUnderflow,
+                expected_gas: 8,
             }),
-            unmodified_stack_after_push_jumpif(@raw {
+            bad_jumpi1(@raw {
+                bytecode: &[op::JUMPI],
+                expected_return: InstructionResult::StackUnderflow,
+                expected_gas: 10,
+            }),
+
+            basic_jumpi1(@raw {
+                bytecode: &[op::JUMPDEST, op::PUSH0, op::PUSH0, op::JUMPI, op::PUSH1, 69],
+                expected_stack: &[69_U256],
+                expected_gas: 1 + 2 + 2 + 10 + 3,
+            }),
+            basic_jumpi1_lazy_invalid_target(@raw {
+                bytecode: &[op::PUSH0, op::PUSH0, op::JUMPI, op::PUSH1, 69],
+                expected_stack: &[69_U256],
+                expected_gas: 2 + 2 + 10 + 3,
+            }),
+            basic_jumpi2(@raw {
+                bytecode: &[op::PUSH1, 1, op::PUSH1, 5, op::JUMPI, op::JUMPDEST, op::PUSH1, 69],
+                expected_stack: &[69_U256],
+                expected_gas: 3 + 3 + 10 + 1 + 3,
+            }),
+            basic_jumpi2_lazy_invalid_target(@raw {
+                bytecode: &[op::PUSH1, 1, op::PUSH0, op::JUMPI, op::PUSH1, 69],
+                expected_return: InstructionResult::InvalidJump,
+                expected_gas: 3 + 2 + 10,
+            }),
+            unmodified_stack_after_push_jumpi(@raw {
                 bytecode: &[op::PUSH1, 1, op::PUSH1, 5, op::JUMPI, op::JUMPDEST, op::PUSH0, op::ADD],
                 expected_return: InstructionResult::StackUnderflow,
                 expected_stack: &[U256::ZERO],
                 expected_gas: 3 + 3 + 10 + 1 + 2 + 3,
             }),
+            // NOTE: These pass but there is a mismatch between interpreter and JIT. This is OK
+            // because the behavior is undefined on failure.
+            // bad_jumpi1(@raw {
+            //     bytecode: &[op::PUSH0, op::JUMPI],
+            //     expected_return: InstructionResult::InvalidJump,
+            //     expected_stack: &[0_U256],
+            //     expected_gas: 2 + 10,
+            // }),
+            // bad_jumpi2(@raw {
+            //     bytecode: &[op::JUMPDEST, op::PUSH0, op::JUMPI],
+            //     expected_return: InstructionResult::StackUnderflow,
+            //     expected_stack: &[0_U256],
+            //     expected_gas: 1 + 2 + 10,
+            // }),
+
             basic_loop(@raw {
                 bytecode: &[
                     op::PUSH1, 3,  // i=3
@@ -2199,6 +2283,7 @@ mod tests {
                 expected_stack: &[69_U256],
                 expected_gas: 3 + (1 + 3 + 3 + 3 + 3 + 3 + 10) * 3 + 2 + 3,
             }),
+
             pc(@raw {
                 bytecode: &[op::PC, op::PC, op::PUSH1, 69, op::PC, op::PUSH0, op::PC],
                 expected_stack: &[0_U256, 1_U256, 69_U256, 4_U256, 0_U256, 6_U256],
@@ -2356,20 +2441,26 @@ mod tests {
             shl1(op::SHL, 0_U256, 1_U256 => 1_U256),
             shl2(op::SHL, 1_U256, 1_U256 => 2_U256),
             shl3(op::SHL, 2_U256, 1_U256 => 4_U256),
+            shl4(op::SHL, 255_U256, -1_U256 => -1_U256 << 255),
+            shl5(op::SHL, 256_U256, -1_U256 => 0_U256),
 
             shr1(op::SHR, 0_U256, 1_U256 => 1_U256),
             shr2(op::SHR, 1_U256, 2_U256 => 1_U256),
             shr3(op::SHR, 2_U256, 4_U256 => 1_U256),
+            shr4(op::SHR, 255_U256, -1_U256 => 1_U256),
+            shr5(op::SHR, 256_U256, -1_U256 => 0_U256),
 
             sar1(op::SAR, 0_U256, 1_U256 => 1_U256),
             sar2(op::SAR, 1_U256, 2_U256 => 1_U256),
             sar3(op::SAR, 2_U256, 4_U256 => 1_U256),
             sar4(op::SAR, 1_U256, -1_U256 => -1_U256),
             sar5(op::SAR, 2_U256, -1_U256 => -1_U256),
+            sar6(op::SAR, 255_U256, -1_U256 => -1_U256),
+            sar7(op::SAR, 256_U256, -1_U256 => -1_U256),
         }
 
         system {
-            gas(@raw {
+            gas0(@raw {
                 bytecode: &[op::GAS, op::GAS, op::JUMPDEST, op::GAS],
                 expected_stack: &[DEF_GAS_LIMIT_U256 - 2_U256, DEF_GAS_LIMIT_U256 - 4_U256, DEF_GAS_LIMIT_U256 - 7_U256],
                 expected_gas: 2 + 2 + 1 + 2,
@@ -2630,6 +2721,25 @@ mod tests {
                 expected_memory: &[0; 64],
                 expected_gas: 2 + 2 + (3 + gas::memory_gas(1)) + 2 + 2 + 3 + (3 + (gas::memory_gas(2) - gas::memory_gas(1))) + 2 + 2,
             }),
+            mcopy1(@raw {
+                bytecode: &[op::PUSH1, 32, op::PUSH0, op::PUSH1, 32, op::MCOPY],
+                expected_memory: &[0; 64],
+                expected_gas: 3 + 2 + 3 + (gas::verylowcopy_cost(32).unwrap() + gas::memory_gas(2)),
+            }),
+            mcopy2(@raw {
+                bytecode: &[op::PUSH2, 0x42, 0x69, op::PUSH0, op::MSTORE,
+                            op::PUSH1, 2, op::PUSH1, 30, op::PUSH1, 1, op::MCOPY],
+                expected_memory: &{
+                    let mut mem = [0; 32];
+                    mem[30] = 0x42;
+                    mem[31] = 0x69;
+                    mem[1] = 0x42;
+                    mem[2] = 0x69;
+                    mem
+                },
+                expected_gas: 3 + 2 + (3 + gas::memory_gas(1)) +
+                              3 + 3 + 3 + gas::verylowcopy_cost(2).unwrap(),
+            }),
         }
 
         host {
@@ -2694,13 +2804,32 @@ mod tests {
                     }]);
                 }),
             }),
-            log1(@raw {
+            log1_1(@raw {
                 bytecode: &[op::PUSH0, op::PUSH0, op::PUSH0, op::LOG1],
                 expected_gas: 2 + 2 + 2 + gas::log_cost(1, 0).unwrap(),
                 assert_host: Some(|host| {
                     assert_eq!(host.log, [primitives::Log {
                         address: DEF_ADDR,
                         data: LogData::new(vec![B256::ZERO], Bytes::new()).unwrap(),
+                    }]);
+                }),
+            }),
+            log1_2(@raw {
+                bytecode: &hex!(
+                    "7f000000000000000000000000ffffffffffffffffffffffffffffffffffffffff"
+                    "7f0000000000000000000000000000000000000000000000000000000000000032" // 50
+                    "59"
+                    "a1"
+                ),
+                expected_memory: &[0; 64],
+                expected_gas: 3 + 3 + 2 + (gas::log_cost(1, 50).unwrap() + gas::memory_gas(2)),
+                assert_host: Some(|host| {
+                    assert_eq!(host.log, [primitives::Log {
+                        address: DEF_ADDR,
+                        data: LogData::new(
+                            vec![0xffffffffffffffffffffffffffffffffffffffff_U256.into()],
+                            Bytes::copy_from_slice(&[0; 50]),
+                        ).unwrap(),
                     }]);
                 }),
             }),
@@ -2824,11 +2953,40 @@ mod tests {
                 }),
             }),
         }
+
+        regressions {
+            // Mismatched costs in < BERLIN.
+            // GeneralStateTests/stSolidityTest/TestKeywords.json
+            st_solidity_keywords(@raw {
+                bytecode: &hex!("7c01000000000000000000000000000000000000000000000000000000006000350463380e439681146037578063c040622614604757005b603d6084565b8060005260206000f35b604d6057565b8060005260206000f35b6000605f6084565b600060006101000a81548160ff0219169083021790555060ff60016000540416905090565b6000808160011560cd575b600a82121560a157600190910190608f565b81600a1460ac5760c9565b50600a5b60008160ff16111560c85760019182900391900360b0565b5b60d5565b6000925060ed565b8160001460e05760e8565b6001925060ed565b600092505b50509056"),
+                spec_id: SpecId::ISTANBUL,
+                modify_ecx: Some(|ecx| {
+                    ecx.contract.value = 1_U256;
+                    ecx.contract.input = Bytes::from(&hex!("c0406226"));
+                }),
+                expected_return: InstructionResult::Return,
+                expected_stack: STACK_WHAT_THE_INTERPRETER_SAYS,
+                expected_gas: GAS_WHAT_THE_INTERPRETER_SAYS,
+                expected_memory: MEMORY_WHAT_THE_INTERPRETER_SAYS,
+                expected_next_action: InterpreterAction::Return {
+                    result: InterpreterResult {
+                        result: InstructionResult::Return,
+                        output: Bytes::copy_from_slice(&1_U256.to_be_bytes::<32>()),
+                        gas: Gas::new(GAS_WHAT_THE_INTERPRETER_SAYS),
+                    },
+                },
+                assert_host: Some(|host| {
+                    assert_eq!(host.storage.get(&0_U256), Some(&1_U256));
+                }),
+            }),
+        }
     }
 
     struct TestCase<'a> {
         bytecode: &'a [u8],
         spec_id: SpecId,
+
+        modify_ecx: Option<fn(&mut EvmContext<'_>)>,
 
         expected_return: InstructionResult,
         expected_stack: &'a [U256],
@@ -2844,6 +3002,7 @@ mod tests {
             Self {
                 bytecode: &[],
                 spec_id: DEF_SPEC,
+                modify_ecx: None,
                 expected_return: InstructionResult::Stop,
                 expected_stack: &[],
                 expected_memory: &[],
@@ -2860,6 +3019,7 @@ mod tests {
             f.debug_struct("TestCase")
                 .field("bytecode", &format_bytecode(self.bytecode))
                 .field("spec_id", &self.spec_id)
+                .field("modify_ecx", &self.modify_ecx.is_some())
                 .field("expected_return", &self.expected_return)
                 .field("expected_stack", &self.expected_stack)
                 .field("expected_memory", &MemDisplay(self.expected_memory))
@@ -2892,7 +3052,10 @@ mod tests {
     const OTHER_ADDR: Address = Address::repeat_byte(0x69);
     const DEF_BN: U256 = uint!(500_U256);
 
-    const GAS_WHAT_THE_INTERPRETER_SAYS: u64 = u64::MAX - 1000;
+    const STACK_WHAT_THE_INTERPRETER_SAYS: &[U256] =
+        &[U256::from_be_slice(&GAS_WHAT_THE_INTERPRETER_SAYS.to_be_bytes())];
+    const MEMORY_WHAT_THE_INTERPRETER_SAYS: &[u8] = &GAS_WHAT_THE_INTERPRETER_SAYS.to_be_bytes();
+    const GAS_WHAT_THE_INTERPRETER_SAYS: u64 = 0x4682e332d6612de1;
 
     fn def_env() -> &'static Env {
         DEF_ENV.get_or_init(|| Env {
@@ -3068,7 +3231,10 @@ mod tests {
         }
     }
 
-    fn with_evm_context<F: FnOnce(&mut EvmContext<'_>) -> R, R>(bytecode: &[u8], f: F) -> R {
+    fn with_evm_context<F: FnOnce(&mut EvmContext<'_>, &mut EvmStack, &mut usize) -> R, R>(
+        bytecode: &[u8],
+        f: F,
+    ) -> R {
         let contract = Contract {
             input: Bytes::from_static(DEF_CD),
             bytecode: revm_interpreter::analysis::to_analysed(revm_primitives::Bytecode::new_raw(
@@ -3087,7 +3253,9 @@ mod tests {
 
         let mut host = TestHost::new();
 
-        f(&mut EvmContext::from_interpreter(&mut interpreter, &mut host))
+        let (mut ecx, stack, stack_len) =
+            EvmContext::from_interpreter_with_stack(&mut interpreter, &mut host);
+        f(&mut ecx, stack, stack_len)
     }
 
     #[cfg(feature = "llvm")]
@@ -3129,6 +3297,7 @@ mod tests {
         let TestCase {
             bytecode,
             spec_id,
+            modify_ecx,
             expected_return,
             expected_stack,
             expected_memory,
@@ -3140,9 +3309,11 @@ mod tests {
         jit.set_inspect_stack_length(true);
         let f = jit.compile(None, bytecode, spec_id).unwrap();
 
-        let mut stack = EvmStack::new();
-        let mut stack_len = 0;
-        with_evm_context(bytecode, |ecx| {
+        with_evm_context(bytecode, |ecx, stack, stack_len| {
+            if let Some(modify_ecx) = modify_ecx {
+                modify_ecx(ecx);
+            }
+
             // Interpreter.
             let table =
                 spec_to_generic!(test_case.spec_id, op::make_instruction_table::<_, SPEC>());
@@ -3157,13 +3328,23 @@ mod tests {
                 "interpreter return value mismatch"
             );
 
-            assert_eq!(interpreter.stack.data(), expected_stack, "interpreter stack mismatch");
+            let mut expected_stack = expected_stack;
+            if expected_stack == STACK_WHAT_THE_INTERPRETER_SAYS {
+                expected_stack = interpreter.stack.data();
+            } else {
+                assert_eq!(interpreter.stack.data(), expected_stack, "interpreter stack mismatch");
+            }
 
-            assert_eq!(
-                MemDisplay(interpreter.shared_memory.context_memory()),
-                MemDisplay(expected_memory),
-                "interpreter memory mismatch"
-            );
+            let mut expected_memory = expected_memory;
+            if expected_memory == MEMORY_WHAT_THE_INTERPRETER_SAYS {
+                expected_memory = interpreter.shared_memory.context_memory();
+            } else {
+                assert_eq!(
+                    MemDisplay(interpreter.shared_memory.context_memory()),
+                    MemDisplay(expected_memory),
+                    "interpreter memory mismatch"
+                );
+            }
 
             let mut expected_gas = expected_gas;
             if expected_gas == GAS_WHAT_THE_INTERPRETER_SAYS {
@@ -3185,10 +3366,7 @@ mod tests {
                         },
                     }))
             {
-                assert_eq!(
-                    interpreter_action, *expected_next_action,
-                    "interpreter next action mismatch"
-                );
+                assert_actions(&interpreter_action, expected_next_action);
             }
 
             if let Some(assert_host) = assert_host {
@@ -3196,12 +3374,12 @@ mod tests {
             }
 
             // JIT.
-            let actual_return = unsafe { f.call(Some(&mut stack), Some(&mut stack_len), ecx) };
+            let actual_return = unsafe { f.call(Some(stack), Some(stack_len), ecx) };
 
             assert_eq!(actual_return, expected_return, "return value mismatch");
 
             let actual_stack =
-                stack.as_slice().iter().take(stack_len).map(|x| x.to_u256()).collect::<Vec<_>>();
+                stack.as_slice().iter().take(*stack_len).map(|x| x.to_u256()).collect::<Vec<_>>();
 
             assert_eq!(actual_stack, *expected_stack, "stack mismatch");
 
@@ -3213,10 +3391,10 @@ mod tests {
 
             assert_eq!(ecx.gas.spent(), expected_gas, "gas mismatch");
 
-            assert_eq!(*ecx.next_action, *expected_next_action, "next action mismatch");
+            assert_actions(ecx.next_action, expected_next_action);
 
             if let Some(assert_host) = assert_host {
-                assert_host(ecx.host.downcast_mut().unwrap());
+                assert_host(ecx.host.downcast_ref().unwrap());
             }
 
             if let Some(assert_ecx) = assert_ecx {
@@ -3234,50 +3412,60 @@ mod tests {
         }
     }
 
+    #[track_caller]
+    fn assert_actions(actual: &InterpreterAction, expected: &InterpreterAction) {
+        match (actual, expected) {
+            (
+                InterpreterAction::Return { result },
+                InterpreterAction::Return { result: expected_result },
+            ) => {
+                assert_eq!(result.result, expected_result.result, "result mismatch");
+                assert_eq!(result.output, expected_result.output, "result output mismatch");
+                if expected_result.gas.limit() != GAS_WHAT_THE_INTERPRETER_SAYS {
+                    assert_eq!(
+                        result.gas.spent(),
+                        expected_result.gas.spent(),
+                        "result gas mismatch"
+                    );
+                }
+            }
+            (a, b) => assert_eq!(a, b, "next action mismatch"),
+        }
+    }
+
     // ---
 
     mod fibonacci {
         use super::*;
 
-        with_matrix!(run_fibonacci_tests);
-    }
-
-    fn run_fibonacci_tests<B: Backend>(jit: &mut JitEvm<B>) {
-        jit.set_inspect_stack_length(true);
-
-        for i in 0..=10 {
-            run_fibonacci_test(jit, i);
-        }
-        run_fibonacci_test(jit, 100);
-
-        fn run_fibonacci_test<B: Backend>(jit: &mut JitEvm<B>, input: u16) {
-            println!("  Running fibonacci({input}) statically");
-            run_fibonacci(jit, input, false);
-            println!("  Running fibonacci({input}) dynamically");
-            run_fibonacci(jit, input, true);
+        macro_rules! fibonacci_tests {
+            ($($i:expr),* $(,)?) => {paste::paste! {
+                $(
+                    matrix_tests!([<native_ $i>] = |jit| run_fibonacci_test(jit, $i, false));
+                    matrix_tests!([<dynamic_ $i>] = |jit| run_fibonacci_test(jit, $i, true));
+                )*
+            }};
         }
 
-        fn run_fibonacci<B: Backend>(jit: &mut JitEvm<B>, input: u16, dynamic: bool) {
+        fibonacci_tests!(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, 40, 50, 100, 1000);
+
+        fn run_fibonacci_test<B: Backend>(jit: &mut JitEvm<B>, input: u16, dynamic: bool) {
             let code = mk_fibonacci_code(input, dynamic);
 
             unsafe { jit.free_all_functions() }.unwrap();
+            jit.set_inspect_stack_length(true);
             let f = jit.compile(None, &code, DEF_SPEC).unwrap();
 
-            let mut stack_buf = EvmStack::new_heap();
-            let stack = EvmStack::from_mut_vec(&mut stack_buf);
-            if dynamic {
-                stack.as_mut_slice()[0] = U256::from(input).into();
-            }
-            let mut stack_len = 0;
-            if dynamic {
-                stack_len = 1;
-            }
-            with_evm_context(&code, |ecx| {
-                let r = unsafe { f.call(Some(stack), Some(&mut stack_len), ecx) };
+            with_evm_context(&code, |ecx, stack, stack_len| {
+                if dynamic {
+                    stack.as_mut_slice()[0] = U256::from(input).into();
+                    *stack_len = 1;
+                }
+                let r = unsafe { f.call(Some(stack), Some(stack_len), ecx) };
                 assert_eq!(r, InstructionResult::Stop);
                 // Apparently the code does `fibonacci(input - 1)`.
+                assert_eq!(*stack_len, 1);
                 assert_eq!(stack.as_slice()[0].to_u256(), fibonacci_rust(input + 1));
-                assert_eq!(stack_len, 1);
             });
         }
 
@@ -3293,6 +3481,9 @@ mod tests {
         // Modified from jitevm: https://github.com/paradigmxyz/jitevm/blob/f82261fc8a1a6c1a3d40025a910ba0ce3fcaed71/src/test_data.rs#L3
         #[rustfmt::skip]
         const FIBONACCI_CODE: &[u8] = &[
+            // Expects the code to be offset 3 bytes.
+            // JUMPDEST, JUMPDEST, JUMPDEST,
+
             // 1st/2nd fib number
             op::PUSH1, 0,
             op::PUSH1, 1,
@@ -3366,11 +3557,7 @@ mod tests {
 
     // ---
 
-    mod resume {
-        use super::*;
-
-        with_matrix!(run_resume_tests);
-    }
+    matrix_tests!(resume = run_resume_tests);
 
     fn run_resume_tests<B: Backend>(jit: &mut JitEvm<B>) {
         #[rustfmt::skip]
@@ -3378,7 +3565,7 @@ mod tests {
             // 0
             op::PUSH1, 0x42,
             TEST_SUSPEND,
-            
+
             // 1
             op::PUSH1, 0x69,
             TEST_SUSPEND,
@@ -3392,86 +3579,84 @@ mod tests {
 
         let f = jit.compile(None, code, DEF_SPEC).unwrap();
 
-        let stack = &mut EvmStack::new();
-        let mut stack_len = 0;
-        with_evm_context(code, |ecx| {
+        with_evm_context(code, |ecx, stack, stack_len| {
             assert_eq!(ecx.resume_at, 0);
 
             // op::PUSH1, 0x42,
-            let r = unsafe { f.call(Some(stack), Some(&mut stack_len), ecx) };
+            let r = unsafe { f.call(Some(stack), Some(stack_len), ecx) };
             assert_eq!(r, InstructionResult::CallOrCreate);
-            assert_eq!(stack_len, 1);
+            assert_eq!(*stack_len, 1);
             assert_eq!(stack.as_slice()[0].to_u256(), U256::from(0x42));
             assert_eq!(ecx.resume_at, 1);
 
             // op::PUSH1, 0x69,
-            let r = unsafe { f.call(Some(stack), Some(&mut stack_len), ecx) };
+            let r = unsafe { f.call(Some(stack), Some(stack_len), ecx) };
             assert_eq!(r, InstructionResult::CallOrCreate);
-            assert_eq!(stack_len, 2);
+            assert_eq!(*stack_len, 2);
             assert_eq!(stack.as_slice()[0].to_u256(), U256::from(0x42));
             assert_eq!(stack.as_slice()[1].to_u256(), U256::from(0x69));
             assert_eq!(ecx.resume_at, 2);
 
             // op::ADD,
-            let r = unsafe { f.call(Some(stack), Some(&mut stack_len), ecx) };
+            let r = unsafe { f.call(Some(stack), Some(stack_len), ecx) };
             assert_eq!(r, InstructionResult::CallOrCreate);
-            assert_eq!(stack_len, 1);
+            assert_eq!(*stack_len, 1);
             assert_eq!(stack.as_slice()[0].to_u256(), U256::from(0x42 + 0x69));
             assert_eq!(ecx.resume_at, 3);
 
             // stop
-            let r = unsafe { f.call(Some(stack), Some(&mut stack_len), ecx) };
+            let r = unsafe { f.call(Some(stack), Some(stack_len), ecx) };
             assert_eq!(r, InstructionResult::Stop);
-            assert_eq!(stack_len, 1);
+            assert_eq!(*stack_len, 1);
             assert_eq!(stack.as_slice()[0].to_u256(), U256::from(0x42 + 0x69));
             assert_eq!(ecx.resume_at, 3);
 
             // op::ADD,
             ecx.resume_at = 2;
-            let r = unsafe { f.call(Some(stack), Some(&mut stack_len), ecx) };
+            let r = unsafe { f.call(Some(stack), Some(stack_len), ecx) };
             assert_eq!(r, InstructionResult::StackUnderflow);
-            assert_eq!(stack_len, 1);
+            assert_eq!(*stack_len, 1);
             assert_eq!(stack.as_slice()[0].to_u256(), U256::from(0x42 + 0x69));
             assert_eq!(ecx.resume_at, 2);
 
-            stack.as_mut_slice()[stack_len] = U256::from(2).into();
-            stack_len += 1;
+            stack.as_mut_slice()[*stack_len] = U256::from(2).into();
+            *stack_len += 1;
 
             // op::ADD,
             ecx.resume_at = 2;
-            let r = unsafe { f.call(Some(stack), Some(&mut stack_len), ecx) };
+            let r = unsafe { f.call(Some(stack), Some(stack_len), ecx) };
             assert_eq!(r, InstructionResult::CallOrCreate);
-            assert_eq!(stack_len, 1);
+            assert_eq!(*stack_len, 1);
             assert_eq!(stack.as_slice()[0].to_u256(), U256::from(0x42 + 0x69 + 2));
             assert_eq!(ecx.resume_at, 3);
 
             // op::PUSH1, 0x69,
             ecx.resume_at = 1;
-            let r = unsafe { f.call(Some(stack), Some(&mut stack_len), ecx) };
+            let r = unsafe { f.call(Some(stack), Some(stack_len), ecx) };
             assert_eq!(r, InstructionResult::CallOrCreate);
-            assert_eq!(stack_len, 2);
+            assert_eq!(*stack_len, 2);
             assert_eq!(stack.as_slice()[0].to_u256(), U256::from(0x42 + 0x69 + 2));
             assert_eq!(stack.as_slice()[1].to_u256(), U256::from(0x69));
             assert_eq!(ecx.resume_at, 2);
 
             // op::ADD,
-            let r = unsafe { f.call(Some(stack), Some(&mut stack_len), ecx) };
+            let r = unsafe { f.call(Some(stack), Some(stack_len), ecx) };
             assert_eq!(r, InstructionResult::CallOrCreate);
-            assert_eq!(stack_len, 1);
+            assert_eq!(*stack_len, 1);
             assert_eq!(stack.as_slice()[0].to_u256(), U256::from(0x42 + 0x69 + 2 + 0x69));
             assert_eq!(ecx.resume_at, 3);
 
             // stop
-            let r = unsafe { f.call(Some(stack), Some(&mut stack_len), ecx) };
+            let r = unsafe { f.call(Some(stack), Some(stack_len), ecx) };
             assert_eq!(r, InstructionResult::Stop);
-            assert_eq!(stack_len, 1);
+            assert_eq!(*stack_len, 1);
             assert_eq!(stack.as_slice()[0].to_u256(), U256::from(0x42 + 0x69 + 2 + 0x69));
             assert_eq!(ecx.resume_at, 3);
 
             // stop
-            let r = unsafe { f.call(Some(stack), Some(&mut stack_len), ecx) };
+            let r = unsafe { f.call(Some(stack), Some(stack_len), ecx) };
             assert_eq!(r, InstructionResult::Stop);
-            assert_eq!(stack_len, 1);
+            assert_eq!(*stack_len, 1);
             assert_eq!(stack.as_slice()[0].to_u256(), U256::from(0x42 + 0x69 + 2 + 0x69));
             assert_eq!(ecx.resume_at, 3);
         });

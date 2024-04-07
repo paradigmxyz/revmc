@@ -1,21 +1,33 @@
 use clap::Parser;
 use color_eyre::{eyre::eyre, Result};
-use revm_interpreter::opcode as op;
-use revm_jit::{debug_time, new_llvm_backend, EvmContext, EvmStack, JitEvm, OptimizationLevel};
+use revm_jit::{
+    debug_time, eyre::Context, new_llvm_backend, EvmContext, JitEvm, OptimizationLevel,
+};
 use revm_jit_benches::Bench;
-use revm_primitives::{Env, SpecId};
-use std::{hint::black_box, path::PathBuf};
+use revm_primitives::{hex, Env, SpecId};
+use std::{
+    hint::black_box,
+    path::{Path, PathBuf},
+};
 
 #[derive(Parser)]
 struct Cli {
     bench_name: String,
     #[arg(default_value = "1")]
     n_iters: u64,
+
+    #[arg(long)]
+    code: Option<String>,
+    #[arg(long, conflicts_with = "code")]
+    code_path: Option<PathBuf>,
+
     #[arg(short = 'O', long)]
     opt_level: Option<OptimizationLevel>,
     // #[arg(long)]
     #[arg(skip)]
     spec_id: Option<SpecId>,
+    #[arg(long)]
+    debug_assertions: bool,
     #[arg(long)]
     no_gas: bool,
     #[arg(long, default_value = "1000000000")]
@@ -39,18 +51,20 @@ fn main() -> Result<()> {
     jit.set_dump_to(Some(PathBuf::from("./tmp/revm-jit")));
     jit.set_disable_gas(cli.no_gas);
     jit.set_frame_pointers(true);
-    // jit.set_debug_assertions(true);
+    jit.set_debug_assertions(cli.debug_assertions);
 
-    let mut all_benches = revm_jit_benches::get_benches();
-    all_benches.push(Bench {
-        bytecode: vec![op::PUSH0, op::PUSH0, op::MSTORE],
-        name: "custom",
-        ..Default::default()
-    });
-    let Bench { name, bytecode, calldata, stack_input, native: _ } = all_benches
-        .iter()
-        .find(|b| b.name == cli.bench_name)
-        .ok_or_else(|| eyre!("unknown benchmark: {}", cli.bench_name))?;
+    let Bench { name, bytecode, calldata, stack_input, native: _ } = if cli.bench_name == "custom" {
+        Bench {
+            bytecode: read_code(cli.code.as_deref(), cli.code_path.as_deref())?,
+            name: "custom",
+            ..Default::default()
+        }
+    } else {
+        revm_jit_benches::get_benches()
+            .into_iter()
+            .find(|b| b.name == cli.bench_name)
+            .ok_or_else(|| eyre!("unknown benchmark: {}", cli.bench_name))?
+    };
 
     let gas_limit = cli.gas_limit;
 
@@ -59,7 +73,7 @@ fn main() -> Result<()> {
     env.tx.gas_limit = gas_limit;
 
     let bytecode = revm_interpreter::analysis::to_analysed(revm_primitives::Bytecode::new_raw(
-        revm_primitives::Bytes::copy_from_slice(bytecode),
+        revm_primitives::Bytes::copy_from_slice(&bytecode),
     ));
     let bytecode_hash = bytecode.hash_slow();
     let contract = revm_interpreter::Contract::new_env(&env, bytecode, bytecode_hash);
@@ -78,34 +92,33 @@ fn main() -> Result<()> {
     }
     let f = jit.compile(Some(name), bytecode, spec_id)?;
 
-    let mut stack = EvmStack::new();
     let mut run = |f: revm_jit::JitEvmFn| {
-        for (i, input) in stack_input.iter().enumerate() {
-            stack.as_mut_slice()[i] = input.into();
-        }
-        let mut stack_len = stack_input.len();
-
         let mut interpreter =
             revm_interpreter::Interpreter::new(contract.clone(), gas_limit, false);
         host.clear();
-        let mut ecx = EvmContext::from_interpreter(&mut interpreter, &mut host);
+        let (mut ecx, stack, stack_len) =
+            EvmContext::from_interpreter_with_stack(&mut interpreter, &mut host);
 
-        unsafe { f.call(Some(&mut stack), Some(&mut stack_len), &mut ecx) }
+        for (i, input) in stack_input.iter().enumerate() {
+            stack.as_mut_slice()[i] = input.into();
+        }
+        *stack_len = stack_input.len();
+
+        unsafe { f.call(Some(stack), Some(stack_len), &mut ecx) }
     };
 
     let ret = debug_time!("run", || run(f));
-    assert!(ret.is_ok(), "{ret:?}");
-
-    bench(cli.n_iters, name, || run(f));
+    if cli.n_iters <= 1 {
+        eprintln!("{ret:?}");
+    } else {
+        assert!(ret.is_ok(), "{ret:?}");
+        bench(cli.n_iters, name, || run(f));
+    }
 
     Ok(())
 }
 
 fn bench<T>(n_iters: u64, name: &str, mut f: impl FnMut() -> T) {
-    if n_iters == 0 {
-        return;
-    }
-
     let warmup = (n_iters / 10).max(10);
     for _ in 0..warmup {
         black_box(f());
@@ -126,4 +139,27 @@ fn init_tracing_subscriber() -> Result<(), tracing_subscriber::util::TryInitErro
         .with(tracing_error::ErrorLayer::default())
         .with(tracing_subscriber::fmt::layer())
         .try_init()
+}
+
+fn read_code(code: Option<&str>, code_path: Option<&Path>) -> Result<Vec<u8>> {
+    if let Some(code) = code {
+        return hex::decode(code).wrap_err("--code is not valid hex");
+    }
+
+    if let Some(code_path) = code_path {
+        let contents = std::fs::read(code_path)?;
+        let ext = code_path.extension().map(|s| s.to_str().unwrap_or(""));
+        let has_prefix = contents.starts_with(b"0x") || contents.starts_with(b"0X");
+        let is_hex =
+            ext != Some("bin") && (ext == Some("hex") || has_prefix || contents.is_ascii());
+        return if is_hex {
+            let code_s =
+                std::str::from_utf8(&contents).wrap_err("--code-path is not valid UTF-8")?;
+            hex::decode(code_s).wrap_err("--code-path is not valid hex")
+        } else {
+            Ok(contents)
+        };
+    }
+
+    Err(eyre!("--code is required when bench_name is 'custom'"))
 }

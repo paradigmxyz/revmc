@@ -146,7 +146,7 @@ impl StackIo {
             JUMPDEST = 0, 0;
             TLOAD    = 1, 1;
             TSTORE   = 2, 0;
-            MCOPY    = 0, 1;
+            MCOPY    = 3, 0;
 
             PUSH0  = 0, 1;
             PUSH1  = 0, 1;

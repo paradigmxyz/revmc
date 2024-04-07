@@ -18,7 +18,7 @@ workspace = true
 
 [dependencies]
 revm-jit-backend.workspace = true
-revm-jit-builtins = { workspace = true, features = ["ir"] }
+revm-jit-builtins = { workspace = true, features = ["ir", "std"] }
 revm-jit-context = { workspace = true, features = ["std"] }
 revm-jit-cranelift = { workspace = true, optional = true }
 revm-jit-llvm = { workspace = true, optional = true }
@@ -30,6 +30,10 @@ revm-primitives.workspace = true
 bitflags = "2.5"
 bitvec = "1"
 tracing.workspace = true
+
+[dev-dependencies]
+revm-jit-context = { workspace = true, features = ["std", "host-ext-any"] }
+paste = "1.0"
 
 [features]
 default = ["llvm"]

@@ -30,4 +30,6 @@ revm-jit-backend = { workspace = true, optional = true }
 tracing = { workspace = true, optional = true }
 
 [features]
+default = ["std"]
 ir = ["dep:revm-jit-backend", "dep:tracing"]
+std = ["revm-jit-context/std"]

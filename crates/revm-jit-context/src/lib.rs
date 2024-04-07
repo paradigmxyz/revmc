@@ -1,24 +1,28 @@
 #![doc = include_str!("../README.md")]
 #![cfg_attr(not(test), warn(unused_extern_crates))]
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
-#![no_std]
+#![cfg_attr(not(feature = "std"), no_std)]
 
-#[cfg(feature = "alloc")]
+#[cfg(all(feature = "alloc", not(feature = "std")))]
 extern crate alloc;
 
-use core::{any::Any, fmt, mem::MaybeUninit, ptr};
+use core::{fmt, mem::MaybeUninit, ptr};
 use revm_interpreter::{
     Contract, Gas, Host, InstructionResult, Interpreter, InterpreterAction, InterpreterResult,
     SharedMemory,
 };
 use revm_primitives::{Address, Bytes, Env, U256};
 
-#[cfg(feature = "alloc")]
+#[cfg(all(feature = "alloc", not(feature = "std")))]
 use alloc::vec::Vec;
+
+#[cfg(feature = "host-ext-any")]
+use core::any::Any;
 
 /// The JIT EVM context.
 ///
-/// Currently contains and handler memory and the host.
+/// This is a simple wrapper around the interpreter's resources, allowing the JIT'd function to
+/// access the memory, contract, gas, host, and other resources.
 pub struct EvmContext<'a> {
     /// The memory.
     pub memory: &'a mut SharedMemory,
@@ -68,7 +72,7 @@ impl<'a> EvmContext<'a> {
             next_action: &mut interpreter.next_action,
             return_data: &interpreter.return_data_buffer,
             is_static: interpreter.is_static,
-            resume_at: 0,
+            resume_at: ResumeAt::load(interpreter.instruction_pointer),
         };
         (this, stack, stack_len)
     }
@@ -90,20 +94,42 @@ impl<'a> EvmContext<'a> {
 }
 
 /// Extension trait for [`Host`].
+#[cfg(not(feature = "host-ext-any"))]
+pub trait HostExt: Host {}
+
+#[cfg(not(feature = "host-ext-any"))]
+impl<T: Host> HostExt for T {}
+
+/// Extension trait for [`Host`].
+#[cfg(feature = "host-ext-any")]
 pub trait HostExt: Host + Any {
+    #[doc(hidden)]
+    fn as_any(&self) -> &dyn Any;
     #[doc(hidden)]
     fn as_any_mut(&mut self) -> &mut dyn Any;
 }
 
+#[cfg(feature = "host-ext-any")]
 impl<T: Host + Any> HostExt for T {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
     }
 }
 
+#[cfg(feature = "host-ext-any")]
+#[doc(hidden)]
 impl dyn HostExt {
     /// Attempts to downcast the host to a concrete type.
-    pub fn downcast_mut<T: 'static>(&mut self) -> Option<&mut T> {
+    pub fn downcast_ref<T: Any>(&self) -> Option<&T> {
+        self.as_any().downcast_ref()
+    }
+
+    /// Attempts to downcast the host to a concrete type.
+    pub fn downcast_mut<T: Any>(&mut self) -> Option<&mut T> {
         self.as_any_mut().downcast_mut()
     }
 }
@@ -116,7 +142,7 @@ pub type RawJitEvmFn = unsafe extern "C" fn(
     gas: *mut Gas,
     stack: *mut EvmStack,
     stack_len: *mut usize,
-    env: *mut Env,
+    env: *const Env,
     contract: *const Contract,
     ecx: *mut EvmContext<'_>,
 ) -> InstructionResult;
@@ -153,18 +179,21 @@ impl JitEvmFn {
         interpreter: &mut Interpreter,
         host: &mut dyn HostExt,
     ) -> InterpreterAction {
+        interpreter.next_action = InterpreterAction::None;
+
         let (mut ecx, stack, stack_len) =
             EvmContext::from_interpreter_with_stack(interpreter, host);
-        interpreter.instruction_result = self.call(Some(stack), Some(stack_len), &mut ecx);
+        let result = self.call(Some(stack), Some(stack_len), &mut ecx);
+
+        let resume_at = ecx.resume_at;
+        ResumeAt::store(&mut interpreter.instruction_pointer, resume_at);
+
+        interpreter.instruction_result = result;
         if interpreter.next_action.is_some() {
             core::mem::take(&mut interpreter.next_action)
         } else {
             InterpreterAction::Return {
-                result: InterpreterResult {
-                    result: interpreter.instruction_result,
-                    output: Bytes::new(),
-                    gas: interpreter.gas,
-                },
+                result: InterpreterResult { result, output: Bytes::new(), gas: interpreter.gas },
             }
         }
     }
@@ -193,7 +222,7 @@ impl JitEvmFn {
             ecx.gas,
             option_as_mut_ptr(stack),
             option_as_mut_ptr(stack_len),
-            ecx.host.env_mut(),
+            ecx.host.env(),
             ecx.contract,
             ecx,
         )
@@ -234,7 +263,9 @@ impl EvmStack {
         debug_assert!(stack.data().capacity() >= Self::CAPACITY);
         unsafe {
             let data = Self::from_mut_ptr(stack.data_mut().as_mut_ptr().cast());
-            let len = &mut *stack.data_mut().as_mut_ptr().cast::<usize>().add(1);
+            // Vec { data: ptr, cap: usize, len: usize }
+            let len = &mut *(stack.data_mut() as *mut Vec<_>).cast::<usize>().add(2);
+            debug_assert_eq!(stack.len(), *len);
             (data, len)
         }
     }
@@ -344,11 +375,10 @@ impl EvmStack {
     }
 }
 
-/// A native-endian 256-bit unsigned integer, aligned to 32 bytes.
+/// A native-endian 256-bit unsigned integer, aligned to 8 bytes.
 ///
-/// This ends up being a simple no-op wrapper around `U256` on little-endian targets, modulo the
-/// stricter alignment requirement, thanks to the `U256` representation being identical.
-#[repr(C, align(32))]
+/// This is a transparent wrapper around [`U256`] on little-endian targets.
+#[repr(C, align(8))]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct EvmWord([u8; 32]);
 
@@ -396,7 +426,7 @@ macro_rules! impl_conversions_through_u256 {
 
                 #[inline]
                 fn try_from(value: EvmWord) -> Result<Self, Self::Error> {
-                    value.to_u256().try_into().map_err(|_| ())
+                    value.to_u256().try_into().map_err(drop)
                 }
             }
 
@@ -591,10 +621,136 @@ impl EvmWord {
     }
 }
 
+/// Logic for handling the `resume_at` field.
+///
+/// This is stored in the [`Interpreter::instruction_pointer`] field.
+struct ResumeAt;
+
+impl ResumeAt {
+    fn load(ip: *const u8) -> u32 {
+        // Arbitrary limit.
+        // TODO: Use upper bits?
+        if (ip as usize) < 1000 {
+            ip as u32
+        } else {
+            0
+        }
+    }
+
+    fn store(ip: &mut *const u8, value: u32) {
+        *ip = value as _;
+    }
+}
+
 #[inline(always)]
 fn option_as_mut_ptr<T>(opt: Option<&mut T>) -> *mut T {
     match opt {
         Some(ref_) => ref_,
         None => ptr::null_mut(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn conversions() {
+        let mut word = EvmWord::ZERO;
+        assert_eq!(usize::try_from(word), Ok(0));
+        assert_eq!(usize::try_from(&word), Ok(0));
+        assert_eq!(usize::try_from(&mut word), Ok(0));
+    }
+
+    #[cfg(not(feature = "host-ext-any"))]
+    extern "C" fn test_fn(
+        _gas: *mut Gas,
+        _stack: *mut EvmStack,
+        _stack_len: *mut usize,
+        _env: *mut Env,
+        _contract: *const Contract,
+        _ecx: *mut EvmContext<'_>,
+    ) -> InstructionResult {
+        InstructionResult::Continue
+    }
+
+    #[cfg(not(feature = "host-ext-any"))]
+    #[test]
+    fn borrowing_host() {
+        #[allow(unused)]
+        struct BHost<'a>(&'a mut Env);
+        #[allow(unused)]
+        impl Host for BHost<'_> {
+            fn env(&self) -> &Env {
+                self.0
+            }
+            fn env_mut(&mut self) -> &mut Env {
+                self.0
+            }
+            fn load_account(&mut self, address: Address) -> Option<(bool, bool)> {
+                todo!()
+            }
+            fn block_hash(&mut self, number: U256) -> Option<revm_primitives::B256> {
+                todo!()
+            }
+            fn balance(&mut self, address: Address) -> Option<(U256, bool)> {
+                todo!()
+            }
+            fn code(&mut self, address: Address) -> Option<(revm_primitives::Bytecode, bool)> {
+                todo!()
+            }
+            fn code_hash(&mut self, address: Address) -> Option<(revm_primitives::B256, bool)> {
+                todo!()
+            }
+            fn sload(&mut self, address: Address, index: U256) -> Option<(U256, bool)> {
+                todo!()
+            }
+            fn sstore(
+                &mut self,
+                address: Address,
+                index: U256,
+                value: U256,
+            ) -> Option<revm_interpreter::SStoreResult> {
+                todo!()
+            }
+            fn tload(&mut self, address: Address, index: U256) -> U256 {
+                todo!()
+            }
+            fn tstore(&mut self, address: Address, index: U256, value: U256) {
+                todo!()
+            }
+            fn log(&mut self, log: revm_primitives::Log) {
+                todo!()
+            }
+            fn selfdestruct(
+                &mut self,
+                address: Address,
+                target: Address,
+            ) -> Option<revm_interpreter::SelfDestructResult> {
+                todo!()
+            }
+        }
+
+        let mut env = Env::default();
+        let mut host = BHost(&mut env);
+        let f = JitEvmFn::new(test_fn);
+        let mut interpreter = Interpreter::new(Contract::default(), u64::MAX, false);
+
+        let (mut ecx, stack, stack_len) =
+            EvmContext::from_interpreter_with_stack(&mut interpreter, &mut host);
+        let r = unsafe { f.call(Some(stack), Some(stack_len), &mut ecx) };
+        assert_eq!(r, InstructionResult::Continue);
+
+        let r = unsafe { f.call_with_interpreter(&mut interpreter, &mut host) };
+        assert_eq!(
+            r,
+            InterpreterAction::Return {
+                result: InterpreterResult {
+                    result: InstructionResult::Continue,
+                    output: Bytes::new(),
+                    gas: Gas::new(u64::MAX),
+                }
+            }
+        );
     }
 }
