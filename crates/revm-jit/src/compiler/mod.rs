@@ -218,7 +218,7 @@ impl<B: Backend> JitEvm<B> {
             trace_time!("dump bytecode", || Self::dump_bytecode(&dump_dir, bytecode))?;
         }
 
-        let bcx = trace_time!("make builder", || Self::make_builder_function(
+        let bcx = trace_time!("make builder", || Self::make_builder(
             &mut self.backend,
             &self.config,
             mname,
@@ -271,7 +271,7 @@ impl<B: Backend> JitEvm<B> {
         Ok(JitEvmFn::new(unsafe { std::mem::transmute::<usize, RawJitEvmFn>(addr) }))
     }
 
-    fn make_builder_function<'a>(
+    fn make_builder<'a>(
         backend: &'a mut B,
         config: &FcxConfig,
         name: &str,

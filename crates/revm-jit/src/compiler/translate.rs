@@ -1,3 +1,5 @@
+//! EVM to IR translation.
+
 use crate::{
     Backend, Builder, Bytecode, EvmContext, Inst, InstData, InstFlags, IntCC, Result, I256_MIN,
     TEST_SUSPEND,
@@ -68,7 +70,9 @@ pub(super) struct FunctionCx<'a, B: Backend> {
     contract: B::Value,
     /// The EVM context. Opaque pointer, only passed to builtins.
     ecx: B::Value,
+    /// Stack length before the current instruction.
     len_before: B::Value,
+    /// Stack length offset for the current instruction, used for push/pop.
     len_offset: i8,
 
     /// The bytecode being translated.
@@ -1144,7 +1148,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             let len = self.bcx.iadd_imm(len_start, self.len_offset as i64);
             let sp = self.sp_at(len);
             let name = b'a' + i as u8;
-            self.load_word(sp, core::str::from_utf8(&[name]).unwrap())
+            self.load_word(sp, std::str::from_utf8(&[name]).unwrap())
         })
     }
 

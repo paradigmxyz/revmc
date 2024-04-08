@@ -252,7 +252,7 @@ impl EvmStack {
 
     /// Creates a vector that can be used as a stack.
     #[inline]
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "std")]
     pub fn new_heap() -> Vec<EvmWord> {
         Vec::with_capacity(1024)
     }
