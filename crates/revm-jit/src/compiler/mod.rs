@@ -160,7 +160,10 @@ impl<B: Backend> JitEvm<B> {
     /// Greatly improves compilation speed and performance, at the cost of not being able to check
     /// for gas exhaustion.
     ///
-    /// Use with care.
+    /// Note that this does not disable gas usage in certain instructions, mainly the ones that
+    /// are implemented as builtins.
+    ///
+    /// Use with care, as executing a function with gas disabled may result in an infinite loop.
     ///
     /// Defaults to `false`.
     pub fn set_disable_gas(&mut self, disable_gas: bool) {
@@ -361,7 +364,7 @@ impl<B: Backend> JitEvm<B> {
         for (inst, (pc, opcode)) in bytecode.opcodes().with_pc().enumerate() {
             let data = bytecode.inst(inst);
             let opcode = opcode.to_string();
-            writeln!(file, "{inst:^6} | {pc:^6} | {opcode:<80} | {data:?}")?;
+            writeln!(file, "{inst:>6} | {pc:>6} | {opcode:<80} | {data:?}")?;
         }
 
         file.flush()?;

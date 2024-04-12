@@ -1,10 +1,11 @@
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use color_eyre::{eyre::eyre, Result};
+use revm_interpreter::InterpreterAction;
 use revm_jit::{
     debug_time, eyre::Context, new_llvm_backend, EvmContext, JitEvm, OptimizationLevel,
 };
 use revm_jit_benches::Bench;
-use revm_primitives::{hex, Env, SpecId};
+use revm_primitives::{hex, Bytes, Env, SpecId};
 use std::{
     hint::black_box,
     path::{Path, PathBuf},
@@ -20,12 +21,13 @@ struct Cli {
     code: Option<String>,
     #[arg(long, conflicts_with = "code")]
     code_path: Option<PathBuf>,
+    #[arg(long)]
+    calldata: Option<Bytes>,
 
     #[arg(short = 'O', long)]
     opt_level: Option<OptimizationLevel>,
-    // #[arg(long)]
-    #[arg(skip)]
-    spec_id: Option<SpecId>,
+    #[arg(long, value_enum)]
+    spec_id: Option<SpecIdValueEnum>,
     #[arg(long)]
     debug_assertions: bool,
     #[arg(long)]
@@ -55,8 +57,8 @@ fn main() -> Result<()> {
 
     let Bench { name, bytecode, calldata, stack_input, native: _ } = if cli.bench_name == "custom" {
         Bench {
-            bytecode: read_code(cli.code.as_deref(), cli.code_path.as_deref())?,
             name: "custom",
+            bytecode: read_code(cli.code.as_deref(), cli.code_path.as_deref())?,
             ..Default::default()
         }
     } else {
@@ -65,11 +67,12 @@ fn main() -> Result<()> {
             .find(|b| b.name == cli.bench_name)
             .ok_or_else(|| eyre!("unknown benchmark: {}", cli.bench_name))?
     };
+    let calldata = cli.calldata.unwrap_or_else(|| calldata.into());
 
     let gas_limit = cli.gas_limit;
 
     let mut env = Env::default();
-    env.tx.data = calldata.clone().into();
+    env.tx.data = calldata;
     env.tx.gas_limit = gas_limit;
 
     let bytecode = revm_interpreter::analysis::to_analysed(revm_primitives::Bytecode::new_raw(
@@ -86,12 +89,13 @@ fn main() -> Result<()> {
     //     revm_primitives::CancunSpec,
     // >();
 
-    let spec_id = cli.spec_id.unwrap_or(SpecId::LATEST);
+    let spec_id = cli.spec_id.map(Into::into).unwrap_or(SpecId::LATEST);
     if !stack_input.is_empty() {
         jit.set_inspect_stack_length(true);
     }
     let f = jit.compile(Some(name), bytecode, spec_id)?;
 
+    let mut action = InterpreterAction::None;
     let mut run = |f: revm_jit::JitEvmFn| {
         let mut interpreter =
             revm_interpreter::Interpreter::new(contract.clone(), gas_limit, false);
@@ -104,16 +108,20 @@ fn main() -> Result<()> {
         }
         *stack_len = stack_input.len();
 
-        unsafe { f.call(Some(stack), Some(stack_len), &mut ecx) }
+        let r = unsafe { f.call(Some(stack), Some(stack_len), &mut ecx) };
+        action = interpreter.next_action;
+        r
     };
 
     let ret = debug_time!("run", || run(f));
-    if cli.n_iters <= 1 {
-        eprintln!("{ret:?}");
-    } else {
+    if cli.n_iters > 1 {
         assert!(ret.is_ok(), "{ret:?}");
         bench(cli.n_iters, name, || run(f));
+        return Ok(());
     }
+
+    println!("InstructionResult::{ret:?}");
+    println!("InterpreterAction::{action:#?}");
 
     Ok(())
 }
@@ -143,7 +151,7 @@ fn init_tracing_subscriber() -> Result<(), tracing_subscriber::util::TryInitErro
 
 fn read_code(code: Option<&str>, code_path: Option<&Path>) -> Result<Vec<u8>> {
     if let Some(code) = code {
-        return hex::decode(code).wrap_err("--code is not valid hex");
+        return hex::decode(code.trim()).wrap_err("--code is not valid hex");
     }
 
     if let Some(code_path) = code_path {
@@ -154,12 +162,63 @@ fn read_code(code: Option<&str>, code_path: Option<&Path>) -> Result<Vec<u8>> {
             ext != Some("bin") && (ext == Some("hex") || has_prefix || contents.is_ascii());
         return if is_hex {
             let code_s =
-                std::str::from_utf8(&contents).wrap_err("--code-path is not valid UTF-8")?;
-            hex::decode(code_s).wrap_err("--code-path is not valid hex")
+                std::str::from_utf8(&contents).wrap_err("--code-path file is not valid UTF-8")?;
+            hex::decode(code_s.trim()).wrap_err("--code-path file is not valid hex")
         } else {
             Ok(contents)
         };
     }
 
     Err(eyre!("--code is required when bench_name is 'custom'"))
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+#[clap(rename_all = "lowercase")]
+#[allow(non_camel_case_types)]
+pub enum SpecIdValueEnum {
+    FRONTIER,
+    FRONTIER_THAWING,
+    HOMESTEAD,
+    DAO_FORK,
+    TANGERINE,
+    SPURIOUS_DRAGON,
+    BYZANTIUM,
+    CONSTANTINOPLE,
+    PETERSBURG,
+    ISTANBUL,
+    MUIR_GLACIER,
+    BERLIN,
+    LONDON,
+    ARROW_GLACIER,
+    GRAY_GLACIER,
+    MERGE,
+    SHANGHAI,
+    CANCUN,
+    LATEST,
+}
+
+impl From<SpecIdValueEnum> for SpecId {
+    fn from(v: SpecIdValueEnum) -> Self {
+        match v {
+            SpecIdValueEnum::FRONTIER => SpecId::FRONTIER,
+            SpecIdValueEnum::FRONTIER_THAWING => SpecId::FRONTIER_THAWING,
+            SpecIdValueEnum::HOMESTEAD => SpecId::HOMESTEAD,
+            SpecIdValueEnum::DAO_FORK => SpecId::DAO_FORK,
+            SpecIdValueEnum::TANGERINE => SpecId::TANGERINE,
+            SpecIdValueEnum::SPURIOUS_DRAGON => SpecId::SPURIOUS_DRAGON,
+            SpecIdValueEnum::BYZANTIUM => SpecId::BYZANTIUM,
+            SpecIdValueEnum::CONSTANTINOPLE => SpecId::CONSTANTINOPLE,
+            SpecIdValueEnum::PETERSBURG => SpecId::PETERSBURG,
+            SpecIdValueEnum::ISTANBUL => SpecId::ISTANBUL,
+            SpecIdValueEnum::MUIR_GLACIER => SpecId::MUIR_GLACIER,
+            SpecIdValueEnum::BERLIN => SpecId::BERLIN,
+            SpecIdValueEnum::LONDON => SpecId::LONDON,
+            SpecIdValueEnum::ARROW_GLACIER => SpecId::ARROW_GLACIER,
+            SpecIdValueEnum::GRAY_GLACIER => SpecId::GRAY_GLACIER,
+            SpecIdValueEnum::MERGE => SpecId::MERGE,
+            SpecIdValueEnum::SHANGHAI => SpecId::SHANGHAI,
+            SpecIdValueEnum::CANCUN => SpecId::CANCUN,
+            SpecIdValueEnum::LATEST => SpecId::LATEST,
+        }
+    }
 }

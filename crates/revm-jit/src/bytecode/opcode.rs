@@ -135,7 +135,7 @@ impl fmt::Display for Opcode<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match OPCODE_JUMPMAP[self.opcode as usize] {
             Some(s) => f.write_str(s),
-            None => write!(f, "UNKNOWN({:02x})", self.opcode),
+            None => write!(f, "UNKNOWN(0x{:02x})", self.opcode),
         }?;
         match self.immediate {
             Some(imm) => write!(f, " {}", revm_primitives::hex::encode_prefixed(imm)),
