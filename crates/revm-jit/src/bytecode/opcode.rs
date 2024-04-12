@@ -1,4 +1,4 @@
-use revm_interpreter::{opcode as op, OPCODE_JUMPMAP};
+use revm_interpreter::OPCODE_INFO_JUMPTABLE;
 use std::{fmt, slice};
 
 /// A bytecode iterator that yields opcodes and their immediate data, alongside the program counter.
@@ -94,7 +94,7 @@ impl<'a> Iterator for OpcodesIter<'a> {
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         self.iter.next().copied().map(|opcode| {
-            let len = imm_len(opcode);
+            let len = imm_len(opcode) as usize;
             let immediate = if len > 0 {
                 let r = self.iter.as_slice().get(..len);
                 // TODO: Use `advance_by` when stable.
@@ -133,8 +133,8 @@ impl fmt::Debug for Opcode<'_> {
 
 impl fmt::Display for Opcode<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match OPCODE_JUMPMAP[self.opcode as usize] {
-            Some(s) => f.write_str(s),
+        match OPCODE_INFO_JUMPTABLE[self.opcode as usize] {
+            Some(s) => f.write_str(s.name()),
             None => write!(f, "UNKNOWN(0x{:02x})", self.opcode),
         }?;
         match self.immediate {
@@ -146,20 +146,21 @@ impl fmt::Display for Opcode<'_> {
 
 /// Returns the length of the immediate data for the given opcode, or `0` if none.
 #[inline]
-pub const fn imm_len(op: u8) -> usize {
-    match op {
-        op::PUSH1..=op::PUSH32 => (op - op::PUSH0) as usize,
-        // op::DATALOADN => 1,
-        //
-        // op::RJUMP => 2,
-        // op::RJUMPI => 2,
-        // op::RJUMPV => 2,
-        // op::CALLF => 2,
-        // op::JUMPF => 2,
-        // op::DUPN => 1,
-        // op::SWAPN => 1,
-        // op::EXCHANGE => 1,
-        _ => 0,
+pub const fn imm_len(op: u8) -> u8 {
+    if let Some(info) = &OPCODE_INFO_JUMPTABLE[op as usize] {
+        info.imm_size()
+    } else {
+        0
+    }
+}
+
+/// Returns the number of input and output stack elements of the given opcode.
+#[inline]
+pub const fn stack_io(op: u8) -> (u8, u8) {
+    if let Some(info) = &OPCODE_INFO_JUMPTABLE[op as usize] {
+        (info.inputs(), info.outputs())
+    } else {
+        (0, 0)
     }
 }
 
@@ -176,6 +177,7 @@ pub fn format_bytecode_to<W: fmt::Write + ?Sized>(bytecode: &[u8], w: &mut W) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use revm_interpreter::opcode as op;
 
     #[test]
     fn iter_basic() {

@@ -13,8 +13,9 @@ extern crate alloc;
 extern crate tracing;
 
 use revm_interpreter::{
-    as_u64_saturated, as_usize_saturated, gas as rgas, CallContext, CallInputs, CallScheme,
-    CreateInputs, InstructionResult, InterpreterAction, InterpreterResult, SStoreResult, Transfer,
+    as_u64_saturated, as_usize_saturated, gas as rgas, CallInputs, CallScheme, CreateInputs,
+    InstructionResult, InterpreterAction, InterpreterResult, LoadAccountResult, SStoreResult,
+    TransferValue,
 };
 use revm_jit_context::{EvmContext, EvmWord};
 use revm_primitives::{
@@ -135,8 +136,11 @@ pub unsafe extern "C" fn __revm_jit_builtin_balance(
 ) -> InstructionResult {
     let (balance, is_cold) = try_host!(ecx.host.balance(address.to_address()));
     *address = balance.into();
-    let gas = if spec_id.is_enabled_in(SpecId::ISTANBUL) {
-        rgas::account_access_gas(spec_id, is_cold)
+    let gas = if spec_id.is_enabled_in(SpecId::BERLIN) {
+        rgas::warm_cold_cost(is_cold)
+    } else if spec_id.is_enabled_in(SpecId::ISTANBUL) {
+        // EIP-1884: Repricing for trie-size-dependent opcodes
+        700
     } else if spec_id.is_enabled_in(SpecId::TANGERINE) {
         400
     } else {
@@ -156,11 +160,18 @@ pub unsafe extern "C" fn __revm_jit_builtin_calldatacopy(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn __revm_jit_builtin_codesize(ecx: &mut EvmContext<'_>) -> usize {
+    assume!(!ecx.contract.bytecode.is_eof());
+    ecx.contract.bytecode.len()
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn __revm_jit_builtin_codecopy(
     ecx: &mut EvmContext<'_>,
     sp: &mut [EvmWord; 3],
 ) -> InstructionResult {
-    let code = decouple_lt(ecx.contract.bytecode.original_bytecode_slice());
+    assume!(!ecx.contract.bytecode.is_eof());
+    let code = decouple_lt(ecx.contract.bytecode.original_byte_slice());
     copy_operation(ecx, sp, code)
 }
 
@@ -201,7 +212,7 @@ pub unsafe extern "C" fn __revm_jit_builtin_extcodecopy(
         let code_offset = code_offset.to_u256();
         let code_offset = as_usize_saturated!(code_offset).min(code.len());
         resize_memory!(ecx, memory_offset, len);
-        ecx.memory.set_data(memory_offset, code_offset, len, code.bytes());
+        ecx.memory.set_data(memory_offset, code_offset, len, code.original_byte_slice());
     }
     InstructionResult::Continue
 }
@@ -274,7 +285,7 @@ pub unsafe extern "C" fn __revm_jit_builtin_self_balance(
     ecx: &mut EvmContext<'_>,
     slot: &mut EvmWord,
 ) -> InstructionResult {
-    let (balance, _) = try_host!(ecx.host.balance(ecx.contract.address));
+    let (balance, _) = try_host!(ecx.host.balance(ecx.contract.target_address));
     *slot = balance.into();
     InstructionResult::Continue
 }
@@ -347,7 +358,7 @@ pub unsafe extern "C" fn __revm_jit_builtin_sload(
     index: &mut EvmWord,
     spec_id: SpecId,
 ) -> InstructionResult {
-    let address = ecx.contract.address;
+    let address = ecx.contract.target_address;
     let (res, is_cold) = try_opt!(ecx.host.sload(address, index.to_u256()));
     gas!(ecx, rgas::sload_cost(spec_id, is_cold));
     *index = res.into();
@@ -361,7 +372,7 @@ pub unsafe extern "C" fn __revm_jit_builtin_sstore(
     spec_id: SpecId,
 ) -> InstructionResult {
     let SStoreResult { original_value: original, present_value: old, new_value: new, is_cold } =
-        try_opt!(ecx.host.sstore(ecx.contract.address, index.to_u256(), value.to_u256()));
+        try_opt!(ecx.host.sstore(ecx.contract.target_address, index.to_u256(), value.to_u256()));
 
     gas_opt!(ecx, rgas::sstore_cost(spec_id, original, old, new, ecx.gas.remaining(), is_cold));
     ecx.gas.record_refund(rgas::sstore_refund(spec_id, original, old, new));
@@ -379,12 +390,12 @@ pub unsafe extern "C" fn __revm_jit_builtin_tstore(
     ecx: &mut EvmContext<'_>,
     rev![key, value]: &mut [EvmWord; 2],
 ) {
-    ecx.host.tstore(ecx.contract.address, key.to_u256(), value.to_u256());
+    ecx.host.tstore(ecx.contract.target_address, key.to_u256(), value.to_u256());
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn __revm_jit_builtin_tload(ecx: &mut EvmContext<'_>, key: &mut EvmWord) {
-    *key = ecx.host.tload(ecx.contract.address, key.to_u256()).into();
+    *key = ecx.host.tload(ecx.contract.target_address, key.to_u256()).into();
 }
 
 #[no_mangle]
@@ -428,7 +439,7 @@ pub unsafe extern "C" fn __revm_jit_builtin_log(
     }
 
     ecx.host.log(Log {
-        address: ecx.contract.address,
+        address: ecx.contract.target_address,
         data: LogData::new(topics, data).expect("too many topics"),
     });
     InstructionResult::Continue
@@ -492,7 +503,7 @@ pub unsafe extern "C" fn __revm_jit_builtin_create(
 
     *ecx.next_action = InterpreterAction::Create {
         inputs: Box::new(CreateInputs {
-            caller: ecx.contract.address,
+            caller: ecx.contract.target_address,
             scheme,
             value: value.to_u256(),
             init_code: code,
@@ -557,61 +568,16 @@ pub unsafe extern "C" fn __revm_jit_builtin_call(
         usize::MAX // unrealistic value so we are sure it is not used
     };
 
-    let context = match call_kind {
-        CallKind::Call | CallKind::StaticCall => CallContext {
-            address: to,
-            caller: ecx.contract.address,
-            code_address: to,
-            apparent_value: value,
-            scheme: call_kind.into(),
-        },
-        CallKind::CallCode => CallContext {
-            address: ecx.contract.address,
-            caller: ecx.contract.address,
-            code_address: to,
-            apparent_value: value,
-            scheme: call_kind.into(),
-        },
-        CallKind::DelegateCall => CallContext {
-            address: ecx.contract.address,
-            caller: ecx.contract.caller,
-            code_address: to,
-            apparent_value: ecx.contract.value,
-            scheme: call_kind.into(),
-        },
-    };
-
-    let transfer = match call_kind {
-        CallKind::Call => Transfer { source: ecx.contract.address, target: to, value },
-        CallKind::CallCode => {
-            Transfer { source: ecx.contract.address, target: ecx.contract.address, value }
-        }
-        CallKind::DelegateCall | CallKind::StaticCall => {
-            // This is a dummy `Send` for `StaticCall` and `DelegateCall`, it should do nothing and
-            // not touch anything.
-            Transfer {
-                source: ecx.contract.address,
-                target: ecx.contract.address,
-                value: U256::ZERO,
-            }
-        }
+    let transfer_value = if matches!(call_kind, CallKind::Call | CallKind::CallCode) {
+        TransferValue::Value(value)
+    } else {
+        TransferValue::ApparentValue(ecx.contract.call_value)
     };
 
     // load account and calculate gas cost.
-    let (is_cold, exist) = try_host!(ecx.host.load_account(to));
-    let is_new = !exist;
+    let LoadAccountResult { is_cold, is_empty } = try_host!(ecx.host.load_account(to));
 
-    gas!(
-        ecx,
-        rgas::call_cost(
-            spec_id,
-            value != U256::ZERO,
-            is_new,
-            is_cold,
-            matches!(call_kind, CallKind::Call | CallKind::CallCode),
-            matches!(call_kind, CallKind::Call | CallKind::StaticCall),
-        )
-    );
+    gas!(ecx, rgas::call_cost(spec_id, value != U256::ZERO, is_cold, is_empty,));
 
     // EIP-150: Gas cost changes for IO-heavy operations
     let mut gas_limit = if spec_id.is_enabled_in(SpecId::TANGERINE) {
@@ -625,20 +591,32 @@ pub unsafe extern "C" fn __revm_jit_builtin_call(
     gas!(ecx, gas_limit);
 
     // Add call stipend if there is value to be transferred.
-    if matches!(call_kind, CallKind::Call | CallKind::CallCode) && transfer.value != U256::ZERO {
+    if matches!(call_kind, CallKind::Call | CallKind::CallCode) && value != U256::ZERO {
         gas_limit = gas_limit.saturating_add(rgas::CALL_STIPEND);
     }
     let is_static = matches!(call_kind, CallKind::StaticCall) || ecx.is_static;
 
     *ecx.next_action = InterpreterAction::Call {
         inputs: Box::new(CallInputs {
-            contract: to,
-            transfer,
             input,
-            gas_limit,
-            context,
-            is_static,
             return_memory_offset: out_offset..out_offset + out_len,
+            gas_limit,
+            bytecode_address: if call_kind == CallKind::DelegateCall {
+                ecx.contract.target_address
+            } else {
+                to
+            },
+            target_address: to,
+            caller: if call_kind == CallKind::DelegateCall {
+                ecx.contract.caller
+            } else {
+                ecx.contract.target_address
+            },
+            value: transfer_value,
+            scheme: call_kind.into(),
+            is_static,
+            // TODO(EOF)
+            is_eof: false,
         }),
     };
 
@@ -670,7 +648,7 @@ pub unsafe extern "C" fn __revm_jit_builtin_selfdestruct(
     target: &mut EvmWord,
     spec_id: SpecId,
 ) -> InstructionResult {
-    let res = try_host!(ecx.host.selfdestruct(ecx.contract.address, target.to_address()));
+    let res = try_host!(ecx.host.selfdestruct(ecx.contract.target_address, target.to_address()));
 
     // EIP-3529: Reduction in refunds
     if !spec_id.is_enabled_in(SpecId::LONDON) && !res.previously_destroyed {

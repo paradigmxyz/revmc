@@ -2,7 +2,7 @@
 
 use bitvec::vec::BitVec;
 use revm_interpreter::opcode as op;
-use revm_jit_backend::Result;
+use revm_jit_backend::{eyre::ensure, Result};
 use revm_primitives::SpecId;
 use std::fmt;
 
@@ -11,9 +11,6 @@ pub use info::*;
 
 mod opcode;
 pub use opcode::*;
-
-mod stack;
-pub use stack::StackIo;
 
 /// Noop opcode used to test suspend-resume.
 pub(crate) const TEST_SUSPEND: u8 = 0x25;
@@ -122,6 +119,8 @@ impl<'a> Bytecode<'a> {
     /// Runs a list of analysis passes on the instructions.
     #[instrument(level = "debug", skip_all)]
     pub(crate) fn analyze(&mut self) -> Result<()> {
+        ensure!(!self.spec_id.is_enabled_in(SpecId::PRAGUE), "EOF is not yet implemented");
+
         trace_time!("static_jump_analysis", || self.static_jump_analysis());
         // NOTE: `mark_dead_code` must run after `static_jump_analysis` as it can mark unreachable
         // `JUMPDEST`s as dead code.
@@ -338,14 +337,14 @@ impl InstData {
 
     /// Returns the length of the immediate data of this instruction.
     #[inline]
-    pub(crate) const fn imm_len(&self) -> usize {
+    pub(crate) const fn imm_len(&self) -> u8 {
         imm_len(self.opcode)
     }
 
     /// Returns the input and output stack elements of this instruction.
     #[inline]
-    pub(crate) const fn stack_io(&self) -> StackIo {
-        StackIo::new(self.opcode)
+    pub(crate) const fn stack_io(&self) -> (u8, u8) {
+        stack_io(self.opcode)
     }
 
     /// Converts this instruction to a raw opcode. Note that the immediate data is not resolved.

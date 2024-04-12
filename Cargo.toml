@@ -51,5 +51,7 @@ tracing-error = "0.2"
 tracing-subscriber = "0.3"
 
 [patch.crates-io]
-revm-primitives = { git = "https://github.com/bluealloy/revm", rev = "4d64bbcd241540f90f3a6ab2285b6fe6f8febb1f" }
-revm-interpreter = { git = "https://github.com/bluealloy/revm", rev = "4d64bbcd241540f90f3a6ab2285b6fe6f8febb1f" }
+# revm-primitives = { git = "https://github.com/bluealloy/revm", rev = "cfc4511fe148296394c19c9ab3fb46f663218413" }
+# revm-interpreter = { git = "https://github.com/bluealloy/revm", rev = "cfc4511fe148296394c19c9ab3fb46f663218413" }
+revm-primitives = { git = "https://github.com/danipopes/revm", branch = "tmp-prs" }
+revm-interpreter = { git = "https://github.com/danipopes/revm", branch = "tmp-prs" }

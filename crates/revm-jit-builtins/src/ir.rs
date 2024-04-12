@@ -147,6 +147,7 @@ builtins! {
     Keccak256      = __revm_jit_builtin_keccak256(ptr, ptr) Some(u8),
     Balance        = __revm_jit_builtin_balance(ptr, ptr, u8) Some(u8),
     CallDataCopy   = __revm_jit_builtin_calldatacopy(ptr, ptr) Some(u8),
+    CodeSize       = __revm_jit_builtin_codesize(ptr) Some(usize),
     CodeCopy       = __revm_jit_builtin_codecopy(ptr, ptr) Some(u8),
     ExtCodeSize    = __revm_jit_builtin_extcodesize(ptr, ptr, u8) Some(u8),
     ExtCodeCopy    = __revm_jit_builtin_extcodecopy(ptr, ptr, u8) Some(u8),

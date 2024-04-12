@@ -55,6 +55,7 @@ pub(crate) unsafe fn copy_operation(
     InstructionResult::Continue
 }
 
-pub(crate) unsafe fn decouple_lt<'b, T: ?Sized>(x: &T) -> &'b T {
+#[inline(always)]
+pub(crate) const unsafe fn decouple_lt<'b, T: ?Sized>(x: &T) -> &'b T {
     core::mem::transmute(x)
 }

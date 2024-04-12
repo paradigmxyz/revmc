@@ -1,6 +1,5 @@
 use clap::{Parser, ValueEnum};
 use color_eyre::{eyre::eyre, Result};
-use revm_interpreter::InterpreterAction;
 use revm_jit::{
     debug_time, eyre::Context, new_llvm_backend, EvmContext, JitEvm, OptimizationLevel,
 };
@@ -26,8 +25,8 @@ struct Cli {
 
     #[arg(short = 'O', long)]
     opt_level: Option<OptimizationLevel>,
-    #[arg(long, value_enum)]
-    spec_id: Option<SpecIdValueEnum>,
+    #[arg(long, value_enum, default_value = "cancun")]
+    spec_id: SpecIdValueEnum,
     #[arg(long)]
     debug_assertions: bool,
     #[arg(long)]
@@ -78,24 +77,22 @@ fn main() -> Result<()> {
     let bytecode = revm_interpreter::analysis::to_analysed(revm_primitives::Bytecode::new_raw(
         revm_primitives::Bytes::copy_from_slice(&bytecode),
     ));
-    let bytecode_hash = bytecode.hash_slow();
-    let contract = revm_interpreter::Contract::new_env(&env, bytecode, bytecode_hash);
+    let contract = revm_interpreter::Contract::new_env(&env, bytecode, None);
     let mut host = revm_interpreter::DummyHost::new(env);
 
-    let bytecode = contract.bytecode.original_bytecode_slice();
+    let bytecode = contract.bytecode.original_byte_slice();
 
     // let table = &revm_interpreter::opcode::make_instruction_table::<
     //     revm_interpreter::DummyHost,
     //     revm_primitives::CancunSpec,
     // >();
 
-    let spec_id = cli.spec_id.map(Into::into).unwrap_or(SpecId::LATEST);
+    let spec_id = cli.spec_id.into();
     if !stack_input.is_empty() {
         jit.set_inspect_stack_length(true);
     }
     let f = jit.compile(Some(name), bytecode, spec_id)?;
 
-    let mut action = InterpreterAction::None;
     let mut run = |f: revm_jit::JitEvmFn| {
         let mut interpreter =
             revm_interpreter::Interpreter::new(contract.clone(), gas_limit, false);
@@ -109,19 +106,17 @@ fn main() -> Result<()> {
         *stack_len = stack_input.len();
 
         let r = unsafe { f.call(Some(stack), Some(stack_len), &mut ecx) };
-        action = interpreter.next_action;
-        r
+        (r, interpreter.next_action)
     };
 
-    let ret = debug_time!("run", || run(f));
+    let (ret, action) = debug_time!("run", || run(f));
+    println!("InstructionResult::{ret:?}");
+    println!("InterpreterAction::{action:#?}");
+
     if cli.n_iters > 1 {
-        assert!(ret.is_ok(), "{ret:?}");
         bench(cli.n_iters, name, || run(f));
         return Ok(());
     }
-
-    println!("InstructionResult::{ret:?}");
-    println!("InterpreterAction::{action:#?}");
 
     Ok(())
 }
@@ -194,6 +189,7 @@ pub enum SpecIdValueEnum {
     MERGE,
     SHANGHAI,
     CANCUN,
+    PRAGUE,
     LATEST,
 }
 
@@ -218,6 +214,7 @@ impl From<SpecIdValueEnum> for SpecId {
             SpecIdValueEnum::MERGE => SpecId::MERGE,
             SpecIdValueEnum::SHANGHAI => SpecId::SHANGHAI,
             SpecIdValueEnum::CANCUN => SpecId::CANCUN,
+            SpecIdValueEnum::PRAGUE => SpecId::PRAGUE,
             SpecIdValueEnum::LATEST => SpecId::LATEST,
         }
     }

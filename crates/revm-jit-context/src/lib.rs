@@ -8,8 +8,8 @@ extern crate alloc;
 
 use core::{fmt, mem::MaybeUninit, ptr};
 use revm_interpreter::{
-    Contract, Gas, Host, InstructionResult, Interpreter, InterpreterAction, InterpreterResult,
-    SharedMemory,
+    Contract, FunctionStack, Gas, Host, InstructionResult, Interpreter, InterpreterAction,
+    InterpreterResult, SharedMemory,
 };
 use revm_primitives::{Address, Bytes, Env, U256};
 
@@ -79,8 +79,13 @@ impl<'a> EvmContext<'a> {
 
     /// Creates a new interpreter by cloning the context.
     pub fn to_interpreter(&self, stack: revm_interpreter::Stack) -> Interpreter {
+        let bytecode = self.contract.bytecode.bytecode_bytes();
         Interpreter {
-            instruction_pointer: self.contract.bytecode.as_ptr(),
+            is_eof: self.contract.bytecode.is_eof(),
+            instruction_pointer: bytecode.as_ptr(),
+            bytecode,
+            function_stack: FunctionStack::new(),
+            is_eof_init: false,
             contract: self.contract.clone(),
             instruction_result: InstructionResult::Continue,
             gas: *self.gas,
@@ -218,6 +223,7 @@ impl JitEvmFn {
         stack_len: Option<&mut usize>,
         ecx: &mut EvmContext<'_>,
     ) -> InstructionResult {
+        assert!(!ecx.contract.bytecode.is_eof(), "EOF is not yet implemented");
         (self.0)(
             ecx.gas,
             option_as_mut_ptr(stack),

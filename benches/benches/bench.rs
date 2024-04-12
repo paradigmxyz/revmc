@@ -32,11 +32,10 @@ fn run_bench(c: &mut Criterion, bench: &Bench) {
     let bytecode = revm_interpreter::analysis::to_analysed(revm_primitives::Bytecode::new_raw(
         revm_primitives::Bytes::copy_from_slice(bytecode),
     ));
-    let bytecode_hash = bytecode.hash_slow();
-    let contract = revm_interpreter::Contract::new_env(&env, bytecode, bytecode_hash);
+    let contract = revm_interpreter::Contract::new_env(&env, bytecode, None);
     let mut host = revm_interpreter::DummyHost::new(env);
 
-    let bytecode = contract.bytecode.original_bytecode_slice();
+    let bytecode = contract.bytecode.original_byte_slice();
 
     let table = &revm_interpreter::opcode::make_instruction_table::<
         revm_interpreter::DummyHost,

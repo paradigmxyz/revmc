@@ -3,8 +3,8 @@
 use crate::*;
 use primitives::SpecId;
 use revm_interpreter::{
-    gas, opcode as op, CallContext, CallInputs, CreateInputs, Gas, InstructionResult,
-    InterpreterAction, InterpreterResult, Transfer,
+    gas, opcode as op, CallInputs, CreateInputs, Gas, InstructionResult, InterpreterAction,
+    InterpreterResult,
 };
 use revm_primitives::{hex, keccak256, Address, Bytes, LogData, B256, KECCAK_EMPTY};
 
@@ -773,23 +773,16 @@ tests! {
             expected_gas: GAS_WHAT_THE_INTERPRETER_SAYS,
             expected_next_action: InterpreterAction::Call {
                 inputs: Box::new(CallInputs {
-                    contract: Address::from_word(6_U256.into()),
-                    transfer: Transfer {
-                        source: DEF_ADDR,
-                        target: Address::from_word(6_U256.into()),
-                        value: 5_U256,
-                    },
                     input: Bytes::copy_from_slice(&[0; 3]),
-                    gas_limit: gas::CALL_STIPEND + 7,
-                    context: CallContext {
-                        address: Address::from_word(6_U256.into()),
-                        caller: DEF_ADDR,
-                        code_address: Address::from_word(6_U256.into()),
-                        apparent_value: 5_U256,
-                        scheme: interpreter::CallScheme::Call,
-                    },
-                    is_static: false,
                     return_memory_offset: 2..2+1,
+                    gas_limit: gas::CALL_STIPEND + 7,
+                    bytecode_address: Address::from_word(6_U256.into()),
+                    target_address: Address::from_word(6_U256.into()),
+                    caller: DEF_ADDR,
+                    value: interpreter::TransferValue::Value(5_U256),
+                    scheme: interpreter::CallScheme::Call,
+                    is_static: false,
+                    is_eof: false,
                 }),
             },
         }),
@@ -849,7 +842,7 @@ tests! {
             bytecode: &hex!("7c01000000000000000000000000000000000000000000000000000000006000350463380e439681146037578063c040622614604757005b603d6084565b8060005260206000f35b604d6057565b8060005260206000f35b6000605f6084565b600060006101000a81548160ff0219169083021790555060ff60016000540416905090565b6000808160011560cd575b600a82121560a157600190910190608f565b81600a1460ac5760c9565b50600a5b60008160ff16111560c85760019182900391900360b0565b5b60d5565b6000925060ed565b8160001460e05760e8565b6001925060ed565b600092505b50509056"),
             spec_id: SpecId::ISTANBUL,
             modify_ecx: Some(|ecx| {
-                ecx.contract.value = 1_U256;
+                ecx.contract.call_value = 1_U256;
                 ecx.contract.input = Bytes::from(&hex!("c0406226"));
             }),
             expected_return: InstructionResult::Return,

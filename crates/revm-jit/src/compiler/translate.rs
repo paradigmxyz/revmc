@@ -509,7 +509,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         // Stack I/O.
         self.len_offset = 0;
         'stack_io: {
-            let (mut inp, out) = data.stack_io().both();
+            let (mut inp, out) = data.stack_io();
 
             if data.is_legacy_static_jump()
                 && !(opcode == op::JUMPI && data.flags.contains(InstFlags::INVALID_JUMP))
@@ -675,15 +675,15 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             op::MOD => binop!(@if_not_zero urem),
             op::SMOD => binop!(@if_not_zero srem),
             op::ADDMOD => {
-                let sp = self.sp_after_input();
+                let sp = self.sp_after_inputs();
                 let _ = self.builtin(Builtin::AddMod, &[sp]);
             }
             op::MULMOD => {
-                let sp = self.sp_after_input();
+                let sp = self.sp_after_inputs();
                 let _ = self.builtin(Builtin::MulMod, &[sp]);
             }
             op::EXP => {
-                let sp = self.sp_after_input();
+                let sp = self.sp_after_inputs();
                 let spec_id = self.const_spec_id();
                 self.builtin_ir(Builtin::Exp, &[self.ecx, sp, spec_id]);
             }
@@ -785,15 +785,15 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             }),
 
             op::KECCAK256 => {
-                let sp = self.sp_after_input();
+                let sp = self.sp_after_inputs();
                 self.builtin_ir(Builtin::Keccak256, &[self.ecx, sp]);
             }
 
             op::ADDRESS => {
-                contract_field!(@push @[endian = "big"] self.address_type, Contract; address)
+                contract_field!(@push @[endian = "big"] self.address_type, Contract; target_address)
             }
             op::BALANCE => {
-                let sp = self.sp_after_input();
+                let sp = self.sp_after_inputs();
                 let spec_id = self.const_spec_id();
                 self.builtin_ir(Builtin::Balance, &[self.ecx, sp, spec_id]);
             }
@@ -804,7 +804,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 contract_field!(@push @[endian = "big"] self.address_type, Contract; caller)
             }
             op::CALLVALUE => {
-                contract_field!(@push @[endian = "little"] self.word_type, Contract; value)
+                contract_field!(@push @[endian = "little"] self.word_type, Contract; call_value)
             }
             op::CALLDATALOAD => {
                 let index = self.pop();
@@ -849,14 +849,16 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 contract_field!(@push self.isize_type, Contract, pf::Bytes; input.len)
             }
             op::CALLDATACOPY => {
-                let sp = self.sp_after_input();
+                let sp = self.sp_after_inputs();
                 self.builtin_ir(Builtin::CallDataCopy, &[self.ecx, sp]);
             }
             op::CODESIZE => {
-                contract_field!(@push self.isize_type, Contract, pf::BytecodeLocked; bytecode.original_len)
+                let size = self.builtin(Builtin::CodeSize, &[self.ecx]).unwrap();
+                let size = self.bcx.zext(self.word_type, size);
+                self.push(size);
             }
             op::CODECOPY => {
-                let sp = self.sp_after_input();
+                let sp = self.sp_after_inputs();
                 self.builtin_ir(Builtin::CodeCopy, &[self.ecx, sp]);
             }
 
@@ -864,12 +866,12 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 env_field!(@push @[endian = "little"] self.word_type, Env, TxEnv; tx.gas_price)
             }
             op::EXTCODESIZE => {
-                let sp = self.sp_after_input();
+                let sp = self.sp_after_inputs();
                 let spec_id = self.const_spec_id();
                 self.builtin_ir(Builtin::ExtCodeSize, &[self.ecx, sp, spec_id]);
             }
             op::EXTCODECOPY => {
-                let sp = self.sp_after_input();
+                let sp = self.sp_after_inputs();
                 let spec_id = self.const_spec_id();
                 self.builtin_ir(Builtin::ExtCodeCopy, &[self.ecx, sp, spec_id]);
             }
@@ -877,16 +879,16 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 field!(ecx; @push self.isize_type, EvmContext<'_>, pf::Slice; return_data.len)
             }
             op::RETURNDATACOPY => {
-                let sp = self.sp_after_input();
+                let sp = self.sp_after_inputs();
                 self.builtin_ir(Builtin::ReturnDataCopy, &[self.ecx, sp]);
             }
             op::EXTCODEHASH => {
-                let sp = self.sp_after_input();
+                let sp = self.sp_after_inputs();
                 let spec_id = self.const_spec_id();
                 self.builtin_ir(Builtin::ExtCodeHash, &[self.ecx, sp, spec_id]);
             }
             op::BLOCKHASH => {
-                let sp = self.sp_after_input();
+                let sp = self.sp_after_inputs();
                 self.builtin_ir(Builtin::BlockHash, &[self.ecx, sp]);
             }
             op::COINBASE => {
@@ -936,7 +938,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 env_field!(@push @[endian = "little"] self.word_type, Env, BlockEnv; block.basefee)
             }
             op::BLOBHASH => {
-                let sp = self.sp_after_input();
+                let sp = self.sp_after_inputs();
                 let _ = self.builtin(Builtin::BlobHash, &[self.ecx, sp]);
             }
             op::BLOBBASEFEE => {
@@ -947,25 +949,25 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
             op::POP => { /* Already handled in stack_io */ }
             op::MLOAD => {
-                let sp = self.sp_after_input();
+                let sp = self.sp_after_inputs();
                 self.builtin_ir(Builtin::Mload, &[self.ecx, sp]);
             }
             op::MSTORE => {
-                let sp = self.sp_after_input();
+                let sp = self.sp_after_inputs();
                 self.builtin_ir(Builtin::Mstore, &[self.ecx, sp]);
             }
             op::MSTORE8 => {
-                let sp = self.sp_after_input();
+                let sp = self.sp_after_inputs();
                 self.builtin_ir(Builtin::Mstore8, &[self.ecx, sp]);
             }
             op::SLOAD => {
-                let sp = self.sp_after_input();
+                let sp = self.sp_after_inputs();
                 let spec_id = self.const_spec_id();
                 self.builtin_ir(Builtin::Sload, &[self.ecx, sp, spec_id]);
             }
             op::SSTORE => {
                 self.fail_if_staticcall(InstructionResult::StateChangeDuringStaticCall);
-                let sp = self.sp_after_input();
+                let sp = self.sp_after_inputs();
                 let spec_id = self.const_spec_id();
                 self.builtin_ir(Builtin::Sstore, &[self.ecx, sp, spec_id]);
             }
@@ -1029,16 +1031,16 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 self.bcx.nop();
             }
             op::TLOAD => {
-                let sp = self.sp_after_input();
+                let sp = self.sp_after_inputs();
                 let _ = self.builtin(Builtin::Tload, &[self.ecx, sp]);
             }
             op::TSTORE => {
                 self.fail_if_staticcall(InstructionResult::StateChangeDuringStaticCall);
-                let sp = self.sp_after_input();
+                let sp = self.sp_after_inputs();
                 let _ = self.builtin(Builtin::Tstore, &[self.ecx, sp]);
             }
             op::MCOPY => {
-                let sp = self.sp_after_input();
+                let sp = self.sp_after_inputs();
                 self.builtin_ir(Builtin::Mcopy, &[self.ecx, sp]);
             }
 
@@ -1061,7 +1063,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             op::LOG0..=op::LOG4 => {
                 self.fail_if_staticcall(InstructionResult::StateChangeDuringStaticCall);
                 let n = opcode - op::LOG0;
-                let sp = self.sp_after_input();
+                let sp = self.sp_after_inputs();
                 let n = self.bcx.iconst(self.i8_type, n as i64);
                 self.builtin_ir(Builtin::Log, &[self.ecx, sp, n]);
             }
@@ -1103,7 +1105,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             op::INVALID => goto_return!(build InstructionResult::InvalidFEOpcode),
             op::SELFDESTRUCT => {
                 self.fail_if_staticcall(InstructionResult::StateChangeDuringStaticCall);
-                let sp = self.sp_after_input();
+                let sp = self.sp_after_inputs();
                 let spec_id = self.const_spec_id();
                 self.builtin_ir(Builtin::SelfDestruct, &[self.ecx, sp, spec_id]);
                 goto_return!(build InstructionResult::SelfDestruct);
@@ -1189,7 +1191,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
     /// `RETURN` or `REVERT` instruction.
     fn return_common(&mut self, ir: InstructionResult) {
-        let sp = self.sp_after_input();
+        let sp = self.sp_after_inputs();
         let ir_const = self.bcx.iconst(self.i8_type, ir as i64);
         self.builtin_ir(Builtin::DoReturn, &[self.ecx, sp, ir_const]);
         self.build_return_imm(ir);
@@ -1198,7 +1200,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     /// `CREATE` or `CREATE2` instruction.
     fn create_common(&mut self, create_kind: CreateKind) {
         self.fail_if_staticcall(InstructionResult::StateChangeDuringStaticCall);
-        let sp = self.sp_after_input();
+        let sp = self.sp_after_inputs();
         let spec_id = self.const_spec_id();
         let create_kind = self.bcx.iconst(self.i8_type, create_kind as i64);
         self.builtin_ir(Builtin::Create, &[self.ecx, sp, spec_id, create_kind]);
@@ -1207,7 +1209,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
     /// `*CALL*` instruction.
     fn call_common(&mut self, call_kind: CallKind) {
-        let sp = self.sp_after_input();
+        let sp = self.sp_after_inputs();
         let spec_id = self.const_spec_id();
         let call_kind = self.bcx.iconst(self.i8_type, call_kind as i64);
         self.builtin_ir(Builtin::Call, &[self.ecx, sp, spec_id, call_kind]);
@@ -1274,11 +1276,11 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
     /// Returns the stack pointer after the input has been popped
     /// (`&stack[stack.len - op.input()]`).
-    fn sp_after_input(&mut self) -> B::Value {
+    fn sp_after_inputs(&mut self) -> B::Value {
         let mut len = self.len_before();
-        let input_len = self.current_inst().stack_io().input();
-        if input_len > 0 {
-            len = self.bcx.isub_imm(len, input_len as i64);
+        let (inputs, _) = self.current_inst().stack_io();
+        if inputs > 0 {
+            len = self.bcx.isub_imm(len, inputs as i64);
         }
         self.sp_at(len)
     }
@@ -1565,7 +1567,6 @@ impl<B: Backend> Pointer<B> {
 #[allow(dead_code)]
 mod pf {
     use super::*;
-    use revm_primitives::JumpMap;
 
     pub(super) struct Bytes {
         pub(super) ptr: *const u8,
@@ -1583,12 +1584,6 @@ mod pf {
         to_vec: unsafe fn(&AtomicPtr<()>, *const u8, usize) -> Vec<u8>,
         /// fn(data, ptr, len)
         drop: unsafe fn(&mut AtomicPtr<()>, *const u8, usize),
-    }
-
-    pub(super) struct BytecodeLocked {
-        pub(super) bytecode: Bytes,
-        pub(super) original_len: usize,
-        jump_map: JumpMap,
     }
 
     #[repr(C)] // See core::ptr::metadata::PtrComponents

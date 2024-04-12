@@ -1,4 +1,5 @@
 use super::*;
+use interpreter::LoadAccountResult;
 use revm_interpreter::{opcode as op, Contract, DummyHost, Host};
 use revm_primitives::{
     spec_to_generic, BlobExcessGasAndPrice, BlockEnv, CfgEnv, Env, HashMap, TxEnv,
@@ -111,6 +112,9 @@ pub fn def_env() -> &'static Env {
             gas_priority_fee: None,
             blob_hashes: vec![B256::repeat_byte(0xb7), B256::repeat_byte(0xb8)],
             max_fee_per_blob_gas: None,
+            // TODO(EOF)
+            eof_initcodes: Vec::new(),
+            eof_initcodes_hashed: HashMap::new(),
         },
     })
 }
@@ -189,7 +193,7 @@ impl Host for TestHost {
         self.host.env_mut()
     }
 
-    fn load_account(&mut self, address: Address) -> Option<(bool, bool)> {
+    fn load_account(&mut self, address: Address) -> Option<LoadAccountResult> {
         self.host.load_account(address)
     }
 
@@ -260,13 +264,11 @@ pub fn with_evm_context<F: FnOnce(&mut EvmContext<'_>, &mut EvmStack, &mut usize
         input: Bytes::from_static(DEF_CD),
         bytecode: revm_interpreter::analysis::to_analysed(revm_primitives::Bytecode::new_raw(
             Bytes::copy_from_slice(bytecode),
-        ))
-        .try_into()
-        .unwrap(),
-        hash: keccak256(bytecode),
-        address: DEF_ADDR,
+        )),
+        hash: None,
+        target_address: DEF_ADDR,
         caller: DEF_CALLER,
-        value: DEF_VALUE,
+        call_value: DEF_VALUE,
     };
 
     let mut interpreter = revm_interpreter::Interpreter::new(contract, DEF_GAS_LIMIT, false);
