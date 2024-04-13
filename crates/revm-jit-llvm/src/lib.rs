@@ -21,6 +21,7 @@ use inkwell::{
 use revm_jit_backend::{
     eyre, Backend, BackendTypes, Builder, Error, IntCC, Result, TypeMethods, U256,
 };
+use rustc_hash::FxHashMap;
 use std::{path::Path, sync::Once};
 
 pub use inkwell;
@@ -48,6 +49,8 @@ pub struct JitEvmLlvmBackend<'ctx> {
 
     debug_assertions: bool,
     opt_level: OptimizationLevel,
+    function_counter: u32,
+    function_names: FxHashMap<u32, String>,
 }
 
 impl<'ctx> JitEvmLlvmBackend<'ctx> {
@@ -140,6 +143,8 @@ impl<'ctx> JitEvmLlvmBackend<'ctx> {
             ty_ptr,
             debug_assertions: cfg!(debug_assertions),
             opt_level,
+            function_counter: 0,
+            function_names: FxHashMap::default(),
         })
     }
 
@@ -159,6 +164,10 @@ impl<'ctx> JitEvmLlvmBackend<'ctx> {
             Some(ret) => ret.fn_type(&params, false),
             None => self.ty_void.fn_type(&params, false),
         }
+    }
+
+    fn id_to_name(&self, id: u32) -> &str {
+        &self.function_names[&id]
     }
 }
 
@@ -204,6 +213,7 @@ impl<'ctx> TypeMethods for JitEvmLlvmBackend<'ctx> {
 
 impl<'ctx> Backend for JitEvmLlvmBackend<'ctx> {
     type Builder<'a> = JitEvmLlvmBuilder<'a, 'ctx> where Self: 'a;
+    type FuncId = u32;
 
     fn ir_extension(&self) -> &'static str {
         "ll"
@@ -240,7 +250,7 @@ impl<'ctx> Backend for JitEvmLlvmBackend<'ctx> {
         params: &[Self::Type],
         param_names: &[&str],
         linkage: revm_jit_backend::Linkage,
-    ) -> Result<Self::Builder<'_>> {
+    ) -> Result<(Self::Builder<'_>, Self::FuncId)> {
         let fn_type = self.fn_type(ret, params);
         let function = self.module.add_function(name, fn_type, Some(convert_linkage(linkage)));
         for (i, &name) in param_names.iter().enumerate() {
@@ -250,15 +260,17 @@ impl<'ctx> Backend for JitEvmLlvmBackend<'ctx> {
         let entry = self.cx.append_basic_block(function, "entry");
         self.bcx.position_at_end(entry);
 
-        Ok(JitEvmLlvmBuilder { backend: self, function })
+        let id = self.function_counter;
+        self.function_counter += 1;
+        let builder = JitEvmLlvmBuilder { backend: self, function };
+        Ok((builder, id))
     }
 
-    fn verify_function(&mut self, name: &str) -> Result<()> {
-        let _ = name;
+    fn verify_module(&mut self) -> Result<()> {
         self.module.verify().map_err(error_msg)
     }
 
-    fn optimize_function(&mut self, _name: &str) -> Result<()> {
+    fn optimize_function(&mut self, _id: Self::FuncId) -> Result<()> {
         // From `opt --help`, `-passes`.
         let passes = match self.opt_level {
             OptimizationLevel::None => "default<O0>",
@@ -270,11 +282,13 @@ impl<'ctx> Backend for JitEvmLlvmBackend<'ctx> {
         self.module.run_passes(passes, &self.machine, opts).map_err(error_msg)
     }
 
-    fn get_function(&mut self, name: &str) -> Result<usize> {
+    fn get_function(&mut self, id: Self::FuncId) -> Result<usize> {
+        let name = self.id_to_name(id);
         self.exec_engine.get_function_address(name).map_err(Into::into)
     }
 
-    unsafe fn free_function(&mut self, name: &str) -> Result<()> {
+    unsafe fn free_function(&mut self, id: Self::FuncId) -> Result<()> {
+        let name = self.id_to_name(id);
         let function = self.exec_engine.get_function_value(name)?;
         self.exec_engine.free_fn_machine_code(function);
         Ok(())

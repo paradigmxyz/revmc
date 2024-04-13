@@ -10,7 +10,7 @@ use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{FuncId, FuncOrDataId, Linkage, Module};
 use pretty_clif::CommentWriter;
 use revm_jit_backend::{
-    Backend, BackendTypes, Builder, Error, OptimizationLevel, Result, TypeMethods, U256,
+    Backend, BackendTypes, Builder, OptimizationLevel, Result, TypeMethods, U256,
 };
 use std::{cell::RefCell, collections::HashMap, io::Write, path::Path, rc::Rc};
 
@@ -69,13 +69,6 @@ impl JitEvmCraneliftBackend {
             comments: CommentWriter::new(),
         }
     }
-
-    fn name_to_id(&mut self, name: &str) -> Result<FuncId> {
-        let Some(FuncOrDataId::Func(id)) = self.module.get_name(name) else {
-            return Err(Error::msg("function not found"));
-        };
-        Ok(id)
-    }
 }
 
 impl BackendTypes for JitEvmCraneliftBackend {
@@ -113,6 +106,7 @@ impl TypeMethods for JitEvmCraneliftBackend {
 
 impl Backend for JitEvmCraneliftBackend {
     type Builder<'a> = JitEvmCraneliftBuilder<'a>;
+    type FuncId = FuncId;
 
     fn ir_extension(&self) -> &'static str {
         "clif"
@@ -160,7 +154,7 @@ impl Backend for JitEvmCraneliftBackend {
         params: &[Self::Type],
         param_names: &[&str],
         linkage: revm_jit_backend::Linkage,
-    ) -> Result<Self::Builder<'_>> {
+    ) -> Result<(Self::Builder<'_>, FuncId)> {
         if let Some(ret) = ret {
             self.ctx.func.signature.returns.push(AbiParam::new(ret));
         }
@@ -169,29 +163,27 @@ impl Backend for JitEvmCraneliftBackend {
         }
         let _ = param_names;
         let ptr_type = self.type_ptr();
-        let _id = self.module.declare_function(
+        let id = self.module.declare_function(
             name,
             convert_linkage(linkage),
             &self.ctx.func.signature,
         )?;
         let bcx = FunctionBuilder::new(&mut self.ctx.func, &mut self.builder_context);
-        Ok(JitEvmCraneliftBuilder {
+        let builder = JitEvmCraneliftBuilder {
             module: &mut self.module,
             comments: &mut self.comments,
             bcx,
             ptr_type,
             symbols: self.symbols.clone(),
-        })
+        };
+        Ok((builder, id))
     }
 
-    fn verify_function(&mut self, name: &str) -> Result<()> {
-        let _ = name;
+    fn verify_module(&mut self) -> Result<()> {
         Ok(())
     }
 
-    fn optimize_function(&mut self, name: &str) -> Result<()> {
-        let id = self.name_to_id(name)?;
-
+    fn optimize_function(&mut self, id: Self::FuncId) -> Result<()> {
         // Define the function to jit. This finishes compilation, although
         // there may be outstanding relocations to perform. Currently, jit
         // cannot finish relocations until all functions to be called are
@@ -211,14 +203,13 @@ impl Backend for JitEvmCraneliftBackend {
         Ok(())
     }
 
-    fn get_function(&mut self, name: &str) -> Result<usize> {
-        let id = self.name_to_id(name)?;
+    fn get_function(&mut self, id: Self::FuncId) -> Result<usize> {
         Ok(self.module.get_finalized_function(id) as usize)
     }
 
-    unsafe fn free_function(&mut self, name: &str) -> Result<()> {
+    unsafe fn free_function(&mut self, id: Self::FuncId) -> Result<()> {
         // This doesn't exist yet.
-        let _ = name;
+        let _ = id;
         Ok(())
     }
 
