@@ -1,5 +1,3 @@
 # revm-jit-builtins
 
-[LLVM] bitcode builtins.
-
-[LLVM]: https://llvm.org/
+EVM bytecode compiler builtins.

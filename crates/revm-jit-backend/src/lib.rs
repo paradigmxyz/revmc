@@ -14,10 +14,10 @@ pub use eyre;
 #[doc(no_inline)]
 pub use ruint::{self, aliases::U256, uint};
 
-/// JIT compilation result.
+/// Compilation result.
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
-/// JIT compilation error.
+/// Compilation error.
 pub type Error = eyre::Error;
 
 // Not public API.

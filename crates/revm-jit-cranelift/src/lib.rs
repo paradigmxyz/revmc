@@ -7,10 +7,11 @@ use cranelift::{
     prelude::*,
 };
 use cranelift_jit::{JITBuilder, JITModule};
-use cranelift_module::{FuncId, FuncOrDataId, Linkage, Module};
+use cranelift_module::{FuncId, FuncOrDataId, Linkage, Module, ModuleError};
+use cranelift_object::{ObjectBuilder, ObjectModule};
 use pretty_clif::CommentWriter;
 use revm_jit_backend::{
-    Backend, BackendTypes, Builder, OptimizationLevel, Result, TypeMethods, U256,
+    eyre::eyre, Backend, BackendTypes, Builder, OptimizationLevel, Result, TypeMethods, U256,
 };
 use std::{cell::RefCell, collections::HashMap, io::Write, path::Path, rc::Rc};
 
@@ -21,10 +22,10 @@ pub use cranelift_jit;
 pub use cranelift_module;
 pub use cranelift_native;
 
-/// The Cranelift-based EVM JIT backend.
+/// The Cranelift-based EVM bytecode compiler backend.
 #[allow(missing_debug_implementations)]
 #[must_use]
-pub struct JitEvmCraneliftBackend {
+pub struct EvmCraneliftBackend {
     /// The function builder context, which is reused across multiple FunctionBuilder instances.
     builder_context: FunctionBuilderContext,
 
@@ -34,7 +35,7 @@ pub struct JitEvmCraneliftBackend {
     ctx: codegen::Context,
 
     /// The module, with the jit backend, which manages the JIT'd functions.
-    module: JITModule,
+    module: ModuleWrapper,
 
     symbols: Symbols,
 
@@ -44,7 +45,7 @@ pub struct JitEvmCraneliftBackend {
 }
 
 #[allow(clippy::new_without_default)]
-impl JitEvmCraneliftBackend {
+impl EvmCraneliftBackend {
     /// Returns `Ok(())` if the current architecture is supported, or `Err(())` if the host machine
     /// is not supported in the current configuration.
     pub fn is_supported() -> Result<(), &'static str> {
@@ -60,10 +61,10 @@ impl JitEvmCraneliftBackend {
     #[track_caller]
     pub fn new(opt_level: OptimizationLevel) -> Self {
         let symbols = Symbols::new();
-        let module = mk_jit_module(opt_level, symbols.clone());
+        let module = ModuleWrapper::new_jit(opt_level, symbols.clone()).unwrap();
         Self {
             builder_context: FunctionBuilderContext::new(),
-            ctx: module.make_context(),
+            ctx: module.get().make_context(),
             module,
             symbols,
             opt_level,
@@ -71,9 +72,32 @@ impl JitEvmCraneliftBackend {
             functions: Vec::new(),
         }
     }
+
+    fn finish_module(&mut self) -> Result<Option<ObjectModule>> {
+        let aot = match self.module {
+            ModuleWrapper::Jit(_) => {
+                // TODO: Can `free_memory` take `&mut self` pls?
+                let new = ModuleWrapper::new_jit(self.opt_level, self.symbols.clone())?;
+                let ModuleWrapper::Jit(old) = std::mem::replace(&mut self.module, new) else {
+                    unreachable!()
+                };
+                unsafe { old.free_memory() };
+                None
+            }
+            ModuleWrapper::Aot(_) => {
+                let new = ModuleWrapper::new_aot(self.opt_level)?;
+                let ModuleWrapper::Aot(old) = std::mem::replace(&mut self.module, new) else {
+                    unreachable!()
+                };
+                Some(old)
+            }
+        };
+        self.ctx = self.module.get().make_context();
+        Ok(aot)
+    }
 }
 
-impl BackendTypes for JitEvmCraneliftBackend {
+impl BackendTypes for EvmCraneliftBackend {
     type Type = Type;
     type Value = Value;
     type StackSlot = StackSlot;
@@ -81,9 +105,9 @@ impl BackendTypes for JitEvmCraneliftBackend {
     type Function = FuncRef;
 }
 
-impl TypeMethods for JitEvmCraneliftBackend {
+impl TypeMethods for EvmCraneliftBackend {
     fn type_ptr(&self) -> Self::Type {
-        self.module.target_config().pointer_type()
+        self.module.get().target_config().pointer_type()
     }
 
     fn type_ptr_sized_int(&self) -> Self::Type {
@@ -106,8 +130,8 @@ impl TypeMethods for JitEvmCraneliftBackend {
     }
 }
 
-impl Backend for JitEvmCraneliftBackend {
-    type Builder<'a> = JitEvmCraneliftBuilder<'a>;
+impl Backend for EvmCraneliftBackend {
+    type Builder<'a> = EvmCraneliftBuilder<'a>;
     type FuncId = FuncId;
 
     fn ir_extension(&self) -> &'static str {
@@ -116,6 +140,10 @@ impl Backend for JitEvmCraneliftBackend {
 
     fn set_module_name(&mut self, name: &str) {
         let _ = name;
+    }
+
+    fn set_aot(&mut self, aot: bool) -> Result<()> {
+        self.module.set_aot(aot, self.opt_level, &self.symbols)
     }
 
     fn set_is_dumping(&mut self, yes: bool) {
@@ -139,7 +167,7 @@ impl Backend for JitEvmCraneliftBackend {
     fn dump_ir(&mut self, path: &Path) -> Result<()> {
         crate::pretty_clif::write_clif_file(
             path,
-            self.module.isa(),
+            self.module.get().isa(),
             &self.ctx.func,
             &self.comments,
         );
@@ -169,14 +197,14 @@ impl Backend for JitEvmCraneliftBackend {
         }
         let _ = param_names;
         let ptr_type = self.type_ptr();
-        let id = self.module.declare_function(
+        let id = self.module.get_mut().declare_function(
             name,
             convert_linkage(linkage),
             &self.ctx.func.signature,
         )?;
         self.functions.push(id);
         let bcx = FunctionBuilder::new(&mut self.ctx.func, &mut self.builder_context);
-        let builder = JitEvmCraneliftBuilder {
+        let builder = EvmCraneliftBuilder {
             module: &mut self.module,
             comments: &mut self.comments,
             bcx,
@@ -197,12 +225,12 @@ impl Backend for JitEvmCraneliftBackend {
         // defined. For this toy demo for now, we'll just finalize the
         // function below.
         for &id in &self.functions {
-            self.module.define_function(id, &mut self.ctx)?;
+            self.module.get_mut().define_function(id, &mut self.ctx)?;
         }
         self.functions.clear();
 
         // Now that compilation is finished, we can clear out the context state.
-        self.module.clear_context(&mut self.ctx);
+        self.module.get().clear_context(&mut self.ctx);
 
         // Finalize the functions which we just defined, which resolves any outstanding relocations
         // (patching in addresses, now that they're available).
@@ -213,8 +241,16 @@ impl Backend for JitEvmCraneliftBackend {
         Ok(())
     }
 
+    fn write_object<W: std::io::Write>(&mut self, w: W) -> Result<()> {
+        let module =
+            self.finish_module()?.ok_or_else(|| eyre!("cannot write object in JIT mode"))?;
+        let product = module.finish();
+        product.object.write_stream(w).map_err(|e| eyre!("{e}"))?;
+        Ok(())
+    }
+
     fn jit_function(&mut self, id: Self::FuncId) -> Result<usize> {
-        Ok(self.module.get_finalized_function(id) as usize)
+        self.module.get_finalized_function(id).map(|ptr| ptr as usize)
     }
 
     unsafe fn free_function(&mut self, id: Self::FuncId) -> Result<()> {
@@ -224,26 +260,29 @@ impl Backend for JitEvmCraneliftBackend {
     }
 
     unsafe fn free_all_functions(&mut self) -> Result<()> {
-        // TODO: Can `free_memory` take `&mut self` pls?
-        let new = mk_jit_module(self.opt_level, self.symbols.clone());
-        let old = std::mem::replace(&mut self.module, new);
-        unsafe { old.free_memory() };
-        self.ctx = self.module.make_context();
+        if let ModuleWrapper::Jit(_) = self.module {
+            // TODO: Can `free_memory` take `&mut self` pls?
+            let new = ModuleWrapper::new_jit(self.opt_level, self.symbols.clone())?;
+            if let ModuleWrapper::Jit(old) = std::mem::replace(&mut self.module, new) {
+                unsafe { old.free_memory() };
+            }
+            self.ctx = self.module.get().make_context();
+        }
         Ok(())
     }
 }
 
-/// The Cranelift-based EVM JIT function builder.
+/// The Cranelift-based EVM bytecode compiler function builder.
 #[allow(missing_debug_implementations)]
-pub struct JitEvmCraneliftBuilder<'a> {
-    module: &'a mut JITModule,
+pub struct EvmCraneliftBuilder<'a> {
+    module: &'a mut ModuleWrapper,
     comments: &'a mut CommentWriter,
     bcx: FunctionBuilder<'a>,
     ptr_type: Type,
     symbols: Symbols,
 }
 
-impl<'a> BackendTypes for JitEvmCraneliftBuilder<'a> {
+impl<'a> BackendTypes for EvmCraneliftBuilder<'a> {
     type Type = Type;
     type Value = Value;
     type StackSlot = StackSlot;
@@ -251,7 +290,7 @@ impl<'a> BackendTypes for JitEvmCraneliftBuilder<'a> {
     type Function = FuncRef;
 }
 
-impl<'a> TypeMethods for JitEvmCraneliftBuilder<'a> {
+impl<'a> TypeMethods for EvmCraneliftBuilder<'a> {
     fn type_ptr(&self) -> Self::Type {
         self.ptr_type
     }
@@ -276,7 +315,7 @@ impl<'a> TypeMethods for JitEvmCraneliftBuilder<'a> {
     }
 }
 
-impl<'a> Builder for JitEvmCraneliftBuilder<'a> {
+impl<'a> Builder for EvmCraneliftBuilder<'a> {
     fn create_block(&mut self, name: &str) -> Self::BasicBlock {
         let block = self.bcx.create_block();
         if !name.is_empty() && self.comments.enabled() {
@@ -636,7 +675,7 @@ impl<'a> Builder for JitEvmCraneliftBuilder<'a> {
     }
 
     fn memcpy(&mut self, dst: Self::Value, src: Self::Value, len: Self::Value) {
-        let config = self.module.target_config();
+        let config = self.module.get().target_config();
         self.bcx.call_memcpy(config, dst, src, len)
     }
 
@@ -646,12 +685,13 @@ impl<'a> Builder for JitEvmCraneliftBuilder<'a> {
 
     fn get_function(&mut self, name: &str) -> Option<Self::Function> {
         self.module
+            .get()
             .get_name(name)
             .and_then(|id| match id {
                 FuncOrDataId::Func(f) => Some(f),
                 FuncOrDataId::Data(_) => None,
             })
-            .map(|id| self.module.declare_func_in_func(id, self.bcx.func))
+            .map(|id| self.module.get_mut().declare_func_in_func(id, self.bcx.func))
     }
 
     fn add_function(
@@ -662,7 +702,7 @@ impl<'a> Builder for JitEvmCraneliftBuilder<'a> {
         address: usize,
         linkage: revm_jit_backend::Linkage,
     ) -> Self::Function {
-        let mut sig = self.module.make_signature();
+        let mut sig = self.module.get().make_signature();
         for ret in &ret {
             sig.returns.push(AbiParam::new(*ret));
         }
@@ -670,8 +710,9 @@ impl<'a> Builder for JitEvmCraneliftBuilder<'a> {
             sig.params.push(AbiParam::new(*param));
         }
         self.symbols.insert(name.to_string(), address as *const u8);
-        let id = self.module.declare_function(name, convert_linkage(linkage), &sig).unwrap();
-        self.module.declare_func_in_func(id, self.bcx.func)
+        let id =
+            self.module.get_mut().declare_function(name, convert_linkage(linkage), &sig).unwrap();
+        self.module.get_mut().declare_func_in_func(id, self.bcx.func)
     }
 
     fn add_function_attribute(
@@ -704,20 +745,75 @@ impl Symbols {
     }
 }
 
-fn mk_jit_module(opt_level: OptimizationLevel, symbols: Symbols) -> JITModule {
-    let opt_level: &str = match opt_level {
-        OptimizationLevel::None => "none",
-        OptimizationLevel::Less | OptimizationLevel::Default | OptimizationLevel::Aggressive => {
-            "speed"
+enum ModuleWrapper {
+    Jit(JITModule),
+    Aot(ObjectModule),
+}
+
+impl ModuleWrapper {
+    fn new_jit(opt_level: OptimizationLevel, symbols: Symbols) -> Result<Self> {
+        let mut builder = JITBuilder::with_flags(
+            &[("opt_level", opt_level_flag(opt_level))],
+            cranelift_module::default_libcall_names(),
+        )?;
+        builder.symbol_lookup_fn(Box::new(move |s| symbols.get(s)));
+        Ok(Self::Jit(JITModule::new(builder)))
+    }
+
+    fn new_aot(opt_level: OptimizationLevel) -> Result<Self> {
+        let mut flag_builder = settings::builder();
+        flag_builder.set("opt_level", opt_level_flag(opt_level))?;
+        let isa_builder = cranelift_native::builder().map_err(|s| eyre!(s))?;
+        let isa = isa_builder.finish(settings::Flags::new(flag_builder))?;
+
+        let builder =
+            ObjectBuilder::new(isa, "jit".to_string(), cranelift_module::default_libcall_names())?;
+        Ok(Self::Aot(ObjectModule::new(builder)))
+    }
+
+    #[inline]
+    fn get(&self) -> &dyn Module {
+        match self {
+            Self::Jit(module) => module,
+            Self::Aot(module) => module,
         }
-    };
-    let mut builder = JITBuilder::with_flags(
-        &[("opt_level", opt_level)],
-        cranelift_module::default_libcall_names(),
-    )
-    .unwrap();
-    builder.symbol_lookup_fn(Box::new(move |s| symbols.get(s)));
-    JITModule::new(builder)
+    }
+
+    #[inline]
+    fn get_mut(&mut self) -> &mut dyn Module {
+        match self {
+            Self::Jit(module) => module,
+            Self::Aot(module) => module,
+        }
+    }
+
+    fn set_aot(
+        &mut self,
+        aot: bool,
+        opt_level: OptimizationLevel,
+        symbols: &Symbols,
+    ) -> Result<()> {
+        match self {
+            Self::Jit(_) if aot => *self = Self::new_aot(opt_level)?,
+            Self::Aot(_) if !aot => *self = Self::new_jit(opt_level, symbols.clone())?,
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn finalize_definitions(&mut self) -> Result<(), ModuleError> {
+        match self {
+            Self::Jit(module) => module.finalize_definitions(),
+            Self::Aot(_) => Ok(()),
+        }
+    }
+
+    fn get_finalized_function(&self, id: FuncId) -> Result<*const u8> {
+        match self {
+            Self::Jit(module) => Ok(module.get_finalized_function(id)),
+            Self::Aot(_) => Err(eyre!("cannot get finalized JIT function in AOT mode")),
+        }
+    }
 }
 
 fn convert_intcc(cond: revm_jit_backend::IntCC) -> IntCC {
@@ -740,5 +836,14 @@ fn convert_linkage(linkage: revm_jit_backend::Linkage) -> Linkage {
         revm_jit_backend::Linkage::Import => Linkage::Import,
         revm_jit_backend::Linkage::Public => Linkage::Export,
         revm_jit_backend::Linkage::Private => Linkage::Local,
+    }
+}
+
+fn opt_level_flag(opt_level: OptimizationLevel) -> &'static str {
+    match opt_level {
+        OptimizationLevel::None => "none",
+        OptimizationLevel::Less | OptimizationLevel::Default | OptimizationLevel::Aggressive => {
+            "speed"
+        }
     }
 }

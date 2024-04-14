@@ -1,6 +1,6 @@
 [package]
 name = "revm-jit-backend"
-description = "REVM JIT - backend abstraction"
+description = "EVM bytecode compiler backend abstraction"
 homepage = "https://github.com/danipopes/revm-jit/tree/main/crates/revm-jit-backend"
 
 version.workspace = true

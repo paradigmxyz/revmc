@@ -137,6 +137,7 @@ pub trait Backend: BackendTypes + TypeMethods {
 
     fn set_module_name(&mut self, name: &str);
 
+    fn set_aot(&mut self, aot: bool) -> Result<()>;
     fn set_is_dumping(&mut self, yes: bool);
     fn set_debug_assertions(&mut self, yes: bool);
     fn opt_level(&self) -> OptimizationLevel;
@@ -154,6 +155,7 @@ pub trait Backend: BackendTypes + TypeMethods {
     ) -> Result<(Self::Builder<'_>, Self::FuncId)>;
     fn verify_module(&mut self) -> Result<()>;
     fn optimize_module(&mut self) -> Result<()>;
+    fn write_object<W: std::io::Write>(&mut self, w: W) -> Result<()>;
     fn jit_function(&mut self, id: Self::FuncId) -> Result<usize>;
     unsafe fn free_function(&mut self, id: Self::FuncId) -> Result<()>;
     unsafe fn free_all_functions(&mut self) -> Result<()>;

@@ -1,6 +1,6 @@
 [package]
 name = "revm-jit-cranelift"
-description = "REVM JIT - Cranelift backend"
+description = "EVM bytecode compiler Cranelift backend"
 homepage = "https://github.com/danipopes/revm-jit/tree/main/crates/revm-jit-cranelift"
 
 version.workspace = true
@@ -23,3 +23,4 @@ cranelift = "0.106"
 cranelift-jit = "0.106"
 cranelift-module = "0.106"
 cranelift-native = "0.106"
+cranelift-object = "0.106"

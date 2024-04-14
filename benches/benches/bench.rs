@@ -2,7 +2,7 @@ use criterion::{
     criterion_group, criterion_main, measurement::WallTime, BenchmarkGroup, Criterion,
 };
 use revm_interpreter::SharedMemory;
-use revm_jit::{llvm, new_llvm_backend, EvmContext, EvmStack, JitEvm, JitEvmFn};
+use revm_jit::{llvm, new_llvm_backend, EvmCompiler, EvmContext, EvmJitFn, EvmStack};
 use revm_jit_benches::Bench;
 use revm_primitives::{Env, SpecId};
 use std::time::Duration;
@@ -42,22 +42,22 @@ fn run_bench(c: &mut Criterion, bench: &Bench) {
         revm_primitives::CancunSpec,
     >();
 
-    // Set up JIT.
+    // Set up the compiler.
     let opt_level = revm_jit::OptimizationLevel::Aggressive;
     let context = llvm::inkwell::context::Context::create();
     let backend = new_llvm_backend(&context, opt_level).unwrap();
-    let mut jit = JitEvm::new(backend);
+    let mut compiler = EvmCompiler::new(backend);
     if !stack_input.is_empty() {
-        jit.set_inspect_stack_length(true);
+        compiler.set_inspect_stack_length(true);
     }
-    jit.set_disable_gas(true);
+    compiler.set_disable_gas(true);
 
     if let Some(native) = *native {
         g.bench_function("native", |b| b.iter(native));
     }
 
     let mut stack = EvmStack::new();
-    let mut call_jit = |f: JitEvmFn| {
+    let mut call_jit = |f: EvmJitFn| {
         for (i, input) in stack_input.iter().enumerate() {
             stack.as_mut_slice()[i] = input.into();
         }
@@ -73,11 +73,11 @@ fn run_bench(c: &mut Criterion, bench: &Bench) {
         r
     };
 
-    let jit_no_gas = jit.translate(Some(name), bytecode, SPEC_ID).unwrap();
-    jit.set_disable_gas(false);
-    let jit_gas = jit.translate(Some(name), bytecode, SPEC_ID).unwrap();
-    let jit_no_gas = jit.jit_function(jit_no_gas).unwrap();
-    let jit_gas = jit.jit_function(jit_gas).unwrap();
+    let jit_no_gas = compiler.translate(Some(name), bytecode, SPEC_ID).unwrap();
+    compiler.set_disable_gas(false);
+    let jit_gas = compiler.translate(Some(name), bytecode, SPEC_ID).unwrap();
+    let jit_no_gas = compiler.jit_function(jit_no_gas).unwrap();
+    let jit_gas = compiler.jit_function(jit_gas).unwrap();
 
     g.bench_function("revm-jit/no_gas", |b| b.iter(|| call_jit(jit_no_gas)));
 

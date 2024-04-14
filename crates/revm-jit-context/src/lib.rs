@@ -19,9 +19,9 @@ use alloc::vec::Vec;
 #[cfg(feature = "host-ext-any")]
 use core::any::Any;
 
-/// The JIT EVM context.
+/// The EVM bytecode compiler runtime context.
 ///
-/// This is a simple wrapper around the interpreter's resources, allowing the JIT'd function to
+/// This is a simple wrapper around the interpreter's resources, allowing the compiled function to
 /// access the memory, contract, gas, host, and other resources.
 pub struct EvmContext<'a> {
     /// The memory.
@@ -51,13 +51,13 @@ impl fmt::Debug for EvmContext<'_> {
 }
 
 impl<'a> EvmContext<'a> {
-    /// Creates a new JIT EVM context from an interpreter.
+    /// Creates a new context from an interpreter.
     #[inline]
     pub fn from_interpreter(interpreter: &'a mut Interpreter, host: &'a mut dyn HostExt) -> Self {
         Self::from_interpreter_with_stack(interpreter, host).0
     }
 
-    /// Creates a new JIT EVM context from an interpreter.
+    /// Creates a new context from an interpreter.
     #[inline]
     pub fn from_interpreter_with_stack<'b: 'a>(
         interpreter: &'a mut Interpreter,
@@ -139,11 +139,11 @@ impl dyn HostExt {
     }
 }
 
-/// The raw function signature of a JIT'd EVM bytecode.
+/// The raw function signature of a bytecode function.
 ///
-/// Prefer using [`JitEvmFn`] instead of this type. See [`JitEvmFn::call`] for more information.
+/// Prefer using [`EvmJitFn`] instead of this type. See [`EvmJitFn::call`] for more information.
 // When changing the signature, also update the corresponding declarations in `fn translate`.
-pub type RawJitEvmFn = unsafe extern "C" fn(
+pub type RawEvmJitFn = unsafe extern "C" fn(
     gas: *mut Gas,
     stack: *mut EvmStack,
     stack_len: *mut usize,
@@ -152,20 +152,20 @@ pub type RawJitEvmFn = unsafe extern "C" fn(
     ecx: *mut EvmContext<'_>,
 ) -> InstructionResult;
 
-/// A JIT'd EVM bytecode function.
+/// An EVM bytecode function.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct JitEvmFn(RawJitEvmFn);
+pub struct EvmJitFn(RawEvmJitFn);
 
-impl JitEvmFn {
+impl EvmJitFn {
     /// Wraps the function.
     #[inline]
-    pub const fn new(f: RawJitEvmFn) -> Self {
+    pub const fn new(f: RawEvmJitFn) -> Self {
         Self(f)
     }
 
     /// Unwraps the function.
     #[inline]
-    pub const fn into_inner(self) -> RawJitEvmFn {
+    pub const fn into_inner(self) -> RawEvmJitFn {
         self.0
     }
 
@@ -235,7 +235,7 @@ impl JitEvmFn {
     }
 }
 
-/// JIT EVM context stack.
+/// EVM context stack.
 #[repr(C)]
 #[allow(missing_debug_implementations)]
 pub struct EvmStack([MaybeUninit<EvmWord>; 1024]);
@@ -290,7 +290,7 @@ impl EvmStack {
 
     /// Creates a stack from a mutable vector's buffer.
     ///
-    /// The JIT'd function will overwrite the internal contents of the vector, and will not
+    /// The bytecode function will overwrite the internal contents of the vector, and will not
     /// set the length. This is simply to have the stack allocated on the heap.
     ///
     /// # Panics
@@ -739,7 +739,7 @@ mod tests {
 
         let mut env = Env::default();
         let mut host = BHost(&mut env);
-        let f = JitEvmFn::new(test_fn);
+        let f = EvmJitFn::new(test_fn);
         let mut interpreter = Interpreter::new(Contract::default(), u64::MAX, false);
 
         let (mut ecx, stack, stack_len) =

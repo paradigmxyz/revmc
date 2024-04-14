@@ -5,6 +5,9 @@
 #[macro_use]
 extern crate tracing;
 
+#[macro_use]
+extern crate revm_jit_backend;
+
 use inkwell::{
     attributes::{Attribute, AttributeLoc},
     basic_block::BasicBlock,
@@ -28,10 +31,10 @@ pub use inkwell;
 
 pub mod orc;
 
-/// The LLVM-based EVM JIT backend.
+/// The LLVM-based EVM bytecode compiler backend.
 #[derive(Debug)]
 #[must_use]
-pub struct JitEvmLlvmBackend<'ctx> {
+pub struct EvmLlvmBackend<'ctx> {
     cx: &'ctx Context,
     bcx: inkwell::builder::Builder<'ctx>,
     module: Module<'ctx>,
@@ -47,18 +50,17 @@ pub struct JitEvmLlvmBackend<'ctx> {
     ty_i256: IntType<'ctx>,
     ty_isize: IntType<'ctx>,
 
+    aot: bool,
     debug_assertions: bool,
     opt_level: OptimizationLevel,
     function_names: FxHashMap<u32, String>,
 }
 
-impl<'ctx> JitEvmLlvmBackend<'ctx> {
-    /// Creates a new LLVM-based EVM JIT backend.
-    ///
-    /// `bc` is the optional bitcode to be loaded into the module.
+impl<'ctx> EvmLlvmBackend<'ctx> {
+    /// Creates a new LLVM backend.
     #[inline]
     pub fn new(cx: &'ctx Context, opt_level: revm_jit_backend::OptimizationLevel) -> Result<Self> {
-        revm_jit_backend::debug_time!("new LLVM backend", || Self::new_inner(cx, opt_level))
+        debug_time!("new LLVM backend", || Self::new_inner(cx, opt_level))
     }
 
     fn new_inner(
@@ -106,15 +108,13 @@ impl<'ctx> JitEvmLlvmBackend<'ctx> {
                 &features.to_string_lossy(),
                 opt_level,
                 RelocMode::PIC,
-                CodeModel::JITDefault,
+                CodeModel::Default,
             )
             .ok_or_else(|| eyre::eyre!("failed to create target machine"))?;
 
         let module = create_module(cx, &machine)?;
 
         let exec_engine = module.create_jit_execution_engine(opt_level).map_err(error_msg)?;
-        #[cfg(not_needed_anymore)]
-        add_symbols(&module, &exec_engine);
 
         let bcx = cx.create_builder();
 
@@ -140,6 +140,7 @@ impl<'ctx> JitEvmLlvmBackend<'ctx> {
             ty_i256,
             ty_isize,
             ty_ptr,
+            aot: false,
             debug_assertions: cfg!(debug_assertions),
             opt_level,
             function_names: FxHashMap::default(),
@@ -169,7 +170,7 @@ impl<'ctx> JitEvmLlvmBackend<'ctx> {
     }
 }
 
-impl<'ctx> BackendTypes for JitEvmLlvmBackend<'ctx> {
+impl<'ctx> BackendTypes for EvmLlvmBackend<'ctx> {
     type Type = BasicTypeEnum<'ctx>;
     type Value = BasicValueEnum<'ctx>;
     type StackSlot = PointerValue<'ctx>;
@@ -177,7 +178,7 @@ impl<'ctx> BackendTypes for JitEvmLlvmBackend<'ctx> {
     type Function = FunctionValue<'ctx>;
 }
 
-impl<'ctx> TypeMethods for JitEvmLlvmBackend<'ctx> {
+impl<'ctx> TypeMethods for EvmLlvmBackend<'ctx> {
     fn type_ptr(&self) -> Self::Type {
         self.ty_ptr.into()
     }
@@ -209,12 +210,17 @@ impl<'ctx> TypeMethods for JitEvmLlvmBackend<'ctx> {
     }
 }
 
-impl<'ctx> Backend for JitEvmLlvmBackend<'ctx> {
-    type Builder<'a> = JitEvmLlvmBuilder<'a, 'ctx> where Self: 'a;
+impl<'ctx> Backend for EvmLlvmBackend<'ctx> {
+    type Builder<'a> = EvmLlvmBuilder<'a, 'ctx> where Self: 'a;
     type FuncId = u32;
 
     fn ir_extension(&self) -> &'static str {
         "ll"
+    }
+
+    fn set_aot(&mut self, aot: bool) -> Result<()> {
+        self.aot = aot;
+        Ok(())
     }
 
     fn set_module_name(&mut self, name: &str) {
@@ -264,7 +270,7 @@ impl<'ctx> Backend for JitEvmLlvmBackend<'ctx> {
 
         let id = self.function_names.len() as u32;
         self.function_names.insert(id, name.to_string());
-        let builder = JitEvmLlvmBuilder { backend: self, function };
+        let builder = EvmLlvmBuilder { backend: self, function };
         Ok((builder, id))
     }
 
@@ -282,6 +288,15 @@ impl<'ctx> Backend for JitEvmLlvmBackend<'ctx> {
         };
         let opts = PassBuilderOptions::create();
         self.module.run_passes(passes, &self.machine, opts).map_err(error_msg)
+    }
+
+    fn write_object<W: std::io::Write>(&mut self, mut w: W) -> Result<()> {
+        let buffer = self
+            .machine
+            .write_to_memory_buffer(&self.module, FileType::Object)
+            .map_err(error_msg)?;
+        w.write_all(buffer.as_slice())?;
+        Ok(())
     }
 
     fn jit_function(&mut self, id: Self::FuncId) -> Result<usize> {
@@ -302,22 +317,20 @@ impl<'ctx> Backend for JitEvmLlvmBackend<'ctx> {
         self.module = create_module(self.cx, &self.machine)?;
         self.exec_engine =
             self.module.create_jit_execution_engine(self.opt_level).map_err(error_msg)?;
-        #[cfg(not_needed_anymore)]
-        add_symbols(&self.module, &self.exec_engine);
         Ok(())
     }
 }
 
-/// The LLVM-based EVM JIT builder.
+/// The LLVM-based EVM bytecode compiler function builder.
 #[derive(Debug)]
 #[must_use]
-pub struct JitEvmLlvmBuilder<'a, 'ctx> {
-    backend: &'a mut JitEvmLlvmBackend<'ctx>,
+pub struct EvmLlvmBuilder<'a, 'ctx> {
+    backend: &'a mut EvmLlvmBackend<'ctx>,
     function: FunctionValue<'ctx>,
 }
 
-impl<'a, 'ctx> std::ops::Deref for JitEvmLlvmBuilder<'a, 'ctx> {
-    type Target = JitEvmLlvmBackend<'ctx>;
+impl<'a, 'ctx> std::ops::Deref for EvmLlvmBuilder<'a, 'ctx> {
+    type Target = EvmLlvmBackend<'ctx>;
 
     #[inline]
     fn deref(&self) -> &Self::Target {
@@ -325,14 +338,14 @@ impl<'a, 'ctx> std::ops::Deref for JitEvmLlvmBuilder<'a, 'ctx> {
     }
 }
 
-impl<'a, 'ctx> std::ops::DerefMut for JitEvmLlvmBuilder<'a, 'ctx> {
+impl<'a, 'ctx> std::ops::DerefMut for EvmLlvmBuilder<'a, 'ctx> {
     #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.backend
     }
 }
 
-impl<'a, 'ctx> JitEvmLlvmBuilder<'a, 'ctx> {
+impl<'a, 'ctx> EvmLlvmBuilder<'a, 'ctx> {
     fn assume_function(&mut self) -> FunctionValue<'ctx> {
         self.get_or_add_function("llvm.assume", |this| {
             this.ty_void.fn_type(&[this.ty_i1.into()], false)
@@ -404,7 +417,7 @@ impl<'a, 'ctx> JitEvmLlvmBuilder<'a, 'ctx> {
     }
 }
 
-impl<'a, 'ctx> BackendTypes for JitEvmLlvmBuilder<'a, 'ctx> {
+impl<'a, 'ctx> BackendTypes for EvmLlvmBuilder<'a, 'ctx> {
     type Type = BasicTypeEnum<'ctx>;
     type Value = BasicValueEnum<'ctx>;
     type StackSlot = PointerValue<'ctx>;
@@ -412,7 +425,7 @@ impl<'a, 'ctx> BackendTypes for JitEvmLlvmBuilder<'a, 'ctx> {
     type Function = FunctionValue<'ctx>;
 }
 
-impl<'a, 'ctx> TypeMethods for JitEvmLlvmBuilder<'a, 'ctx> {
+impl<'a, 'ctx> TypeMethods for EvmLlvmBuilder<'a, 'ctx> {
     fn type_ptr(&self) -> Self::Type {
         self.backend.type_ptr()
     }
@@ -434,7 +447,7 @@ impl<'a, 'ctx> TypeMethods for JitEvmLlvmBuilder<'a, 'ctx> {
     }
 }
 
-impl<'a, 'ctx> Builder for JitEvmLlvmBuilder<'a, 'ctx> {
+impl<'a, 'ctx> Builder for EvmLlvmBuilder<'a, 'ctx> {
     fn create_block(&mut self, name: &str) -> Self::BasicBlock {
         self.cx.append_basic_block(self.function, name)
     }
@@ -876,56 +889,6 @@ fn create_module<'ctx>(cx: &'ctx Context, machine: &TargetMachine) -> Result<Mod
     Ok(module)
 }
 
-#[cfg(not_needed_anymore)]
-fn add_symbols<'ctx>(module: &Module<'ctx>, exec_engine: &ExecutionEngine<'ctx>) {
-    macro_rules! add_symbols {
-        ($([$kw:ident $s:ident $($rest:tt)*]),* $(,)?) => {
-            $(
-                let sym = stringify!($s);
-                if let Some(f) = add_symbols!(@get_value $kw sym module) {
-                    extern "C" {
-                        $kw $s $($rest)*;
-                    }
-                    let addr = add_symbols!(@get_addr $kw $s);
-                    debug!(%sym, addr=%format!("0x{addr:016x}"), "adding symbol");
-                    trace!(?f);
-                    exec_engine.add_global_mapping(&f, addr);
-                } else {
-                    debug!(%sym, "symbol not found");
-                }
-            )*
-        };
-
-        (@get_value fn $sym:ident $module:ident) => {
-            $module.get_function($sym)
-        };
-        (@get_value static $sym:ident $module:ident) => {
-            $module.get_global($sym)
-        };
-
-        (@get_addr fn $name:ident) => {
-            $name as usize
-        };
-        (@get_addr static $name:ident) => {
-            unsafe { &$name as *const _ as usize }
-        };
-    }
-
-    add_symbols![
-        // `::alloc::alloc`.
-        [fn __rust_alloc()],
-        [fn __rust_dealloc()],
-        [fn __rust_realloc()],
-        [fn __rust_alloc_zeroed()],
-        [static __rust_no_alloc_shim_is_unstable: u8],
-        [fn __rust_alloc_error_handler()],
-        [static __rust_alloc_error_handler_should_panic: u8],
-        // Other symbols.
-        [fn rust_eh_personality()],
-        [fn rust_begin_unwind()],
-    ];
-}
-
 fn convert_intcc(cond: IntCC) -> IntPredicate {
     match cond {
         IntCC::Equal => IntPredicate::EQ,
@@ -959,10 +922,7 @@ fn convert_opt_level_rev(level: OptimizationLevel) -> revm_jit_backend::Optimiza
     }
 }
 
-fn convert_attribute(
-    bcx: &JitEvmLlvmBuilder<'_, '_>,
-    attr: revm_jit_backend::Attribute,
-) -> Attribute {
+fn convert_attribute(bcx: &EvmLlvmBuilder<'_, '_>, attr: revm_jit_backend::Attribute) -> Attribute {
     use revm_jit_backend::Attribute as OurAttr;
 
     enum AttrValue<'a> {

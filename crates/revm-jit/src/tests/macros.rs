@@ -4,9 +4,9 @@ macro_rules! matrix_tests {
         mod llvm {
             use super::*;
 
-            fn run_llvm(jit: &mut JitEvm<crate::llvm::JitEvmLlvmBackend<'_>>) {
-                crate::tests::set_test_dump(jit, module_path!());
-                $run(jit);
+            fn run_llvm(compiler: &mut EvmCompiler<crate::llvm::EvmLlvmBackend<'_>>) {
+                crate::tests::set_test_dump(compiler, module_path!());
+                $run(compiler);
             }
 
             #[test]
@@ -21,11 +21,11 @@ macro_rules! matrix_tests {
         }
     };
 
-    ($name:ident = | $jit:ident | $e:expr) => {
+    ($name:ident = | $compiler:ident | $e:expr) => {
         mod $name {
             use super::*;
 
-            fn run_generic<B: Backend>($jit: &mut JitEvm<B>) {
+            fn run_generic<B: Backend>($compiler: &mut EvmCompiler<B>) {
                 $e;
             }
 

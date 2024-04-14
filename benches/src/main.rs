@@ -1,7 +1,7 @@
 use clap::{Parser, ValueEnum};
 use color_eyre::{eyre::eyre, Result};
 use revm_jit::{
-    debug_time, eyre::Context, new_llvm_backend, EvmContext, JitEvm, OptimizationLevel,
+    debug_time, eyre::Context, new_llvm_backend, EvmCompiler, EvmContext, OptimizationLevel,
 };
 use revm_jit_benches::Bench;
 use revm_primitives::{hex, Bytes, Env, SpecId};
@@ -23,6 +23,8 @@ struct Cli {
     #[arg(long)]
     calldata: Option<Bytes>,
 
+    #[arg(long)]
+    aot: bool,
     #[arg(short = 'O', long)]
     opt_level: Option<OptimizationLevel>,
     #[arg(long, value_enum, default_value = "cancun")]
@@ -48,11 +50,12 @@ fn main() -> Result<()> {
     let opt_level = cli.opt_level.unwrap_or(OptimizationLevel::Aggressive);
     let context = revm_jit::llvm::inkwell::context::Context::create();
     let backend = new_llvm_backend(&context, opt_level)?;
-    let mut jit = JitEvm::new(backend);
-    jit.set_dump_to(Some(PathBuf::from("./tmp/revm-jit")));
-    jit.set_disable_gas(cli.no_gas);
-    jit.set_frame_pointers(true);
-    jit.set_debug_assertions(cli.debug_assertions);
+    let mut compiler = EvmCompiler::new(backend);
+    compiler.set_dump_to(Some(PathBuf::from("./tmp/revm-jit")));
+    compiler.set_aot(cli.aot);
+    compiler.set_disable_gas(cli.no_gas);
+    compiler.set_frame_pointers(true);
+    compiler.set_debug_assertions(cli.debug_assertions);
 
     let Bench { name, bytecode, calldata, stack_input, native: _ } = if cli.bench_name == "custom" {
         Bench {
@@ -89,11 +92,21 @@ fn main() -> Result<()> {
 
     let spec_id = cli.spec_id.into();
     if !stack_input.is_empty() {
-        jit.set_inspect_stack_length(true);
+        compiler.set_inspect_stack_length(true);
     }
-    let f = jit.compile(Some(name), bytecode, spec_id)?;
+    let f_id = compiler.translate(Some(name), bytecode, spec_id)?;
 
-    let mut run = |f: revm_jit::JitEvmFn| {
+    if cli.aot {
+        let out = compiler.out_dir().unwrap();
+        eprintln!("{out:?}");
+        let mut file = std::fs::File::create(out.join("a.o"))?;
+        compiler.write_object(&mut file)?;
+        return Ok(());
+    }
+
+    let f = compiler.jit_function(f_id)?;
+
+    let mut run = |f: revm_jit::EvmJitFn| {
         let mut interpreter =
             revm_interpreter::Interpreter::new(contract.clone(), gas_limit, false);
         host.clear();

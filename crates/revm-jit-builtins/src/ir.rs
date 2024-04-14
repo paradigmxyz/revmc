@@ -83,7 +83,7 @@ macro_rules! builtins {
     (|$bcx:ident| { $($init:tt)* }
      $($ident:ident = $(#[$attr:expr])* $name:ident($($params:expr),* $(,)?) $ret:expr),* $(,)?
     ) => {
-        /// Builtins that can be called by the JIT-compiled functions.
+        /// Builtins that can be called by the compiled functions.
         #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
         pub enum Builtin {
             $($ident,)*

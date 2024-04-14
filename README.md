@@ -1,14 +1,15 @@
 # revm-jit
 
-Experimental [JIT compiler][JIT] for the [Ethereum Virtual Machine][EVM].
+Experimental [JIT] and [AOT] compiler for the [Ethereum Virtual Machine][EVM].
 
-The compiler implementation is abstracted over the JIT backend.
+The compiler implementation is abstracted over an intermediate representation backend.
 
-This project hosts two backend implementations:
+This repository hosts two backend implementations:
 - [LLVM] ([`revm-jit-llvm`]): main backend with full test coverage;
 - [Cranelift] ([`revm-jit-cranelift`]); currently not functional due to missing `i256` support in Cranelift. This will likely require a custom fork of Cranelift.
 
 [JIT]: https://en.wikipedia.org/wiki/Just-in-time_compilation
+[AOT]: https://en.wikipedia.org/wiki/Ahead-of-time_compilation
 [EVM]: https://ethereum.org/en/developers/docs/evm/
 [LLVM]: https://llvm.org/
 [`revm-jit-llvm`]: /crates/revm-jit-llvm

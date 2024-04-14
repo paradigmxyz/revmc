@@ -1,3 +1,3 @@
 # revm-jit-backend
 
-Backend abstraction for `revm-jit`.
+EVM bytecode compiler backend abstraction.

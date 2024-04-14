@@ -1,6 +1,6 @@
 [package]
 name = "revm-jit-llvm"
-description = "REVM JIT - LLVM backend"
+description = "EVM bytecode compiler LLVM backend"
 homepage = "https://github.com/danipopes/revm-jit/tree/main/crates/revm-jit-llvm"
 
 version.workspace = true

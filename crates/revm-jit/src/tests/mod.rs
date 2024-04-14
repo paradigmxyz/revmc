@@ -141,7 +141,7 @@ tests! {
             expected_stack: &[U256::ZERO],
             expected_gas: 3 + 3 + 10 + 1 + 2 + 3,
         }),
-        // NOTE: These pass but there is a mismatch between interpreter and JIT. This is OK
+        // NOTE: These pass but there is a mismatch with the interpreter. This is OK
         // because the behavior is undefined on failure.
         // bad_jumpi1(@raw {
         //     bytecode: &[op::PUSH0, op::JUMPI],

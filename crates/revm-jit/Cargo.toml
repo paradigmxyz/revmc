@@ -1,6 +1,6 @@
 [package]
 name = "revm-jit"
-description = "JIT compiler for EVM bytecode"
+description = "EVM bytecode compiler"
 homepage = "https://github.com/danipopes/revm-jit/tree/main/crates/revm-jit"
 
 version.workspace = true

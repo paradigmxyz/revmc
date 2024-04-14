@@ -1,11 +1,11 @@
 use super::{with_evm_context, DEF_SPEC};
-use crate::{Backend, JitEvm, TEST_SUSPEND};
+use crate::{Backend, EvmCompiler, TEST_SUSPEND};
 use revm_interpreter::{opcode as op, InstructionResult};
 use revm_primitives::U256;
 
 matrix_tests!(run_resume_tests);
 
-fn run_resume_tests<B: Backend>(jit: &mut JitEvm<B>) {
+fn run_resume_tests<B: Backend>(compiler: &mut EvmCompiler<B>) {
     #[rustfmt::skip]
     let code = &[
         // 0
@@ -23,7 +23,7 @@ fn run_resume_tests<B: Backend>(jit: &mut JitEvm<B>) {
         // 3
     ][..];
 
-    let f = jit.compile(None, code, DEF_SPEC).unwrap();
+    let f = compiler.jit(None, code, DEF_SPEC).unwrap();
 
     with_evm_context(code, |ecx, stack, stack_len| {
         assert_eq!(ecx.resume_at, 0);

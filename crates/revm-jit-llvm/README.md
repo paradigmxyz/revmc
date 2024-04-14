@@ -1,5 +1,5 @@
 # revm-jit-llvm
 
-[LLVM] backend for `revm-jit`.
+EVM bytecode compiler [LLVM] backend.
 
 [LLVM]: https://llvm.org/

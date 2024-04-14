@@ -1,6 +1,6 @@
 # revm-jit-cranelift
 
-[Cranelift] backend for `revm-jit`.
+EVM bytecode compiler [Cranelift] backend.
 
 This crate is currently not functional due to missing `i256` support in Cranelift.
 

@@ -13,7 +13,7 @@ mod bytecode;
 pub use bytecode::*;
 
 mod compiler;
-pub use compiler::JitEvm;
+pub use compiler::EvmCompiler;
 
 #[cfg(test)]
 mod tests;
@@ -25,14 +25,14 @@ pub use revm_jit_context::*;
 
 #[cfg(feature = "llvm")]
 #[doc(no_inline)]
-pub use llvm::JitEvmLlvmBackend;
+pub use llvm::EvmLlvmBackend;
 #[cfg(feature = "llvm")]
 #[doc(inline)]
 pub use revm_jit_llvm as llvm;
 
 #[cfg(feature = "cranelift")]
 #[doc(no_inline)]
-pub use cranelift::JitEvmCraneliftBackend;
+pub use cranelift::EvmCraneliftBackend;
 #[cfg(feature = "cranelift")]
 #[doc(inline)]
 pub use revm_jit_cranelift as cranelift;
@@ -53,16 +53,17 @@ const I256_MIN: U256 = U256::from_limbs([
 pub fn new_llvm_backend(
     cx: &llvm::inkwell::context::Context,
     opt_level: OptimizationLevel,
-) -> Result<JitEvmLlvmBackend<'_>> {
-    JitEvmLlvmBackend::new(cx, opt_level)
+) -> Result<EvmLlvmBackend<'_>> {
+    EvmLlvmBackend::new(cx, opt_level)
 }
 
 /// Enable for `cargo asm -p revm-jit --lib`.
 #[cfg(any())]
-pub fn generate_all_assembly() -> JitEvm<JitEvmLlvmBackend<'static>> {
+pub fn generate_all_assembly() -> EvmCompiler<EvmLlvmBackend<'static>> {
     let cx = Box::leak(Box::new(llvm::inkwell::context::Context::create()));
-    let mut jit = JitEvm::new(JitEvmLlvmBackend::new(cx, OptimizationLevel::Aggressive).unwrap());
-    let _ = jit.compile(&[], primitives::SpecId::ARROW_GLACIER).unwrap();
-    unsafe { jit.free_all_functions().unwrap() };
-    jit
+    let mut compiler =
+        EvmCompiler::new(EvmLlvmBackend::new(cx, OptimizationLevel::Aggressive).unwrap());
+    let _ = compiler.jit(None, &[], primitives::SpecId::ARROW_GLACIER).unwrap();
+    unsafe { compiler.clear().unwrap() };
+    compiler
 }

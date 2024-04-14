@@ -1,5 +1,5 @@
 use super::{with_evm_context, DEF_SPEC};
-use crate::{Backend, JitEvm};
+use crate::{Backend, EvmCompiler};
 use revm_interpreter::{opcode as op, InstructionResult};
 use revm_primitives::U256;
 
@@ -14,12 +14,12 @@ macro_rules! fibonacci_tests {
 
 fibonacci_tests!(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, 40, 50, 100, 1000);
 
-fn run_fibonacci_test<B: Backend>(jit: &mut JitEvm<B>, input: u16, dynamic: bool) {
+fn run_fibonacci_test<B: Backend>(compiler: &mut EvmCompiler<B>, input: u16, dynamic: bool) {
     let code = mk_fibonacci_code(input, dynamic);
 
-    unsafe { jit.free_all_functions() }.unwrap();
-    jit.set_inspect_stack_length(true);
-    let f = jit.compile(None, &code, DEF_SPEC).unwrap();
+    unsafe { compiler.clear() }.unwrap();
+    compiler.set_inspect_stack_length(true);
+    let f = compiler.jit(None, &code, DEF_SPEC).unwrap();
 
     with_evm_context(&code, |ecx, stack, stack_len| {
         if dynamic {

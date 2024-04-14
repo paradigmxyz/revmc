@@ -1,6 +1,6 @@
 [package]
 name = "revm-jit-context"
-description = "REVM JIT - runtime context"
+description = "EVM bytecode compiler runtime context"
 homepage = "https://github.com/danipopes/revm-jit/tree/main/crates/revm-jit-context"
 
 version.workspace = true

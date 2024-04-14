@@ -1,6 +1,6 @@
 [package]
 name = "revm-jit-builtins"
-description = "REVM JIT - builtins"
+description = "EVM bytecode compiler builtins"
 homepage = "https://github.com/danipopes/revm-jit/tree/main/crates/revm-jit-builtins"
 
 version.workspace = true

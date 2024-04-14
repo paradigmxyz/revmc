@@ -1,10 +1,10 @@
-//! JIT compiler implementation.
+//! EVM bytecode compiler implementation.
 
-use crate::{Backend, Builder, Bytecode, EvmContext, EvmStack, JitEvmFn, Result};
+use crate::{Backend, Builder, Bytecode, EvmContext, EvmJitFn, EvmStack, Result};
 use revm_interpreter::{Contract, Gas};
 use revm_jit_backend::{eyre::ensure, Attribute, FunctionAttributeLocation, OptimizationLevel};
 use revm_jit_builtins::Builtins;
-use revm_jit_context::RawJitEvmFn;
+use revm_jit_context::RawEvmJitFn;
 use revm_primitives::{Env, SpecId};
 use std::{
     io::Write,
@@ -31,15 +31,28 @@ use translate::{FcxConfig, FunctionCx};
 /// EVM bytecode compiler.
 ///
 /// This currently represents one single-threaded IR context and module, which can be used to
-/// compile multiple functions.
+/// compile multiple functions as JIT or AOT.
+///
+/// Functions can be incrementally added with [`translate`], and then either written to an object
+/// file with [`write_object`] when in AOT mode, or JIT-compiled with [`jit_function`].
+///
+/// Performing either of these operations finalizes the module, and no more functions can be added
+/// afterwards until [`free_all_functions`] is called, which will reset the module to its initial
+/// state.
+///
+/// [`translate`]: EvmCompiler::translate
+/// [`write_object`]: EvmCompiler::write_object
+/// [`jit_function`]: EvmCompiler::jit_function
+/// [`free_all_functions`]: EvmCompiler::free_all_functions
 #[allow(missing_debug_implementations)]
-pub struct JitEvm<B: Backend> {
+pub struct EvmCompiler<B: Backend> {
     name: Option<String>,
     backend: B,
     out_dir: Option<PathBuf>,
     config: FcxConfig,
     builtins: Builtins<B>,
 
+    aot: bool,
     dump_assembly: bool,
     dump_unopt_assembly: bool,
 
@@ -47,8 +60,8 @@ pub struct JitEvm<B: Backend> {
     finalized: bool,
 }
 
-impl<B: Backend> JitEvm<B> {
-    /// Creates a new instance of the JIT compiler with the given backend.
+impl<B: Backend> EvmCompiler<B> {
+    /// Creates a new instance of the compiler with the given backend.
     pub fn new(backend: B) -> Self {
         Self {
             name: None,
@@ -57,6 +70,7 @@ impl<B: Backend> JitEvm<B> {
             config: FcxConfig::default(),
             function_counter: 0,
             builtins: Builtins::new(),
+            aot: false,
             dump_assembly: true,
             dump_unopt_assembly: false,
             finalized: false,
@@ -80,6 +94,16 @@ impl<B: Backend> JitEvm<B> {
             self.name = None;
         }
         r
+    }
+
+    /// Sets whether to do Ahead-Of-Time (AOT) compilation instead of Just-In-Time (JIT).
+    pub fn set_aot(&mut self, aot: bool) {
+        self.aot = aot;
+    }
+
+    /// Returns the output directory.
+    pub fn out_dir(&self) -> Option<&Path> {
+        self.out_dir.as_deref()
     }
 
     /// Dumps the IR and potential to the given directory after compilation.
@@ -196,17 +220,22 @@ impl<B: Backend> JitEvm<B> {
         spec_id: SpecId,
     ) -> Result<B::FuncId> {
         ensure!(!self.finalized, "cannot compile more functions after finalizing the module");
-        let bytecode = debug_time!("parse", || self.parse(bytecode, spec_id))?;
-        debug_time!("translate", || self.translate_inner(name, &bytecode))
+        self.with_name(
+            || name.unwrap_or("evm").to_string(),
+            |this| {
+                let bytecode = debug_time!("parse", || this.parse(bytecode, spec_id))?;
+                debug_time!("translate", || this.translate_inner(name, &bytecode))
+            },
+        )
     }
 
-    /// Compiles the given EVM bytecode into a JIT function.
-    pub fn compile(
+    /// (JIT) Compiles the given EVM bytecode into a JIT function.
+    pub fn jit(
         &mut self,
         name: Option<&str>,
         bytecode: &[u8],
         spec_id: SpecId,
-    ) -> Result<JitEvmFn> {
+    ) -> Result<EvmJitFn> {
         self.with_name(
             || name.unwrap_or("evm").to_string(),
             |this| {
@@ -216,20 +245,27 @@ impl<B: Backend> JitEvm<B> {
         )
     }
 
-    /// Finalizes the module and JITs the given function.
-    pub fn jit_function(&mut self, id: B::FuncId) -> Result<JitEvmFn> {
-        if !self.finalized {
-            trace_time!("finalize", || self.finalize())?;
-            self.finalized = true;
-        }
+    /// (JIT) Finalizes the module and JITs the given function.
+    pub fn jit_function(&mut self, id: B::FuncId) -> Result<EvmJitFn> {
+        ensure!(!self.aot, "cannot JIT functions during AOT compilation");
+        self.finalize()?;
         let addr = trace_time!("get_function", || self.backend.jit_function(id))?;
-        Ok(JitEvmFn::new(unsafe { std::mem::transmute::<usize, RawJitEvmFn>(addr) }))
+        Ok(EvmJitFn::new(unsafe { std::mem::transmute::<usize, RawEvmJitFn>(addr) }))
     }
 
-    /// Frees a single function.
+    /// (AOT) Writes the compiled object to the given writer.
+    pub fn write_object<W: std::io::Write>(&mut self, w: W) -> Result<()> {
+        ensure!(self.aot, "cannot write AOT object during JIT compilation");
+        self.finalize()?;
+        trace_time!("write_object", || self.backend.write_object(w))
+    }
+
+    /// (JIT) Frees the memory associated with a single function.
     ///
     /// Note that this will not reset the state of the internal module even if all functions are
-    /// freed with this function. Use `free_all_functions` to reset the module.
+    /// freed with this function. Use [`clear`] to reset the module.
+    ///
+    /// [`clear`]: EvmCompiler::clear
     ///
     /// # Safety
     ///
@@ -248,7 +284,7 @@ impl<B: Backend> JitEvm<B> {
     /// Because this function invalidates any pointers retrived from the corresponding module, it
     /// should only be used when none of the functions from that module are currently executing and
     /// none of the `fn` pointers are called afterwards.
-    pub unsafe fn free_all_functions(&mut self) -> Result<()> {
+    pub unsafe fn clear(&mut self) -> Result<()> {
         self.builtins.clear();
         self.function_counter = 0;
         self.finalized = false;
@@ -289,6 +325,15 @@ impl<B: Backend> JitEvm<B> {
     }
 
     fn finalize(&mut self) -> Result<()> {
+        if !self.finalized {
+            self.finalized = true;
+            trace_time!("finalize", || self.finalize_inner())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn finalize_inner(&mut self) -> Result<()> {
         let verify = |b: &mut B| trace_time!("verify", || b.verify_module());
         if let Some(dump_dir) = &self.dump_dir() {
             trace_time!("dump unopt IR", || {

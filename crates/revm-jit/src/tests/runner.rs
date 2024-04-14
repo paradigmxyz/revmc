@@ -291,19 +291,19 @@ fn with_llvm_context(f: impl FnOnce(&LlvmContext)) {
 }
 
 #[cfg(feature = "llvm")]
-fn with_llvm_backend(opt_level: OptimizationLevel, f: impl FnOnce(JitEvmLlvmBackend<'_>)) {
+fn with_llvm_backend(opt_level: OptimizationLevel, f: impl FnOnce(EvmLlvmBackend<'_>)) {
     with_llvm_context(|cx| f(new_llvm_backend(cx, opt_level).unwrap()))
 }
 
 #[cfg(feature = "llvm")]
 pub fn with_llvm_backend_jit(
     opt_level: OptimizationLevel,
-    f: fn(&mut JitEvm<JitEvmLlvmBackend<'_>>),
+    f: fn(&mut EvmCompiler<EvmLlvmBackend<'_>>),
 ) {
-    with_llvm_backend(opt_level, |backend| f(&mut JitEvm::new(backend)));
+    with_llvm_backend(opt_level, |backend| f(&mut EvmCompiler::new(backend)));
 }
 
-pub fn set_test_dump<B: Backend>(jit: &mut JitEvm<B>, module_path: &str) {
+pub fn set_test_dump<B: Backend>(compiler: &mut EvmCompiler<B>, module_path: &str) {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().parent().unwrap();
     let mut dump_path = root.to_path_buf();
     dump_path.push("target");
@@ -312,11 +312,11 @@ pub fn set_test_dump<B: Backend>(jit: &mut JitEvm<B>, module_path: &str) {
     for part in module_path.split("::").skip(2) {
         dump_path.push(part);
     }
-    dump_path.push(format!("{:?}", jit.opt_level()));
-    jit.set_dump_to(Some(dump_path));
+    dump_path.push(format!("{:?}", compiler.opt_level()));
+    compiler.set_dump_to(Some(dump_path));
 }
 
-pub fn run_test_case<B: Backend>(test_case: &TestCase<'_>, jit: &mut JitEvm<B>) {
+pub fn run_test_case<B: Backend>(test_case: &TestCase<'_>, compiler: &mut EvmCompiler<B>) {
     let TestCase {
         bytecode,
         spec_id,
@@ -329,8 +329,8 @@ pub fn run_test_case<B: Backend>(test_case: &TestCase<'_>, jit: &mut JitEvm<B>) 
         assert_host,
         assert_ecx,
     } = *test_case;
-    jit.set_inspect_stack_length(true);
-    let f = jit.compile(None, bytecode, spec_id).unwrap();
+    compiler.set_inspect_stack_length(true);
+    let f = compiler.jit(None, bytecode, spec_id).unwrap();
 
     with_evm_context(bytecode, |ecx, stack, stack_len| {
         if let Some(modify_ecx) = modify_ecx {
@@ -395,7 +395,6 @@ pub fn run_test_case<B: Backend>(test_case: &TestCase<'_>, jit: &mut JitEvm<B>) 
             assert_host(&int_host);
         }
 
-        // JIT.
         let actual_return = unsafe { f.call(Some(stack), Some(stack_len), ecx) };
 
         assert_eq!(actual_return, expected_return, "return value mismatch");

@@ -671,6 +671,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "cranelift-object"
+version = "0.106.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "014effb46f23d749598adc54b3dde1010f96f0e7f97a4fb80bdc792c6de7c24c"
+dependencies = [
+ "anyhow",
+ "cranelift-codegen",
+ "cranelift-control",
+ "cranelift-module",
+ "log",
+ "object",
+ "target-lexicon",
+]
+
+[[package]]
+name = "crc32fast"
+version = "1.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b3855a8a784b474f333699ef2bbca9db2c4a1f6d9088a90a2d25b1eb53111eaa"
+dependencies = [
+ "cfg-if",
+]
+
+[[package]]
 name = "criterion"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1301,6 +1325,9 @@ version = "0.32.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a6a622008b6e321afc04970976f62ee297fdbaa6f95318ca343e3eebb9648441"
 dependencies = [
+ "crc32fast",
+ "hashbrown 0.14.3",
+ "indexmap",
  "memchr",
 ]
 
@@ -1704,6 +1731,7 @@ dependencies = [
  "cranelift-jit",
  "cranelift-module",
  "cranelift-native",
+ "cranelift-object",
  "revm-jit-backend",
 ]
 
