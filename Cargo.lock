@@ -1659,7 +1659,6 @@ version = "4.0.0"
 source = "git+https://github.com/danipopes/revm?branch=tmp-prs#30923817aa72866a907c8fb5bff47f8e20073ad4"
 dependencies = [
  "revm-primitives",
- "serde",
 ]
 
 [[package]]
@@ -1759,7 +1758,6 @@ dependencies = [
  "enumn",
  "hashbrown 0.14.3",
  "hex",
- "serde",
 ]
 
 [[package]]

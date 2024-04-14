@@ -22,15 +22,6 @@ rust.unused_must_use = "deny"
 rust.rust_2018_idioms = "deny"
 rustdoc.all = "warn"
 
-[profile.bitcode]
-inherits = "release"
-opt-level = 3
-debug = 0
-lto = "fat"
-strip = "symbols"
-panic = "abort"
-codegen-units = 1
-
 [workspace.dependencies]
 revm-jit = { version = "0.1.0", path = "crates/revm-jit", default-features = false }
 revm-jit-backend = { version = "0.1.0", path = "crates/revm-jit-backend", default-features = false }

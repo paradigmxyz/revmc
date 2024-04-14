@@ -18,12 +18,12 @@ workspace = true
 
 [dependencies]
 revm-jit-backend.workspace = true
-revm-jit-builtins = { workspace = true, features = ["ir", "std"] }
-revm-jit-context = { workspace = true, features = ["std"] }
+revm-jit-builtins = { workspace = true, features = ["ir"] }
+revm-jit-context.workspace = true
 revm-jit-cranelift = { workspace = true, optional = true }
 revm-jit-llvm = { workspace = true, optional = true }
 
-alloy-primitives.workspace = true
+alloy-primitives = { workspace = true, features = ["std"] }
 revm-interpreter.workspace = true
 revm-primitives.workspace = true
 
@@ -33,7 +33,7 @@ rustc-hash.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
-revm-jit-context = { workspace = true, features = ["std", "host-ext-any"] }
+revm-jit-context = { workspace = true, features = ["host-ext-any"] }
 paste = "1.0"
 
 [features]

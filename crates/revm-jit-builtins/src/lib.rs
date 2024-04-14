@@ -2,7 +2,7 @@
 #![allow(missing_docs, clippy::missing_safety_doc)]
 #![cfg_attr(not(test), warn(unused_extern_crates))]
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
-#![cfg_attr(not(feature = "std"), no_std)]
+#![no_std]
 
 #[allow(unused_imports)]
 #[macro_use]
@@ -12,6 +12,7 @@ extern crate alloc;
 #[macro_use]
 extern crate tracing;
 
+use alloc::{boxed::Box, vec::Vec};
 use revm_interpreter::{
     as_u64_saturated, as_usize_saturated, gas as rgas, CallInputs, CallScheme, CreateInputs,
     InstructionResult, InterpreterAction, InterpreterResult, LoadAccountResult, SStoreResult,
@@ -22,9 +23,6 @@ use revm_primitives::{
     Bytes, CreateScheme, Log, LogData, SpecId, BLOCK_HASH_HISTORY, KECCAK_EMPTY, MAX_INITCODE_SIZE,
     U256,
 };
-
-#[cfg(not(feature = "std"))]
-use alloc::{boxed::Box, vec::Vec};
 
 #[cfg(feature = "ir")]
 mod ir;

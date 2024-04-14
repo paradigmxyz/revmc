@@ -7,6 +7,7 @@ extern crate tracing;
 #[macro_use]
 extern crate revm_jit_backend;
 
+// For features.
 use alloy_primitives as _;
 
 mod bytecode;

@@ -1,20 +1,17 @@
 #![doc = include_str!("../README.md")]
 #![cfg_attr(not(test), warn(unused_extern_crates))]
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
-#![cfg_attr(not(feature = "std"), no_std)]
+#![no_std]
 
-#[cfg(not(feature = "std"))]
 extern crate alloc;
 
+use alloc::vec::Vec;
 use core::{fmt, mem::MaybeUninit, ptr};
 use revm_interpreter::{
     Contract, FunctionStack, Gas, Host, InstructionResult, Interpreter, InterpreterAction,
     InterpreterResult, SharedMemory,
 };
 use revm_primitives::{Address, Bytes, Env, U256};
-
-#[cfg(not(feature = "std"))]
-use alloc::vec::Vec;
 
 #[cfg(feature = "host-ext-any")]
 use core::any::Any;
@@ -258,7 +255,6 @@ impl EvmStack {
 
     /// Creates a vector that can be used as a stack.
     #[inline]
-    #[cfg(feature = "std")]
     pub fn new_heap() -> Vec<EvmWord> {
         Vec::with_capacity(1024)
     }
@@ -282,7 +278,6 @@ impl EvmStack {
     ///
     /// Panics if the vector's capacity is less than the required stack capacity.
     #[inline]
-    #[cfg(feature = "std")]
     pub fn from_vec(vec: &Vec<EvmWord>) -> &Self {
         assert!(vec.capacity() >= Self::CAPACITY);
         unsafe { Self::from_ptr(vec.as_ptr()) }
@@ -306,7 +301,6 @@ impl EvmStack {
     /// assert_eq!(stack.as_slice().len(), EvmStack::CAPACITY);
     /// ```
     #[inline]
-    #[cfg(feature = "std")]
     pub fn from_mut_vec(vec: &mut Vec<EvmWord>) -> &mut Self {
         assert!(vec.capacity() >= Self::CAPACITY);
         unsafe { Self::from_mut_ptr(vec.as_mut_ptr()) }
