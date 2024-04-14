@@ -23,4 +23,5 @@ inkwell = { version = "0.4", default-features = true, features = [
     "target-x86",
     "llvm17-0-prefer-dynamic",
 ] }
+rustc-hash.workspace = true
 tracing.workspace = true

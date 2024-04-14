@@ -1650,6 +1650,7 @@ dependencies = [
  "revm-jit-cranelift",
  "revm-jit-llvm",
  "revm-primitives",
+ "rustc-hash",
  "tracing",
 ]
 
@@ -1712,6 +1713,7 @@ version = "0.1.0"
 dependencies = [
  "inkwell",
  "revm-jit-backend",
+ "rustc-hash",
  "tracing",
 ]
 

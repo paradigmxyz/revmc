@@ -73,12 +73,14 @@ fn run_bench(c: &mut Criterion, bench: &Bench) {
         r
     };
 
-    let jit_no_gas = jit.compile(Some(name), bytecode, SPEC_ID).unwrap();
+    let jit_no_gas = jit.translate(Some(name), bytecode, SPEC_ID).unwrap();
+    jit.set_disable_gas(false);
+    let jit_gas = jit.translate(Some(name), bytecode, SPEC_ID).unwrap();
+    let jit_no_gas = jit.jit_function(jit_no_gas).unwrap();
+    let jit_gas = jit.jit_function(jit_gas).unwrap();
+
     g.bench_function("revm-jit/no_gas", |b| b.iter(|| call_jit(jit_no_gas)));
 
-    unsafe { jit.free_all_functions() }.unwrap();
-    jit.set_disable_gas(false);
-    let jit_gas = jit.compile(Some(name), bytecode, SPEC_ID).unwrap();
     g.bench_function("revm-jit/gas", |b| b.iter(|| call_jit(jit_gas)));
 
     g.bench_function("revm-interpreter", |b| {

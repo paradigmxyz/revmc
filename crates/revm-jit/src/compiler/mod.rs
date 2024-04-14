@@ -2,7 +2,7 @@
 
 use crate::{Backend, Builder, Bytecode, EvmContext, EvmStack, JitEvmFn, Result};
 use revm_interpreter::{Contract, Gas};
-use revm_jit_backend::{Attribute, FunctionAttributeLocation, OptimizationLevel};
+use revm_jit_backend::{eyre::ensure, Attribute, FunctionAttributeLocation, OptimizationLevel};
 use revm_jit_builtins::Builtins;
 use revm_jit_context::RawJitEvmFn;
 use revm_primitives::{Env, SpecId};
@@ -11,10 +11,6 @@ use std::{
     mem,
     path::{Path, PathBuf},
 };
-
-// TODO: ~~Cannot find function if `compile` is called a second time.~~
-// `get_function` finalizes the module, making it impossible to add more functions.
-// TODO: Refactor the API to allow for multiple functions to be compiled.
 
 // TODO: Add `nuw`/`nsw` flags to stack length arithmetic.
 
@@ -32,28 +28,30 @@ use std::{
 mod translate;
 use translate::{FcxConfig, FunctionCx};
 
-/// JIT compiler for EVM bytecode.
+/// EVM bytecode compiler.
+///
+/// This currently represents one single-threaded IR context and module, which can be used to
+/// compile multiple functions.
 #[allow(missing_debug_implementations)]
 pub struct JitEvm<B: Backend> {
+    name: Option<String>,
     backend: B,
     out_dir: Option<PathBuf>,
     config: FcxConfig,
-    function_counter: usize,
     builtins: Builtins<B>,
+
     dump_assembly: bool,
     dump_unopt_assembly: bool,
-}
 
-impl<B: Backend + Default> Default for JitEvm<B> {
-    fn default() -> Self {
-        Self::new(B::default())
-    }
+    function_counter: u32,
+    finalized: bool,
 }
 
 impl<B: Backend> JitEvm<B> {
     /// Creates a new instance of the JIT compiler with the given backend.
     pub fn new(backend: B) -> Self {
         Self {
+            name: None,
             backend,
             out_dir: None,
             config: FcxConfig::default(),
@@ -61,7 +59,27 @@ impl<B: Backend> JitEvm<B> {
             builtins: Builtins::new(),
             dump_assembly: true,
             dump_unopt_assembly: false,
+            finalized: false,
         }
+    }
+
+    /// Sets the name of the module.
+    pub fn set_name(&mut self, name: impl Into<String>) {
+        let name = name.into();
+        self.backend.set_module_name(&name);
+        self.name = Some(name);
+    }
+
+    fn with_name<T>(&mut self, name: impl FnOnce() -> String, f: impl FnOnce(&mut Self) -> T) -> T {
+        let none = self.name.is_none();
+        if none {
+            self.set_name(name());
+        }
+        let r = f(self);
+        if none {
+            self.name = None;
+        }
+        r
     }
 
     /// Dumps the IR and potential to the given directory after compilation.
@@ -170,6 +188,18 @@ impl<B: Backend> JitEvm<B> {
         self.config.gas_disabled = disable_gas;
     }
 
+    /// Translates the given EVM bytecode into an internal function.
+    pub fn translate(
+        &mut self,
+        name: Option<&str>,
+        bytecode: &[u8],
+        spec_id: SpecId,
+    ) -> Result<B::FuncId> {
+        ensure!(!self.finalized, "cannot compile more functions after finalizing the module");
+        let bytecode = debug_time!("parse", || self.parse(bytecode, spec_id))?;
+        debug_time!("translate", || self.translate_inner(name, &bytecode))
+    }
+
     /// Compiles the given EVM bytecode into a JIT function.
     pub fn compile(
         &mut self,
@@ -177,11 +207,41 @@ impl<B: Backend> JitEvm<B> {
         bytecode: &[u8],
         spec_id: SpecId,
     ) -> Result<JitEvmFn> {
-        let bytecode = debug_time!("parse", || self.parse_bytecode(bytecode, spec_id))?;
-        debug_time!("compile", || self.compile_bytecode(name, &bytecode))
+        self.with_name(
+            || name.unwrap_or("evm").to_string(),
+            |this| {
+                let id = this.translate(name, bytecode, spec_id)?;
+                this.jit_function(id)
+            },
+        )
     }
 
-    /// Frees all functions compiled by this JIT compiler.
+    /// Finalizes the module and JITs the given function.
+    pub fn jit_function(&mut self, id: B::FuncId) -> Result<JitEvmFn> {
+        if !self.finalized {
+            trace_time!("finalize", || self.finalize())?;
+            self.finalized = true;
+        }
+        let addr = trace_time!("get_function", || self.backend.jit_function(id))?;
+        Ok(JitEvmFn::new(unsafe { std::mem::transmute::<usize, RawJitEvmFn>(addr) }))
+    }
+
+    /// Frees a single function.
+    ///
+    /// Note that this will not reset the state of the internal module even if all functions are
+    /// freed with this function. Use `free_all_functions` to reset the module.
+    ///
+    /// # Safety
+    ///
+    /// Because this function invalidates any pointers retrived from the corresponding module, it
+    /// should only be used when none of the functions from that module are currently executing and
+    /// none of the `fn` pointers are called afterwards.
+    pub unsafe fn free_function(&mut self, id: B::FuncId) -> Result<()> {
+        self.backend.free_function(id)
+    }
+
+    /// Frees all functions and resets the state of the internal module, allowing for new functions
+    /// to be compiled.
     ///
     /// # Safety
     ///
@@ -191,42 +251,33 @@ impl<B: Backend> JitEvm<B> {
     pub unsafe fn free_all_functions(&mut self) -> Result<()> {
         self.builtins.clear();
         self.function_counter = 0;
+        self.finalized = false;
         self.backend.free_all_functions()
     }
 
-    fn parse_bytecode<'a>(&mut self, bytecode: &'a [u8], spec_id: SpecId) -> Result<Bytecode<'a>> {
+    fn parse<'a>(&mut self, bytecode: &'a [u8], spec_id: SpecId) -> Result<Bytecode<'a>> {
         let mut bytecode = trace_time!("new bytecode", || Bytecode::new(bytecode, spec_id));
         trace_time!("analyze", || bytecode.analyze())?;
         Ok(bytecode)
     }
 
-    fn compile_bytecode(
+    fn translate_inner(
         &mut self,
         name: Option<&str>,
         bytecode: &Bytecode<'_>,
-    ) -> Result<JitEvmFn> {
+    ) -> Result<B::FuncId> {
         let name = name.unwrap_or("evm_bytecode");
-        let mname = &self.mangle_name(name, bytecode.spec_id)[..];
+        let mname = self.mangle_name(name, bytecode.spec_id);
 
-        let mut dump_dir = PathBuf::new();
-        if let Some(out_dir) = &self.out_dir {
-            dump_dir.push(out_dir);
-            dump_dir.push(name);
-            dump_dir.push(format!("{:?}", bytecode.spec_id));
-            std::fs::create_dir_all(&dump_dir)?;
-        }
-        let dumping = self.out_dir.is_some();
-
-        if dumping {
-            trace_time!("dump bytecode", || Self::dump_bytecode(&dump_dir, bytecode))?;
+        if let Some(dump_dir) = &self.dump_dir() {
+            trace_time!("dump bytecode", || Self::dump_bytecode(dump_dir, bytecode))?;
         }
 
-        let bcx = trace_time!("make builder", || Self::make_builder(
+        let (bcx, id) = trace_time!("make builder", || Self::make_builder(
             &mut self.backend,
             &self.config,
-            mname,
+            &mname,
         ))?;
-
         trace_time!("translate", || FunctionCx::translate(
             bcx,
             &self.config,
@@ -234,8 +285,12 @@ impl<B: Backend> JitEvm<B> {
             bytecode,
         ))?;
 
-        let verify = |b: &mut B| trace_time!("verify", || b.verify_function(mname));
-        if dumping {
+        Ok(id)
+    }
+
+    fn finalize(&mut self) -> Result<()> {
+        let verify = |b: &mut B| trace_time!("verify", || b.verify_module());
+        if let Some(dump_dir) = &self.dump_dir() {
             trace_time!("dump unopt IR", || {
                 let path = dump_dir.join("unopt").with_extension(self.backend.ir_extension());
                 self.backend.dump_ir(&path)
@@ -254,9 +309,9 @@ impl<B: Backend> JitEvm<B> {
             verify(&mut self.backend)?;
         }
 
-        trace_time!("optimize", || self.backend.optimize_function(mname))?;
+        trace_time!("optimize", || self.backend.optimize_module())?;
 
-        if dumping {
+        if let Some(dump_dir) = &self.dump_dir() {
             trace_time!("dump opt IR", || {
                 let path = dump_dir.join("opt").with_extension(self.backend.ir_extension());
                 self.backend.dump_ir(&path)
@@ -270,15 +325,14 @@ impl<B: Backend> JitEvm<B> {
             }
         }
 
-        let addr = trace_time!("finalize", || self.backend.get_function(mname))?;
-        Ok(JitEvmFn::new(unsafe { std::mem::transmute::<usize, RawJitEvmFn>(addr) }))
+        Ok(())
     }
 
     fn make_builder<'a>(
         backend: &'a mut B,
         config: &FcxConfig,
         name: &str,
-    ) -> Result<B::Builder<'a>> {
+    ) -> Result<(B::Builder<'a>, B::FuncId)> {
         fn align_size<T>(i: usize) -> (usize, usize, usize) {
             (i, mem::align_of::<T>(), mem::size_of::<T>())
         }
@@ -307,7 +361,7 @@ impl<B: Backend> JitEvm<B> {
         );
         debug_assert_eq!(params.len(), param_names.len());
         let linkage = revm_jit_backend::Linkage::Public;
-        let mut bcx = backend.build_function(name, ret, params, param_names, linkage)?;
+        let (mut bcx, id) = backend.build_function(name, ret, params, param_names, linkage)?;
 
         // Function attributes.
         let function_attributes = [
@@ -345,17 +399,20 @@ impl<B: Backend> JitEvm<B> {
             }
         }
 
-        Ok(bcx)
+        Ok((bcx, id))
     }
 
     fn dump_bytecode(dump_dir: &Path, bytecode: &Bytecode<'_>) -> Result<()> {
-        std::fs::create_dir_all(dump_dir)?;
+        fn extra_ext(p: &Path, ext: &str) -> PathBuf {
+            p.with_file_name(format!("{}.{ext}", p.file_name().unwrap().to_str().unwrap()))
+        }
 
-        std::fs::write(dump_dir.join("evm.bin"), bytecode.code)?;
+        let fname = dump_dir.join("evm").with_extension(format!("{:?}", bytecode.spec_id));
+        std::fs::write(extra_ext(&fname, "bin"), bytecode.code)?;
 
-        std::fs::write(dump_dir.join("evm.hex"), revm_primitives::hex::encode(bytecode.code))?;
+        std::fs::write(extra_ext(&fname, "hex"), revm_primitives::hex::encode(bytecode.code))?;
 
-        let file = std::fs::File::create(dump_dir.join("evm.txt"))?;
+        let file = std::fs::File::create(extra_ext(&fname, "txt"))?;
         let mut file = std::io::BufWriter::new(file);
 
         let header = format!("{:^6} | {:^6} | {:^80} | {}", "ic", "pc", "opcode", "instruction");
@@ -376,5 +433,16 @@ impl<B: Backend> JitEvm<B> {
         let name = format!("{base}_{spec_id:?}_{}", self.function_counter);
         self.function_counter += 1;
         name
+    }
+
+    fn dump_dir(&self) -> Option<PathBuf> {
+        let mut dump_dir = self.out_dir.clone()?;
+        if let Some(name) = &self.name {
+            dump_dir.push(name.replace(char::is_whitespace, "_"));
+        }
+        if !dump_dir.exists() {
+            let _ = std::fs::create_dir_all(&dump_dir);
+        }
+        Some(dump_dir)
     }
 }

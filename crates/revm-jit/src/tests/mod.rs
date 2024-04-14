@@ -12,6 +12,7 @@ use revm_primitives::{hex, keccak256, Address, Bytes, LogData, B256, KECCAK_EMPT
 mod macros;
 
 mod fibonacci;
+mod meta;
 mod resume;
 
 mod runner;

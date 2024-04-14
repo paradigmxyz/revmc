@@ -29,6 +29,7 @@ revm-primitives.workspace = true
 
 bitflags = "2.5"
 bitvec = "1"
+rustc-hash.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]

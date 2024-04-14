@@ -131,8 +131,11 @@ pub trait Backend: BackendTypes + TypeMethods {
     >
     where
         Self: 'a;
+    type FuncId: Copy + Eq + std::hash::Hash + fmt::Debug;
 
     fn ir_extension(&self) -> &'static str;
+
+    fn set_module_name(&mut self, name: &str);
 
     fn set_is_dumping(&mut self, yes: bool);
     fn set_debug_assertions(&mut self, yes: bool);
@@ -148,11 +151,11 @@ pub trait Backend: BackendTypes + TypeMethods {
         params: &[Self::Type],
         param_names: &[&str],
         linkage: Linkage,
-    ) -> Result<Self::Builder<'_>>;
-    fn verify_function(&mut self, name: &str) -> Result<()>;
-    fn optimize_function(&mut self, name: &str) -> Result<()>;
-    fn get_function(&mut self, name: &str) -> Result<usize>;
-    unsafe fn free_function(&mut self, name: &str) -> Result<()>;
+    ) -> Result<(Self::Builder<'_>, Self::FuncId)>;
+    fn verify_module(&mut self) -> Result<()>;
+    fn optimize_module(&mut self) -> Result<()>;
+    fn jit_function(&mut self, id: Self::FuncId) -> Result<usize>;
+    unsafe fn free_function(&mut self, id: Self::FuncId) -> Result<()>;
     unsafe fn free_all_functions(&mut self) -> Result<()>;
 }
 
