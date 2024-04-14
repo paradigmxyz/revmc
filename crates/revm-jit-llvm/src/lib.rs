@@ -53,18 +53,25 @@ pub struct EvmLlvmBackend<'ctx> {
     aot: bool,
     debug_assertions: bool,
     opt_level: OptimizationLevel,
+    /// Separate from `function_names` to have always increasing IDs.
+    function_counter: u32,
     function_names: FxHashMap<u32, String>,
 }
 
 impl<'ctx> EvmLlvmBackend<'ctx> {
     /// Creates a new LLVM backend.
     #[inline]
-    pub fn new(cx: &'ctx Context, opt_level: revm_jit_backend::OptimizationLevel) -> Result<Self> {
-        debug_time!("new LLVM backend", || Self::new_inner(cx, opt_level))
+    pub fn new(
+        cx: &'ctx Context,
+        aot: bool,
+        opt_level: revm_jit_backend::OptimizationLevel,
+    ) -> Result<Self> {
+        debug_time!("new LLVM backend", || Self::new_inner(cx, aot, opt_level))
     }
 
     fn new_inner(
         cx: &'ctx Context,
+        aot: bool,
         opt_level: revm_jit_backend::OptimizationLevel,
     ) -> Result<Self> {
         let mut init_result = Ok(());
@@ -107,8 +114,8 @@ impl<'ctx> EvmLlvmBackend<'ctx> {
                 &cpu.to_string_lossy(),
                 &features.to_string_lossy(),
                 opt_level,
-                RelocMode::PIC,
-                CodeModel::Default,
+                if aot { RelocMode::Default } else { RelocMode::PIC },
+                if aot { CodeModel::Default } else { CodeModel::JITDefault },
             )
             .ok_or_else(|| eyre::eyre!("failed to create target machine"))?;
 
@@ -140,9 +147,10 @@ impl<'ctx> EvmLlvmBackend<'ctx> {
             ty_i256,
             ty_isize,
             ty_ptr,
-            aot: false,
+            aot,
             debug_assertions: cfg!(debug_assertions),
             opt_level,
+            function_counter: 0,
             function_names: FxHashMap::default(),
         })
     }
@@ -218,11 +226,6 @@ impl<'ctx> Backend for EvmLlvmBackend<'ctx> {
         "ll"
     }
 
-    fn set_aot(&mut self, aot: bool) -> Result<()> {
-        self.aot = aot;
-        Ok(())
-    }
-
     fn set_module_name(&mut self, name: &str) {
         self.module.set_name(name);
     }
@@ -241,6 +244,10 @@ impl<'ctx> Backend for EvmLlvmBackend<'ctx> {
 
     fn set_opt_level(&mut self, level: revm_jit_backend::OptimizationLevel) {
         self.opt_level = convert_opt_level(level);
+    }
+
+    fn is_aot(&self) -> bool {
+        self.aot
     }
 
     fn dump_ir(&mut self, path: &Path) -> Result<()> {
@@ -268,7 +275,8 @@ impl<'ctx> Backend for EvmLlvmBackend<'ctx> {
         let entry = self.cx.append_basic_block(function, "entry");
         self.bcx.position_at_end(entry);
 
-        let id = self.function_names.len() as u32;
+        let id = self.function_counter;
+        self.function_counter += 1;
         self.function_names.insert(id, name.to_string());
         let builder = EvmLlvmBuilder { backend: self, function };
         Ok((builder, id))

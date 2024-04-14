@@ -37,13 +37,12 @@ use translate::{FcxConfig, FunctionCx};
 /// file with [`write_object`] when in AOT mode, or JIT-compiled with [`jit_function`].
 ///
 /// Performing either of these operations finalizes the module, and no more functions can be added
-/// afterwards until [`free_all_functions`] is called, which will reset the module to its initial
-/// state.
+/// afterwards until [`clear`] is called, which will reset the module to its initial state.
 ///
 /// [`translate`]: EvmCompiler::translate
 /// [`write_object`]: EvmCompiler::write_object
 /// [`jit_function`]: EvmCompiler::jit_function
-/// [`free_all_functions`]: EvmCompiler::free_all_functions
+/// [`clear`]: EvmCompiler::clear
 #[allow(missing_debug_implementations)]
 pub struct EvmCompiler<B: Backend> {
     name: Option<String>,
@@ -52,7 +51,6 @@ pub struct EvmCompiler<B: Backend> {
     config: FcxConfig,
     builtins: Builtins<B>,
 
-    aot: bool,
     dump_assembly: bool,
     dump_unopt_assembly: bool,
 
@@ -70,7 +68,6 @@ impl<B: Backend> EvmCompiler<B> {
             config: FcxConfig::default(),
             function_counter: 0,
             builtins: Builtins::new(),
-            aot: false,
             dump_assembly: true,
             dump_unopt_assembly: false,
             finalized: false,
@@ -78,27 +75,14 @@ impl<B: Backend> EvmCompiler<B> {
     }
 
     /// Sets the name of the module.
-    pub fn set_name(&mut self, name: impl Into<String>) {
+    pub fn set_module_name(&mut self, name: impl Into<String>) {
         let name = name.into();
         self.backend.set_module_name(&name);
         self.name = Some(name);
     }
 
-    fn with_name<T>(&mut self, name: impl FnOnce() -> String, f: impl FnOnce(&mut Self) -> T) -> T {
-        let none = self.name.is_none();
-        if none {
-            self.set_name(name());
-        }
-        let r = f(self);
-        if none {
-            self.name = None;
-        }
-        r
-    }
-
-    /// Sets whether to do Ahead-Of-Time (AOT) compilation instead of Just-In-Time (JIT).
-    pub fn set_aot(&mut self, aot: bool) {
-        self.aot = aot;
+    fn is_aot(&self) -> bool {
+        self.backend.is_aot()
     }
 
     /// Returns the output directory.
@@ -220,13 +204,8 @@ impl<B: Backend> EvmCompiler<B> {
         spec_id: SpecId,
     ) -> Result<B::FuncId> {
         ensure!(!self.finalized, "cannot compile more functions after finalizing the module");
-        self.with_name(
-            || name.unwrap_or("evm").to_string(),
-            |this| {
-                let bytecode = debug_time!("parse", || this.parse(bytecode, spec_id))?;
-                debug_time!("translate", || this.translate_inner(name, &bytecode))
-            },
-        )
+        let bytecode = debug_time!("parse", || self.parse(bytecode, spec_id))?;
+        debug_time!("translate", || self.translate_inner(name, &bytecode))
     }
 
     /// (JIT) Compiles the given EVM bytecode into a JIT function.
@@ -236,18 +215,13 @@ impl<B: Backend> EvmCompiler<B> {
         bytecode: &[u8],
         spec_id: SpecId,
     ) -> Result<EvmJitFn> {
-        self.with_name(
-            || name.unwrap_or("evm").to_string(),
-            |this| {
-                let id = this.translate(name, bytecode, spec_id)?;
-                this.jit_function(id)
-            },
-        )
+        let id = self.translate(name, bytecode, spec_id)?;
+        self.jit_function(id)
     }
 
     /// (JIT) Finalizes the module and JITs the given function.
     pub fn jit_function(&mut self, id: B::FuncId) -> Result<EvmJitFn> {
-        ensure!(!self.aot, "cannot JIT functions during AOT compilation");
+        ensure!(!self.is_aot(), "cannot JIT functions during AOT compilation");
         self.finalize()?;
         let addr = trace_time!("get_function", || self.backend.jit_function(id))?;
         Ok(EvmJitFn::new(unsafe { std::mem::transmute::<usize, RawEvmJitFn>(addr) }))
@@ -255,7 +229,7 @@ impl<B: Backend> EvmCompiler<B> {
 
     /// (AOT) Writes the compiled object to the given writer.
     pub fn write_object<W: std::io::Write>(&mut self, w: W) -> Result<()> {
-        ensure!(self.aot, "cannot write AOT object during JIT compilation");
+        ensure!(self.is_aot(), "cannot write AOT object during JIT compilation");
         self.finalize()?;
         trace_time!("write_object", || self.backend.write_object(w))
     }

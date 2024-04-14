@@ -45,7 +45,7 @@ fn run_bench(c: &mut Criterion, bench: &Bench) {
     // Set up the compiler.
     let opt_level = revm_jit::OptimizationLevel::Aggressive;
     let context = llvm::inkwell::context::Context::create();
-    let backend = new_llvm_backend(&context, opt_level).unwrap();
+    let backend = new_llvm_backend(&context, false, opt_level).unwrap();
     let mut compiler = EvmCompiler::new(backend);
     if !stack_input.is_empty() {
         compiler.set_inspect_stack_length(true);

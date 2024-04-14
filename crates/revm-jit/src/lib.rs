@@ -52,9 +52,10 @@ const I256_MIN: U256 = U256::from_limbs([
 #[inline]
 pub fn new_llvm_backend(
     cx: &llvm::inkwell::context::Context,
+    aot: bool,
     opt_level: OptimizationLevel,
 ) -> Result<EvmLlvmBackend<'_>> {
-    EvmLlvmBackend::new(cx, opt_level)
+    EvmLlvmBackend::new(cx, aot, opt_level)
 }
 
 /// Enable for `cargo asm -p revm-jit --lib`.

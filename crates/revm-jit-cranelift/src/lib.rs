@@ -59,9 +59,9 @@ impl EvmCraneliftBackend {
     /// Panics if the current architecture is not supported. See
     /// [`is_supported`](Self::is_supported).
     #[track_caller]
-    pub fn new(opt_level: OptimizationLevel) -> Self {
+    pub fn new(aot: bool, opt_level: OptimizationLevel) -> Self {
         let symbols = Symbols::new();
-        let module = ModuleWrapper::new_jit(opt_level, symbols.clone()).unwrap();
+        let module = ModuleWrapper::new(aot, opt_level, &symbols).unwrap();
         Self {
             builder_context: FunctionBuilderContext::new(),
             ctx: module.get().make_context(),
@@ -92,7 +92,7 @@ impl EvmCraneliftBackend {
                 Some(old)
             }
         };
-        self.ctx = self.module.get().make_context();
+        self.module.get().clear_context(&mut self.ctx);
         Ok(aot)
     }
 }
@@ -142,10 +142,6 @@ impl Backend for EvmCraneliftBackend {
         let _ = name;
     }
 
-    fn set_aot(&mut self, aot: bool) -> Result<()> {
-        self.module.set_aot(aot, self.opt_level, &self.symbols)
-    }
-
     fn set_is_dumping(&mut self, yes: bool) {
         self.ctx.set_disasm(yes);
     }
@@ -162,6 +158,10 @@ impl Backend for EvmCraneliftBackend {
         // Note that this will only affect new functions after a new module is created in
         // `free_all_functions`.
         self.opt_level = level;
+    }
+
+    fn is_aot(&self) -> bool {
+        self.module.is_aot()
     }
 
     fn dump_ir(&mut self, path: &Path) -> Result<()> {
@@ -260,14 +260,19 @@ impl Backend for EvmCraneliftBackend {
     }
 
     unsafe fn free_all_functions(&mut self) -> Result<()> {
-        if let ModuleWrapper::Jit(_) = self.module {
-            // TODO: Can `free_memory` take `&mut self` pls?
-            let new = ModuleWrapper::new_jit(self.opt_level, self.symbols.clone())?;
-            if let ModuleWrapper::Jit(old) = std::mem::replace(&mut self.module, new) {
-                unsafe { old.free_memory() };
+        match self.module {
+            ModuleWrapper::Jit(_) => {
+                // TODO: Can `free_memory` take `&mut self` pls?
+                let new = ModuleWrapper::new_jit(self.opt_level, self.symbols.clone())?;
+                if let ModuleWrapper::Jit(old) = std::mem::replace(&mut self.module, new) {
+                    unsafe { old.free_memory() };
+                }
             }
-            self.ctx = self.module.get().make_context();
+            ModuleWrapper::Aot(_) => {
+                self.module = ModuleWrapper::new_aot(self.opt_level)?;
+            }
         }
+        self.ctx = self.module.get().make_context();
         Ok(())
     }
 }
@@ -751,6 +756,14 @@ enum ModuleWrapper {
 }
 
 impl ModuleWrapper {
+    fn new(aot: bool, opt_level: OptimizationLevel, symbols: &Symbols) -> Result<Self> {
+        if aot {
+            Self::new_aot(opt_level)
+        } else {
+            Self::new_jit(opt_level, symbols.clone())
+        }
+    }
+
     fn new_jit(opt_level: OptimizationLevel, symbols: Symbols) -> Result<Self> {
         let mut builder = JITBuilder::with_flags(
             &[("opt_level", opt_level_flag(opt_level))],
@@ -771,6 +784,10 @@ impl ModuleWrapper {
         Ok(Self::Aot(ObjectModule::new(builder)))
     }
 
+    fn is_aot(&self) -> bool {
+        matches!(self, Self::Aot(_))
+    }
+
     #[inline]
     fn get(&self) -> &dyn Module {
         match self {
@@ -785,20 +802,6 @@ impl ModuleWrapper {
             Self::Jit(module) => module,
             Self::Aot(module) => module,
         }
-    }
-
-    fn set_aot(
-        &mut self,
-        aot: bool,
-        opt_level: OptimizationLevel,
-        symbols: &Symbols,
-    ) -> Result<()> {
-        match self {
-            Self::Jit(_) if aot => *self = Self::new_aot(opt_level)?,
-            Self::Aot(_) if !aot => *self = Self::new_jit(opt_level, symbols.clone())?,
-            _ => {}
-        }
-        Ok(())
     }
 
     fn finalize_definitions(&mut self) -> Result<(), ModuleError> {

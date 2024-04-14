@@ -292,7 +292,7 @@ fn with_llvm_context(f: impl FnOnce(&LlvmContext)) {
 
 #[cfg(feature = "llvm")]
 fn with_llvm_backend(opt_level: OptimizationLevel, f: impl FnOnce(EvmLlvmBackend<'_>)) {
-    with_llvm_context(|cx| f(new_llvm_backend(cx, opt_level).unwrap()))
+    with_llvm_context(|cx| f(new_llvm_backend(cx, false, opt_level).unwrap()))
 }
 
 #[cfg(feature = "llvm")]

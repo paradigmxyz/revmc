@@ -49,10 +49,10 @@ fn main() -> Result<()> {
     // Build the compiler.
     let opt_level = cli.opt_level.unwrap_or(OptimizationLevel::Aggressive);
     let context = revm_jit::llvm::inkwell::context::Context::create();
-    let backend = new_llvm_backend(&context, opt_level)?;
+    let backend = new_llvm_backend(&context, cli.aot, opt_level)?;
     let mut compiler = EvmCompiler::new(backend);
     compiler.set_dump_to(Some(PathBuf::from("./tmp/revm-jit")));
-    compiler.set_aot(cli.aot);
+    compiler.set_module_name(&cli.bench_name);
     compiler.set_disable_gas(cli.no_gas);
     compiler.set_frame_pointers(true);
     compiler.set_debug_assertions(cli.debug_assertions);
@@ -97,10 +97,12 @@ fn main() -> Result<()> {
     let f_id = compiler.translate(Some(name), bytecode, spec_id)?;
 
     if cli.aot {
-        let out = compiler.out_dir().unwrap();
-        eprintln!("{out:?}");
-        let mut file = std::fs::File::create(out.join("a.o"))?;
+        let mut path = compiler.out_dir().unwrap().to_path_buf();
+        path.push(cli.bench_name);
+        path.push("a.o");
+        let mut file = std::fs::File::create(&path)?;
         compiler.write_object(&mut file)?;
+        eprintln!("Wrote object file to {}", path.display());
         return Ok(());
     }
 
