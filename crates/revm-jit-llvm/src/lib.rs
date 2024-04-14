@@ -49,7 +49,6 @@ pub struct JitEvmLlvmBackend<'ctx> {
 
     debug_assertions: bool,
     opt_level: OptimizationLevel,
-    function_counter: u32,
     function_names: FxHashMap<u32, String>,
 }
 
@@ -143,7 +142,6 @@ impl<'ctx> JitEvmLlvmBackend<'ctx> {
             ty_ptr,
             debug_assertions: cfg!(debug_assertions),
             opt_level,
-            function_counter: 0,
             function_names: FxHashMap::default(),
         })
     }
@@ -219,6 +217,10 @@ impl<'ctx> Backend for JitEvmLlvmBackend<'ctx> {
         "ll"
     }
 
+    fn set_module_name(&mut self, name: &str) {
+        self.module.set_name(name);
+    }
+
     fn set_is_dumping(&mut self, yes: bool) {
         self.machine.set_asm_verbosity(yes);
     }
@@ -260,8 +262,8 @@ impl<'ctx> Backend for JitEvmLlvmBackend<'ctx> {
         let entry = self.cx.append_basic_block(function, "entry");
         self.bcx.position_at_end(entry);
 
-        let id = self.function_counter;
-        self.function_counter += 1;
+        let id = self.function_names.len() as u32;
+        self.function_names.insert(id, name.to_string());
         let builder = JitEvmLlvmBuilder { backend: self, function };
         Ok((builder, id))
     }
@@ -270,7 +272,7 @@ impl<'ctx> Backend for JitEvmLlvmBackend<'ctx> {
         self.module.verify().map_err(error_msg)
     }
 
-    fn optimize_function(&mut self, _id: Self::FuncId) -> Result<()> {
+    fn optimize_module(&mut self) -> Result<()> {
         // From `opt --help`, `-passes`.
         let passes = match self.opt_level {
             OptimizationLevel::None => "default<O0>",
@@ -282,7 +284,7 @@ impl<'ctx> Backend for JitEvmLlvmBackend<'ctx> {
         self.module.run_passes(passes, &self.machine, opts).map_err(error_msg)
     }
 
-    fn get_function(&mut self, id: Self::FuncId) -> Result<usize> {
+    fn jit_function(&mut self, id: Self::FuncId) -> Result<usize> {
         let name = self.id_to_name(id);
         self.exec_engine.get_function_address(name).map_err(Into::into)
     }
@@ -291,6 +293,7 @@ impl<'ctx> Backend for JitEvmLlvmBackend<'ctx> {
         let name = self.id_to_name(id);
         let function = self.exec_engine.get_function_value(name)?;
         self.exec_engine.free_fn_machine_code(function);
+        self.function_names.clear();
         Ok(())
     }
 

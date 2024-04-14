@@ -40,6 +40,7 @@ pub struct JitEvmCraneliftBackend {
 
     opt_level: OptimizationLevel,
     comments: CommentWriter,
+    functions: Vec<FuncId>,
 }
 
 #[allow(clippy::new_without_default)]
@@ -67,6 +68,7 @@ impl JitEvmCraneliftBackend {
             symbols,
             opt_level,
             comments: CommentWriter::new(),
+            functions: Vec::new(),
         }
     }
 }
@@ -110,6 +112,10 @@ impl Backend for JitEvmCraneliftBackend {
 
     fn ir_extension(&self) -> &'static str {
         "clif"
+    }
+
+    fn set_module_name(&mut self, name: &str) {
+        let _ = name;
     }
 
     fn set_is_dumping(&mut self, yes: bool) {
@@ -168,6 +174,7 @@ impl Backend for JitEvmCraneliftBackend {
             convert_linkage(linkage),
             &self.ctx.func.signature,
         )?;
+        self.functions.push(id);
         let bcx = FunctionBuilder::new(&mut self.ctx.func, &mut self.builder_context);
         let builder = JitEvmCraneliftBuilder {
             module: &mut self.module,
@@ -183,13 +190,16 @@ impl Backend for JitEvmCraneliftBackend {
         Ok(())
     }
 
-    fn optimize_function(&mut self, id: Self::FuncId) -> Result<()> {
+    fn optimize_module(&mut self) -> Result<()> {
         // Define the function to jit. This finishes compilation, although
         // there may be outstanding relocations to perform. Currently, jit
         // cannot finish relocations until all functions to be called are
         // defined. For this toy demo for now, we'll just finalize the
         // function below.
-        self.module.define_function(id, &mut self.ctx)?;
+        for &id in &self.functions {
+            self.module.define_function(id, &mut self.ctx)?;
+        }
+        self.functions.clear();
 
         // Now that compilation is finished, we can clear out the context state.
         self.module.clear_context(&mut self.ctx);
@@ -203,7 +213,7 @@ impl Backend for JitEvmCraneliftBackend {
         Ok(())
     }
 
-    fn get_function(&mut self, id: Self::FuncId) -> Result<usize> {
+    fn jit_function(&mut self, id: Self::FuncId) -> Result<usize> {
         Ok(self.module.get_finalized_function(id) as usize)
     }
 
