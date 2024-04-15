@@ -16,6 +16,9 @@ pub use bytecode::*;
 mod compiler;
 pub use compiler::EvmCompiler;
 
+mod linker;
+pub use linker::Linker;
+
 #[cfg(test)]
 mod tests;
 

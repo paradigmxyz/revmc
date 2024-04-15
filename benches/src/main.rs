@@ -1,7 +1,9 @@
 use clap::{Parser, ValueEnum};
 use color_eyre::{eyre::eyre, Result};
 use revm_jit::{
-    debug_time, eyre::Context, new_llvm_backend, EvmCompiler, EvmContext, OptimizationLevel,
+    debug_time,
+    eyre::{ensure, Context},
+    new_llvm_backend, EvmCompiler, EvmContext, OptimizationLevel,
 };
 use revm_jit_benches::Bench;
 use revm_primitives::{hex, Bytes, Env, SpecId};
@@ -51,7 +53,7 @@ fn main() -> Result<()> {
     let context = revm_jit::llvm::inkwell::context::Context::create();
     let backend = new_llvm_backend(&context, cli.aot, opt_level)?;
     let mut compiler = EvmCompiler::new(backend);
-    compiler.set_dump_to(Some(PathBuf::from("./tmp/revm-jit")));
+    compiler.set_dump_to(Some(PathBuf::from("tmp/revm-jit")));
     compiler.set_module_name(&cli.bench_name);
     compiler.set_disable_gas(cli.no_gas);
     compiler.set_frame_pointers(true);
@@ -97,12 +99,21 @@ fn main() -> Result<()> {
     let f_id = compiler.translate(Some(name), bytecode, spec_id)?;
 
     if cli.aot {
-        let mut path = compiler.out_dir().unwrap().to_path_buf();
-        path.push(cli.bench_name);
-        path.push("a.o");
-        let mut file = std::fs::File::create(&path)?;
+        let mut out_dir = compiler.out_dir().unwrap().to_path_buf();
+        out_dir.push(cli.bench_name);
+
+        let obj = out_dir.join("a.o");
+        let mut file = std::fs::File::create(&obj)?;
         compiler.write_object(&mut file)?;
-        eprintln!("Wrote object file to {}", path.display());
+        ensure!(obj.exists(), "Failed to write object file");
+        eprintln!("Compiled object file to {}", obj.display());
+
+        let so = out_dir.join("a.so");
+        let linker = revm_jit::Linker::new();
+        linker.link(&so, [obj.to_str().unwrap()])?;
+        ensure!(so.exists(), "Failed to link object file");
+        eprintln!("Linked shared object file to {}", so.display());
+
         return Ok(());
     }
 

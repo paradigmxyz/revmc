@@ -114,7 +114,7 @@ impl<'ctx> EvmLlvmBackend<'ctx> {
                 &cpu.to_string_lossy(),
                 &features.to_string_lossy(),
                 opt_level,
-                if aot { RelocMode::Default } else { RelocMode::PIC },
+                if aot { RelocMode::DynamicNoPic } else { RelocMode::PIC },
                 if aot { CodeModel::Default } else { CodeModel::JITDefault },
             )
             .ok_or_else(|| eyre::eyre!("failed to create target machine"))?;
