@@ -35,6 +35,8 @@ struct Cli {
     debug_assertions: bool,
     #[arg(long)]
     no_gas: bool,
+    #[arg(long)]
+    no_len_checks: bool,
     #[arg(long, default_value = "1000000000")]
     gas_limit: u64,
 }
@@ -55,9 +57,10 @@ fn main() -> Result<()> {
     let mut compiler = EvmCompiler::new(backend);
     compiler.set_dump_to(Some(PathBuf::from("tmp/revm-jit")));
     compiler.set_module_name(&cli.bench_name);
-    compiler.set_disable_gas(cli.no_gas);
-    compiler.set_frame_pointers(true);
-    compiler.set_debug_assertions(cli.debug_assertions);
+    compiler.gas_metering(!cli.no_gas);
+    unsafe { compiler.stack_length_checks(!cli.no_len_checks) };
+    compiler.frame_pointers(true);
+    compiler.debug_assertions(cli.debug_assertions);
 
     let Bench { name, bytecode, calldata, stack_input, native: _ } = if cli.bench_name == "custom" {
         Bench {
@@ -94,7 +97,7 @@ fn main() -> Result<()> {
 
     let spec_id = cli.spec_id.into();
     if !stack_input.is_empty() {
-        compiler.set_inspect_stack_length(true);
+        compiler.inspect_stack_length(true);
     }
     let f_id = compiler.translate(Some(name), bytecode, spec_id)?;
 

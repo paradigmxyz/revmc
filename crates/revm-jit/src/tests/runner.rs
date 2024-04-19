@@ -309,9 +309,7 @@ pub fn set_test_dump<B: Backend>(compiler: &mut EvmCompiler<B>, module_path: &st
     dump_path.push("target");
     dump_path.push("tests_dump");
     // Skip `revm_jit::tests`.
-    for part in module_path.split("::").skip(2) {
-        dump_path.push(part);
-    }
+    dump_path.extend(module_path.split("::").skip(2));
     dump_path.push(format!("{:?}", compiler.opt_level()));
     compiler.set_dump_to(Some(dump_path));
 }
@@ -329,7 +327,7 @@ pub fn run_test_case<B: Backend>(test_case: &TestCase<'_>, compiler: &mut EvmCom
         assert_host,
         assert_ecx,
     } = *test_case;
-    compiler.set_inspect_stack_length(true);
+    compiler.inspect_stack_length(true);
     let f = compiler.jit(None, bytecode, spec_id).unwrap();
 
     with_evm_context(bytecode, |ecx, stack, stack_len| {

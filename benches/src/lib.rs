@@ -17,7 +17,7 @@ pub fn get_benches() -> Vec<Bench> {
             bytecode: FIBONACCI.to_vec(),
             stack_input: vec![U256::from(69)],
             native: Some(|| {
-                black_box(fibonacci_rust(70));
+                black_box(fibonacci_rust(black_box(70)));
             }),
             ..Default::default()
         },

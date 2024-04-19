@@ -9,9 +9,9 @@ fn translate_then_compile<B: Backend>(compiler: &mut EvmCompiler<B>) {
     let name = Some("test");
     let bytecode: &[u8] = &[];
     let spec_id = SpecId::CANCUN;
-    compiler.set_disable_gas(false);
+    compiler.gas_metering(false);
     let gas_id = compiler.translate(name, bytecode, spec_id).unwrap();
-    compiler.set_disable_gas(true);
+    compiler.gas_metering(true);
     let no_gas_id = compiler.translate(name, bytecode, spec_id).unwrap();
     let gas_fn = compiler.jit_function(gas_id).unwrap();
     let no_gas_fn = compiler.jit_function(no_gas_id).unwrap();

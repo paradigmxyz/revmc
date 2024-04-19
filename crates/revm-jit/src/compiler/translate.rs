@@ -13,26 +13,28 @@ use std::{fmt::Write, mem, sync::atomic::AtomicPtr};
 const STACK_CAP: usize = 1024;
 // const WORD_SIZE: usize = 32;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub(super) struct FcxConfig {
-    pub(super) comments_enabled: bool,
+    pub(super) comments: bool,
     pub(super) debug_assertions: bool,
     pub(super) frame_pointers: bool,
 
     pub(super) local_stack: bool,
     pub(super) inspect_stack_length: bool,
-    pub(super) gas_disabled: bool,
+    pub(super) stack_length_checks: bool,
+    pub(super) gas_metering: bool,
 }
 
 impl Default for FcxConfig {
     fn default() -> Self {
         Self {
             debug_assertions: cfg!(debug_assertions),
-            comments_enabled: false,
+            comments: false,
             frame_pointers: cfg!(debug_assertions),
             local_stack: false,
             inspect_stack_length: false,
-            gas_disabled: false,
+            stack_length_checks: true,
+            gas_metering: true,
         }
     }
 }
@@ -42,8 +44,7 @@ type Incoming<B> = Vec<(<B as BackendTypes>::Value, <B as BackendTypes>::BasicBl
 
 pub(super) struct FunctionCx<'a, B: Backend> {
     // Configuration.
-    comments_enabled: bool,
-    disable_gas: bool,
+    config: FcxConfig,
 
     /// The backend's function builder.
     bcx: B::Builder<'a>,
@@ -163,7 +164,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     #[allow(rustdoc::invalid_rust_codeblocks)] // Syntax highlighting.
     pub(super) fn translate(
         mut bcx: B::Builder<'a>,
-        config: &FcxConfig,
+        config: FcxConfig,
         builtins: &'a mut Builtins<B>,
         bytecode: &'a Bytecode<'a>,
     ) -> Result<()> {
@@ -231,8 +232,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let return_block = bcx.create_block("return");
 
         let mut fx = FunctionCx {
-            comments_enabled: config.comments_enabled,
-            disable_gas: config.gas_disabled,
+            config,
 
             isize_type,
             address_type,
@@ -271,7 +271,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         // Add debug assertions for the parameters.
         if config.debug_assertions {
             fx.pointer_panic_with_bool(
-                !config.gas_disabled,
+                config.gas_metering,
                 gas_ptr,
                 "gas pointer",
                 "gas metering is enabled",
@@ -462,7 +462,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         macro_rules! goto_return {
             (no_branch $($comment:expr)?) => {
                 $(
-                    if self.comments_enabled {
+                    if self.config.comments {
                         self.add_comment($comment);
                     }
                 )?
@@ -496,7 +496,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         }
 
         // Pay static gas.
-        if !self.disable_gas {
+        if self.config.gas_metering {
             if let Some(static_gas) = data.static_gas() {
                 self.gas_cost_imm(static_gas as u64);
             }
@@ -526,37 +526,39 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             }
             self.len_before = self.stack_len.load(&mut self.bcx, "stack_len");
 
-            let underflow = |this: &mut Self| {
-                this.bcx.icmp_imm(IntCC::UnsignedLessThan, this.len_before, inp as i64)
-            };
-            let overflow = |this: &mut Self| {
-                this.bcx.icmp_imm(
-                    IntCC::UnsignedGreaterThan,
-                    this.len_before,
-                    STACK_CAP as i64 - diff,
-                )
-            };
-
-            if may_underflow && may_overflow {
-                let underflow = underflow(self);
-                let overflow = overflow(self);
-                let cond = self.bcx.bitor(underflow, overflow);
-                let ret = {
-                    let under =
-                        self.bcx.iconst(self.i8_type, InstructionResult::StackUnderflow as i64);
-                    let over =
-                        self.bcx.iconst(self.i8_type, InstructionResult::StackOverflow as i64);
-                    self.bcx.select(underflow, under, over)
+            if self.config.stack_length_checks {
+                let underflow = |this: &mut Self| {
+                    this.bcx.icmp_imm(IntCC::UnsignedLessThan, this.len_before, inp as i64)
                 };
-                self.build_failure_inner(true, cond, ret);
-            } else if may_underflow {
-                let cond = underflow(self);
-                self.build_failure(cond, InstructionResult::StackUnderflow);
-            } else if may_overflow {
-                let cond = overflow(self);
-                self.build_failure(cond, InstructionResult::StackOverflow);
-            } else {
-                unreachable!("in stack_io without underflow or overflow");
+                let overflow = |this: &mut Self| {
+                    this.bcx.icmp_imm(
+                        IntCC::UnsignedGreaterThan,
+                        this.len_before,
+                        STACK_CAP as i64 - diff,
+                    )
+                };
+
+                if may_underflow && may_overflow {
+                    let underflow = underflow(self);
+                    let overflow = overflow(self);
+                    let cond = self.bcx.bitor(underflow, overflow);
+                    let ret = {
+                        let under =
+                            self.bcx.iconst(self.i8_type, InstructionResult::StackUnderflow as i64);
+                        let over =
+                            self.bcx.iconst(self.i8_type, InstructionResult::StackOverflow as i64);
+                        self.bcx.select(underflow, under, over)
+                    };
+                    self.build_failure_inner(true, cond, ret);
+                } else if may_underflow {
+                    let cond = underflow(self);
+                    self.build_failure(cond, InstructionResult::StackUnderflow);
+                } else if may_overflow {
+                    let cond = overflow(self);
+                    self.build_failure(cond, InstructionResult::StackOverflow);
+                } else {
+                    unreachable!("in stack_io without underflow or overflow");
+                }
             }
 
             if diff != 0 {
@@ -1126,7 +1128,11 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     fn pushn(&mut self, values: &[B::Value]) {
         let len_start = self.len_before();
         for &value in values {
-            let len = self.bcx.iadd_imm(len_start, self.len_offset as i64);
+            let len = if self.len_offset != 0 {
+                self.bcx.iadd_imm(len_start, self.len_offset as i64)
+            } else {
+                len_start
+            };
             self.len_offset += 1;
             let sp = self.sp_at(len);
             self.bcx.store(value, sp);
@@ -1147,7 +1153,11 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let len_start = self.len_before();
         std::array::from_fn(|i| {
             self.len_offset -= 1;
-            let len = self.bcx.iadd_imm(len_start, self.len_offset as i64);
+            let len = if self.len_offset != 0 {
+                self.bcx.iadd_imm(len_start, self.len_offset as i64)
+            } else {
+                len_start
+            };
             let sp = self.sp_at(len);
             let name = b'a' + i as u8;
             self.load_word(sp, std::str::from_utf8(&[name]).unwrap())
@@ -1300,7 +1310,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
     /// Builds a gas cost deduction for an immediate value.
     fn gas_cost_imm(&mut self, cost: u64) {
-        if self.disable_gas || cost == 0 {
+        if !self.config.gas_metering || cost == 0 {
             return;
         }
         let value = self.bcx.iconst(self.isize_type, cost as i64);
@@ -1309,7 +1319,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
     /// Builds a gas cost deduction for a value.
     fn gas_cost(&mut self, cost: B::Value) {
-        if self.disable_gas {
+        if !self.config.gas_metering {
             return;
         }
 
@@ -1367,7 +1377,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     fn build_return_imm(&mut self, ret: InstructionResult) {
         let ret_value = self.bcx.iconst(self.i8_type, ret as i64);
         self.build_return(ret_value);
-        if self.comments_enabled {
+        if self.config.comments {
             self.add_comment(&format!("return {ret:?}"));
         }
     }

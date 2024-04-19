@@ -47,10 +47,8 @@ fn run_bench(c: &mut Criterion, bench: &Bench) {
     let context = llvm::inkwell::context::Context::create();
     let backend = new_llvm_backend(&context, false, opt_level).unwrap();
     let mut compiler = EvmCompiler::new(backend);
-    if !stack_input.is_empty() {
-        compiler.set_inspect_stack_length(true);
-    }
-    compiler.set_disable_gas(true);
+    compiler.inspect_stack_length(!stack_input.is_empty());
+    compiler.gas_metering(true);
 
     if let Some(native) = *native {
         g.bench_function("native", |b| b.iter(native));
@@ -73,15 +71,21 @@ fn run_bench(c: &mut Criterion, bench: &Bench) {
         r
     };
 
-    let jit_no_gas = compiler.translate(Some(name), bytecode, SPEC_ID).unwrap();
-    compiler.set_disable_gas(false);
-    let jit_gas = compiler.translate(Some(name), bytecode, SPEC_ID).unwrap();
-    let jit_no_gas = compiler.jit_function(jit_no_gas).unwrap();
-    let jit_gas = compiler.jit_function(jit_gas).unwrap();
-
-    g.bench_function("revm-jit/no_gas", |b| b.iter(|| call_jit(jit_no_gas)));
-
-    g.bench_function("revm-jit/gas", |b| b.iter(|| call_jit(jit_gas)));
+    let jit_matrix = [
+        ("default", (true, true)),
+        ("no_gas", (false, true)),
+        ("no_stack", (true, false)),
+        ("no_gas_no_stack", (false, false)),
+    ];
+    let jit_ids = jit_matrix.map(|(name, (gas, stack))| {
+        compiler.gas_metering(gas);
+        unsafe { compiler.stack_length_checks(stack) };
+        (name, compiler.translate(Some(name), bytecode, SPEC_ID).expect(name))
+    });
+    for &(name, fn_id) in &jit_ids {
+        let jit = compiler.jit_function(fn_id).expect(name);
+        g.bench_function(&format!("revm-jit/{name}"), |b| b.iter(|| call_jit(jit)));
+    }
 
     g.bench_function("revm-interpreter", |b| {
         b.iter(|| {

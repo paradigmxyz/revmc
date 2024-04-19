@@ -97,7 +97,7 @@ impl<B: Backend> EvmCompiler<B> {
     /// Creates a subdirectory with the name of the backend in the given directory.
     pub fn set_dump_to(&mut self, output_dir: Option<PathBuf>) {
         self.backend.set_is_dumping(output_dir.is_some());
-        self.config.comments_enabled = output_dir.is_some();
+        self.config.comments = output_dir.is_some();
         self.out_dir = output_dir;
     }
 
@@ -139,7 +139,7 @@ impl<B: Backend> EvmCompiler<B> {
     /// insertion of extra checks and removal of certain assumptions.
     ///
     /// Defaults to `cfg!(debug_assertions)`.
-    pub fn set_debug_assertions(&mut self, yes: bool) {
+    pub fn debug_assertions(&mut self, yes: bool) {
         self.backend.set_debug_assertions(yes);
         self.config.debug_assertions = yes;
     }
@@ -149,7 +149,7 @@ impl<B: Backend> EvmCompiler<B> {
     /// This is useful for profiling and debugging, but it incurs a very slight performance penalty.
     ///
     /// Defaults to `cfg!(debug_assertions)`.
-    pub fn set_frame_pointers(&mut self, yes: bool) {
+    pub fn frame_pointers(&mut self, yes: bool) {
         self.config.frame_pointers = yes;
     }
 
@@ -162,7 +162,7 @@ impl<B: Backend> EvmCompiler<B> {
     /// restored afterwards.
     ///
     /// Defaults to `false`.
-    pub fn set_local_stack(&mut self, yes: bool) {
+    pub fn local_stack(&mut self, yes: bool) {
         self.config.local_stack = yes;
     }
 
@@ -177,23 +177,39 @@ impl<B: Backend> EvmCompiler<B> {
     /// incur a performance penalty as the length will be stored at all return sites.
     ///
     /// Defaults to `false`.
-    pub fn set_inspect_stack_length(&mut self, yes: bool) {
+    pub fn inspect_stack_length(&mut self, yes: bool) {
         self.config.inspect_stack_length = yes;
     }
 
-    /// Sets whether to disable gas accounting.
+    /// Sets whether to enable stack checks.
     ///
-    /// Greatly improves compilation speed and performance, at the cost of not being able to check
-    /// for gas exhaustion.
+    /// Defaults to `true`.
+    ///
+    /// # Safety
+    ///
+    /// Removing stack length checks may improve compilation speed and performance, but will result
+    /// in **undefined behavior** if the stack length overflows at runtime, rather than a
+    /// [`StackUnderflow`]/[`StackOverflow`] result.
+    ///
+    /// [`StackUnderflow`]: crate::interpreter::InstructionResult::StackUnderflow
+    /// [`StackOverflow`]: crate::interpreter::InstructionResult::StackOverflow
+    pub unsafe fn stack_length_checks(&mut self, yes: bool) {
+        self.config.stack_length_checks = yes;
+    }
+
+    /// Sets whether to track gas costs.
+    ///
+    /// Disabling this will greatly improves compilation speed and performance, at the cost of not
+    /// being able to check for gas exhaustion.
     ///
     /// Note that this does not disable gas usage in certain instructions, mainly the ones that
     /// are implemented as builtins.
     ///
     /// Use with care, as executing a function with gas disabled may result in an infinite loop.
     ///
-    /// Defaults to `false`.
-    pub fn set_disable_gas(&mut self, disable_gas: bool) {
-        self.config.gas_disabled = disable_gas;
+    /// Defaults to `true`.
+    pub fn gas_metering(&mut self, yes: bool) {
+        self.config.gas_metering = yes;
     }
 
     /// Translates the given EVM bytecode into an internal function.
@@ -290,7 +306,7 @@ impl<B: Backend> EvmCompiler<B> {
         ))?;
         trace_time!("translate", || FunctionCx::translate(
             bcx,
-            &self.config,
+            self.config,
             &mut self.builtins,
             bytecode,
         ))?;
