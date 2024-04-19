@@ -1656,7 +1656,7 @@ dependencies = [
 [[package]]
 name = "revm-interpreter"
 version = "4.0.0"
-source = "git+https://github.com/danipopes/revm?branch=tmp-prs#30923817aa72866a907c8fb5bff47f8e20073ad4"
+source = "git+https://github.com/danipopes/revm?branch=refactor-opinfo#c0776326d9e1d3cde69fa550df1ae50c4ec15edc"
 dependencies = [
  "revm-primitives",
 ]
@@ -1748,7 +1748,7 @@ dependencies = [
 [[package]]
 name = "revm-primitives"
 version = "3.1.1"
-source = "git+https://github.com/danipopes/revm?branch=tmp-prs#30923817aa72866a907c8fb5bff47f8e20073ad4"
+source = "git+https://github.com/danipopes/revm?branch=refactor-opinfo#c0776326d9e1d3cde69fa550df1ae50c4ec15edc"
 dependencies = [
  "alloy-primitives",
  "auto_impl",

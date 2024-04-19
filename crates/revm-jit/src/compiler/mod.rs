@@ -243,7 +243,7 @@ impl<B: Backend> EvmCompiler<B> {
         Ok(EvmJitFn::new(unsafe { std::mem::transmute::<usize, RawEvmJitFn>(addr) }))
     }
 
-    /// (AOT) Writes the compiled object to the given writer.
+    /// (AOT) Finalizes the module and writes the compiled object to the given writer.
     pub fn write_object<W: std::io::Write>(&mut self, w: W) -> Result<()> {
         ensure!(self.is_aot(), "cannot write AOT object during JIT compilation");
         self.finalize()?;
