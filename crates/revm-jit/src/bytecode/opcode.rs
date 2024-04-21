@@ -148,7 +148,7 @@ impl fmt::Display for Opcode<'_> {
 #[inline]
 pub const fn imm_len(op: u8) -> u8 {
     if let Some(info) = &OPCODE_INFO_JUMPTABLE[op as usize] {
-        info.imm_size()
+        info.immediate_size()
     } else {
         0
     }

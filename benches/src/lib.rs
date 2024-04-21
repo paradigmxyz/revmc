@@ -17,7 +17,7 @@ pub fn get_benches() -> Vec<Bench> {
             bytecode: FIBONACCI.to_vec(),
             stack_input: vec![U256::from(69)],
             native: Some(|| {
-                black_box(fibonacci_rust(black_box(70)));
+                black_box(fibonacci_rust(black_box(U256::from(70))));
             }),
             ..Default::default()
         },
@@ -101,13 +101,15 @@ const FIBONACCI: &[u8] = &[
     op::STOP,
 ];
 
-fn fibonacci_rust(n: u16) -> U256 {
+fn fibonacci_rust(n: U256) -> U256 {
     let mut a = U256::from(0);
     let mut b = U256::from(1);
-    for _ in 0..n {
+    let mut i = U256::from(0);
+    while i < n {
         let tmp = a;
         a = b;
         b = b.wrapping_add(tmp);
+        i += U256::from(1);
     }
     a
 }
