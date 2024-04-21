@@ -780,7 +780,7 @@ tests! {
                     bytecode_address: Address::from_word(6_U256.into()),
                     target_address: Address::from_word(6_U256.into()),
                     caller: DEF_ADDR,
-                    value: interpreter::TransferValue::Value(5_U256),
+                    value: interpreter::CallValue::Transfer(5_U256),
                     scheme: interpreter::CallScheme::Call,
                     is_static: false,
                     is_eof: false,

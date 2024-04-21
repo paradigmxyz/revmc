@@ -14,9 +14,9 @@ extern crate tracing;
 
 use alloc::{boxed::Box, vec::Vec};
 use revm_interpreter::{
-    as_u64_saturated, as_usize_saturated, gas as rgas, CallInputs, CallScheme, CreateInputs,
-    InstructionResult, InterpreterAction, InterpreterResult, LoadAccountResult, SStoreResult,
-    TransferValue,
+    as_u64_saturated, as_usize_saturated, gas as rgas, CallInputs, CallScheme, CallValue,
+    CreateInputs, InstructionResult, InterpreterAction, InterpreterResult, LoadAccountResult,
+    SStoreResult,
 };
 use revm_jit_context::{EvmContext, EvmWord};
 use revm_primitives::{
@@ -567,9 +567,9 @@ pub unsafe extern "C" fn __revm_jit_builtin_call(
     };
 
     let transfer_value = if matches!(call_kind, CallKind::Call | CallKind::CallCode) {
-        TransferValue::Value(value)
+        CallValue::Transfer(value)
     } else {
-        TransferValue::ApparentValue(ecx.contract.call_value)
+        CallValue::Apparent(ecx.contract.call_value)
     };
 
     // load account and calculate gas cost.
