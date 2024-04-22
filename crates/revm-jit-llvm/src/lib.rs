@@ -11,12 +11,13 @@ extern crate revm_jit_backend;
 use inkwell::{
     attributes::{Attribute, AttributeLoc},
     basic_block::BasicBlock,
-    context::Context,
     execution_engine::ExecutionEngine,
     module::Module,
     passes::PassBuilderOptions,
     support::error_handling::install_fatal_error_handler,
-    targets::{CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine},
+    targets::{
+        CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine, TargetTriple,
+    },
     types::{BasicType, BasicTypeEnum, FunctionType, IntType, PointerType, StringRadix, VoidType},
     values::{BasicValue, BasicValueEnum, FunctionValue, PointerValue},
     AddressSpace, IntPredicate, OptimizationLevel,
@@ -25,11 +26,23 @@ use revm_jit_backend::{
     eyre, Backend, BackendTypes, Builder, Error, IntCC, Result, TypeMethods, U256,
 };
 use rustc_hash::FxHashMap;
-use std::{path::Path, sync::Once};
+use std::{
+    path::Path,
+    sync::{Once, OnceLock},
+};
 
-pub use inkwell;
+pub use inkwell::{self, context::Context};
 
 pub mod orc;
+
+/// Executes the given closure with a thread-local LLVM context.
+#[inline]
+pub fn with_llvm_context<R>(f: impl FnOnce(&Context) -> R) -> R {
+    thread_local! {
+        static TLS_LLVM_CONTEXT: Context = Context::create();
+    }
+    TLS_LLVM_CONTEXT.with(f)
+}
 
 /// The LLVM-based EVM bytecode compiler backend.
 #[derive(Debug)]
@@ -38,7 +51,7 @@ pub struct EvmLlvmBackend<'ctx> {
     cx: &'ctx Context,
     bcx: inkwell::builder::Builder<'ctx>,
     module: Module<'ctx>,
-    exec_engine: ExecutionEngine<'ctx>,
+    exec_engine: Option<ExecutionEngine<'ctx>>,
     machine: TargetMachine,
 
     ty_void: VoidType<'ctx>,
@@ -74,45 +87,17 @@ impl<'ctx> EvmLlvmBackend<'ctx> {
         aot: bool,
         opt_level: revm_jit_backend::OptimizationLevel,
     ) -> Result<Self> {
-        let mut init_result = Ok(());
-        static INIT: Once = Once::new();
-        INIT.call_once(|| {
-            // TODO: This also reports "PLEASE submit a bug report to..." when the segfault is
-            // outside of LLVM.
-            // enable_llvm_pretty_stack_trace();
-
-            extern "C" fn report_fatal_error(msg: *const std::ffi::c_char) {
-                let msg = unsafe { std::ffi::CStr::from_ptr(msg) };
-                error!(msg = %msg.to_string_lossy(), "LLVM fatal error");
-            }
-
-            unsafe {
-                install_fatal_error_handler(report_fatal_error);
-            }
-
-            let config = InitializationConfig {
-                asm_parser: false,
-                asm_printer: true,
-                base: true,
-                disassembler: true,
-                info: true,
-                machine_code: true,
-            };
-            init_result = Target::initialize_native(&config).map_err(Error::msg);
-        });
-        init_result?;
+        init()?;
 
         let opt_level = convert_opt_level(opt_level);
 
-        let triple = TargetMachine::get_default_triple();
-        let cpu = TargetMachine::get_host_cpu_name();
-        let features = TargetMachine::get_host_cpu_features();
-        let target = Target::from_triple(&triple).map_err(error_msg)?;
+        let target_defaults = TargetDefaults::get();
+        let target = Target::from_triple(&target_defaults.triple).map_err(error_msg)?;
         let machine = target
             .create_target_machine(
-                &triple,
-                &cpu.to_string_lossy(),
-                &features.to_string_lossy(),
+                &target_defaults.triple,
+                &target_defaults.cpu,
+                &target_defaults.features,
                 opt_level,
                 if aot { RelocMode::DynamicNoPic } else { RelocMode::PIC },
                 if aot { CodeModel::Default } else { CodeModel::JITDefault },
@@ -121,7 +106,20 @@ impl<'ctx> EvmLlvmBackend<'ctx> {
 
         let module = create_module(cx, &machine)?;
 
-        let exec_engine = module.create_jit_execution_engine(opt_level).map_err(error_msg)?;
+        let exec_engine = if aot {
+            None
+        } else {
+            if !target.has_jit() {
+                return Err(eyre::eyre!("target {:?} does not support JIT", target.get_name()));
+            }
+            if !target.has_target_machine() {
+                return Err(eyre::eyre!(
+                    "target {:?} does not have target machine",
+                    target.get_name()
+                ));
+            }
+            Some(module.create_jit_execution_engine(opt_level).map_err(error_msg)?)
+        };
 
         let bcx = cx.create_builder();
 
@@ -159,6 +157,11 @@ impl<'ctx> EvmLlvmBackend<'ctx> {
     #[inline]
     pub fn cx(&self) -> &'ctx Context {
         self.cx
+    }
+
+    fn exec_engine(&self) -> &ExecutionEngine<'ctx> {
+        assert!(!self.aot, "requested JIT execution engine on AOT");
+        self.exec_engine.as_ref().expect("missing JIT execution engine")
     }
 
     fn fn_type(
@@ -309,23 +312,51 @@ impl<'ctx> Backend for EvmLlvmBackend<'ctx> {
 
     fn jit_function(&mut self, id: Self::FuncId) -> Result<usize> {
         let name = self.id_to_name(id);
-        self.exec_engine.get_function_address(name).map_err(Into::into)
+        self.exec_engine().get_function_address(name).map_err(Into::into)
     }
 
     unsafe fn free_function(&mut self, id: Self::FuncId) -> Result<()> {
         let name = self.id_to_name(id);
-        let function = self.exec_engine.get_function_value(name)?;
-        self.exec_engine.free_fn_machine_code(function);
+        let function = self.exec_engine().get_function_value(name)?;
+        self.exec_engine().free_fn_machine_code(function);
         self.function_names.clear();
         Ok(())
     }
 
     unsafe fn free_all_functions(&mut self) -> Result<()> {
-        self.exec_engine.remove_module(&self.module).map_err(|e| Error::msg(e.to_string()))?;
+        if let Some(exec_engine) = &self.exec_engine {
+            exec_engine.remove_module(&self.module).map_err(|e| Error::msg(e.to_string()))?;
+        }
         self.module = create_module(self.cx, &self.machine)?;
-        self.exec_engine =
-            self.module.create_jit_execution_engine(self.opt_level).map_err(error_msg)?;
+        if self.exec_engine.is_some() {
+            self.exec_engine =
+                Some(self.module.create_jit_execution_engine(self.opt_level).map_err(error_msg)?);
+        }
         Ok(())
+    }
+}
+
+/// Cached target information.
+struct TargetDefaults {
+    triple: TargetTriple,
+    cpu: String,
+    features: String,
+    // target: Target,
+}
+
+// SAFETY: No mutability is exposed and `TargetTriple` is an owned string.
+unsafe impl std::marker::Send for TargetDefaults {}
+unsafe impl std::marker::Sync for TargetDefaults {}
+
+impl TargetDefaults {
+    fn get() -> &'static Self {
+        static TARGET_DEFAULTS: OnceLock<TargetDefaults> = OnceLock::new();
+        TARGET_DEFAULTS.get_or_init(|| {
+            let triple = TargetMachine::get_default_triple();
+            let cpu = TargetMachine::get_host_cpu_name().to_string_lossy().into_owned();
+            let features = TargetMachine::get_host_cpu_features().to_string_lossy().into_owned();
+            TargetDefaults { triple, cpu, features }
+        })
     }
 }
 
@@ -872,7 +903,9 @@ impl<'a, 'ctx> Builder for EvmLlvmBuilder<'a, 'ctx> {
     ) -> Self::Function {
         let func_ty = self.fn_type(ret, params);
         let function = self.module.add_function(name, func_ty, Some(convert_linkage(linkage)));
-        self.exec_engine.add_global_mapping(&function, address);
+        if let Some(exec_engine) = &self.exec_engine {
+            exec_engine.add_global_mapping(&function, address);
+        }
         function
     }
 
@@ -886,6 +919,38 @@ impl<'a, 'ctx> Builder for EvmLlvmBuilder<'a, 'ctx> {
         let attr = convert_attribute(self, attribute);
         function.unwrap_or(self.function).add_attribute(loc, attr);
     }
+}
+
+fn init() -> Result<()> {
+    let mut init_result = Ok(());
+    static INIT: Once = Once::new();
+    INIT.call_once(|| init_result = init_());
+    init_result
+}
+
+fn init_() -> Result<()> {
+    // TODO: This also reports "PLEASE submit a bug report to..." when the segfault is
+    // outside of LLVM.
+    // enable_llvm_pretty_stack_trace();
+
+    extern "C" fn report_fatal_error(msg: *const std::ffi::c_char) {
+        let msg = unsafe { std::ffi::CStr::from_ptr(msg) };
+        error!(msg = %msg.to_string_lossy(), "LLVM fatal error");
+    }
+
+    unsafe {
+        install_fatal_error_handler(report_fatal_error);
+    }
+
+    let config = InitializationConfig {
+        asm_parser: false,
+        asm_printer: true,
+        base: true,
+        disassembler: true,
+        info: true,
+        machine_code: true,
+    };
+    Target::initialize_native(&config).map_err(Error::msg)
 }
 
 fn create_module<'ctx>(cx: &'ctx Context, machine: &TargetMachine) -> Result<Module<'ctx>> {

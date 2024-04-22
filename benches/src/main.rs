@@ -58,7 +58,7 @@ fn main() -> Result<()> {
     compiler.set_dump_to(Some(PathBuf::from("tmp/revm-jit")));
     compiler.set_module_name(&cli.bench_name);
     compiler.gas_metering(!cli.no_gas);
-    unsafe { compiler.stack_length_checks(!cli.no_len_checks) };
+    unsafe { compiler.stack_bound_checks(!cli.no_len_checks) };
     compiler.frame_pointers(true);
     compiler.debug_assertions(cli.debug_assertions);
 

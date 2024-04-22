@@ -21,7 +21,7 @@ pub(super) struct FcxConfig {
 
     pub(super) local_stack: bool,
     pub(super) inspect_stack_length: bool,
-    pub(super) stack_length_checks: bool,
+    pub(super) stack_bound_checks: bool,
     pub(super) gas_metering: bool,
 }
 
@@ -33,7 +33,7 @@ impl Default for FcxConfig {
             frame_pointers: cfg!(debug_assertions),
             local_stack: false,
             inspect_stack_length: false,
-            stack_length_checks: true,
+            stack_bound_checks: true,
             gas_metering: true,
         }
     }
@@ -526,7 +526,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             }
             self.len_before = self.stack_len.load(&mut self.bcx, "stack_len");
 
-            if self.config.stack_length_checks {
+            if self.config.stack_bound_checks {
                 let underflow = |this: &mut Self| {
                     this.bcx.icmp_imm(IntCC::UnsignedLessThan, this.len_before, inp as i64)
                 };

@@ -6,9 +6,6 @@ use revm_primitives::{
 };
 use std::{fmt, path::Path, sync::OnceLock};
 
-#[cfg(feature = "llvm")]
-use llvm::inkwell::context::Context as LlvmContext;
-
 pub struct TestCase<'a> {
     pub bytecode: &'a [u8],
     pub spec_id: SpecId,
@@ -282,17 +279,8 @@ pub fn with_evm_context<F: FnOnce(&mut EvmContext<'_>, &mut EvmStack, &mut usize
 }
 
 #[cfg(feature = "llvm")]
-fn with_llvm_context(f: impl FnOnce(&LlvmContext)) {
-    thread_local! {
-        static TLS_LLVM_CONTEXT: LlvmContext = LlvmContext::create();
-    }
-
-    TLS_LLVM_CONTEXT.with(f);
-}
-
-#[cfg(feature = "llvm")]
 fn with_llvm_backend(opt_level: OptimizationLevel, f: impl FnOnce(EvmLlvmBackend<'_>)) {
-    with_llvm_context(|cx| f(new_llvm_backend(cx, false, opt_level).unwrap()))
+    llvm::with_llvm_context(|cx| f(new_llvm_backend(cx, false, opt_level).unwrap()))
 }
 
 #[cfg(feature = "llvm")]

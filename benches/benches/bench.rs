@@ -79,8 +79,8 @@ fn run_bench(c: &mut Criterion, bench: &Bench) {
     ];
     let jit_ids = jit_matrix.map(|(name, (gas, stack))| {
         compiler.gas_metering(gas);
-        unsafe { compiler.stack_length_checks(stack) };
-        (name, compiler.translate(Some(name), bytecode, SPEC_ID).expect(name))
+        unsafe { compiler.stack_bound_checks(stack) };
+        (name, compiler.translate(None, bytecode, SPEC_ID).expect(name))
     });
     for &(name, fn_id) in &jit_ids {
         let jit = compiler.jit_function(fn_id).expect(name);

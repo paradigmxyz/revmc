@@ -181,7 +181,7 @@ impl<B: Backend> EvmCompiler<B> {
         self.config.inspect_stack_length = yes;
     }
 
-    /// Sets whether to enable stack checks.
+    /// Sets whether to enable stack bound checks.
     ///
     /// Defaults to `true`.
     ///
@@ -193,8 +193,8 @@ impl<B: Backend> EvmCompiler<B> {
     ///
     /// [`StackUnderflow`]: crate::interpreter::InstructionResult::StackUnderflow
     /// [`StackOverflow`]: crate::interpreter::InstructionResult::StackOverflow
-    pub unsafe fn stack_length_checks(&mut self, yes: bool) {
-        self.config.stack_length_checks = yes;
+    pub unsafe fn stack_bound_checks(&mut self, yes: bool) {
+        self.config.stack_bound_checks = yes;
     }
 
     /// Sets whether to track gas costs.
@@ -213,6 +213,9 @@ impl<B: Backend> EvmCompiler<B> {
     }
 
     /// Translates the given EVM bytecode into an internal function.
+    ///
+    /// NOTE: `name` must be unique for each function, as it is used as the name of the final
+    /// symbol. Use `None` for a default unique name.
     pub fn translate(
         &mut self,
         name: Option<&str>,
@@ -225,6 +228,8 @@ impl<B: Backend> EvmCompiler<B> {
     }
 
     /// (JIT) Compiles the given EVM bytecode into a JIT function.
+    ///
+    /// See [`translate`](Self::translate) for more information.
     pub fn jit(
         &mut self,
         name: Option<&str>,
@@ -292,8 +297,14 @@ impl<B: Backend> EvmCompiler<B> {
         name: Option<&str>,
         bytecode: &Bytecode<'_>,
     ) -> Result<B::FuncId> {
-        let name = name.unwrap_or("evm_bytecode");
-        let mname = self.mangle_name(name, bytecode.spec_id);
+        let storage;
+        let name = match name {
+            Some(name) => name,
+            None => {
+                storage = self.default_name();
+                &storage
+            }
+        };
 
         if let Some(dump_dir) = &self.dump_dir() {
             trace_time!("dump bytecode", || Self::dump_bytecode(dump_dir, bytecode))?;
@@ -302,7 +313,7 @@ impl<B: Backend> EvmCompiler<B> {
         let (bcx, id) = trace_time!("make builder", || Self::make_builder(
             &mut self.backend,
             &self.config,
-            &mname,
+            &name,
         ))?;
         trace_time!("translate", || FunctionCx::translate(
             bcx,
@@ -464,8 +475,8 @@ impl<B: Backend> EvmCompiler<B> {
         Ok(())
     }
 
-    fn mangle_name(&mut self, base: &str, spec_id: SpecId) -> String {
-        let name = format!("{base}_{spec_id:?}_{}", self.function_counter);
+    fn default_name(&mut self) -> String {
+        let name = format!("__evm_compiler_{}", self.function_counter);
         self.function_counter += 1;
         name
     }
