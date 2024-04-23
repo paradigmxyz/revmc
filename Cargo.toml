@@ -25,6 +25,7 @@ rustdoc.all = "warn"
 [workspace.dependencies]
 revm-jit = { version = "0.1.0", path = "crates/revm-jit", default-features = false }
 revm-jit-backend = { version = "0.1.0", path = "crates/revm-jit-backend", default-features = false }
+revm-jit-build = { version = "0.1.0", path = "crates/revm-jit-build", default-features = false }
 revm-jit-builtins = { version = "0.1.0", path = "crates/revm-jit-builtins", default-features = false }
 revm-jit-context = { version = "0.1.0", path = "crates/revm-jit-context", default-features = false }
 revm-jit-cranelift = { version = "0.1.0", path = "crates/revm-jit-cranelift", default-features = false }

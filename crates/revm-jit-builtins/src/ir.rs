@@ -129,6 +129,8 @@ macro_rules! builtins {
 }
 
 // TODO: Parameter attributes, especially `dereferenceable(<size>)` and `sret(<ty>)`.
+// NOTE: If the format of this macro invocation is changed,
+// the build script support crate must be updated as well.
 builtins! {
     |bcx| {
         let ptr = bcx.type_ptr();

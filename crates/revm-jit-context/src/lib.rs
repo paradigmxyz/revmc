@@ -631,7 +631,7 @@ impl ResumeAt {
     fn load(ip: *const u8) -> u32 {
         // Arbitrary limit.
         // TODO: Use upper bits?
-        if (ip as usize) < 1000 {
+        if (ip as usize) <= u16::MAX as usize {
             ip as u32
         } else {
             0

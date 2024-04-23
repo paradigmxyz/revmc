@@ -13,11 +13,6 @@ keywords.workspace = true
 repository.workspace = true
 exclude.workspace = true
 
-[lib]
-# We want this library both to be available in the final binary for JIT-ing, as well as a dynamic
-# library for the AOT-produced object files to link against.
-crate-type = ["lib", "dylib"]
-
 [lints]
 workspace = true
 

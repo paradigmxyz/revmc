@@ -264,6 +264,7 @@ pub unsafe extern "C" fn __revm_jit_builtin_blockhash(
     ecx: &mut EvmContext<'_>,
     number_ptr: &mut EvmWord,
 ) -> InstructionResult {
+    // TODO(EOF): EIP-2935 https://github.com/bluealloy/revm/pull/1354
     let number = number_ptr.to_u256();
     if let Some(diff) = ecx.host.env().block.number.checked_sub(number) {
         let diff = as_usize_saturated!(diff);
@@ -566,16 +567,13 @@ pub unsafe extern "C" fn __revm_jit_builtin_call(
         usize::MAX // unrealistic value so we are sure it is not used
     };
 
-    let transfer_value = if matches!(call_kind, CallKind::Call | CallKind::CallCode) {
-        CallValue::Transfer(value)
-    } else {
-        CallValue::Apparent(ecx.contract.call_value)
-    };
+    // Load account and calculate gas cost.
+    let LoadAccountResult { is_cold, mut is_empty } = try_host!(ecx.host.load_account(to));
+    if !matches!(call_kind, CallKind::Call) {
+        is_empty = false;
+    }
 
-    // load account and calculate gas cost.
-    let LoadAccountResult { is_cold, is_empty } = try_host!(ecx.host.load_account(to));
-
-    gas!(ecx, rgas::call_cost(spec_id, value != U256::ZERO, is_cold, is_empty,));
+    gas!(ecx, rgas::call_cost(spec_id, value != U256::ZERO, is_cold, is_empty));
 
     // EIP-150: Gas cost changes for IO-heavy operations
     let mut gas_limit = if spec_id.is_enabled_in(SpecId::TANGERINE) {
@@ -592,27 +590,30 @@ pub unsafe extern "C" fn __revm_jit_builtin_call(
     if matches!(call_kind, CallKind::Call | CallKind::CallCode) && value != U256::ZERO {
         gas_limit = gas_limit.saturating_add(rgas::CALL_STIPEND);
     }
-    let is_static = matches!(call_kind, CallKind::StaticCall) || ecx.is_static;
 
     *ecx.next_action = InterpreterAction::Call {
         inputs: Box::new(CallInputs {
             input,
             return_memory_offset: out_offset..out_offset + out_len,
             gas_limit,
-            bytecode_address: if call_kind == CallKind::DelegateCall {
+            bytecode_address: to,
+            target_address: if matches!(call_kind, CallKind::DelegateCall | CallKind::CallCode) {
                 ecx.contract.target_address
             } else {
                 to
             },
-            target_address: to,
             caller: if call_kind == CallKind::DelegateCall {
                 ecx.contract.caller
             } else {
                 ecx.contract.target_address
             },
-            value: transfer_value,
+            value: if matches!(call_kind, CallKind::DelegateCall) {
+                CallValue::Apparent(ecx.contract.call_value)
+            } else {
+                CallValue::Transfer(value)
+            },
             scheme: call_kind.into(),
-            is_static,
+            is_static: ecx.is_static || matches!(call_kind, CallKind::StaticCall),
             // TODO(EOF)
             is_eof: false,
         }),
