@@ -90,11 +90,9 @@ impl<B: Backend> EvmCompiler<B> {
         self.out_dir.as_deref()
     }
 
-    /// Dumps the IR and potential to the given directory after compilation.
+    /// Dumps intermediate outputs and other debug info to the given directory after compilation.
     ///
     /// Disables dumping if `output_dir` is `None`.
-    ///
-    /// Creates a subdirectory with the name of the backend in the given directory.
     pub fn set_dump_to(&mut self, output_dir: Option<PathBuf>) {
         self.backend.set_is_dumping(output_dir.is_some());
         self.config.comments = output_dir.is_some();
