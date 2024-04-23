@@ -122,7 +122,7 @@ fn main() -> Result<()> {
 
     let f = compiler.jit_function(f_id)?;
 
-    let mut run = |f: revm_jit::EvmJitFn| {
+    let mut run = |f: revm_jit::EvmCompilerFn| {
         let mut interpreter =
             revm_interpreter::Interpreter::new(contract.clone(), gas_limit, false);
         host.clear();

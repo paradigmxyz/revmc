@@ -138,9 +138,10 @@ impl dyn HostExt {
 
 /// The raw function signature of a bytecode function.
 ///
-/// Prefer using [`EvmJitFn`] instead of this type. See [`EvmJitFn::call`] for more information.
+/// Prefer using [`EvmCompilerFn`] instead of this type. See [`EvmCompilerFn::call`] for more
+/// information.
 // When changing the signature, also update the corresponding declarations in `fn translate`.
-pub type RawEvmJitFn = unsafe extern "C" fn(
+pub type RawEvmCompilerFn = unsafe extern "C" fn(
     gas: *mut Gas,
     stack: *mut EvmStack,
     stack_len: *mut usize,
@@ -151,18 +152,18 @@ pub type RawEvmJitFn = unsafe extern "C" fn(
 
 /// An EVM bytecode function.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct EvmJitFn(RawEvmJitFn);
+pub struct EvmCompilerFn(RawEvmCompilerFn);
 
-impl EvmJitFn {
+impl EvmCompilerFn {
     /// Wraps the function.
     #[inline]
-    pub const fn new(f: RawEvmJitFn) -> Self {
+    pub const fn new(f: RawEvmCompilerFn) -> Self {
         Self(f)
     }
 
     /// Unwraps the function.
     #[inline]
-    pub const fn into_inner(self) -> RawEvmJitFn {
+    pub const fn into_inner(self) -> RawEvmCompilerFn {
         self.0
     }
 
@@ -733,7 +734,7 @@ mod tests {
 
         let mut env = Env::default();
         let mut host = BHost(&mut env);
-        let f = EvmJitFn::new(test_fn);
+        let f = EvmCompilerFn::new(test_fn);
         let mut interpreter = Interpreter::new(Contract::default(), u64::MAX, false);
 
         let (mut ecx, stack, stack_len) =

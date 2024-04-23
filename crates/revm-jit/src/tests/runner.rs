@@ -112,6 +112,8 @@ pub fn def_env() -> &'static Env {
             // TODO(EOF)
             eof_initcodes: Vec::new(),
             eof_initcodes_hashed: HashMap::new(),
+            #[cfg(feature = "optimism")]
+            optimism: Default::default(),
         },
     })
 }

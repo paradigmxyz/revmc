@@ -1,10 +1,10 @@
 //! EVM bytecode compiler implementation.
 
-use crate::{Backend, Builder, Bytecode, EvmContext, EvmJitFn, EvmStack, Result};
+use crate::{Backend, Builder, Bytecode, EvmCompilerFn, EvmContext, EvmStack, Result};
 use revm_interpreter::{Contract, Gas};
 use revm_jit_backend::{eyre::ensure, Attribute, FunctionAttributeLocation, OptimizationLevel};
 use revm_jit_builtins::Builtins;
-use revm_jit_context::RawEvmJitFn;
+use revm_jit_context::RawEvmCompilerFn;
 use revm_primitives::{Env, SpecId};
 use std::{
     io::Write,
@@ -235,24 +235,24 @@ impl<B: Backend> EvmCompiler<B> {
         name: Option<&str>,
         bytecode: &[u8],
         spec_id: SpecId,
-    ) -> Result<EvmJitFn> {
+    ) -> Result<EvmCompilerFn> {
         let id = self.translate(name, bytecode, spec_id)?;
         self.jit_function(id)
     }
 
     /// (JIT) Finalizes the module and JITs the given function.
-    pub fn jit_function(&mut self, id: B::FuncId) -> Result<EvmJitFn> {
+    pub fn jit_function(&mut self, id: B::FuncId) -> Result<EvmCompilerFn> {
         ensure!(!self.is_aot(), "cannot JIT functions during AOT compilation");
         self.finalize()?;
-        let addr = trace_time!("get_function", || self.backend.jit_function(id))?;
-        Ok(EvmJitFn::new(unsafe { std::mem::transmute::<usize, RawEvmJitFn>(addr) }))
+        let addr = debug_time!("get_function", || self.backend.jit_function(id))?;
+        Ok(EvmCompilerFn::new(unsafe { std::mem::transmute::<usize, RawEvmCompilerFn>(addr) }))
     }
 
     /// (AOT) Finalizes the module and writes the compiled object to the given writer.
     pub fn write_object<W: std::io::Write>(&mut self, w: W) -> Result<()> {
         ensure!(self.is_aot(), "cannot write AOT object during JIT compilation");
         self.finalize()?;
-        trace_time!("write_object", || self.backend.write_object(w))
+        debug_time!("write_object", || self.backend.write_object(w))
     }
 
     /// (JIT) Frees the memory associated with a single function.
@@ -313,9 +313,9 @@ impl<B: Backend> EvmCompiler<B> {
         let (bcx, id) = trace_time!("make builder", || Self::make_builder(
             &mut self.backend,
             &self.config,
-            &name,
+            name,
         ))?;
-        trace_time!("translate", || FunctionCx::translate(
+        trace_time!("translate inner", || FunctionCx::translate(
             bcx,
             self.config,
             &mut self.builtins,
@@ -328,7 +328,7 @@ impl<B: Backend> EvmCompiler<B> {
     fn finalize(&mut self) -> Result<()> {
         if !self.finalized {
             self.finalized = true;
-            trace_time!("finalize", || self.finalize_inner())
+            debug_time!("finalize module", || self.finalize_inner())
         } else {
             Ok(())
         }

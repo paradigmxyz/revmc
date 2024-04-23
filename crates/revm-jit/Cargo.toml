@@ -43,3 +43,7 @@ llvm = ["dep:revm-jit-llvm"]
 cranelift = ["dep:revm-jit-cranelift"]
 
 asm-keccak = ["alloy-primitives/asm-keccak"]
+
+# I don't think this is supported, but it's necessary for --all-features to work in workspaces which
+# also have this feature.
+optimism = ["revm-primitives/optimism", "revm-interpreter/optimism"]

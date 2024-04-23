@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 #[derive(Debug)]
 pub struct Linker {
     cc: Option<PathBuf>,
+    cflags: Vec<String>,
 }
 
 impl Default for Linker {
@@ -15,13 +16,17 @@ impl Default for Linker {
 impl Linker {
     /// Creates a new linker.
     pub fn new() -> Self {
-        Self { cc: None }
+        Self { cc: None, cflags: vec![] }
     }
 
     /// Sets the C compiler to use for linking.
-    pub fn with_cc(mut self, cc: impl Into<PathBuf>) -> Self {
-        self.cc = Some(cc.into());
-        self
+    pub fn cc(&mut self, cc: Option<PathBuf>) {
+        self.cc = cc;
+    }
+
+    /// Sets the C compiler flags to use for linking.
+    pub fn cflags(&mut self, cflags: impl IntoIterator<Item = impl Into<String>>) {
+        self.cflags.extend(cflags.into_iter().map(Into::into));
     }
 
     /// Links the given object files into a shared library at the given path.
@@ -61,12 +66,10 @@ impl Linker {
             cmd.arg("-Wl,--gc-sections");
             cmd.arg("-Wl,--strip-all");
         }
-        // Link libc and the builtins.
-        cmd.arg("-lc");
-        // TODO
-        // cmd.arg("-Ltarget/release/").arg("-lrevm_jit_builtins");
+        cmd.args(&self.cflags);
         cmd.args(objects);
-        debug!(?cmd, "linking");
+        debug!(cmd=?cmd.get_program(), "linking");
+        trace!(?cmd, "full linking command");
         let output = cmd.output()?;
         if !output.status.success() {
             return Err(std::io::Error::new(

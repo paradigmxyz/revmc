@@ -2,7 +2,7 @@ use criterion::{
     criterion_group, criterion_main, measurement::WallTime, BenchmarkGroup, Criterion,
 };
 use revm_interpreter::SharedMemory;
-use revm_jit::{llvm, new_llvm_backend, EvmCompiler, EvmContext, EvmJitFn, EvmStack};
+use revm_jit::{llvm, new_llvm_backend, EvmCompiler, EvmCompilerFn, EvmContext, EvmStack};
 use revm_jit_benches::Bench;
 use revm_primitives::{Env, SpecId};
 use std::time::Duration;
@@ -55,7 +55,7 @@ fn run_bench(c: &mut Criterion, bench: &Bench) {
     }
 
     let mut stack = EvmStack::new();
-    let mut call_jit = |f: EvmJitFn| {
+    let mut call_jit = |f: EvmCompilerFn| {
         for (i, input) in stack_input.iter().enumerate() {
             stack.as_mut_slice()[i] = input.into();
         }
