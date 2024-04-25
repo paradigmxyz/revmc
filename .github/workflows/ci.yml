@@ -7,7 +7,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  LLVM_VERSION: 17
+  LLVM_VERSION: "17.0"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
@@ -21,7 +21,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: ["ubuntu-latest", "macos-13", "macos-latest"]
+        runner: ["ubuntu-latest", "macos-14"]
         toolchain: ["stable", "nightly"]
         profile: ["dev", "release"]
     steps:
