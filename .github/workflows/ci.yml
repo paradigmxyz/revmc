@@ -43,6 +43,8 @@ jobs:
         run: |
           brew install zlib
           echo 'LDFLAGS=-L/opt/homebrew/opt/zlib/lib' >> $GITHUB_ENV
+          echo 'CFLAGS=-I/opt/homebrew/opt/zlib/include' >> $GITHUB_ENV
+          echo 'CPPFLAGS=-I/opt/homebrew/opt/zlib/include' >> $GITHUB_ENV
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.toolchain }}
