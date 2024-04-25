@@ -36,7 +36,6 @@ jobs:
         with:
           version: ${{ env.LLVM_VERSION }}
           arch: ${{ matrix.arch }}
-          env: true
       - name: llvm-config
         run: llvm-config --version --bindir --libdir
       - name: Install zlib
