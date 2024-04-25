@@ -101,15 +101,34 @@ const FIBONACCI: &[u8] = &[
     op::STOP,
 ];
 
-fn fibonacci_rust(n: U256) -> U256 {
+/// Literal translation of the `FIBONACCI` EVM bytecode to Rust.
+pub fn fibonacci_rust(mut i: U256) -> U256 {
     let mut a = U256::from(0);
     let mut b = U256::from(1);
-    let mut i = U256::from(0);
-    while i < n {
+    while i != U256::ZERO {
         let tmp = a;
         a = b;
         b = b.wrapping_add(tmp);
-        i += U256::from(1);
+        i -= U256::from(1);
     }
     a
+}
+
+#[test]
+fn test_fibonacci_rust() {
+    revm_primitives::uint! {
+        assert_eq!(fibonacci_rust(0_U256), 0_U256);
+        assert_eq!(fibonacci_rust(1_U256), 1_U256);
+        assert_eq!(fibonacci_rust(2_U256), 1_U256);
+        assert_eq!(fibonacci_rust(3_U256), 2_U256);
+        assert_eq!(fibonacci_rust(4_U256), 3_U256);
+        assert_eq!(fibonacci_rust(5_U256), 5_U256);
+        assert_eq!(fibonacci_rust(6_U256), 8_U256);
+        assert_eq!(fibonacci_rust(7_U256), 13_U256);
+        assert_eq!(fibonacci_rust(8_U256), 21_U256);
+        assert_eq!(fibonacci_rust(9_U256), 34_U256);
+        assert_eq!(fibonacci_rust(10_U256), 55_U256);
+        assert_eq!(fibonacci_rust(100_U256), 354224848179261915075_U256);
+        assert_eq!(fibonacci_rust(1000_U256), 0x2e3510283c1d60b00930b7e8803c312b4c8e6d5286805fc70b594dc75cc0604b_U256);
+    }
 }
