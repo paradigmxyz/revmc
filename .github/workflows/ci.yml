@@ -42,7 +42,7 @@ jobs:
         if: ${{ contains(matrix.runner, 'macos') }}
         run: |
           brew install zlib
-          export LDFLAGS="-L/opt/homebrew/opt/zlib/lib"
+          echo 'LDFLAGS="-L/opt/homebrew/opt/zlib/lib"' >> $GITHUB_ENV
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.toolchain }}
