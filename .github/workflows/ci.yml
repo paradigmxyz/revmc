@@ -36,12 +36,14 @@ jobs:
         with:
           version: ${{ env.LLVM_VERSION }}
           arch: ${{ matrix.arch }}
+          env: true
       - name: llvm-config
         run: llvm-config --version --bindir --libdir
       - name: Install zlib
         if: ${{ contains(matrix.runner, 'macos') }}
         run: |
-          brew install zstd
+          echo hi
+          # brew install zstd
           # echo 'LDFLAGS=-L/opt/homebrew/opt/zlib/lib' >> $GITHUB_ENV
           # echo 'CFLAGS=-I/opt/homebrew/opt/zlib/include' >> $GITHUB_ENV
           # echo 'CPPFLAGS=-I/opt/homebrew/opt/zlib/include' >> $GITHUB_ENV
