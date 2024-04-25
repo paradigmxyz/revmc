@@ -15,12 +15,13 @@ concurrency:
 
 jobs:
   test:
-    name: test +${{ matrix.toolchain }} ${{ matrix.profile }}
-    runs-on: ubuntu-latest
+    name: test +${{ matrix.runner }}-${{ matrix.toolchain }} ${{ matrix.profile }}
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
+        runner: ["ubuntu-latest", "macos-13", "macos-latest"]
         toolchain: ["stable", "nightly"]
         profile: ["dev", "release"]
     steps:
