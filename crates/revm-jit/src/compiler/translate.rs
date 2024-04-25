@@ -2,7 +2,6 @@
 
 use crate::{
     Backend, Builder, Bytecode, EvmContext, Inst, InstData, InstFlags, IntCC, Result, I256_MIN,
-    TEST_SUSPEND,
 };
 use revm_interpreter::{opcode as op, Contract, InstructionResult};
 use revm_jit_backend::{BackendTypes, TypeMethods};
@@ -482,7 +481,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         // Assert that we already skipped the block.
         debug_assert!(!data.flags.contains(InstFlags::DEAD_CODE));
 
-        if cfg!(test) && opcode == TEST_SUSPEND {
+        #[cfg(test)]
+        if opcode == crate::TEST_SUSPEND {
             self.suspend();
             goto_return!(no_branch);
         }
@@ -495,72 +495,60 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             goto_return!(build InstructionResult::OpcodeNotFound);
         }
 
-        // Pay static gas.
-        if self.config.gas_metering {
-            if let Some(static_gas) = data.static_gas() {
-                self.gas_cost_imm(static_gas as u64);
-            }
-        }
+        // Pay static gas for the current section.
+        self.gas_cost_imm(data.section.gas_cost as u64);
 
         if data.flags.contains(InstFlags::SKIP_LOGIC) {
             goto_return!("skipped");
         }
 
-        // Stack I/O.
+        // Reset the stack length offset for this instruction.
         self.len_offset = 0;
-        'stack_io: {
-            let (mut inp, out) = data.stack_io();
+        self.len_before = self.stack_len.load(&mut self.bcx, "stack_len");
 
-            if data.is_legacy_static_jump()
-                && !(opcode == op::JUMPI && data.flags.contains(InstFlags::INVALID_JUMP))
-            {
-                inp -= 1;
-            }
-
+        // Check stack length for the current section.
+        if self.config.stack_bound_checks {
+            let inp = data.section.inputs;
+            let diff = data.section.max_growth as i64;
             let may_underflow = inp > 0;
-            let diff = out as i64 - inp as i64;
             let may_overflow = diff > 0;
 
-            if !(may_overflow || may_underflow) {
-                break 'stack_io;
-            }
-            self.len_before = self.stack_len.load(&mut self.bcx, "stack_len");
+            let underflow = |this: &mut Self| {
+                this.bcx.icmp_imm(IntCC::UnsignedLessThan, this.len_before, inp as i64)
+            };
+            let overflow = |this: &mut Self| {
+                this.bcx.icmp_imm(
+                    IntCC::UnsignedGreaterThan,
+                    this.len_before,
+                    STACK_CAP as i64 - diff,
+                )
+            };
 
-            if self.config.stack_bound_checks {
-                let underflow = |this: &mut Self| {
-                    this.bcx.icmp_imm(IntCC::UnsignedLessThan, this.len_before, inp as i64)
+            if may_underflow && may_overflow {
+                let underflow = underflow(self);
+                let overflow = overflow(self);
+                let cond = self.bcx.bitor(underflow, overflow);
+                let ret = {
+                    let under =
+                        self.bcx.iconst(self.i8_type, InstructionResult::StackUnderflow as i64);
+                    let over =
+                        self.bcx.iconst(self.i8_type, InstructionResult::StackOverflow as i64);
+                    self.bcx.select(underflow, under, over)
                 };
-                let overflow = |this: &mut Self| {
-                    this.bcx.icmp_imm(
-                        IntCC::UnsignedGreaterThan,
-                        this.len_before,
-                        STACK_CAP as i64 - diff,
-                    )
-                };
-
-                if may_underflow && may_overflow {
-                    let underflow = underflow(self);
-                    let overflow = overflow(self);
-                    let cond = self.bcx.bitor(underflow, overflow);
-                    let ret = {
-                        let under =
-                            self.bcx.iconst(self.i8_type, InstructionResult::StackUnderflow as i64);
-                        let over =
-                            self.bcx.iconst(self.i8_type, InstructionResult::StackOverflow as i64);
-                        self.bcx.select(underflow, under, over)
-                    };
-                    self.build_failure_inner(true, cond, ret);
-                } else if may_underflow {
-                    let cond = underflow(self);
-                    self.build_failure(cond, InstructionResult::StackUnderflow);
-                } else if may_overflow {
-                    let cond = overflow(self);
-                    self.build_failure(cond, InstructionResult::StackOverflow);
-                } else {
-                    unreachable!("in stack_io without underflow or overflow");
-                }
+                self.build_failure_inner(true, cond, ret);
+            } else if may_underflow {
+                let cond = underflow(self);
+                self.build_failure(cond, InstructionResult::StackUnderflow);
+            } else if may_overflow {
+                let cond = overflow(self);
+                self.build_failure(cond, InstructionResult::StackOverflow);
             }
+        }
 
+        // Update the stack length for this instruction.
+        {
+            let (inp, out) = data.stack_io();
+            let diff = out as i64 - inp as i64;
             if diff != 0 {
                 let mut diff = diff;
                 // HACK: For now all opcodes that suspend (minus the test one, which does not reach

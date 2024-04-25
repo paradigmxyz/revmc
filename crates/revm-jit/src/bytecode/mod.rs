@@ -3,8 +3,11 @@
 use bitvec::vec::BitVec;
 use revm_interpreter::opcode as op;
 use revm_jit_backend::{eyre::ensure, Result};
-use revm_primitives::SpecId;
+use revm_primitives::{hex, SpecId};
 use std::fmt;
+
+mod sections;
+use sections::{Section, SectionAnalysis};
 
 mod info;
 pub use info::*;
@@ -13,6 +16,7 @@ mod opcode;
 pub use opcode::*;
 
 /// Noop opcode used to test suspend-resume.
+#[cfg(test)]
 pub(crate) const TEST_SUSPEND: u8 = 0x25;
 
 // TODO: Use `indexvec`.
@@ -24,7 +28,6 @@ pub(crate) const TEST_SUSPEND: u8 = 0x25;
 pub(crate) type Inst = usize;
 
 /// EVM bytecode.
-#[derive(Debug)]
 pub(crate) struct Bytecode<'a> {
     /// The original bytecode slice.
     pub(crate) code: &'a [u8],
@@ -40,9 +43,46 @@ pub(crate) struct Bytecode<'a> {
     will_suspend: bool,
 }
 
+impl fmt::Display for Bytecode<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let header = format!("{:^6} | {:^6} | {:^80} | {}", "ic", "pc", "opcode", "instruction");
+        writeln!(f, "{header}")?;
+        writeln!(f, "{}", "-".repeat(header.len()))?;
+        for (inst, (pc, opcode)) in self.opcodes().with_pc().enumerate() {
+            let data = self.inst(inst);
+            let opcode = opcode.to_string();
+            writeln!(f, "{inst:>6} | {pc:>6} | {opcode:<80} | {data:?}")?;
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Debug for Bytecode<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Bytecode")
+            .field("code", &hex::encode(self.code))
+            .field("insts", &self.insts)
+            .field("jumpdests", &hex::encode(bitvec_as_bytes(&self.jumpdests)))
+            .field("spec_id", &self.spec_id)
+            .field("has_dynamic_jumps", &self.has_dynamic_jumps)
+            .field("will_suspend", &self.will_suspend)
+            .finish()
+    }
+}
+
+fn bitvec_as_bytes<T: bitvec::store::BitStore, O: bitvec::order::BitOrder>(
+    bitvec: &BitVec<T, O>,
+) -> &[u8] {
+    slice_as_bytes(bitvec.as_raw_slice())
+}
+
+fn slice_as_bytes<T>(a: &[T]) -> &[u8] {
+    unsafe { std::slice::from_raw_parts(a.as_ptr().cast(), std::mem::size_of_val(a)) }
+}
+
 impl<'a> Bytecode<'a> {
     pub(crate) fn new(code: &'a [u8], spec_id: SpecId) -> Self {
-        let mut insts = Vec::with_capacity(code.len() + 1);
+        let mut insts = Vec::with_capacity(32);
         let mut jumpdests = BitVec::repeat(false, code.len());
         let op_infos = op_info_map(spec_id);
         for (pc, Opcode { opcode, immediate }) in OpcodesIter::new(code).with_pc() {
@@ -67,7 +107,9 @@ impl<'a> Bytecode<'a> {
             }
             let static_gas = info.static_gas().unwrap_or(u16::MAX);
 
-            insts.push(InstData { opcode, flags, static_gas, data, pc: pc as u32 });
+            let section = Section::default();
+
+            insts.push(InstData { opcode, flags, static_gas, data, pc: pc as u32, section });
         }
 
         let mut bytecode =
@@ -89,14 +131,15 @@ impl<'a> Bytecode<'a> {
 
     /// Returns the instruction at the given instruction counter.
     #[inline]
+    #[track_caller]
     pub(crate) fn inst(&self, inst: Inst) -> &InstData {
         &self.insts[inst]
     }
 
     /// Returns a mutable reference the instruction at the given instruction counter.
     #[inline]
-    #[allow(dead_code)]
-    pub(crate) fn instr_mut(&mut self, inst: Inst) -> &mut InstData {
+    #[track_caller]
+    pub(crate) fn inst_mut(&mut self, inst: Inst) -> &mut InstData {
         &mut self.insts[inst]
     }
 
@@ -126,6 +169,7 @@ impl<'a> Bytecode<'a> {
         // `JUMPDEST`s as dead code.
         trace_time!("mark_dead_code", || self.mark_dead_code());
         trace_time!("will_suspend", || self.calc_will_suspend());
+        trace_time!("sections", || self.construct_sections());
 
         Ok(())
     }
@@ -137,7 +181,7 @@ impl<'a> Bytecode<'a> {
             let jump = &self.insts[jump_inst];
             let Some(push_inst) = jump_inst.checked_sub(1) else {
                 if jump.is_legacy_jump() {
-                    debug!(jump_inst, "found dynamic jump");
+                    debug!(jump_inst, target=?None::<()>, "found jump");
                     self.has_dynamic_jumps = true;
                 }
                 continue;
@@ -146,7 +190,7 @@ impl<'a> Bytecode<'a> {
             let push = &self.insts[push_inst];
             if !(push.is_push() && jump.is_legacy_jump()) {
                 if jump.is_legacy_jump() {
-                    debug!(jump_inst, "found dynamic jump");
+                    debug!(jump_inst, target=?None::<()>, "found jump");
                     self.has_dynamic_jumps = true;
                 }
                 continue;
@@ -187,7 +231,7 @@ impl<'a> Bytecode<'a> {
             }
 
             // Set the target on the `JUMP` instruction.
-            debug!(jump_inst, target, "resolved jump target");
+            debug!(jump_inst, target, "found jump");
             self.insts[jump_inst].data = target as u32;
         }
     }
@@ -231,6 +275,18 @@ impl<'a> Bytecode<'a> {
     fn calc_will_suspend(&mut self) {
         let will_suspend = self.iter_insts().any(|(_, data)| data.will_suspend());
         self.will_suspend = will_suspend;
+    }
+
+    /// Constructs the sections in the bytecode.
+    #[instrument(name = "sections", level = "debug", skip_all)]
+    fn construct_sections(&mut self) {
+        let mut analysis = SectionAnalysis::default();
+        for inst in 0..self.insts.len() {
+            if !self.inst(inst).is_dead_code() {
+                analysis.process(self, inst);
+            }
+        }
+        analysis.finish(self);
     }
 
     /// Returns the immediate value of the given instruction data, if any.
@@ -285,7 +341,7 @@ impl<'a> Bytecode<'a> {
 }
 
 /// A single instruction in the bytecode.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub(crate) struct InstData {
     /// The opcode byte.
     pub(crate) opcode: u8,
@@ -301,6 +357,8 @@ pub(crate) struct InstData {
     pub(crate) data: u32,
     /// The program counter, meaning `code[pc]` is this instruction's opcode.
     pub(crate) pc: u32,
+    /// The section this instruction belongs to.
+    pub(crate) section: Section,
 }
 
 impl PartialEq<u8> for InstData {
@@ -321,8 +379,10 @@ impl fmt::Debug for InstData {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("InstData")
             .field("opcode", &self.to_op())
-            .field("flags", &self.flags)
+            .field("flags", &format_args!("{:?}", self.flags))
             .field("data", &self.data)
+            .field("pc", &self.pc)
+            .field("section", &self.section)
             .finish()
     }
 }
@@ -331,8 +391,8 @@ impl InstData {
     /// Creates a new instruction data with the given opcode byte.
     /// Note that this may not be a valid instruction.
     #[inline]
-    const fn new(opcode: u8) -> Self {
-        Self { opcode, flags: InstFlags::empty(), static_gas: 0, data: 0, pc: 0 }
+    fn new(opcode: u8) -> Self {
+        Self { opcode, ..Default::default() }
     }
 
     /// Returns the length of the immediate data of this instruction.
@@ -341,10 +401,16 @@ impl InstData {
         imm_len(self.opcode)
     }
 
-    /// Returns the input and output stack elements of this instruction.
+    /// Returns the number of input and output stack elements of this instruction.
     #[inline]
-    pub(crate) const fn stack_io(&self) -> (u8, u8) {
-        stack_io(self.opcode)
+    pub(crate) fn stack_io(&self) -> (u8, u8) {
+        let (mut inp, out) = stack_io(self.opcode);
+        if self.is_legacy_static_jump()
+            && !(self.opcode == op::JUMPI && self.flags.contains(InstFlags::INVALID_JUMP))
+        {
+            inp -= 1;
+        }
+        (inp, out)
     }
 
     /// Converts this instruction to a raw opcode. Note that the immediate data is not resolved.
@@ -398,10 +464,17 @@ impl InstData {
         self.flags.contains(InstFlags::DEAD_CODE)
     }
 
+    /// Returns `true` if we know that this instruction will branch or stop execution.
+    #[inline]
+    pub(crate) const fn is_branching(&self, is_eof: bool) -> bool {
+        matches!(self.opcode, op::JUMP | op::JUMPI) || self.is_diverging(is_eof)
+    }
+
     /// Returns `true` if we know that this instruction will stop execution.
     #[inline]
     pub(crate) const fn is_diverging(&self, is_eof: bool) -> bool {
-        if cfg!(test) && self.opcode == TEST_SUSPEND {
+        #[cfg(test)]
+        if self.opcode == TEST_SUSPEND {
             return false;
         }
 
@@ -416,7 +489,8 @@ impl InstData {
     /// Returns `true` if this instruction will suspend execution.
     #[inline]
     pub(crate) const fn will_suspend(&self) -> bool {
-        if cfg!(test) && self.opcode == TEST_SUSPEND {
+        #[cfg(test)]
+        if self.opcode == TEST_SUSPEND {
             return true;
         }
 
@@ -429,7 +503,7 @@ impl InstData {
 
 bitflags::bitflags! {
     /// [`InstrData`] flags.
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
     pub(crate) struct InstFlags: u8 {
         /// The `JUMP`/`JUMPI` target is known at compile time.
         /// This is implied for other jump instructions which are always static.
