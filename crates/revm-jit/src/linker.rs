@@ -62,11 +62,9 @@ impl Linker {
         cmd.arg("-o").arg(out);
         cmd.arg("-shared");
         cmd.arg("-O3");
-        if !cfg!(debug_assertions) {
-            cmd.arg("-Wl,--gc-sections");
-            cmd.arg("-Wl,--strip-all");
-        }
-        cmd.arg("-Wl,-undefined");
+        cmd.arg("-Wl,--gc-sections");
+        cmd.arg("-Wl,--strip-all");
+        cmd.arg("-Wl,--undefined");
         cmd.args(&self.cflags);
         cmd.args(objects);
         debug!(cmd=?cmd.get_program(), "linking");
@@ -112,10 +110,25 @@ mod tests {
         assert!(obj.exists());
 
         // Link object to shared library.
-        let linker = Linker::new();
-        if let Err(e) = linker.link(&so, [&obj]) {
-            panic!("failed to link: {e}");
+        let mut linker = Linker::new();
+        let mut n = 0;
+        for driver in ["cc", "gcc", "clang"] {
+            if !command_v(driver) {
+                continue;
+            }
+            n += 1;
+
+            let _ = std::fs::remove_file(&so);
+            linker.cc = Some(driver.into());
+            if let Err(e) = linker.link(&so, [&obj]) {
+                panic!("failed to link with {driver}: {e}");
+            }
+            assert!(so.exists());
         }
-        assert!(so.exists());
+        assert!(n > 0, "no C compiler found");
+    }
+
+    fn command_v(cmd: &str) -> bool {
+        std::process::Command::new(cmd).arg("--version").status().is_ok_and(|s| s.success())
     }
 }
