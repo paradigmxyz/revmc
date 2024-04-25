@@ -66,6 +66,7 @@ impl Linker {
             cmd.arg("-Wl,--gc-sections");
             cmd.arg("-Wl,--strip-all");
         }
+        cmd.arg("-Wl,-zundefs");
         cmd.args(&self.cflags);
         cmd.args(objects);
         debug!(cmd=?cmd.get_program(), "linking");
