@@ -45,7 +45,7 @@ jobs:
         with:
           cache-on-failure: true
       - name: test
-        run: cargo test --all-features --workspace --verbose --profile ${{ matrix.profile }}
+        run: cargo test --all-features --workspace --profile ${{ matrix.profile }}
 
   feature-checks:
     runs-on: ubuntu-latest
