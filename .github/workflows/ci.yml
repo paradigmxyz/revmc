@@ -45,6 +45,7 @@ jobs:
           echo 'LDFLAGS=-L/opt/homebrew/opt/zlib/lib' >> $GITHUB_ENV
           echo 'CFLAGS=-I/opt/homebrew/opt/zlib/include' >> $GITHUB_ENV
           echo 'CPPFLAGS=-I/opt/homebrew/opt/zlib/include' >> $GITHUB_ENV
+          echo 'PKG_CONFIG_PATH=/opt/homebrew/opt/zlib/lib/pkgconfig' >> $GITHUB_ENV
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.toolchain }}
