@@ -7,7 +7,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  LLVM_VERSION: "17.0"
+  LLVM_VERSION: 17
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
@@ -15,15 +15,19 @@ concurrency:
 
 jobs:
   test:
-    name: test +${{ matrix.runner }}-${{ matrix.toolchain }} ${{ matrix.profile }}
+    name: test +${{ matrix.runner }}-${{ matrix.arch }}-${{ matrix.toolchain }} ${{ matrix.profile }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         runner: ["ubuntu-latest", "macos-14"]
+        arch: ["x64", "arm64"]
         toolchain: ["stable", "nightly"]
         profile: ["dev", "release"]
+        exclude:
+          - runner: "macos-14"
+            arch: "x64"
     steps:
       - uses: actions/checkout@v4
       - uses: KyleMayes/install-llvm-action@v2
@@ -34,6 +38,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.toolchain }}
+          arch: ${{ matrix.arch }}
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
