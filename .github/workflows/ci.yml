@@ -33,12 +33,12 @@ jobs:
       - uses: KyleMayes/install-llvm-action@v2.0.2
         with:
           version: ${{ env.LLVM_VERSION }}
+          arch: ${{ matrix.arch }}
       - name: llvm-config
         run: llvm-config --version --bindir --libdir
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.toolchain }}
-          arch: ${{ matrix.arch }}
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
