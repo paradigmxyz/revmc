@@ -532,13 +532,11 @@ impl<'a, 'ctx> Builder for EvmLlvmBuilder<'a, 'ctx> {
     }
 
     fn add_comment_to_current_inst(&mut self, comment: &str) {
-        // TODO: Is this even possible?
-        let _ = comment;
-        // let Some(block) = self.current_block() else { return };
-        // let Some(ins) = block.get_last_instruction() else { return };
-        // let metadata = self.cx.metadata_string(comment);
-        // let metadata = self.cx.metadata_node(&[metadata.into()]);
-        // ins.set_metadata(metadata, 0).unwrap();
+        let Some(block) = self.current_block() else { return };
+        let Some(ins) = block.get_last_instruction() else { return };
+        let metadata = self.cx.metadata_string(comment);
+        let metadata = self.cx.metadata_node(&[metadata.into()]);
+        ins.set_metadata(metadata, self.cx.get_kind_id("annotation")).unwrap();
     }
 
     fn fn_param(&mut self, index: usize) -> Self::Value {
