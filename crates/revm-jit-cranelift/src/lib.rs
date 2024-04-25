@@ -260,20 +260,7 @@ impl Backend for EvmCraneliftBackend {
     }
 
     unsafe fn free_all_functions(&mut self) -> Result<()> {
-        match self.module {
-            ModuleWrapper::Jit(_) => {
-                // TODO: Can `free_memory` take `&mut self` pls?
-                let new = ModuleWrapper::new_jit(self.opt_level, self.symbols.clone())?;
-                if let ModuleWrapper::Jit(old) = std::mem::replace(&mut self.module, new) {
-                    unsafe { old.free_memory() };
-                }
-            }
-            ModuleWrapper::Aot(_) => {
-                self.module = ModuleWrapper::new_aot(self.opt_level)?;
-            }
-        }
-        self.ctx = self.module.get().make_context();
-        Ok(())
+        self.finish_module().map(drop)
     }
 }
 
