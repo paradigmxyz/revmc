@@ -49,7 +49,7 @@ jobs:
         if: ${{ contains(matrix.runner, 'macos') }}
         run: |
           brew install llvm@17
-          echo "$(brew --prefix llvm@17)" >> $GITHUB_ENV
+          echo "LLVM_SYS_170_PREFIX=$(brew --prefix llvm@17)" >> $GITHUB_ENV
           # brew install zstd
           # echo 'LDFLAGS=-L/opt/homebrew/opt/zlib/lib' >> $GITHUB_ENV
           # echo 'CFLAGS=-I/opt/homebrew/opt/zlib/include' >> $GITHUB_ENV
