@@ -26,6 +26,8 @@ jobs:
         toolchain: ["stable", "nightly"]
         profile: ["dev", "release"]
         exclude:
+          - runner: "ubuntu-latest"
+            arch: "arm64"
           - runner: "macos-14"
             arch: "x64"
     steps:
