@@ -18,7 +18,10 @@ use inkwell::{
     targets::{
         CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine, TargetTriple,
     },
-    types::{BasicType, BasicTypeEnum, FunctionType, IntType, PointerType, StringRadix, VoidType},
+    types::{
+        AnyType, AnyTypeEnum, BasicType, BasicTypeEnum, FunctionType, IntType, PointerType,
+        StringRadix, VoidType,
+    },
     values::{BasicValue, BasicValueEnum, FunctionValue, PointerValue},
     AddressSpace, IntPredicate, OptimizationLevel,
 };
@@ -999,6 +1002,7 @@ fn convert_attribute(bcx: &EvmLlvmBuilder<'_, '_>, attr: revm_jit_backend::Attri
     enum AttrValue<'a> {
         String(&'a str),
         Enum(u64),
+        Type(AnyTypeEnum<'a>),
     }
 
     let cpu;
@@ -1030,6 +1034,9 @@ fn convert_attribute(bcx: &EvmLlvmBuilder<'_, '_>, attr: revm_jit_backend::Attri
         OurAttr::Align(n) => ("align", AttrValue::Enum(n)),
         OurAttr::NonNull => ("nonnull", AttrValue::Enum(1)),
         OurAttr::Dereferenceable(n) => ("dereferenceable", AttrValue::Enum(n)),
+        OurAttr::SRet(n) => {
+            ("sret", AttrValue::Type(bcx.type_array(bcx.ty_i8.into(), n as _).as_any_type_enum()))
+        }
         OurAttr::ReadNone => ("readnone", AttrValue::Enum(1)),
         OurAttr::ReadOnly => ("readonly", AttrValue::Enum(1)),
         OurAttr::WriteOnly => ("writeonly", AttrValue::Enum(1)),
@@ -1042,6 +1049,10 @@ fn convert_attribute(bcx: &EvmLlvmBuilder<'_, '_>, attr: revm_jit_backend::Attri
         AttrValue::Enum(value) => {
             let id = Attribute::get_named_enum_kind_id(key);
             bcx.cx.create_enum_attribute(id, value)
+        }
+        AttrValue::Type(ty) => {
+            let id = Attribute::get_named_enum_kind_id(key);
+            bcx.cx.create_type_attribute(id, ty)
         }
     }
 }
