@@ -40,7 +40,9 @@ jobs:
         run: llvm-config --version --bindir --libdir
       - name: Install zlib
         if: ${{ contains(matrix.runner, 'macos') }}
-        run: brew install zlib
+        run: |
+          brew install zlib
+          export LDFLAGS="-L/opt/homebrew/opt/zlib/lib"
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.toolchain }}
