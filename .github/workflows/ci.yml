@@ -8,7 +8,6 @@ on:
 env:
   CARGO_TERM_COLOR: always
   LLVM_VERSION: "17.0"
-  RUSTFLAGS: "--print link-args"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
@@ -36,26 +35,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.toolchain }}
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
-      #- uses: KyleMayes/install-llvm-action@v2.0.2
-      #  with:
-      #    version: ${{ env.LLVM_VERSION }}
-      #    arch: ${{ matrix.arch }}
-      # - name: llvm-config
-      #  run: llvm-config --version --bindir --libdir
-      - name: Install zlib
+      - name: Install LLVM
         if: ${{ contains(matrix.runner, 'macos') }}
         run: |
           brew install llvm@17
           echo "LLVM_SYS_170_PREFIX=$(brew --prefix llvm@17)" >> $GITHUB_ENV
-          # brew install zstd
-          # echo 'LDFLAGS=-L/opt/homebrew/opt/zlib/lib' >> $GITHUB_ENV
-          # echo 'CFLAGS=-I/opt/homebrew/opt/zlib/include' >> $GITHUB_ENV
-          # echo 'CPPFLAGS=-I/opt/homebrew/opt/zlib/include' >> $GITHUB_ENV
-          # echo 'PKG_CONFIG_PATH=/opt/homebrew/opt/zlib/lib/pkgconfig' >> $GITHUB_ENV
-          cc --version
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - name: test
         run: cargo test --all-features --workspace --profile ${{ matrix.profile }}
 
