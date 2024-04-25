@@ -8,6 +8,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   LLVM_VERSION: "17.0"
+  RUSTFLAGS: "--print link-args"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
