@@ -53,7 +53,7 @@ jobs:
           # echo 'CFLAGS=-I/opt/homebrew/opt/zlib/include' >> $GITHUB_ENV
           # echo 'CPPFLAGS=-I/opt/homebrew/opt/zlib/include' >> $GITHUB_ENV
           # echo 'PKG_CONFIG_PATH=/opt/homebrew/opt/zlib/lib/pkgconfig' >> $GITHUB_ENV
-          echo zstd -V
+          zstd -V
       - name: test
         run: cargo test --all-features --workspace --profile ${{ matrix.profile }}
 
