@@ -89,6 +89,10 @@ pub(super) struct FunctionCx<'a, B: Backend> {
     /// The block that all jumps branch to if the jump is invalid.
     jump_fail: B::BasicBlock,
 
+    /// `failure_block` incoming values.
+    incoming_failures: Incoming<B>,
+    /// The block that all failures branch to.
+    failure_block: B::BasicBlock,
     /// `return_block` incoming values.
     incoming_returns: Incoming<B>,
     /// The return block that all return instructions branch to.
@@ -228,6 +232,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
         let dynamic_jump_table = bcx.create_block("dynamic_jump_table");
         let suspend_block = bcx.create_block("suspend");
+        let failure_block = bcx.create_block("failure");
         let return_block = bcx.create_block("return");
 
         let mut fx = FunctionCx {
@@ -255,11 +260,15 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             incoming_dynamic_jumps: Vec::new(),
             dynamic_jump_table,
             jump_fail,
+
+            incoming_failures: Vec::new(),
+            failure_block,
+            incoming_returns: Vec::new(),
+            return_block,
+
             resume_blocks: Vec::new(),
             suspend_blocks: Vec::new(),
             suspend_block,
-            incoming_returns: Vec::new(),
-            return_block,
 
             builtins,
         };
@@ -402,8 +411,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 fx.bcx.store(resume_value, resume_at);
 
                 let ret = fx.bcx.iconst(fx.i8_type, InstructionResult::CallOrCreate as i64);
-                fx.incoming_returns.push((ret, fx.suspend_block));
-                fx.bcx.br(fx.return_block);
+                fx.build_return(ret);
             }
         } else {
             debug_assert!(fx.resume_blocks.is_empty());
@@ -418,6 +426,12 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             fx.bcx.switch_to_block(fx.suspend_block);
             fx.bcx.unreachable();
         }
+
+        // Finalize the failure block.
+        fx.bcx.switch_to_block(fx.failure_block);
+        let failure_value = fx.bcx.phi(fx.i8_type, &fx.incoming_failures);
+        fx.bcx.set_cold_block(fx.failure_block);
+        fx.build_return(failure_value);
 
         // Finalize the return block.
         fx.bcx.switch_to_block(fx.return_block);
@@ -1346,17 +1360,15 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     }
 
     fn build_failure_inner(&mut self, is_failure: bool, cond: B::Value, ret: B::Value) {
-        let failure = self.create_block_after_current("fail");
-        let target = self.create_block_after(failure, "contd");
-        if is_failure {
-            self.bcx.brif(cond, failure, target);
-        } else {
-            self.bcx.brif(cond, target, failure);
-        }
+        let current_block = self.current_block();
+        self.incoming_failures.push((ret, current_block));
 
-        self.bcx.set_cold_block(failure);
-        self.bcx.switch_to_block(failure);
-        self.build_return(ret);
+        let target = self.create_block_after(current_block, "contd");
+        if is_failure {
+            self.bcx.brif(cond, self.failure_block, target);
+        } else {
+            self.bcx.brif(cond, target, self.failure_block);
+        }
 
         self.bcx.switch_to_block(target);
     }

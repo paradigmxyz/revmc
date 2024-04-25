@@ -2,8 +2,6 @@ use super::Bytecode;
 use core::fmt;
 use revm_interpreter::opcode as op;
 
-// TODO: integrate stack checks.
-
 /// A section is a sequence of instructions that are executed sequentially without any jumps or
 /// branches.
 ///
