@@ -73,12 +73,11 @@ impl fmt::Debug for Bytecode<'_> {
 fn bitvec_as_bytes<T: bitvec::store::BitStore, O: bitvec::order::BitOrder>(
     bitvec: &BitVec<T, O>,
 ) -> &[u8] {
-    unsafe {
-        std::slice::from_raw_parts(
-            bitvec.as_bitptr().address().to_const().cast(),
-            (bitvec.len() / 8) * std::mem::size_of::<T>(),
-        )
-    }
+    slice_as_bytes(bitvec.as_raw_slice())
+}
+
+fn slice_as_bytes<T>(a: &[T]) -> &[u8] {
+    unsafe { std::slice::from_raw_parts(a.as_ptr().cast(), std::mem::size_of_val(a)) }
 }
 
 impl<'a> Bytecode<'a> {
@@ -402,7 +401,7 @@ impl InstData {
         imm_len(self.opcode)
     }
 
-    /// Returns the input and output stack elements of this instruction.
+    /// Returns the number of input and output stack elements of this instruction.
     #[inline]
     pub(crate) fn stack_io(&self) -> (u8, u8) {
         let (mut inp, out) = stack_io(self.opcode);
