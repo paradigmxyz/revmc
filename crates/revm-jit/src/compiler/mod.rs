@@ -7,7 +7,8 @@ use revm_jit_builtins::Builtins;
 use revm_jit_context::RawEvmCompilerFn;
 use revm_primitives::{Env, SpecId};
 use std::{
-    io::Write,
+    fs,
+    io::{self, Write},
     mem,
     path::{Path, PathBuf},
 };
@@ -247,7 +248,7 @@ impl<B: Backend> EvmCompiler<B> {
     }
 
     /// (AOT) Finalizes the module and writes the compiled object to the given writer.
-    pub fn write_object<W: std::io::Write>(&mut self, w: W) -> Result<()> {
+    pub fn write_object<W: io::Write>(&mut self, w: W) -> Result<()> {
         ensure!(self.is_aot(), "cannot write AOT object during JIT compilation");
         self.finalize()?;
         debug_time!("write_object", || self.backend.write_object(w))
@@ -447,28 +448,28 @@ impl<B: Backend> EvmCompiler<B> {
     }
 
     fn dump_bytecode(dump_dir: &Path, bytecode: &Bytecode<'_>) -> Result<()> {
-        fn extra_ext(p: &Path, ext: &str) -> PathBuf {
+        fn with_extra_ext(p: &Path, ext: &str) -> PathBuf {
             p.with_file_name(format!("{}.{ext}", p.file_name().unwrap().to_str().unwrap()))
         }
 
         let fname = dump_dir.join("evm").with_extension(format!("{:?}", bytecode.spec_id));
-        std::fs::write(extra_ext(&fname, "bin"), bytecode.code)?;
+        fs::write(with_extra_ext(&fname, "bin"), bytecode.code)?;
 
-        std::fs::write(extra_ext(&fname, "hex"), revm_primitives::hex::encode(bytecode.code))?;
+        fs::write(with_extra_ext(&fname, "hex"), revm_primitives::hex::encode(bytecode.code))?;
 
-        let file = std::fs::File::create(extra_ext(&fname, "txt"))?;
-        let mut file = std::io::BufWriter::new(file);
-
-        let header = format!("{:^6} | {:^6} | {:^80} | {}", "ic", "pc", "opcode", "instruction");
-        writeln!(file, "{header}")?;
-        writeln!(file, "{}", "-".repeat(header.len()))?;
-        for (inst, (pc, opcode)) in bytecode.opcodes().with_pc().enumerate() {
-            let data = bytecode.inst(inst);
-            let opcode = opcode.to_string();
-            writeln!(file, "{inst:>6} | {pc:>6} | {opcode:<80} | {data:?}")?;
+        {
+            let file = fs::File::create(with_extra_ext(&fname, "txt"))?;
+            let mut writer = io::BufWriter::new(file);
+            write!(writer, "{bytecode}")?;
+            writer.flush()?;
         }
 
-        file.flush()?;
+        {
+            let file = fs::File::create(with_extra_ext(&fname, "dbg.txt"))?;
+            let mut writer = io::BufWriter::new(file);
+            writeln!(writer, "{bytecode:#?}")?;
+            writer.flush()?;
+        }
 
         Ok(())
     }
@@ -485,7 +486,7 @@ impl<B: Backend> EvmCompiler<B> {
             dump_dir.push(name.replace(char::is_whitespace, "_"));
         }
         if !dump_dir.exists() {
-            let _ = std::fs::create_dir_all(&dump_dir);
+            let _ = fs::create_dir_all(&dump_dir);
         }
         Some(dump_dir)
     }

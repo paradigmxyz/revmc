@@ -2,7 +2,6 @@
 
 use crate::{
     Backend, Builder, Bytecode, EvmContext, Inst, InstData, InstFlags, IntCC, Result, I256_MIN,
-    TEST_SUSPEND,
 };
 use revm_interpreter::{opcode as op, Contract, InstructionResult};
 use revm_jit_backend::{BackendTypes, TypeMethods};
@@ -482,7 +481,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         // Assert that we already skipped the block.
         debug_assert!(!data.flags.contains(InstFlags::DEAD_CODE));
 
-        if cfg!(test) && opcode == TEST_SUSPEND {
+        #[cfg(test)]
+        if opcode == crate::TEST_SUSPEND {
             self.suspend();
             goto_return!(no_branch);
         }
@@ -496,11 +496,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         }
 
         // Pay static gas.
-        if self.config.gas_metering {
-            if let Some(static_gas) = data.static_gas() {
-                self.gas_cost_imm(static_gas as u64);
-            }
-        }
+        self.gas_cost_imm(data.section.gas_cost as u64);
 
         if data.flags.contains(InstFlags::SKIP_LOGIC) {
             goto_return!("skipped");
@@ -509,13 +505,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         // Stack I/O.
         self.len_offset = 0;
         'stack_io: {
-            let (mut inp, out) = data.stack_io();
-
-            if data.is_legacy_static_jump()
-                && !(opcode == op::JUMPI && data.flags.contains(InstFlags::INVALID_JUMP))
-            {
-                inp -= 1;
-            }
+            let (inp, out) = data.stack_io();
 
             let may_underflow = inp > 0;
             let diff = out as i64 - inp as i64;
