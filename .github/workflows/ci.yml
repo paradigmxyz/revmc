@@ -32,14 +32,20 @@ jobs:
             arch: "x64"
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+      - uses: KyleMayes/install-llvm-action@v1
+        if: ${{ !contains(matrix.runner, 'macos') }}
         with:
-          toolchain: ${{ matrix.toolchain }}
+          version: ${{ env.LLVM_VERSION }}
       - name: Install LLVM
         if: ${{ contains(matrix.runner, 'macos') }}
         run: |
           brew install llvm@17
           echo "LLVM_SYS_170_PREFIX=$(brew --prefix llvm@17)" >> $GITHUB_ENV
+      - name: llvm-config
+        run: llvm-config --version --bindir --libdir
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.toolchain }}
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
