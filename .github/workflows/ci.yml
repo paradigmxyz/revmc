@@ -42,7 +42,6 @@ jobs:
       - name: Install zlib
         if: ${{ contains(matrix.runner, 'macos') }}
         run: |
-          xcode-select --install
           echo 'LLVM_SYS_170_PREFIX=/Users/runner/work/revm-jit/revm-jit/llvm' >> $GITHUB_ENV
           # brew install zstd
           # echo 'LDFLAGS=-L/opt/homebrew/opt/zlib/lib' >> $GITHUB_ENV
