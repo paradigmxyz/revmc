@@ -32,6 +32,12 @@ jobs:
             arch: "x64"
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - uses: KyleMayes/install-llvm-action@v2.0.2
         with:
           version: ${{ env.LLVM_VERSION }}
@@ -47,12 +53,7 @@ jobs:
           # echo 'CFLAGS=-I/opt/homebrew/opt/zlib/include' >> $GITHUB_ENV
           # echo 'CPPFLAGS=-I/opt/homebrew/opt/zlib/include' >> $GITHUB_ENV
           # echo 'PKG_CONFIG_PATH=/opt/homebrew/opt/zlib/lib/pkgconfig' >> $GITHUB_ENV
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ matrix.toolchain }}
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
+          echo zstd -V
       - name: test
         run: cargo test --all-features --workspace --profile ${{ matrix.profile }}
 
