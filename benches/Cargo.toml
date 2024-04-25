@@ -27,7 +27,6 @@ tracing-subscriber = { workspace = true, features = ["fmt", "env-filter"] }
 
 [dev-dependencies]
 criterion = "0.5"
-libz-sys = "1.1"
 
 [features]
 default = ["llvm", "revm-jit/asm-keccak"]
