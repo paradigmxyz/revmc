@@ -318,7 +318,7 @@ pub unsafe extern "C" fn __revm_jit_builtin_blob_base_fee(
 #[no_mangle]
 pub unsafe extern "C" fn __revm_jit_builtin_mload(
     ecx: &mut EvmContext<'_>,
-    [offset_ptr]: &mut [EvmWord; 1],
+    offset_ptr: &mut EvmWord,
 ) -> InstructionResult {
     gas!(ecx, rgas::VERYLOW);
     let offset = try_into_usize!(offset_ptr.as_u256());
