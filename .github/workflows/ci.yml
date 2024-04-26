@@ -42,7 +42,7 @@ jobs:
           bins=(clang llvm-config lld ld.lld FileCheck)
           for bin in "${bins[@]}"; do
             echo "-- $bin --"
-            $bin --version
+            $bin --version || true
             echo "-- $bin-$v --"
             $bin-$v --version
             echo "-- $bin again --"
