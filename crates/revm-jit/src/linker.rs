@@ -68,16 +68,16 @@ impl Linker {
         cmd.arg("-o").arg(out);
         cmd.arg("-shared");
         cmd.arg("-O3");
-        if cfg!(target_vendor = "apple") {
-            // TODO:
-            cmd.arg("-Wl,-undefined");
-        } else {
-            cmd.arg("-Wl,--gc-sections,--strip-all,--undefined");
-        }
         if let Some(linker) = &self.linker {
             cmd.arg(format!("-fuse-ld={}", linker.display()));
         } else {
             cmd.arg("-fuse-ld=lld");
+        }
+        if cfg!(target_vendor = "apple") {
+            // TODO
+            cmd.arg("-Wl,-undefined");
+        } else {
+            cmd.arg("-Wl,--gc-sections,--strip-all,--undefined");
         }
         cmd.args(&self.cflags);
         cmd.args(objects);

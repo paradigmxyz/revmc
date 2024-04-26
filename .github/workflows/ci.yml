@@ -7,7 +7,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  LLVM_VERSION: "17.0"
+  LLVM_VERSION: "17"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
@@ -39,10 +39,10 @@ jobs:
       - name: Install LLVM
         if: ${{ contains(matrix.runner, 'macos') }}
         run: |
-          brew install llvm@17
-          echo "LLVM_SYS_170_PREFIX=$(brew --prefix llvm@17)" >> $GITHUB_ENV
-          echo "/opt/homebrew/opt/llvm@17/bin" >> $GITHUB_PATH
-          clang --version || true
+          v=${{ env.LLVM_VERSION }}
+          brew install "llvm@${v}"
+          echo "LLVM_SYS_${v}0_PREFIX=$(brew --prefix llvm@${v})" >> $GITHUB_ENV
+          echo "/opt/homebrew/opt/llvm@${v}/bin" >> $GITHUB_PATH
       - name: llvm-config
         run: llvm-config --version --bindir --libdir
       - uses: dtolnay/rust-toolchain@master
