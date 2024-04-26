@@ -524,13 +524,17 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         if self.config.stack_bound_checks {
             let inp = data.section.inputs;
             let diff = data.section.max_growth as i64;
-            let may_underflow = inp > 0;
-            let may_overflow = diff > 0;
+
+            if diff > revm_jit_context::EvmStack::CAPACITY as i64 {
+                goto_return!(build InstructionResult::StackOverflow);
+            }
 
             let underflow = |this: &mut Self| {
+                debug_assert!(inp > 0);
                 this.bcx.icmp_imm(IntCC::UnsignedLessThan, this.len_before, inp as i64)
             };
             let overflow = |this: &mut Self| {
+                debug_assert!(diff > 0 && diff <= STACK_CAP as i64);
                 this.bcx.icmp_imm(
                     IntCC::UnsignedGreaterThan,
                     this.len_before,
@@ -538,6 +542,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 )
             };
 
+            let may_underflow = inp > 0;
+            let may_overflow = diff > 0;
             if may_underflow && may_overflow {
                 let underflow = underflow(self);
                 let overflow = overflow(self);
