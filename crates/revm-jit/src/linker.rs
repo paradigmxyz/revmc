@@ -74,8 +74,7 @@ impl Linker {
             cmd.arg("-fuse-ld=lld");
         }
         if cfg!(target_vendor = "apple") {
-            // TODO
-            cmd.arg("-Wl,-undefined");
+            cmd.arg("-Wl,-dead_strip,-undefined,dynamic_lookup");
         } else {
             cmd.arg("-Wl,--gc-sections,--strip-all,--undefined");
         }
