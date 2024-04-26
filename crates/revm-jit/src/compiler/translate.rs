@@ -410,8 +410,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 let resume_at = get_ecx_resume_at(&mut fx);
                 fx.bcx.store(resume_value, resume_at);
 
-                let ret = fx.bcx.iconst(fx.i8_type, InstructionResult::CallOrCreate as i64);
-                fx.build_return(ret);
+                fx.build_return_imm(InstructionResult::CallOrCreate);
             }
         } else {
             debug_assert!(fx.resume_blocks.is_empty());
