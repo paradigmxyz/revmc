@@ -23,31 +23,31 @@ pub fn get_benches() -> Vec<Bench> {
         },
         Bench {
             name: "counter",
-            bytecode: hex::decode(include_str!("../../data/counter.rt.hex")).unwrap(),
+            bytecode: hex::decode(include_str!("../../../data/counter.rt.hex")).unwrap(),
             // `increment()`
             calldata: hex!("d09de08a").to_vec(),
             ..Default::default()
         },
         Bench {
             name: "snailtracer",
-            bytecode: hex::decode(include_str!("../../data/snailtracer.rt.hex")).unwrap(),
+            bytecode: hex::decode(include_str!("../../../data/snailtracer.rt.hex")).unwrap(),
             // `Benchmark()`
             calldata: hex!("30627b7c").to_vec(),
             ..Default::default()
         },
         Bench {
             name: "push0_proxy",
-            bytecode: hex::decode(include_str!("../../data/push0_proxy.rt.hex")).unwrap(),
+            bytecode: hex::decode(include_str!("../../../data/push0_proxy.rt.hex")).unwrap(),
             ..Default::default()
         },
         Bench {
             name: "weth",
-            bytecode: hex::decode(include_str!("../../data/weth.rt.hex")).unwrap(),
+            bytecode: hex::decode(include_str!("../../../data/weth.rt.hex")).unwrap(),
             ..Default::default()
         },
         Bench {
             name: "hash_20k",
-            bytecode: hex::decode(include_str!("../../data/hash_20k.rt.hex")).unwrap(),
+            bytecode: hex::decode(include_str!("../../../data/hash_20k.rt.hex")).unwrap(),
             // `Benchmark()`
             calldata: hex!("30627b7c").to_vec(),
             ..Default::default()

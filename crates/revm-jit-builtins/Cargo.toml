@@ -17,10 +17,10 @@ exclude.workspace = true
 workspace = true
 
 [dependencies]
-revm-jit-context = { workspace = true, default-features = false }
+revm-jit-context.workspace = true
 
-revm-primitives = { workspace = true, default-features = false }
-revm-interpreter = { workspace = true, default-features = false }
+revm-primitives.workspace = true
+revm-interpreter.workspace = true
 
 # ir
 paste = { workspace = true, optional = true }

@@ -1,16 +1,18 @@
+#![allow(missing_docs)]
+
 use criterion::{
     criterion_group, criterion_main, measurement::WallTime, BenchmarkGroup, Criterion,
 };
 use revm_interpreter::SharedMemory;
 use revm_jit::{llvm, new_llvm_backend, EvmCompiler, EvmCompilerFn, EvmContext, EvmStack};
-use revm_jit_benches::Bench;
+use revm_jit_cli::Bench;
 use revm_primitives::{Env, SpecId};
 use std::time::Duration;
 
 const SPEC_ID: SpecId = SpecId::CANCUN;
 
 fn bench(c: &mut Criterion) {
-    for bench in &revm_jit_benches::get_benches() {
+    for bench in &revm_jit_cli::get_benches() {
         if matches!(bench.name, "push0_proxy" | "weth") {
             continue;
         }

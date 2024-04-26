@@ -1,5 +1,5 @@
 [workspace]
-members = ["benches/", "crates/*"]
+members = ["crates/*"]
 resolver = "2"
 
 [workspace.package]
@@ -47,5 +47,5 @@ paste = "1.0"
 [patch.crates-io]
 # revm-primitives = { git = "https://github.com/bluealloy/revm", rev = "cfc4511fe148296394c19c9ab3fb46f663218413" }
 # revm-interpreter = { git = "https://github.com/bluealloy/revm", rev = "cfc4511fe148296394c19c9ab3fb46f663218413" }
-revm-primitives = { git = "https://github.com/danipopes/revm", branch = "refactor-opinfo" }
-revm-interpreter = { git = "https://github.com/danipopes/revm", branch = "refactor-opinfo" }
+revm-primitives = { git = "https://github.com/danipopes/revm", branch = "tmp-prs2" }
+revm-interpreter = { git = "https://github.com/danipopes/revm", branch = "tmp-prs2" }
