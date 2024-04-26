@@ -39,15 +39,13 @@ jobs:
           wget https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
           sudo ./llvm.sh $v all
-          clang --version || true
-          clang-$v --version || true
-          llvm-config --version || true
-          llvm-config-$v --version || true
-          FileCheck --version || true
-          FileCheck-$v --version || true
-          bins=(llvm-config clang lld FileCheck)
+          bins=(clang llvm-config lld FileCheck)
           for bin in "${bins[@]}"; do
-            sudo ln -s /usr/bin/$bin $(which $bin-$v) || true
+            echo "-- $bin --"
+            $bin --version || true
+            echo "-- $bin-$v --"
+            $bin-$v --version || true
+            sudo ln -s $(which $bin-$v) /usr/bin/$bin || true
           done
       - name: Install LLVM (brew)
         if: ${{ contains(matrix.runner, 'macos') }}
