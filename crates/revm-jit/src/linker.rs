@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 #[derive(Debug)]
 pub struct Linker {
     cc: Option<PathBuf>,
+    linker: Option<PathBuf>,
     cflags: Vec<String>,
 }
 
@@ -16,12 +17,17 @@ impl Default for Linker {
 impl Linker {
     /// Creates a new linker.
     pub fn new() -> Self {
-        Self { cc: None, cflags: vec![] }
+        Self { cc: None, linker: None, cflags: vec![] }
     }
 
-    /// Sets the C compiler to use for linking.
+    /// Sets the C compiler to use for linking. Default: "cc".
     pub fn cc(&mut self, cc: Option<PathBuf>) {
         self.cc = cc;
+    }
+
+    /// Sets the linker to use for linking. Default: `lld`.
+    pub fn linker(&mut self, linker: Option<PathBuf>) {
+        self.linker = linker;
     }
 
     /// Sets the C compiler flags to use for linking.
@@ -65,6 +71,11 @@ impl Linker {
         cmd.arg("-Wl,--gc-sections");
         cmd.arg("-Wl,--strip-all");
         cmd.arg("-Wl,--undefined");
+        if let Some(linker) = &self.linker {
+            cmd.arg(format!("-fuse-ld={}", linker.display()));
+        } else {
+            cmd.arg("-fuse-ld=lld");
+        }
         cmd.args(&self.cflags);
         cmd.args(objects);
         debug!(cmd=?cmd.get_program(), "linking");
