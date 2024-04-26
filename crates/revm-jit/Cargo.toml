@@ -34,7 +34,7 @@ tracing.workspace = true
 
 [dev-dependencies]
 revm-jit-context = { workspace = true, features = ["host-ext-any"] }
-paste = "1.0"
+paste.workspace = true
 tempfile = "3.10"
 
 [features]

@@ -1712,6 +1712,7 @@ version = "0.1.0"
 name = "revm-jit-builtins"
 version = "0.1.0"
 dependencies = [
+ "paste",
  "revm-interpreter",
  "revm-jit-backend",
  "revm-jit-context",

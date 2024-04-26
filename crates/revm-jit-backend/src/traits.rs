@@ -83,6 +83,8 @@ pub enum Attribute {
     Align(u64),
     NonNull,
     Dereferenceable(u64),
+    /// Size of the return type in bytes.
+    SRet(u64),
     ReadNone,
     ReadOnly,
     WriteOnly,

@@ -23,8 +23,9 @@ revm-primitives = { workspace = true, default-features = false }
 revm-interpreter = { workspace = true, default-features = false }
 
 # ir
+paste = { workspace = true, optional = true }
 revm-jit-backend = { workspace = true, optional = true }
 tracing = { workspace = true, optional = true }
 
 [features]
-ir = ["dep:revm-jit-backend", "dep:tracing"]
+ir = ["dep:paste", "dep:revm-jit-backend", "dep:tracing"]
