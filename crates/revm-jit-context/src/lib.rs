@@ -76,7 +76,7 @@ impl<'a> EvmContext<'a> {
 
     /// Creates a new interpreter by cloning the context.
     pub fn to_interpreter(&self, stack: revm_interpreter::Stack) -> Interpreter {
-        let bytecode = self.contract.bytecode.bytecode_bytes();
+        let bytecode = self.contract.bytecode.bytecode().clone();
         Interpreter {
             is_eof: self.contract.bytecode.is_eof(),
             instruction_pointer: bytecode.as_ptr(),

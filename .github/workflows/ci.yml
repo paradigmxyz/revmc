@@ -7,7 +7,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  LLVM_VERSION: "17"
+  LLVM_VERSION: "17" # Must be just the major version
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
@@ -32,11 +32,18 @@ jobs:
             arch: "x64"
     steps:
       - uses: actions/checkout@v4
-      - uses: KyleMayes/install-llvm-action@v2.0.2
+      - name: Install LLVM (apt)
         if: ${{ !contains(matrix.runner, 'macos') }}
-        with:
-          version: ${{ env.LLVM_VERSION }}
-      - name: Install LLVM
+        run: |
+          echo $PATH
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh ${{ env.LLVM_VERSION }} all
+          echo $PATH
+          clang --version || true
+          llvm-config --version || true
+          FileCheck --version || true
+      - name: Install LLVM (brew)
         if: ${{ contains(matrix.runner, 'macos') }}
         run: |
           v=${{ env.LLVM_VERSION }}

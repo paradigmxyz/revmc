@@ -24,8 +24,6 @@ use std::{
 // TODO: Test on big-endian hardware.
 // It probably doesn't work when loading Rust U256 into native endianness.
 
-// TODO: Add FileCheck codegen tests.
-
 mod translate;
 use translate::{FcxConfig, FunctionCx};
 

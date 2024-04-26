@@ -1,3 +1,5 @@
+#![allow(missing_docs)]
+
 use clap::{Parser, ValueEnum};
 use color_eyre::{eyre::eyre, Result};
 use revm_jit::{
@@ -5,7 +7,7 @@ use revm_jit::{
     eyre::{ensure, Context},
     new_llvm_backend, EvmCompiler, EvmContext, OptimizationLevel,
 };
-use revm_jit_benches::Bench;
+use revm_jit_cli::{get_benches, parse_evm_dsl, Bench};
 use revm_primitives::{hex, Bytes, Env, SpecId};
 use std::{
     hint::black_box,
@@ -15,7 +17,7 @@ use std::{
 #[derive(Parser)]
 struct Cli {
     bench_name: String,
-    #[arg(default_value = "1")]
+    #[arg(default_value = "0")]
     n_iters: u64,
 
     #[arg(long)]
@@ -27,8 +29,10 @@ struct Cli {
 
     #[arg(long)]
     aot: bool,
-    #[arg(short = 'O', long)]
-    opt_level: Option<OptimizationLevel>,
+    #[arg(short = 'o', long)]
+    out_dir: Option<PathBuf>,
+    #[arg(short = 'O', long, default_value = "3")]
+    opt_level: OptimizationLevel,
     #[arg(long, value_enum, default_value = "cancun")]
     spec_id: SpecIdValueEnum,
     #[arg(long)]
@@ -51,12 +55,10 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     // Build the compiler.
-    let opt_level = cli.opt_level.unwrap_or(OptimizationLevel::Aggressive);
     let context = revm_jit::llvm::inkwell::context::Context::create();
-    let backend = new_llvm_backend(&context, cli.aot, opt_level)?;
+    let backend = new_llvm_backend(&context, cli.aot, cli.opt_level)?;
     let mut compiler = EvmCompiler::new(backend);
-    compiler.set_dump_to(Some(PathBuf::from("tmp/revm-jit")));
-    compiler.set_module_name(&cli.bench_name);
+    compiler.set_dump_to(cli.out_dir);
     compiler.gas_metering(!cli.no_gas);
     unsafe { compiler.stack_bound_checks(!cli.no_len_checks) };
     compiler.frame_pointers(true);
@@ -68,14 +70,25 @@ fn main() -> Result<()> {
             bytecode: read_code(cli.code.as_deref(), cli.code_path.as_deref())?,
             ..Default::default()
         }
+    } else if Path::new(&cli.bench_name).exists() {
+        let path = Path::new(&cli.bench_name);
+        ensure!(path.is_file(), "argument must be a file");
+        ensure!(cli.code.is_none(), "--code is not allowed with a file argument");
+        ensure!(cli.code_path.is_none(), "--code-path is not allowed with a file argument");
+        Bench {
+            name: path.file_stem().unwrap().to_str().unwrap().to_string().leak(),
+            bytecode: read_code(None, Some(path))?,
+            ..Default::default()
+        }
     } else {
-        revm_jit_benches::get_benches()
+        get_benches()
             .into_iter()
             .find(|b| b.name == cli.bench_name)
             .ok_or_else(|| eyre!("unknown benchmark: {}", cli.bench_name))?
     };
-    let calldata = cli.calldata.unwrap_or_else(|| calldata.into());
+    compiler.set_module_name(name);
 
+    let calldata = cli.calldata.unwrap_or_else(|| calldata.into());
     let gas_limit = cli.gas_limit;
 
     let mut env = Env::default();
@@ -175,28 +188,34 @@ fn init_tracing_subscriber() -> Result<(), tracing_subscriber::util::TryInitErro
 
 fn read_code(code: Option<&str>, code_path: Option<&Path>) -> Result<Vec<u8>> {
     if let Some(code) = code {
-        return hex::decode(code.trim()).wrap_err("--code is not valid hex");
+        return read_code_string(code.trim().as_bytes(), None).wrap_err("--code is not valid hex");
     }
 
     if let Some(code_path) = code_path {
         let contents = std::fs::read(code_path)?;
-        let ext = code_path.extension().map(|s| s.to_str().unwrap_or(""));
-        let has_prefix = contents.starts_with(b"0x") || contents.starts_with(b"0X");
-        let is_hex =
-            ext != Some("bin") && (ext == Some("hex") || has_prefix || contents.is_ascii());
-        return if is_hex {
-            let code_s =
-                std::str::from_utf8(&contents).wrap_err("--code-path file is not valid UTF-8")?;
-            hex::decode(code_s.trim()).wrap_err("--code-path file is not valid hex")
-        } else {
-            Ok(contents)
-        };
+        let ext = code_path.extension().and_then(|s| s.to_str());
+        return read_code_string(&contents, ext).wrap_err("--code-path file is not valid hex");
     }
 
-    Err(eyre!("--code is required when bench_name is 'custom'"))
+    Err(eyre!("one of --code, --code-path is required when argument is 'custom'"))
 }
 
-#[derive(Clone, Copy, ValueEnum)]
+fn read_code_string(contents: &[u8], ext: Option<&str>) -> Result<Vec<u8>> {
+    let has_prefix = contents.starts_with(b"0x") || contents.starts_with(b"0X");
+    let is_hex = ext != Some("bin") && (ext == Some("hex") || has_prefix);
+    let utf8 = || std::str::from_utf8(contents).wrap_err("given file is not valid UTF-8");
+    if is_hex {
+        hex::decode(utf8()?.trim()).wrap_err("given file is not valid hex")
+    } else if ext == Some("bin") || !contents.is_ascii() {
+        Ok(contents.to_vec())
+    } else if ext == Some("evm") {
+        parse_evm_dsl(utf8()?)
+    } else {
+        Err(eyre!("could not determine bytecode type"))
+    }
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
 #[clap(rename_all = "lowercase")]
 #[allow(non_camel_case_types)]
 pub enum SpecIdValueEnum {

@@ -1,7 +1,8 @@
 [package]
-name = "revm-jit-context"
-description = "EVM bytecode compiler runtime context"
-homepage = "https://github.com/danipopes/revm-jit/tree/main/crates/revm-jit-context"
+name = "revm-jit-cli-tests"
+description = "EVM bytecode compiler CLI tests"
+homepage = "https://github.com/danipopes/revm-jit/tree/main/crates/revm-jit-cli-test"
+publish = false
 
 version.workspace = true
 authors.workspace = true
@@ -17,8 +18,5 @@ exclude.workspace = true
 workspace = true
 
 [dependencies]
-revm-interpreter.workspace = true
-revm-primitives.workspace = true
-
-[features]
-host-ext-any = []
+walkdir = "2.5"
+tester = "0.9"
