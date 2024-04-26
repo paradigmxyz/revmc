@@ -69,6 +69,31 @@ tests! {
             expected_stack: &[U256::ZERO],
             expected_gas: 5,
         }),
+        // LLVM is slow on this, but it passes.
+        // overflow_not0(@raw {
+        //     bytecode: &[op::PUSH0; 1023],
+        //     expected_return: InstructionResult::Stop,
+        //     expected_stack: &[0_U256; 1023],
+        //     expected_gas: 2 * 1023,
+        // }),
+        overflow_not1(@raw {
+            bytecode: &[op::PUSH0; 1024],
+            expected_return: InstructionResult::Stop,
+            expected_stack: &[0_U256; 1024],
+            expected_gas: 2 * 1024,
+        }),
+        overflow0(@raw {
+            bytecode: &[op::PUSH0; 1025],
+            expected_return: InstructionResult::StackOverflow,
+            expected_stack: &[0_U256; 1024],
+            expected_gas: 2 * 1025,
+        }),
+        overflow1(@raw {
+            bytecode: &[op::PUSH0; 1026],
+            expected_return: InstructionResult::StackOverflow,
+            expected_stack: &[0_U256; 1024],
+            expected_gas: 2 * 1025,
+        }),
     }
 
     spec_id {

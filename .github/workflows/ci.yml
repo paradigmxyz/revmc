@@ -7,7 +7,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  LLVM_VERSION: "17.0"
+  LLVM_VERSION: "17"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
@@ -15,19 +15,34 @@ concurrency:
 
 jobs:
   test:
-    name: test +${{ matrix.toolchain }} ${{ matrix.profile }}
-    runs-on: ubuntu-latest
+    name: test +${{ matrix.runner }}-${{ matrix.arch }}-${{ matrix.toolchain }} ${{ matrix.profile }}
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
+        runner: ["ubuntu-latest", "macos-14"]
+        arch: ["x64", "arm64"]
         toolchain: ["stable", "nightly"]
         profile: ["dev", "release"]
+        exclude:
+          - runner: "ubuntu-latest"
+            arch: "arm64"
+          - runner: "macos-14"
+            arch: "x64"
     steps:
       - uses: actions/checkout@v4
-      - uses: KyleMayes/install-llvm-action@v1
+      - uses: KyleMayes/install-llvm-action@v2.0.2
+        if: ${{ !contains(matrix.runner, 'macos') }}
         with:
           version: ${{ env.LLVM_VERSION }}
+      - name: Install LLVM
+        if: ${{ contains(matrix.runner, 'macos') }}
+        run: |
+          v=${{ env.LLVM_VERSION }}
+          brew install "llvm@${v}"
+          echo "LLVM_SYS_${v}0_PREFIX=$(brew --prefix llvm@${v})" >> $GITHUB_ENV
+          echo "/opt/homebrew/opt/llvm@${v}/bin" >> $GITHUB_PATH
       - name: llvm-config
         run: llvm-config --version --bindir --libdir
       - uses: dtolnay/rust-toolchain@master
@@ -37,14 +52,14 @@ jobs:
         with:
           cache-on-failure: true
       - name: test
-        run: cargo test --all-features --workspace --verbose --profile ${{ matrix.profile }}
+        run: cargo test --all-features --workspace --profile ${{ matrix.profile }}
 
   feature-checks:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - uses: KyleMayes/install-llvm-action@v1
+      - uses: KyleMayes/install-llvm-action@v2.0.2
         with:
           version: ${{ env.LLVM_VERSION }}
       - uses: dtolnay/rust-toolchain@stable
@@ -61,7 +76,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - uses: KyleMayes/install-llvm-action@v1
+      - uses: KyleMayes/install-llvm-action@v2.0.2
         with:
           version: ${{ env.LLVM_VERSION }}
       - uses: dtolnay/rust-toolchain@clippy
@@ -77,7 +92,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - uses: KyleMayes/install-llvm-action@v1
+      - uses: KyleMayes/install-llvm-action@v2.0.2
         with:
           version: ${{ env.LLVM_VERSION }}
       - uses: dtolnay/rust-toolchain@nightly

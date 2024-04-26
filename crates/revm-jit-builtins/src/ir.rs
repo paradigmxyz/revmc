@@ -43,13 +43,13 @@ impl<B: Backend> Builtins<B> {
         })
     }
 
-    fn build(name: &str, cb: Builtin, bcx: &mut B::Builder<'_>) -> B::Function {
-        let ret = cb.ret(bcx);
-        let params = cb.params(bcx);
-        let address = cb.addr();
+    fn build(name: &str, builtin: Builtin, bcx: &mut B::Builder<'_>) -> B::Function {
+        let ret = builtin.ret(bcx);
+        let params = builtin.params(bcx);
+        let address = builtin.addr();
         let linkage = revm_jit_backend::Linkage::Import;
         let f = bcx.add_function(name, ret, &params, address, linkage);
-        let default_attrs: &[Attribute] = if cb == Builtin::Panic {
+        let default_attrs: &[Attribute] = if builtin == Builtin::Panic {
             &[
                 Attribute::Cold,
                 Attribute::NoReturn,
@@ -67,8 +67,18 @@ impl<B: Backend> Builtins<B> {
                 Attribute::Speculatable,
             ]
         };
-        for attr in default_attrs.iter().chain(cb.attrs()).copied() {
+        for attr in default_attrs.iter().chain(builtin.attrs()).copied() {
             bcx.add_function_attribute(Some(f), attr, FunctionAttributeLocation::Function);
+        }
+        let param_attrs = builtin.param_attrs();
+        for (i, param_attrs) in param_attrs.iter().enumerate() {
+            for attr in param_attrs {
+                bcx.add_function_attribute(
+                    Some(f),
+                    *attr,
+                    FunctionAttributeLocation::Param(i as u32),
+                );
+            }
         }
         f
     }
@@ -78,9 +88,13 @@ macro_rules! builtins {
     (@count) => { 0 };
     (@count $first:tt $(, $rest:tt)*) => { 1 + builtins!(@count $($rest),*) };
 
-    (|$bcx:ident| { $($init:tt)* }
-     $($ident:ident = $(#[$attr:expr])* $name:ident($($params:expr),* $(,)?) $ret:expr),* $(,)?
-    ) => {
+    (@param_attr $default:ident) => { $default() };
+    (@param_attr $default:ident $name:expr) => { $name };
+
+    (@types |$bcx:ident| { $($types_init:tt)* }
+     @param_attrs |$op:ident| { $($attrs_init:tt)* }
+     $($ident:ident = $(#[$attr:expr])* $name:ident($($(@[$param_attr:expr])? $params:expr),* $(,)?) $ret:expr),* $(,)?
+    ) => { paste::paste! {
         /// Builtins that can be called by the compiled functions.
         #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
         pub enum Builtin {
@@ -104,14 +118,14 @@ macro_rules! builtins {
             }
 
             pub fn ret<B: TypeMethods>(self, $bcx: &mut B) -> Option<B::Type> {
-                $($init)*
+                $($types_init)*
                 match self {
                     $(Self::$ident => $ret,)*
                 }
             }
 
             pub fn params<B: TypeMethods>(self, $bcx: &mut B) -> Vec<B::Type> {
-                $($init)*
+                $($types_init)*
                 match self {
                     $(Self::$ident => vec![$($params),*],)*
                 }
@@ -124,52 +138,112 @@ macro_rules! builtins {
                     $(Self::$ident => &[$($attr)*]),*
                 }
             }
+
+            #[allow(non_upper_case_globals)]
+            pub fn param_attrs(self) -> Vec<Vec<Attribute>> {
+                #[allow(unused_imports)]
+                use Attribute::*;
+                let $op = self;
+                let default = || vec![Attribute::NoUndef];
+                $($attrs_init)*
+                match self {
+                    $(Self::$ident => vec![$(builtins!(@param_attr default $($param_attr)?)),*]),*
+                }
+            }
+
+            fn op(self) -> u8 {
+                use revm_interpreter::opcode::*;
+                const PANIC: u8 = 0;
+                const LOG: u8 = LOG0;
+                const DORETURN: u8 = RETURN;
+
+                match self {
+                    $(Self::$ident => [<$ident:upper>]),*
+                }
+            }
         }
-    };
+    }};
 }
 
-// TODO: Parameter attributes, especially `dereferenceable(<size>)` and `sret(<ty>)`.
 // NOTE: If the format of this macro invocation is changed,
 // the build script support crate must be updated as well.
 builtins! {
-    |bcx| {
+    @types |bcx| {
         let ptr = bcx.type_ptr();
         let usize = bcx.type_ptr_sized_int();
         let bool = bcx.type_int(1);
         let u8 = bcx.type_int(8);
     }
 
+    @param_attrs |op| {
+        fn size_and_align<T>() -> Vec<Attribute> {
+            size_and_align2(Some(core::mem::size_of::<T>()), core::mem::align_of::<T>())
+        }
+
+        fn size_and_align2(size: Option<usize>, align: usize) -> Vec<Attribute> {
+            let mut vec = Vec::with_capacity(5);
+            vec.push(Attribute::NoAlias);
+            vec.push(Attribute::NoCapture);
+            vec.push(Attribute::NoUndef);
+            vec.push(Attribute::Align(align as u64));
+            if let Some(size) = size {
+                vec.push(Attribute::Dereferenceable(size as u64));
+            }
+            vec
+        }
+
+        let op = op.op();
+        let (inputs, outputs) = if let Some(info) = revm_interpreter::opcode::OPCODE_INFO_JUMPTABLE[op as usize] {
+            (info.inputs(), info.outputs())
+        } else {
+            (0, 0)
+        };
+
+        let ecx = size_and_align::<revm_jit_context::EvmContext<'static>>();
+
+        let sp_dyn = size_and_align2(None, core::mem::align_of::<revm_jit_context::EvmWord>());
+
+        let mut sp = sp_dyn.clone();
+        sp.push(Attribute::Dereferenceable((core::mem::size_of::<revm_jit_context::EvmWord>() * inputs as usize) as u64));
+        match (inputs, outputs) {
+            (0, 0) => sp.push(Attribute::ReadNone),
+            (0, 1..) => sp.push(Attribute::WriteOnly),
+            (1.., 0) => sp.push(Attribute::ReadOnly),
+            (1.., 1..) => {}
+        }
+    }
+
     Panic          = __revm_jit_builtin_panic(ptr, usize) None,
 
-    AddMod         = __revm_jit_builtin_addmod(ptr) None,
-    MulMod         = __revm_jit_builtin_mulmod(ptr) None,
-    Exp            = __revm_jit_builtin_exp(ptr, ptr, u8) Some(u8),
-    Keccak256      = __revm_jit_builtin_keccak256(ptr, ptr) Some(u8),
-    Balance        = __revm_jit_builtin_balance(ptr, ptr, u8) Some(u8),
-    CallDataCopy   = __revm_jit_builtin_calldatacopy(ptr, ptr) Some(u8),
-    CodeSize       = __revm_jit_builtin_codesize(ptr) Some(usize),
-    CodeCopy       = __revm_jit_builtin_codecopy(ptr, ptr) Some(u8),
-    ExtCodeSize    = __revm_jit_builtin_extcodesize(ptr, ptr, u8) Some(u8),
-    ExtCodeCopy    = __revm_jit_builtin_extcodecopy(ptr, ptr, u8) Some(u8),
-    ReturnDataCopy = __revm_jit_builtin_returndatacopy(ptr, ptr) Some(u8),
-    ExtCodeHash    = __revm_jit_builtin_extcodehash(ptr, ptr, u8) Some(u8),
-    BlockHash      = __revm_jit_builtin_blockhash(ptr, ptr) Some(u8),
-    SelfBalance    = __revm_jit_builtin_self_balance(ptr, ptr) Some(u8),
-    BlobHash       = __revm_jit_builtin_blob_hash(ptr, ptr) None,
-    BlobBaseFee    = __revm_jit_builtin_blob_base_fee(ptr, ptr) None,
-    Mload          = __revm_jit_builtin_mload(ptr, ptr) Some(u8),
-    Mstore         = __revm_jit_builtin_mstore(ptr, ptr) Some(u8),
-    Mstore8        = __revm_jit_builtin_mstore8(ptr, ptr) Some(u8),
-    Sload          = __revm_jit_builtin_sload(ptr, ptr, u8) Some(u8),
-    Sstore         = __revm_jit_builtin_sstore(ptr, ptr, u8) Some(u8),
-    Msize          = __revm_jit_builtin_msize(ptr) Some(usize),
-    Tstore         = __revm_jit_builtin_tstore(ptr, ptr) None,
-    Tload          = __revm_jit_builtin_tload(ptr, ptr) None,
-    Mcopy          = __revm_jit_builtin_mcopy(ptr, ptr) Some(u8),
-    Log            = __revm_jit_builtin_log(ptr, ptr, u8) Some(u8),
+    AddMod         = __revm_jit_builtin_addmod(@[sp] ptr) None,
+    MulMod         = __revm_jit_builtin_mulmod(@[sp] ptr) None,
+    Exp            = __revm_jit_builtin_exp(@[ecx] ptr, @[sp] ptr, u8) Some(u8),
+    Keccak256      = __revm_jit_builtin_keccak256(@[ecx] ptr, @[sp] ptr) Some(u8),
+    Balance        = __revm_jit_builtin_balance(@[ecx] ptr, @[sp] ptr, u8) Some(u8),
+    CallDataCopy   = __revm_jit_builtin_calldatacopy(@[ecx] ptr, @[sp] ptr) Some(u8),
+    CodeSize       = __revm_jit_builtin_codesize(@[ecx] ptr) Some(usize),
+    CodeCopy       = __revm_jit_builtin_codecopy(@[ecx] ptr, @[sp] ptr) Some(u8),
+    ExtCodeSize    = __revm_jit_builtin_extcodesize(@[ecx] ptr, @[sp] ptr, u8) Some(u8),
+    ExtCodeCopy    = __revm_jit_builtin_extcodecopy(@[ecx] ptr, @[sp] ptr, u8) Some(u8),
+    ReturnDataCopy = __revm_jit_builtin_returndatacopy(@[ecx] ptr, @[sp] ptr) Some(u8),
+    ExtCodeHash    = __revm_jit_builtin_extcodehash(@[ecx] ptr, @[sp] ptr, u8) Some(u8),
+    BlockHash      = __revm_jit_builtin_blockhash(@[ecx] ptr, @[sp] ptr) Some(u8),
+    SelfBalance    = __revm_jit_builtin_self_balance(@[ecx] ptr, @[sp] ptr) Some(u8),
+    BlobHash       = __revm_jit_builtin_blob_hash(@[ecx] ptr, @[sp] ptr) None,
+    BlobBaseFee    = __revm_jit_builtin_blob_base_fee(@[ecx] ptr, @[sp] ptr) None,
+    Mload          = __revm_jit_builtin_mload(@[ecx] ptr, @[sp] ptr) Some(u8),
+    Mstore         = __revm_jit_builtin_mstore(@[ecx] ptr, @[sp] ptr) Some(u8),
+    Mstore8        = __revm_jit_builtin_mstore8(@[ecx] ptr, @[sp] ptr) Some(u8),
+    Sload          = __revm_jit_builtin_sload(@[ecx] ptr, @[sp] ptr, u8) Some(u8),
+    Sstore         = __revm_jit_builtin_sstore(@[ecx] ptr, @[sp] ptr, u8) Some(u8),
+    Msize          = __revm_jit_builtin_msize(@[ecx] ptr) Some(usize),
+    Tstore         = __revm_jit_builtin_tstore(@[ecx] ptr, @[sp] ptr) None,
+    Tload          = __revm_jit_builtin_tload(@[ecx] ptr, @[sp] ptr) None,
+    Mcopy          = __revm_jit_builtin_mcopy(@[ecx] ptr, @[sp] ptr) Some(u8),
+    Log            = __revm_jit_builtin_log(@[ecx] ptr, @[sp_dyn] ptr, u8) Some(u8),
 
-    Create         = __revm_jit_builtin_create(ptr, ptr, u8, u8) Some(u8),
-    Call           = __revm_jit_builtin_call(ptr, ptr, u8, u8) Some(u8),
-    DoReturn       = __revm_jit_builtin_do_return(ptr, ptr, u8) Some(u8),
-    SelfDestruct   = __revm_jit_builtin_selfdestruct(ptr, ptr, u8) Some(u8),
+    Create         = __revm_jit_builtin_create(@[ecx] ptr, @[sp_dyn] ptr, u8, u8) Some(u8),
+    Call           = __revm_jit_builtin_call(@[ecx] ptr, @[sp_dyn] ptr, u8, u8) Some(u8),
+    DoReturn       = __revm_jit_builtin_do_return(@[ecx] ptr, @[sp] ptr, u8) Some(u8),
+    SelfDestruct   = __revm_jit_builtin_selfdestruct(@[ecx] ptr, @[sp] ptr, u8) Some(u8),
 }

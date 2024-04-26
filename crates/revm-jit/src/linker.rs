@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 #[derive(Debug)]
 pub struct Linker {
     cc: Option<PathBuf>,
+    linker: Option<PathBuf>,
     cflags: Vec<String>,
 }
 
@@ -16,12 +17,17 @@ impl Default for Linker {
 impl Linker {
     /// Creates a new linker.
     pub fn new() -> Self {
-        Self { cc: None, cflags: vec![] }
+        Self { cc: None, linker: None, cflags: vec![] }
     }
 
-    /// Sets the C compiler to use for linking.
+    /// Sets the C compiler to use for linking. Default: "cc".
     pub fn cc(&mut self, cc: Option<PathBuf>) {
         self.cc = cc;
+    }
+
+    /// Sets the linker to use for linking. Default: `lld`.
+    pub fn linker(&mut self, linker: Option<PathBuf>) {
+        self.linker = linker;
     }
 
     /// Sets the C compiler flags to use for linking.
@@ -62,9 +68,15 @@ impl Linker {
         cmd.arg("-o").arg(out);
         cmd.arg("-shared");
         cmd.arg("-O3");
-        if !cfg!(debug_assertions) {
-            cmd.arg("-Wl,--gc-sections");
-            cmd.arg("-Wl,--strip-all");
+        if let Some(linker) = &self.linker {
+            cmd.arg(format!("-fuse-ld={}", linker.display()));
+        } else {
+            cmd.arg("-fuse-ld=lld");
+        }
+        if cfg!(target_vendor = "apple") {
+            cmd.arg("-Wl,-dead_strip,-undefined,dynamic_lookup");
+        } else {
+            cmd.arg("-Wl,--gc-sections,--strip-all,--undefined");
         }
         cmd.args(&self.cflags);
         cmd.args(objects);
@@ -111,10 +123,32 @@ mod tests {
         assert!(obj.exists());
 
         // Link object to shared library.
-        let linker = Linker::new();
-        if let Err(e) = linker.link(&so, [&obj]) {
-            panic!("failed to link: {e}");
+        let mut linker = Linker::new();
+        let mut n = 0;
+        for driver in ["cc", "gcc", "clang"] {
+            if !command_v(driver) {
+                continue;
+            }
+            n += 1;
+
+            let _ = std::fs::remove_file(&so);
+            linker.cc = Some(driver.into());
+            if let Err(e) = linker.link(&so, [&obj]) {
+                panic!("failed to link with {driver}: {e}");
+            }
+            assert!(so.exists());
         }
-        assert!(so.exists());
+        assert!(n > 0, "no C compiler found");
+    }
+
+    fn command_v(cmd: &str) -> bool {
+        let Ok(output) = std::process::Command::new(cmd).arg("--version").output() else {
+            return false;
+        };
+        if !output.status.success() {
+            eprintln!("command {cmd} failed: {output:#?}");
+            return false;
+        }
+        true
     }
 }

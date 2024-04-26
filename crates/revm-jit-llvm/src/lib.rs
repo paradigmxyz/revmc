@@ -18,7 +18,10 @@ use inkwell::{
     targets::{
         CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine, TargetTriple,
     },
-    types::{BasicType, BasicTypeEnum, FunctionType, IntType, PointerType, StringRadix, VoidType},
+    types::{
+        AnyType, AnyTypeEnum, BasicType, BasicTypeEnum, FunctionType, IntType, PointerType,
+        StringRadix, VoidType,
+    },
     values::{BasicValue, BasicValueEnum, FunctionValue, PointerValue},
     AddressSpace, IntPredicate, OptimizationLevel,
 };
@@ -532,13 +535,11 @@ impl<'a, 'ctx> Builder for EvmLlvmBuilder<'a, 'ctx> {
     }
 
     fn add_comment_to_current_inst(&mut self, comment: &str) {
-        // TODO: Is this even possible?
-        let _ = comment;
-        // let Some(block) = self.current_block() else { return };
-        // let Some(ins) = block.get_last_instruction() else { return };
-        // let metadata = self.cx.metadata_string(comment);
-        // let metadata = self.cx.metadata_node(&[metadata.into()]);
-        // ins.set_metadata(metadata, 0).unwrap();
+        let Some(block) = self.current_block() else { return };
+        let Some(ins) = block.get_last_instruction() else { return };
+        let metadata = self.cx.metadata_string(comment);
+        let metadata = self.cx.metadata_node(&[metadata.into()]);
+        ins.set_metadata(metadata, self.cx.get_kind_id("annotation")).unwrap();
     }
 
     fn fn_param(&mut self, index: usize) -> Self::Value {
@@ -1001,6 +1002,7 @@ fn convert_attribute(bcx: &EvmLlvmBuilder<'_, '_>, attr: revm_jit_backend::Attri
     enum AttrValue<'a> {
         String(&'a str),
         Enum(u64),
+        Type(AnyTypeEnum<'a>),
     }
 
     let cpu;
@@ -1032,6 +1034,9 @@ fn convert_attribute(bcx: &EvmLlvmBuilder<'_, '_>, attr: revm_jit_backend::Attri
         OurAttr::Align(n) => ("align", AttrValue::Enum(n)),
         OurAttr::NonNull => ("nonnull", AttrValue::Enum(1)),
         OurAttr::Dereferenceable(n) => ("dereferenceable", AttrValue::Enum(n)),
+        OurAttr::SRet(n) => {
+            ("sret", AttrValue::Type(bcx.type_array(bcx.ty_i8.into(), n as _).as_any_type_enum()))
+        }
         OurAttr::ReadNone => ("readnone", AttrValue::Enum(1)),
         OurAttr::ReadOnly => ("readonly", AttrValue::Enum(1)),
         OurAttr::WriteOnly => ("writeonly", AttrValue::Enum(1)),
@@ -1044,6 +1049,10 @@ fn convert_attribute(bcx: &EvmLlvmBuilder<'_, '_>, attr: revm_jit_backend::Attri
         AttrValue::Enum(value) => {
             let id = Attribute::get_named_enum_kind_id(key);
             bcx.cx.create_enum_attribute(id, value)
+        }
+        AttrValue::Type(ty) => {
+            let id = Attribute::get_named_enum_kind_id(key);
+            bcx.cx.create_type_attribute(id, ty)
         }
     }
 }

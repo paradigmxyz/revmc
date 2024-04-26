@@ -26,8 +26,6 @@ use std::{
 
 // TODO: Add FileCheck codegen tests.
 
-// TODO: Unify failure blocks that are just cold + goto return.
-
 mod translate;
 use translate::{FcxConfig, FunctionCx};
 
