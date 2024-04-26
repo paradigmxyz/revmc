@@ -41,6 +41,7 @@ jobs:
         run: |
           brew install llvm@17
           echo "LLVM_SYS_170_PREFIX=$(brew --prefix llvm@17)" >> $GITHUB_ENV
+          echo "/opt/homebrew/opt/llvm@17/bin" >> $GITHUB_PATH
           clang --version || true
       - name: llvm-config
         run: llvm-config --version --bindir --libdir
