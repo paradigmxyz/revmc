@@ -188,13 +188,13 @@ fn init_tracing_subscriber() -> Result<(), tracing_subscriber::util::TryInitErro
 
 fn read_code(code: Option<&str>, code_path: Option<&Path>) -> Result<Vec<u8>> {
     if let Some(code) = code {
-        return read_code_string(code.trim().as_bytes(), None).wrap_err("--code is not valid hex");
+        return read_code_string(code.trim().as_bytes(), None);
     }
 
     if let Some(code_path) = code_path {
         let contents = std::fs::read(code_path)?;
         let ext = code_path.extension().and_then(|s| s.to_str());
-        return read_code_string(&contents, ext).wrap_err("--code-path file is not valid hex");
+        return read_code_string(&contents, ext);
     }
 
     Err(eyre!("one of --code, --code-path is required when argument is 'custom'"))

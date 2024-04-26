@@ -36,6 +36,7 @@ use std::{
 
 pub use inkwell::{self, context::Context};
 
+mod dh;
 pub mod orc;
 
 /// Executes the given closure with a thread-local LLVM context.
@@ -52,6 +53,7 @@ pub fn with_llvm_context<R>(f: impl FnOnce(&Context) -> R) -> R {
 #[must_use]
 pub struct EvmLlvmBackend<'ctx> {
     cx: &'ctx Context,
+    _dh: dh::DiagnosticHandlerGuard<'ctx>,
     bcx: inkwell::builder::Builder<'ctx>,
     module: Module<'ctx>,
     exec_engine: Option<ExecutionEngine<'ctx>>,
@@ -136,6 +138,7 @@ impl<'ctx> EvmLlvmBackend<'ctx> {
         let ty_ptr = ty_i8.ptr_type(AddressSpace::default());
         Ok(Self {
             cx,
+            _dh: dh::DiagnosticHandlerGuard::new(cx),
             bcx,
             module,
             exec_engine,
@@ -935,12 +938,22 @@ fn init_() -> Result<()> {
     // enable_llvm_pretty_stack_trace();
 
     extern "C" fn report_fatal_error(msg: *const std::ffi::c_char) {
-        let msg = unsafe { std::ffi::CStr::from_ptr(msg) };
-        error!(msg = %msg.to_string_lossy(), "LLVM fatal error");
+        let msg_cstr = unsafe { std::ffi::CStr::from_ptr(msg) };
+        let msg = msg_cstr.to_string_lossy();
+        error!(target: "llvm", "LLVM fatal error: {msg}");
     }
 
     unsafe {
         install_fatal_error_handler(report_fatal_error);
+    }
+
+    let args = [c"revm-jit-llvm".as_ptr(), c"-x86-asm-syntax=intel".as_ptr()];
+    unsafe {
+        inkwell::llvm_sys::support::LLVMParseCommandLineOptions(
+            args.len() as i32,
+            args.as_ptr(),
+            std::ptr::null(),
+        )
     }
 
     let config = InitializationConfig {
@@ -951,7 +964,9 @@ fn init_() -> Result<()> {
         info: true,
         machine_code: true,
     };
-    Target::initialize_native(&config).map_err(Error::msg)
+    Target::initialize_native(&config).map_err(Error::msg)?;
+
+    Ok(())
 }
 
 fn create_module<'ctx>(cx: &'ctx Context, machine: &TargetMachine) -> Result<Module<'ctx>> {
