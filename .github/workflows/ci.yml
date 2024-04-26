@@ -35,14 +35,20 @@ jobs:
       - name: Install LLVM (apt)
         if: ${{ !contains(matrix.runner, 'macos') }}
         run: |
-          echo $PATH
+          v=${{ env.LLVM_VERSION }}
           wget https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
-          sudo ./llvm.sh ${{ env.LLVM_VERSION }} all
-          echo $PATH
+          sudo ./llvm.sh $v all
           clang --version || true
+          clang-$v --version || true
           llvm-config --version || true
+          llvm-config-$v --version || true
           FileCheck --version || true
+          FileCheck-$v --version || true
+          bins=(llvm-config clang lld FileCheck)
+          for bin in "${bins[@]}"; do
+            sudo ln -s /usr/bin/$bin $(which $bin-$v) || true
+          done
       - name: Install LLVM (brew)
         if: ${{ contains(matrix.runner, 'macos') }}
         run: |
