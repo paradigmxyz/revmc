@@ -142,6 +142,13 @@ mod tests {
     }
 
     fn command_v(cmd: &str) -> bool {
-        std::process::Command::new(cmd).arg("--version").status().is_ok_and(|s| s.success())
+        let Ok(output) = std::process::Command::new(cmd).arg("--version").output() else {
+            return false;
+        };
+        if !output.status.success() {
+            eprintln!("command {cmd} failed: {output:#?}");
+            return false;
+        }
+        true
     }
 }
