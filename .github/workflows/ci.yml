@@ -41,13 +41,7 @@ jobs:
           sudo ./llvm.sh $v all
           bins=(clang llvm-config lld ld.lld FileCheck)
           for bin in "${bins[@]}"; do
-            echo "-- $bin --"
-            $bin --version || true
-            echo "-- $bin-$v --"
-            $bin-$v --version
-            echo "-- $bin again --"
             sudo ln -fs $(which $bin-$v) /usr/bin/$bin
-            $bin --version
           done
       - name: Install LLVM (brew)
         if: ${{ contains(matrix.runner, 'macos') }}
