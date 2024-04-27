@@ -420,7 +420,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         // Finalize the failure block.
         fx.bcx.switch_to_block(fx.failure_block);
         let failure_value = fx.bcx.phi(fx.i8_type, &fx.incoming_failures);
-        fx.bcx.set_cold_block(fx.failure_block);
+        fx.bcx.set_current_block_cold();
         fx.build_return(failure_value);
 
         // Finalize the return block.
@@ -476,6 +476,10 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 self.build_return_imm($ret);
                 goto_return!(no_branch);
             }};
+            (fail $ret:expr) => {{
+                self.build_fail_imm($ret);
+                goto_return!(no_branch);
+            }};
             ($($comment:expr)?) => {
                 branch_to_next_opcode(self);
                 goto_return!(no_branch $($comment)?);
@@ -493,10 +497,10 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
         // Disabled instructions don't pay gas.
         if data.flags.contains(InstFlags::DISABLED) {
-            goto_return!(build InstructionResult::NotActivated);
+            goto_return!(fail InstructionResult::NotActivated);
         }
         if data.flags.contains(InstFlags::UNKNOWN) {
-            goto_return!(build InstructionResult::OpcodeNotFound);
+            goto_return!(fail InstructionResult::OpcodeNotFound);
         }
 
         // Pay static gas for the current section.
@@ -516,7 +520,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             let diff = data.section.max_growth as i64;
 
             if diff > revm_jit_context::EvmStack::CAPACITY as i64 {
-                goto_return!(build InstructionResult::StackOverflow);
+                goto_return!(fail InstructionResult::StackOverflow);
             }
 
             let underflow = |this: &mut Self| {
@@ -545,7 +549,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                         self.bcx.iconst(self.i8_type, InstructionResult::StackOverflow as i64);
                     self.bcx.select(underflow, under, over)
                 };
-                self.build_check_inner(true, cond, ret);
+                let target = self.build_check_inner(true, cond, ret);
+                self.bcx.switch_to_block(target);
             } else if may_underflow {
                 let cond = underflow(self);
                 self.build_check(cond, InstructionResult::StackUnderflow);
@@ -655,11 +660,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 let r = self.bcx.lazy_select(
                     b_is_zero,
                     self.word_type,
-                    |bcx, block| {
-                        bcx.set_cold_block(block);
-                        bcx.iconst_256(U256::ZERO)
-                    },
-                    |bcx, _op_block| {
+                    |bcx| bcx.iconst_256(U256::ZERO),
+                    |bcx| {
                         let min = bcx.iconst_256(I256_MIN);
                         let is_weird_sdiv_edge_case = {
                             let a_is_min = bcx.icmp(IntCC::Equal, a, min);
@@ -702,7 +704,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 let r = self.bcx.lazy_select(
                     might_do_something,
                     self.word_type,
-                    |bcx, _block| {
+                    |bcx| {
                         // Adapted from revm: https://github.com/bluealloy/revm/blob/fda371f73aba2c30a83c639608be78145fd1123b/crates/interpreter/src/instructions/arithmetic.rs#L89
                         // let bit_index = 8 * ext + 7;
                         // let bit = (x >> bit_index) & 1 != 0;
@@ -729,7 +731,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                         let zext = bcx.bitand(x, mask);
                         bcx.select(bit, sext, zext)
                     },
-                    |_bcx, _block| x,
+                    |_bcx| x,
                 );
                 self.push(r);
             }
@@ -821,7 +823,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 let value = self.bcx.lazy_select(
                     in_bounds,
                     self.word_type,
-                    |bcx, _| {
+                    |bcx| {
                         let ptr = bcx.load(bcx.type_ptr(), ptr, "contract.input.ptr");
                         let index = bcx.ireduce(isize_type, index);
                         let calldata = bcx.gep(i8_type, ptr, &[index], "calldata.addr");
@@ -844,7 +846,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                         }
                         value
                     },
-                    |_, _| zero,
+                    |_| zero,
                 );
                 self.push(value);
             }
@@ -1105,7 +1107,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 self.return_common(InstructionResult::Revert);
                 goto_return!(no_branch);
             }
-            op::INVALID => goto_return!(build InstructionResult::InvalidFEOpcode),
+            op::INVALID => goto_return!(fail InstructionResult::InvalidFEOpcode),
             op::SELFDESTRUCT => {
                 self.fail_if_staticcall(InstructionResult::StateChangeDuringStaticCall);
                 let sp = self.sp_after_inputs();
@@ -1352,28 +1354,40 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     }
 
     fn build_check_imm_inner(&mut self, is_failure: bool, cond: B::Value, ret: InstructionResult) {
-        let ret = self.bcx.iconst(self.i8_type, ret as i64);
-        self.build_check_inner(is_failure, cond, ret);
+        let ret_value = self.bcx.iconst(self.i8_type, ret as i64);
+        let target = self.build_check_inner(is_failure, cond, ret_value);
+        if self.config.comments {
+            self.add_comment(&format!("check {ret:?}"));
+        }
+        self.bcx.switch_to_block(target);
     }
 
-    fn build_check_inner(&mut self, is_failure: bool, cond: B::Value, ret: B::Value) {
+    #[must_use]
+    fn build_check_inner(
+        &mut self,
+        is_failure: bool,
+        cond: B::Value,
+        ret: B::Value,
+    ) -> B::BasicBlock {
         let current_block = self.current_block();
-        self.incoming_failures.push((ret, current_block));
-
         let target = self.create_block_after(current_block, "contd");
-        if is_failure {
-            self.bcx.brif(cond, self.failure_block, target);
-        } else {
-            self.bcx.brif(cond, target, self.failure_block);
-        }
 
-        self.bcx.switch_to_block(target);
+        self.incoming_returns.push((ret, current_block));
+        let return_block = self.return_block;
+        let then_block = if is_failure { return_block } else { target };
+        let else_block = if is_failure { target } else { return_block };
+        self.bcx.brif_cold(cond, then_block, else_block, is_failure);
+
+        target
     }
 
     /// Builds a branch to the failure block.
     fn build_fail_imm(&mut self, ret: InstructionResult) {
         let ret_value = self.bcx.iconst(self.i8_type, ret as i64);
         self.build_fail(ret_value);
+        if self.config.comments {
+            self.add_comment(&format!("fail {ret:?}"));
+        }
     }
 
     /// Builds a branch to the failure block.
@@ -1441,7 +1455,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     fn builtin_ir(&mut self, builtin: Builtin, args: &[B::Value]) {
         let ret = self.builtin(builtin, args).expect("builtin does not return a value");
         let failure = self.bcx.icmp_imm(IntCC::NotEqual, ret, InstructionResult::Continue as i64);
-        self.build_check_inner(true, failure, ret);
+        let target = self.build_check_inner(true, failure, ret);
+        self.bcx.switch_to_block(target);
     }
 
     /// Build a call to a builtin.

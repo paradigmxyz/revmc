@@ -282,9 +282,14 @@ impl<B: Backend> EvmCompiler<B> {
         self.backend.free_all_functions()
     }
 
-    fn parse<'a>(&mut self, bytecode: &'a [u8], spec_id: SpecId) -> Result<Bytecode<'a>> {
+    /// Parses the given EVM bytecode. Not public API.
+    #[doc(hidden)]
+    pub fn parse<'a>(&mut self, bytecode: &'a [u8], spec_id: SpecId) -> Result<Bytecode<'a>> {
         let mut bytecode = trace_time!("new bytecode", || Bytecode::new(bytecode, spec_id));
         trace_time!("analyze", || bytecode.analyze())?;
+        if let Some(dump_dir) = &self.dump_dir() {
+            trace_time!("dump bytecode", || Self::dump_bytecode(dump_dir, &bytecode))?;
+        }
         Ok(bytecode)
     }
 
@@ -301,10 +306,6 @@ impl<B: Backend> EvmCompiler<B> {
                 &storage
             }
         };
-
-        if let Some(dump_dir) = &self.dump_dir() {
-            trace_time!("dump bytecode", || Self::dump_bytecode(dump_dir, bytecode))?;
-        }
 
         let (bcx, id) = trace_time!("make builder", || Self::make_builder(
             &mut self.backend,

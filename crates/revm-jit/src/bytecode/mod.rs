@@ -4,6 +4,7 @@ use bitvec::vec::BitVec;
 use revm_interpreter::opcode as op;
 use revm_jit_backend::{eyre::ensure, Result};
 use revm_primitives::{hex, SpecId};
+use rustc_hash::FxHashMap;
 use std::fmt;
 
 mod sections;
@@ -28,7 +29,8 @@ pub(crate) const TEST_SUSPEND: u8 = 0x25;
 pub(crate) type Inst = usize;
 
 /// EVM bytecode.
-pub(crate) struct Bytecode<'a> {
+#[doc(hidden)] // Not public API.
+pub struct Bytecode<'a> {
     /// The original bytecode slice.
     pub(crate) code: &'a [u8],
     /// The instructions.
@@ -41,6 +43,8 @@ pub(crate) struct Bytecode<'a> {
     has_dynamic_jumps: bool,
     /// Whether the bytecode will suspend execution.
     will_suspend: bool,
+    /// Mapping from program counter to instruction.
+    pc_to_inst: FxHashMap<u32, u32>,
 }
 
 impl fmt::Display for Bytecode<'_> {
@@ -82,10 +86,15 @@ fn slice_as_bytes<T>(a: &[T]) -> &[u8] {
 
 impl<'a> Bytecode<'a> {
     pub(crate) fn new(code: &'a [u8], spec_id: SpecId) -> Self {
-        let mut insts = Vec::with_capacity(32);
+        let mut insts = Vec::with_capacity(code.len() + 8);
         let mut jumpdests = BitVec::repeat(false, code.len());
+        let mut pc_to_inst = FxHashMap::with_capacity_and_hasher(code.len(), Default::default());
         let op_infos = op_info_map(spec_id);
-        for (pc, Opcode { opcode, immediate }) in OpcodesIter::new(code).with_pc() {
+        for (inst, (pc, Opcode { opcode, immediate })) in
+            OpcodesIter::new(code).with_pc().enumerate()
+        {
+            pc_to_inst.insert(pc as u32, inst as u32);
+
             let mut data = 0;
             match opcode {
                 op::JUMPDEST => jumpdests.set(pc, true),
@@ -112,8 +121,15 @@ impl<'a> Bytecode<'a> {
             insts.push(InstData { opcode, flags, static_gas, data, pc: pc as u32, section });
         }
 
-        let mut bytecode =
-            Self { code, insts, jumpdests, spec_id, has_dynamic_jumps: false, will_suspend: false };
+        let mut bytecode = Self {
+            code,
+            insts,
+            jumpdests,
+            spec_id,
+            has_dynamic_jumps: false,
+            will_suspend: false,
+            pc_to_inst,
+        };
 
         // Pad code to ensure there is at least one diverging instruction.
         if bytecode.insts.last().map_or(true, |last| !last.is_diverging(bytecode.is_eof())) {
@@ -324,20 +340,18 @@ impl<'a> Bytecode<'a> {
         self.insts[inst].is_diverging(self.is_eof())
     }
 
-    // TODO: is it worth it to make this a map?
     /// Converts a program counter (`self.code[ic]`) to an instruction (`self.inst(pc)`).
+    #[inline]
     fn pc_to_inst(&self, pc: usize) -> usize {
-        debug_assert!(pc < self.code.len(), "pc out of bounds: {pc}");
-        let (inst, (_, op)) = OpcodesIter::new(self.code)
-            .with_pc() // pc
-            .enumerate() // inst
-            // Don't go until the end because we know `pc` are yielded in order.
-            .take_while(|(_, (pc2, _))| *pc2 <= pc)
-            .find(|(_, (pc2, _))| *pc2 == pc)
-            .unwrap_or_else(|| panic!("pc to inst conversion failed; pc={pc}"));
-        debug_assert_eq!(self.insts[inst].to_op_in(self), op, "pc={pc} inst={inst}");
-        inst
+        self.pc_to_inst[&(pc as u32)] as usize
     }
+
+    /*
+    /// Converts an instruction to a program counter.
+    fn inst_to_pc(&self, inst: Inst) -> usize {
+        self.insts[inst].pc as usize
+    }
+    */
 }
 
 /// A single instruction in the bytecode.
@@ -421,6 +435,7 @@ impl InstData {
 
     /// Converts this instruction to a raw opcode in the given bytecode.
     #[inline]
+    #[allow(dead_code)]
     pub(crate) fn to_op_in<'a>(&self, bytecode: &Bytecode<'a>) -> Opcode<'a> {
         Opcode { opcode: self.opcode, immediate: bytecode.get_imm_of(self) }
     }

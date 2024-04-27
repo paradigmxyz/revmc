@@ -178,7 +178,7 @@ pub trait Builder: BackendTypes + TypeMethods {
     fn switch_to_block(&mut self, block: Self::BasicBlock);
     fn seal_block(&mut self, block: Self::BasicBlock);
     fn seal_all_blocks(&mut self);
-    fn set_cold_block(&mut self, block: Self::BasicBlock);
+    fn set_current_block_cold(&mut self);
     fn current_block(&mut self) -> Option<Self::BasicBlock>;
 
     fn add_comment_to_current_inst(&mut self, comment: &str);
@@ -216,6 +216,16 @@ pub trait Builder: BackendTypes + TypeMethods {
         then_block: Self::BasicBlock,
         else_block: Self::BasicBlock,
     );
+    fn brif_cold(
+        &mut self,
+        cond: Self::Value,
+        then_block: Self::BasicBlock,
+        else_block: Self::BasicBlock,
+        then_is_cold: bool,
+    ) {
+        let _ = then_is_cold;
+        self.brif(cond, then_block, else_block)
+    }
     fn switch(
         &mut self,
         index: Self::Value,
@@ -233,8 +243,8 @@ pub trait Builder: BackendTypes + TypeMethods {
         &mut self,
         cond: Self::Value,
         ty: Self::Type,
-        then_value: impl FnOnce(&mut Self, Self::BasicBlock) -> Self::Value,
-        else_value: impl FnOnce(&mut Self, Self::BasicBlock) -> Self::Value,
+        then_value: impl FnOnce(&mut Self) -> Self::Value,
+        else_value: impl FnOnce(&mut Self) -> Self::Value,
     ) -> Self::Value;
 
     fn iadd(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;

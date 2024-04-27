@@ -328,8 +328,8 @@ impl<'a> Builder for EvmCraneliftBuilder<'a> {
         self.bcx.seal_all_blocks();
     }
 
-    fn set_cold_block(&mut self, block: Self::BasicBlock) {
-        self.bcx.set_cold_block(block);
+    fn set_current_block_cold(&mut self) {
+        self.bcx.set_cold_block(self.bcx.current_block().unwrap());
     }
 
     fn current_block(&mut self) -> Option<Self::BasicBlock> {
@@ -524,8 +524,8 @@ impl<'a> Builder for EvmCraneliftBuilder<'a> {
         &mut self,
         cond: Self::Value,
         ty: Self::Type,
-        then_value: impl FnOnce(&mut Self, Self::BasicBlock) -> Self::Value,
-        else_value: impl FnOnce(&mut Self, Self::BasicBlock) -> Self::Value,
+        then_value: impl FnOnce(&mut Self) -> Self::Value,
+        else_value: impl FnOnce(&mut Self) -> Self::Value,
     ) -> Self::Value {
         let then_block = if let Some(current) = self.current_block() {
             self.create_block_after(current, "then")
@@ -540,12 +540,12 @@ impl<'a> Builder for EvmCraneliftBuilder<'a> {
 
         self.seal_block(then_block);
         self.switch_to_block(then_block);
-        let then_value = then_value(self, then_block);
+        let then_value = then_value(self);
         self.bcx.ins().jump(done_block, &[then_value]);
 
         self.seal_block(else_block);
         self.switch_to_block(else_block);
-        let else_value = else_value(self, else_block);
+        let else_value = else_value(self);
         self.bcx.ins().jump(done_block, &[else_value]);
 
         self.seal_block(done_block);
