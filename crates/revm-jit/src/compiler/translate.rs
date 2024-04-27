@@ -89,8 +89,6 @@ pub(super) struct FunctionCx<'a, B: Backend> {
     incoming_dynamic_jumps: Incoming<B>,
     /// The dynamic jump table block where all dynamic jumps branch to.
     dynamic_jump_table: B::BasicBlock,
-    /// The block that all jumps branch to if the jump is invalid.
-    jump_fail: B::BasicBlock,
 
     /// `failure_block` incoming values.
     incoming_failures: Incoming<B>,
@@ -212,12 +210,12 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let ecx = bcx.fn_param(5);
 
         // Create all instruction entry blocks.
-        let jump_fail = bcx.create_block("jump_fail");
+        let unreachable_block = bcx.create_block("unreachable");
         let inst_entries: Vec<_> = bytecode
             .iter_all_insts()
             .map(|(i, data)| {
                 if data.is_dead_code() {
-                    jump_fail
+                    unreachable_block
                 } else {
                     bcx.create_block(&op_block_name_with(i, data, ""))
                 }
@@ -254,7 +252,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
             incoming_dynamic_jumps: Vec::new(),
             dynamic_jump_table,
-            jump_fail,
 
             incoming_failures: Vec::new(),
             failure_block,
@@ -317,8 +314,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         }
 
         // Finalize the dynamic jump table.
-        fx.bcx.switch_to_block(jump_fail);
-        fx.build_fail_imm(InstructionResult::InvalidJump);
+        fx.bcx.switch_to_block(unreachable_block);
+        fx.bcx.unreachable();
         let i32_type = fx.bcx.type_int(32);
         if bytecode.has_dynamic_jumps() {
             fx.bcx.switch_to_block(fx.dynamic_jump_table);
@@ -338,7 +335,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
             // fx.bcx.switch_to_block(target);
             // let index = fx.bcx.ireduce(i32_type, index);
-            fx.bcx.switch(index, jump_fail, &targets);
+            fx.add_invalid_jump();
+            fx.bcx.switch(index, return_block, &targets, true);
         } else {
             // No dynamic jumps.
             debug_assert!(fx.incoming_dynamic_jumps.is_empty());
@@ -391,7 +389,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 let stack_len = fx.bcx.load(fx.isize_type, stack_len_arg, "stack_len");
                 fx.stack_len.store(&mut fx.bcx, stack_len);
                 fx.resume_blocks[0].1 = default; // Zero case is handled above.
-                fx.bcx.switch(resume_at, default, &fx.resume_blocks);
+                fx.bcx.switch(resume_at, default, &fx.resume_blocks, true);
             }
 
             // Suspend block: store the `resume_at` value and return `CallOrCreate`.
@@ -987,7 +985,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                         debug_assert_eq!(*data, op::JUMPI);
                         // The jump target is invalid, but we still need to account for the stack.
                         self.len_offset -= 1;
-                        self.jump_fail
+                        self.return_block
                     } else if data.flags.contains(InstFlags::STATIC_JUMP) {
                         let target_inst = data.data as usize;
                         debug_assert_eq!(
@@ -1009,6 +1007,9 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                         let cond_word = self.pop();
                         let cond = self.bcx.icmp_imm(IntCC::NotEqual, cond_word, 0);
                         let next = self.inst_entries[inst + 1];
+                        if target == self.return_block {
+                            self.add_invalid_jump();
+                        }
                         self.bcx.brif(cond, target, next);
                     } else {
                         self.bcx.br(target);
@@ -1409,6 +1410,13 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     fn build_return(&mut self, ret: B::Value) {
         self.incoming_returns.push((ret, self.bcx.current_block().unwrap()));
         self.bcx.br(self.return_block);
+    }
+
+    fn add_invalid_jump(&mut self) {
+        self.incoming_returns.push((
+            self.bcx.iconst(self.i8_type, InstructionResult::InvalidJump as i64),
+            self.bcx.current_block().unwrap(),
+        ));
     }
 
     // Pointer must not be null if `must_be_set` is true.

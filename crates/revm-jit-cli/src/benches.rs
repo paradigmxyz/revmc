@@ -52,6 +52,16 @@ pub fn get_benches() -> Vec<Bench> {
             calldata: hex!("30627b7c").to_vec(),
             ..Default::default()
         },
+        Bench {
+            name: "fiat_token",
+            bytecode: hex::decode(include_str!("../../../data/fiat_token.rt.hex")).unwrap(),
+            ..Default::default()
+        },
+        Bench {
+            name: "usdc_proxy",
+            bytecode: hex::decode(include_str!("../../../data/usdc_proxy.rt.hex")).unwrap(),
+            ..Default::default()
+        },
     ]
 }
 

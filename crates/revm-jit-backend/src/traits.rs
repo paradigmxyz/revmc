@@ -231,6 +231,7 @@ pub trait Builder: BackendTypes + TypeMethods {
         index: Self::Value,
         default: Self::BasicBlock,
         targets: &[(u64, Self::BasicBlock)],
+        default_is_cold: bool,
     );
     fn phi(&mut self, ty: Self::Type, incoming: &[(Self::Value, Self::BasicBlock)]) -> Self::Value;
     fn select(
