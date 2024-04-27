@@ -197,7 +197,7 @@ impl<'a> Bytecode<'a> {
             let jump = &self.insts[jump_inst];
             let Some(push_inst) = jump_inst.checked_sub(1) else {
                 if jump.is_legacy_jump() {
-                    debug!(jump_inst, target=?None::<()>, "found jump");
+                    trace!(jump_inst, target=?None::<()>, "found jump");
                     self.has_dynamic_jumps = true;
                 }
                 continue;
@@ -206,7 +206,7 @@ impl<'a> Bytecode<'a> {
             let push = &self.insts[push_inst];
             if !(push.is_push() && jump.is_legacy_jump()) {
                 if jump.is_legacy_jump() {
-                    debug!(jump_inst, target=?None::<()>, "found jump");
+                    trace!(jump_inst, target=?None::<()>, "found jump");
                     self.has_dynamic_jumps = true;
                 }
                 continue;
@@ -218,7 +218,7 @@ impl<'a> Bytecode<'a> {
 
             const USIZE_SIZE: usize = std::mem::size_of::<usize>();
             if imm.len() > USIZE_SIZE {
-                debug!(jump_inst, "jump target too large");
+                trace!(jump_inst, "jump target too large");
                 self.insts[jump_inst].flags |= InstFlags::INVALID_JUMP;
                 continue;
             }
@@ -227,7 +227,7 @@ impl<'a> Bytecode<'a> {
             padded[USIZE_SIZE - imm.len()..].copy_from_slice(imm);
             let target_pc = usize::from_be_bytes(padded);
             if !self.is_valid_jump(target_pc) {
-                debug!(jump_inst, target_pc, "invalid jump target");
+                trace!(jump_inst, target_pc, "invalid jump target");
                 self.insts[jump_inst].flags |= InstFlags::INVALID_JUMP;
                 continue;
             }
@@ -247,7 +247,7 @@ impl<'a> Bytecode<'a> {
             }
 
             // Set the target on the `JUMP` instruction.
-            debug!(jump_inst, target, "found jump");
+            trace!(jump_inst, target, "found jump");
             self.insts[jump_inst].data = target as u32;
         }
     }

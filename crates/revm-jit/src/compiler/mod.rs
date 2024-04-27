@@ -82,6 +82,10 @@ impl<B: Backend> EvmCompiler<B> {
         self.backend.is_aot()
     }
 
+    fn is_jit(&self) -> bool {
+        !self.is_aot()
+    }
+
     /// Returns the output directory.
     pub fn out_dir(&self) -> Option<&Path> {
         self.out_dir.as_deref()
@@ -238,7 +242,7 @@ impl<B: Backend> EvmCompiler<B> {
 
     /// (JIT) Finalizes the module and JITs the given function.
     pub fn jit_function(&mut self, id: B::FuncId) -> Result<EvmCompilerFn> {
-        ensure!(!self.is_aot(), "cannot JIT functions during AOT compilation");
+        ensure!(self.is_jit(), "cannot JIT functions during AOT compilation");
         self.finalize()?;
         let addr = debug_time!("get_function", || self.backend.jit_function(id))?;
         Ok(EvmCompilerFn::new(unsafe { std::mem::transmute::<usize, RawEvmCompilerFn>(addr) }))

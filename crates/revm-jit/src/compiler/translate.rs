@@ -388,8 +388,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 fx.bcx.switch_to_block(resume_block);
                 let stack_len = fx.bcx.load(fx.isize_type, stack_len_arg, "stack_len");
                 fx.stack_len.store(&mut fx.bcx, stack_len);
-                fx.resume_blocks[0].1 = default; // Zero case is handled above.
-                fx.bcx.switch(resume_at, default, &fx.resume_blocks, true);
+                let targets = &fx.resume_blocks[1..]; // Zero case is handled above.
+                fx.bcx.switch(resume_at, default, targets, true);
             }
 
             // Suspend block: store the `resume_at` value and return `CallOrCreate`.

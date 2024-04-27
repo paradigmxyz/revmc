@@ -82,6 +82,7 @@ impl SectionAnalysis {
         if enabled!(tracing::Level::DEBUG) {
             let mut max_len = 0;
             let mut current = 0;
+            let mut count = 0usize;
             for (inst, data) in bytecode.iter_insts() {
                 if data.section.is_empty() {
                     continue;
@@ -89,8 +90,9 @@ impl SectionAnalysis {
                 let len = inst - current;
                 max_len = max_len.max(len);
                 current = inst;
+                count += 1;
             }
-            debug!(max_len);
+            debug!(count, max_len, "sections");
         }
     }
 
@@ -101,7 +103,7 @@ impl SectionAnalysis {
         }
         let section = self.section();
         if !section.is_empty() {
-            debug!(
+            trace!(
                 inst = self.start_inst,
                 len = next_section_inst - self.start_inst,
                 ?section,
