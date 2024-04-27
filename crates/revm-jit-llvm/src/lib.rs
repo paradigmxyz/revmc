@@ -22,7 +22,10 @@ use inkwell::{
         AnyType, AnyTypeEnum, BasicType, BasicTypeEnum, FunctionType, IntType, PointerType,
         StringRadix, VoidType,
     },
-    values::{BasicValue, BasicValueEnum, FunctionValue, PointerValue},
+    values::{
+        BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, InstructionValue,
+        PointerValue,
+    },
     AddressSpace, IntPredicate, OptimizationLevel,
 };
 use revm_jit_backend::{
@@ -30,6 +33,7 @@ use revm_jit_backend::{
 };
 use rustc_hash::FxHashMap;
 use std::{
+    iter,
     path::Path,
     sync::{Once, OnceLock},
 };
@@ -38,6 +42,9 @@ pub use inkwell::{self, context::Context};
 
 mod dh;
 pub mod orc;
+
+const DEFAULT_WEIGHT: u32 = 20000;
+const OVERRIDE_TARGET: bool = false;
 
 /// Executes the given closure with a thread-local LLVM context.
 #[inline]
@@ -358,9 +365,21 @@ impl TargetDefaults {
     fn get() -> &'static Self {
         static TARGET_DEFAULTS: OnceLock<TargetDefaults> = OnceLock::new();
         TARGET_DEFAULTS.get_or_init(|| {
+            if let Some(r#override) = Self::r#override() {
+                return r#override;
+            }
             let triple = TargetMachine::get_default_triple();
             let cpu = TargetMachine::get_host_cpu_name().to_string_lossy().into_owned();
             let features = TargetMachine::get_host_cpu_features().to_string_lossy().into_owned();
+            TargetDefaults { triple, cpu, features }
+        })
+    }
+
+    fn r#override() -> Option<Self> {
+        OVERRIDE_TARGET.then(|| {
+            let triple = TargetTriple::create("aarch64-unknown-linux-gnu");
+            let cpu = String::from("");
+            let features = String::from("");
             TargetDefaults { triple, cpu, features }
         })
     }
@@ -465,6 +484,23 @@ impl<'a, 'ctx> EvmLlvmBuilder<'a, 'ctx> {
                 self.module.add_function(name, ty, None)
             }
         }
+    }
+
+    fn set_branch_weights(
+        &self,
+        inst: InstructionValue<'ctx>,
+        weights: impl IntoIterator<Item = u32>,
+    ) {
+        let weights = weights.into_iter();
+        let mut values =
+            Vec::<BasicMetadataValueEnum<'ctx>>::with_capacity(1 + weights.size_hint().1.unwrap());
+        values.push(self.cx.metadata_string("branch_weights").into());
+        for weight in weights {
+            values.push(self.ty_i32.const_int(weight as u64, false).into());
+        }
+        let metadata = self.cx.metadata_node(&values);
+        let kind_id = self.cx.get_kind_id("prof");
+        inst.set_metadata(metadata, kind_id).unwrap();
     }
 }
 
@@ -653,17 +689,8 @@ impl<'a, 'ctx> Builder for EvmLlvmBuilder<'a, 'ctx> {
             .bcx
             .build_conditional_branch(cond.into_int_value(), then_block, else_block)
             .unwrap();
-        let metadata = {
-            // From Clang.
-            let branch_weights = self.cx.metadata_string("branch_weights");
-            let then_weight = if then_is_cold { 1 } else { 2000 };
-            let else_weight = if then_is_cold { 2000 } else { 1 };
-            let then_weight = self.ty_i32.const_int(then_weight, false);
-            let else_weight = self.ty_i32.const_int(else_weight, false);
-            self.cx.metadata_node(&[branch_weights.into(), then_weight.into(), else_weight.into()])
-        };
-        let kind_id = self.cx.get_kind_id("prof");
-        inst.set_metadata(metadata, kind_id).unwrap();
+        let weights = if then_is_cold { [1, DEFAULT_WEIGHT] } else { [DEFAULT_WEIGHT, 1] };
+        self.set_branch_weights(inst, weights);
     }
 
     fn switch(
@@ -671,11 +698,16 @@ impl<'a, 'ctx> Builder for EvmLlvmBuilder<'a, 'ctx> {
         index: Self::Value,
         default: Self::BasicBlock,
         targets: &[(u64, Self::BasicBlock)],
+        default_is_cold: bool,
     ) {
         let ty = index.get_type().into_int_type();
         let targets =
             targets.iter().map(|(v, b)| (ty.const_int(*v, false), *b)).collect::<Vec<_>>();
-        self.bcx.build_switch(index.into_int_value(), default, &targets).unwrap();
+        let inst = self.bcx.build_switch(index.into_int_value(), default, &targets).unwrap();
+        if default_is_cold {
+            let weights = iter::once(1).chain(iter::repeat(DEFAULT_WEIGHT).take(targets.len()));
+            self.set_branch_weights(inst, weights);
+        }
     }
 
     fn phi(&mut self, ty: Self::Type, incoming: &[(Self::Value, Self::BasicBlock)]) -> Self::Value {
@@ -988,7 +1020,11 @@ fn init_() -> Result<()> {
         info: true,
         machine_code: true,
     };
-    Target::initialize_native(&config).map_err(Error::msg)?;
+    if OVERRIDE_TARGET {
+        Target::initialize_all(&config);
+    } else {
+        Target::initialize_native(&config).map_err(Error::msg)?;
+    }
 
     Ok(())
 }

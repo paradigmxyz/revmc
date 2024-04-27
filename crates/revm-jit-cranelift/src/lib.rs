@@ -490,7 +490,9 @@ impl<'a> Builder for EvmCraneliftBuilder<'a> {
         index: Self::Value,
         default: Self::BasicBlock,
         targets: &[(u64, Self::BasicBlock)],
+        default_is_cold: bool,
     ) {
+        let _ = default_is_cold;
         let mut switch = cranelift::frontend::Switch::new();
         for (value, block) in targets {
             switch.set_entry(*value as u128, *block);

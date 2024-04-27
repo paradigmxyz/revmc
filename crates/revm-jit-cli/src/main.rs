@@ -17,7 +17,7 @@ use std::{
 #[derive(Parser)]
 struct Cli {
     bench_name: String,
-    #[arg(default_value = "0")]
+    #[arg(default_value = "1")]
     n_iters: u64,
 
     #[arg(long)]
@@ -153,6 +153,10 @@ fn main() -> Result<()> {
         let r = unsafe { f.call(Some(stack), Some(stack_len), &mut ecx) };
         (r, interpreter.next_action)
     };
+
+    if cli.n_iters == 0 {
+        return Ok(());
+    }
 
     let (ret, action) = debug_time!("run", || run(f));
     println!("InstructionResult::{ret:?}");
