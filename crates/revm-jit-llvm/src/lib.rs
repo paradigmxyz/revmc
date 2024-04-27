@@ -397,6 +397,16 @@ impl<'a, 'ctx> EvmLlvmBuilder<'a, 'ctx> {
         })
     }
 
+    #[allow(dead_code)]
+    fn extract_value(
+        &mut self,
+        value: BasicValueEnum<'ctx>,
+        index: u32,
+        name: &str,
+    ) -> BasicValueEnum<'ctx> {
+        self.bcx.build_extract_value(value.into_struct_value(), index, name).unwrap()
+    }
+
     fn memcpy_inner(
         &mut self,
         dst: BasicValueEnum<'ctx>,
@@ -421,6 +431,7 @@ impl<'a, 'ctx> EvmLlvmBuilder<'a, 'ctx> {
             .unwrap();
     }
 
+    #[allow(dead_code)]
     fn call_overflow_function(
         &mut self,
         name: &str,
@@ -432,6 +443,7 @@ impl<'a, 'ctx> EvmLlvmBuilder<'a, 'ctx> {
         (self.extract_value(result, 0, "result"), self.extract_value(result, 1, "overflow"))
     }
 
+    #[allow(dead_code)]
     fn get_overflow_function(
         &mut self,
         name: &str,
@@ -463,11 +475,11 @@ impl<'a, 'ctx> EvmLlvmBuilder<'a, 'ctx> {
 }
 
 impl<'a, 'ctx> BackendTypes for EvmLlvmBuilder<'a, 'ctx> {
-    type Type = BasicTypeEnum<'ctx>;
-    type Value = BasicValueEnum<'ctx>;
-    type StackSlot = PointerValue<'ctx>;
-    type BasicBlock = BasicBlock<'ctx>;
-    type Function = FunctionValue<'ctx>;
+    type Type = <EvmLlvmBackend<'ctx> as BackendTypes>::Type;
+    type Value = <EvmLlvmBackend<'ctx> as BackendTypes>::Value;
+    type StackSlot = <EvmLlvmBackend<'ctx> as BackendTypes>::StackSlot;
+    type BasicBlock = <EvmLlvmBackend<'ctx> as BackendTypes>::BasicBlock;
+    type Function = <EvmLlvmBackend<'ctx> as BackendTypes>::Function;
 }
 
 impl<'a, 'ctx> TypeMethods for EvmLlvmBuilder<'a, 'ctx> {
@@ -570,7 +582,11 @@ impl<'a, 'ctx> Builder for EvmLlvmBuilder<'a, 'ctx> {
         self.bcx.build_global_string_ptr(value, "").unwrap().as_pointer_value().into()
     }
 
-    fn new_stack_slot(&mut self, ty: Self::Type, name: &str) -> Self::StackSlot {
+    fn new_stack_slot_raw(&mut self, ty: Self::Type, name: &str) -> Self::StackSlot {
+        // let ty = self.ty_i8.array_type(size);
+        // let ptr = self.bcx.build_alloca(ty, name).unwrap();
+        // ptr.as_instruction().unwrap().set_alignment(align).unwrap();
+        // ptr
         self.bcx.build_alloca(ty, name).unwrap()
     }
 
@@ -582,8 +598,9 @@ impl<'a, 'ctx> Builder for EvmLlvmBuilder<'a, 'ctx> {
         self.store(value, slot.into())
     }
 
-    fn stack_addr(&mut self, stack_slot: Self::StackSlot) -> Self::Value {
-        stack_slot.into()
+    fn stack_addr(&mut self, ty: Self::Type, slot: Self::StackSlot) -> Self::Value {
+        let _ = ty;
+        slot.into()
     }
 
     fn load(&mut self, ty: Self::Type, ptr: Self::Value, name: &str) -> Self::Value {
@@ -644,9 +661,11 @@ impl<'a, 'ctx> Builder for EvmLlvmBuilder<'a, 'ctx> {
         &mut self,
         index: Self::Value,
         default: Self::BasicBlock,
-        targets: &[(Self::Value, Self::BasicBlock)],
+        targets: &[(u64, Self::BasicBlock)],
     ) {
-        let targets = targets.iter().map(|(v, b)| (v.into_int_value(), *b)).collect::<Vec<_>>();
+        let ty = index.get_type().into_int_type();
+        let targets =
+            targets.iter().map(|(v, b)| (ty.const_int(*v, false), *b)).collect::<Vec<_>>();
         self.bcx.build_switch(index.into_int_value(), default, &targets).unwrap();
     }
 
@@ -755,20 +774,19 @@ impl<'a, 'ctx> Builder for EvmLlvmBuilder<'a, 'ctx> {
         self.imul(lhs, rhs)
     }
 
+    // - [Avoid using arithmetic intrinsics](https://llvm.org/docs/Frontend/PerformanceTips.html)
+    // - [Don't use usub.with.overflow intrinsic](https://github.com/rust-lang/rust/pull/103299)
+    // - [for unsigned add overflow the recommended pattern is x + y < x](https://github.com/rust-lang/rust/pull/124114#issuecomment-2066173305)
     fn uadd_overflow(&mut self, lhs: Self::Value, rhs: Self::Value) -> (Self::Value, Self::Value) {
-        self.call_overflow_function("uadd", lhs, rhs)
+        let result = self.iadd(lhs, rhs);
+        let overflow = self.icmp(IntCC::UnsignedLessThan, result, rhs);
+        (result, overflow)
     }
 
     fn usub_overflow(&mut self, lhs: Self::Value, rhs: Self::Value) -> (Self::Value, Self::Value) {
-        self.call_overflow_function("usub", lhs, rhs)
-
-        // https://llvm.org/docs/Frontend/PerformanceTips.html
-        // > Avoid using arithmetic intrinsics
-        // Rustc also codegens this sequence for `usize::overflowing_sub`.
-
-        // let result = self.isub(lhs, rhs);
-        // let overflow = self.icmp(IntCC::UnsignedLessThan, lhs, rhs);
-        // (result, overflow)
+        let result = self.isub(lhs, rhs);
+        let overflow = self.icmp(IntCC::UnsignedLessThan, lhs, rhs);
+        (result, overflow)
     }
 
     fn umax(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
@@ -870,10 +888,6 @@ impl<'a, 'ctx> Builder for EvmLlvmBuilder<'a, 'ctx> {
             .into()
     }
 
-    fn extract_value(&mut self, value: Self::Value, index: u32, name: &str) -> Self::Value {
-        self.bcx.build_extract_value(value.into_struct_value(), index, name).unwrap()
-    }
-
     fn call(&mut self, function: Self::Function, args: &[Self::Value]) -> Option<Self::Value> {
         let args = args.iter().copied().map(Into::into).collect::<Vec<_>>();
         let callsite = self.bcx.build_call(function, &args, "").unwrap();
@@ -947,6 +961,7 @@ fn init_() -> Result<()> {
         install_fatal_error_handler(report_fatal_error);
     }
 
+    // The first arg is only used in `-help` output AFAICT.
     let args = [c"revm-jit-llvm".as_ptr(), c"-x86-asm-syntax=intel".as_ptr()];
     unsafe {
         inkwell::llvm_sys::support::LLVMParseCommandLineOptions(
@@ -1057,7 +1072,7 @@ fn convert_attribute(bcx: &EvmLlvmBuilder<'_, '_>, attr: revm_jit_backend::Attri
         OurAttr::WriteOnly => ("writeonly", AttrValue::Enum(1)),
         OurAttr::Writable => ("writable", AttrValue::Enum(1)),
 
-        attr => todo!("{attr:?}"),
+        attr => unimplemented!("llvm attribute conversion: {attr:?}"),
     };
     match value {
         AttrValue::String(value) => bcx.cx.create_string_attribute(key, value),

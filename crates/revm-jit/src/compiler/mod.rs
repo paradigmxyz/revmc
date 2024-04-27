@@ -13,8 +13,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-// TODO: Add `nuw`/`nsw` flags to stack length arithmetic.
-
 // TODO: Somehow have a config to tell the backend to assume that stack stores are unobservable,
 // making it eliminate redundant stores for values outside the stack length when optimized away.
 // E.g. `PUSH0 POP` gets fully optimized away, but the `store i256 0, ptr %stack` will still get
@@ -219,6 +217,7 @@ impl<B: Backend> EvmCompiler<B> {
         bytecode: &[u8],
         spec_id: SpecId,
     ) -> Result<B::FuncId> {
+        ensure!(cfg!(target_endian = "little"), "only little-endian is supported");
         ensure!(!self.finalized, "cannot compile more functions after finalizing the module");
         let bytecode = debug_time!("parse", || self.parse(bytecode, spec_id))?;
         debug_time!("translate", || self.translate_inner(name, &bytecode))

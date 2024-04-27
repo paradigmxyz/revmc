@@ -19,8 +19,8 @@ workspace = true
 [dependencies]
 revm-jit-backend.workspace = true
 
-cranelift = "0.106"
-cranelift-jit = "0.106"
-cranelift-module = "0.106"
-cranelift-native = "0.106"
-cranelift-object = "0.106"
+cranelift = "0.107"
+cranelift-jit = "0.107"
+cranelift-module = "0.107"
+cranelift-native = "0.107"
+cranelift-object = "0.107"

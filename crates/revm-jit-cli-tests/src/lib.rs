@@ -22,11 +22,13 @@ pub fn run_tests(cmd: &'static Path) -> i32 {
         }
         None => return 0,
     };
+    /*
     // Condense output if not explicitly requested.
     let requested_pretty = || args.iter().any(|x| x.contains("--format"));
     if opts.format == test::OutputFormat::Pretty && !requested_pretty() {
         opts.format = test::OutputFormat::Terse;
     }
+    */
     // [`tester`] currently (0.9.1) uses `num_cpus::get_physical`;
     // use all available threads instead.
     if opts.test_threads.is_none() {

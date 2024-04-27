@@ -2,9 +2,8 @@ ADDRESS
 PUSH20 0xffffffffffffffffffffffffffffffffffffffff
 AND
 
-; CHECK-LABEL: define i8 @address_mask(
-; CHECK: load i160, ptr
+; CHECK: load i160
 ; CHECK: [[ADDR:%.*]] = zext i160 {{.*}} to i256
 ; CHECK-NOT: and
-; CHECK: store i256 [[ADDR]], ptr
+; CHECK: store i256 [[ADDR]]
 ; CHECK: ret i8
