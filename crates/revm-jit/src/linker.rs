@@ -76,7 +76,7 @@ impl Linker {
         if cfg!(target_vendor = "apple") {
             cmd.arg("-Wl,-dead_strip,-undefined,dynamic_lookup");
         } else {
-            cmd.arg("-Wl,--gc-sections,--strip-all,--undefined");
+            cmd.arg("-Wl,--gc-sections,--strip-debug");
         }
         cmd.args(&self.cflags);
         cmd.args(objects);
