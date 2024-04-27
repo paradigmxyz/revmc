@@ -4,7 +4,7 @@ use crate::{
     Backend, Builder, Bytecode, EvmContext, Inst, InstData, InstFlags, IntCC, Result, I256_MIN,
 };
 use revm_interpreter::{opcode as op, Contract, InstructionResult};
-use revm_jit_backend::{BackendTypes, TypeMethods};
+use revm_jit_backend::{BackendTypes, Pointer, PointerBase, TypeMethods};
 use revm_jit_builtins::{Builtin, Builtins, CallKind, CreateKind};
 use revm_primitives::{BlockEnv, CfgEnv, Env, SpecId, TxEnv, U256};
 use std::{fmt::Write, mem, sync::atomic::AtomicPtr};
@@ -38,8 +38,11 @@ impl Default for FcxConfig {
     }
 }
 
-/// A list of incoming values for a block.
+/// A list of incoming values for a block. Represents a `phi` node.
 type Incoming<B> = Vec<(<B as BackendTypes>::Value, <B as BackendTypes>::BasicBlock)>;
+
+/// A list of `switch` targets.
+type SwitchTargets<B> = Vec<(u64, <B as BackendTypes>::BasicBlock)>;
 
 pub(super) struct FunctionCx<'a, B: Backend> {
     // Configuration.
@@ -56,14 +59,14 @@ pub(super) struct FunctionCx<'a, B: Backend> {
 
     // Locals.
     /// The stack length. Either passed in the arguments as a pointer or allocated locally.
-    stack_len: Pointer<B>,
+    stack_len: Pointer<B::Builder<'a>>,
     /// The stack value. Constant throughout the function, either passed in the arguments as a
     /// pointer or allocated locally.
-    stack: Pointer<B>,
+    stack: Pointer<B::Builder<'a>>,
     /// The amount of gas remaining. `i64`. See `Gas`.
-    gas_remaining: Pointer<B>,
+    gas_remaining: Pointer<B::Builder<'a>>,
     /// The amount of gas remaining, without accounting for memory expansion. `i64`. See `Gas`.
-    gas_remaining_nomem: Pointer<B>,
+    gas_remaining_nomem: Pointer<B::Builder<'a>>,
     /// The environment. Constant throughout the function.
     env: B::Value,
     /// The contract. Constant throughout the function.
@@ -99,7 +102,7 @@ pub(super) struct FunctionCx<'a, B: Backend> {
     return_block: B::BasicBlock,
 
     /// `resume_block` switch values.
-    resume_blocks: Incoming<B>,
+    resume_blocks: SwitchTargets<B>,
     /// `suspend_block` incoming values.
     suspend_blocks: Incoming<B>,
     /// The suspend block that all suspend instructions branch to.
@@ -194,23 +197,15 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         };
 
         let sp_arg = bcx.fn_param(1);
-        let stack = {
-            let base = if !config.local_stack {
-                PointerBase::Address(sp_arg)
-            } else {
-                let stack_type = bcx.type_array(word_type, STACK_CAP as _);
-                let stack_slot = bcx.new_stack_slot(stack_type, "stack.addr");
-                PointerBase::StackSlot(stack_slot)
-            };
-            Pointer { ty: word_type, base }
+        let stack = if config.local_stack {
+            bcx.new_stack_slot(word_type, "stack.addr")
+        } else {
+            Pointer::new_address(word_type, sp_arg)
         };
 
         let stack_len_arg = bcx.fn_param(2);
-        let stack_len = {
-            // This is initialized later in `post_entry_block`.
-            let base = PointerBase::StackSlot(bcx.new_stack_slot(isize_type, "len.addr"));
-            Pointer { ty: isize_type, base }
-        };
+        // This is initialized later in `post_entry_block`.
+        let stack_len = bcx.new_stack_slot(isize_type, "len.addr");
 
         let env = bcx.fn_param(3);
         let contract = bcx.fn_param(4);
@@ -323,8 +318,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
         // Finalize the dynamic jump table.
         fx.bcx.switch_to_block(jump_fail);
-        fx.bcx.set_cold_block(jump_fail);
-        fx.build_return_imm(InstructionResult::InvalidJump);
+        fx.build_fail_imm(InstructionResult::InvalidJump);
         let i32_type = fx.bcx.type_int(32);
         if bytecode.has_dynamic_jumps() {
             fx.bcx.switch_to_block(fx.dynamic_jump_table);
@@ -334,10 +328,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             // let max_pc =
             //     jumpdests.clone().map(|(_, data)| data.pc).next_back().expect("no jumpdests");
             let targets = jumpdests
-                .map(|(inst, data)| {
-                    let pc = fx.bcx.iconst(word_type, data.pc as i64);
-                    (pc, fx.inst_entries[inst])
-                })
+                .map(|(inst, data)| (data.pc as u64, fx.inst_entries[inst]))
                 .collect::<Vec<_>>();
             let index = fx.bcx.phi(fx.word_type, &fx.incoming_dynamic_jumps);
             // let target =
@@ -554,13 +545,13 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                         self.bcx.iconst(self.i8_type, InstructionResult::StackOverflow as i64);
                     self.bcx.select(underflow, under, over)
                 };
-                self.build_failure_inner(true, cond, ret);
+                self.build_check_inner(true, cond, ret);
             } else if may_underflow {
                 let cond = underflow(self);
-                self.build_failure(cond, InstructionResult::StackUnderflow);
+                self.build_check(cond, InstructionResult::StackUnderflow);
             } else if may_overflow {
                 let cond = overflow(self);
-                self.build_failure(cond, InstructionResult::StackOverflow);
+                self.build_check(cond, InstructionResult::StackOverflow);
             }
         }
 
@@ -824,29 +815,32 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
                 let ptr = contract_field!(@get Contract, pf::Bytes; input.ptr);
                 let zero = self.bcx.iconst_256(U256::ZERO);
-                let value = self.lazy_select(
+                let isize_type = self.isize_type;
+                let i8_type = self.i8_type;
+                let word_type = self.word_type;
+                let value = self.bcx.lazy_select(
                     in_bounds,
                     self.word_type,
-                    |this, _| {
-                        let ptr = this.bcx.load(this.bcx.type_ptr(), ptr, "contract.input.ptr");
-                        let index = this.bcx.ireduce(this.isize_type, index);
-                        let calldata = this.bcx.gep(this.i8_type, ptr, &[index], "calldata.addr");
+                    |bcx, _| {
+                        let ptr = bcx.load(bcx.type_ptr(), ptr, "contract.input.ptr");
+                        let index = bcx.ireduce(isize_type, index);
+                        let calldata = bcx.gep(i8_type, ptr, &[index], "calldata.addr");
 
                         // `32.min(contract.input.len() - index)`
                         let slice_len = {
-                            let len = this.bcx.ireduce(this.isize_type, len);
-                            let diff = this.bcx.isub(len, index);
-                            let max = this.bcx.iconst(this.isize_type, 32);
-                            this.bcx.umin(diff, max)
+                            let len = bcx.ireduce(isize_type, len);
+                            let diff = bcx.isub(len, index);
+                            let max = bcx.iconst(isize_type, 32);
+                            bcx.umin(diff, max)
                         };
 
-                        let tmp = this.bcx.new_stack_slot(this.word_type, "calldata.addr");
-                        this.bcx.stack_store(zero, tmp);
-                        let tmp_addr = this.bcx.stack_addr(tmp);
-                        this.bcx.memcpy(tmp_addr, calldata, slice_len);
-                        let mut value = this.bcx.stack_load(this.word_type, tmp, "calldata.i256");
+                        let tmp = bcx.new_stack_slot(word_type, "calldata.addr");
+                        tmp.store(bcx, zero);
+                        let tmp_addr = tmp.addr(bcx);
+                        bcx.memcpy(tmp_addr, calldata, slice_len);
+                        let mut value = tmp.load(bcx, "calldata.i256");
                         if cfg!(target_endian = "little") {
-                            value = this.bcx.bswap(value);
+                            value = bcx.bswap(value);
                         }
                         value
                     },
@@ -985,7 +979,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 if is_invalid && opcode == op::JUMP {
                     // NOTE: We can't early return for `JUMPI` since the jump target is evaluated
                     // lazily.
-                    self.build_return_imm(InstructionResult::InvalidJump);
+                    self.build_fail_imm(InstructionResult::InvalidJump);
                 } else {
                     let target = if is_invalid {
                         debug_assert_eq!(*data, op::JUMPI);
@@ -1177,7 +1171,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             self.get_field(self.ecx, mem::offset_of!(EvmContext<'_>, is_static), "ecx.is_static");
         let bool = self.bcx.type_int(1);
         let is_static = self.bcx.load(bool, ptr, "is_static");
-        self.build_failure(is_static, ret)
+        self.build_check(is_static, ret)
     }
 
     /// Duplicates the `n`th value from the top of the stack.
@@ -1249,8 +1243,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     /// Adds a resume point and returns its index.
     fn add_resume_at(&mut self, block: B::BasicBlock) -> usize {
         let value = self.resume_blocks.len();
-        let value_ = self.bcx.iconst(self.bcx.type_int(32), value as i64);
-        self.resume_blocks.push((value_, block));
+        self.resume_blocks.push((value as u64, block));
         value
     }
 
@@ -1333,7 +1326,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         // `Gas::record_cost`
         let gas_remaining = self.load_gas_remaining();
         let (res, overflow) = self.bcx.usub_overflow(gas_remaining, cost);
-        self.build_failure(overflow, InstructionResult::OutOfGas);
+        self.build_check(overflow, InstructionResult::OutOfGas);
 
         let nomem = self.gas_remaining_nomem.load(&mut self.bcx, "gas_remaining_nomem");
         let nomem = self.bcx.isub(nomem, cost);
@@ -1343,28 +1336,27 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     }
 
     /*
+    /// Builds a check, failing if the condition is false.
+    ///
     /// `if success_cond { ... } else { return ret }`
     fn build_failure_inv(&mut self, success_cond: B::Value, ret: InstructionResult) {
         self.build_failure_imm_inner(false, success_cond, ret);
     }
     */
 
+    /// Builds a check, failing if the condition is true.
+    ///
     /// `if failure_cond { return ret } else { ... }`
-    fn build_failure(&mut self, failure_cond: B::Value, ret: InstructionResult) {
-        self.build_failure_imm_inner(true, failure_cond, ret);
+    fn build_check(&mut self, failure_cond: B::Value, ret: InstructionResult) {
+        self.build_check_imm_inner(true, failure_cond, ret);
     }
 
-    fn build_failure_imm_inner(
-        &mut self,
-        is_failure: bool,
-        cond: B::Value,
-        ret: InstructionResult,
-    ) {
+    fn build_check_imm_inner(&mut self, is_failure: bool, cond: B::Value, ret: InstructionResult) {
         let ret = self.bcx.iconst(self.i8_type, ret as i64);
-        self.build_failure_inner(is_failure, cond, ret);
+        self.build_check_inner(is_failure, cond, ret);
     }
 
-    fn build_failure_inner(&mut self, is_failure: bool, cond: B::Value, ret: B::Value) {
+    fn build_check_inner(&mut self, is_failure: bool, cond: B::Value, ret: B::Value) {
         let current_block = self.current_block();
         self.incoming_failures.push((ret, current_block));
 
@@ -1376,6 +1368,18 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         }
 
         self.bcx.switch_to_block(target);
+    }
+
+    /// Builds a branch to the failure block.
+    fn build_fail_imm(&mut self, ret: InstructionResult) {
+        let ret_value = self.bcx.iconst(self.i8_type, ret as i64);
+        self.build_fail(ret_value);
+    }
+
+    /// Builds a branch to the failure block.
+    fn build_fail(&mut self, ret: B::Value) {
+        self.incoming_failures.push((ret, self.bcx.current_block().unwrap()));
+        self.bcx.br(self.failure_block);
     }
 
     /// Builds a branch to the return block.
@@ -1437,7 +1441,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     fn builtin_ir(&mut self, builtin: Builtin, args: &[B::Value]) {
         let ret = self.builtin(builtin, args).expect("builtin does not return a value");
         let failure = self.bcx.icmp_imm(IntCC::NotEqual, ret, InstructionResult::Continue as i64);
-        self.build_failure_inner(true, failure, ret);
+        self.build_check_inner(true, failure, ret);
     }
 
     /// Build a call to a builtin.
@@ -1496,84 +1500,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             return format!("entry.{name}");
         }
         op_block_name_with(self.current_inst, self.bytecode.inst(self.current_inst), name)
-    }
-
-    #[inline]
-    fn lazy_select(
-        &mut self,
-        cond: B::Value,
-        ty: B::Type,
-        then_value: impl FnOnce(&mut Self, B::BasicBlock) -> B::Value,
-        else_value: impl FnOnce(&mut Self, B::BasicBlock) -> B::Value,
-    ) -> B::Value {
-        let this1 = unsafe { std::mem::transmute::<&mut Self, &mut Self>(self) };
-        let this2 = unsafe { std::mem::transmute::<&mut Self, &mut Self>(self) };
-        self.bcx.lazy_select(
-            cond,
-            ty,
-            #[inline]
-            move |_bcx, block| then_value(this1, block),
-            #[inline]
-            move |_bcx, block| else_value(this2, block),
-        )
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-struct Pointer<B: Backend> {
-    /// The type of the pointee.
-    ty: B::Type,
-    /// The base of the pointer. Either an address or a stack slot.
-    base: PointerBase<B>,
-}
-
-#[derive(Clone, Copy, Debug)]
-enum PointerBase<B: Backend> {
-    Address(B::Value),
-    StackSlot(B::StackSlot),
-}
-
-impl<B: Backend> Pointer<B> {
-    /// Returns `true` if the pointer is an address.
-    #[allow(dead_code)]
-    fn is_address(&self) -> bool {
-        matches!(self.base, PointerBase::Address(_))
-    }
-
-    /// Returns `true` if the pointer is a stack slot.
-    #[allow(dead_code)]
-    fn is_stack_slot(&self) -> bool {
-        matches!(self.base, PointerBase::StackSlot(_))
-    }
-
-    /// Loads the value from the pointer.
-    fn load(&self, bcx: &mut B::Builder<'_>, name: &str) -> B::Value {
-        match self.base {
-            PointerBase::Address(ptr) => bcx.load(self.ty, ptr, name),
-            PointerBase::StackSlot(slot) => bcx.stack_load(self.ty, slot, name),
-        }
-    }
-
-    /// Stores the value to the pointer.
-    fn store(&self, bcx: &mut B::Builder<'_>, value: B::Value) {
-        match self.base {
-            PointerBase::Address(ptr) => bcx.store(value, ptr),
-            PointerBase::StackSlot(slot) => bcx.stack_store(value, slot),
-        }
-    }
-
-    /// Stores the value to the pointer.
-    fn store_imm(&self, bcx: &mut B::Builder<'_>, value: i64) {
-        let value = bcx.iconst(self.ty, value);
-        self.store(bcx, value)
-    }
-
-    /// Gets the address of the pointer.
-    fn addr(&self, bcx: &mut B::Builder<'_>) -> B::Value {
-        match self.base {
-            PointerBase::Address(ptr) => ptr,
-            PointerBase::StackSlot(slot) => bcx.stack_addr(slot),
-        }
     }
 }
 

@@ -478,7 +478,6 @@ impl InstData {
             return false;
         }
 
-        // TODO: SELFDESTRUCT will not be diverging in the future.
         (self.opcode == op::JUMP && self.flags.contains(InstFlags::INVALID_JUMP))
             || self.flags.contains(InstFlags::DISABLED)
             || self.flags.contains(InstFlags::UNKNOWN)

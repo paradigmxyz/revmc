@@ -689,22 +689,22 @@ mod tests {
                 self.0
             }
             fn load_account(&mut self, address: Address) -> Option<(bool, bool)> {
-                todo!()
+                unimplemented!()
             }
             fn block_hash(&mut self, number: U256) -> Option<revm_primitives::B256> {
-                todo!()
+                unimplemented!()
             }
             fn balance(&mut self, address: Address) -> Option<(U256, bool)> {
-                todo!()
+                unimplemented!()
             }
             fn code(&mut self, address: Address) -> Option<(revm_primitives::Bytecode, bool)> {
-                todo!()
+                unimplemented!()
             }
             fn code_hash(&mut self, address: Address) -> Option<(revm_primitives::B256, bool)> {
-                todo!()
+                unimplemented!()
             }
             fn sload(&mut self, address: Address, index: U256) -> Option<(U256, bool)> {
-                todo!()
+                unimplemented!()
             }
             fn sstore(
                 &mut self,
@@ -712,23 +712,23 @@ mod tests {
                 index: U256,
                 value: U256,
             ) -> Option<revm_interpreter::SStoreResult> {
-                todo!()
+                unimplemented!()
             }
             fn tload(&mut self, address: Address, index: U256) -> U256 {
-                todo!()
+                unimplemented!()
             }
             fn tstore(&mut self, address: Address, index: U256, value: U256) {
-                todo!()
+                unimplemented!()
             }
             fn log(&mut self, log: revm_primitives::Log) {
-                todo!()
+                unimplemented!()
             }
             fn selfdestruct(
                 &mut self,
                 address: Address,
                 target: Address,
             ) -> Option<revm_interpreter::SelfDestructResult> {
-                todo!()
+                unimplemented!()
             }
         }
 

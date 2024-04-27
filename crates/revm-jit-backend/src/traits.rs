@@ -1,4 +1,4 @@
-use crate::Result;
+use crate::{Pointer, Result};
 use ruint::aliases::U256;
 use std::{fmt, path::Path};
 
@@ -114,7 +114,7 @@ pub enum FunctionAttributeLocation {
     Function,
 }
 
-pub trait BackendTypes {
+pub trait BackendTypes: Sized {
     type Type: Copy + Eq + fmt::Debug;
     type Value: Copy + Eq + fmt::Debug;
     type StackSlot: Copy + Eq + fmt::Debug;
@@ -190,10 +190,13 @@ pub trait Builder: BackendTypes + TypeMethods {
     fn iconst_256(&mut self, value: U256) -> Self::Value;
     fn str_const(&mut self, value: &str) -> Self::Value;
 
-    fn new_stack_slot(&mut self, ty: Self::Type, name: &str) -> Self::StackSlot;
+    fn new_stack_slot(&mut self, ty: Self::Type, name: &str) -> Pointer<Self> {
+        Pointer::new_stack_slot(self, ty, name)
+    }
+    fn new_stack_slot_raw(&mut self, ty: Self::Type, name: &str) -> Self::StackSlot;
     fn stack_load(&mut self, ty: Self::Type, slot: Self::StackSlot, name: &str) -> Self::Value;
     fn stack_store(&mut self, value: Self::Value, slot: Self::StackSlot);
-    fn stack_addr(&mut self, stack_slot: Self::StackSlot) -> Self::Value;
+    fn stack_addr(&mut self, ty: Self::Type, slot: Self::StackSlot) -> Self::Value;
 
     fn load(&mut self, ty: Self::Type, ptr: Self::Value, name: &str) -> Self::Value;
     fn store(&mut self, value: Self::Value, ptr: Self::Value);
@@ -217,7 +220,7 @@ pub trait Builder: BackendTypes + TypeMethods {
         &mut self,
         index: Self::Value,
         default: Self::BasicBlock,
-        targets: &[(Self::Value, Self::BasicBlock)],
+        targets: &[(u64, Self::BasicBlock)],
     );
     fn phi(&mut self, ty: Self::Type, incoming: &[(Self::Value, Self::BasicBlock)]) -> Self::Value;
     fn select(
@@ -279,7 +282,6 @@ pub trait Builder: BackendTypes + TypeMethods {
         indexes: &[Self::Value],
         name: &str,
     ) -> Self::Value;
-    fn extract_value(&mut self, value: Self::Value, index: u32, name: &str) -> Self::Value;
 
     fn call(&mut self, function: Self::Function, args: &[Self::Value]) -> Option<Self::Value>;
 

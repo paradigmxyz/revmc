@@ -14,6 +14,9 @@ pub use eyre;
 #[doc(no_inline)]
 pub use ruint::{self, aliases::U256, uint};
 
+mod pointer;
+pub use pointer::{Pointer, PointerBase};
+
 /// Compilation result.
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 

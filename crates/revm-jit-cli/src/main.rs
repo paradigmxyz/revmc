@@ -58,7 +58,7 @@ fn main() -> Result<()> {
     let context = revm_jit::llvm::inkwell::context::Context::create();
     let backend = new_llvm_backend(&context, cli.aot, cli.opt_level)?;
     let mut compiler = EvmCompiler::new(backend);
-    compiler.set_dump_to(cli.out_dir);
+    compiler.set_dump_to(cli.out_dir.or_else(|| Some(PathBuf::from("tmp/revm-jit"))));
     compiler.gas_metering(!cli.no_gas);
     unsafe { compiler.stack_bound_checks(!cli.no_len_checks) };
     compiler.frame_pointers(true);
@@ -102,11 +102,6 @@ fn main() -> Result<()> {
     let mut host = revm_interpreter::DummyHost::new(env);
 
     let bytecode = contract.bytecode.original_byte_slice();
-
-    // let table = &revm_interpreter::opcode::make_instruction_table::<
-    //     revm_interpreter::DummyHost,
-    //     revm_primitives::CancunSpec,
-    // >();
 
     let spec_id = cli.spec_id.into();
     if !stack_input.is_empty() {

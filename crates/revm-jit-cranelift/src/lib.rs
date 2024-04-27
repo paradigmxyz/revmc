@@ -7,7 +7,7 @@ use cranelift::{
     prelude::*,
 };
 use cranelift_jit::{JITBuilder, JITModule};
-use cranelift_module::{FuncId, FuncOrDataId, Linkage, Module, ModuleError};
+use cranelift_module::{DataDescription, FuncId, FuncOrDataId, Linkage, Module, ModuleError};
 use cranelift_object::{ObjectBuilder, ObjectModule};
 use pretty_clif::CommentWriter;
 use revm_jit_backend::{
@@ -115,14 +115,11 @@ impl TypeMethods for EvmCraneliftBackend {
     }
 
     fn type_int(&self, bits: u32) -> Self::Type {
-        bits.try_into()
-            .ok()
-            .and_then(Type::int)
-            .unwrap_or_else(|| panic!("unsupported int type with {bits} bits"))
+        bits.try_into().ok().and_then(Type::int).unwrap_or_else(|| unimplemented!("type: i{bits}"))
     }
 
     fn type_array(&self, ty: Self::Type, size: u32) -> Self::Type {
-        unimplemented!("type: {size} x {ty}")
+        unimplemented!("type: [{size} x {ty}]")
     }
 
     fn type_bit_width(&self, ty: Self::Type) -> u32 {
@@ -275,11 +272,11 @@ pub struct EvmCraneliftBuilder<'a> {
 }
 
 impl<'a> BackendTypes for EvmCraneliftBuilder<'a> {
-    type Type = Type;
-    type Value = Value;
-    type StackSlot = StackSlot;
-    type BasicBlock = Block;
-    type Function = FuncRef;
+    type Type = <EvmCraneliftBackend as BackendTypes>::Type;
+    type Value = <EvmCraneliftBackend as BackendTypes>::Value;
+    type StackSlot = <EvmCraneliftBackend as BackendTypes>::StackSlot;
+    type BasicBlock = <EvmCraneliftBackend as BackendTypes>::BasicBlock;
+    type Function = <EvmCraneliftBackend as BackendTypes>::Function;
 }
 
 impl<'a> TypeMethods for EvmCraneliftBuilder<'a> {
@@ -292,14 +289,11 @@ impl<'a> TypeMethods for EvmCraneliftBuilder<'a> {
     }
 
     fn type_int(&self, bits: u32) -> Self::Type {
-        bits.try_into()
-            .ok()
-            .and_then(Type::int)
-            .unwrap_or_else(|| panic!("unsupported int type with {bits} bits"))
+        bits.try_into().ok().and_then(Type::int).unwrap_or_else(|| unimplemented!("type: i{bits}"))
     }
 
     fn type_array(&self, ty: Self::Type, size: u32) -> Self::Type {
-        unimplemented!("type: {size} x {ty}")
+        unimplemented!("type: [{size} x {ty}]")
     }
 
     fn type_bit_width(&self, ty: Self::Type) -> u32 {
@@ -363,15 +357,58 @@ impl<'a> Builder for EvmCraneliftBuilder<'a> {
 
     fn iconst_256(&mut self, value: U256) -> Self::Value {
         let _ = value;
-        unimplemented!("no i256 :(")
+        todo!("no i256 :(")
     }
 
     fn str_const(&mut self, value: &str) -> Self::Value {
-        let _ = value;
-        todo!("str_const")
+        // https://github.com/rust-lang/rustc_codegen_cranelift/blob/1122338eb88648ec36a2eb2b1c27031fa897964d/src/common.rs#L432
+
+        let mut data = DataDescription::new();
+        data.define(value.as_bytes().into());
+        let msg_id = self.module.get_mut().declare_anonymous_data(false, false).unwrap();
+
+        // Ignore DuplicateDefinition error, as the data will be the same
+        let _ = self.module.get_mut().define_data(msg_id, &data);
+
+        let local_msg_id = self.module.get().declare_data_in_func(msg_id, self.bcx.func);
+        if self.comments.enabled() {
+            self.comments.add_comment(local_msg_id, value);
+        }
+        self.bcx.ins().global_value(self.ptr_type, local_msg_id)
     }
 
-    fn new_stack_slot(&mut self, ty: Self::Type, name: &str) -> Self::StackSlot {
+    fn new_stack_slot_raw(&mut self, ty: Self::Type, name: &str) -> Self::StackSlot {
+        // https://github.com/rust-lang/rustc_codegen_cranelift/blob/1122338eb88648ec36a2eb2b1c27031fa897964d/src/common.rs#L388
+
+        /*
+        let _ = name;
+        let abi_align = 16;
+        if align <= abi_align {
+            self.bcx.create_sized_stack_slot(StackSlotData {
+                kind: StackSlotKind::ExplicitSlot,
+                // FIXME Don't force the size to a multiple of <abi_align> bytes once Cranelift gets
+                // a way to specify stack slot alignment.
+                size: (size + abi_align - 1) / abi_align * abi_align,
+            })
+        } else {
+            unimplemented!("{align} > {abi_align}")
+            /*
+            // Alignment is too big to handle using the above hack. Dynamically realign a stack slot
+            // instead. This wastes some space for the realignment.
+            let stack_slot = self.bcx.create_sized_stack_slot(StackSlotData {
+                kind: StackSlotKind::ExplicitSlot,
+                // FIXME Don't force the size to a multiple of <abi_align> bytes once Cranelift gets
+                // a way to specify stack slot alignment.
+                size: (size + align) / abi_align * abi_align,
+            });
+            let base_ptr = self.bcx.ins().stack_addr(self.pointer_type, stack_slot, 0);
+            let misalign_offset = self.bcx.ins().urem_imm(base_ptr, i64::from(align));
+            let realign_offset = self.bcx.ins().irsub_imm(misalign_offset, i64::from(align));
+            Pointer::new(self.bcx.ins().iadd(base_ptr, realign_offset))
+            */
+        }
+        */
+
         let _ = name;
         self.bcx.create_sized_stack_slot(StackSlotData {
             kind: StackSlotKind::ExplicitSlot,
@@ -380,31 +417,21 @@ impl<'a> Builder for EvmCraneliftBuilder<'a> {
     }
 
     fn stack_load(&mut self, ty: Self::Type, slot: Self::StackSlot, name: &str) -> Self::Value {
-        let value = self.bcx.ins().stack_load(ty, slot, 0);
         let _ = name;
-        // if !name.is_empty() {
-        //     self.declare_var(ty, value, name);
-        // }
-        value
+        self.bcx.ins().stack_load(ty, slot, 0)
     }
 
     fn stack_store(&mut self, value: Self::Value, slot: Self::StackSlot) {
         self.bcx.ins().stack_store(value, slot, 0);
     }
 
-    fn stack_addr(&mut self, stack_slot: Self::StackSlot) -> Self::Value {
-        // self.bcx.ins().stack_addr(self., stack_slot, 0)
-        let _ = stack_slot;
-        todo!("stack_addr")
+    fn stack_addr(&mut self, ty: Self::Type, slot: Self::StackSlot) -> Self::Value {
+        self.bcx.ins().stack_addr(ty, slot, 0)
     }
 
     fn load(&mut self, ty: Self::Type, ptr: Self::Value, name: &str) -> Self::Value {
-        let value = self.bcx.ins().load(ty, MemFlags::trusted(), ptr, 0);
         let _ = name;
-        // if !name.is_empty() {
-        //     self.declare_var(ty, value, name);
-        // }
-        value
+        self.bcx.ins().load(ty, MemFlags::trusted(), ptr, 0)
     }
 
     fn store(&mut self, value: Self::Value, ptr: Self::Value) {
@@ -462,15 +489,13 @@ impl<'a> Builder for EvmCraneliftBuilder<'a> {
         &mut self,
         index: Self::Value,
         default: Self::BasicBlock,
-        targets: &[(Self::Value, Self::BasicBlock)],
+        targets: &[(u64, Self::BasicBlock)],
     ) {
-        let _ = index;
-        let _ = default;
-        let _ = targets;
-        todo!()
-        // let default = self.bcx.func.dfg.block_call(default, &[]);
-        // let jt = self.bcx.create_jump_table(JumpTableData::new(default, &[]));
-        // self.bcx.ins().br_table(index, jt);
+        let mut switch = cranelift::frontend::Switch::new();
+        for (value, block) in targets {
+            switch.set_entry(*value as u128, *block);
+        }
+        switch.emit(&mut self.bcx, index, default)
     }
 
     fn phi(&mut self, ty: Self::Type, incoming: &[(Self::Value, Self::BasicBlock)]) -> Self::Value {
@@ -478,9 +503,9 @@ impl<'a> Builder for EvmCraneliftBuilder<'a> {
         let param = self.bcx.append_block_param(current, ty);
         for &(value, block) in incoming {
             self.bcx.switch_to_block(block);
+            let last_inst = self.bcx.func.layout.last_inst(block).unwrap();
             let src = self.bcx.ins().jump(current, &[value]);
-            let dst = self.bcx.func.layout.last_inst(block).unwrap();
-            self.bcx.func.transplant_inst(dst, src)
+            self.bcx.func.transplant_inst(last_inst, src);
         }
         self.bcx.switch_to_block(current);
         param
@@ -650,15 +675,6 @@ impl<'a> Builder for EvmCraneliftBuilder<'a> {
         let _ = name;
         let offset = self.bcx.ins().imul_imm(*indexes.first().unwrap(), ty.bytes() as i64);
         self.bcx.ins().iadd(ptr, offset)
-    }
-
-    fn extract_value(&mut self, value: Self::Value, index: u32, name: &str) -> Self::Value {
-        // let offset = self.bcx.func.dfg.value_type(value).bytes() as i64 * index as i64;
-        // self.bcx.ins().iadd_imm(value, offset)
-        let _ = value;
-        let _ = index;
-        let _ = name;
-        todo!()
     }
 
     fn call(&mut self, function: Self::Function, args: &[Self::Value]) -> Option<Self::Value> {
