@@ -54,8 +54,8 @@ impl SectionAnalysis {
     /// Process a single instruction.
     pub(crate) fn process(&mut self, bytecode: &mut Bytecode<'_>, inst: usize) {
         // JUMPDEST starts a section.
-        if bytecode.inst(inst).is_jumpdest() {
-            self.save_to(bytecode);
+        if bytecode.inst(inst).is_reachable_jumpdest(bytecode.has_dynamic_jumps()) {
+            self.save_to(bytecode, inst);
             self.reset(inst);
         }
 
@@ -70,22 +70,45 @@ impl SectionAnalysis {
 
         // Branching instructions end a section, starting a new one on the next instruction, if any.
         if data.opcode == op::GAS || data.is_branching(bytecode.is_eof()) || data.will_suspend() {
-            self.save_to(bytecode);
-            self.reset(inst + 1);
+            let next = inst + 1;
+            self.save_to(bytecode, next);
+            self.reset(next);
         }
     }
 
     /// Finishes the analysis.
     pub(crate) fn finish(self, bytecode: &mut Bytecode<'_>) {
-        self.save_to(bytecode);
+        self.save_to(bytecode, bytecode.insts.len() - 1);
+        if enabled!(tracing::Level::DEBUG) {
+            let mut max_len = 0;
+            let mut current = 0;
+            for (inst, data) in bytecode.iter_insts() {
+                if data.section.is_empty() {
+                    continue;
+                }
+                let len = inst - current;
+                max_len = max_len.max(len);
+                current = inst;
+            }
+            debug!(max_len);
+        }
     }
 
     /// Saves the current section to the bytecode.
-    fn save_to(&self, bytecode: &mut Bytecode<'_>) {
+    fn save_to(&self, bytecode: &mut Bytecode<'_>, next_section_inst: usize) {
         if self.start_inst >= bytecode.insts.len() {
             return;
         }
-        bytecode.inst_mut(self.start_inst).section = self.section();
+        let section = self.section();
+        if !section.is_empty() {
+            debug!(
+                inst = self.start_inst,
+                len = next_section_inst - self.start_inst,
+                ?section,
+                "saving"
+            );
+            bytecode.inst_mut(self.start_inst).section = section;
+        }
     }
 
     /// Starts a new section.

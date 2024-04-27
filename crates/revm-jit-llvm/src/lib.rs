@@ -391,12 +391,6 @@ impl<'a, 'ctx> std::ops::DerefMut for EvmLlvmBuilder<'a, 'ctx> {
 }
 
 impl<'a, 'ctx> EvmLlvmBuilder<'a, 'ctx> {
-    fn assume_function(&mut self) -> FunctionValue<'ctx> {
-        self.get_or_add_function("llvm.assume", |this| {
-            this.ty_void.fn_type(&[this.ty_i1.into()], false)
-        })
-    }
-
     #[allow(dead_code)]
     fn extract_value(
         &mut self,
@@ -526,23 +520,14 @@ impl<'a, 'ctx> Builder for EvmLlvmBuilder<'a, 'ctx> {
         // Nothing to do.
     }
 
-    fn set_cold_block(&mut self, block: Self::BasicBlock) {
-        let prev = self.current_block();
-        if prev != Some(block) {
-            self.switch_to_block(block);
-        }
-
-        let function = self.assume_function();
+    fn set_current_block_cold(&mut self) {
+        let function = self.get_or_add_function("llvm.assume", |this| {
+            this.ty_void.fn_type(&[this.ty_i1.into()], false)
+        });
         let true_ = self.bool_const(true);
         let callsite = self.bcx.build_call(function, &[true_.into()], "cold").unwrap();
         let cold = self.cx.create_enum_attribute(Attribute::get_named_enum_kind_id("cold"), 1);
         callsite.add_attribute(AttributeLoc::Function, cold);
-
-        if let Some(prev) = prev {
-            if prev != block {
-                self.switch_to_block(prev);
-            }
-        }
     }
 
     fn current_block(&mut self) -> Option<Self::BasicBlock> {
@@ -657,6 +642,30 @@ impl<'a, 'ctx> Builder for EvmLlvmBuilder<'a, 'ctx> {
         self.bcx.build_conditional_branch(cond.into_int_value(), then_block, else_block).unwrap();
     }
 
+    fn brif_cold(
+        &mut self,
+        cond: Self::Value,
+        then_block: Self::BasicBlock,
+        else_block: Self::BasicBlock,
+        then_is_cold: bool,
+    ) {
+        let inst = self
+            .bcx
+            .build_conditional_branch(cond.into_int_value(), then_block, else_block)
+            .unwrap();
+        let metadata = {
+            // From Clang.
+            let branch_weights = self.cx.metadata_string("branch_weights");
+            let then_weight = if then_is_cold { 1 } else { 2000 };
+            let else_weight = if then_is_cold { 2000 } else { 1 };
+            let then_weight = self.ty_i32.const_int(then_weight, false);
+            let else_weight = self.ty_i32.const_int(else_weight, false);
+            self.cx.metadata_node(&[branch_weights.into(), then_weight.into(), else_weight.into()])
+        };
+        let kind_id = self.cx.get_kind_id("prof");
+        inst.set_metadata(metadata, kind_id).unwrap();
+    }
+
     fn switch(
         &mut self,
         index: Self::Value,
@@ -692,8 +701,8 @@ impl<'a, 'ctx> Builder for EvmLlvmBuilder<'a, 'ctx> {
         &mut self,
         cond: Self::Value,
         ty: Self::Type,
-        then_value: impl FnOnce(&mut Self, Self::BasicBlock) -> Self::Value,
-        else_value: impl FnOnce(&mut Self, Self::BasicBlock) -> Self::Value,
+        then_value: impl FnOnce(&mut Self) -> Self::Value,
+        else_value: impl FnOnce(&mut Self) -> Self::Value,
     ) -> Self::Value {
         let then_block = if let Some(current) = self.current_block() {
             self.create_block_after(current, "then")
@@ -706,11 +715,11 @@ impl<'a, 'ctx> Builder for EvmLlvmBuilder<'a, 'ctx> {
         self.brif(cond, then_block, else_block);
 
         self.switch_to_block(then_block);
-        let then_value = then_value(self, then_block);
+        let then_value = then_value(self);
         self.br(done_block);
 
         self.switch_to_block(else_block);
-        let else_value = else_value(self, else_block);
+        let else_value = else_value(self);
         self.br(done_block);
 
         self.switch_to_block(done_block);

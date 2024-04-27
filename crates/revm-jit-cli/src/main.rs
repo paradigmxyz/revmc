@@ -29,6 +29,8 @@ struct Cli {
 
     #[arg(long)]
     aot: bool,
+    #[arg(long)]
+    parse_only: bool,
     #[arg(short = 'o', long)]
     out_dir: Option<PathBuf>,
     #[arg(short = 'O', long, default_value = "3")]
@@ -107,6 +109,12 @@ fn main() -> Result<()> {
     if !stack_input.is_empty() {
         compiler.inspect_stack_length(true);
     }
+
+    if cli.parse_only {
+        let _ = compiler.parse(bytecode, spec_id)?;
+        return Ok(());
+    }
+
     let f_id = compiler.translate(Some(name), bytecode, spec_id)?;
 
     if cli.aot {
