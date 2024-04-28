@@ -33,6 +33,7 @@ tracing-subscriber = { workspace = true, features = ["fmt", "env-filter"] }
 
 [dev-dependencies]
 criterion = "0.5"
+iai-callgrind = "0.10"
 revm-jit-cli-tests = { path = "../revm-jit-cli-tests/" }
 
 [features]
@@ -49,6 +50,13 @@ doc = false
 [[bench]]
 name = "bench"
 path = "benches/bench.rs"
+required-features = ["llvm"]
+harness = false
+doc = false
+
+[[bench]]
+name = "iai"
+path = "benches/iai.rs"
 required-features = ["llvm"]
 harness = false
 doc = false

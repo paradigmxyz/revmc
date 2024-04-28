@@ -231,6 +231,21 @@ impl EvmCompilerFn {
             ecx,
         )
     }
+
+    /// Same as [`call`](Self::call) but with `#[inline(never)]`.
+    ///
+    /// # Safety
+    ///
+    /// See [`call`](Self::call).
+    #[inline(never)]
+    pub unsafe fn call_noinline(
+        self,
+        stack: Option<&mut EvmStack>,
+        stack_len: Option<&mut usize>,
+        ecx: &mut EvmContext<'_>,
+    ) -> InstructionResult {
+        self.call(stack, stack_len, ecx)
+    }
 }
 
 /// EVM context stack.

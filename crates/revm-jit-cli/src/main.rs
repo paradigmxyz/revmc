@@ -29,6 +29,8 @@ struct Cli {
 
     #[arg(long)]
     aot: bool,
+    #[arg(long, requires = "aot")]
+    no_link: bool,
     #[arg(long)]
     parse_only: bool,
     #[arg(short = 'o', long)]
@@ -60,7 +62,7 @@ fn main() -> Result<()> {
     let context = revm_jit::llvm::inkwell::context::Context::create();
     let backend = new_llvm_backend(&context, cli.aot, cli.opt_level)?;
     let mut compiler = EvmCompiler::new(backend);
-    compiler.set_dump_to(cli.out_dir.or_else(|| Some(PathBuf::from("tmp/revm-jit"))));
+    compiler.set_dump_to(cli.out_dir);
     compiler.gas_metering(!cli.no_gas);
     unsafe { compiler.stack_bound_checks(!cli.no_len_checks) };
     compiler.frame_pointers(true);
@@ -118,20 +120,28 @@ fn main() -> Result<()> {
     let f_id = compiler.translate(Some(name), bytecode, spec_id)?;
 
     if cli.aot {
-        let mut out_dir = compiler.out_dir().unwrap().to_path_buf();
-        out_dir.push(cli.bench_name);
+        let out_dir = if let Some(out_dir) = compiler.out_dir() {
+            out_dir.join(cli.bench_name)
+        } else {
+            let dir = std::env::temp_dir().join("revm-jit-cli").join(cli.bench_name);
+            std::fs::create_dir_all(&dir)?;
+            dir
+        };
 
+        // Compile.
         let obj = out_dir.join("a.o");
-        let mut file = std::fs::File::create(&obj)?;
-        compiler.write_object(&mut file)?;
+        compiler.write_object_to_file(&obj)?;
         ensure!(obj.exists(), "Failed to write object file");
         eprintln!("Compiled object file to {}", obj.display());
 
-        let so = out_dir.join("a.so");
-        let linker = revm_jit::Linker::new();
-        linker.link(&so, [obj.to_str().unwrap()])?;
-        ensure!(so.exists(), "Failed to link object file");
-        eprintln!("Linked shared object file to {}", so.display());
+        // Link.
+        if !cli.no_link {
+            let so = out_dir.join("a.so");
+            let linker = revm_jit::Linker::new();
+            linker.link(&so, [obj.to_str().unwrap()])?;
+            ensure!(so.exists(), "Failed to link object file");
+            eprintln!("Linked shared object file to {}", so.display());
+        }
 
         return Ok(());
     }
@@ -150,7 +160,7 @@ fn main() -> Result<()> {
         }
         *stack_len = stack_input.len();
 
-        let r = unsafe { f.call(Some(stack), Some(stack_len), &mut ecx) };
+        let r = unsafe { f.call_noinline(Some(stack), Some(stack_len), &mut ecx) };
         (r, interpreter.next_action)
     };
 

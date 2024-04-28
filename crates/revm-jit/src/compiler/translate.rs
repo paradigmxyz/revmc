@@ -4,7 +4,7 @@ use crate::{
     Backend, Builder, Bytecode, EvmContext, Inst, InstData, InstFlags, IntCC, Result, I256_MIN,
 };
 use revm_interpreter::{opcode as op, Contract, InstructionResult};
-use revm_jit_backend::{BackendTypes, Pointer, PointerBase, TypeMethods};
+use revm_jit_backend::{BackendTypes, Pointer, TypeMethods};
 use revm_jit_builtins::{Builtin, Builtins, CallKind, CreateKind};
 use revm_primitives::{BlockEnv, CfgEnv, Env, SpecId, TxEnv, U256};
 use std::{fmt::Write, mem, sync::atomic::AtomicPtr};
@@ -182,16 +182,14 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         // Set up entry block.
         let gas_ptr = bcx.fn_param(0);
         let gas_remaining = {
-            let offset = bcx.iconst(isize_type, mem::offset_of!(pf::Gas, remaining) as i64);
+            let offset = bcx.iconst(i64_type, mem::offset_of!(pf::Gas, remaining) as i64);
             let name = "gas.remaining.addr";
-            let base = PointerBase::Address(bcx.gep(i8_type, gas_ptr, &[offset], name));
-            Pointer { ty: isize_type, base }
+            Pointer::new_address(i64_type, bcx.gep(i8_type, gas_ptr, &[offset], name))
         };
         let gas_remaining_nomem = {
-            let offset = bcx.iconst(isize_type, mem::offset_of!(pf::Gas, remaining_nomem) as i64);
+            let offset = bcx.iconst(i64_type, mem::offset_of!(pf::Gas, remaining_nomem) as i64);
             let name = "gas.remaining_nomem.addr";
-            let base = PointerBase::Address(bcx.gep(i8_type, gas_ptr, &[offset], name));
-            Pointer { ty: i64_type, base }
+            Pointer::new_address(i64_type, bcx.gep(i8_type, gas_ptr, &[offset], name))
         };
 
         let sp_arg = bcx.fn_param(1);
