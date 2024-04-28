@@ -23,15 +23,10 @@ pub(crate) fn resize_memory(
 ) -> InstructionResult {
     let size = offset.saturating_add(len);
     if size > ecx.memory.len() {
-        let rounded_size = revm_interpreter::interpreter::next_multiple_of_32(size);
-
         // TODO: Memory limit
-
-        // TODO: try_resize
-        if !ecx.gas.record_memory(rgas::memory_gas(rounded_size / 32)) {
-            return InstructionResult::MemoryLimitOOG;
+        if !revm_interpreter::interpreter::resize_memory(ecx.memory, ecx.gas, size) {
+            return InstructionResult::MemoryOOG;
         }
-        ecx.memory.resize(rounded_size);
     }
     InstructionResult::Continue
 }

@@ -826,8 +826,7 @@ tests! {
                     output: Bytes::copy_from_slice(&0x69_U256.to_be_bytes::<32>()),
                     gas: {
                         let mut gas = Gas::new(DEF_GAS_LIMIT);
-                        assert!(gas.record_cost(3 + 2 + 3 + 3 + 2));
-                        assert!(gas.record_memory(gas::memory_gas(1)));
+                        assert!(gas.record_cost(3 + 2 + (3 + gas::memory_gas(1)) + 3 + 2));
                         gas
                     },
                 },
@@ -844,8 +843,7 @@ tests! {
                     output: Bytes::copy_from_slice(&0x69_U256.to_be_bytes::<32>()),
                     gas: {
                         let mut gas = Gas::new(DEF_GAS_LIMIT);
-                        assert!(gas.record_cost(3 + 2 + 3 + 3 + 2));
-                        assert!(gas.record_memory(gas::memory_gas(1)));
+                        assert!(gas.record_cost(3 + 2 + (3 + gas::memory_gas(1)) + 3 + 2));
                         gas
                     },
                 },

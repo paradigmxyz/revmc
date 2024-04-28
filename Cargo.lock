@@ -1945,7 +1945,7 @@ dependencies = [
 [[package]]
 name = "revm-interpreter"
 version = "4.0.0"
-source = "git+https://github.com/danipopes/revm?branch=tmp-prs2#9aeebfbb74682c247df2fd9985d601dde0269fea"
+source = "git+https://github.com/danipopes/revm?branch=tmp-prs2#7d1de60df1cb4416014c5662d86c78aab5893823"
 dependencies = [
  "paste",
  "phf",
@@ -2054,7 +2054,7 @@ dependencies = [
 [[package]]
 name = "revm-primitives"
 version = "3.1.1"
-source = "git+https://github.com/danipopes/revm?branch=tmp-prs2#9aeebfbb74682c247df2fd9985d601dde0269fea"
+source = "git+https://github.com/danipopes/revm?branch=tmp-prs2#7d1de60df1cb4416014c5662d86c78aab5893823"
 dependencies = [
  "alloy-primitives",
  "auto_impl",
