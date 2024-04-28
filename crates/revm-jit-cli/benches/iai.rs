@@ -46,7 +46,8 @@ fn setup_group(group: &mut BinaryBenchmarkGroup, is_ct: bool) {
         }
         run.regression(regression);
 
-        if small && !is_ci() && false { // Uses an insane amount of memory (???)
+        // Uses an insane amount of memory (???)
+        if cfg!(any()) && small && !is_ci() {
             let flamegraph = FlamegraphConfig::default();
             run.flamegraph(flamegraph);
         }
