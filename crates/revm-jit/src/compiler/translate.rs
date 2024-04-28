@@ -1324,16 +1324,17 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             return;
         }
 
-        // `Gas::record_cost`
+        // Modified from `Gas::record_cost`.
         let gas_remaining = self.load_gas_remaining();
         let (res, overflow) = self.bcx.usub_overflow(gas_remaining, cost);
-        self.build_check(overflow, InstructionResult::OutOfGas);
 
         let nomem = self.gas_remaining_nomem.load(&mut self.bcx, "gas_remaining_nomem");
         let nomem = self.bcx.isub(nomem, cost);
-        self.gas_remaining_nomem.store(&mut self.bcx, nomem);
 
         self.store_gas_remaining(res);
+        self.gas_remaining_nomem.store(&mut self.bcx, nomem);
+
+        self.build_check(overflow, InstructionResult::OutOfGas);
     }
 
     /*

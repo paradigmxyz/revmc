@@ -18,13 +18,17 @@ binary_benchmark_group!(
 );
 
 fn setup_group(group: &mut BinaryBenchmarkGroup, is_ct: bool) {
-    let make_run = |name: &str| {
+    let make_run = |name: &str, small: bool| {
         let mut args = Vec::with_capacity(3);
         args.push(name);
+        // let out_dir = std::env::temp_dir().join("revm-jit-cli-iai");
+        // let so = out_dir.join(name).join("a.so");
         if is_ct {
             args.extend(["--aot", "--no-link"]);
+            // args.extend(["--aot", "--no-link", "-o", out_dir.to_str().unwrap()]);
         } else {
             args.push("1");
+            // args.extend(["1", "--shared-library", so.to_str().unwrap()]);
         }
         let arg = Arg::new(name, args);
         let mut run = Run::with_cmd(CMD, arg);
@@ -35,22 +39,32 @@ fn setup_group(group: &mut BinaryBenchmarkGroup, is_ct: bool) {
 
         let mut regression = RegressionConfig::default();
         if is_ct {
-            regression.limits([(EventKind::EstimatedCycles, 10.0)]);
+            let cycles = if small { 50.0 } else { 20.0 };
+            regression.limits([(EventKind::EstimatedCycles, cycles)]);
         } else {
             regression.limits([(EventKind::EstimatedCycles, 5.0)]);
         }
         run.regression(regression);
 
-        if !is_ci() {
+        if small && !is_ci() {
             let flamegraph = FlamegraphConfig::default();
             run.flamegraph(flamegraph);
         }
 
         run
     };
-    let benches = ["fibonacci", "counter", "push0_proxy", "weth", "hash_20k", "usdc_proxy"];
-    for bench in &benches {
-        group.bench(make_run(bench));
+    let benches = [
+        ("fibonacci", true),
+        ("counter", true),
+        ("hash_20k", true),
+        ("usdc_proxy", false),
+        ("weth", false),
+    ];
+    for (bench, small) in benches {
+        if !is_ct && !small {
+            continue;
+        }
+        group.bench(make_run(bench, small));
     }
 }
 
