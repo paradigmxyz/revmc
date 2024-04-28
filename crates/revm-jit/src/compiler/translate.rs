@@ -1325,10 +1325,12 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         }
 
         // Modified from `Gas::record_cost`.
+        // Group operations to allow for vectorization.
+        // This can overflow the gas counters, which has to be adjusted for after the call.
         let gas_remaining = self.load_gas_remaining();
-        let (res, overflow) = self.bcx.usub_overflow(gas_remaining, cost);
-
         let nomem = self.gas_remaining_nomem.load(&mut self.bcx, "gas_remaining_nomem");
+
+        let (res, overflow) = self.bcx.usub_overflow(gas_remaining, cost);
         let nomem = self.bcx.isub(nomem, cost);
 
         self.store_gas_remaining(res);

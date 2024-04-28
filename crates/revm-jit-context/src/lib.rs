@@ -188,6 +188,12 @@ impl EvmCompilerFn {
             EvmContext::from_interpreter_with_stack(interpreter, host);
         let result = self.call(Some(stack), Some(stack_len), &mut ecx);
 
+        // Set the remaining gas to 0 if the result is `OutOfGas`, as it will have overflown inside
+        // of the function.
+        if result == InstructionResult::OutOfGas {
+            ecx.gas.spend_all();
+        }
+
         let resume_at = ecx.resume_at;
         ResumeAt::store(&mut interpreter.instruction_pointer, resume_at);
 
