@@ -71,6 +71,11 @@ pub fn get_benches() -> Vec<Bench> {
             bytecode: hex::decode(include_str!("../../../data/uniswap_v2_pair.rt.hex")).unwrap(),
             ..Default::default()
         },
+        Bench {
+            name: "seaport",
+            bytecode: hex::decode(include_str!("../../../data/seaport.rt.hex")).unwrap(),
+            ..Default::default()
+        },
     ]
 }
 

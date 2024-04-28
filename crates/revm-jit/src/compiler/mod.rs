@@ -459,24 +459,15 @@ impl<B: Backend> EvmCompiler<B> {
     }
 
     fn dump_bytecode(dump_dir: &Path, bytecode: &Bytecode<'_>) -> Result<()> {
-        fn with_extra_ext(p: &Path, ext: &str) -> PathBuf {
-            p.with_file_name(format!("{}.{ext}", p.file_name().unwrap().to_str().unwrap()))
-        }
-
-        let fname = dump_dir.join("evm").with_extension(format!("{:?}", bytecode.spec_id));
-        fs::write(with_extra_ext(&fname, "bin"), bytecode.code)?;
-
-        fs::write(with_extra_ext(&fname, "hex"), revm_primitives::hex::encode(bytecode.code))?;
-
         {
-            let file = fs::File::create(with_extra_ext(&fname, "txt"))?;
+            let file = fs::File::create(dump_dir.join("bytecode.txt"))?;
             let mut writer = io::BufWriter::new(file);
             write!(writer, "{bytecode}")?;
             writer.flush()?;
         }
 
         {
-            let file = fs::File::create(with_extra_ext(&fname, "dbg.txt"))?;
+            let file = fs::File::create(dump_dir.join("bytecode.dbg.txt"))?;
             let mut writer = io::BufWriter::new(file);
             writeln!(writer, "{bytecode:#?}")?;
             writer.flush()?;

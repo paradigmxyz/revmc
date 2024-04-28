@@ -38,8 +38,8 @@ impl<'ctx> DiagnosticHandlerGuard<'ctx> {
             match LLVMGetDiagInfoSeverity(di) {
                 LLVMDSError => error!(target: "llvm", "{msg}"),
                 LLVMDSWarning => warn!(target: "llvm", "{msg}"),
-                LLVMDSRemark => debug!(target: "llvm", "{msg}"),
-                LLVMDSNote => info!(target: "llvm", "{msg}"),
+                LLVMDSRemark => trace!(target: "llvm", "{msg}"),
+                LLVMDSNote => debug!(target: "llvm", "{msg}"),
             }
         }
     }
