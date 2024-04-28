@@ -13,10 +13,10 @@ const SPEC_ID: SpecId = SpecId::CANCUN;
 
 fn bench(c: &mut Criterion) {
     for bench in &revm_jit_cli::get_benches() {
-        if matches!(bench.name, "push0_proxy" | "weth") {
-            continue;
-        }
         run_bench(c, bench);
+        if matches!(bench.name, "hash_20k") {
+            break;
+        }
     }
 }
 
@@ -68,16 +68,14 @@ fn run_bench(c: &mut Criterion, bench: &Bench) {
         host.clear();
         let mut ecx = EvmContext::from_interpreter(&mut interpreter, &mut host);
 
-        let r = unsafe { f.call(Some(&mut stack), Some(&mut stack_len), &mut ecx) };
-        assert!(r.is_ok(), "JIT failed with {r:?}");
-        r
+        unsafe { f.call(Some(&mut stack), Some(&mut stack_len), &mut ecx) }
     };
 
     let jit_matrix = [
         ("default", (true, true)),
         ("no_gas", (false, true)),
-        ("no_stack", (true, false)),
-        ("no_gas_no_stack", (false, false)),
+        // ("no_stack", (true, false)),
+        // ("no_gas_no_stack", (false, false)),
     ];
     let jit_ids = jit_matrix.map(|(name, (gas, stack))| {
         compiler.gas_metering(gas);
@@ -112,7 +110,7 @@ fn run_bench(c: &mut Criterion, bench: &Bench) {
 
 fn mk_group<'a>(c: &'a mut Criterion, name: &str) -> BenchmarkGroup<'a, WallTime> {
     let mut g = c.benchmark_group(name);
-    g.sample_size(20);
+    g.sample_size(50);
     g.warm_up_time(Duration::from_secs(5));
     g.measurement_time(Duration::from_secs(15));
     g

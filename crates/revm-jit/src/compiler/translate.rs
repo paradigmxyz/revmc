@@ -65,8 +65,6 @@ pub(super) struct FunctionCx<'a, B: Backend> {
     stack: Pointer<B::Builder<'a>>,
     /// The amount of gas remaining. `i64`. See `Gas`.
     gas_remaining: Pointer<B::Builder<'a>>,
-    /// The amount of gas remaining, without accounting for memory expansion. `i64`. See `Gas`.
-    gas_remaining_nomem: Pointer<B::Builder<'a>>,
     /// The environment. Constant throughout the function.
     env: B::Value,
     /// The contract. Constant throughout the function.
@@ -186,11 +184,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             let name = "gas.remaining.addr";
             Pointer::new_address(i64_type, bcx.gep(i8_type, gas_ptr, &[offset], name))
         };
-        let gas_remaining_nomem = {
-            let offset = bcx.iconst(i64_type, mem::offset_of!(pf::Gas, remaining_nomem) as i64);
-            let name = "gas.remaining_nomem.addr";
-            Pointer::new_address(i64_type, bcx.gep(i8_type, gas_ptr, &[offset], name))
-        };
 
         let sp_arg = bcx.fn_param(1);
         let stack = if config.local_stack {
@@ -236,7 +229,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             stack_len,
             stack,
             gas_remaining,
-            gas_remaining_nomem,
             env,
             contract,
             ecx,
@@ -1325,18 +1317,19 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         }
 
         // Modified from `Gas::record_cost`.
-        // Group operations to allow for vectorization.
         // This can overflow the gas counters, which has to be adjusted for after the call.
         let gas_remaining = self.load_gas_remaining();
-        let nomem = self.gas_remaining_nomem.load(&mut self.bcx, "gas_remaining_nomem");
-
         let (res, overflow) = self.bcx.usub_overflow(gas_remaining, cost);
-        let nomem = self.bcx.isub(nomem, cost);
-
-        self.store_gas_remaining(res);
-        self.gas_remaining_nomem.store(&mut self.bcx, nomem);
-
-        self.build_check(overflow, InstructionResult::OutOfGas);
+        if self.bytecode.is_small() {
+            // Storing the result before the check significantly increases time spent in
+            // `llvm::MemoryDependenceResults::getNonLocalPointerDependency`, but it might produce
+            // slightly better code.
+            self.store_gas_remaining(res);
+            self.build_check(overflow, InstructionResult::OutOfGas);
+        } else {
+            self.build_check(overflow, InstructionResult::OutOfGas);
+            self.store_gas_remaining(res);
+        }
     }
 
     /*
@@ -1540,6 +1533,7 @@ mod pf {
         data: AtomicPtr<()>,
         vtable: &'static Vtable,
     }
+    const _: [(); mem::size_of::<revm_primitives::Bytes>()] = [(); mem::size_of::<Bytes>()];
     struct Vtable {
         /// fn(data, ptr, len)
         clone: unsafe fn(&AtomicPtr<()>, *const u8, usize) -> Bytes,
@@ -1556,19 +1550,17 @@ mod pf {
         pub(super) ptr: *const u8,
         pub(super) len: usize,
     }
+    const _: [(); mem::size_of::<&'static [u8]>()] = [(); mem::size_of::<Slice>()];
 
     pub(super) struct Gas {
         /// The initial gas limit. This is constant throughout execution.
         pub(super) limit: u64,
         /// The remaining gas.
         pub(super) remaining: u64,
-        /// The remaining gas, without memory expansion.
-        pub(super) remaining_nomem: u64,
-        /// The **last** memory expansion cost.
-        memory: u64,
         /// Refunded gas. This is used only at the end of execution.
         refunded: i64,
     }
+    const _: [(); mem::size_of::<revm_interpreter::Gas>()] = [(); mem::size_of::<Gas>()];
 }
 
 fn op_block_name_with(op: Inst, data: &InstData, with: &str) -> String {

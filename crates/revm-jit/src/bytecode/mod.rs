@@ -335,6 +335,13 @@ impl<'a> Bytecode<'a> {
         false
     }
 
+    /// Returns `true` if the bytecode is small.
+    ///
+    /// This is arbitarily chosen to speed up compilation for larger contracts.
+    pub(crate) fn is_small(&self) -> bool {
+        self.insts.len() < 2000
+    }
+
     /// Returns `true` if the instruction is diverging.
     pub(crate) fn is_instr_diverging(&self, inst: Inst) -> bool {
         self.insts[inst].is_diverging(self.is_eof())

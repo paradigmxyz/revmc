@@ -40,11 +40,6 @@ pub fn get_benches() -> Vec<Bench> {
             ..Default::default()
         },
         Bench {
-            name: "push0_proxy",
-            bytecode: hex::decode(include_str!("../../../data/push0_proxy.rt.hex")).unwrap(),
-            ..Default::default()
-        },
-        Bench {
             name: "weth",
             bytecode: hex::decode(include_str!("../../../data/weth.rt.hex")).unwrap(),
             ..Default::default()
@@ -57,13 +52,18 @@ pub fn get_benches() -> Vec<Bench> {
             ..Default::default()
         },
         Bench {
-            name: "fiat_token",
-            bytecode: hex::decode(include_str!("../../../data/fiat_token.rt.hex")).unwrap(),
+            name: "push0_proxy",
+            bytecode: hex::decode(include_str!("../../../data/push0_proxy.rt.hex")).unwrap(),
             ..Default::default()
         },
         Bench {
             name: "usdc_proxy",
             bytecode: hex::decode(include_str!("../../../data/usdc_proxy.rt.hex")).unwrap(),
+            ..Default::default()
+        },
+        Bench {
+            name: "fiat_token",
+            bytecode: hex::decode(include_str!("../../../data/fiat_token.rt.hex")).unwrap(),
             ..Default::default()
         },
         Bench {
