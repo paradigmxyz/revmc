@@ -97,7 +97,6 @@ impl Linker {
 mod tests {
     use super::*;
     use revm_primitives::SpecId;
-    use std::fs::File;
 
     #[test]
     fn basic() {
@@ -114,11 +113,8 @@ mod tests {
             panic!("failed to compile: {e}");
         }
 
-        {
-            let mut f = File::create(&obj).unwrap();
-            if let Err(e) = compiler.write_object(&mut f) {
-                panic!("failed to write object: {e}");
-            }
+        if let Err(e) = compiler.write_object_to_file(&obj) {
+            panic!("failed to write object: {e}");
         }
         assert!(obj.exists());
 

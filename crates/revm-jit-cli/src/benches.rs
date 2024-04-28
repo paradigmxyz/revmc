@@ -10,6 +10,10 @@ pub struct Bench {
     pub native: Option<fn()>,
 }
 
+pub fn get_bench(name: &str) -> Option<Bench> {
+    get_benches().into_iter().find(|b| b.name == name)
+}
+
 pub fn get_benches() -> Vec<Bench> {
     vec![
         Bench {

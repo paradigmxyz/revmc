@@ -34,15 +34,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install LLVM (apt)
         if: ${{ !contains(matrix.runner, 'macos') }}
-        run: |
-          v=${{ env.LLVM_VERSION }}
-          wget https://apt.llvm.org/llvm.sh
-          chmod +x llvm.sh
-          sudo ./llvm.sh $v all
-          bins=(clang llvm-config lld ld.lld FileCheck)
-          for bin in "${bins[@]}"; do
-            sudo ln -fs $(which $bin-$v) /usr/bin/$bin
-          done
+        run: sudo .github/scripts/install_llvm_ubuntu.sh ${{ env.LLVM_VERSION }}
       - name: Install LLVM (brew)
         if: ${{ contains(matrix.runner, 'macos') }}
         run: |
@@ -61,14 +53,55 @@ jobs:
       - name: test
         run: cargo test --all-features --workspace --profile ${{ matrix.profile }}
 
+  iai:
+    runs-on: ubuntu-latest
+    env:
+      BASELINE: base
+      IAI_CALLGRIND_RUNNER: iai-callgrind-runner
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install LLVM
+        run: sudo .github/scripts/install_llvm_ubuntu.sh ${{ env.LLVM_VERSION }}
+      - name: Install Valgrind
+        run: sudo apt update && sudo apt install valgrind
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - name: Install cargo-binstall
+        uses: taiki-e/install-action@cargo-binstall
+      - name: Install iai-callgrind-runner
+        run: |
+          echo "::group::Install"
+          version=$(cargo metadata --format-version=1 |\
+            jq '.packages[] | select(.name == "iai-callgrind").version' |\
+            tr -d '"'
+          )
+          cargo binstall iai-callgrind-runner --version $version --no-confirm --no-symlinks --force
+          echo "::endgroup::"
+          echo "::group::Verification"
+          which iai-callgrind-runner
+          echo "::endgroup::"
+      - name: Checkout base
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.base_ref || 'main' }}
+      - name: Save baseline
+        run: cargo bench -p revm-jit-cli --bench iai -- --save-baseline=$BASELINE
+      - name: Checkout PR
+        uses: actions/checkout@v4
+        with:
+          clean: false
+      - name: Compare PR benchmarks
+        run: cargo bench -p revm-jit-cli --bench iai -- --baseline=$BASELINE
+
   feature-checks:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - uses: KyleMayes/install-llvm-action@v2.0.2
-        with:
-          version: ${{ env.LLVM_VERSION }}
+      - name: Install LLVM
+        run: sudo .github/scripts/install_llvm_ubuntu.sh ${{ env.LLVM_VERSION }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: taiki-e/install-action@cargo-hack
       - uses: Swatinem/rust-cache@v2
@@ -83,9 +116,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - uses: KyleMayes/install-llvm-action@v2.0.2
-        with:
-          version: ${{ env.LLVM_VERSION }}
+      - name: Install LLVM
+        run: sudo .github/scripts/install_llvm_ubuntu.sh ${{ env.LLVM_VERSION }}
       - uses: dtolnay/rust-toolchain@clippy
       - uses: Swatinem/rust-cache@v2
         with:
@@ -99,9 +131,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - uses: KyleMayes/install-llvm-action@v2.0.2
-        with:
-          version: ${{ env.LLVM_VERSION }}
+      - name: Install LLVM
+        run: sudo .github/scripts/install_llvm_ubuntu.sh ${{ env.LLVM_VERSION }}
       - uses: dtolnay/rust-toolchain@nightly
       - uses: Swatinem/rust-cache@v2
         with:
