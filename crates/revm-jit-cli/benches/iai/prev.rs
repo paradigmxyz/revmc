@@ -114,4 +114,4 @@ macro_rules! make_benchmarks {
     };
 }
 
-make_benchmarks!(fibonacci, counter, snailtracer, push0_proxy, weth, hash_20k);
+make_benchmarks!(fibonacci, counter, snailtracer, push0_proxy, weth, hash_10k);

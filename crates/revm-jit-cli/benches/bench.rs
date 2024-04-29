@@ -14,7 +14,7 @@ const SPEC_ID: SpecId = SpecId::CANCUN;
 fn bench(c: &mut Criterion) {
     for bench in &revm_jit_cli::get_benches() {
         run_bench(c, bench);
-        if matches!(bench.name, "hash_20k") {
+        if matches!(bench.name, "hash_10k") {
             break;
         }
     }

@@ -57,7 +57,7 @@ fn setup_group(group: &mut BinaryBenchmarkGroup, is_ct: bool) {
     let benches = [
         ("fibonacci", true),
         ("counter", true),
-        ("hash_20k", true),
+        ("hash_10k", true),
         ("usdc_proxy", false),
         ("weth", false),
     ];

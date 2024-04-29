@@ -45,8 +45,15 @@ pub fn get_benches() -> Vec<Bench> {
             ..Default::default()
         },
         Bench {
-            name: "hash_20k",
-            bytecode: hex::decode(include_str!("../../../data/hash_20k.rt.hex")).unwrap(),
+            name: "hash_10k",
+            bytecode: hex::decode(include_str!("../../../data/hash_10k.rt.hex")).unwrap(),
+            // `Benchmark()`
+            calldata: hex!("30627b7c").to_vec(),
+            ..Default::default()
+        },
+        Bench {
+            name: "erc20_transfer",
+            bytecode: hex::decode(include_str!("../../../data/erc20_transfer.rt.hex")).unwrap(),
             // `Benchmark()`
             calldata: hex!("30627b7c").to_vec(),
             ..Default::default()

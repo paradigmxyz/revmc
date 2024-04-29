@@ -8,7 +8,7 @@ use revm_jit::{
     new_llvm_backend, EvmCompiler, EvmContext, OptimizationLevel,
 };
 use revm_jit_cli::{get_benches, parse_evm_dsl, Bench};
-use revm_primitives::{hex, Bytes, Env, SpecId};
+use revm_primitives::{address, hex, Bytes, Env, SpecId};
 use std::{
     hint::black_box,
     path::{Path, PathBuf},
@@ -96,6 +96,7 @@ fn main() -> Result<()> {
     let gas_limit = cli.gas_limit;
 
     let mut env = Env::default();
+    env.tx.caller = address!("1000000000000000000000000000000000000001");
     env.tx.data = calldata;
     env.tx.gas_limit = gas_limit;
 
