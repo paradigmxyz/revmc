@@ -21,11 +21,6 @@ revm-jit-context.workspace = true
 
 revm-primitives.workspace = true
 revm-interpreter.workspace = true
-
-# ir
-paste = { workspace = true, optional = true }
-revm-jit-backend = { workspace = true, optional = true }
-tracing = { workspace = true, optional = true }
-
-[features]
-ir = ["dep:paste", "dep:revm-jit-backend", "dep:tracing"]
+paste.workspace = true
+revm-jit-backend.workspace = true
+tracing.workspace = true

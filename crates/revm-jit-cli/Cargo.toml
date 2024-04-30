@@ -28,6 +28,7 @@ revm-primitives.workspace = true
 
 clap = { version = "4", features = ["derive"] }
 color-eyre.workspace = true
+libloading = "0.8"
 tracing-error.workspace = true
 tracing-subscriber = { workspace = true, features = ["fmt", "env-filter"] }
 
@@ -35,6 +36,9 @@ tracing-subscriber = { workspace = true, features = ["fmt", "env-filter"] }
 criterion = "0.5"
 iai-callgrind = "0.10"
 revm-jit-cli-tests = { path = "../revm-jit-cli-tests/" }
+
+[build-dependencies]
+revm-jit-build.workspace = true
 
 [features]
 default = ["llvm", "revm-jit/asm-keccak"]

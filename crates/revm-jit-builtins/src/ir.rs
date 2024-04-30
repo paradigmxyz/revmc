@@ -1,4 +1,3 @@
-use alloc::vec::Vec;
 use revm_jit_backend::{Attribute, Backend, Builder, FunctionAttributeLocation, TypeMethods};
 
 /// Builtin cache.

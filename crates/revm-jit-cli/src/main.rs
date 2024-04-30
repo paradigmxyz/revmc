@@ -16,6 +16,7 @@ use std::{
 
 #[derive(Parser)]
 struct Cli {
+    /// Benchmark name, "custom", path to a file, or a symbol to load from a shared object.
     bench_name: String,
     #[arg(default_value = "1")]
     n_iters: u64,
@@ -27,12 +28,23 @@ struct Cli {
     #[arg(long)]
     calldata: Option<Bytes>,
 
+    /// Load a shared object file instead of JIT compiling.
+    ///
+    /// Use with `--aot` to also run the compiled library.
     #[arg(long)]
-    aot: bool,
-    #[arg(long, requires = "aot")]
-    no_link: bool,
+    load: Option<Option<PathBuf>>,
+
+    /// Parse the bytecode only.
     #[arg(long)]
     parse_only: bool,
+
+    /// Compile and link to a shared library.
+    #[arg(long)]
+    aot: bool,
+    /// Compile only, do not link.
+    #[arg(long, requires = "aot")]
+    no_link: bool,
+
     #[arg(short = 'o', long)]
     out_dir: Option<PathBuf>,
     #[arg(short = 'O', long, default_value = "3")]
@@ -85,10 +97,20 @@ fn main() -> Result<()> {
             ..Default::default()
         }
     } else {
-        get_benches()
-            .into_iter()
-            .find(|b| b.name == cli.bench_name)
-            .ok_or_else(|| eyre!("unknown benchmark: {}", cli.bench_name))?
+        match get_benches().into_iter().find(|b| b.name == cli.bench_name) {
+            Some(b) => b,
+            None => {
+                if cli.load.is_some() {
+                    Bench {
+                        name: cli.bench_name.clone().leak(),
+                        bytecode: Vec::new(),
+                        ..Default::default()
+                    }
+                } else {
+                    return Err(eyre!("unknown benchmark: {}", cli.bench_name));
+                }
+            }
+        }
     };
     compiler.set_module_name(name);
 
@@ -120,6 +142,7 @@ fn main() -> Result<()> {
 
     let f_id = compiler.translate(Some(name), bytecode, spec_id)?;
 
+    let mut load = cli.load;
     if cli.aot {
         let out_dir = if let Some(out_dir) = compiler.out_dir() {
             out_dir.join(cli.bench_name)
@@ -144,10 +167,27 @@ fn main() -> Result<()> {
             eprintln!("Linked shared object file to {}", so.display());
         }
 
-        return Ok(());
+        // Fall through to loading the library below if requested.
+        if let Some(load @ None) = &mut load {
+            *load = Some(out_dir.join("a.so"));
+        } else {
+            return Ok(());
+        }
     }
 
-    let f = compiler.jit_function(f_id)?;
+    let lib;
+    let f = if let Some(load) = load {
+        if let Some(load) = load {
+            lib = unsafe { libloading::Library::new(load) }?;
+            let f: libloading::Symbol<'_, revm_jit::EvmCompilerFn> =
+                unsafe { lib.get(name.as_bytes())? };
+            *f
+        } else {
+            return Err(eyre!("--load with no argument requires --aot"));
+        }
+    } else {
+        compiler.jit_function(f_id)?
+    };
 
     let mut run = |f: revm_jit::EvmCompilerFn| {
         let mut interpreter =

@@ -1,11 +1,7 @@
 #![doc = include_str!("../README.md")]
 #![cfg_attr(not(test), warn(unused_extern_crates))]
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
-#![no_std]
 
-extern crate alloc;
-
-use alloc::vec::Vec;
 use core::{fmt, mem::MaybeUninit, ptr};
 use revm_interpreter::{
     Contract, FunctionStack, Gas, Host, InstructionResult, Interpreter, InterpreterAction,
