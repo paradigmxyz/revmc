@@ -8,6 +8,6 @@ const MANGLE_PREFIX: &str = "__revm_jit_builtin_";
 pub fn emit() {
     let target_vendor = std::env::var("CARGO_CFG_TARGET_VENDOR").unwrap();
     let flag =
-        if target_vendor == "apple" { "-exported-symbol" } else { "--export-dynamic-symbol" };
+        if target_vendor == "apple" { "-exported_symbol" } else { "--export-dynamic-symbol" };
     println!("cargo:rustc-link-arg=-Wl,{flag},{MANGLE_PREFIX}*");
 }
