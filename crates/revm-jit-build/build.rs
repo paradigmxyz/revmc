@@ -12,12 +12,11 @@ fn main() {
     println!("cargo:rerun-if-changed={input_path}");
 
     let input = std::fs::read_to_string(input_path).unwrap();
-    eprintln!("INPUT: {input:?}");
     // Skip the first which is the string itself as a variable.
     let symbols = input.match_indices(MANGLE_PREFIX).skip(1).map(|(i, _)| {
         let start_search = i + MANGLE_PREFIX.len();
-        let end = input[start_search..].find('(').unwrap() + start_search;
-        dbg!(&input[i..end])
+        let end = start_search + input[start_search..].find('(').unwrap();
+        &input[i..end]
     });
     let symbols = symbols.collect::<Vec<_>>();
     assert!(!symbols.is_empty(), "No symbols found in the input file");

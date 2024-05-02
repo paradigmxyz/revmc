@@ -83,6 +83,13 @@ pub fn get_benches() -> Vec<Bench> {
             bytecode: hex::decode(include_str!("../../../data/seaport.rt.hex")).unwrap(),
             ..Default::default()
         },
+        Bench {
+            name: "airdrop",
+            bytecode: hex::decode(include_str!("../../../data/airdrop.rt.hex")).unwrap(),
+            // `paused()`
+            calldata: hex!("5c975abb").to_vec(),
+            ..Default::default()
+        },
     ]
 }
 

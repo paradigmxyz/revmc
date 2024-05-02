@@ -7,15 +7,16 @@
 extern crate tracing;
 
 use revm_interpreter::{
-    as_u64_saturated, as_usize_saturated, gas as rgas, CallInputs, CallScheme, CallValue,
-    CreateInputs, InstructionResult, InterpreterAction, InterpreterResult, LoadAccountResult,
-    SStoreResult,
+    as_u64_saturated, as_usize_saturated, CallInputs, CallScheme, CallValue, CreateInputs,
+    InstructionResult, InterpreterAction, InterpreterResult, LoadAccountResult, SStoreResult,
 };
 use revm_jit_context::{EvmContext, EvmWord};
 use revm_primitives::{
     Bytes, CreateScheme, Log, LogData, SpecId, BLOCK_HASH_HISTORY, KECCAK_EMPTY, MAX_INITCODE_SIZE,
     U256,
 };
+
+pub mod gas;
 
 mod ir;
 pub use ir::*;
@@ -90,7 +91,7 @@ pub unsafe extern "C" fn __revm_jit_builtin_exp(
     spec_id: SpecId,
 ) -> InstructionResult {
     let exponent = exponent_ptr.to_u256();
-    gas_opt!(ecx, rgas::exp_cost(spec_id, exponent));
+    gas_opt!(ecx, gas::exp_cost(spec_id, exponent));
     *exponent_ptr = base.to_u256().pow(exponent).into();
     InstructionResult::Continue
 }
@@ -102,11 +103,11 @@ pub unsafe extern "C" fn __revm_jit_builtin_keccak256(
 ) -> InstructionResult {
     if *len_ptr == EvmWord::ZERO {
         *len_ptr = EvmWord::from_be_bytes(KECCAK_EMPTY.0);
-        gas!(ecx, rgas::KECCAK256);
+        gas!(ecx, gas::KECCAK256);
         return InstructionResult::Continue;
     }
     let len = try_into_usize!(len_ptr.as_u256());
-    gas_opt!(ecx, rgas::keccak256_cost(len as u64));
+    gas_opt!(ecx, gas::keccak256_cost(len as u64));
     let offset = try_into_usize!(offset.as_u256());
 
     resize_memory!(ecx, offset, len);
@@ -126,7 +127,7 @@ pub unsafe extern "C" fn __revm_jit_builtin_balance(
     let (balance, is_cold) = try_host!(ecx.host.balance(address.to_address()));
     *address = balance.into();
     let gas = if spec_id.is_enabled_in(SpecId::BERLIN) {
-        rgas::warm_cold_cost(is_cold)
+        gas::warm_cold_cost(is_cold)
     } else if spec_id.is_enabled_in(SpecId::ISTANBUL) {
         // EIP-1884: Repricing for trie-size-dependent opcodes
         700
@@ -174,9 +175,9 @@ pub unsafe extern "C" fn __revm_jit_builtin_extcodesize(
     *address = code.len().into();
     let gas = if spec_id.is_enabled_in(SpecId::BERLIN) {
         if is_cold {
-            rgas::COLD_ACCOUNT_ACCESS_COST
+            gas::COLD_ACCOUNT_ACCESS_COST
         } else {
-            rgas::WARM_STORAGE_READ_COST
+            gas::WARM_STORAGE_READ_COST
         }
     } else if spec_id.is_enabled_in(SpecId::TANGERINE) {
         700
@@ -195,7 +196,7 @@ pub unsafe extern "C" fn __revm_jit_builtin_extcodecopy(
 ) -> InstructionResult {
     let (code, is_cold) = try_host!(ecx.host.code(address.to_address()));
     let len = tri!(usize::try_from(len));
-    gas_opt!(ecx, rgas::extcodecopy_cost(spec_id, len as u64, is_cold));
+    gas_opt!(ecx, gas::extcodecopy_cost(spec_id, len as u64, is_cold));
     if len != 0 {
         let memory_offset = try_into_usize!(memory_offset.as_u256());
         let code_offset = code_offset.to_u256();
@@ -212,7 +213,7 @@ pub unsafe extern "C" fn __revm_jit_builtin_returndatacopy(
     rev![memory_offset, offset, len]: &mut [EvmWord; 3],
 ) -> InstructionResult {
     let len = tri!(usize::try_from(len));
-    gas_opt!(ecx, rgas::verylowcopy_cost(len as u64));
+    gas_opt!(ecx, gas::verylowcopy_cost(len as u64));
     let data_offset = offset.to_u256();
     let data_offset = as_usize_saturated!(data_offset);
     let (data_end, overflow) = data_offset.overflowing_add(len);
@@ -237,9 +238,9 @@ pub unsafe extern "C" fn __revm_jit_builtin_extcodehash(
     *address = EvmWord::from_be_bytes(hash.0);
     let gas = if spec_id.is_enabled_in(SpecId::BERLIN) {
         if is_cold {
-            rgas::COLD_ACCOUNT_ACCESS_COST
+            gas::COLD_ACCOUNT_ACCESS_COST
         } else {
-            rgas::WARM_STORAGE_READ_COST
+            gas::WARM_STORAGE_READ_COST
         }
     } else if spec_id.is_enabled_in(SpecId::ISTANBUL) {
         700
@@ -311,7 +312,7 @@ pub unsafe extern "C" fn __revm_jit_builtin_mload(
     ecx: &mut EvmContext<'_>,
     offset_ptr: &mut EvmWord,
 ) -> InstructionResult {
-    gas!(ecx, rgas::VERYLOW);
+    gas!(ecx, gas::VERYLOW);
     let offset = try_into_usize!(offset_ptr.as_u256());
     resize_memory!(ecx, offset, 32);
     *offset_ptr = ecx.memory.get_u256(offset).into();
@@ -323,7 +324,7 @@ pub unsafe extern "C" fn __revm_jit_builtin_mstore(
     ecx: &mut EvmContext<'_>,
     rev![offset, value]: &mut [EvmWord; 2],
 ) -> InstructionResult {
-    gas!(ecx, rgas::VERYLOW);
+    gas!(ecx, gas::VERYLOW);
     let offset = try_into_usize!(offset.as_u256());
     resize_memory!(ecx, offset, 32);
     ecx.memory.set(offset, &value.to_be_bytes());
@@ -335,7 +336,7 @@ pub unsafe extern "C" fn __revm_jit_builtin_mstore8(
     ecx: &mut EvmContext<'_>,
     rev![offset, value]: &mut [EvmWord; 2],
 ) -> InstructionResult {
-    gas!(ecx, rgas::VERYLOW);
+    gas!(ecx, gas::VERYLOW);
     let offset = try_into_usize!(offset.as_u256());
     resize_memory!(ecx, offset, 1);
     ecx.memory.set_byte(offset, value.to_u256().byte(0));
@@ -350,7 +351,7 @@ pub unsafe extern "C" fn __revm_jit_builtin_sload(
 ) -> InstructionResult {
     let address = ecx.contract.target_address;
     let (res, is_cold) = try_opt!(ecx.host.sload(address, index.to_u256()));
-    gas!(ecx, rgas::sload_cost(spec_id, is_cold));
+    gas!(ecx, gas::sload_cost(spec_id, is_cold));
     *index = res.into();
     InstructionResult::Continue
 }
@@ -364,8 +365,8 @@ pub unsafe extern "C" fn __revm_jit_builtin_sstore(
     let SStoreResult { original_value: original, present_value: old, new_value: new, is_cold } =
         try_opt!(ecx.host.sstore(ecx.contract.target_address, index.to_u256(), value.to_u256()));
 
-    gas_opt!(ecx, rgas::sstore_cost(spec_id, original, old, new, ecx.gas.remaining(), is_cold));
-    ecx.gas.record_refund(rgas::sstore_refund(spec_id, original, old, new));
+    gas_opt!(ecx, gas::sstore_cost(spec_id, original, old, new, ecx.gas.remaining(), is_cold));
+    ecx.gas.record_refund(gas::sstore_refund(spec_id, original, old, new));
     InstructionResult::Continue
 }
 
@@ -394,7 +395,7 @@ pub unsafe extern "C" fn __revm_jit_builtin_mcopy(
     rev![dst, src, len]: &mut [EvmWord; 3],
 ) -> InstructionResult {
     let len = try_into_usize!(len.to_u256());
-    gas_opt!(ecx, rgas::verylowcopy_cost(len as u64));
+    gas_opt!(ecx, gas::verylowcopy_cost(len as u64));
     if len != 0 {
         let dst = try_into_usize!(dst.to_u256());
         let src = try_into_usize!(src.to_u256());
@@ -414,7 +415,7 @@ pub unsafe extern "C" fn __revm_jit_builtin_log(
     let sp = sp.add(n as usize);
     read_words!(sp, offset, len);
     let len = tri!(usize::try_from(len));
-    gas_opt!(ecx, rgas::log_cost(n, len as u64));
+    gas_opt!(ecx, gas::log_cost(n, len as u64));
     let data = if len != 0 {
         let offset = try_into_usize!(offset.as_u256());
         resize_memory!(ecx, offset, len);
@@ -465,7 +466,7 @@ pub unsafe extern "C" fn __revm_jit_builtin_create(
             if len > max_initcode_size {
                 return InstructionResult::CreateInitCodeSizeLimit;
             }
-            gas!(ecx, rgas::initcode_cost(len as u64));
+            gas!(ecx, gas::initcode_cost(len as u64));
         }
 
         let code_offset = try_into_usize!(code_offset.as_u256());
@@ -476,7 +477,7 @@ pub unsafe extern "C" fn __revm_jit_builtin_create(
     };
 
     let is_create2 = create_kind == CreateKind::Create2;
-    gas_opt!(ecx, if is_create2 { rgas::create2_cost(len as u64) } else { Some(rgas::CREATE) });
+    gas_opt!(ecx, if is_create2 { gas::create2_cost(len as u64) } else { Some(gas::CREATE) });
 
     let scheme = if is_create2 {
         pop!(sp; salt);
@@ -564,7 +565,7 @@ pub unsafe extern "C" fn __revm_jit_builtin_call(
         is_empty = false;
     }
 
-    gas!(ecx, rgas::call_cost(spec_id, value != U256::ZERO, is_cold, is_empty));
+    gas!(ecx, gas::call_cost(spec_id, value != U256::ZERO, is_cold, is_empty));
 
     // EIP-150: Gas cost changes for IO-heavy operations
     let mut gas_limit = if spec_id.is_enabled_in(SpecId::TANGERINE) {
@@ -579,7 +580,7 @@ pub unsafe extern "C" fn __revm_jit_builtin_call(
 
     // Add call stipend if there is value to be transferred.
     if matches!(call_kind, CallKind::Call | CallKind::CallCode) && value != U256::ZERO {
-        gas_limit = gas_limit.saturating_add(rgas::CALL_STIPEND);
+        gas_limit = gas_limit.saturating_add(gas::CALL_STIPEND);
     }
 
     *ecx.next_action = InterpreterAction::Call {
@@ -642,9 +643,9 @@ pub unsafe extern "C" fn __revm_jit_builtin_selfdestruct(
 
     // EIP-3529: Reduction in refunds
     if !spec_id.is_enabled_in(SpecId::LONDON) && !res.previously_destroyed {
-        ecx.gas.record_refund(rgas::SELFDESTRUCT);
+        ecx.gas.record_refund(gas::SELFDESTRUCT);
     }
-    gas!(ecx, rgas::selfdestruct_cost(spec_id, res));
+    gas!(ecx, gas::selfdestruct_cost(spec_id, res));
 
     InstructionResult::Continue
 }
