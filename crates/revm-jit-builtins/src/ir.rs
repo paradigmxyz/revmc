@@ -1,5 +1,7 @@
 use revm_jit_backend::{Attribute, Backend, Builder, FunctionAttributeLocation, TypeMethods};
 
+const MANGLE_PREFIX: &str = "__revm_jit_builtin_";
+
 /// Builtin cache.
 #[derive(Debug)]
 pub struct Builtins<B: Backend>([Option<B::Function>; Builtin::COUNT]);
@@ -28,13 +30,8 @@ impl<B: Backend> Builtins<B> {
 
     #[cold]
     fn init(builtin: Builtin, bcx: &mut B::Builder<'_>) -> B::Function {
-        let mut name = builtin.name();
-        let mangle_prefix = "__revm_jit_builtin_";
-        let storage;
-        if !name.starts_with(mangle_prefix) {
-            storage = [mangle_prefix, name].concat();
-            name = storage.as_str();
-        }
+        let name = builtin.name();
+        debug_assert!(name.starts_with(MANGLE_PREFIX), "{name:?}");
         bcx.get_function(name).inspect(|r| trace!(name, ?r, "pre-existing")).unwrap_or_else(|| {
             let r = Self::build(name, builtin, bcx);
             trace!(name, ?r, "built");
