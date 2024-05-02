@@ -1,4 +1,4 @@
-use revm_interpreter::opcode as op;
+use revm_interpreter::{gas, opcode as op};
 use revm_primitives::{spec_to_generic, SpecId};
 
 /// Opcode information.
@@ -39,14 +39,12 @@ impl OpcodeInfo {
         self.0 & Self::DISABLED != 0
     }
 
-    /// Returns the gas cost of the opcode.
+    /// Returns the base gas cost of the opcode.
+    ///
+    /// This may not be the final/full gas cost of the opcode as it may also have a dynamic cost.
     #[inline]
-    pub const fn static_gas(self) -> Option<u16> {
-        if self.is_dynamic() {
-            None
-        } else {
-            Some(self.0 & Self::MASK)
-        }
+    pub const fn base_gas(self) -> u16 {
+        self.0 & Self::MASK
     }
 
     /// Sets the unknown flag.
@@ -106,7 +104,9 @@ const fn make_map(spec_id: SpecId) -> [OpcodeInfo; 256] {
             )*
         };
     }
-    // [1]: Not dynamic in all `SpecId`s, but is calculated dynamically in a builtin.
+    // [1]: Not dynamic in all `SpecId`s, but gas is calculated dynamically in a builtin.
+    //      TODO: Could be converted into [2] with a base cost.
+    // [2]: Dynamic with a base cost. Only the dynamic part is paid in builtins.
     set! {
         STOP = 0;
 
@@ -119,7 +119,7 @@ const fn make_map(spec_id: SpecId) -> [OpcodeInfo; 256] {
         SMOD       = 5;
         ADDMOD     = 8;
         MULMOD     = 8;
-        EXP        = DYNAMIC;
+        EXP        = 10 | DYNAMIC; // [2]
         SIGNEXTEND = 5;
         // 0x0C
         // 0x0D
@@ -141,7 +141,7 @@ const fn make_map(spec_id: SpecId) -> [OpcodeInfo; 256] {
         SAR    = 3, if CONSTANTINOPLE;
         // 0x1E
         // 0x1F
-        KECCAK256 = DYNAMIC;
+        KECCAK256 = 30 | DYNAMIC; // [2]
         // 0x21
         // 0x22
         // 0x23
@@ -164,15 +164,15 @@ const fn make_map(spec_id: SpecId) -> [OpcodeInfo; 256] {
         CALLVALUE    = 2;
         CALLDATALOAD = 3;
         CALLDATASIZE = 2;
-        CALLDATACOPY = DYNAMIC;
+        CALLDATACOPY = 3 | DYNAMIC; // [2]
         CODESIZE     = 2;
-        CODECOPY     = DYNAMIC;
+        CODECOPY     = 3 | DYNAMIC; // [2]
 
         GASPRICE       = 2;
         EXTCODESIZE    = DYNAMIC; // [1]
         EXTCODECOPY    = DYNAMIC;
         RETURNDATASIZE = 2, if BYZANTIUM;
-        RETURNDATACOPY = DYNAMIC, if BYZANTIUM;
+        RETURNDATACOPY = 3 | DYNAMIC, if BYZANTIUM; // [2]
         EXTCODEHASH    = DYNAMIC, if CONSTANTINOPLE; // [1]
         BLOCKHASH      = 20;
         COINBASE       = 2;
@@ -191,9 +191,9 @@ const fn make_map(spec_id: SpecId) -> [OpcodeInfo; 256] {
         // 0x4E
         // 0x4F
         POP      = 2;
-        MLOAD    = DYNAMIC;
-        MSTORE   = DYNAMIC;
-        MSTORE8  = DYNAMIC;
+        MLOAD    = 3 | DYNAMIC; // [2]
+        MSTORE   = 3 | DYNAMIC; // [2]
+        MSTORE8  = 3 | DYNAMIC; // [2]
         SLOAD    = DYNAMIC; // [1]
         SSTORE   = DYNAMIC;
         JUMP     = 8;
@@ -204,7 +204,7 @@ const fn make_map(spec_id: SpecId) -> [OpcodeInfo; 256] {
         JUMPDEST = 1;
         TLOAD    = 100, if CANCUN;
         TSTORE   = 100, if CANCUN;
-        MCOPY    = DYNAMIC, if CANCUN;
+        MCOPY    = 3 | DYNAMIC, if CANCUN; // [2]
 
         PUSH0  = 2, if SHANGHAI;
         PUSH1  = 3;
@@ -274,11 +274,11 @@ const fn make_map(spec_id: SpecId) -> [OpcodeInfo; 256] {
         SWAP15 = 3;
         SWAP16 = 3;
 
-        LOG0 = DYNAMIC;
-        LOG1 = DYNAMIC;
-        LOG2 = DYNAMIC;
-        LOG3 = DYNAMIC;
-        LOG4 = DYNAMIC;
+        LOG0 = log_cost(0) | DYNAMIC; // [2]
+        LOG1 = log_cost(1) | DYNAMIC; // [2]
+        LOG2 = log_cost(2) | DYNAMIC; // [2]
+        LOG3 = log_cost(3) | DYNAMIC; // [2]
+        LOG4 = log_cost(4) | DYNAMIC; // [2]
         // 0xA5
         // 0xA6
         // 0xA7
@@ -374,58 +374,12 @@ const fn make_map(spec_id: SpecId) -> [OpcodeInfo; 256] {
     map
 }
 
-/// [`gas::account_access_gas`]
-#[cfg(any())]
-const fn balance_cost(spec_id: SpecId) -> u16 {
-    let gas = gas::account_access_gas(spec_id, true);
-    if gas == gas::COLD_ACCOUNT_ACCESS_COST {
-        OpcodeInfo::DYNAMIC
-    } else {
-        gas as u16
-    }
-}
-
-/// [`gas::sload_cost`]
-#[cfg(any())]
-const fn sload_cost(spec_id: SpecId) -> u16 {
-    let gas = gas::sload_cost(spec_id, true);
-    if gas == gas::COLD_SLOAD_COST {
-        OpcodeInfo::DYNAMIC
-    } else {
-        gas as u16
-    }
-}
-
-/// [`revm_interpreter::instructions::host::extcodesize`]
-#[cfg(any())]
-const fn extcodesize_cost(spec_id: SpecId) -> u16 {
-    if spec_id.is_enabled_in(SpecId::BERLIN) {
-        OpcodeInfo::DYNAMIC
-        // if is_cold {
-        //     COLD_ACCOUNT_ACCESS_COST
-        // } else {
-        //     WARM_STORAGE_READ_COST
-        // }
-    } else if spec_id.is_enabled_in(SpecId::TANGERINE) {
-        700
-    } else {
-        20
-    }
-}
-
-/// [`revm_interpreter::instructions::host::extcodehash`]
-#[cfg(any())]
-const fn extcodehash_cost(spec_id: SpecId) -> u16 {
-    if spec_id.is_enabled_in(SpecId::BERLIN) {
-        OpcodeInfo::DYNAMIC
-        // if is_cold {
-        //     COLD_ACCOUNT_ACCESS_COST
-        // } else {
-        //     WARM_STORAGE_READ_COST
-        // }
-    } else if spec_id.is_enabled_in(SpecId::ISTANBUL) {
-        700
-    } else {
-        400
+const fn log_cost(n: u8) -> u16 {
+    match gas::log_cost(n, 0) {
+        Some(gas) => {
+            assert!(gas <= u16::MAX as u64);
+            gas as u16
+        }
+        None => unreachable!(),
     }
 }

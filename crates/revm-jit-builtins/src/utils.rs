@@ -1,4 +1,5 @@
-use revm_interpreter::{as_usize_saturated, gas as rgas, InstructionResult};
+use crate::gas;
+use revm_interpreter::{as_usize_saturated, InstructionResult};
 use revm_jit_context::{EvmContext, EvmWord};
 
 /// Splits the stack pointer into `N` elements by casting it to an array.
@@ -37,12 +38,12 @@ pub(crate) unsafe fn copy_operation(
     rev![memory_offset, data_offset, len]: &mut [EvmWord; 3],
     data: &[u8],
 ) -> InstructionResult {
-    let len = tri!(usize::try_from(len));
-    gas_opt!(ecx, rgas::verylowcopy_cost(len as u64));
+    let len = try_into_usize!(len);
+    gas_opt!(ecx, gas::verylowcopy_cost(len as u64).map(|g| g - gas::VERYLOW));
     if len == 0 {
         return InstructionResult::Continue;
     }
-    let memory_offset = try_into_usize!(memory_offset.as_u256());
+    let memory_offset = try_into_usize!(memory_offset);
     resize_memory!(ecx, memory_offset, len);
     let data_offset = data_offset.to_u256();
     let data_offset = as_usize_saturated!(data_offset);

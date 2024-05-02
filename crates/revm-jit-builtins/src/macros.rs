@@ -1,3 +1,4 @@
+#[allow(unused_macros)]
 macro_rules! tri {
     ($e:expr) => {
         match $e {
@@ -69,16 +70,12 @@ macro_rules! pop {
 
 macro_rules! try_into_usize {
     ($x:expr) => {
-        match $x {
+        match $x.to_u256().as_limbs() {
             x => {
-                let x = x.as_limbs();
-                if x[1] != 0 || x[2] != 0 || x[3] != 0 {
+                if (x[0] > usize::MAX as u64) | (x[1] != 0) | (x[2] != 0) | (x[3] != 0) {
                     return InstructionResult::InvalidOperandOOG;
                 }
-                let Ok(val) = usize::try_from(x[0]) else {
-                    return InstructionResult::InvalidOperandOOG;
-                };
-                val
+                x[0] as usize
             }
         }
     };
