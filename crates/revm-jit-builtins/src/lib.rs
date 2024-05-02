@@ -91,7 +91,7 @@ pub unsafe extern "C" fn __revm_jit_builtin_exp(
     spec_id: SpecId,
 ) -> InstructionResult {
     let exponent = exponent_ptr.to_u256();
-    gas_opt!(ecx, gas::exp_cost(spec_id, exponent));
+    gas_opt!(ecx, gas::exp_cost(spec_id, exponent).map(|g| g - gas::EXP));
     *exponent_ptr = base.to_u256().pow(exponent).into();
     InstructionResult::Continue
 }
@@ -101,20 +101,16 @@ pub unsafe extern "C" fn __revm_jit_builtin_keccak256(
     ecx: &mut EvmContext<'_>,
     rev![offset, len_ptr]: &mut [EvmWord; 2],
 ) -> InstructionResult {
-    if *len_ptr == EvmWord::ZERO {
-        *len_ptr = EvmWord::from_be_bytes(KECCAK_EMPTY.0);
-        gas!(ecx, gas::KECCAK256);
-        return InstructionResult::Continue;
-    }
-    let len = try_into_usize!(len_ptr.as_u256());
-    gas_opt!(ecx, gas::keccak256_cost(len as u64));
-    let offset = try_into_usize!(offset.as_u256());
-
-    resize_memory!(ecx, offset, len);
-
-    let data = ecx.memory.slice(offset, len);
-    *len_ptr = EvmWord::from_be_bytes(revm_primitives::keccak256(data).0);
-
+    let len = try_into_usize!(len_ptr);
+    *len_ptr = EvmWord::from_be_bytes(if len == 0 {
+        KECCAK_EMPTY.0
+    } else {
+        gas_opt!(ecx, gas::keccak256_cost(len as u64).map(|g| g - gas::KECCAK256));
+        let offset = try_into_usize!(offset);
+        resize_memory!(ecx, offset, len);
+        let data = ecx.memory.slice(offset, len);
+        revm_primitives::keccak256(data).0
+    });
     InstructionResult::Continue
 }
 
@@ -195,10 +191,10 @@ pub unsafe extern "C" fn __revm_jit_builtin_extcodecopy(
     spec_id: SpecId,
 ) -> InstructionResult {
     let (code, is_cold) = try_host!(ecx.host.code(address.to_address()));
-    let len = tri!(usize::try_from(len));
+    let len = try_into_usize!(len);
     gas_opt!(ecx, gas::extcodecopy_cost(spec_id, len as u64, is_cold));
     if len != 0 {
-        let memory_offset = try_into_usize!(memory_offset.as_u256());
+        let memory_offset = try_into_usize!(memory_offset);
         let code_offset = code_offset.to_u256();
         let code_offset = as_usize_saturated!(code_offset).min(code.len());
         resize_memory!(ecx, memory_offset, len);
@@ -212,8 +208,8 @@ pub unsafe extern "C" fn __revm_jit_builtin_returndatacopy(
     ecx: &mut EvmContext<'_>,
     rev![memory_offset, offset, len]: &mut [EvmWord; 3],
 ) -> InstructionResult {
-    let len = tri!(usize::try_from(len));
-    gas_opt!(ecx, gas::verylowcopy_cost(len as u64));
+    let len = try_into_usize!(len);
+    gas_opt!(ecx, gas::verylowcopy_cost(len as u64).map(|g| g - gas::VERYLOW));
     let data_offset = offset.to_u256();
     let data_offset = as_usize_saturated!(data_offset);
     let (data_end, overflow) = data_offset.overflowing_add(len);
@@ -221,7 +217,7 @@ pub unsafe extern "C" fn __revm_jit_builtin_returndatacopy(
         return InstructionResult::OutOfOffset;
     }
     if len != 0 {
-        let memory_offset = try_into_usize!(memory_offset.as_u256());
+        let memory_offset = try_into_usize!(memory_offset);
         resize_memory!(ecx, memory_offset, len);
         ecx.memory.set(memory_offset, &ecx.return_data[data_offset..data_end]);
     }
@@ -312,8 +308,7 @@ pub unsafe extern "C" fn __revm_jit_builtin_mload(
     ecx: &mut EvmContext<'_>,
     offset_ptr: &mut EvmWord,
 ) -> InstructionResult {
-    gas!(ecx, gas::VERYLOW);
-    let offset = try_into_usize!(offset_ptr.as_u256());
+    let offset = try_into_usize!(offset_ptr);
     resize_memory!(ecx, offset, 32);
     *offset_ptr = ecx.memory.get_u256(offset).into();
     InstructionResult::Continue
@@ -324,8 +319,7 @@ pub unsafe extern "C" fn __revm_jit_builtin_mstore(
     ecx: &mut EvmContext<'_>,
     rev![offset, value]: &mut [EvmWord; 2],
 ) -> InstructionResult {
-    gas!(ecx, gas::VERYLOW);
-    let offset = try_into_usize!(offset.as_u256());
+    let offset = try_into_usize!(offset);
     resize_memory!(ecx, offset, 32);
     ecx.memory.set(offset, &value.to_be_bytes());
     InstructionResult::Continue
@@ -336,8 +330,7 @@ pub unsafe extern "C" fn __revm_jit_builtin_mstore8(
     ecx: &mut EvmContext<'_>,
     rev![offset, value]: &mut [EvmWord; 2],
 ) -> InstructionResult {
-    gas!(ecx, gas::VERYLOW);
-    let offset = try_into_usize!(offset.as_u256());
+    let offset = try_into_usize!(offset);
     resize_memory!(ecx, offset, 1);
     ecx.memory.set_byte(offset, value.to_u256().byte(0));
     InstructionResult::Continue
@@ -394,11 +387,11 @@ pub unsafe extern "C" fn __revm_jit_builtin_mcopy(
     ecx: &mut EvmContext<'_>,
     rev![dst, src, len]: &mut [EvmWord; 3],
 ) -> InstructionResult {
-    let len = try_into_usize!(len.to_u256());
-    gas_opt!(ecx, gas::verylowcopy_cost(len as u64));
+    let len = try_into_usize!(len);
+    gas_opt!(ecx, gas::verylowcopy_cost(len as u64).map(|g| g - gas::VERYLOW));
     if len != 0 {
-        let dst = try_into_usize!(dst.to_u256());
-        let src = try_into_usize!(src.to_u256());
+        let dst = try_into_usize!(dst);
+        let src = try_into_usize!(src);
         resize_memory!(ecx, dst.max(src), len);
         ecx.memory.copy(dst, src, len);
     }
@@ -411,13 +404,13 @@ pub unsafe extern "C" fn __revm_jit_builtin_log(
     sp: *mut EvmWord,
     n: u8,
 ) -> InstructionResult {
-    debug_assert!(n <= 4, "invalid log topic count: {n}");
+    assume!(n <= 4, "invalid log topic count: {n}");
     let sp = sp.add(n as usize);
     read_words!(sp, offset, len);
-    let len = tri!(usize::try_from(len));
-    gas_opt!(ecx, gas::log_cost(n, len as u64));
+    let len = try_into_usize!(len);
+    gas_opt!(ecx, gas::LOGDATA.checked_mul(len as u64));
     let data = if len != 0 {
-        let offset = try_into_usize!(offset.as_u256());
+        let offset = try_into_usize!(offset);
         resize_memory!(ecx, offset, len);
         Bytes::copy_from_slice(ecx.memory.slice(offset, len))
     } else {
@@ -452,7 +445,7 @@ pub unsafe extern "C" fn __revm_jit_builtin_create(
     let mut sp = sp.add(len);
     pop!(sp; value, code_offset, len);
 
-    let len = tri!(usize::try_from(len));
+    let len = try_into_usize!(len);
     let code = if len != 0 {
         if spec_id.is_enabled_in(SpecId::SHANGHAI) {
             // Limit is set as double of max contract bytecode size
@@ -469,7 +462,7 @@ pub unsafe extern "C" fn __revm_jit_builtin_create(
             gas!(ecx, gas::initcode_cost(len as u64));
         }
 
-        let code_offset = try_into_usize!(code_offset.as_u256());
+        let code_offset = try_into_usize!(code_offset);
         resize_memory!(ecx, code_offset, len);
         Bytes::copy_from_slice(ecx.memory.slice(code_offset, len))
     } else {
@@ -541,18 +534,18 @@ pub unsafe extern "C" fn __revm_jit_builtin_call(
 
     pop!(sp; in_offset, in_len, out_offset, out_len);
 
-    let in_len = try_into_usize!(in_len.to_u256());
+    let in_len = try_into_usize!(in_len);
     let input = if in_len != 0 {
-        let in_offset = try_into_usize!(in_offset.to_u256());
+        let in_offset = try_into_usize!(in_offset);
         resize_memory!(ecx, in_offset, in_len);
         Bytes::copy_from_slice(ecx.memory.slice(in_offset, in_len))
     } else {
         Bytes::new()
     };
 
-    let out_len = try_into_usize!(out_len.to_u256());
+    let out_len = try_into_usize!(out_len);
     let out_offset = if out_len != 0 {
-        let out_offset = try_into_usize!(out_offset.to_u256());
+        let out_offset = try_into_usize!(out_offset);
         resize_memory!(ecx, out_offset, out_len);
         out_offset
     } else {
@@ -620,9 +613,9 @@ pub unsafe extern "C" fn __revm_jit_builtin_do_return(
     rev![offset, len]: &mut [EvmWord; 2],
     result: InstructionResult,
 ) -> InstructionResult {
-    let len = try_into_usize!(len.as_u256());
+    let len = try_into_usize!(len);
     let output = if len != 0 {
-        let offset = try_into_usize!(offset.as_u256());
+        let offset = try_into_usize!(offset);
         resize_memory!(ecx, offset, len);
         ecx.memory.slice(offset, len).to_vec().into()
     } else {

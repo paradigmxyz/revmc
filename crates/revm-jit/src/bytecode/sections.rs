@@ -66,7 +66,7 @@ impl SectionAnalysis {
         self.diff += stack_diff;
         self.max_growth = self.max_growth.max(self.diff);
 
-        self.gas_cost += data.static_gas().unwrap_or(0) as u64;
+        self.gas_cost += data.base_gas as u64;
 
         // Branching instructions end a section, starting a new one on the next instruction, if any.
         if data.opcode == op::GAS || data.is_branching(bytecode.is_eof()) || data.will_suspend() {

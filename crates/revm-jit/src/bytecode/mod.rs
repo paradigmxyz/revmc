@@ -114,11 +114,11 @@ impl<'a> Bytecode<'a> {
             if info.is_disabled() {
                 flags |= InstFlags::DISABLED;
             }
-            let static_gas = info.static_gas().unwrap_or(u16::MAX);
+            let base_gas = info.base_gas();
 
             let section = Section::default();
 
-            insts.push(InstData { opcode, flags, static_gas, data, pc: pc as u32, section });
+            insts.push(InstData { opcode, flags, base_gas, data, pc: pc as u32, section });
         }
 
         let mut bytecode = Self {
@@ -368,8 +368,10 @@ pub(crate) struct InstData {
     pub(crate) opcode: u8,
     /// Flags.
     pub(crate) flags: InstFlags,
-    /// Static gas. Stored as `u16::MAX` if the gas is dynamic.
-    static_gas: u16,
+    /// The base gas cost of the opcode.
+    ///
+    /// This may not be the final/full gas cost of the opcode as it may also have a dynamic cost.
+    base_gas: u16,
     /// Instruction-specific data:
     /// - if the instruction has immediate data, this is a packed offset+length into the bytecode;
     /// - `JUMP{,I} && STATIC_JUMP in kind`: the jump target, `Instr`;
@@ -445,12 +447,6 @@ impl InstData {
     #[allow(dead_code)]
     pub(crate) fn to_op_in<'a>(&self, bytecode: &Bytecode<'a>) -> Opcode<'a> {
         Opcode { opcode: self.opcode, immediate: bytecode.get_imm_of(self) }
-    }
-
-    /// Returns the static gas for this instruction, if any.
-    #[inline]
-    pub(crate) fn static_gas(&self) -> Option<u16> {
-        (self.static_gas != u16::MAX).then_some(self.static_gas)
     }
 
     /// Returns `true` if this instruction is a push instruction.

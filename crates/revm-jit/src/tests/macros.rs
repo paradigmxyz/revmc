@@ -85,7 +85,7 @@ macro_rules! tests {
     (@gas $op:expr; $($args:expr),+) => {
         tests!(@gas
             $op,
-            DEF_OPINFOS[$op as usize].static_gas().expect(stringify!($op)) as u64;
+            DEF_OPINFOS[$op as usize].base_gas() as u64;
             $($args),+
         )
     };
