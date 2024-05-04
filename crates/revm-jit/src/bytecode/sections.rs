@@ -2,7 +2,8 @@ use super::Bytecode;
 use core::fmt;
 
 // TODO: Separate gas sections from stack length sections.
-// E.g. `GAS` should stop a gas section because it requires to know the gas spent, but not the stack
+// E.g. `GAS` should stop only a gas section because it requires `gasleft`, and execution will
+// continue with the next instruction.
 
 /// A section is a sequence of instructions that are executed sequentially without any jumps or
 /// branches.
