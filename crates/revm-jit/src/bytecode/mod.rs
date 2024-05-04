@@ -155,6 +155,7 @@ impl<'a> Bytecode<'a> {
     /// Returns a mutable reference the instruction at the given instruction counter.
     #[inline]
     #[track_caller]
+    #[allow(dead_code)]
     pub(crate) fn inst_mut(&mut self, inst: Inst) -> &mut InstData {
         &mut self.insts[inst]
     }
@@ -167,12 +168,30 @@ impl<'a> Bytecode<'a> {
         self.iter_all_insts().filter(|(_, data)| !data.is_dead_code())
     }
 
+    /// Returns an iterator over the instructions.
+    #[inline]
+    #[allow(dead_code)]
+    pub(crate) fn iter_mut_insts(
+        &mut self,
+    ) -> impl DoubleEndedIterator<Item = (usize, &mut InstData)> + '_ {
+        self.iter_mut_all_insts().filter(|(_, data)| !data.is_dead_code())
+    }
+
     /// Returns an iterator over all the instructions, including dead code.
     #[inline]
     pub(crate) fn iter_all_insts(
         &self,
     ) -> impl DoubleEndedIterator<Item = (usize, &InstData)> + ExactSizeIterator + Clone + '_ {
         self.insts.iter().enumerate()
+    }
+
+    /// Returns an iterator over all the instructions, including dead code.
+    #[inline]
+    #[allow(dead_code)]
+    pub(crate) fn iter_mut_all_insts(
+        &mut self,
+    ) -> impl DoubleEndedIterator<Item = (usize, &mut InstData)> + ExactSizeIterator + '_ {
+        self.insts.iter_mut().enumerate()
     }
 
     /// Runs a list of analysis passes on the instructions.
@@ -303,6 +322,18 @@ impl<'a> Bytecode<'a> {
             }
         }
         analysis.finish(self);
+    }
+
+    /// Constructs the sections in the bytecode.
+    #[instrument(name = "sections", level = "debug", skip_all)]
+    #[cfg(any())]
+    fn construct_sections_default(&mut self) {
+        for inst in &mut self.insts {
+            let (inp, out) = inst.stack_io();
+            let stack_diff = out as i16 - inp as i16;
+            inst.section =
+                Section { gas_cost: inst.base_gas as _, inputs: inp as _, max_growth: stack_diff }
+        }
     }
 
     /// Returns the immediate value of the given instruction data, if any.
@@ -480,6 +511,15 @@ impl InstData {
     /// Returns `true` if this instruction is dead code.
     pub(crate) fn is_dead_code(&self) -> bool {
         self.flags.contains(InstFlags::DEAD_CODE)
+    }
+
+    /// Returns `true` if this instruction requires to know `gasleft()`.
+    /// Note that this does not include CALL and CREATE.
+    #[inline]
+    pub(crate) fn requires_gasleft(&self, spec_id: SpecId) -> bool {
+        // For SSTORE, see `revm_interpreter::gas::sstore_cost`.
+        self.opcode == op::GAS
+            || (self.opcode == op::SSTORE && spec_id.is_enabled_in(SpecId::ISTANBUL))
     }
 
     /// Returns `true` if we know that this instruction will branch or stop execution.

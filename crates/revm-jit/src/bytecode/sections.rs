@@ -1,6 +1,8 @@
 use super::Bytecode;
 use core::fmt;
-use revm_interpreter::opcode as op;
+
+// TODO: Separate gas sections from stack length sections.
+// E.g. `GAS` should stop a gas section because it requires to know the gas spent, but not the stack
 
 /// A section is a sequence of instructions that are executed sequentially without any jumps or
 /// branches.
@@ -68,8 +70,12 @@ impl SectionAnalysis {
 
         self.gas_cost += data.base_gas as u64;
 
-        // Branching instructions end a section, starting a new one on the next instruction, if any.
-        if data.opcode == op::GAS || data.is_branching(bytecode.is_eof()) || data.will_suspend() {
+        // Instructions that require `gasleft` and branching instructions end a section, starting a
+        // new one on the next instruction, if any.
+        if data.requires_gasleft(bytecode.spec_id)
+            || data.is_branching(bytecode.is_eof())
+            || data.will_suspend()
+        {
             let next = inst + 1;
             self.save_to(bytecode, next);
             self.reset(next);
@@ -109,7 +115,10 @@ impl SectionAnalysis {
                 ?section,
                 "saving"
             );
-            bytecode.inst_mut(self.start_inst).section = section;
+            let mut insts = bytecode.insts[self.start_inst..].iter_mut();
+            if let Some(inst) = insts.find(|inst| !inst.is_dead_code()) {
+                inst.section = section;
+            }
         }
     }
 
