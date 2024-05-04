@@ -91,7 +91,7 @@ pub unsafe extern "C" fn __revm_jit_builtin_exp(
     spec_id: SpecId,
 ) -> InstructionResult {
     let exponent = exponent_ptr.to_u256();
-    gas_opt!(ecx, gas::exp_cost(spec_id, exponent).map(|g| g - gas::EXP));
+    gas_opt!(ecx, gas::dyn_exp_cost(spec_id, exponent));
     *exponent_ptr = base.to_u256().pow(exponent).into();
     InstructionResult::Continue
 }
@@ -105,7 +105,7 @@ pub unsafe extern "C" fn __revm_jit_builtin_keccak256(
     *len_ptr = EvmWord::from_be_bytes(if len == 0 {
         KECCAK_EMPTY.0
     } else {
-        gas_opt!(ecx, gas::keccak256_cost(len as u64).map(|g| g - gas::KECCAK256));
+        gas_opt!(ecx, gas::dyn_keccak256_cost(len as u64));
         let offset = try_into_usize!(offset);
         resize_memory!(ecx, offset, len);
         let data = ecx.memory.slice(offset, len);
@@ -209,7 +209,7 @@ pub unsafe extern "C" fn __revm_jit_builtin_returndatacopy(
     rev![memory_offset, offset, len]: &mut [EvmWord; 3],
 ) -> InstructionResult {
     let len = try_into_usize!(len);
-    gas_opt!(ecx, gas::verylowcopy_cost(len as u64).map(|g| g - gas::VERYLOW));
+    gas_opt!(ecx, gas::dyn_verylowcopy_cost(len as u64));
     let data_offset = offset.to_u256();
     let data_offset = as_usize_saturated!(data_offset);
     let (data_end, overflow) = data_offset.overflowing_add(len);
@@ -388,7 +388,7 @@ pub unsafe extern "C" fn __revm_jit_builtin_mcopy(
     rev![dst, src, len]: &mut [EvmWord; 3],
 ) -> InstructionResult {
     let len = try_into_usize!(len);
-    gas_opt!(ecx, gas::verylowcopy_cost(len as u64).map(|g| g - gas::VERYLOW));
+    gas_opt!(ecx, gas::dyn_verylowcopy_cost(len as u64));
     if len != 0 {
         let dst = try_into_usize!(dst);
         let src = try_into_usize!(src);
@@ -408,7 +408,7 @@ pub unsafe extern "C" fn __revm_jit_builtin_log(
     let sp = sp.add(n as usize);
     read_words!(sp, offset, len);
     let len = try_into_usize!(len);
-    gas_opt!(ecx, gas::LOGDATA.checked_mul(len as u64));
+    gas_opt!(ecx, gas::dyn_log_cost(len as u64));
     let data = if len != 0 {
         let offset = try_into_usize!(offset);
         resize_memory!(ecx, offset, len);

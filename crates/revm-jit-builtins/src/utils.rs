@@ -39,7 +39,7 @@ pub(crate) unsafe fn copy_operation(
     data: &[u8],
 ) -> InstructionResult {
     let len = try_into_usize!(len);
-    gas_opt!(ecx, gas::verylowcopy_cost(len as u64).map(|g| g - gas::VERYLOW));
+    gas_opt!(ecx, gas::dyn_verylowcopy_cost(len as u64));
     if len == 0 {
         return InstructionResult::Continue;
     }
