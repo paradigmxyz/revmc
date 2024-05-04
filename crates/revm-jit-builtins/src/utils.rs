@@ -39,15 +39,14 @@ pub(crate) unsafe fn copy_operation(
     data: &[u8],
 ) -> InstructionResult {
     let len = try_into_usize!(len);
-    gas_opt!(ecx, gas::dyn_verylowcopy_cost(len as u64));
-    if len == 0 {
-        return InstructionResult::Continue;
+    if len != 0 {
+        gas_opt!(ecx, gas::dyn_verylowcopy_cost(len as u64));
+        let memory_offset = try_into_usize!(memory_offset);
+        resize_memory!(ecx, memory_offset, len);
+        let data_offset = data_offset.to_u256();
+        let data_offset = as_usize_saturated!(data_offset);
+        ecx.memory.set_data(memory_offset, data_offset, len, data);
     }
-    let memory_offset = try_into_usize!(memory_offset);
-    resize_memory!(ecx, memory_offset, len);
-    let data_offset = data_offset.to_u256();
-    let data_offset = as_usize_saturated!(data_offset);
-    ecx.memory.set_data(memory_offset, data_offset, len, data);
     InstructionResult::Continue
 }
 

@@ -310,7 +310,7 @@ pub unsafe extern "C" fn __revm_jit_builtin_mload(
 ) -> InstructionResult {
     let offset = try_into_usize!(offset_ptr);
     resize_memory!(ecx, offset, 32);
-    *offset_ptr = ecx.memory.get_u256(offset).into();
+    *offset_ptr = EvmWord::from_be_bytes(ecx.memory.get_word(offset).0);
     InstructionResult::Continue
 }
 
