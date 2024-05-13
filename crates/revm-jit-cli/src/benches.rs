@@ -90,6 +90,16 @@ pub fn get_benches() -> Vec<Bench> {
             calldata: hex!("5c975abb").to_vec(),
             ..Default::default()
         },
+        Bench {
+            name: "bswap64",
+            bytecode: hex::decode(include_str!("../../../data/bswap64.rt.hex")).unwrap(),
+            // `to_little_endian_64(uint64 = 0x0102)` returns (bytes)
+            calldata: hex!(
+                "ff2f79f10000000000000000000000000000000000000000000000000000000000000102"
+            )
+            .to_vec(),
+            ..Default::default()
+        },
     ]
 }
 

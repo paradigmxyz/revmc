@@ -261,9 +261,12 @@ fn read_code(code: Option<&str>, code_path: Option<&Path>) -> Result<Vec<u8>> {
 fn read_code_string(contents: &[u8], ext: Option<&str>) -> Result<Vec<u8>> {
     let has_prefix = contents.starts_with(b"0x") || contents.starts_with(b"0X");
     let is_hex = ext != Some("bin") && (ext == Some("hex") || has_prefix);
-    let utf8 = || std::str::from_utf8(contents).wrap_err("given file is not valid UTF-8");
+    let utf8 = || std::str::from_utf8(contents).wrap_err("given code is not valid UTF-8");
     if is_hex {
-        hex::decode(utf8()?.trim()).wrap_err("given file is not valid hex")
+        let input = utf8()?.trim();
+        let mut lines = input.lines().map(str::trim);
+        let first_line = lines.next().unwrap_or_default();
+        hex::decode(first_line).wrap_err("given code is not valid hex")
     } else if ext == Some("bin") || !contents.is_ascii() {
         Ok(contents.to_vec())
     } else if ext == Some("evm") {

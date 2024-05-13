@@ -58,6 +58,7 @@ fn setup_group(group: &mut BinaryBenchmarkGroup, is_ct: bool) {
         ("fibonacci", true),
         ("counter", true),
         ("hash_10k", true),
+        ("bswap64", true),
         ("usdc_proxy", false),
         ("weth", false),
     ];
