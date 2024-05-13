@@ -44,7 +44,6 @@ mod dh;
 pub mod orc;
 
 const DEFAULT_WEIGHT: u32 = 20000;
-const OVERRIDE_TARGET: bool = false;
 
 /// Executes the given closure with a thread-local LLVM context.
 #[inline]
@@ -376,10 +375,10 @@ impl TargetDefaults {
     }
 
     fn r#override() -> Option<Self> {
-        OVERRIDE_TARGET.then(|| {
-            let triple = TargetTriple::create("aarch64-unknown-linux-gnu");
-            let cpu = String::from("");
-            let features = String::from("");
+        override_target_triple().map(|triple_str| {
+            let triple = TargetTriple::create(triple_str);
+            let cpu = std::env::var("__REVM_JIT_OVERRIDE_TARGET_CPU").unwrap_or_default();
+            let features = std::env::var("__REVM_JIT_OVERRIDE_TARGET_FEATURES").unwrap_or_default();
             TargetDefaults { triple, cpu, features }
         })
     }
@@ -1020,7 +1019,7 @@ fn init_() -> Result<()> {
         info: true,
         machine_code: true,
     };
-    if OVERRIDE_TARGET {
+    if override_target_triple().is_some() {
         Target::initialize_all(&config);
     } else {
         Target::initialize_native(&config).map_err(Error::msg)?;
@@ -1150,4 +1149,9 @@ fn convert_linkage(linkage: revm_jit_backend::Linkage) -> inkwell::module::Linka
 
 fn error_msg(msg: inkwell::support::LLVMString) -> revm_jit_backend::Error {
     revm_jit_backend::Error::msg(msg.to_string_lossy().trim_end().to_string())
+}
+
+fn override_target_triple() -> Option<&'static str> {
+    static CACHE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::env::var("__REVM_JIT_OVERRIDE_TARGET_TRIPLE").ok()).as_deref()
 }
