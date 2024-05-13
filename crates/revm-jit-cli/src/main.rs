@@ -3,12 +3,10 @@
 use clap::{Parser, ValueEnum};
 use color_eyre::{eyre::eyre, Result};
 use revm_jit::{
-    debug_time,
-    eyre::{ensure, Context},
-    new_llvm_backend, EvmCompiler, EvmContext, OptimizationLevel,
+    debug_time, eyre::ensure, new_llvm_backend, EvmCompiler, EvmContext, OptimizationLevel,
 };
-use revm_jit_cli::{get_benches, parse_evm_dsl, Bench};
-use revm_primitives::{address, hex, Bytes, Env, SpecId};
+use revm_jit_cli::{get_benches, read_code, Bench};
+use revm_primitives::{address, Bytes, Env, SpecId};
 use std::{
     hint::black_box,
     path::{Path, PathBuf},
@@ -242,38 +240,6 @@ fn init_tracing_subscriber() -> Result<(), tracing_subscriber::util::TryInitErro
         .with(tracing_error::ErrorLayer::default())
         .with(tracing_subscriber::fmt::layer())
         .try_init()
-}
-
-fn read_code(code: Option<&str>, code_path: Option<&Path>) -> Result<Vec<u8>> {
-    if let Some(code) = code {
-        return read_code_string(code.trim().as_bytes(), None);
-    }
-
-    if let Some(code_path) = code_path {
-        let contents = std::fs::read(code_path)?;
-        let ext = code_path.extension().and_then(|s| s.to_str());
-        return read_code_string(&contents, ext);
-    }
-
-    Err(eyre!("one of --code, --code-path is required when argument is 'custom'"))
-}
-
-fn read_code_string(contents: &[u8], ext: Option<&str>) -> Result<Vec<u8>> {
-    let has_prefix = contents.starts_with(b"0x") || contents.starts_with(b"0X");
-    let is_hex = ext != Some("bin") && (ext == Some("hex") || has_prefix);
-    let utf8 = || std::str::from_utf8(contents).wrap_err("given code is not valid UTF-8");
-    if is_hex {
-        let input = utf8()?.trim();
-        let mut lines = input.lines().map(str::trim);
-        let first_line = lines.next().unwrap_or_default();
-        hex::decode(first_line).wrap_err("given code is not valid hex")
-    } else if ext == Some("bin") || !contents.is_ascii() {
-        Ok(contents.to_vec())
-    } else if ext == Some("evm") {
-        parse_evm_dsl(utf8()?)
-    } else {
-        Err(eyre!("could not determine bytecode type"))
-    }
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]

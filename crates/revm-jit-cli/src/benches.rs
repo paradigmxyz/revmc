@@ -1,6 +1,15 @@
 use revm_jit::{interpreter::opcode as op, primitives::hex, U256};
 use std::hint::black_box;
 
+macro_rules! include_code_str {
+    ($path:literal) => {
+        crate::read_code_string(
+            include_bytes!($path),
+            std::path::Path::new($path).extension().and_then(|s| s.to_str()),
+        )
+    };
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Bench {
     pub name: &'static str,
@@ -27,72 +36,72 @@ pub fn get_benches() -> Vec<Bench> {
         },
         Bench {
             name: "counter",
-            bytecode: hex::decode(include_str!("../../../data/counter.rt.hex")).unwrap(),
+            bytecode: include_code_str!("../../../data/counter.rt.hex").unwrap(),
             // `increment()`
             calldata: hex!("d09de08a").to_vec(),
             ..Default::default()
         },
         Bench {
             name: "snailtracer",
-            bytecode: hex::decode(include_str!("../../../data/snailtracer.rt.hex")).unwrap(),
+            bytecode: include_code_str!("../../../data/snailtracer.rt.hex").unwrap(),
             // `Benchmark()`
             calldata: hex!("30627b7c").to_vec(),
             ..Default::default()
         },
         Bench {
             name: "weth",
-            bytecode: hex::decode(include_str!("../../../data/weth.rt.hex")).unwrap(),
+            bytecode: include_code_str!("../../../data/weth.rt.hex").unwrap(),
             ..Default::default()
         },
         Bench {
             name: "hash_10k",
-            bytecode: hex::decode(include_str!("../../../data/hash_10k.rt.hex")).unwrap(),
+            bytecode: include_code_str!("../../../data/hash_10k.rt.hex").unwrap(),
             // `Benchmark()`
             calldata: hex!("30627b7c").to_vec(),
             ..Default::default()
         },
         Bench {
             name: "erc20_transfer",
-            bytecode: hex::decode(include_str!("../../../data/erc20_transfer.rt.hex")).unwrap(),
+            bytecode: include_code_str!("../../../data/erc20_transfer.rt.hex").unwrap(),
             // `Benchmark()`
             calldata: hex!("30627b7c").to_vec(),
             ..Default::default()
         },
         Bench {
             name: "push0_proxy",
-            bytecode: hex::decode(include_str!("../../../data/push0_proxy.rt.hex")).unwrap(),
+            bytecode: include_code_str!("../../../data/push0_proxy.rt.hex").unwrap(),
             ..Default::default()
         },
         Bench {
             name: "usdc_proxy",
-            bytecode: hex::decode(include_str!("../../../data/usdc_proxy.rt.hex")).unwrap(),
+            bytecode: include_code_str!("../../../data/usdc_proxy.rt.hex").unwrap(),
             ..Default::default()
         },
         Bench {
             name: "fiat_token",
-            bytecode: hex::decode(include_str!("../../../data/fiat_token.rt.hex")).unwrap(),
+            bytecode: include_code_str!("../../../data/fiat_token.rt.hex").unwrap(),
             ..Default::default()
         },
         Bench {
             name: "uniswap_v2_pair",
-            bytecode: hex::decode(include_str!("../../../data/uniswap_v2_pair.rt.hex")).unwrap(),
+            bytecode: include_code_str!("../../../data/uniswap_v2_pair.rt.hex").unwrap(),
             ..Default::default()
         },
         Bench {
             name: "seaport",
-            bytecode: hex::decode(include_str!("../../../data/seaport.rt.hex")).unwrap(),
+            bytecode: include_code_str!("../../../data/seaport.rt.hex").unwrap(),
             ..Default::default()
         },
         Bench {
             name: "airdrop",
-            bytecode: hex::decode(include_str!("../../../data/airdrop.rt.hex")).unwrap(),
+            bytecode: include_code_str!("../../../data/airdrop.rt.hex").unwrap(),
             // `paused()`
             calldata: hex!("5c975abb").to_vec(),
             ..Default::default()
         },
         Bench {
             name: "bswap64",
-            bytecode: hex::decode(include_str!("../../../data/bswap64.rt.hex")).unwrap(),
+            bytecode: include_code_str!("../../../data/bswap64.rt.hex").unwrap(),
             // `to_little_endian_64(uint64 = 0x0102)` returns (bytes)
             calldata: hex!(
                 "ff2f79f10000000000000000000000000000000000000000000000000000000000000102"
