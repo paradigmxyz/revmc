@@ -2,10 +2,7 @@ use inkwell::{
     context::{AsContextRef, Context},
     llvm_sys::{core::*, prelude::*, LLVMDiagnosticHandler, LLVMDiagnosticSeverity::*},
 };
-use std::{
-    ffi::{c_void, CStr},
-    fmt, ptr,
-};
+use std::{ffi::c_void, fmt, ptr};
 
 /// LLVM diagnostic handler guard.
 pub(crate) struct DiagnosticHandlerGuard<'ctx> {
@@ -33,7 +30,8 @@ impl<'ctx> DiagnosticHandlerGuard<'ctx> {
 
     extern "C" fn diagnostic_handler(di: LLVMDiagnosticInfoRef, _context: *mut c_void) {
         unsafe {
-            let msg_cstr = CStr::from_ptr(LLVMGetDiagInfoDescription(di));
+            // `LLVMGetDiagInfoDescription` returns an LLVM `Message`.
+            let msg_cstr = crate::llvm_string(LLVMGetDiagInfoDescription(di));
             let msg = msg_cstr.to_string_lossy();
             match LLVMGetDiagInfoSeverity(di) {
                 LLVMDSError => error!(target: "llvm", "{msg}"),

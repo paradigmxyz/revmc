@@ -43,6 +43,9 @@ pub use inkwell::{self, context::Context};
 mod dh;
 pub mod orc;
 
+mod utils;
+pub(crate) use utils::*;
+
 const DEFAULT_WEIGHT: u32 = 20000;
 
 /// Executes the given closure with a thread-local LLVM context.
@@ -198,6 +201,9 @@ impl<'ctx> EvmLlvmBackend<'ctx> {
         for function in self.module.get_functions() {
             unsafe { function.delete() };
         }
+        for global in self.module.get_globals() {
+            unsafe { global.delete() };
+        }
     }
 }
 
@@ -335,7 +341,6 @@ impl<'ctx> Backend for EvmLlvmBackend<'ctx> {
         let name = self.id_to_name(id);
         let addr = self.exec_engine().get_function_address(name)?;
         self.clear_module();
-
         Ok(addr)
     }
 
@@ -351,12 +356,19 @@ impl<'ctx> Backend for EvmLlvmBackend<'ctx> {
         if let Some(exec_engine) = &self.exec_engine {
             exec_engine.remove_module(&self.module).map_err(|e| Error::msg(e.to_string()))?;
         }
+        self.clear_module();
         self.module = create_module(self.cx, &self.machine)?;
         if self.exec_engine.is_some() {
             self.exec_engine =
                 Some(self.module.create_jit_execution_engine(self.opt_level).map_err(error_msg)?);
         }
         Ok(())
+    }
+}
+
+impl Drop for EvmLlvmBackend<'_> {
+    fn drop(&mut self) {
+        self.clear_module();
     }
 }
 

@@ -12,6 +12,7 @@
 #![allow(clippy::new_without_default)]
 #![allow(clippy::missing_safety_doc)]
 
+use crate::llvm_string;
 use inkwell::{
     context::ContextRef,
     llvm_sys::{
@@ -1120,11 +1121,6 @@ fn panic_payload(any: &dyn std::any::Any) -> Option<&str> {
     } else {
         None
     }
-}
-
-unsafe fn llvm_string(ptr: *const c_char) -> LLVMString {
-    // `LLVMString::new` is private
-    std::mem::transmute(ptr)
 }
 
 #[cfg(test)]
