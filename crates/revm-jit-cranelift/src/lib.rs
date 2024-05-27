@@ -713,8 +713,8 @@ impl<'a> Builder for EvmCraneliftBuilder<'a> {
         linkage: revm_jit_backend::Linkage,
     ) -> Self::Function {
         let mut sig = self.module.get().make_signature();
-        for ret in &ret {
-            sig.returns.push(AbiParam::new(*ret));
+        if let Some(ret) = ret {
+            sig.returns.push(AbiParam::new(ret));
         }
         for param in params {
             sig.params.push(AbiParam::new(*param));

@@ -34,7 +34,7 @@ tracing-subscriber = { workspace = true, features = ["fmt", "env-filter"] }
 
 [dev-dependencies]
 criterion = "0.5"
-iai-callgrind = "0.10"
+iai-callgrind = "0.11"
 revm-jit-cli-tests = { path = "../revm-jit-cli-tests/" }
 
 [build-dependencies]
