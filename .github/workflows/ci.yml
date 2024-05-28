@@ -9,6 +9,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   LLVM_VERSION: "17" # Must be just the major version
+  ALL_BACKENDS: "llvm,cranelift"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
@@ -52,7 +53,7 @@ jobs:
         with:
           cache-on-failure: true
       - name: test
-        run: cargo test --all-features --workspace --profile ${{ matrix.profile }}
+        run: cargo test --workspace --profile ${{ matrix.profile }} --features ${{ env.ALL_BACKENDS }}
 
   feature-checks:
     runs-on: ubuntu-latest
@@ -68,7 +69,10 @@ jobs:
           cache-on-failure: true
       - name: cargo hack
         # The builtins library cannot be built with `no_std`.
-        run: cargo hack check --feature-powerset --depth 2 --workspace --exclude revm-jit-builtins
+        run: |
+          cargo hack check --feature-powerset --depth 2 \
+            --workspace --exclude revm-jit-builtins \
+            --skip llvm-prefer-static --skip prefer-static
 
   clippy:
     runs-on: ubuntu-latest
@@ -81,7 +85,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
-      - run: cargo clippy --workspace --all-targets --all-features
+      - run: cargo clippy --workspace --all-targets --features ${{ env.ALL_BACKENDS }}
         env:
           RUSTFLAGS: -Dwarnings
 
@@ -96,7 +100,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
-      - run: cargo doc --workspace --all-features --no-deps --document-private-items
+      - run: cargo doc --workspace --features ${{ env.ALL_BACKENDS }} --no-deps --document-private-items
         env:
           RUSTDOCFLAGS: --cfg docsrs -D warnings --show-type-layout --generate-link-to-definition --enable-index-page -Zunstable-options
       # - name: Deploy documentation

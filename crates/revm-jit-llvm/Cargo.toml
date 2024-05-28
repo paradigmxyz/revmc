@@ -19,6 +19,10 @@ workspace = true
 [dependencies]
 revm-jit-backend.workspace = true
 
-inkwell = { version = "0.4", features = ["llvm17-0-prefer-dynamic"] }
+inkwell = { version = "0.4", features = ["llvm17-0"] }
 rustc-hash.workspace = true
 tracing.workspace = true
+
+[features]
+prefer-static = ["inkwell/llvm17-0-prefer-static"]
+prefer-dynamic = ["inkwell/llvm17-0-prefer-dynamic"]

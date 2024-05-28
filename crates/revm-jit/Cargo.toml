@@ -40,6 +40,8 @@ tempfile = "3.10"
 [features]
 default = ["llvm"]
 llvm = ["dep:revm-jit-llvm"]
+llvm-prefer-static = ["llvm", "revm-jit-llvm?/prefer-static"]
+llvm-prefer-dynamic = ["llvm", "revm-jit-llvm?/prefer-dynamic"]
 cranelift = ["dep:revm-jit-cranelift"]
 
 asm-keccak = ["alloy-primitives/asm-keccak"]

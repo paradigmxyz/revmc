@@ -41,8 +41,10 @@ revm-jit-cli-tests = { path = "../revm-jit-cli-tests/" }
 revm-jit-build.workspace = true
 
 [features]
-default = ["llvm", "revm-jit/asm-keccak"]
+default = ["llvm-prefer-dynamic", "revm-jit/asm-keccak"]
 llvm = ["revm-jit/llvm"]
+llvm-prefer-static = ["llvm", "revm-jit/llvm-prefer-static"]
+llvm-prefer-dynamic = ["llvm", "revm-jit/llvm-prefer-dynamic"]
 cranelift = ["revm-jit/cranelift"]
 
 [[bin]]
