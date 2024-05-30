@@ -200,7 +200,10 @@ builtins! {
         let sp_dyn = size_and_align2(None, core::mem::align_of::<revm_jit_context::EvmWord>());
 
         let mut sp = sp_dyn.clone();
-        sp.push(Attribute::Dereferenceable((core::mem::size_of::<revm_jit_context::EvmWord>() * inputs as usize) as u64));
+        // `sp` is at `top - inputs`, we have access to `max(inputs, outputs)` words.
+        let n_stack_words = inputs.max(outputs);
+        let size_of_word = core::mem::size_of::<revm_jit_context::EvmWord>();
+        sp.push(Attribute::Dereferenceable(size_of_word as u64 * n_stack_words as u64));
         match (inputs, outputs) {
             (0, 0) => sp.push(Attribute::ReadNone),
             (0, 1..) => sp.push(Attribute::WriteOnly),
