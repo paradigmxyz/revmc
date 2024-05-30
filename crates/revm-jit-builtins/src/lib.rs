@@ -268,6 +268,19 @@ pub unsafe extern "C" fn __revm_jit_builtin_blockhash(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn __revm_jit_builtin_difficulty(
+    ecx: &mut EvmContext<'_>,
+    slot: &mut EvmWord,
+    spec_id: SpecId,
+) {
+    *slot = if spec_id.is_enabled_in(SpecId::MERGE) {
+        EvmWord::from_be_bytes(ecx.host.env().block.prevrandao.unwrap().0)
+    } else {
+        ecx.host.env().block.difficulty.into()
+    };
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn __revm_jit_builtin_self_balance(
     ecx: &mut EvmContext<'_>,
     slot: &mut EvmWord,
