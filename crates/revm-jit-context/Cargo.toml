@@ -21,4 +21,6 @@ revm-interpreter.workspace = true
 revm-primitives.workspace = true
 
 [features]
+default = ["std"]
+std = ["revm-interpreter/std", "revm-primitives/std"]
 host-ext-any = []

@@ -68,10 +68,8 @@ jobs:
         with:
           cache-on-failure: true
       - name: cargo hack
-        # The builtins library cannot be built with `no_std`.
         run: |
-          cargo hack check --feature-powerset --depth 2 \
-            --workspace --exclude revm-jit-builtins \
+          cargo hack check --feature-powerset --depth 2 --workspace \
             --skip llvm-prefer-static --skip prefer-static
 
   clippy:
