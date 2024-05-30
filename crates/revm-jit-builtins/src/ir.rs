@@ -224,6 +224,7 @@ builtins! {
     ReturnDataCopy = __revm_jit_builtin_returndatacopy(@[ecx] ptr, @[sp] ptr) Some(u8),
     ExtCodeHash    = __revm_jit_builtin_extcodehash(@[ecx] ptr, @[sp] ptr, u8) Some(u8),
     BlockHash      = __revm_jit_builtin_blockhash(@[ecx] ptr, @[sp] ptr) Some(u8),
+    Difficulty     = __revm_jit_builtin_difficulty(@[ecx] ptr, @[sp] ptr, u8) None,
     SelfBalance    = __revm_jit_builtin_self_balance(@[ecx] ptr, @[sp] ptr) Some(u8),
     BlobHash       = __revm_jit_builtin_blob_hash(@[ecx] ptr, @[sp] ptr) None,
     BlobBaseFee    = __revm_jit_builtin_blob_base_fee(@[ecx] ptr, @[sp] ptr) None,

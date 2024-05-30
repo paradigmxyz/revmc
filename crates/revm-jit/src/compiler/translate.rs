@@ -6,7 +6,7 @@ use crate::{
 use revm_interpreter::{opcode as op, Contract, InstructionResult};
 use revm_jit_backend::{BackendTypes, Pointer, TypeMethods};
 use revm_jit_builtins::{Builtin, Builtins, CallKind, CreateKind};
-use revm_primitives::{BlockEnv, CfgEnv, Env, SpecId, TxEnv, U256};
+use revm_primitives::{BlockEnv, CfgEnv, Env, TxEnv, U256};
 use std::{fmt::Write, mem, sync::atomic::AtomicPtr};
 
 const STACK_CAP: usize = 1024;
@@ -894,30 +894,9 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 env_field!(@push @[endian = "little"] self.word_type, Env, BlockEnv; block.number)
             }
             op::DIFFICULTY => {
-                let value = if self.bytecode.spec_id.is_enabled_in(SpecId::MERGE) {
-                    // Option<[u8; 32]> == { u8, [u8; 32] }
-                    let opt = env_field!(@get Env, BlockEnv; block.prevrandao);
-                    let is_some = {
-                        let name = "env.block.prevrandao.is_some";
-                        let is_some = self.bcx.load(self.i8_type, opt, name);
-                        self.bcx.icmp_imm(IntCC::NotEqual, is_some, 0)
-                    };
-                    let some = {
-                        let one = self.bcx.iconst(self.isize_type, 1);
-                        let ptr =
-                            self.bcx.gep(self.i8_type, opt, &[one], "env.block.prevrandao.ptr");
-                        let mut v = self.bcx.load(self.word_type, ptr, "env.block.prevrandao");
-                        if !cfg!(target_endian = "big") {
-                            v = self.bcx.bswap(v);
-                        }
-                        v
-                    };
-                    let none = self.bcx.iconst_256(U256::ZERO);
-                    self.bcx.select(is_some, some, none)
-                } else {
-                    env_field!(@load @[endian = "little"] self.word_type, Env, BlockEnv; block.difficulty)
-                };
-                self.push(value);
+                let slot = self.sp_at_top();
+                let spec_id = self.const_spec_id();
+                let _ = self.builtin(Builtin::Difficulty, &[self.ecx, slot, spec_id]);
             }
             op::GASLIMIT => {
                 env_field!(@push @[endian = "little"] self.word_type, Env, BlockEnv; block.gas_limit)
