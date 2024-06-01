@@ -20,18 +20,18 @@ This repository hosts two backend implementations:
 
 - Linux or macOS, Windows is not supported
 - Latest stable Rust version
-- LLVM 17
+- LLVM 18
   - On Debian-based Linux distros: see [apt.llvm.org](https://apt.llvm.org/)
-  - On Arch-based Linux distros: `pacman -S llvm`
-  - On macOS: `brew install llvm@17`
+  - On Arch-based Linux distros: `pacman -S llvm` or `yay -S llvm-18`
+  - On macOS: `brew install llvm@18`
   - The following environment variables may be required:
     ```bash
     prefix=$(llvm-config --prefix)
     # or
-    #prefix=$(llvm-config-17 --prefix)
+    #prefix=$(llvm-config-18 --prefix)
     # on macOS:
-    #prefix=$(brew --prefix llvm@17)
-    export LLVM_SYS_170_PREFIX=$prefix
+    #prefix=$(brew --prefix llvm@18)
+    export LLVM_SYS_180_PREFIX=$prefix
     ```
 
 ## Usage
