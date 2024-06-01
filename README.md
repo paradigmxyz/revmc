@@ -5,11 +5,8 @@ Experimental [JIT] and [AOT] compiler for the [Ethereum Virtual Machine][EVM].
 The compiler implementation is abstracted over an intermediate representation backend.
 
 This repository hosts two backend implementations:
-
 - [LLVM] ([`revm-jit-llvm`]): main backend with full test coverage;
 - [Cranelift] ([`revm-jit-cranelift`]); currently not functional due to missing `i256` support in Cranelift. This will likely require a custom fork of Cranelift.
-
-Compiling the crate requires LLVM 17.
 
 [JIT]: https://en.wikipedia.org/wiki/Just-in-time_compilation
 [AOT]: https://en.wikipedia.org/wiki/Ahead-of-time_compilation
@@ -18,6 +15,39 @@ Compiling the crate requires LLVM 17.
 [`revm-jit-llvm`]: /crates/revm-jit-llvm
 [Cranelift]: https://cranelift.dev/
 [`revm-jit-cranelift`]: /crates/revm-jit-cranelift
+
+## Requirements
+
+- Linux or macOS, Windows is not supported
+- Latest stable Rust version
+- LLVM 17
+  - On Debian-based Linux distros: see [apt.llvm.org](https://apt.llvm.org/)
+  - On Arch-based Linux distros: `pacman -S llvm`
+  - On macOS: `brew install llvm@17`
+  - The following environment variables may be required:
+    ```bash
+    prefix=$(llvm-config --prefix)
+    # or
+    #prefix=$(llvm-config-17 --prefix)
+    # on macOS:
+    #prefix=$(brew --prefix llvm@17)
+    export LLVM_SYS_170_PREFIX=$prefix
+    ```
+
+## Usage
+
+The compiler is implemented as a library and can be used as such through the `revm-jit` crate.
+
+A minimal runtime is required to run AOT-compiled bytecodes. A default runtime implementation is
+provided through symbols exported in the `revm-jit-builtins` crate and must be exported in the final
+binary. This can be achieved with the following build script:
+```rust,ignore
+fn main() {
+    revm_jit_build::emit();
+}
+```
+
+You can check out the [examples](/examples) directory for example usage.
 
 ## Credits
 

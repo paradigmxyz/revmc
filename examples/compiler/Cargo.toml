@@ -1,0 +1,22 @@
+[package]
+name = "revm-jit-examples-compiler"
+publish = false
+
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+categories.workspace = true
+keywords.workspace = true
+repository.workspace = true
+exclude.workspace = true
+
+[build-dependencies]
+revm-jit-build.workspace = true
+
+[dependencies]
+revm-jit = { workspace = true, features = ["llvm-prefer-dynamic"] }
+
+clap = { version = "4", features = ["derive"] }
+eyre.workspace = true
