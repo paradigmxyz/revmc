@@ -146,7 +146,7 @@ impl<'ctx> EvmLlvmBackend<'ctx> {
         let ty_i64 = cx.i64_type();
         let ty_i256 = cx.custom_width_int_type(256);
         let ty_isize = cx.ptr_sized_int_type(&machine.get_target_data(), None);
-        let ty_ptr = ty_i8.ptr_type(AddressSpace::default());
+        let ty_ptr = cx.ptr_type(AddressSpace::default());
         Ok(Self {
             cx,
             _dh: dh::DiagnosticHandlerGuard::new(cx),
