@@ -1,6 +1,7 @@
 [workspace]
 members = ["crates/*", "examples/*"]
 default-members = ["crates/revm-jit-cli"]
+exclude = ["crates/revm-jit-mlir"]
 resolver = "2"
 
 [workspace.package]
