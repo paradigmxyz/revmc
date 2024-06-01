@@ -12,7 +12,7 @@ echo "::endgroup::"
 chmod +x "$llvm_sh"
 
 echo "::group::Install LLVM $v"
-"$llvm_sh" "$v" all
+sudo "$llvm_sh" "$v" all
 for bin in "${bins[@]}"; do
     sudo ln -fs "$(which "$bin-$v")" "/usr/bin/$bin"
 done
