@@ -106,17 +106,8 @@ impl<'ctx> EvmLlvmBackend<'ctx> {
         let opt_level = convert_opt_level(opt_level);
 
         let target_defaults = TargetDefaults::get();
-        let target = Target::from_triple(&target_defaults.triple).map_err(error_msg)?;
-        let machine = target
-            .create_target_machine(
-                &target_defaults.triple,
-                &target_defaults.cpu,
-                &target_defaults.features,
-                opt_level,
-                if aot { RelocMode::DynamicNoPic } else { RelocMode::PIC },
-                if aot { CodeModel::Default } else { CodeModel::JITDefault },
-            )
-            .ok_or_else(|| eyre::eyre!("failed to create target machine"))?;
+        let target = target_defaults.target()?;
+        let machine = target_defaults.create_target_machine(aot, opt_level)?;
 
         let module = create_module(cx, &machine)?;
 
@@ -373,10 +364,14 @@ impl Drop for EvmLlvmBackend<'_> {
 }
 
 /// Cached target information.
-struct TargetDefaults {
-    triple: TargetTriple,
-    cpu: String,
-    features: String,
+#[derive(Debug)]
+pub struct TargetDefaults {
+    /// Target triple.
+    pub triple: TargetTriple,
+    /// Target CPU.
+    pub cpu: String,
+    /// Target features.
+    pub features: String,
     // target: Target,
 }
 
@@ -385,7 +380,8 @@ unsafe impl std::marker::Send for TargetDefaults {}
 unsafe impl std::marker::Sync for TargetDefaults {}
 
 impl TargetDefaults {
-    fn get() -> &'static Self {
+    /// Returns the target defaults.
+    pub fn get() -> &'static Self {
         static TARGET_DEFAULTS: OnceLock<TargetDefaults> = OnceLock::new();
         TARGET_DEFAULTS.get_or_init(|| {
             if let Some(r#override) = Self::r#override() {
@@ -405,6 +401,29 @@ impl TargetDefaults {
             let features = std::env::var("__REVM_JIT_OVERRIDE_TARGET_FEATURES").unwrap_or_default();
             TargetDefaults { triple, cpu, features }
         })
+    }
+
+    /// Parses the target triple into a [`Target`].
+    pub fn target(&self) -> Result<Target> {
+        Target::from_triple(&self.triple).map_err(error_msg)
+    }
+
+    /// Creates a target machine.
+    pub fn create_target_machine(
+        &self,
+        aot: bool,
+        opt_level: OptimizationLevel,
+    ) -> Result<TargetMachine> {
+        self.target()?
+            .create_target_machine(
+                &self.triple,
+                &self.cpu,
+                &self.features,
+                opt_level,
+                if aot { RelocMode::DynamicNoPic } else { RelocMode::PIC },
+                if aot { CodeModel::Default } else { CodeModel::JITDefault },
+            )
+            .ok_or_else(|| eyre::eyre!("failed to create target machine"))
     }
 }
 
@@ -1003,14 +1022,15 @@ impl<'a, 'ctx> Builder for EvmLlvmBuilder<'a, 'ctx> {
     }
 }
 
-fn init() -> Result<()> {
+/// Initializes LLVM.
+pub fn init() -> Result<()> {
     let mut init_result = Ok(());
     static INIT: Once = Once::new();
-    INIT.call_once(|| init_result = init_());
+    INIT.call_once(|| init_result = init_inner());
     init_result
 }
 
-fn init_() -> Result<()> {
+fn init_inner() -> Result<()> {
     // TODO: This also reports "PLEASE submit a bug report to..." when the segfault is
     // outside of LLVM.
     // enable_llvm_pretty_stack_trace();
@@ -1026,7 +1046,7 @@ fn init_() -> Result<()> {
     }
 
     // The first arg is only used in `-help` output AFAICT.
-    let args = [c"revm-jit-llvm".as_ptr(), c"-x86-asm-syntax=intel".as_ptr()];
+    let args = [c"revm-jit".as_ptr(), c"-x86-asm-syntax=intel".as_ptr()];
     unsafe {
         inkwell::llvm_sys::support::LLVMParseCommandLineOptions(
             args.len() as i32,
@@ -1076,7 +1096,8 @@ fn convert_intcc(cond: IntCC) -> IntPredicate {
     }
 }
 
-fn convert_opt_level(level: revm_jit_backend::OptimizationLevel) -> OptimizationLevel {
+/// Converts to an LLVM optimization level.
+pub fn convert_opt_level(level: revm_jit_backend::OptimizationLevel) -> OptimizationLevel {
     match level {
         revm_jit_backend::OptimizationLevel::None => OptimizationLevel::None,
         revm_jit_backend::OptimizationLevel::Less => OptimizationLevel::Less,
@@ -1085,7 +1106,8 @@ fn convert_opt_level(level: revm_jit_backend::OptimizationLevel) -> Optimization
     }
 }
 
-fn convert_opt_level_rev(level: OptimizationLevel) -> revm_jit_backend::OptimizationLevel {
+/// Converts from an LLVM optimization level.
+pub fn convert_opt_level_rev(level: OptimizationLevel) -> revm_jit_backend::OptimizationLevel {
     match level {
         OptimizationLevel::None => revm_jit_backend::OptimizationLevel::None,
         OptimizationLevel::Less => revm_jit_backend::OptimizationLevel::Less,
