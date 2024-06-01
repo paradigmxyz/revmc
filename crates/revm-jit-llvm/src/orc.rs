@@ -32,6 +32,8 @@ use std::{
     ptr,
 };
 
+// TODO: `&mut dyn FnMut` is not always right here if it's stored by LLVM.
+
 /// A thread-safe LLVM context.
 ///
 /// Must use a lock to access the context in multi-threaded scenarios.
