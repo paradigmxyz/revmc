@@ -1,0 +1,22 @@
+[package]
+name = "revm-jit-examples-runner"
+publish = false
+
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+categories.workspace = true
+keywords.workspace = true
+repository.workspace = true
+exclude.workspace = true
+
+[build-dependencies]
+revm-jit-build.workspace = true
+
+[dependencies]
+revm-jit-builtins = { workspace = true, default-features = false }
+revm-jit-context = { workspace = true, default-features = false }
+
+revm = { workspace = true, default-features = false }

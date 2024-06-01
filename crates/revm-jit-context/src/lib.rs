@@ -9,7 +9,7 @@ use alloc::vec::Vec;
 use core::{fmt, mem::MaybeUninit, ptr};
 use revm_interpreter::{
     Contract, FunctionStack, Gas, Host, InstructionResult, Interpreter, InterpreterAction,
-    InterpreterResult, SharedMemory,
+    InterpreterResult, SharedMemory, EMPTY_SHARED_MEMORY,
 };
 use revm_primitives::{Address, Bytes, Env, U256};
 
@@ -165,6 +165,27 @@ impl EvmCompilerFn {
     #[inline]
     pub const fn into_inner(self) -> RawEvmCompilerFn {
         self.0
+    }
+
+    /// Calls the function by re-using the interpreter's resources and memory.
+    ///
+    /// See [`call_with_interpreter_and_memory`](Self::call_with_interpreter_and_memory) for more
+    /// information.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that the function is safe to call.
+    #[inline]
+    pub unsafe fn call_with_interpreter_and_memory(
+        self,
+        interpreter: &mut Interpreter,
+        memory: &mut SharedMemory,
+        host: &mut dyn HostExt,
+    ) -> InterpreterAction {
+        interpreter.shared_memory = core::mem::replace(memory, EMPTY_SHARED_MEMORY);
+        let result = self.call_with_interpreter(interpreter, host);
+        *memory = interpreter.take_memory();
+        result
     }
 
     /// Calls the function by re-using the interpreter's resources.

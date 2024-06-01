@@ -305,9 +305,16 @@ pub fn set_test_dump<B: Backend>(compiler: &mut EvmCompiler<B>, module_path: &st
 }
 
 pub fn run_test_case<B: Backend>(test_case: &TestCase<'_>, compiler: &mut EvmCompiler<B>) {
+    let TestCase { bytecode, spec_id, .. } = *test_case;
+    compiler.inspect_stack_length(true);
+    let f = compiler.jit(None, bytecode, spec_id).unwrap();
+    run_compiled_test_case(test_case, f);
+}
+
+fn run_compiled_test_case(test_case: &TestCase<'_>, f: EvmCompilerFn) {
     let TestCase {
         bytecode,
-        spec_id,
+        spec_id: _,
         modify_ecx,
         expected_return,
         expected_stack,
@@ -317,8 +324,6 @@ pub fn run_test_case<B: Backend>(test_case: &TestCase<'_>, compiler: &mut EvmCom
         assert_host,
         assert_ecx,
     } = *test_case;
-    compiler.inspect_stack_length(true);
-    let f = compiler.jit(None, bytecode, spec_id).unwrap();
 
     with_evm_context(bytecode, |ecx, stack, stack_len| {
         if let Some(modify_ecx) = modify_ecx {
