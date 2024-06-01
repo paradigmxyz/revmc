@@ -32,6 +32,8 @@ This repository hosts two backend implementations:
     # on macOS:
     #prefix=$(brew --prefix llvm@18)
     export LLVM_SYS_180_PREFIX=$prefix
+    export MLIR_SYS_180_PREFIX=$prefix
+    export TABLEGEN_180_PREFIX=$prefix
     ```
 
 ## Usage

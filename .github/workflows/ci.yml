@@ -9,7 +9,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   LLVM_VERSION: "18" # Must be just the major version
-  ALL_BACKENDS: "llvm,cranelift"
+  ALL_BACKENDS: "llvm,mlir,cranelift"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
@@ -39,11 +39,7 @@ jobs:
         run: sudo .github/scripts/install_llvm_ubuntu.sh ${{ env.LLVM_VERSION }}
       - name: Install LLVM (brew)
         if: ${{ contains(matrix.runner, 'macos') }}
-        run: |
-          v=${{ env.LLVM_VERSION }}
-          brew install "llvm@${v}"
-          echo "LLVM_SYS_${v}0_PREFIX=$(brew --prefix llvm@${v})" >> $GITHUB_ENV
-          echo "/opt/homebrew/opt/llvm@${v}/bin" >> $GITHUB_PATH
+        run: .github/scripts/install_llvm_macos.sh ${{ env.LLVM_VERSION }}
       - name: llvm-config
         run: llvm-config --version --bindir --libdir
       - uses: dtolnay/rust-toolchain@master

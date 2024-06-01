@@ -11,3 +11,8 @@ chmod +x "$llvm_sh"
 for bin in "${bins[@]}"; do
     ln -fs "$(which "$bin-$v")" "/usr/bin/$bin"
 done
+
+prefix="$(llvm-config --prefix)"
+echo "LLVM_SYS_${v}0_PREFIX=$prefix" >> $GITHUB_ENV
+echo "MLIR_SYS_${v}0_PREFIX=$prefix" >> $GITHUB_ENV
+echo "TABLEGEN_${v}0_PREFIX=$prefix" >> $GITHUB_ENV

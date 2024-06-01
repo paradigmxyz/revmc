@@ -1,7 +1,6 @@
 [workspace]
 members = ["crates/*", "examples/*"]
 default-members = ["crates/revm-jit-cli"]
-exclude = ["crates/revm-jit-mlir"]
 resolver = "2"
 
 [workspace.package]
@@ -32,6 +31,7 @@ revm-jit-builtins = { version = "0.1.0", path = "crates/revm-jit-builtins", defa
 revm-jit-context = { version = "0.1.0", path = "crates/revm-jit-context", default-features = false }
 revm-jit-cranelift = { version = "0.1.0", path = "crates/revm-jit-cranelift", default-features = false }
 revm-jit-llvm = { version = "0.1.0", path = "crates/revm-jit-llvm", default-features = false }
+revm-jit-mlir = { version = "0.1.0", path = "crates/revm-jit-mlir", default-features = false }
 
 alloy-primitives = { version = "0.7.0", default-features = false }
 revm = { version = "9.0.0", default-features = false }

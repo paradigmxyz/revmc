@@ -20,8 +20,10 @@ workspace = true
 revm-jit-backend.workspace = true
 revm-jit-builtins = { workspace = true, features = ["ir"] }
 revm-jit-context.workspace = true
-revm-jit-cranelift = { workspace = true, optional = true }
+
 revm-jit-llvm = { workspace = true, optional = true }
+revm-jit-mlir = { workspace = true, optional = true }
+revm-jit-cranelift = { workspace = true, optional = true }
 
 alloy-primitives = { workspace = true, features = ["std"] }
 revm-interpreter.workspace = true
@@ -39,9 +41,13 @@ tempfile = "3.10"
 
 [features]
 default = ["llvm"]
+
 llvm = ["dep:revm-jit-llvm"]
 llvm-prefer-static = ["llvm", "revm-jit-llvm?/prefer-static"]
 llvm-prefer-dynamic = ["llvm", "revm-jit-llvm?/prefer-dynamic"]
+
+mlir = ["dep:revm-jit-mlir"]
+
 cranelift = ["dep:revm-jit-cranelift"]
 
 asm-keccak = ["alloy-primitives/asm-keccak"]
