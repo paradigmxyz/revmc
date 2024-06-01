@@ -34,8 +34,12 @@ jobs:
             arch: "x64"
     steps:
       - uses: actions/checkout@v4
-      - name: Install LLVM
-        run: .github/scripts/install_llvm.sh ${{ env.LLVM_VERSION }}
+      - name: Install LLVM (apt)
+        if: ${{ !contains(matrix.runner, 'macos') }}
+        run: .github/scripts/install_llvm_ubuntu.sh ${{ env.LLVM_VERSION }}
+      - name: Install LLVM (brew)
+        if: ${{ contains(matrix.runner, 'macos') }}
+        run: .github/scripts/install_llvm_macos.sh ${{ env.LLVM_VERSION }}
       - name: llvm-config
         run: llvm-config --version --bindir --libdir
       - uses: dtolnay/rust-toolchain@master
@@ -53,7 +57,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install LLVM
-        run: .github/scripts/install_llvm.sh ${{ env.LLVM_VERSION }}
+        run: .github/scripts/install_llvm_ubuntu.sh ${{ env.LLVM_VERSION }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: taiki-e/install-action@cargo-hack
       - uses: Swatinem/rust-cache@v2
@@ -70,7 +74,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install LLVM
-        run: .github/scripts/install_llvm.sh ${{ env.LLVM_VERSION }}
+        run: .github/scripts/install_llvm_ubuntu.sh ${{ env.LLVM_VERSION }}
       - uses: dtolnay/rust-toolchain@clippy
       - uses: Swatinem/rust-cache@v2
         with:
@@ -85,7 +89,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install LLVM
-        run: .github/scripts/install_llvm.sh ${{ env.LLVM_VERSION }}
+        run: .github/scripts/install_llvm_ubuntu.sh ${{ env.LLVM_VERSION }}
       - uses: dtolnay/rust-toolchain@nightly
       - uses: Swatinem/rust-cache@v2
         with:
