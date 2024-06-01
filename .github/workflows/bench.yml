@@ -23,8 +23,9 @@ jobs:
       IAI_CALLGRIND_RUNNER: iai-callgrind-runner
     steps:
       - uses: actions/checkout@v4
+      - uses: homebrew/actions/setup-homebrew@master
       - name: Install LLVM
-        run: sudo .github/scripts/install_llvm_ubuntu.sh ${{ env.LLVM_VERSION }}
+        run: .github/scripts/install_llvm_brew.sh ${{ env.LLVM_VERSION }}
       - name: llvm-config
         run: llvm-config --version --bindir --libdir
       - name: Install Valgrind
