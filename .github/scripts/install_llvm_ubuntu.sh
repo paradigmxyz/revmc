@@ -5,7 +5,7 @@ v=${1:-$LLVM_VERSION}
 bins=(clang llvm-config lld ld.lld FileCheck)
 llvm_sh=$(mktemp)
 
-echo "::group::Download LLVM $v"
+echo "::group::Download llvm.sh"
 wget https://apt.llvm.org/llvm.sh -O "$llvm_sh"
 echo "::endgroup::"
 
@@ -13,11 +13,10 @@ chmod +x "$llvm_sh"
 
 echo "::group::Install LLVM $v"
 "$llvm_sh" "$v" all
-echo "::endgroup::"
-
 for bin in "${bins[@]}"; do
-    ln -fs "$(which "$bin-$v")" "/usr/bin/$bin"
+    sudo ln -fs "$(which "$bin-$v")" "/usr/bin/$bin"
 done
+echo "::endgroup::"
 
 echo "GITHUB_ENV=$GITHUB_ENV"
 prefix="$(llvm-config --prefix)"
