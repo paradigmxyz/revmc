@@ -3,20 +3,24 @@ set -eo pipefail
 
 v=${1:-$LLVM_VERSION}
 bins=(clang llvm-config lld ld.lld FileCheck)
-llvm_sh=$(mktemp)
 
 echo "::group::Download llvm.sh"
-wget https://apt.llvm.org/llvm.sh -O "$llvm_sh"
+wget https://apt.llvm.org/llvm.sh
 echo "::endgroup::"
 
-chmod +x "$llvm_sh"
+chmod +x ./llvm.sh
 
 echo "::group::Install LLVM $v"
-sudo "$llvm_sh" "$v" all
+sudo ./llvm.sh "$v" all
+echo "::endgroup::"
+
+echo "::group::Install MLIR $v"
+sudo apt-get install -y libmlir-18-dev mlir-18-tools
+echo "::endgroup::"
+
 for bin in "${bins[@]}"; do
     sudo ln -fs "$(which "$bin-$v")" "/usr/bin/$bin"
 done
-echo "::endgroup::"
 
 echo "GITHUB_ENV=$GITHUB_ENV"
 prefix="$(llvm-config --prefix)"
