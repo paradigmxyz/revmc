@@ -850,7 +850,7 @@ tests! {
             },
         }),
         selfdestruct(@raw {
-            bytecode: &[op::PUSH1, 0x69, op::SELFDESTRUCT],
+            bytecode: &[op::PUSH1, 0x69, op::SELFDESTRUCT, op::INVALID],
             expected_return: InstructionResult::SelfDestruct,
             expected_gas: GAS_WHAT_THE_INTERPRETER_SAYS,
             assert_host: Some(|host| {
