@@ -204,7 +204,18 @@ impl<'a> Bytecode<'a> {
         // `JUMPDEST`s as dead code.
         trace_time!("mark_dead_code", || self.mark_dead_code());
         trace_time!("will_suspend", || self.calc_will_suspend());
-        trace_time!("sections", || self.construct_sections());
+        static CACHE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *CACHE.get_or_init(|| {
+            let value = std::env::var("__REVM_JIT_NO_SECTIONS").is_ok();
+            if value {
+                warn!("section analysis will be skipped");
+            }
+            value
+        }) {
+            trace_time!("sections", || self.construct_sections_default());
+        } else {
+            trace_time!("sections", || self.construct_sections());
+        }
 
         Ok(())
     }
@@ -326,7 +337,6 @@ impl<'a> Bytecode<'a> {
 
     /// Constructs the sections in the bytecode.
     #[instrument(name = "sections", level = "debug", skip_all)]
-    #[cfg(any())]
     fn construct_sections_default(&mut self) {
         for inst in &mut self.insts {
             let (inp, out) = inst.stack_io();
