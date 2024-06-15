@@ -259,7 +259,6 @@ pub unsafe extern "C" fn __revm_jit_builtin_blockhash(
     ecx: &mut EvmContext<'_>,
     number_ptr: &mut EvmWord,
 ) -> InstructionResult {
-    // TODO(EOF): EIP-2935 https://github.com/bluealloy/revm/pull/1354
     let number = number_ptr.to_u256();
     if let Some(diff) = ecx.host.env().block.number.checked_sub(number) {
         let diff = as_usize_saturated!(diff);
@@ -383,7 +382,6 @@ pub unsafe extern "C" fn __revm_jit_builtin_sstore(
     InstructionResult::Continue
 }
 
-#[inline]
 #[no_mangle]
 pub unsafe extern "C" fn __revm_jit_builtin_msize(ecx: &mut EvmContext<'_>) -> usize {
     ecx.memory.len()

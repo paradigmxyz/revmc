@@ -34,6 +34,27 @@ pub fn get_benches() -> Vec<Bench> {
             }),
             ..Default::default()
         },
+        // https://github.com/lambdaclass/evm_mlir/blob/b766d0bbc2093bbfa4feb3aa25baf82b512aee74/bench/revm_comparison/src/lib.rs#L12-L15
+        // https://blog.lambdaclass.com/evm-performance-boosts-with-mlir/
+        // > We chose 1000 as N
+        Bench {
+            name: "fibonacci-calldata",
+            bytecode: hex!(
+                "5f355f60015b8215601a578181019150909160019003916005565b9150505f5260205ff3"
+            )
+            .to_vec(),
+            calldata: U256::from(1000).to_be_bytes_vec(),
+            ..Default::default()
+        },
+        Bench {
+            name: "factorial",
+            bytecode: hex!(
+                "5f355f60015b8215601b57906001018091029160019003916005565b9150505f5260205ff3"
+            )
+            .to_vec(),
+            calldata: U256::from(1000).to_be_bytes_vec(),
+            ..Default::default()
+        },
         Bench {
             name: "counter",
             bytecode: include_code_str!("../../../data/counter.rt.hex").unwrap(),
