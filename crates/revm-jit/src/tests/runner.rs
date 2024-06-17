@@ -109,9 +109,6 @@ pub fn def_env() -> &'static Env {
             gas_priority_fee: None,
             blob_hashes: vec![B256::repeat_byte(0xb7), B256::repeat_byte(0xb8)],
             max_fee_per_blob_gas: None,
-            // TODO(EOF)
-            eof_initcodes: Vec::new(),
-            eof_initcodes_hashed: HashMap::new(),
             #[cfg(feature = "optimism")]
             optimism: Default::default(),
         },
@@ -204,11 +201,11 @@ impl Host for TestHost {
         Some((U256::from(*address.last().unwrap()), false))
     }
 
-    fn code(&mut self, address: Address) -> Option<(primitives::Bytecode, bool)> {
+    fn code(&mut self, address: Address) -> Option<(Bytes, bool)> {
         self.code_map
             .get(&address)
-            .map(|b| (b.clone(), false))
-            .or(Some((primitives::Bytecode::new(), false)))
+            .map(|b| (b.original_bytes(), false))
+            .or_else(|| Some((Bytes::new(), false)))
     }
 
     fn code_hash(&mut self, address: Address) -> Option<(B256, bool)> {

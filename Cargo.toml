@@ -48,3 +48,9 @@ paste = "1.0"
 
 [profile.release]
 codegen-units = 1
+
+[patch.crates-io]
+revm = { git = "https://github.com/bluealloy/revm.git", rev = "dd98b3b" }
+revm-interpreter = { git = "https://github.com/bluealloy/revm.git", rev = "dd98b3b" }
+revm-precompile = { git = "https://github.com/bluealloy/revm.git", rev = "dd98b3b" }
+revm-primitives = { git = "https://github.com/bluealloy/revm.git", rev = "dd98b3b" }
