@@ -506,11 +506,12 @@ tests! {
             expected_stack: &[def_env().tx.gas_price],
             expected_gas: 2,
         }),
-        blockhash0(op::BLOCKHASH, DEF_BN - 0_U256 => 0_U256),
+        // Host determines blockhash
+        blockhash0(op::BLOCKHASH, DEF_BN - 0_U256 => DEF_BN - 0_U256),
         blockhash1(op::BLOCKHASH, DEF_BN - 1_U256 => DEF_BN - 1_U256),
         blockhash2(op::BLOCKHASH, DEF_BN - 255_U256 => DEF_BN - 255_U256),
         blockhash3(op::BLOCKHASH, DEF_BN - 256_U256 => DEF_BN - 256_U256),
-        blockhash4(op::BLOCKHASH, DEF_BN - 257_U256 => 0_U256),
+        blockhash4(op::BLOCKHASH, DEF_BN - 257_U256 => DEF_BN - 257_U256),
         coinbase(@raw {
             bytecode: &[op::COINBASE, op::COINBASE],
             expected_stack: &[def_env().block.coinbase.into_word().into(), def_env().block.coinbase.into_word().into()],

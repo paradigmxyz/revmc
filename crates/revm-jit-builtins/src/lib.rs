@@ -17,8 +17,7 @@ use revm_interpreter::{
 };
 use revm_jit_context::{EvmContext, EvmWord};
 use revm_primitives::{
-    Bytes, CreateScheme, Log, LogData, SpecId, BLOCK_HASH_HISTORY, KECCAK_EMPTY, MAX_INITCODE_SIZE,
-    U256,
+    Bytes, CreateScheme, Log, LogData, SpecId, KECCAK_EMPTY, MAX_INITCODE_SIZE, U256,
 };
 
 pub mod gas;
@@ -205,7 +204,7 @@ pub unsafe extern "C" fn __revm_jit_builtin_extcodecopy(
         let code_offset = code_offset.to_u256();
         let code_offset = as_usize_saturated!(code_offset).min(code.len());
         resize_memory!(ecx, memory_offset, len);
-        ecx.memory.set_data(memory_offset, code_offset, len, code.original_byte_slice());
+        ecx.memory.set_data(memory_offset, code_offset, len, &code);
     }
     InstructionResult::Continue
 }
@@ -259,17 +258,8 @@ pub unsafe extern "C" fn __revm_jit_builtin_blockhash(
     ecx: &mut EvmContext<'_>,
     number_ptr: &mut EvmWord,
 ) -> InstructionResult {
-    let number = number_ptr.to_u256();
-    if let Some(diff) = ecx.host.env().block.number.checked_sub(number) {
-        let diff = as_usize_saturated!(diff);
-        // blockhash should push zero if number is same as current block number.
-        if diff != 0 && diff <= BLOCK_HASH_HISTORY {
-            let hash = try_host!(ecx.host.block_hash(number));
-            *number_ptr = EvmWord::from_be_bytes(hash.0);
-            return InstructionResult::Continue;
-        }
-    }
-    *number_ptr = EvmWord::ZERO;
+    let hash = try_host!(ecx.host.block_hash(number_ptr.to_u256()));
+    *number_ptr = EvmWord::from_be_bytes(hash.0);
     InstructionResult::Continue
 }
 

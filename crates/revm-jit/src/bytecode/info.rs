@@ -369,7 +369,7 @@ const fn make_map(spec_id: SpecId) -> [OpcodeInfo; 256] {
         // 0xFC
         REVERT       = DYNAMIC, if BYZANTIUM;
         INVALID      = 0;
-        SELFDESTRUCT = 0;
+        SELFDESTRUCT = DYNAMIC;
     }
     map
 }
