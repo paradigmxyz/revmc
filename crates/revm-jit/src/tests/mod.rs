@@ -503,7 +503,7 @@ tests! {
     env {
         gas_price(@raw {
             bytecode: &[op::GASPRICE],
-            expected_stack: &[def_env().tx.gas_price],
+            expected_stack: &[def_env().effective_gas_price()],
             expected_gas: 2,
         }),
         // Host determines blockhash

@@ -856,7 +856,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             }
 
             op::GASPRICE => {
-                env_field!(@push @[endian = "little"] self.word_type, Env, TxEnv; tx.gas_price)
+                let sp = self.sp_after_inputs();
+                let _ = self.builtin(Builtin::GasPrice, &[self.ecx, sp]);
             }
             op::EXTCODESIZE => {
                 let sp = self.sp_after_inputs();
