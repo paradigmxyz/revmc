@@ -222,6 +222,7 @@ builtins! {
     CallDataCopy   = __revm_jit_builtin_calldatacopy(@[ecx] ptr, @[sp] ptr) Some(u8),
     CodeSize       = __revm_jit_builtin_codesize(@[ecx] ptr) Some(usize),
     CodeCopy       = __revm_jit_builtin_codecopy(@[ecx] ptr, @[sp] ptr) Some(u8),
+    GasPrice       = __revm_jit_builtin_gas_price(@[ecx] ptr, @[sp] ptr) None,
     ExtCodeSize    = __revm_jit_builtin_extcodesize(@[ecx] ptr, @[sp] ptr, u8) Some(u8),
     ExtCodeCopy    = __revm_jit_builtin_extcodecopy(@[ecx] ptr, @[sp] ptr, u8) Some(u8),
     ReturnDataCopy = __revm_jit_builtin_returndatacopy(@[ecx] ptr, @[sp] ptr) Some(u8),

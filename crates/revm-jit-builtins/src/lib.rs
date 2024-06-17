@@ -168,6 +168,14 @@ pub unsafe extern "C" fn __revm_jit_builtin_codecopy(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn __revm_jit_builtin_gas_price(
+    ecx: &mut EvmContext<'_>,
+    slot: &mut EvmWord,
+) {
+    *slot = ecx.host.env().effective_gas_price().into();
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn __revm_jit_builtin_extcodesize(
     ecx: &mut EvmContext<'_>,
     address: &mut EvmWord,
