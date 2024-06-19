@@ -54,10 +54,10 @@ jobs:
         with:
           cache-on-failure: true
       - name: Save baseline
-        run: cargo bench -p revm-jit-cli --bench iai -- --save-baseline=$BASELINE
+        run: cargo bench -p revmc-cli --bench iai -- --save-baseline=$BASELINE
       - name: Checkout PR
         uses: actions/checkout@v4
         with:
           clean: false
       - name: Compare PR benchmarks
-        run: cargo bench -p revm-jit-cli --bench iai -- --baseline=$BASELINE
+        run: cargo bench -p revmc-cli --bench iai -- --baseline=$BASELINE

@@ -1,0 +1,75 @@
+[package]
+name = "revmc-cli"
+description = "EVM bytecode compiler CLI"
+homepage = "https://github.com/danipopes/revmc/tree/main/crates/revmc-cli"
+publish = false
+
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+categories.workspace = true
+keywords.workspace = true
+repository.workspace = true
+exclude.workspace = true
+
+[lib]
+doc = false
+
+[lints]
+workspace = true
+
+[dependencies]
+revmc.workspace = true
+
+revm-interpreter = { workspace = true, features = ["parse"] }
+revm-primitives.workspace = true
+
+clap = { version = "4", features = ["derive"] }
+color-eyre.workspace = true
+libloading = "0.8"
+tracing-error.workspace = true
+tracing-subscriber = { workspace = true, features = ["fmt", "env-filter"] }
+
+[dev-dependencies]
+criterion = "0.5"
+iai-callgrind = "0.11"
+revmc-cli-tests = { path = "../revmc-cli-tests/" }
+
+[build-dependencies]
+revmc-build.workspace = true
+
+[features]
+default = ["llvm-prefer-dynamic", "revmc/asm-keccak"]
+llvm = ["revmc/llvm"]
+llvm-prefer-static = ["llvm", "revmc/llvm-prefer-static"]
+llvm-prefer-dynamic = ["llvm", "revmc/llvm-prefer-dynamic"]
+cranelift = ["revmc/cranelift"]
+
+[[bin]]
+name = "revmc-cli"
+path = "src/main.rs"
+required-features = ["llvm"]
+doc = false
+
+[[bench]]
+name = "bench"
+path = "benches/bench.rs"
+required-features = ["llvm"]
+harness = false
+doc = false
+
+[[bench]]
+name = "iai"
+path = "benches/iai.rs"
+required-features = ["llvm"]
+harness = false
+doc = false
+
+[[test]]
+name = "tests"
+path = "tests.rs"
+required-features = ["llvm"]
+harness = false
+doc = false

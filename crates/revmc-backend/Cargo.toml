@@ -1,6 +1,7 @@
 [package]
-name = "revmc-examples-compiler"
-publish = false
+name = "revmc-backend"
+description = "EVM bytecode compiler backend abstraction"
+homepage = "https://github.com/danipopes/revmc/tree/main/crates/revmc-backend"
 
 version.workspace = true
 authors.workspace = true
@@ -12,11 +13,10 @@ keywords.workspace = true
 repository.workspace = true
 exclude.workspace = true
 
-[build-dependencies]
-revmc-build.workspace = true
+[lints]
+workspace = true
 
 [dependencies]
-revmc = { workspace = true, features = ["llvm-prefer-dynamic"] }
-
-clap = { version = "4", features = ["derive"] }
+ruint = { workspace = true, features = ["std"] }
 eyre.workspace = true
+tracing.workspace = true

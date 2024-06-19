@@ -6,11 +6,11 @@ extern crate alloc;
 
 // This dependency is needed to export the necessary symbols used by the compiled bytecodes,
 // but we don't use it directly, so silence the unused crate depedency warning.
-use revm_jit_builtins as _;
+use revmc_builtins as _;
 
 use alloc::sync::Arc;
 use revm::{handler::register::EvmHandler, primitives::B256, Database};
-use revm_jit_context::EvmCompilerFn;
+use revmc_context::EvmCompilerFn;
 
 pub fn get_evm<'a, DB: Database + 'static>(db: DB) -> revm::Evm<'a, ExternalContext, DB> {
     revm::Evm::builder()

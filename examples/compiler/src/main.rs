@@ -1,10 +1,10 @@
 //! Simple JIT compiler example.
 //!
-//! For a more complete example, see the `revm-jit-cli` crate.
+//! For a more complete example, see the `revmc-cli` crate.
 
 use clap::Parser;
 use eyre::Context;
-use revm_jit::{
+use revmc::{
     interpreter::{Contract, DummyHost, Interpreter},
     new_llvm_backend,
     primitives::SpecId,
@@ -29,11 +29,11 @@ fn main() -> eyre::Result<()> {
             .wrap_err_with(|| format!("Failed to read code from file: {path:?}"))?,
         _ => unreachable!(),
     };
-    let bytecode = revm_jit::primitives::hex::decode(code.trim())
+    let bytecode = revmc::primitives::hex::decode(code.trim())
         .wrap_err("Failed to decode hex-encoded code")?;
 
     // Compile the code.
-    let context = revm_jit::llvm::inkwell::context::Context::create();
+    let context = revmc::llvm::inkwell::context::Context::create();
     let backend = new_llvm_backend(&context, false, OptimizationLevel::Aggressive)?;
     let mut compiler = EvmCompiler::new(backend);
     let f = compiler

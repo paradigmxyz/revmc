@@ -2030,127 +2030,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "revm-jit"
-version = "0.1.0"
-dependencies = [
- "alloy-primitives",
- "bitflags 2.5.0",
- "bitvec",
- "paste",
- "revm-interpreter",
- "revm-jit-backend",
- "revm-jit-builtins",
- "revm-jit-context",
- "revm-jit-cranelift",
- "revm-jit-llvm",
- "revm-primitives",
- "rustc-hash",
- "tempfile",
- "tracing",
-]
-
-[[package]]
-name = "revm-jit-backend"
-version = "0.1.0"
-dependencies = [
- "eyre",
- "ruint",
- "tracing",
-]
-
-[[package]]
-name = "revm-jit-build"
-version = "0.1.0"
-
-[[package]]
-name = "revm-jit-builtins"
-version = "0.1.0"
-dependencies = [
- "paste",
- "revm-interpreter",
- "revm-jit-backend",
- "revm-jit-context",
- "revm-primitives",
- "tracing",
-]
-
-[[package]]
-name = "revm-jit-cli"
-version = "0.1.0"
-dependencies = [
- "clap",
- "color-eyre",
- "criterion",
- "iai-callgrind",
- "libloading",
- "revm-interpreter",
- "revm-jit",
- "revm-jit-build",
- "revm-jit-cli-tests",
- "revm-primitives",
- "tracing-error",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "revm-jit-cli-tests"
-version = "0.1.0"
-dependencies = [
- "tester",
- "walkdir",
-]
-
-[[package]]
-name = "revm-jit-context"
-version = "0.1.0"
-dependencies = [
- "revm-interpreter",
- "revm-primitives",
-]
-
-[[package]]
-name = "revm-jit-cranelift"
-version = "0.1.0"
-dependencies = [
- "cranelift",
- "cranelift-jit",
- "cranelift-module",
- "cranelift-native",
- "cranelift-object",
- "revm-jit-backend",
-]
-
-[[package]]
-name = "revm-jit-examples-compiler"
-version = "0.1.0"
-dependencies = [
- "clap",
- "eyre",
- "revm-jit",
- "revm-jit-build",
-]
-
-[[package]]
-name = "revm-jit-examples-runner"
-version = "0.1.0"
-dependencies = [
- "revm",
- "revm-jit-build",
- "revm-jit-builtins",
- "revm-jit-context",
-]
-
-[[package]]
-name = "revm-jit-llvm"
-version = "0.1.0"
-dependencies = [
- "inkwell",
- "revm-jit-backend",
- "rustc-hash",
- "tracing",
-]
-
-[[package]]
 name = "revm-precompile"
 version = "7.0.0"
 source = "git+https://github.com/bluealloy/revm.git?rev=dd98b3b#dd98b3bb977396d23966e0a2f40d97678d931573"
@@ -2179,6 +2058,127 @@ dependencies = [
  "hashbrown 0.14.5",
  "hex",
  "serde",
+]
+
+[[package]]
+name = "revmc"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "bitflags 2.5.0",
+ "bitvec",
+ "paste",
+ "revm-interpreter",
+ "revm-primitives",
+ "revmc-backend",
+ "revmc-builtins",
+ "revmc-context",
+ "revmc-cranelift",
+ "revmc-llvm",
+ "rustc-hash",
+ "tempfile",
+ "tracing",
+]
+
+[[package]]
+name = "revmc-backend"
+version = "0.1.0"
+dependencies = [
+ "eyre",
+ "ruint",
+ "tracing",
+]
+
+[[package]]
+name = "revmc-build"
+version = "0.1.0"
+
+[[package]]
+name = "revmc-builtins"
+version = "0.1.0"
+dependencies = [
+ "paste",
+ "revm-interpreter",
+ "revm-primitives",
+ "revmc-backend",
+ "revmc-context",
+ "tracing",
+]
+
+[[package]]
+name = "revmc-cli"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "color-eyre",
+ "criterion",
+ "iai-callgrind",
+ "libloading",
+ "revm-interpreter",
+ "revm-primitives",
+ "revmc",
+ "revmc-build",
+ "revmc-cli-tests",
+ "tracing-error",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "revmc-cli-tests"
+version = "0.1.0"
+dependencies = [
+ "tester",
+ "walkdir",
+]
+
+[[package]]
+name = "revmc-context"
+version = "0.1.0"
+dependencies = [
+ "revm-interpreter",
+ "revm-primitives",
+]
+
+[[package]]
+name = "revmc-cranelift"
+version = "0.1.0"
+dependencies = [
+ "cranelift",
+ "cranelift-jit",
+ "cranelift-module",
+ "cranelift-native",
+ "cranelift-object",
+ "revmc-backend",
+]
+
+[[package]]
+name = "revmc-examples-compiler"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "eyre",
+ "revmc",
+ "revmc-build",
+]
+
+[[package]]
+name = "revmc-examples-runner"
+version = "0.1.0"
+dependencies = [
+ "revm",
+ "revmc-build",
+ "revmc-builtins",
+ "revmc-context",
+]
+
+[[package]]
+name = "revmc-llvm"
+version = "0.1.0"
+dependencies = [
+ "inkwell",
+ "revmc-backend",
+ "rustc-hash",
+ "tracing",
 ]
 
 [[package]]

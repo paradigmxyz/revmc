@@ -1,0 +1,17 @@
+[package]
+name = "revmc-build"
+description = "EVM bytecode compiler build script support"
+homepage = "https://github.com/danipopes/revmc/tree/main/crates/revmc-build"
+
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+categories.workspace = true
+keywords.workspace = true
+repository.workspace = true
+exclude = ["build.rs"]
+
+[lints]
+workspace = true
