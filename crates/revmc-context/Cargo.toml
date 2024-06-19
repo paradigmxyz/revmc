@@ -1,0 +1,26 @@
+[package]
+name = "revmc-context"
+description = "EVM bytecode compiler runtime context"
+homepage = "https://github.com/danipopes/revmc/tree/main/crates/revmc-context"
+
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+categories.workspace = true
+keywords.workspace = true
+repository.workspace = true
+exclude.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+revm-interpreter.workspace = true
+revm-primitives.workspace = true
+
+[features]
+default = ["std"]
+std = ["revm-interpreter/std", "revm-primitives/std"]
+host-ext-any = []

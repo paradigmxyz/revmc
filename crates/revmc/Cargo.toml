@@ -1,0 +1,51 @@
+[package]
+name = "revmc"
+description = "EVM bytecode compiler"
+homepage = "https://github.com/danipopes/revmc/tree/main/crates/revmc"
+
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+categories.workspace = true
+keywords.workspace = true
+repository.workspace = true
+exclude.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+revmc-backend.workspace = true
+revmc-builtins = { workspace = true, features = ["ir"] }
+revmc-context.workspace = true
+revmc-cranelift = { workspace = true, optional = true }
+revmc-llvm = { workspace = true, optional = true }
+
+alloy-primitives = { workspace = true, features = ["std"] }
+revm-interpreter.workspace = true
+revm-primitives.workspace = true
+
+bitflags = "2.5"
+bitvec = "1"
+rustc-hash.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+revmc-context = { workspace = true, features = ["host-ext-any"] }
+paste.workspace = true
+tempfile = "3.10"
+
+[features]
+default = ["llvm"]
+llvm = ["dep:revmc-llvm"]
+llvm-prefer-static = ["llvm", "revmc-llvm?/prefer-static"]
+llvm-prefer-dynamic = ["llvm", "revmc-llvm?/prefer-dynamic"]
+cranelift = ["dep:revmc-cranelift"]
+
+asm-keccak = ["alloy-primitives/asm-keccak"]
+
+# I don't think this is supported, but it's necessary for --all-features to work in workspaces which
+# also have this feature.
+optimism = ["revm-primitives/optimism", "revm-interpreter/optimism"]

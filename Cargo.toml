@@ -1,6 +1,6 @@
 [workspace]
 members = ["crates/*", "examples/*"]
-default-members = ["crates/revm-jit-cli"]
+default-members = ["crates/revmc-cli"]
 resolver = "2"
 
 [workspace.package]
@@ -24,13 +24,13 @@ rust.rust_2018_idioms = { level = "deny", priority = -1 }
 rustdoc.all = "warn"
 
 [workspace.dependencies]
-revm-jit = { version = "0.1.0", path = "crates/revm-jit", default-features = false }
-revm-jit-backend = { version = "0.1.0", path = "crates/revm-jit-backend", default-features = false }
-revm-jit-build = { version = "0.1.0", path = "crates/revm-jit-build", default-features = false }
-revm-jit-builtins = { version = "0.1.0", path = "crates/revm-jit-builtins", default-features = false }
-revm-jit-context = { version = "0.1.0", path = "crates/revm-jit-context", default-features = false }
-revm-jit-cranelift = { version = "0.1.0", path = "crates/revm-jit-cranelift", default-features = false }
-revm-jit-llvm = { version = "0.1.0", path = "crates/revm-jit-llvm", default-features = false }
+revmc = { version = "0.1.0", path = "crates/revmc", default-features = false }
+revmc-backend = { version = "0.1.0", path = "crates/revmc-backend", default-features = false }
+revmc-build = { version = "0.1.0", path = "crates/revmc-build", default-features = false }
+revmc-builtins = { version = "0.1.0", path = "crates/revmc-builtins", default-features = false }
+revmc-context = { version = "0.1.0", path = "crates/revmc-context", default-features = false }
+revmc-cranelift = { version = "0.1.0", path = "crates/revmc-cranelift", default-features = false }
+revmc-llvm = { version = "0.1.0", path = "crates/revmc-llvm", default-features = false }
 
 alloy-primitives = { version = "0.7.0", default-features = false }
 revm = { version = "9.0.0", default-features = false }

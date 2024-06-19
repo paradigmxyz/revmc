@@ -1,3 +1,3 @@
 fn main() {
-    revm_jit_build::emit();
+    revmc_build::emit();
 }

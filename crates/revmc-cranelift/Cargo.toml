@@ -1,0 +1,26 @@
+[package]
+name = "revmc-cranelift"
+description = "EVM bytecode compiler Cranelift backend"
+homepage = "https://github.com/danipopes/revmc/tree/main/crates/revmc-cranelift"
+
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+categories.workspace = true
+keywords.workspace = true
+repository.workspace = true
+exclude.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+revmc-backend.workspace = true
+
+cranelift = "0.108"
+cranelift-jit = "0.108"
+cranelift-module = "0.108"
+cranelift-native = "0.108"
+cranelift-object = "0.108"
