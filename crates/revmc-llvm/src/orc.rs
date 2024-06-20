@@ -547,10 +547,7 @@ impl MaterializationResponsibility {
     ///
     /// The caller retains responsibility of the the passed
     /// MaterializationResponsibility.
-    pub fn delegate(
-        &self,
-        syms: &[SymbolStringPoolEntry],
-    ) -> Result<Self, LLVMString> {
+    pub fn delegate(&self, syms: &[SymbolStringPoolEntry]) -> Result<Self, LLVMString> {
         let mut res = MaybeUninit::uninit();
         cvt(unsafe {
             LLVMOrcMaterializationResponsibilityDelegate(
@@ -1184,9 +1181,8 @@ mod tests {
 
         let jit = LLJIT::new_empty().unwrap();
         jit.add_module(tsm).unwrap();
-        let address = jit
-            .lookup_unmangled(&jit.mangle_and_intern(&CString::new(fn_name).unwrap()))
-            .unwrap();
+        let address =
+            jit.lookup_unmangled(&jit.mangle_and_intern(&CString::new(fn_name).unwrap())).unwrap();
         eprintln!("address: {address:#x}");
         let f = unsafe { std::mem::transmute::<usize, extern "C" fn() -> u64>(address) };
         let r = f();
