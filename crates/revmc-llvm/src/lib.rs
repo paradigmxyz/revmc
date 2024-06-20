@@ -394,7 +394,7 @@ impl TargetDefaults {
             let triple = TargetMachine::get_default_triple();
             let cpu = TargetMachine::get_host_cpu_name().to_string_lossy().into_owned();
             let features = TargetMachine::get_host_cpu_features().to_string_lossy().into_owned();
-            TargetDefaults { triple, cpu, features }
+            Self { triple, cpu, features }
         })
     }
 
@@ -403,7 +403,7 @@ impl TargetDefaults {
             let triple = TargetTriple::create(triple_str);
             let cpu = std::env::var("__REVMC_OVERRIDE_TARGET_CPU").unwrap_or_default();
             let features = std::env::var("__REVMC_OVERRIDE_TARGET_FEATURES").unwrap_or_default();
-            TargetDefaults { triple, cpu, features }
+            Self { triple, cpu, features }
         })
     }
 }
