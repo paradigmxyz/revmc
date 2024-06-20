@@ -395,25 +395,25 @@ impl EvmStack {
 
     /// Returns the stack as a byte array.
     #[inline]
-    pub const fn as_bytes(&self) -> &[u8; EvmStack::SIZE] {
+    pub const fn as_bytes(&self) -> &[u8; Self::SIZE] {
         unsafe { &*self.0.as_ptr().cast() }
     }
 
     /// Returns the stack as a byte array.
     #[inline]
-    pub fn as_bytes_mut(&mut self) -> &mut [u8; EvmStack::SIZE] {
+    pub fn as_bytes_mut(&mut self) -> &mut [u8; Self::SIZE] {
         unsafe { &mut *self.0.as_mut_ptr().cast() }
     }
 
     /// Returns the stack as a slice.
     #[inline]
-    pub const fn as_slice(&self) -> &[EvmWord; EvmStack::CAPACITY] {
+    pub const fn as_slice(&self) -> &[EvmWord; Self::CAPACITY] {
         unsafe { &*self.0.as_ptr().cast() }
     }
 
     /// Returns the stack as a mutable slice.
     #[inline]
-    pub fn as_mut_slice(&mut self) -> &mut [EvmWord; EvmStack::CAPACITY] {
+    pub fn as_mut_slice(&mut self) -> &mut [EvmWord; Self::CAPACITY] {
         unsafe { &mut *self.0.as_mut_ptr().cast() }
     }
 }

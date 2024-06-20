@@ -33,7 +33,7 @@ impl Default for CommentWriter {
 
 impl CommentWriter {
     pub(crate) fn new() -> Self {
-        CommentWriter {
+        Self {
             enabled: should_write_ir(),
             global_comments: Vec::new(),
             entity_comments: HashMap::new(),
@@ -81,7 +81,7 @@ impl FuncWriter for &'_ CommentWriter {
     ) -> Result<bool, fmt::Error> {
         for comment in &self.global_comments {
             if !comment.is_empty() {
-                writeln!(w, "; {}", comment)?;
+                writeln!(w, "; {comment}")?;
             } else {
                 writeln!(w)?;
             }
@@ -102,9 +102,9 @@ impl FuncWriter for &'_ CommentWriter {
         maybe_fact: Option<&Fact>,
     ) -> fmt::Result {
         if let Some(fact) = maybe_fact {
-            write!(w, "    {} ! {} = {}", entity, fact, value)?;
+            write!(w, "    {entity} ! {fact} = {value}")?;
         } else {
-            write!(w, "    {} = {}", entity, value)?;
+            write!(w, "    {entity} = {value}")?;
         }
 
         if let Some(comment) = self.entity_comments.get(&entity) {
@@ -165,11 +165,11 @@ pub(crate) fn write_clif_file(
         cranelift::codegen::write::decorate_function(&mut clif_comments, &mut clif, func).unwrap();
 
         for flag in isa.flags().iter() {
-            writeln!(file, "set {}", flag)?;
+            writeln!(file, "set {flag}")?;
         }
         write!(file, "target {}", isa.triple().architecture)?;
         for isa_flag in isa.isa_flags().iter() {
-            write!(file, " {}", isa_flag)?;
+            write!(file, " {isa_flag}")?;
         }
         writeln!(file, "\n")?;
         writeln!(file)?;

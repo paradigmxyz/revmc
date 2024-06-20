@@ -50,10 +50,10 @@ pub enum CallKind {
 impl From<CallKind> for CallScheme {
     fn from(kind: CallKind) -> Self {
         match kind {
-            CallKind::Call => CallScheme::Call,
-            CallKind::CallCode => CallScheme::CallCode,
-            CallKind::DelegateCall => CallScheme::DelegateCall,
-            CallKind::StaticCall => CallScheme::StaticCall,
+            CallKind::Call => Self::Call,
+            CallKind::CallCode => Self::CallCode,
+            CallKind::DelegateCall => Self::DelegateCall,
+            CallKind::StaticCall => Self::StaticCall,
         }
     }
 }

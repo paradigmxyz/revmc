@@ -7,7 +7,7 @@ resolver = "2"
 version = "0.1.0"
 authors = ["DaniPopes <57450786+DaniPopes@users.noreply.github.com>"]
 edition = "2021"
-rust-version = "1.77"
+rust-version = "1.79"
 license = "MIT OR Apache-2.0"
 categories = ["compilers", "cryptography::cryptocurrencies"]
 keywords = ["compile", "compiler", "jit", "evm", "ethereum"]
@@ -15,13 +15,24 @@ homepage = "https://github.com/danipopes/cranelift-jit-evm"
 repository = "https://github.com/danipopes/cranelift-jit-evm"
 exclude = [".github/", "benches/", "fuzz/", "tests/"]
 
-[workspace.lints]
-rust.missing_debug_implementations = "warn"
-rust.missing_docs = "warn"
-rust.unreachable_pub = "warn"
-rust.unused_must_use = "deny"
-rust.rust_2018_idioms = { level = "deny", priority = -1 }
-rustdoc.all = "warn"
+[workspace.lints.clippy]
+dbg-macro = "warn"
+manual-string-new = "warn"
+uninlined-format-args = "warn"
+use-self = "warn"
+redundant-clone = "warn"
+
+[workspace.lints.rust]
+missing-debug-implementations = "warn"
+missing-docs = "warn"
+rust-2018-idioms = "warn"
+unreachable-pub = "warn"
+unused-must-use = "warn"
+redundant-lifetimes = "warn"
+unnameable-types = "warn"
+
+[workspace.lints.rustdoc]
+all = "warn"
 
 [workspace.dependencies]
 revmc = { version = "0.1.0", path = "crates/revmc", default-features = false }

@@ -550,7 +550,7 @@ impl MaterializationResponsibility {
     pub fn delegate(
         &self,
         syms: &[SymbolStringPoolEntry],
-    ) -> Result<MaterializationResponsibility, LLVMString> {
+    ) -> Result<Self, LLVMString> {
         let mut res = MaybeUninit::uninit();
         cvt(unsafe {
             LLVMOrcMaterializationResponsibilityDelegate(
@@ -560,7 +560,7 @@ impl MaterializationResponsibility {
                 res.as_mut_ptr(),
             )
         })?;
-        Ok(unsafe { MaterializationResponsibility::from_inner(res.assume_init()) })
+        Ok(unsafe { Self::from_inner(res.assume_init()) })
     }
 }
 
@@ -589,7 +589,7 @@ impl ResourceTracker {
 
     /// Transfers tracking of all resources associated with this resource tracker to the given
     /// resource tracker.
-    pub fn transfer_to(&self, rt: &ResourceTracker) {
+    pub fn transfer_to(&self, rt: &Self) {
         unsafe { LLVMOrcResourceTrackerTransferTo(self.as_inner(), rt.as_inner()) };
     }
 }
@@ -760,7 +760,7 @@ impl JITTargetMachineBuilder {
     }
 
     /// Create a JITTargetMachineBuilder by detecting the host.
-    pub fn detect_host() -> Result<JITTargetMachineBuilder, LLVMString> {
+    pub fn detect_host() -> Result<Self, LLVMString> {
         let mut res = MaybeUninit::uninit();
         cvt(unsafe { LLVMOrcJITTargetMachineBuilderDetectHost(res.as_mut_ptr()) })?;
         Ok(Self { builder: unsafe { res.assume_init() } })
@@ -1185,7 +1185,7 @@ mod tests {
         let jit = LLJIT::new_empty().unwrap();
         jit.add_module(tsm).unwrap();
         let address = jit
-            .lookup_unmangled(dbg!(&jit.mangle_and_intern(&CString::new(fn_name).unwrap())))
+            .lookup_unmangled(&jit.mangle_and_intern(&CString::new(fn_name).unwrap()))
             .unwrap();
         eprintln!("address: {address:#x}");
         let f = unsafe { std::mem::transmute::<usize, extern "C" fn() -> u64>(address) };
