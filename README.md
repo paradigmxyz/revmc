@@ -2,7 +2,9 @@
 
 Experimental [JIT] and [AOT] compiler for the [Ethereum Virtual Machine][EVM].
 
-The compiler implementation is abstracted over an intermediate representation backend.
+The compiler implementation is abstracted over an intermediate representation backend. It performs very well, as demonstrated below from our criterion benchmarks, and exposes an intuitive API via Revm.
+
+![image](https://github.com/paradigmxyz/revmc/assets/17802178/96adf64b-8513-469d-925d-4f8d902e4e0a)
 
 This repository hosts two backend implementations:
 - [LLVM] ([`revmc-llvm`]): main backend with full test coverage;
