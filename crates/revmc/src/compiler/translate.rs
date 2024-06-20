@@ -1078,7 +1078,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 self.return_common(InstructionResult::Revert);
                 goto_return!(no_branch);
             }
-            op::INVALID => goto_return!(fail InstructionResult::InvalidFEOpcode),
+            op::INVALID => goto_return!(fail InstructionResult::InvalidEFOpcode),
             op::SELFDESTRUCT => {
                 self.fail_if_staticcall(InstructionResult::StateChangeDuringStaticCall);
                 let sp = self.sp_after_inputs();

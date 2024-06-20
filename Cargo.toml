@@ -44,9 +44,9 @@ revmc-cranelift = { version = "0.1.0", path = "crates/revmc-cranelift", default-
 revmc-llvm = { version = "0.1.0", path = "crates/revmc-llvm", default-features = false }
 
 alloy-primitives = { version = "0.7.0", default-features = false }
-revm = { version = "9.0.0", default-features = false }
-revm-primitives = { version = "4.0.0", default-features = false }
-revm-interpreter = { version = "5.0.0", default-features = false }
+revm = { version = "10.0.0", default-features = false }
+revm-primitives = { version = "5.0.0", default-features = false }
+revm-interpreter = { version = "6.0.0", default-features = false }
 ruint = { version = "1.12.1", default-features = false }
 
 color-eyre = "0.6"
@@ -59,9 +59,3 @@ paste = "1.0"
 
 [profile.release]
 codegen-units = 1
-
-[patch.crates-io]
-revm = { git = "https://github.com/bluealloy/revm.git", rev = "dd98b3b" }
-revm-interpreter = { git = "https://github.com/bluealloy/revm.git", rev = "dd98b3b" }
-revm-precompile = { git = "https://github.com/bluealloy/revm.git", rev = "dd98b3b" }
-revm-primitives = { git = "https://github.com/bluealloy/revm.git", rev = "dd98b3b" }
