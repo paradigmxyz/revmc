@@ -5,7 +5,7 @@ use crate::{
 };
 use revm_interpreter::{opcode as op, Contract, InstructionResult};
 use revm_primitives::{BlockEnv, CfgEnv, Env, TxEnv, U256};
-use revmc_backend::{BackendTypes, Pointer, TypeMethods};
+use revmc_backend::{Attribute, BackendTypes, FunctionAttributeLocation, Pointer, TypeMethods};
 use revmc_builtins::{Builtin, Builtins, CallKind, CreateKind};
 use std::{fmt::Write, mem, sync::atomic::AtomicPtr};
 
@@ -1586,6 +1586,11 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         debug_assert_eq!(args.len(), arg_types.len());
         let linkage = revmc_backend::Linkage::Private;
         let f = self.bcx.get_or_build_function(name, arg_types, ret, linkage, build);
+        self.bcx.add_function_attribute(
+            Some(f),
+            Attribute::HintInline,
+            FunctionAttributeLocation::Function,
+        );
         self.bcx.call(f, args)
     }
 }
