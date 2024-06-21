@@ -1588,7 +1588,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let f = self.bcx.get_or_build_function(name, arg_types, ret, linkage, build);
         self.bcx.add_function_attribute(
             Some(f),
-            Attribute::HintInline,
+            Attribute::AlwaysInline,
             FunctionAttributeLocation::Function,
         );
         self.bcx.call(f, args)
