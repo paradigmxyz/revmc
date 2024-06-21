@@ -2,6 +2,7 @@
 #![cfg_attr(not(test), warn(unused_extern_crates))]
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
 
+// Must be kept in sync with `remvc-builtins`.
 const MANGLE_PREFIX: &str = "__revmc_builtin_";
 
 /// Emits the linker flag to export all the necessary symbols.

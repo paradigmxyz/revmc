@@ -21,8 +21,6 @@ use std::{
 
 // TODO: Implement memory instructions in IR rather than as builtins.
 
-// TODO: Make builtins take an argument per input/output instead of just the stack pointer.
-
 // TODO: Test on big-endian hardware.
 // It probably doesn't work when loading Rust U256 into native endianness.
 

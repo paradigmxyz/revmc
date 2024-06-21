@@ -1,5 +1,6 @@
 use revmc_backend::{Attribute, Backend, Builder, FunctionAttributeLocation, TypeMethods};
 
+// Must be kept in sync with `remvc-build`.
 const MANGLE_PREFIX: &str = "__revmc_builtin_";
 
 /// Builtin cache.
@@ -161,8 +162,6 @@ macro_rules! builtins {
     }};
 }
 
-// NOTE: If the format of this macro invocation is changed,
-// the build script support crate must be updated as well.
 builtins! {
     @types |bcx| {
         let ptr = bcx.type_ptr();
