@@ -717,7 +717,8 @@ impl<'a> Builder for EvmCraneliftBuilder<'a> {
         let mut builder_ctx = FunctionBuilderContext::new();
         let new_bcx = FunctionBuilder::new(&mut func, &mut builder_ctx);
         // TODO: SAFETY: Not really safe, lifetime extension.
-        let new_bcx = unsafe { std::mem::transmute(new_bcx) };
+        let new_bcx =
+            unsafe { std::mem::transmute::<FunctionBuilder<'_>, FunctionBuilder<'a>>(new_bcx) };
         let old_bcx = std::mem::replace(&mut self.bcx, new_bcx);
 
         let f = self.module.get_mut().declare_func_in_func(id, self.bcx.func);
