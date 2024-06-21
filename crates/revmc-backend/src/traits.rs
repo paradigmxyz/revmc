@@ -304,15 +304,26 @@ pub trait Builder: BackendTypes + TypeMethods {
 
     fn unreachable(&mut self);
 
+    fn get_or_build_function(
+        &mut self,
+        name: &str,
+        params: &[Self::Type],
+        ret: Option<Self::Type>,
+        linkage: Linkage,
+        build: impl FnOnce(&mut Self),
+    ) -> Self::Function;
+
     fn get_function(&mut self, name: &str) -> Option<Self::Function>;
 
     /// Adds a function to the module that's located at `address`.
+    ///
+    /// If `address` is `None`, the function must be built.
     fn add_function(
         &mut self,
         name: &str,
-        ret: Option<Self::Type>,
         params: &[Self::Type],
-        address: usize,
+        ret: Option<Self::Type>,
+        address: Option<usize>,
         linkage: Linkage,
     ) -> Self::Function;
 

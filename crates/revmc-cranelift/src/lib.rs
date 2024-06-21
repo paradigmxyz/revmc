@@ -2,6 +2,7 @@
 #![cfg_attr(not(test), warn(unused_extern_crates))]
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
 
+use codegen::ir::Function;
 use cranelift::{
     codegen::ir::{FuncRef, StackSlot},
     prelude::*,
@@ -688,6 +689,48 @@ impl<'a> Builder for EvmCraneliftBuilder<'a> {
         self.bcx.ins().trap(TrapCode::UnreachableCodeReached);
     }
 
+    fn get_or_build_function(
+        &mut self,
+        name: &str,
+        params: &[Self::Type],
+        ret: Option<Self::Type>,
+        linkage: revmc_backend::Linkage,
+        build: impl FnOnce(&mut Self),
+    ) -> Self::Function {
+        if let Some(f) = self.get_function(name) {
+            return f;
+        }
+
+        let mut sig = self.module.get().make_signature();
+        if let Some(ret) = ret {
+            sig.returns.push(AbiParam::new(ret));
+        }
+        for param in params {
+            sig.params.push(AbiParam::new(*param));
+        }
+
+        let id =
+            self.module.get_mut().declare_function(name, convert_linkage(linkage), &sig).unwrap();
+
+        let mut func = Function::new();
+        func.signature = sig;
+        let mut builder_ctx = FunctionBuilderContext::new();
+        let new_bcx = FunctionBuilder::new(&mut func, &mut builder_ctx);
+        // TODO: SAFETY: Not really safe, lifetime extension.
+        let new_bcx = unsafe { std::mem::transmute(new_bcx) };
+        let old_bcx = std::mem::replace(&mut self.bcx, new_bcx);
+
+        let f = self.module.get_mut().declare_func_in_func(id, self.bcx.func);
+
+        let entry = self.bcx.create_block();
+        self.bcx.append_block_params_for_function_params(entry);
+        build(self);
+
+        self.bcx = old_bcx;
+
+        f
+    }
+
     fn get_function(&mut self, name: &str) -> Option<Self::Function> {
         self.module
             .get()
@@ -702,9 +745,9 @@ impl<'a> Builder for EvmCraneliftBuilder<'a> {
     fn add_function(
         &mut self,
         name: &str,
-        ret: Option<Self::Type>,
         params: &[Self::Type],
-        address: usize,
+        ret: Option<Self::Type>,
+        address: Option<usize>,
         linkage: revmc_backend::Linkage,
     ) -> Self::Function {
         let mut sig = self.module.get().make_signature();
@@ -714,7 +757,9 @@ impl<'a> Builder for EvmCraneliftBuilder<'a> {
         for param in params {
             sig.params.push(AbiParam::new(*param));
         }
-        self.symbols.insert(name.to_string(), address as *const u8);
+        if let Some(address) = address {
+            self.symbols.insert(name.to_string(), address as *const u8);
+        }
         let id =
             self.module.get_mut().declare_function(name, convert_linkage(linkage), &sig).unwrap();
         self.module.get_mut().declare_func_in_func(id, self.bcx.func)

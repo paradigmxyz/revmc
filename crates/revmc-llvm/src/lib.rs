@@ -971,6 +971,36 @@ impl<'a, 'ctx> Builder for EvmLlvmBuilder<'a, 'ctx> {
         self.bcx.build_unreachable().unwrap();
     }
 
+    fn get_or_build_function(
+        &mut self,
+        name: &str,
+        params: &[Self::Type],
+        ret: Option<Self::Type>,
+        linkage: revmc_backend::Linkage,
+        build: impl FnOnce(&mut Self),
+    ) -> Self::Function {
+        if let Some(function) = self.module.get_function(name) {
+            return function;
+        }
+
+        let before = self.current_block();
+
+        let func_ty = self.fn_type(ret, params);
+        let function = self.module.add_function(name, func_ty, Some(convert_linkage(linkage)));
+        let prev_function = std::mem::replace(&mut self.function, function);
+
+        let entry = self.cx.append_basic_block(function, "entry");
+        self.bcx.position_at_end(entry);
+        build(self);
+        if let Some(before) = before {
+            self.bcx.position_at_end(before);
+        }
+
+        self.function = prev_function;
+
+        function
+    }
+
     fn get_function(&mut self, name: &str) -> Option<Self::Function> {
         self.module.get_function(name)
     }
@@ -978,14 +1008,14 @@ impl<'a, 'ctx> Builder for EvmLlvmBuilder<'a, 'ctx> {
     fn add_function(
         &mut self,
         name: &str,
-        ret: Option<Self::Type>,
         params: &[Self::Type],
-        address: usize,
+        ret: Option<Self::Type>,
+        address: Option<usize>,
         linkage: revmc_backend::Linkage,
     ) -> Self::Function {
         let func_ty = self.fn_type(ret, params);
         let function = self.module.add_function(name, func_ty, Some(convert_linkage(linkage)));
-        if let Some(exec_engine) = &self.exec_engine {
+        if let (Some(address), Some(exec_engine)) = (address, &self.exec_engine) {
             exec_engine.add_global_mapping(&function, address);
         }
         function

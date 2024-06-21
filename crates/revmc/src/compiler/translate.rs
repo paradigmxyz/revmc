@@ -666,61 +666,20 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             op::SMOD => binop!(@if_not_zero srem),
             op::ADDMOD => {
                 let sp = self.sp_after_inputs();
-                let _ = self.builtin(Builtin::AddMod, &[sp]);
+                let _ = self.call_builtin(Builtin::AddMod, &[sp]);
             }
             op::MULMOD => {
                 let sp = self.sp_after_inputs();
-                let _ = self.builtin(Builtin::MulMod, &[sp]);
+                let _ = self.call_builtin(Builtin::MulMod, &[sp]);
             }
             op::EXP => {
                 let sp = self.sp_after_inputs();
                 let spec_id = self.const_spec_id();
-                self.builtin_ir(Builtin::Exp, &[self.ecx, sp, spec_id]);
+                self.call_fallible_builtin(Builtin::Exp, &[self.ecx, sp, spec_id]);
             }
             op::SIGNEXTEND => {
-                // From the yellow paper:
-                /*
-                let [ext, x] = stack.pop();
-                let t = 256 - 8 * (ext + 1);
-                let mut result = x;
-                result[..t] = [x[t]; t]; // Index by bits.
-                */
-
                 let [ext, x] = self.popn();
-                // For 31 we also don't need to do anything.
-                let might_do_something = self.bcx.icmp_imm(IntCC::UnsignedLessThan, ext, 31);
-                let r = self.bcx.lazy_select(
-                    might_do_something,
-                    self.word_type,
-                    |bcx| {
-                        // Adapted from revm: https://github.com/bluealloy/revm/blob/fda371f73aba2c30a83c639608be78145fd1123b/crates/interpreter/src/instructions/arithmetic.rs#L89
-                        // let bit_index = 8 * ext + 7;
-                        // let bit = (x >> bit_index) & 1 != 0;
-                        // let mask = (1 << bit_index) - 1;
-                        // let r = if bit { x | !mask } else { *x & mask };
-
-                        // let bit_index = 8 * ext + 7;
-                        let bit_index = bcx.imul_imm(ext, 8);
-                        let bit_index = bcx.iadd_imm(bit_index, 7);
-
-                        // let bit = (x >> bit_index) & 1 != 0;
-                        let one = bcx.iconst_256(U256::from(1));
-                        let bit = bcx.ushr(x, bit_index);
-                        let bit = bcx.bitand(bit, one);
-                        let bit = bcx.icmp_imm(IntCC::NotEqual, bit, 0);
-
-                        // let mask = (1 << bit_index) - 1;
-                        let mask = bcx.ishl(one, bit_index);
-                        let mask = bcx.isub_imm(mask, 1);
-
-                        // let r = if bit { x | !mask } else { *x & mask };
-                        let not_mask = bcx.bitnot(mask);
-                        let sext = bcx.bitor(x, not_mask);
-                        let zext = bcx.bitand(x, mask);
-                        bcx.select(bit, sext, zext)
-                    },
-                    |_bcx| x,
-                );
+                let r = self.call_signextend(ext, x);
                 self.push(r);
             }
 
@@ -751,18 +710,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             op::NOT => unop!(bitnot),
             op::BYTE => {
                 let [index, value] = self.popn();
-                let cond = self.bcx.icmp_imm(IntCC::UnsignedLessThan, index, 32);
-                let byte = {
-                    // (value >> (31 - index) * 8) & 0xFF
-                    let thirty_one = self.bcx.iconst_256(U256::from(31));
-                    let shift = self.bcx.isub(thirty_one, index);
-                    let shift = self.bcx.imul_imm(shift, 8);
-                    let shifted = self.bcx.ushr(value, shift);
-                    let mask = self.bcx.iconst_256(U256::from(0xFF));
-                    self.bcx.bitand(shifted, mask)
-                };
-                let zero = self.bcx.iconst_256(U256::ZERO);
-                let r = self.bcx.select(cond, byte, zero);
+                let r = self.call_byte(index, value);
                 self.push(r);
             }
             op::SHL => binop!(@shift ishl, |value, shift| self.bcx.iconst_256(U256::ZERO)),
@@ -776,7 +724,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
             op::KECCAK256 => {
                 let sp = self.sp_after_inputs();
-                self.builtin_ir(Builtin::Keccak256, &[self.ecx, sp]);
+                self.call_fallible_builtin(Builtin::Keccak256, &[self.ecx, sp]);
             }
 
             op::ADDRESS => {
@@ -785,7 +733,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             op::BALANCE => {
                 let sp = self.sp_after_inputs();
                 let spec_id = self.const_spec_id();
-                self.builtin_ir(Builtin::Balance, &[self.ecx, sp, spec_id]);
+                self.call_fallible_builtin(Builtin::Balance, &[self.ecx, sp, spec_id]);
             }
             op::ORIGIN => {
                 env_field!(@push @[endian = "big"] self.address_type, Env, TxEnv; tx.caller)
@@ -843,47 +791,47 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             }
             op::CALLDATACOPY => {
                 let sp = self.sp_after_inputs();
-                self.builtin_ir(Builtin::CallDataCopy, &[self.ecx, sp]);
+                self.call_fallible_builtin(Builtin::CallDataCopy, &[self.ecx, sp]);
             }
             op::CODESIZE => {
-                let size = self.builtin(Builtin::CodeSize, &[self.ecx]).unwrap();
+                let size = self.call_builtin(Builtin::CodeSize, &[self.ecx]).unwrap();
                 let size = self.bcx.zext(self.word_type, size);
                 self.push(size);
             }
             op::CODECOPY => {
                 let sp = self.sp_after_inputs();
-                self.builtin_ir(Builtin::CodeCopy, &[self.ecx, sp]);
+                self.call_fallible_builtin(Builtin::CodeCopy, &[self.ecx, sp]);
             }
 
             op::GASPRICE => {
                 let sp = self.sp_after_inputs();
-                let _ = self.builtin(Builtin::GasPrice, &[self.ecx, sp]);
+                let _ = self.call_builtin(Builtin::GasPrice, &[self.ecx, sp]);
             }
             op::EXTCODESIZE => {
                 let sp = self.sp_after_inputs();
                 let spec_id = self.const_spec_id();
-                self.builtin_ir(Builtin::ExtCodeSize, &[self.ecx, sp, spec_id]);
+                self.call_fallible_builtin(Builtin::ExtCodeSize, &[self.ecx, sp, spec_id]);
             }
             op::EXTCODECOPY => {
                 let sp = self.sp_after_inputs();
                 let spec_id = self.const_spec_id();
-                self.builtin_ir(Builtin::ExtCodeCopy, &[self.ecx, sp, spec_id]);
+                self.call_fallible_builtin(Builtin::ExtCodeCopy, &[self.ecx, sp, spec_id]);
             }
             op::RETURNDATASIZE => {
                 field!(ecx; @push self.isize_type, EvmContext<'_>, pf::Slice; return_data.len)
             }
             op::RETURNDATACOPY => {
                 let sp = self.sp_after_inputs();
-                self.builtin_ir(Builtin::ReturnDataCopy, &[self.ecx, sp]);
+                self.call_fallible_builtin(Builtin::ReturnDataCopy, &[self.ecx, sp]);
             }
             op::EXTCODEHASH => {
                 let sp = self.sp_after_inputs();
                 let spec_id = self.const_spec_id();
-                self.builtin_ir(Builtin::ExtCodeHash, &[self.ecx, sp, spec_id]);
+                self.call_fallible_builtin(Builtin::ExtCodeHash, &[self.ecx, sp, spec_id]);
             }
             op::BLOCKHASH => {
                 let sp = self.sp_after_inputs();
-                self.builtin_ir(Builtin::BlockHash, &[self.ecx, sp]);
+                self.call_fallible_builtin(Builtin::BlockHash, &[self.ecx, sp]);
             }
             op::COINBASE => {
                 env_field!(@push @[endian = "big"] self.address_type, Env, BlockEnv; block.coinbase)
@@ -897,7 +845,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             op::DIFFICULTY => {
                 let slot = self.sp_at_top();
                 let spec_id = self.const_spec_id();
-                let _ = self.builtin(Builtin::Difficulty, &[self.ecx, slot, spec_id]);
+                let _ = self.call_builtin(Builtin::Difficulty, &[self.ecx, slot, spec_id]);
             }
             op::GASLIMIT => {
                 env_field!(@push @[endian = "little"] self.word_type, Env, BlockEnv; block.gas_limit)
@@ -905,44 +853,44 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             op::CHAINID => env_field!(@push self.bcx.type_int(64), Env, CfgEnv; cfg.chain_id),
             op::SELFBALANCE => {
                 let slot = self.sp_at_top();
-                self.builtin_ir(Builtin::SelfBalance, &[self.ecx, slot]);
+                self.call_fallible_builtin(Builtin::SelfBalance, &[self.ecx, slot]);
             }
             op::BASEFEE => {
                 env_field!(@push @[endian = "little"] self.word_type, Env, BlockEnv; block.basefee)
             }
             op::BLOBHASH => {
                 let sp = self.sp_after_inputs();
-                let _ = self.builtin(Builtin::BlobHash, &[self.ecx, sp]);
+                let _ = self.call_builtin(Builtin::BlobHash, &[self.ecx, sp]);
             }
             op::BLOBBASEFEE => {
                 let len = self.len_before();
                 let slot = self.sp_at(len);
-                let _ = self.builtin(Builtin::BlobBaseFee, &[self.ecx, slot]);
+                let _ = self.call_builtin(Builtin::BlobBaseFee, &[self.ecx, slot]);
             }
 
             op::POP => { /* Already handled in stack_io */ }
             op::MLOAD => {
                 let sp = self.sp_after_inputs();
-                self.builtin_ir(Builtin::Mload, &[self.ecx, sp]);
+                self.call_fallible_builtin(Builtin::Mload, &[self.ecx, sp]);
             }
             op::MSTORE => {
                 let sp = self.sp_after_inputs();
-                self.builtin_ir(Builtin::Mstore, &[self.ecx, sp]);
+                self.call_fallible_builtin(Builtin::Mstore, &[self.ecx, sp]);
             }
             op::MSTORE8 => {
                 let sp = self.sp_after_inputs();
-                self.builtin_ir(Builtin::Mstore8, &[self.ecx, sp]);
+                self.call_fallible_builtin(Builtin::Mstore8, &[self.ecx, sp]);
             }
             op::SLOAD => {
                 let sp = self.sp_after_inputs();
                 let spec_id = self.const_spec_id();
-                self.builtin_ir(Builtin::Sload, &[self.ecx, sp, spec_id]);
+                self.call_fallible_builtin(Builtin::Sload, &[self.ecx, sp, spec_id]);
             }
             op::SSTORE => {
                 self.fail_if_staticcall(InstructionResult::StateChangeDuringStaticCall);
                 let sp = self.sp_after_inputs();
                 let spec_id = self.const_spec_id();
-                self.builtin_ir(Builtin::Sstore, &[self.ecx, sp, spec_id]);
+                self.call_fallible_builtin(Builtin::Sstore, &[self.ecx, sp, spec_id]);
             }
             op::JUMP | op::JUMPI => {
                 let is_invalid = data.flags.contains(InstFlags::INVALID_JUMP);
@@ -994,7 +942,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 self.push(pc);
             }
             op::MSIZE => {
-                let msize = self.builtin(Builtin::Msize, &[self.ecx]).unwrap();
+                let msize = self.call_builtin(Builtin::Msize, &[self.ecx]).unwrap();
                 let msize = self.bcx.zext(self.word_type, msize);
                 self.push(msize);
             }
@@ -1008,16 +956,16 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             }
             op::TLOAD => {
                 let sp = self.sp_after_inputs();
-                let _ = self.builtin(Builtin::Tload, &[self.ecx, sp]);
+                let _ = self.call_builtin(Builtin::Tload, &[self.ecx, sp]);
             }
             op::TSTORE => {
                 self.fail_if_staticcall(InstructionResult::StateChangeDuringStaticCall);
                 let sp = self.sp_after_inputs();
-                let _ = self.builtin(Builtin::Tstore, &[self.ecx, sp]);
+                let _ = self.call_builtin(Builtin::Tstore, &[self.ecx, sp]);
             }
             op::MCOPY => {
                 let sp = self.sp_after_inputs();
-                self.builtin_ir(Builtin::Mcopy, &[self.ecx, sp]);
+                self.call_fallible_builtin(Builtin::Mcopy, &[self.ecx, sp]);
             }
 
             op::PUSH0 => {
@@ -1041,7 +989,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 let n = opcode - op::LOG0;
                 let sp = self.sp_after_inputs();
                 let n = self.bcx.iconst(self.i8_type, n as i64);
-                self.builtin_ir(Builtin::Log, &[self.ecx, sp, n]);
+                self.call_fallible_builtin(Builtin::Log, &[self.ecx, sp, n]);
             }
 
             op::CREATE => {
@@ -1083,7 +1031,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 self.fail_if_staticcall(InstructionResult::StateChangeDuringStaticCall);
                 let sp = self.sp_after_inputs();
                 let spec_id = self.const_spec_id();
-                self.builtin_ir(Builtin::SelfDestruct, &[self.ecx, sp, spec_id]);
+                self.call_fallible_builtin(Builtin::SelfDestruct, &[self.ecx, sp, spec_id]);
                 goto_return!(build InstructionResult::SelfDestruct);
             }
 
@@ -1177,7 +1125,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     fn return_common(&mut self, ir: InstructionResult) {
         let sp = self.sp_after_inputs();
         let ir_const = self.bcx.iconst(self.i8_type, ir as i64);
-        self.builtin_ir(Builtin::DoReturn, &[self.ecx, sp, ir_const]);
+        self.call_fallible_builtin(Builtin::DoReturn, &[self.ecx, sp, ir_const]);
         self.build_return_imm(ir);
     }
 
@@ -1187,7 +1135,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let sp = self.sp_after_inputs();
         let spec_id = self.const_spec_id();
         let create_kind = self.bcx.iconst(self.i8_type, create_kind as i64);
-        self.builtin_ir(Builtin::Create, &[self.ecx, sp, spec_id, create_kind]);
+        self.call_fallible_builtin(Builtin::Create, &[self.ecx, sp, spec_id, create_kind]);
         self.suspend();
     }
 
@@ -1196,7 +1144,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let sp = self.sp_after_inputs();
         let spec_id = self.const_spec_id();
         let call_kind = self.bcx.iconst(self.i8_type, call_kind as i64);
-        self.builtin_ir(Builtin::Call, &[self.ecx, sp, spec_id, call_kind]);
+        self.call_fallible_builtin(Builtin::Call, &[self.ecx, sp, spec_id, call_kind]);
         self.suspend();
     }
 
@@ -1425,6 +1373,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         self.bcx.switch_to_block(target);
     }
 
+    /// Build a call to the panic builtin.
     fn call_panic(&mut self, msg: &str) {
         let function = self.builtin_function(Builtin::Panic);
         let ptr = self.bcx.str_const(msg);
@@ -1434,8 +1383,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     }
 
     /// Build a call to a builtin that returns an [`InstructionResult`].
-    fn builtin_ir(&mut self, builtin: Builtin, args: &[B::Value]) {
-        let ret = self.builtin(builtin, args).expect("builtin does not return a value");
+    fn call_fallible_builtin(&mut self, builtin: Builtin, args: &[B::Value]) {
+        let ret = self.call_builtin(builtin, args).expect("builtin does not return a value");
         let failure = self.bcx.icmp_imm(IntCC::NotEqual, ret, InstructionResult::Continue as i64);
         let target = self.build_check_inner(true, failure, ret);
         self.bcx.switch_to_block(target);
@@ -1443,11 +1392,12 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
     /// Build a call to a builtin.
     #[must_use]
-    fn builtin(&mut self, builtin: Builtin, args: &[B::Value]) -> Option<B::Value> {
+    fn call_builtin(&mut self, builtin: Builtin, args: &[B::Value]) -> Option<B::Value> {
         let function = self.builtin_function(builtin);
         self.bcx.call(function, args)
     }
 
+    /// Gets the function for the given builtin.
     fn builtin_function(&mut self, builtin: Builtin) -> B::Function {
         self.builtins.get(builtin, &mut self.bcx)
     }
@@ -1497,6 +1447,113 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             return format!("entry.{name}");
         }
         op_block_name_with(self.current_inst, self.bytecode.inst(self.current_inst), name)
+    }
+}
+
+/// IR builtins.
+impl<'a, B: Backend> FunctionCx<'a, B> {
+    fn call_byte(&mut self, index: B::Value, value: B::Value) -> B::Value {
+        self.call_ir_binop_builtin("byte", index, value, Self::builtin_byte)
+    }
+
+    /// Builds: `fn byte(index: u256, value: u256) -> u256`
+    fn builtin_byte(bcx: &mut B::Builder<'_>) {
+        let index = bcx.fn_param(0);
+        let value = bcx.fn_param(1);
+
+        let cond = bcx.icmp_imm(IntCC::UnsignedLessThan, index, 32);
+        let byte = {
+            // (value >> (31 - index) * 8) & 0xFF
+            let thirty_one = bcx.iconst_256(U256::from(31));
+            let shift = bcx.isub(thirty_one, index);
+            let shift = bcx.imul_imm(shift, 8);
+            let shifted = bcx.ushr(value, shift);
+            let mask = bcx.iconst_256(U256::from(0xFF));
+            bcx.bitand(shifted, mask)
+        };
+        let zero = bcx.iconst_256(U256::ZERO);
+        let r = bcx.select(cond, byte, zero);
+
+        bcx.ret(&[r]);
+    }
+
+    fn call_signextend(&mut self, ext: B::Value, x: B::Value) -> B::Value {
+        self.call_ir_binop_builtin("signextend", ext, x, Self::builtin_signextend)
+    }
+
+    /// Builds: `fn signextend(ext: u256, x: u256) -> u256`
+    fn builtin_signextend(bcx: &mut B::Builder<'_>) {
+        // From the yellow paper:
+        /*
+        let [ext, x] = stack.pop();
+        let t = 256 - 8 * (ext + 1);
+        let mut result = x;
+        result[..t] = [x[t]; t]; // Index by bits.
+        */
+
+        let ext = bcx.fn_param(0);
+        let x = bcx.fn_param(1);
+
+        // For 31 we also don't need to do anything.
+        let might_do_something = bcx.icmp_imm(IntCC::UnsignedLessThan, ext, 31);
+        let r = bcx.lazy_select(
+            might_do_something,
+            bcx.type_int(256),
+            |bcx| {
+                // Adapted from revm: https://github.com/bluealloy/revm/blob/fda371f73aba2c30a83c639608be78145fd1123b/crates/interpreter/src/instructions/arithmetic.rs#L89
+                // let bit_index = 8 * ext + 7;
+                // let bit = (x >> bit_index) & 1 != 0;
+                // let mask = (1 << bit_index) - 1;
+                // let r = if bit { x | !mask } else { *x & mask };
+
+                // let bit_index = 8 * ext + 7;
+                let bit_index = bcx.imul_imm(ext, 8);
+                let bit_index = bcx.iadd_imm(bit_index, 7);
+
+                // let bit = (x >> bit_index) & 1 != 0;
+                let one = bcx.iconst_256(U256::from(1));
+                let bit = bcx.ushr(x, bit_index);
+                let bit = bcx.bitand(bit, one);
+                let bit = bcx.icmp_imm(IntCC::NotEqual, bit, 0);
+
+                // let mask = (1 << bit_index) - 1;
+                let mask = bcx.ishl(one, bit_index);
+                let mask = bcx.isub_imm(mask, 1);
+
+                // let r = if bit { x | !mask } else { *x & mask };
+                let not_mask = bcx.bitnot(mask);
+                let sext = bcx.bitor(x, not_mask);
+                let zext = bcx.bitand(x, mask);
+                bcx.select(bit, sext, zext)
+            },
+            |_bcx| x,
+        );
+        bcx.ret(&[r]);
+    }
+
+    fn call_ir_binop_builtin(
+        &mut self,
+        name: &str,
+        x1: B::Value,
+        x2: B::Value,
+        build: fn(&mut B::Builder<'a>),
+    ) -> B::Value {
+        let word = self.word_type;
+        self.call_ir_builtin(name, &[x1, x2], &[word, word], Some(word), build).unwrap()
+    }
+
+    fn call_ir_builtin(
+        &mut self,
+        name: &str,
+        args: &[B::Value],
+        arg_types: &[B::Type],
+        ret: Option<B::Type>,
+        build: fn(&mut B::Builder<'a>),
+    ) -> Option<B::Value> {
+        debug_assert_eq!(args.len(), arg_types.len());
+        let linkage = revmc_backend::Linkage::Private;
+        let f = self.bcx.get_or_build_function(name, arg_types, ret, linkage, build);
+        self.bcx.call(f, args)
     }
 }
 
