@@ -21,6 +21,8 @@ use std::{
 
 // TODO: Implement memory instructions in IR rather than as builtins.
 
+// TODO: Expose target configuration, and get rid of `cfg!(target_endian)` calls.
+
 // TODO: Test on big-endian hardware.
 // It probably doesn't work when loading Rust U256 into native endianness.
 

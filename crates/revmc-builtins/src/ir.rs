@@ -45,7 +45,7 @@ impl<B: Backend> Builtins<B> {
         let params = builtin.params(bcx);
         let address = builtin.addr();
         let linkage = revmc_backend::Linkage::Import;
-        let f = bcx.add_function(name, ret, &params, address, linkage);
+        let f = bcx.add_function(name, &params, ret, Some(address), linkage);
         let default_attrs: &[Attribute] = if builtin == Builtin::Panic {
             &[
                 Attribute::Cold,
