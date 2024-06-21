@@ -746,45 +746,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             }
             op::CALLDATALOAD => {
                 let index = self.pop();
-                let len_ptr = contract_field!(@get Contract, pf::Bytes; input.len);
-                let len = self.bcx.load(self.isize_type, len_ptr, "input.len");
-                let len = self.bcx.zext(self.word_type, len);
-                let in_bounds = self.bcx.icmp(IntCC::UnsignedLessThan, index, len);
-
-                let ptr = contract_field!(@get Contract, pf::Bytes; input.ptr);
-                let zero = self.bcx.iconst_256(U256::ZERO);
-                let isize_type = self.isize_type;
-                let i8_type = self.i8_type;
-                let word_type = self.word_type;
-                let value = self.bcx.lazy_select(
-                    in_bounds,
-                    self.word_type,
-                    |bcx| {
-                        let ptr = bcx.load(bcx.type_ptr(), ptr, "contract.input.ptr");
-                        let index = bcx.ireduce(isize_type, index);
-                        let calldata = bcx.gep(i8_type, ptr, &[index], "calldata.addr");
-
-                        // `32.min(contract.input.len() - index)`
-                        let slice_len = {
-                            let len = bcx.ireduce(isize_type, len);
-                            let diff = bcx.isub(len, index);
-                            let max = bcx.iconst(isize_type, 32);
-                            bcx.umin(diff, max)
-                        };
-
-                        let tmp = bcx.new_stack_slot(word_type, "calldata.addr");
-                        tmp.store(bcx, zero);
-                        let tmp_addr = tmp.addr(bcx);
-                        bcx.memcpy(tmp_addr, calldata, slice_len);
-                        let mut value = tmp.load(bcx, "calldata.i256");
-                        if cfg!(target_endian = "little") {
-                            value = bcx.bswap(value);
-                        }
-                        value
-                    },
-                    |_| zero,
-                );
-                self.push(value);
+                let r = self.call_calldataload(index);
+                self.push(r);
             }
             op::CALLDATASIZE => {
                 contract_field!(@push self.isize_type, Contract, pf::Bytes; input.len)
@@ -1185,8 +1148,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
     /// Gets the environment field at the given offset.
     fn get_field(&mut self, ptr: B::Value, offset: usize, name: &str) -> B::Value {
-        let offset = self.bcx.iconst(self.isize_type, offset as i64);
-        self.bcx.gep(self.i8_type, ptr, &[offset], name)
+        get_field(&mut self.bcx, ptr, offset, name)
     }
 
     /// Loads the gas used.
@@ -1453,11 +1415,11 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 /// IR builtins.
 impl<'a, B: Backend> FunctionCx<'a, B> {
     fn call_byte(&mut self, index: B::Value, value: B::Value) -> B::Value {
-        self.call_ir_binop_builtin("byte", index, value, Self::builtin_byte)
+        self.call_ir_binop_builtin("byte", index, value, Self::build_byte)
     }
 
     /// Builds: `fn byte(index: u256, value: u256) -> u256`
-    fn builtin_byte(bcx: &mut B::Builder<'_>) {
+    fn build_byte(bcx: &mut B::Builder<'_>) {
         let index = bcx.fn_param(0);
         let value = bcx.fn_param(1);
 
@@ -1478,11 +1440,11 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     }
 
     fn call_signextend(&mut self, ext: B::Value, x: B::Value) -> B::Value {
-        self.call_ir_binop_builtin("signextend", ext, x, Self::builtin_signextend)
+        self.call_ir_binop_builtin("signextend", ext, x, Self::build_signextend)
     }
 
     /// Builds: `fn signextend(ext: u256, x: u256) -> u256`
-    fn builtin_signextend(bcx: &mut B::Builder<'_>) {
+    fn build_signextend(bcx: &mut B::Builder<'_>) {
         // From the yellow paper:
         /*
         let [ext, x] = stack.pop();
@@ -1531,6 +1493,77 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         bcx.ret(&[r]);
     }
 
+    fn call_calldataload(&mut self, index: B::Value) -> B::Value {
+        self.call_ir_builtin(
+            "calldataload",
+            &[index, self.contract],
+            &[self.word_type, self.bcx.type_ptr()],
+            Some(self.word_type),
+            Self::build_calldataload,
+        )
+        .unwrap()
+    }
+
+    /// Builds: `fn calldataload(index: u256, contract: &Contract) -> u256`
+    fn build_calldataload(bcx: &mut B::Builder<'_>) {
+        let index = bcx.fn_param(0);
+        let contract = bcx.fn_param(1);
+
+        let isize_type = bcx.type_ptr_sized_int();
+        let i8_type = bcx.type_int(8);
+        let word_type = bcx.type_int(256);
+
+        let input_offset = mem::offset_of!(Contract, input);
+        let ptr_ptr = get_field(
+            bcx,
+            contract,
+            input_offset + mem::offset_of!(pf::Bytes, ptr),
+            "contract.input.ptr.addr",
+        );
+        let ptr = bcx.load(bcx.type_ptr(), ptr_ptr, "contract.input.ptr");
+
+        let len_ptr = get_field(
+            bcx,
+            contract,
+            input_offset + mem::offset_of!(pf::Bytes, len),
+            "contract.input.len.addr",
+        );
+        let len = bcx.load(isize_type, len_ptr, "contract.input.len");
+
+        let len_256 = bcx.zext(word_type, len);
+
+        let in_bounds = bcx.icmp(IntCC::UnsignedLessThan, index, len_256);
+
+        let zero = bcx.iconst_256(U256::ZERO);
+        let r = bcx.lazy_select(
+            in_bounds,
+            word_type,
+            |bcx| {
+                let index = bcx.ireduce(isize_type, index);
+                let calldata = bcx.gep(i8_type, ptr, &[index], "calldata.addr");
+
+                // `min(contract.input.len() - index, 32)`
+                let slice_len = {
+                    let diff = bcx.isub(len, index);
+                    let max = bcx.iconst(isize_type, 32);
+                    bcx.umin(diff, max)
+                };
+
+                let tmp = bcx.new_stack_slot(word_type, "calldata.addr");
+                tmp.store(bcx, zero);
+                let tmp_addr = tmp.addr(bcx);
+                bcx.memcpy(tmp_addr, calldata, slice_len);
+                let mut value = tmp.load(bcx, "calldata.i256");
+                if cfg!(target_endian = "little") {
+                    value = bcx.bswap(value);
+                }
+                value
+            },
+            |_| zero,
+        );
+        bcx.ret(&[r]);
+    }
+
     fn call_ir_binop_builtin(
         &mut self,
         name: &str,
@@ -1555,6 +1588,11 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let f = self.bcx.get_or_build_function(name, arg_types, ret, linkage, build);
         self.bcx.call(f, args)
     }
+}
+
+fn get_field<B: Builder>(bcx: &mut B, ptr: B::Value, offset: usize, name: &str) -> B::Value {
+    let offset = bcx.iconst(bcx.type_ptr_sized_int(), offset as i64);
+    bcx.gep(bcx.type_int(8), ptr, &[offset], name)
 }
 
 // HACK: Need these structs' fields to be public for `offset_of!`.
