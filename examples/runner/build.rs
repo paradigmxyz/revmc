@@ -11,7 +11,7 @@ fn main() -> Result<()> {
     let bytecode = revmc::primitives::hex!(
         "5f355f60015b8215601a578181019150909160019003916005565b9150505f5260205ff3"
     );
-    println!("cargo:rustc-env=FIB_HASH={}", revmc::primitives::keccak256(&bytecode));
+    println!("cargo:rustc-env=FIB_HASH={}", revmc::primitives::keccak256(bytecode));
 
     let out_dir = PathBuf::from(std::env::var("OUT_DIR")?);
     let context = revmc::llvm::inkwell::context::Context::create();
