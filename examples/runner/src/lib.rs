@@ -4,7 +4,7 @@
 
 extern crate alloc;
 
-// This dependency is needed to export the necessary symbols used by the compiled bytecodes,
+// This dependency is needed to define the necessary symbols used by the compiled bytecodes,
 // but we don't use it directly, so silence the unused crate depedency warning.
 use revmc_builtins as _;
 
@@ -12,7 +12,18 @@ use alloc::sync::Arc;
 use revm::{handler::register::EvmHandler, primitives::B256, Database};
 use revmc_context::EvmCompilerFn;
 
-pub fn get_evm<'a, DB: Database + 'static>(db: DB) -> revm::Evm<'a, ExternalContext, DB> {
+// The bytecode we statically linked.
+const FIB_HASH: B256 =
+    match revm::primitives::hex::const_decode_to_array(env!("FIB_HASH").as_bytes()) {
+        Ok(hash) => B256::new(hash),
+        Err(_err) => panic!(),
+    };
+revmc_context::extern_revmc! {
+    fn fibonacci;
+}
+
+/// Build a [`revm::Evm`] with a custom handler that can call compiled functions.
+pub fn build_evm<'a, DB: Database + 'static>(db: DB) -> revm::Evm<'a, ExternalContext, DB> {
     revm::Evm::builder()
         .with_db(db)
         .with_external_context(ExternalContext::new())
@@ -28,8 +39,11 @@ impl ExternalContext {
     }
 
     fn get_function(&self, bytecode_hash: B256) -> Option<EvmCompilerFn> {
-        // Some way to get the function, either linked statically or dynamically.
-        let _ = bytecode_hash;
+        // Can use any mapping between bytecode hash and function.
+        if bytecode_hash == FIB_HASH {
+            return Some(EvmCompilerFn::new(fibonacci));
+        }
+
         None
     }
 }
