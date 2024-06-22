@@ -1595,11 +1595,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     }
 }
 
-fn get_field<B: Builder>(bcx: &mut B, ptr: B::Value, offset: usize, name: &str) -> B::Value {
-    let offset = bcx.iconst(bcx.type_ptr_sized_int(), offset as i64);
-    bcx.gep(bcx.type_int(8), ptr, &[offset], name)
-}
-
 // HACK: Need these structs' fields to be public for `offset_of!`.
 // `pf == private_fields`.
 #[allow(dead_code)]
@@ -1650,4 +1645,9 @@ fn op_block_name_with(op: Inst, data: &InstData, with: &str) -> String {
     } else {
         format!("op.{op}.{data}.{with}")
     }
+}
+
+fn get_field<B: Builder>(bcx: &mut B, ptr: B::Value, offset: usize, name: &str) -> B::Value {
+    let offset = bcx.iconst(bcx.type_ptr_sized_int(), offset as i64);
+    bcx.gep(bcx.type_int(8), ptr, &[offset], name)
 }
