@@ -2169,7 +2169,9 @@ dependencies = [
 name = "revmc-examples-runner"
 version = "0.1.0"
 dependencies = [
+ "cc",
  "revm",
+ "revmc",
  "revmc-build",
  "revmc-builtins",
  "revmc-context",

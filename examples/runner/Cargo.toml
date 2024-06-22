@@ -13,7 +13,9 @@ repository.workspace = true
 exclude.workspace = true
 
 [build-dependencies]
+revmc = { workspace = true, features = ["llvm-prefer-dynamic"] }
 revmc-build.workspace = true
+cc = "1.0"
 
 [dependencies]
 revmc-builtins = { workspace = true, default-features = false }

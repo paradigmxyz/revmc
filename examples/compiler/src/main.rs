@@ -14,9 +14,9 @@ use std::path::PathBuf;
 
 #[derive(Parser)]
 struct Cli {
-    #[arg(long)]
+    #[arg(long, required_unless_present = "code_path")]
     code: Option<String>,
-    #[arg(long, conflicts_with = "code", required_unless_present = "code")]
+    #[arg(long, conflicts_with = "code")]
     code_path: Option<PathBuf>,
 }
 

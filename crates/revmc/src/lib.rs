@@ -23,8 +23,10 @@ pub use linker::Linker;
 #[cfg(test)]
 mod tests;
 
+#[allow(ambiguous_glob_reexports)]
 #[doc(inline)]
 pub use revmc_backend::*;
+#[allow(ambiguous_glob_reexports)]
 #[doc(inline)]
 pub use revmc_context::*;
 

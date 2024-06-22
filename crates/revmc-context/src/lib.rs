@@ -136,6 +136,40 @@ impl dyn HostExt {
     }
 }
 
+/// Declare [`RawEvmCompilerFn`] functions in an `extern "C"` block.
+///
+/// # Examples
+///
+/// ```no_run
+/// use revmc_context::{extern_revmc, EvmCompilerFn};
+///
+/// extern_revmc! {
+///    /// A simple function that returns `Continue`.
+///    pub fn test_fn;
+/// }
+///
+/// let test_fn = EvmCompilerFn::new(test_fn);
+/// ```
+#[macro_export]
+macro_rules! extern_revmc {
+    ($( $(#[$attr:meta])* $vis:vis fn $name:ident; )+) => {
+        #[allow(improper_ctypes)]
+        extern "C" {
+            $(
+                $(#[$attr])*
+                $vis fn $name(
+                    gas: *mut $crate::private::revm_interpreter::Gas,
+                    stack: *mut $crate::EvmStack,
+                    stack_len: *mut usize,
+                    env: *const $crate::private::revm_primitives::Env,
+                    contract: *const $crate::private::revm_interpreter::Contract,
+                    ecx: *mut $crate::EvmContext<'_>,
+                ) -> $crate::private::revm_interpreter::InstructionResult;
+            )+
+        }
+    };
+}
+
 /// The raw function signature of a bytecode function.
 ///
 /// Prefer using [`EvmCompilerFn`] instead of this type. See [`EvmCompilerFn::call`] for more
@@ -153,6 +187,20 @@ pub type RawEvmCompilerFn = unsafe extern "C" fn(
 /// An EVM bytecode function.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EvmCompilerFn(RawEvmCompilerFn);
+
+impl From<RawEvmCompilerFn> for EvmCompilerFn {
+    #[inline]
+    fn from(f: RawEvmCompilerFn) -> Self {
+        Self::new(f)
+    }
+}
+
+impl From<EvmCompilerFn> for RawEvmCompilerFn {
+    #[inline]
+    fn from(f: EvmCompilerFn) -> Self {
+        f.into_inner()
+    }
+}
 
 impl EvmCompilerFn {
     /// Wraps the function.
@@ -693,6 +741,14 @@ fn option_as_mut_ptr<T>(opt: Option<&mut T>) -> *mut T {
     }
 }
 
+// Macro re-exports.
+// Not public API.
+#[doc(hidden)]
+pub mod private {
+    pub use revm_interpreter;
+    pub use revm_primitives;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -705,19 +761,30 @@ mod tests {
         assert_eq!(usize::try_from(&mut word), Ok(0));
     }
 
-    #[cfg(not(feature = "host-ext-any"))]
-    extern "C" fn test_fn(
+    extern_revmc! {
+        #[link_name = "__test_fn"]
+        fn test_fn;
+    }
+
+    #[no_mangle]
+    extern "C" fn __test_fn(
         _gas: *mut Gas,
         _stack: *mut EvmStack,
         _stack_len: *mut usize,
-        _env: *mut Env,
+        _env: *const Env,
         _contract: *const Contract,
         _ecx: *mut EvmContext<'_>,
     ) -> InstructionResult {
         InstructionResult::Continue
     }
 
-    #[cfg(not(feature = "host-ext-any"))]
+    #[test]
+    fn extern_macro() {
+        let _f1 = EvmCompilerFn::new(test_fn);
+        let _f2 = EvmCompilerFn::new(__test_fn);
+        assert_eq!(test_fn as usize, __test_fn as usize);
+    }
+
     #[test]
     fn borrowing_host() {
         #[allow(unused)]
@@ -730,7 +797,10 @@ mod tests {
             fn env_mut(&mut self) -> &mut Env {
                 self.0
             }
-            fn load_account(&mut self, address: Address) -> Option<(bool, bool)> {
+            fn load_account(
+                &mut self,
+                address: Address,
+            ) -> Option<revm_interpreter::LoadAccountResult> {
                 unimplemented!()
             }
             fn block_hash(&mut self, number: U256) -> Option<revm_primitives::B256> {
@@ -739,7 +809,7 @@ mod tests {
             fn balance(&mut self, address: Address) -> Option<(U256, bool)> {
                 unimplemented!()
             }
-            fn code(&mut self, address: Address) -> Option<(revm_primitives::Bytecode, bool)> {
+            fn code(&mut self, address: Address) -> Option<(revm_primitives::Bytes, bool)> {
                 unimplemented!()
             }
             fn code_hash(&mut self, address: Address) -> Option<(revm_primitives::B256, bool)> {
@@ -774,8 +844,14 @@ mod tests {
             }
         }
 
+        #[allow(unused_mut)]
         let mut env = Env::default();
-        let mut host = BHost(&mut env);
+        #[cfg(not(feature = "host-ext-any"))]
+        let env = &mut env;
+        #[cfg(feature = "host-ext-any")]
+        let env = Box::leak(Box::new(env));
+
+        let mut host = BHost(env);
         let f = EvmCompilerFn::new(test_fn);
         let mut interpreter = Interpreter::new(Contract::default(), u64::MAX, false);
 
