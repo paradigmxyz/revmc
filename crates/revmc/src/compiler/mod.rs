@@ -261,6 +261,11 @@ impl<B: Backend> EvmCompiler<B> {
         Ok(())
     }
 
+    /// (AOT) Writes the llvm to the given file.
+    pub fn write_llvm_to_file(&mut self, path: &Path) -> Result<()> {
+        self.backend.dump_ir(path)
+    }
+
     /// (AOT) Finalizes the module and writes the compiled object to the given writer.
     pub fn write_object<W: io::Write>(&mut self, w: W) -> Result<()> {
         ensure!(self.is_aot(), "cannot write AOT object during JIT compilation");

@@ -42,6 +42,9 @@ struct Cli {
     /// Compile only, do not link.
     #[arg(long, requires = "aot")]
     no_link: bool,
+    /// Compile to a llvm ir.
+    #[arg(long, requires = "aot")]
+    ir: bool,
 
     #[arg(short = 'o', long)]
     out_dir: Option<PathBuf>,
@@ -149,6 +152,14 @@ fn main() -> Result<()> {
             std::fs::create_dir_all(&dir)?;
             dir
         };
+
+        // IR
+        if cli.ir {
+            let ll = out_dir.join("a.ll");
+            compiler.write_llvm_to_file(&ll)?;
+            ensure!(ll.exists(), "Failed to write llvm file");
+            eprintln!("Compiled llvm file to {}", ll.display());
+        }
 
         // Compile.
         let obj = out_dir.join("a.o");
