@@ -6,9 +6,8 @@ use clap::Parser;
 use eyre::Context;
 use revmc::{
     interpreter::{Contract, DummyHost, Interpreter},
-    new_llvm_backend,
     primitives::SpecId,
-    EvmCompiler, OptimizationLevel,
+    EvmCompiler, EvmLlvmBackend, OptimizationLevel,
 };
 use std::path::PathBuf;
 
@@ -34,7 +33,7 @@ fn main() -> eyre::Result<()> {
 
     // Compile the code.
     let context = revmc::llvm::inkwell::context::Context::create();
-    let backend = new_llvm_backend(&context, false, OptimizationLevel::Aggressive)?;
+    let backend = EvmLlvmBackend::new(&context, false, OptimizationLevel::Aggressive)?;
     let mut compiler = EvmCompiler::new(backend);
     let f = compiler
         .jit(Some("test"), &bytecode, SpecId::CANCUN)

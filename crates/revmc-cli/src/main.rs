@@ -3,9 +3,7 @@
 use clap::{Parser, ValueEnum};
 use color_eyre::{eyre::eyre, Result};
 use revm_primitives::{address, Bytes, Env, SpecId};
-use revmc::{
-    debug_time, eyre::ensure, new_llvm_backend, EvmCompiler, EvmContext, OptimizationLevel,
-};
+use revmc::{debug_time, eyre::ensure, EvmCompiler, EvmContext, EvmLlvmBackend, OptimizationLevel};
 use revmc_cli::{get_benches, read_code, Bench};
 use std::{
     hint::black_box,
@@ -39,6 +37,17 @@ struct Cli {
     /// Compile and link to a shared library.
     #[arg(long)]
     aot: bool,
+
+    /// Target triple.
+    #[arg(long, default_value = "native")]
+    target: String,
+    /// Target CPU.
+    #[arg(long)]
+    target_cpu: Option<String>,
+    /// Target features.
+    #[arg(long)]
+    target_features: Option<String>,
+
     /// Compile only, do not link.
     #[arg(long, requires = "aot")]
     no_link: bool,
@@ -70,7 +79,8 @@ fn main() -> Result<()> {
 
     // Build the compiler.
     let context = revmc::llvm::inkwell::context::Context::create();
-    let backend = new_llvm_backend(&context, cli.aot, cli.opt_level)?;
+    let target = revmc::Target::new(cli.target, cli.target_cpu, cli.target_features);
+    let backend = EvmLlvmBackend::new_for_target(&context, cli.aot, cli.opt_level, &target)?;
     let mut compiler = EvmCompiler::new(backend);
     compiler.set_dump_to(cli.out_dir);
     compiler.gas_metering(!cli.no_gas);
