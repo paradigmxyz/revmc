@@ -57,6 +57,7 @@ const I256_MIN: U256 = U256::from_limbs([
 /// Creates a new LLVM backend with the default builtin functions.
 #[cfg(feature = "llvm")]
 #[inline]
+#[deprecated = "use `EvmLlvmBackend::new` instead"]
 pub fn new_llvm_backend(
     cx: &llvm::inkwell::context::Context,
     aot: bool,

@@ -279,7 +279,7 @@ pub fn with_evm_context<F: FnOnce(&mut EvmContext<'_>, &mut EvmStack, &mut usize
 
 #[cfg(feature = "llvm")]
 fn with_llvm_backend(opt_level: OptimizationLevel, f: impl FnOnce(EvmLlvmBackend<'_>)) {
-    llvm::with_llvm_context(|cx| f(new_llvm_backend(cx, false, opt_level).unwrap()))
+    llvm::with_llvm_context(|cx| f(EvmLlvmBackend::new(cx, false, opt_level).unwrap()))
 }
 
 #[cfg(feature = "llvm")]

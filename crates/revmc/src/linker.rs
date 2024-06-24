@@ -107,7 +107,7 @@ mod tests {
         // Compile and build object file.
         let cx = crate::llvm::inkwell::context::Context::create();
         let opt_level = revmc_backend::OptimizationLevel::Aggressive;
-        let backend = crate::new_llvm_backend(&cx, true, opt_level).unwrap();
+        let backend = crate::EvmLlvmBackend::new(&cx, true, opt_level).unwrap();
         let mut compiler = crate::EvmCompiler::new(backend);
         if let Err(e) = compiler.translate(Some("link_test_basic"), &[], SpecId::CANCUN) {
             panic!("failed to compile: {e}");

@@ -2,6 +2,59 @@ use crate::{Pointer, Result};
 use ruint::aliases::U256;
 use std::{fmt, path::Path};
 
+/// Target machine.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Target {
+    /// The host machine.
+    Native,
+    /// LLVM-style target triple.
+    ///
+    /// Ref: <https://llvm.org/docs/LangRef.html#target-triple>
+    Triple {
+        /// The target triple.
+        triple: String,
+        /// The target CPU.
+        cpu: Option<String>,
+        /// The target features string.
+        features: Option<String>,
+    },
+}
+
+impl Default for Target {
+    fn default() -> Self {
+        Self::Native
+    }
+}
+
+impl std::str::FromStr for Target {
+    type Err = std::convert::Infallible;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Self::triple(s))
+    }
+}
+
+impl Target {
+    /// Creates a target from a triple string.
+    ///
+    /// `cpu` and `features` are ignored if `triple` is `native`.
+    pub fn new(
+        triple: impl AsRef<str> + Into<String>,
+        cpu: Option<String>,
+        features: Option<String>,
+    ) -> Self {
+        if triple.as_ref() == "native" {
+            return Self::Native;
+        }
+        Self::Triple { triple: triple.into(), cpu, features }
+    }
+
+    /// Creates a target from a triple string.
+    pub fn triple(triple: impl AsRef<str> + Into<String>) -> Self {
+        Self::new(triple, None, None)
+    }
+}
+
 /// Optimization level.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum OptimizationLevel {

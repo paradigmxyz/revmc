@@ -33,6 +33,7 @@ use revmc_backend::{
 };
 use rustc_hash::FxHashMap;
 use std::{
+    borrow::Cow,
     iter,
     path::Path,
     sync::{Once, OnceLock},
@@ -86,34 +87,46 @@ pub struct EvmLlvmBackend<'ctx> {
 }
 
 impl<'ctx> EvmLlvmBackend<'ctx> {
-    /// Creates a new LLVM backend.
-    #[inline]
+    /// Creates a new LLVM backend for the host machine.
+    ///
+    /// Use [`new_for_target`](Self::new_for_target) to create a backend for a specific target.
     pub fn new(
         cx: &'ctx Context,
         aot: bool,
         opt_level: revmc_backend::OptimizationLevel,
     ) -> Result<Self> {
-        debug_time!("new LLVM backend", || Self::new_inner(cx, aot, opt_level))
+        Self::new_for_target(cx, aot, opt_level, &revmc_backend::Target::Native)
+    }
+
+    /// Creates a new LLVM backend for the given target.
+    pub fn new_for_target(
+        cx: &'ctx Context,
+        aot: bool,
+        opt_level: revmc_backend::OptimizationLevel,
+        target: &revmc_backend::Target,
+    ) -> Result<Self> {
+        debug_time!("new LLVM backend", || Self::new_inner(cx, aot, opt_level, target))
     }
 
     fn new_inner(
         cx: &'ctx Context,
         aot: bool,
         opt_level: revmc_backend::OptimizationLevel,
+        target: &revmc_backend::Target,
     ) -> Result<Self> {
         init()?;
 
         let opt_level = convert_opt_level(opt_level);
 
-        let target_defaults = TargetDefaults::get();
-        let target = Target::from_triple(&target_defaults.triple).map_err(error_msg)?;
+        let target_info = TargetInfo::new(target)?;
+        let target = &target_info.target;
         let machine = target
             .create_target_machine(
-                &target_defaults.triple,
-                &target_defaults.cpu,
-                &target_defaults.features,
+                &target_info.triple,
+                &target_info.cpu,
+                &target_info.features,
                 opt_level,
-                if aot { RelocMode::DynamicNoPic } else { RelocMode::PIC },
+                RelocMode::PIC,
                 if aot { CodeModel::Default } else { CodeModel::JITDefault },
             )
             .ok_or_else(|| eyre::eyre!("failed to create target machine"))?;
@@ -372,39 +385,53 @@ impl Drop for EvmLlvmBackend<'_> {
     }
 }
 
-/// Cached target information.
-struct TargetDefaults {
+/// Cached target information for the host machine.
+#[derive(Debug)]
+struct TargetInfo {
     triple: TargetTriple,
+    target: Target,
     cpu: String,
     features: String,
-    // target: Target,
 }
 
 // SAFETY: No mutability is exposed and `TargetTriple` is an owned string.
-unsafe impl std::marker::Send for TargetDefaults {}
-unsafe impl std::marker::Sync for TargetDefaults {}
+unsafe impl std::marker::Send for TargetInfo {}
+unsafe impl std::marker::Sync for TargetInfo {}
 
-impl TargetDefaults {
-    fn get() -> &'static Self {
-        static TARGET_DEFAULTS: OnceLock<TargetDefaults> = OnceLock::new();
-        TARGET_DEFAULTS.get_or_init(|| {
-            if let Some(r#override) = Self::r#override() {
-                return r#override;
-            }
-            let triple = TargetMachine::get_default_triple();
-            let cpu = TargetMachine::get_host_cpu_name().to_string_lossy().into_owned();
-            let features = TargetMachine::get_host_cpu_features().to_string_lossy().into_owned();
-            Self { triple, cpu, features }
-        })
+impl Clone for TargetInfo {
+    fn clone(&self) -> Self {
+        let triple = TargetTriple::create(self.triple.as_str().to_str().unwrap());
+        Self {
+            target: Target::from_triple(&triple).unwrap(),
+            triple,
+            cpu: self.cpu.clone(),
+            features: self.features.clone(),
+        }
     }
+}
 
-    fn r#override() -> Option<Self> {
-        override_target_triple().map(|triple_str| {
-            let triple = TargetTriple::create(triple_str);
-            let cpu = std::env::var("__REVMC_OVERRIDE_TARGET_CPU").unwrap_or_default();
-            let features = std::env::var("__REVMC_OVERRIDE_TARGET_FEATURES").unwrap_or_default();
-            Self { triple, cpu, features }
-        })
+impl TargetInfo {
+    fn new(target: &revmc_backend::Target) -> Result<Cow<'static, Self>> {
+        match target {
+            revmc_backend::Target::Native => {
+                static HOST_TARGET_INFO: OnceLock<TargetInfo> = OnceLock::new();
+                Ok(Cow::Borrowed(HOST_TARGET_INFO.get_or_init(|| {
+                    let triple = TargetMachine::get_default_triple();
+                    let target = Target::from_triple(&triple).unwrap();
+                    let cpu = TargetMachine::get_host_cpu_name().to_string_lossy().into_owned();
+                    let features =
+                        TargetMachine::get_host_cpu_features().to_string_lossy().into_owned();
+                    Self { target, triple, cpu, features }
+                })))
+            }
+            revmc_backend::Target::Triple { triple, cpu, features } => {
+                let triple = TargetTriple::create(triple);
+                let target = Target::from_triple(&triple).map_err(error_msg)?;
+                let cpu = cpu.as_ref().cloned().unwrap_or_default();
+                let features = features.as_ref().cloned().unwrap_or_default();
+                Ok(Cow::Owned(Self { target, triple, cpu, features }))
+            }
+        }
     }
 }
 
@@ -1073,11 +1100,7 @@ fn init_() -> Result<()> {
         info: true,
         machine_code: true,
     };
-    if override_target_triple().is_some() {
-        Target::initialize_all(&config);
-    } else {
-        Target::initialize_native(&config).map_err(Error::msg)?;
-    }
+    Target::initialize_all(&config);
 
     Ok(())
 }
@@ -1203,9 +1226,4 @@ fn convert_linkage(linkage: revmc_backend::Linkage) -> inkwell::module::Linkage 
 
 fn error_msg(msg: inkwell::support::LLVMString) -> revmc_backend::Error {
     revmc_backend::Error::msg(msg.to_string_lossy().trim_end().to_string())
-}
-
-fn override_target_triple() -> Option<&'static str> {
-    static CACHE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    CACHE.get_or_init(|| std::env::var("__REVMC_OVERRIDE_TARGET_TRIPLE").ok()).as_deref()
 }

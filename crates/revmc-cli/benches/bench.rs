@@ -5,7 +5,7 @@ use criterion::{
 };
 use revm_interpreter::SharedMemory;
 use revm_primitives::{Env, SpecId};
-use revmc::{llvm, new_llvm_backend, EvmCompiler, EvmCompilerFn, EvmContext, EvmStack};
+use revmc::{llvm, EvmCompiler, EvmCompilerFn, EvmContext, EvmLlvmBackend, EvmStack};
 use revmc_cli::Bench;
 use std::time::Duration;
 
@@ -45,9 +45,9 @@ fn run_bench(c: &mut Criterion, bench: &Bench) {
     >();
 
     // Set up the compiler.
-    let opt_level = revmc::OptimizationLevel::Aggressive;
     let context = llvm::inkwell::context::Context::create();
-    let backend = new_llvm_backend(&context, false, opt_level).unwrap();
+    let opt_level = revmc::OptimizationLevel::Aggressive;
+    let backend = EvmLlvmBackend::new(&context, false, opt_level).unwrap();
     let mut compiler = EvmCompiler::new(backend);
     compiler.inspect_stack_length(!stack_input.is_empty());
     compiler.gas_metering(true);
