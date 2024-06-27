@@ -425,6 +425,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         Ok(())
     }
 
+    #[instrument(level = "debug", skip_all, fields(inst = %self.bytecode.inst(inst).to_op()))]
     fn translate_inst(&mut self, inst: Inst) -> Result<()> {
         self.current_inst = inst;
         let data = self.bytecode.inst(inst);

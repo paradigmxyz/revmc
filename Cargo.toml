@@ -53,9 +53,24 @@ color-eyre = "0.6"
 eyre = "0.6"
 rustc-hash = "2.0"
 tracing = "0.1"
-tracing-error = "0.2"
 tracing-subscriber = "0.3"
+tracing-tracy = "0.11"
 paste = "1.0"
 
 [profile.release]
-codegen-units = 1
+opt-level = 3
+lto = "thin"
+debug = "line-tables-only"
+strip = true
+panic = "abort"
+codegen-units = 16
+
+# Use the `--profile profiling` flag to show symbols in release mode.
+# e.g. `cargo build --profile profiling`
+[profile.profiling]
+inherits = "release"
+debug = 2
+strip = false
+
+[profile.bench]
+inherits = "profiling"

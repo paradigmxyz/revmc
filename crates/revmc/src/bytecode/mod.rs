@@ -85,6 +85,7 @@ fn slice_as_bytes<T>(a: &[T]) -> &[u8] {
 }
 
 impl<'a> Bytecode<'a> {
+    #[instrument(name = "new_bytecode", level = "debug", skip_all)]
     pub(crate) fn new(code: &'a [u8], spec_id: SpecId) -> Self {
         let mut insts = Vec::with_capacity(code.len() + 8);
         let mut jumpdests = BitVec::repeat(false, code.len());
@@ -160,6 +161,13 @@ impl<'a> Bytecode<'a> {
         &mut self.insts[inst]
     }
 
+    /// Returns the opcode at the given instruction counter.
+    #[inline]
+    #[allow(dead_code)]
+    pub(crate) fn opcode(&self, inst: Inst) -> Opcode<'_> {
+        self.inst(inst).to_op_in(self)
+    }
+
     /// Returns an iterator over the instructions.
     #[inline]
     pub(crate) fn iter_insts(
@@ -199,12 +207,12 @@ impl<'a> Bytecode<'a> {
     pub(crate) fn analyze(&mut self) -> Result<()> {
         ensure!(!self.spec_id.is_enabled_in(SpecId::PRAGUE), "EOF is not yet implemented");
 
-        trace_time!("static_jump_analysis", || self.static_jump_analysis());
+        self.static_jump_analysis();
         // NOTE: `mark_dead_code` must run after `static_jump_analysis` as it can mark unreachable
         // `JUMPDEST`s as dead code.
-        trace_time!("mark_dead_code", || self.mark_dead_code());
-        trace_time!("will_suspend", || self.calc_will_suspend());
-        trace_time!("sections", || self.construct_sections());
+        self.mark_dead_code();
+        self.calc_will_suspend();
+        self.construct_sections();
 
         Ok(())
     }

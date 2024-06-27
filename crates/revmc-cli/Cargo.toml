@@ -29,8 +29,8 @@ revm-primitives.workspace = true
 clap = { version = "4", features = ["derive"] }
 color-eyre.workspace = true
 libloading = "0.8"
-tracing-error.workspace = true
 tracing-subscriber = { workspace = true, features = ["fmt", "env-filter"] }
+tracing-tracy = { workspace = true, optional = true }
 
 [dev-dependencies]
 criterion = "0.5"
@@ -46,6 +46,8 @@ llvm = ["revmc/llvm"]
 llvm-prefer-static = ["llvm", "revmc/llvm-prefer-static"]
 llvm-prefer-dynamic = ["llvm", "revmc/llvm-prefer-dynamic"]
 cranelift = ["revmc/cranelift"]
+
+tracy = ["dep:tracing-tracy"]
 
 [[bin]]
 name = "revmc-cli"

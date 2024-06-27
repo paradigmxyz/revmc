@@ -5,8 +5,6 @@
 
 #[macro_use]
 extern crate tracing;
-#[macro_use]
-extern crate revmc_backend;
 
 // For features.
 use alloy_primitives as _;

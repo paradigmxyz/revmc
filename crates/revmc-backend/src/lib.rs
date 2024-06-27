@@ -3,9 +3,6 @@
 #![cfg_attr(not(test), warn(unused_extern_crates))]
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
 
-#[macro_use]
-mod macros;
-
 mod traits;
 pub use traits::*;
 
@@ -22,9 +19,3 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 /// Compilation error.
 pub type Error = eyre::Error;
-
-// Not public API.
-#[doc(hidden)]
-pub mod private {
-    pub use tracing;
-}

@@ -5,9 +5,6 @@
 #[macro_use]
 extern crate tracing;
 
-#[macro_use]
-extern crate revmc_backend;
-
 use inkwell::{
     attributes::{Attribute, AttributeLoc},
     basic_block::BasicBlock,
@@ -99,16 +96,8 @@ impl<'ctx> EvmLlvmBackend<'ctx> {
     }
 
     /// Creates a new LLVM backend for the given target.
+    #[instrument(name = "new_llvm_backend", level = "debug", skip_all)]
     pub fn new_for_target(
-        cx: &'ctx Context,
-        aot: bool,
-        opt_level: revmc_backend::OptimizationLevel,
-        target: &revmc_backend::Target,
-    ) -> Result<Self> {
-        debug_time!("new LLVM backend", || Self::new_inner(cx, aot, opt_level, target))
-    }
-
-    fn new_inner(
         cx: &'ctx Context,
         aot: bool,
         opt_level: revmc_backend::OptimizationLevel,
