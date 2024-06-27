@@ -36,15 +36,8 @@ impl Linker {
     }
 
     /// Links the given object files into a shared library at the given path.
+    #[instrument(level = "debug", skip_all)]
     pub fn link(
-        &self,
-        out: &Path,
-        objects: impl IntoIterator<Item = impl AsRef<std::ffi::OsStr>>,
-    ) -> std::io::Result<()> {
-        debug_time!("link", || self.link_inner(out, objects))
-    }
-
-    fn link_inner(
         &self,
         out: &Path,
         objects: impl IntoIterator<Item = impl AsRef<std::ffi::OsStr>>,

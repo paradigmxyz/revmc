@@ -19,4 +19,3 @@ workspace = true
 [dependencies]
 ruint = { workspace = true, features = ["std"] }
 eyre.workspace = true
-tracing.workspace = true

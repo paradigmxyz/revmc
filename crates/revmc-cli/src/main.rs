@@ -3,7 +3,7 @@
 use clap::{Parser, ValueEnum};
 use color_eyre::{eyre::eyre, Result};
 use revm_primitives::{address, Bytes, Env, SpecId};
-use revmc::{debug_time, eyre::ensure, EvmCompiler, EvmContext, EvmLlvmBackend, OptimizationLevel};
+use revmc::{eyre::ensure, EvmCompiler, EvmContext, EvmLlvmBackend, OptimizationLevel};
 use revmc_cli::{get_benches, read_code, Bench};
 use std::{
     hint::black_box,
@@ -217,7 +217,7 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let (ret, action) = debug_time!("run", || run(f));
+    let (ret, action) = run(f);
     println!("InstructionResult::{ret:?}");
     println!("InterpreterAction::{action:#?}");
 
@@ -245,11 +245,11 @@ fn bench<T>(n_iters: u64, name: &str, mut f: impl FnMut() -> T) {
 
 fn init_tracing_subscriber() -> Result<(), tracing_subscriber::util::TryInitError> {
     use tracing_subscriber::prelude::*;
-    tracing_subscriber::Registry::default()
-        .with(tracing_subscriber::EnvFilter::from_default_env())
-        .with(tracing_error::ErrorLayer::default())
-        .with(tracing_subscriber::fmt::layer())
-        .try_init()
+    let registry = tracing_subscriber::Registry::default()
+        .with(tracing_subscriber::EnvFilter::from_default_env());
+    #[cfg(feature = "tracy")]
+    let registry = registry.with(tracing_tracy::TracyLayer::default());
+    registry.with(tracing_subscriber::fmt::layer()).try_init()
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]

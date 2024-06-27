@@ -1,7 +1,7 @@
 use super::{with_evm_context, DEF_SPEC};
 use crate::{Backend, EvmCompiler};
 use revm_interpreter::{opcode as op, InstructionResult};
-use revm_primitives::U256;
+use revm_primitives::{uint, U256};
 
 macro_rules! fibonacci_tests {
     ($($i:expr),* $(,)?) => {paste::paste! {

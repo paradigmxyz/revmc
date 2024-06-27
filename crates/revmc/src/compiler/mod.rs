@@ -227,8 +227,8 @@ impl<B: Backend> EvmCompiler<B> {
     ) -> Result<B::FuncId> {
         ensure!(cfg!(target_endian = "little"), "only little-endian is supported");
         ensure!(!self.finalized, "cannot compile more functions after finalizing the module");
-        let bytecode = debug_time!("parse", || self.parse(bytecode, spec_id))?;
-        debug_time!("translate", || self.translate_inner(name, &bytecode))
+        let bytecode = self.parse(bytecode, spec_id)?;
+        self.translate_inner(name, &bytecode)
     }
 
     /// (JIT) Compiles the given EVM bytecode into a JIT function.
@@ -248,7 +248,7 @@ impl<B: Backend> EvmCompiler<B> {
     pub fn jit_function(&mut self, id: B::FuncId) -> Result<EvmCompilerFn> {
         ensure!(self.is_jit(), "cannot JIT functions during AOT compilation");
         self.finalize()?;
-        let addr = debug_time!("get_function", || self.backend.jit_function(id))?;
+        let addr = self.backend.jit_function(id)?;
         Ok(EvmCompilerFn::new(unsafe { std::mem::transmute::<usize, RawEvmCompilerFn>(addr) }))
     }
 
@@ -265,7 +265,7 @@ impl<B: Backend> EvmCompiler<B> {
     pub fn write_object<W: io::Write>(&mut self, w: W) -> Result<()> {
         ensure!(self.is_aot(), "cannot write AOT object during JIT compilation");
         self.finalize()?;
-        debug_time!("write_object", || self.backend.write_object(w))
+        self.backend.write_object(w)
     }
 
     /// (JIT) Frees the memory associated with a single function.
@@ -302,14 +302,15 @@ impl<B: Backend> EvmCompiler<B> {
     /// Parses the given EVM bytecode. Not public API.
     #[doc(hidden)]
     pub fn parse<'a>(&mut self, bytecode: &'a [u8], spec_id: SpecId) -> Result<Bytecode<'a>> {
-        let mut bytecode = trace_time!("new bytecode", || Bytecode::new(bytecode, spec_id));
-        trace_time!("analyze", || bytecode.analyze())?;
+        let mut bytecode = Bytecode::new(bytecode, spec_id);
+        bytecode.analyze()?;
         if let Some(dump_dir) = &self.dump_dir() {
-            trace_time!("dump bytecode", || Self::dump_bytecode(dump_dir, &bytecode))?;
+            Self::dump_bytecode(dump_dir, &bytecode)?;
         }
         Ok(bytecode)
     }
 
+    #[instrument(name = "translate", level = "debug", skip_all)]
     fn translate_inner(
         &mut self,
         name: Option<&str>,
@@ -324,70 +325,50 @@ impl<B: Backend> EvmCompiler<B> {
             }
         };
 
-        let (bcx, id) = trace_time!("make builder", || Self::make_builder(
-            &mut self.backend,
-            &self.config,
-            name,
-        ))?;
-        trace_time!("translate inner", || FunctionCx::translate(
-            bcx,
-            self.config,
-            &mut self.builtins,
-            bytecode,
-        ))?;
+        let (bcx, id) = Self::make_builder(&mut self.backend, &self.config, name)?;
+        FunctionCx::translate(bcx, self.config, &mut self.builtins, bytecode)?;
 
         Ok(id)
     }
 
+    #[instrument(level = "debug", skip_all)]
     fn finalize(&mut self) -> Result<()> {
-        if !self.finalized {
-            self.finalized = true;
-            debug_time!("finalize module", || self.finalize_inner())
-        } else {
-            Ok(())
+        if self.finalized {
+            return Ok(());
         }
-    }
+        self.finalized = true;
 
-    fn finalize_inner(&mut self) -> Result<()> {
-        let verify = |b: &mut B| trace_time!("verify", || b.verify_module());
         if let Some(dump_dir) = &self.dump_dir() {
-            trace_time!("dump unopt IR", || {
-                let path = dump_dir.join("unopt").with_extension(self.backend.ir_extension());
-                self.backend.dump_ir(&path)
-            })?;
+            let path = dump_dir.join("unopt").with_extension(self.backend.ir_extension());
+            self.dump_ir(&path)?;
 
             // Dump IR before verifying for better debugging.
-            verify(&mut self.backend)?;
+            self.verify_module()?;
 
             if self.dump_assembly && self.dump_unopt_assembly {
-                trace_time!("dump unopt disasm", || {
-                    let path = dump_dir.join("unopt.s");
-                    self.backend.dump_disasm(&path)
-                })?;
+                let path = dump_dir.join("unopt.s");
+                self.dump_disasm(&path)?;
             }
         } else {
-            verify(&mut self.backend)?;
+            self.verify_module()?;
         }
 
-        trace_time!("optimize", || self.backend.optimize_module())?;
+        self.optimize_module()?;
 
         if let Some(dump_dir) = &self.dump_dir() {
-            trace_time!("dump opt IR", || {
-                let path = dump_dir.join("opt").with_extension(self.backend.ir_extension());
-                self.backend.dump_ir(&path)
-            })?;
+            let path = dump_dir.join("opt").with_extension(self.backend.ir_extension());
+            self.dump_ir(&path)?;
 
             if self.dump_assembly {
-                trace_time!("dump opt disasm", || {
-                    let path = dump_dir.join("opt.s");
-                    self.backend.dump_disasm(&path)
-                })?;
+                let path = dump_dir.join("opt.s");
+                self.dump_disasm(&path)?;
             }
         }
 
         Ok(())
     }
 
+    #[instrument(level = "debug", skip_all)]
     fn make_builder<'a>(
         backend: &'a mut B,
         config: &FcxConfig,
@@ -462,6 +443,27 @@ impl<B: Backend> EvmCompiler<B> {
         Ok((bcx, id))
     }
 
+    #[instrument(level = "debug", skip_all)]
+    fn dump_ir(&mut self, path: &Path) -> Result<()> {
+        self.backend.dump_ir(path)
+    }
+
+    #[instrument(level = "debug", skip_all)]
+    fn dump_disasm(&mut self, path: &Path) -> Result<()> {
+        self.backend.dump_disasm(path)
+    }
+
+    #[instrument(level = "debug", skip_all)]
+    fn verify_module(&mut self) -> Result<()> {
+        self.backend.verify_module()
+    }
+
+    #[instrument(level = "debug", skip_all)]
+    fn optimize_module(&mut self) -> Result<()> {
+        self.backend.optimize_module()
+    }
+
+    #[instrument(level = "debug", skip_all)]
     fn dump_bytecode(dump_dir: &Path, bytecode: &Bytecode<'_>) -> Result<()> {
         {
             let file = fs::File::create(dump_dir.join("bytecode.txt"))?;
