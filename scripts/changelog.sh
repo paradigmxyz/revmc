@@ -13,7 +13,7 @@ root=$WORKSPACE_ROOT
 crate=$CRATE_ROOT
 crate_glob="${crate#"$root/"}/**"
 
-if [[ "$crate" = */tests/* || "$crate" = *test-utils* || "$crate" = "revmc-cli" ]]; then
+if [[ "$crate" = */tests/* || "$crate" = */examples/* || "$crate" = *test-utils* || "$crate" = "revmc-cli" ]]; then
     exit 0
 fi
 
