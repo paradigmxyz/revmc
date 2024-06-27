@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Bump revm
 
+### Documentation
+
+- Add changelogs
+
 ### Features
 
 - Add target configuration ([#39](https://github.com/paradigmxyz/revmc/issues/39))

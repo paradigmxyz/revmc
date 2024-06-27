@@ -42,6 +42,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation
 
+- Add changelogs
 - Add requirements and examples ([#29](https://github.com/paradigmxyz/revmc/issues/29))
 - Wording
 
