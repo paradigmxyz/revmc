@@ -23,7 +23,7 @@ fn run_resume_tests<B: Backend>(compiler: &mut EvmCompiler<B>) {
         // 3
     ][..];
 
-    let f = compiler.jit(None, code, DEF_SPEC).unwrap();
+    let f = unsafe { compiler.jit(None, code, DEF_SPEC) }.unwrap();
 
     with_evm_context(code, |ecx, stack, stack_len| {
         assert_eq!(ecx.resume_at, 0);

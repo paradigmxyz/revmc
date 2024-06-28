@@ -194,7 +194,7 @@ fn main() -> Result<()> {
             return Err(eyre!("--load with no argument requires --aot"));
         }
     } else {
-        compiler.jit_function(f_id)?
+        unsafe { compiler.jit_function(f_id)? }
     };
 
     let mut run = |f: revmc::EvmCompilerFn| {
