@@ -9,15 +9,16 @@ extern crate alloc;
 use revmc_builtins as _;
 
 use alloc::sync::Arc;
-use revm::{handler::register::EvmHandler, primitives::B256, Database};
+use revm::{
+    handler::register::EvmHandler,
+    primitives::{hex, B256},
+    Database,
+};
 use revmc_context::EvmCompilerFn;
 
+include!("./common.rs");
+
 // The bytecode we statically linked.
-const FIB_HASH: B256 =
-    match revm::primitives::hex::const_decode_to_array(env!("FIB_HASH").as_bytes()) {
-        Ok(hash) => B256::new(hash),
-        Err(_err) => panic!(),
-    };
 revmc_context::extern_revmc! {
     fn fibonacci;
 }
@@ -40,7 +41,7 @@ impl ExternalContext {
 
     fn get_function(&self, bytecode_hash: B256) -> Option<EvmCompilerFn> {
         // Can use any mapping between bytecode hash and function.
-        if bytecode_hash == FIB_HASH {
+        if bytecode_hash == FIBONACCI_HASH {
             return Some(EvmCompilerFn::new(fibonacci));
         }
 
