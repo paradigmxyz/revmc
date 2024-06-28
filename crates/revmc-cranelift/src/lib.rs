@@ -14,7 +14,12 @@ use pretty_clif::CommentWriter;
 use revmc_backend::{
     eyre::eyre, Backend, BackendTypes, Builder, OptimizationLevel, Result, TypeMethods, U256,
 };
-use std::{cell::RefCell, collections::HashMap, io::Write, path::Path, rc::Rc};
+use std::{
+    collections::HashMap,
+    io::Write,
+    path::Path,
+    sync::{Arc, RwLock},
+};
 
 mod pretty_clif;
 
@@ -414,6 +419,7 @@ impl<'a> Builder for EvmCraneliftBuilder<'a> {
         self.bcx.create_sized_stack_slot(StackSlotData {
             kind: StackSlotKind::ExplicitSlot,
             size: ty.bytes(),
+            align_shift: 1,
         })
     }
 
@@ -780,7 +786,7 @@ impl<'a> Builder for EvmCraneliftBuilder<'a> {
 }
 
 #[derive(Clone, Debug, Default)]
-struct Symbols(Rc<RefCell<HashMap<String, *const u8>>>);
+struct Symbols(Arc<RwLock<HashMap<String, usize>>>);
 
 impl Symbols {
     fn new() -> Self {
@@ -788,11 +794,11 @@ impl Symbols {
     }
 
     fn get(&self, name: &str) -> Option<*const u8> {
-        self.0.borrow().get(name).copied()
+        self.0.read().unwrap().get(name).copied().map(|addr| addr as *const u8)
     }
 
     fn insert(&self, name: String, ptr: *const u8) -> Option<*const u8> {
-        self.0.borrow_mut().insert(name, ptr)
+        self.0.write().unwrap().insert(name, ptr as usize).map(|addr| addr as *const u8)
     }
 }
 
