@@ -234,18 +234,28 @@ impl<B: Backend> EvmCompiler<B> {
     /// (JIT) Compiles the given EVM bytecode into a JIT function.
     ///
     /// See [`translate`](Self::translate) for more information.
-    pub fn jit(
+    ///
+    /// # Safety
+    ///
+    /// The returned function pointer is owned by the module, and must not be called after the
+    /// module is cleared or the function is freed.
+    pub unsafe fn jit(
         &mut self,
         name: Option<&str>,
         bytecode: &[u8],
         spec_id: SpecId,
     ) -> Result<EvmCompilerFn> {
         let id = self.translate(name, bytecode, spec_id)?;
-        self.jit_function(id)
+        unsafe { self.jit_function(id) }
     }
 
     /// (JIT) Finalizes the module and JITs the given function.
-    pub fn jit_function(&mut self, id: B::FuncId) -> Result<EvmCompilerFn> {
+    ///
+    /// # Safety
+    ///
+    /// The returned function pointer is owned by the module, and must not be called after the
+    /// module is cleared or the function is freed.
+    pub unsafe fn jit_function(&mut self, id: B::FuncId) -> Result<EvmCompilerFn> {
         ensure!(self.is_jit(), "cannot JIT functions during AOT compilation");
         self.finalize()?;
         let addr = self.backend.jit_function(id)?;

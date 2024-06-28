@@ -19,7 +19,7 @@ fn run_fibonacci_test<B: Backend>(compiler: &mut EvmCompiler<B>, input: u16, dyn
 
     unsafe { compiler.clear() }.unwrap();
     compiler.inspect_stack_length(true);
-    let f = compiler.jit(None, &code, DEF_SPEC).unwrap();
+    let f = unsafe { compiler.jit(None, &code, DEF_SPEC) }.unwrap();
 
     with_evm_context(&code, |ecx, stack, stack_len| {
         if dynamic {

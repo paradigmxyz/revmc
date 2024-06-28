@@ -83,7 +83,7 @@ fn run_bench(c: &mut Criterion, bench: &Bench) {
         (name, compiler.translate(None, bytecode, SPEC_ID).expect(name))
     });
     for &(name, fn_id) in &jit_ids {
-        let jit = compiler.jit_function(fn_id).expect(name);
+        let jit = unsafe { compiler.jit_function(fn_id) }.expect(name);
         g.bench_function(&format!("revmc/{name}"), |b| b.iter(|| call_jit(jit)));
     }
 
