@@ -2,7 +2,8 @@
 
 use clap::{Parser, ValueEnum};
 use color_eyre::{eyre::eyre, Result};
-use revm_primitives::{address, Bytes, Env, SpecId};
+use revm_interpreter::{opcode::make_instruction_table, SharedMemory};
+use revm_primitives::{address, spec_to_generic, Bytes, Env, SpecId};
 use revmc::{eyre::ensure, EvmCompiler, EvmContext, EvmLlvmBackend, OptimizationLevel};
 use revmc_cli::{get_benches, read_code, Bench};
 use std::{
@@ -37,6 +38,10 @@ struct Cli {
     /// Compile and link to a shared library.
     #[arg(long)]
     aot: bool,
+
+    /// Interpret the code instead of compiling.
+    #[arg(long, conflicts_with = "aot")]
+    interpret: bool,
 
     /// Target triple.
     #[arg(long, default_value = "native")]
@@ -197,20 +202,28 @@ fn main() -> Result<()> {
         unsafe { compiler.jit_function(f_id)? }
     };
 
+    #[allow(unused_parens)]
+    let table = spec_to_generic!(spec_id, (const { &make_instruction_table::<_, SPEC>() }));
     let mut run = |f: revmc::EvmCompilerFn| {
         let mut interpreter =
             revm_interpreter::Interpreter::new(contract.clone(), gas_limit, false);
         host.clear();
-        let (mut ecx, stack, stack_len) =
-            EvmContext::from_interpreter_with_stack(&mut interpreter, &mut host);
 
-        for (i, input) in stack_input.iter().enumerate() {
-            stack.as_mut_slice()[i] = input.into();
+        if cli.interpret {
+            let action = interpreter.run(SharedMemory::new(), table, &mut host);
+            (interpreter.instruction_result, action)
+        } else {
+            let (mut ecx, stack, stack_len) =
+                EvmContext::from_interpreter_with_stack(&mut interpreter, &mut host);
+
+            for (i, input) in stack_input.iter().enumerate() {
+                stack.as_mut_slice()[i] = input.into();
+            }
+            *stack_len = stack_input.len();
+
+            let r = unsafe { f.call_noinline(Some(stack), Some(stack_len), &mut ecx) };
+            (r, interpreter.next_action)
         }
-        *stack_len = stack_input.len();
-
-        let r = unsafe { f.call_noinline(Some(stack), Some(stack_len), &mut ecx) };
-        (r, interpreter.next_action)
     };
 
     if cli.n_iters == 0 {

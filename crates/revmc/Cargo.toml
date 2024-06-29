@@ -36,6 +36,8 @@ bitvec = "1"
 rustc-hash.workspace = true
 tracing.workspace = true
 
+arbitrary = { version = "1.3", optional = true }
+
 [dev-dependencies]
 revmc-context = { workspace = true, features = ["host-ext-any"] }
 paste.workspace = true
@@ -53,3 +55,6 @@ asm-keccak = ["alloy-primitives/asm-keccak"]
 # I don't think this is supported, but it's necessary for --all-features to work in workspaces which
 # also have this feature.
 optimism = ["revm-primitives/optimism", "revm-interpreter/optimism"]
+
+# Internal features.
+__fuzzing = ["dep:arbitrary"]

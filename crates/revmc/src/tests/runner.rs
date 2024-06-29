@@ -1,4 +1,5 @@
 use super::*;
+use arbitrary::Arbitrary;
 use interpreter::LoadAccountResult;
 use revm_interpreter::{opcode as op, Contract, DummyHost, Host};
 use revm_primitives::{
@@ -19,6 +20,22 @@ pub struct TestCase<'a> {
     pub expected_next_action: InterpreterAction,
     pub assert_host: Option<fn(&TestHost)>,
     pub assert_ecx: Option<fn(&EvmContext<'_>)>,
+}
+
+impl<'a> Arbitrary<'a> for TestCase<'a> {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        let spec_id = SpecId::try_from_u8(u.arbitrary()?).unwrap_or(DEF_SPEC);
+        Ok(Self::what_interpreter_says(u.arbitrary()?, spec_id))
+    }
+
+    fn arbitrary_take_rest(mut u: arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        let spec_id = SpecId::try_from_u8(u.arbitrary()?).unwrap_or(DEF_SPEC);
+        Ok(Self::what_interpreter_says(u.take_rest(), spec_id))
+    }
+
+    fn size_hint(depth: usize) -> (usize, Option<usize>) {
+        <(u8, &'static [u8]) as Arbitrary>::size_hint(depth)
+    }
 }
 
 impl Default for TestCase<'_> {
@@ -55,6 +72,23 @@ impl fmt::Debug for TestCase<'_> {
     }
 }
 
+impl<'a> TestCase<'a> {
+    pub fn what_interpreter_says(bytecode: &'a [u8], spec_id: SpecId) -> Self {
+        Self {
+            bytecode,
+            spec_id,
+            modify_ecx: None,
+            expected_return: RETURN_WHAT_INTERPRETER_SAYS,
+            expected_stack: STACK_WHAT_INTERPRETER_SAYS,
+            expected_memory: MEMORY_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+            expected_next_action: ACTION_WHAT_INTERPRETER_SAYS,
+            assert_host: None,
+            assert_ecx: None,
+        }
+    }
+}
+
 // Default values.
 pub const DEF_SPEC: SpecId = SpecId::CANCUN;
 pub const DEF_OPINFOS: &[OpcodeInfo; 256] = op_info_map(DEF_SPEC);
@@ -74,10 +108,18 @@ pub static DEF_CODEMAP: OnceLock<HashMap<Address, primitives::Bytecode>> = OnceL
 pub const OTHER_ADDR: Address = Address::repeat_byte(0x69);
 pub const DEF_BN: U256 = uint!(500_U256);
 
-pub const STACK_WHAT_THE_INTERPRETER_SAYS: &[U256] =
-    &[U256::from_be_slice(&GAS_WHAT_THE_INTERPRETER_SAYS.to_be_bytes())];
-pub const MEMORY_WHAT_THE_INTERPRETER_SAYS: &[u8] = &GAS_WHAT_THE_INTERPRETER_SAYS.to_be_bytes();
-pub const GAS_WHAT_THE_INTERPRETER_SAYS: u64 = 0x4682e332d6612de1;
+pub const RETURN_WHAT_INTERPRETER_SAYS: InstructionResult = InstructionResult::PrecompileError;
+pub const STACK_WHAT_INTERPRETER_SAYS: &[U256] =
+    &[U256::from_be_slice(&GAS_WHAT_INTERPRETER_SAYS.to_be_bytes())];
+pub const MEMORY_WHAT_INTERPRETER_SAYS: &[u8] = &GAS_WHAT_INTERPRETER_SAYS.to_be_bytes();
+pub const GAS_WHAT_INTERPRETER_SAYS: u64 = 0x4682e332d6612de1;
+pub const ACTION_WHAT_INTERPRETER_SAYS: InterpreterAction = InterpreterAction::Return {
+    result: InterpreterResult {
+        gas: Gas::new(GAS_WHAT_INTERPRETER_SAYS),
+        output: Bytes::from_static(MEMORY_WHAT_INTERPRETER_SAYS),
+        result: RETURN_WHAT_INTERPRETER_SAYS,
+    },
+};
 
 pub fn def_env() -> &'static Env {
     DEF_ENV.get_or_init(|| Env {
@@ -149,6 +191,12 @@ pub struct TestHost {
     pub host: DummyHost,
     pub code_map: &'static HashMap<Address, primitives::Bytecode>,
     pub selfdestructs: Vec<(Address, Address)>,
+}
+
+impl Default for TestHost {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TestHost {
@@ -335,20 +383,25 @@ fn run_compiled_test_case(test_case: &TestCase<'_>, f: EvmCompilerFn) {
 
         let interpreter_action = interpreter.run(memory, &table, &mut int_host);
 
-        assert_eq!(
-            interpreter.instruction_result, expected_return,
-            "interpreter return value mismatch"
-        );
+        let mut expected_return = expected_return;
+        if expected_return == RETURN_WHAT_INTERPRETER_SAYS {
+            expected_return = interpreter.instruction_result;
+        } else {
+            assert_eq!(
+                interpreter.instruction_result, expected_return,
+                "interpreter return value mismatch"
+            );
+        }
 
         let mut expected_stack = expected_stack;
-        if expected_stack == STACK_WHAT_THE_INTERPRETER_SAYS {
+        if expected_stack == STACK_WHAT_INTERPRETER_SAYS {
             expected_stack = interpreter.stack.data();
         } else {
             assert_eq!(interpreter.stack.data(), expected_stack, "interpreter stack mismatch");
         }
 
         let mut expected_memory = expected_memory;
-        if expected_memory == MEMORY_WHAT_THE_INTERPRETER_SAYS {
+        if expected_memory == MEMORY_WHAT_INTERPRETER_SAYS {
             expected_memory = interpreter.shared_memory.context_memory();
         } else {
             assert_eq!(
@@ -359,26 +412,28 @@ fn run_compiled_test_case(test_case: &TestCase<'_>, f: EvmCompilerFn) {
         }
 
         let mut expected_gas = expected_gas;
-        if expected_gas == GAS_WHAT_THE_INTERPRETER_SAYS {
-            println!("asked for interpreter gas: {}", interpreter.gas.spent());
+        if expected_gas == GAS_WHAT_INTERPRETER_SAYS {
             expected_gas = interpreter.gas.spent();
         } else {
             assert_eq!(interpreter.gas.spent(), expected_gas, "interpreter gas mismatch");
         }
 
-        // Check next action only if it's not the default. This should be `None` but `run`
-        // returns a default value.
-        if !(expected_next_action.is_none()
-            && interpreter_action
-                == (InterpreterAction::Return {
-                    result: InterpreterResult {
-                        result: interpreter.instruction_result,
-                        output: Bytes::new(),
-                        gas: interpreter.gas,
-                    },
-                }))
-        {
-            assert_actions(&interpreter_action, expected_next_action);
+        // This is what the interpreter returns when the internal action is None in `run`.
+        let default_action = InterpreterAction::Return {
+            result: InterpreterResult {
+                result: interpreter.instruction_result,
+                output: Bytes::new(),
+                gas: interpreter.gas,
+            },
+        };
+        let mut expected_next_action = expected_next_action;
+        if *expected_next_action == ACTION_WHAT_INTERPRETER_SAYS {
+            expected_next_action = &interpreter_action;
+        } else {
+            if expected_next_action.is_none() {
+                expected_next_action = &default_action;
+            }
+            assert_actions(&interpreter_action, &expected_next_action);
         }
 
         if let Some(assert_host) = assert_host {
@@ -387,31 +442,44 @@ fn run_compiled_test_case(test_case: &TestCase<'_>, f: EvmCompilerFn) {
 
         let actual_return = unsafe { f.call(Some(stack), Some(stack_len), ecx) };
 
-        assert_eq!(actual_return, expected_return, "return value mismatch");
+        // We can have a stack overflow/underflow before other error codes due to sections.
+        if matches!(
+            actual_return,
+            InstructionResult::StackOverflow | InstructionResult::StackUnderflow
+        ) {
+            assert_eq!(
+                actual_return.is_error(),
+                expected_return.is_error(),
+                "return value mismatch"
+            );
+        } else {
+            assert_eq!(actual_return, expected_return, "return value mismatch");
+        }
 
         let actual_stack =
             stack.as_slice().iter().take(*stack_len).map(|x| x.to_u256()).collect::<Vec<_>>();
 
-        // On EVM halt all available gas is consumed, so we can go a bit off here.
+        // On EVM halt all available gas is consumed, so resulting stack, memory, and gas do not
+        // matter. We do less work than the interpreter by bailing out earlier due to sections.
         if !actual_return.is_error() {
             assert_eq!(actual_stack, *expected_stack, "stack mismatch");
-        }
 
-        assert_eq!(
-            MemDisplay(ecx.memory.context_memory()),
-            MemDisplay(expected_memory),
-            "interpreter memory mismatch"
-        );
+            assert_eq!(
+                MemDisplay(ecx.memory.context_memory()),
+                MemDisplay(expected_memory),
+                "interpreter memory mismatch"
+            );
 
-        // On EVM halt all available gas is consumed, so we can go a bit off here.
-        if !actual_return.is_error() {
             assert_eq!(ecx.gas.spent(), expected_gas, "gas mismatch");
         }
 
-        assert_actions(ecx.next_action, expected_next_action);
+        let actual_next_action =
+            if ecx.next_action.is_none() { &default_action } else { &*ecx.next_action };
+        assert_actions(actual_next_action, &expected_next_action);
 
-        if let Some(assert_host) = assert_host {
-            assert_host(ecx.host.downcast_ref().unwrap());
+        if let Some(_assert_host) = assert_host {
+            #[cfg(not(feature = "__fuzzing"))]
+            _assert_host(ecx.host.downcast_ref().unwrap());
         }
 
         if let Some(assert_ecx) = assert_ecx {
@@ -438,7 +506,7 @@ fn assert_actions(actual: &InterpreterAction, expected: &InterpreterAction) {
         ) => {
             assert_eq!(result.result, expected_result.result, "result mismatch");
             assert_eq!(result.output, expected_result.output, "result output mismatch");
-            if expected_result.gas.limit() != GAS_WHAT_THE_INTERPRETER_SAYS {
+            if expected_result.gas.limit() != GAS_WHAT_INTERPRETER_SAYS {
                 assert_eq!(result.gas.spent(), expected_result.gas.spent(), "result gas mismatch");
             }
         }
