@@ -433,7 +433,7 @@ fn run_compiled_test_case(test_case: &TestCase<'_>, f: EvmCompilerFn) {
             if expected_next_action.is_none() {
                 expected_next_action = &default_action;
             }
-            assert_actions(&interpreter_action, &expected_next_action);
+            assert_actions(&interpreter_action, expected_next_action);
         }
 
         if let Some(assert_host) = assert_host {
@@ -475,7 +475,7 @@ fn run_compiled_test_case(test_case: &TestCase<'_>, f: EvmCompilerFn) {
 
         let actual_next_action =
             if ecx.next_action.is_none() { &default_action } else { &*ecx.next_action };
-        assert_actions(actual_next_action, &expected_next_action);
+        assert_actions(actual_next_action, expected_next_action);
 
         if let Some(_assert_host) = assert_host {
             #[cfg(not(feature = "__fuzzing"))]
