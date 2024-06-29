@@ -36,7 +36,7 @@ pub fn read_code_string(contents: &[u8], ext: Option<&str>) -> Result<Vec<u8>> {
         hex::decode(first_line).wrap_err("given code is not valid hex")
     } else if ext == Some("bin") || !contents.is_ascii() {
         Ok(contents.to_vec())
-    } else if ext == Some("evm") {
+    } else if ext == Some("evm") || contents.is_ascii() {
         parse_evm_dsl(utf8()?)
     } else {
         Err(eyre!("could not determine bytecode type"))

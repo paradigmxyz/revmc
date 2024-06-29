@@ -18,8 +18,9 @@ pub use compiler::EvmCompiler;
 mod linker;
 pub use linker::Linker;
 
-#[cfg(test)]
-mod tests;
+/// Internal tests and testing utilities. Not public API.
+#[cfg(any(test, feature = "__fuzzing"))]
+pub mod tests;
 
 #[allow(ambiguous_glob_reexports)]
 #[doc(inline)]

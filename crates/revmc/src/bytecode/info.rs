@@ -79,11 +79,9 @@ impl OpcodeInfo {
 }
 
 /// Returns the static info map for the given `SpecId`.
+#[allow(unused_parens)]
 pub const fn op_info_map(spec_id: SpecId) -> &'static [OpcodeInfo; 256] {
-    spec_to_generic!(spec_id, {
-        const MAP: &[OpcodeInfo; 256] = &make_map(<SPEC as revm_primitives::Spec>::SPEC_ID);
-        MAP
-    })
+    spec_to_generic!(spec_id, (const { &make_map(<SPEC as revm_primitives::Spec>::SPEC_ID) }))
 }
 
 #[allow(unused_mut)]

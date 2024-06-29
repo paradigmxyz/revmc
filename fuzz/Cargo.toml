@@ -1,0 +1,23 @@
+[package]
+name = "revmc-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+revmc = { workspace = true, features = ["llvm-prefer-dynamic", "__fuzzing"] }
+eyre.workspace = true
+
+[build-dependencies]
+revmc-build.workspace = true
+
+[[bin]]
+name = "vs_interpreter"
+path = "fuzz_targets/vs_interpreter.rs"
+test = false
+doc = false
+bench = false

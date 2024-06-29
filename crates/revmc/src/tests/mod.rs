@@ -1,4 +1,10 @@
-#![allow(clippy::needless_update, unreachable_pub)]
+#![allow(
+    clippy::needless_update,
+    unreachable_pub,
+    dead_code,
+    missing_docs,
+    missing_debug_implementations
+)]
 
 use crate::*;
 use primitives::SpecId;
@@ -11,12 +17,15 @@ use revm_primitives::{hex, keccak256, Address, Bytes, LogData, B256, KECCAK_EMPT
 #[macro_use]
 mod macros;
 
-mod fibonacci;
 mod meta;
+
+#[cfg(not(feature = "__fuzzing"))]
+mod fibonacci;
+#[cfg(not(feature = "__fuzzing"))]
 mod resume;
 
 mod runner;
-use runner::*;
+pub use runner::*;
 
 const I256_MAX: U256 = U256::from_limbs([
     0xFFFFFFFFFFFFFFFF,
@@ -677,7 +686,7 @@ tests! {
         sstore1(@raw {
             bytecode: &[op::PUSH1, 200, op::SLOAD, op::PUSH1, 100, op::PUSH1, 200, op::SSTORE, op::PUSH1, 200, op::SLOAD],
             expected_stack: &[0_U256, 100_U256],
-            expected_gas: GAS_WHAT_THE_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
             assert_host: Some(|host| {
                 assert_eq!(host.storage.get(&200_U256), Some(&100_U256));
             }),
@@ -754,7 +763,7 @@ tests! {
             // NOTE: The address is pushed by the caller.
             expected_stack: &[],
             expected_memory: &0x69_U256.to_be_bytes::<32>(),
-            expected_gas: GAS_WHAT_THE_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
             expected_next_action: InterpreterAction::Create {
                 inputs: Box::new(CreateInputs {
                     caller: DEF_ADDR,
@@ -771,7 +780,7 @@ tests! {
             // NOTE: The address is pushed by the caller.
             expected_stack: &[],
             expected_memory: &0x69_U256.to_be_bytes::<32>(),
-            expected_gas: GAS_WHAT_THE_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
             expected_next_action: InterpreterAction::Create {
                 inputs: Box::new(CreateInputs {
                     caller: DEF_ADDR,
@@ -797,7 +806,7 @@ tests! {
             // NOTE: The return is pushed by the caller.
             expected_stack: &[],
             expected_memory: &[0; 32],
-            expected_gas: GAS_WHAT_THE_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
             expected_next_action: InterpreterAction::Call {
                 inputs: Box::new(CallInputs {
                     input: Bytes::copy_from_slice(&[0; 3]),
@@ -853,7 +862,7 @@ tests! {
         selfdestruct(@raw {
             bytecode: &[op::PUSH1, 0x69, op::SELFDESTRUCT, op::INVALID],
             expected_return: InstructionResult::SelfDestruct,
-            expected_gas: GAS_WHAT_THE_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
             assert_host: Some(|host| {
                 assert_eq!(host.selfdestructs, [(DEF_ADDR, Address::with_last_byte(0x69))]);
             }),
@@ -871,14 +880,14 @@ tests! {
                 ecx.contract.input = Bytes::from(&hex!("c0406226"));
             }),
             expected_return: InstructionResult::Return,
-            expected_stack: STACK_WHAT_THE_INTERPRETER_SAYS,
-            expected_gas: GAS_WHAT_THE_INTERPRETER_SAYS,
-            expected_memory: MEMORY_WHAT_THE_INTERPRETER_SAYS,
+            expected_stack: STACK_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+            expected_memory: MEMORY_WHAT_INTERPRETER_SAYS,
             expected_next_action: InterpreterAction::Return {
                 result: InterpreterResult {
                     result: InstructionResult::Return,
                     output: Bytes::copy_from_slice(&1_U256.to_be_bytes::<32>()),
-                    gas: Gas::new(GAS_WHAT_THE_INTERPRETER_SAYS),
+                    gas: Gas::new(GAS_WHAT_INTERPRETER_SAYS),
                 },
             },
             assert_host: Some(|host| {
