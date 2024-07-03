@@ -3,7 +3,7 @@
 use clap::{Parser, ValueEnum};
 use color_eyre::{eyre::eyre, Result};
 use revm_interpreter::{opcode::make_instruction_table, SharedMemory};
-use revm_primitives::{address, spec_to_generic, Bytes, Env, SpecId};
+use revm_primitives::{address, spec_to_generic, Env, SpecId};
 use revmc::{eyre::ensure, EvmCompiler, EvmContext, EvmLlvmBackend, OptimizationLevel};
 use revmc_cli::{get_benches, read_code, Bench};
 use std::{
@@ -23,7 +23,7 @@ struct Cli {
     #[arg(long, conflicts_with = "code")]
     code_path: Option<PathBuf>,
     #[arg(long)]
-    calldata: Option<Bytes>,
+    calldata: Option<String>,
 
     /// Load a shared object file instead of JIT compiling.
     ///
@@ -127,7 +127,11 @@ fn main() -> Result<()> {
     };
     compiler.set_module_name(name);
 
-    let calldata = cli.calldata.unwrap_or_else(|| calldata.into());
+    let calldata = if let Some(calldata) = cli.calldata {
+        revmc::primitives::hex::decode(calldata)?.into()
+    } else {
+        calldata.into()
+    };
     let gas_limit = cli.gas_limit;
 
     let mut env = Env::default();
