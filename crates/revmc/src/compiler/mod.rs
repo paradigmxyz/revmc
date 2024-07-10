@@ -287,7 +287,7 @@ impl<B: Backend> EvmCompiler<B> {
     ///
     /// # Safety
     ///
-    /// Because this function invalidates any pointers retrived from the corresponding module, it
+    /// Because this function invalidates any pointers retrieved from the corresponding module, it
     /// should only be used when none of the functions from that module are currently executing and
     /// none of the `fn` pointers are called afterwards.
     pub unsafe fn free_function(&mut self, id: B::FuncId) -> Result<()> {
@@ -299,7 +299,7 @@ impl<B: Backend> EvmCompiler<B> {
     ///
     /// # Safety
     ///
-    /// Because this function invalidates any pointers retrived from the corresponding module, it
+    /// Because this function invalidates any pointers retrieved from the corresponding module, it
     /// should only be used when none of the functions from that module are currently executing and
     /// none of the `fn` pointers are called afterwards.
     pub unsafe fn clear(&mut self) -> Result<()> {

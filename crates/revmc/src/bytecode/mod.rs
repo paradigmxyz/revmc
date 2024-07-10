@@ -376,7 +376,7 @@ impl<'a> Bytecode<'a> {
 
     /// Returns `true` if the bytecode is small.
     ///
-    /// This is arbitarily chosen to speed up compilation for larger contracts.
+    /// This is arbitrarily chosen to speed up compilation for larger contracts.
     pub(crate) fn is_small(&self) -> bool {
         self.insts.len() < 2000
     }
