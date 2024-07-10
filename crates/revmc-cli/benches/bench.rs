@@ -84,7 +84,7 @@ fn run_bench(c: &mut Criterion, bench: &Bench) {
     });
     for &(name, fn_id) in &jit_ids {
         let jit = unsafe { compiler.jit_function(fn_id) }.expect(name);
-        g.bench_function(&format!("revmc/{name}"), |b| b.iter(|| call_jit(jit)));
+        g.bench_function(format!("revmc/{name}"), |b| b.iter(|| call_jit(jit)));
     }
 
     g.bench_function("revm-interpreter", |b| {
