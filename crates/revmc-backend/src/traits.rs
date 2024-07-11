@@ -354,6 +354,7 @@ pub trait Builder: BackendTypes + TypeMethods {
         name: &str,
     ) -> Self::Value;
 
+    #[must_use]
     fn call(&mut self, function: Self::Function, args: &[Self::Value]) -> Option<Self::Value>;
 
     fn memcpy(&mut self, dst: Self::Value, src: Self::Value, len: Self::Value);

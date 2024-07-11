@@ -1541,6 +1541,12 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
     /// Builds: `fn calldataload(index: u256, contract: ptr) -> u256`
     fn build_calldataload(&mut self) {
+        self.bcx.add_function_attribute(
+            None,
+            Attribute::AlwaysInline,
+            FunctionAttributeLocation::Function,
+        );
+
         let index = self.bcx.fn_param(0);
         let contract = self.bcx.fn_param(1);
 
@@ -1636,6 +1642,12 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     }
 
     fn build_mload_mstore_common(&mut self, kind: MemOpKind) {
+        self.bcx.add_function_attribute(
+            None,
+            Attribute::HintInline,
+            FunctionAttributeLocation::Function,
+        );
+
         let offset = self.bcx.fn_param(0);
         let value = self.bcx.fn_param(1);
         let ecx = self.bcx.fn_param(2);
@@ -1658,12 +1670,12 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         // `new_size = offset + len`
         // `if new_size > memory.len() { resize_memory(new_size) }`
         let last_checkpoint = {
-            let last_checkpoint_ptr = self.get_field(
+            let ptr = self.get_field(
                 memory_ptr,
                 mem::offset_of!(pf::SharedMemory, last_checkpoint),
                 "ecx.memory.last_checkpoint.addr",
             );
-            self.bcx.load(self.isize_type, last_checkpoint_ptr, "ecx.memory.last_checkpoint")
+            self.bcx.load(self.isize_type, ptr, "ecx.memory.last_checkpoint")
         };
         let buffer_len = self.bcx.isub(sm_len, last_checkpoint);
         let max_isize = ((1u128 << self.bcx.type_bit_width(self.isize_type)) - 1u128) as u64;
@@ -1692,17 +1704,16 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         self.bcx.br(cont);
 
         // `ecx.memory.buffer[last_checkpoint + offset..]`
+        // Implemented as `ecx.memory.buffer[last_checkpoint..][offset..]`
         self.bcx.switch_to_block(cont);
-        let shared_buffer_ptr_ptr = self.get_field(
-            memory_ptr,
-            memory_buffer_offset + mem::offset_of!(pf::Vec<u8>, ptr),
-            "ecx.memory.buffer.ptr.shared.addr",
-        );
-        let shared_buffer_ptr = self.bcx.load(
-            self.bcx.type_ptr(),
-            shared_buffer_ptr_ptr,
-            "ecx.memory.buffer.ptr.shared",
-        );
+        let shared_buffer_ptr = {
+            let ptr = self.get_field(
+                memory_ptr,
+                memory_buffer_offset + mem::offset_of!(pf::Vec<u8>, ptr),
+                "ecx.memory.buffer.ptr.shared.addr",
+            );
+            self.bcx.load(self.bcx.type_ptr(), ptr, "ecx.memory.buffer.ptr.shared")
+        };
         let buffer_ptr = self.bcx.gep(
             self.i8_type,
             shared_buffer_ptr,
@@ -1739,7 +1750,15 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         build: fn(&mut Self),
     ) -> B::Value {
         let word = self.word_type;
-        self.call_ir_builtin(name, &[x1, x2], &[word, word], Some(word), build).unwrap()
+        self.call_ir_builtin(name, &[x1, x2], &[word, word], Some(word), |this| {
+            build(this);
+            this.bcx.add_function_attribute(
+                None,
+                Attribute::AlwaysInline,
+                FunctionAttributeLocation::Function,
+            );
+        })
+        .unwrap()
     }
 
     #[must_use]
@@ -1763,11 +1782,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             this.failure_block = prev_failure_block;
             this.return_block = prev_return_block;
         });
-        self.bcx.add_function_attribute(
-            Some(f),
-            Attribute::AlwaysInline,
-            FunctionAttributeLocation::Function,
-        );
         self.bcx.call(f, args)
     }
 }
