@@ -239,8 +239,13 @@ pub trait Builder: BackendTypes + TypeMethods {
     fn fn_param(&mut self, index: usize) -> Self::Value;
 
     fn bool_const(&mut self, value: bool) -> Self::Value;
+    /// Sign-extends negative values to `ty`.
     fn iconst(&mut self, ty: Self::Type, value: i64) -> Self::Value;
+    fn uconst(&mut self, ty: Self::Type, value: u64) -> Self::Value;
     fn iconst_256(&mut self, value: U256) -> Self::Value;
+    fn cstr_const(&mut self, value: &std::ffi::CStr) -> Self::Value {
+        self.str_const(value.to_str().unwrap())
+    }
     fn str_const(&mut self, value: &str) -> Self::Value;
 
     fn new_stack_slot(&mut self, ty: Self::Type, name: &str) -> Pointer<Self> {
@@ -317,6 +322,8 @@ pub trait Builder: BackendTypes + TypeMethods {
     fn uadd_overflow(&mut self, lhs: Self::Value, rhs: Self::Value) -> (Self::Value, Self::Value);
     fn usub_overflow(&mut self, lhs: Self::Value, rhs: Self::Value) -> (Self::Value, Self::Value);
 
+    fn uadd_sat(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
+
     fn umax(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
     fn umin(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
     fn bswap(&mut self, value: Self::Value) -> Self::Value;
@@ -367,6 +374,8 @@ pub trait Builder: BackendTypes + TypeMethods {
     ) -> Self::Function;
 
     fn get_function(&mut self, name: &str) -> Option<Self::Function>;
+
+    fn get_printf_function(&mut self) -> Self::Function;
 
     /// Adds a function to the module that's located at `address`.
     ///

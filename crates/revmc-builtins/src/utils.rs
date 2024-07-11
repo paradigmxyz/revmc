@@ -17,17 +17,22 @@ pub(crate) unsafe fn read_words_rev<'a, const N: usize>(sp: *mut EvmWord) -> &'a
 }
 
 #[inline]
-pub(crate) fn resize_memory(
+pub(crate) fn ensure_memory(
     ecx: &mut EvmContext<'_>,
     offset: usize,
     len: usize,
 ) -> InstructionResult {
-    let size = offset.saturating_add(len);
-    if size > ecx.memory.len() {
-        // TODO: Memory limit
-        if !revm_interpreter::interpreter::resize_memory(ecx.memory, ecx.gas, size) {
-            return InstructionResult::MemoryOOG;
-        }
+    let new_size = offset.saturating_add(len);
+    if new_size > ecx.memory.len() {
+        return resize_memory(ecx, new_size);
+    }
+    InstructionResult::Continue
+}
+
+pub(crate) fn resize_memory(ecx: &mut EvmContext<'_>, new_size: usize) -> InstructionResult {
+    // TODO: Memory limit
+    if !revm_interpreter::interpreter::resize_memory(ecx.memory, ecx.gas, new_size) {
+        return InstructionResult::MemoryOOG;
     }
     InstructionResult::Continue
 }
@@ -42,7 +47,7 @@ pub(crate) unsafe fn copy_operation(
     if len != 0 {
         gas_opt!(ecx, gas::dyn_verylowcopy_cost(len as u64));
         let memory_offset = try_into_usize!(memory_offset);
-        resize_memory!(ecx, memory_offset, len);
+        ensure_memory!(ecx, memory_offset, len);
         let data_offset = data_offset.to_u256();
         let data_offset = as_usize_saturated!(data_offset);
         ecx.memory.set_data(memory_offset, data_offset, len, data);

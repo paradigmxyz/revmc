@@ -361,6 +361,10 @@ impl<'a> Builder for EvmCraneliftBuilder<'a> {
         self.bcx.ins().iconst(ty, value)
     }
 
+    fn uconst(&mut self, ty: Self::Type, value: u64) -> Self::Value {
+        self.iconst(ty, value as i64)
+    }
+
     fn iconst_256(&mut self, value: U256) -> Self::Value {
         let _ = value;
         todo!("no i256 :(")
@@ -605,6 +609,10 @@ impl<'a> Builder for EvmCraneliftBuilder<'a> {
         self.bcx.ins().usub_overflow(lhs, rhs)
     }
 
+    fn uadd_sat(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
+        self.bcx.ins().uadd_sat(lhs, rhs)
+    }
+
     fn umax(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
         self.bcx.ins().umax(lhs, rhs)
     }
@@ -747,6 +755,14 @@ impl<'a> Builder for EvmCraneliftBuilder<'a> {
                 FuncOrDataId::Data(_) => None,
             })
             .map(|id| self.module.get_mut().declare_func_in_func(id, self.bcx.func))
+    }
+
+    fn get_printf_function(&mut self) -> Self::Function {
+        if let Some(f) = self.get_function("printf") {
+            return f;
+        }
+
+        unimplemented!()
     }
 
     fn add_function(

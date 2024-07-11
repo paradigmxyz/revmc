@@ -43,9 +43,9 @@ macro_rules! gas_opt {
     };
 }
 
-macro_rules! resize_memory {
+macro_rules! ensure_memory {
     ($ecx:expr, $offset:expr, $len:expr) => {
-        match resize_memory($ecx, $offset, $len) {
+        match ensure_memory($ecx, $offset, $len) {
             InstructionResult::Continue => {}
             ir => return ir,
         }

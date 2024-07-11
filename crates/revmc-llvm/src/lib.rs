@@ -511,6 +511,12 @@ impl<'a, 'ctx> EvmLlvmBuilder<'a, 'ctx> {
         })
     }
 
+    fn get_sat_function(&mut self, name: &str, ty: BasicTypeEnum<'ctx>) -> FunctionValue<'ctx> {
+        let bits = ty.into_int_type().get_bit_width();
+        let name = format!("llvm.{name}.sat.i{bits}");
+        self.get_or_add_function(&name, |this| this.fn_type(Some(ty), &[ty, ty]))
+    }
+
     fn get_or_add_function(
         &mut self,
         name: &str,
@@ -626,8 +632,11 @@ impl<'a, 'ctx> Builder for EvmLlvmBuilder<'a, 'ctx> {
     }
 
     fn iconst(&mut self, ty: Self::Type, value: i64) -> Self::Value {
-        // TODO: sign extend?
         ty.into_int_type().const_int(value as u64, value.is_negative()).into()
+    }
+
+    fn uconst(&mut self, ty: Self::Type, value: u64) -> Self::Value {
+        ty.into_int_type().const_int(value, false).into()
     }
 
     fn iconst_256(&mut self, value: U256) -> Self::Value {
@@ -869,6 +878,11 @@ impl<'a, 'ctx> Builder for EvmLlvmBuilder<'a, 'ctx> {
         (result, overflow)
     }
 
+    fn uadd_sat(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
+        let f = self.get_sat_function("uadd", lhs.get_type());
+        self.call(f, &[lhs, rhs]).unwrap()
+    }
+
     fn umax(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
         let ty = lhs.get_type();
         let bits = ty.into_int_type().get_bit_width();
@@ -1019,6 +1033,16 @@ impl<'a, 'ctx> Builder for EvmLlvmBuilder<'a, 'ctx> {
 
     fn get_function(&mut self, name: &str) -> Option<Self::Function> {
         self.module.get_function(name)
+    }
+
+    fn get_printf_function(&mut self) -> Self::Function {
+        let name = "printf";
+        if let Some(function) = self.module.get_function(name) {
+            return function;
+        }
+
+        let ty = self.cx.void_type().fn_type(&[self.ty_ptr.into()], true);
+        self.module.add_function(name, ty, Some(inkwell::module::Linkage::External))
     }
 
     fn add_function(

@@ -83,6 +83,7 @@ pub(super) struct FunctionCx<'a, B: Backend> {
     /// The current instruction being translated.
     current_inst: Inst,
 
+    // Basic blocks are `None` when outside of a main function.
     /// `dynamic_jump_table` incoming values.
     incoming_dynamic_jumps: Incoming<B>,
     /// The dynamic jump table block where all dynamic jumps branch to.
@@ -91,11 +92,11 @@ pub(super) struct FunctionCx<'a, B: Backend> {
     /// `failure_block` incoming values.
     incoming_failures: Incoming<B>,
     /// The block that all failures branch to.
-    failure_block: B::BasicBlock,
+    failure_block: Option<B::BasicBlock>,
     /// `return_block` incoming values.
     incoming_returns: Incoming<B>,
     /// The return block that all return instructions branch to.
-    return_block: B::BasicBlock,
+    return_block: Option<B::BasicBlock>,
 
     /// `resume_block` switch values.
     resume_blocks: SwitchTargets<B>,
@@ -244,9 +245,9 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             dynamic_jump_table,
 
             incoming_failures: Vec::new(),
-            failure_block,
+            failure_block: Some(failure_block),
             incoming_returns: Vec::new(),
-            return_block,
+            return_block: Some(return_block),
 
             resume_blocks: Vec::new(),
             suspend_blocks: Vec::new(),
@@ -406,13 +407,13 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         }
 
         // Finalize the failure block.
-        fx.bcx.switch_to_block(fx.failure_block);
+        fx.bcx.switch_to_block(fx.failure_block.unwrap());
         let failure_value = fx.bcx.phi(fx.i8_type, &fx.incoming_failures);
         fx.bcx.set_current_block_cold();
         fx.build_return(failure_value);
 
         // Finalize the return block.
-        fx.bcx.switch_to_block(fx.return_block);
+        fx.bcx.switch_to_block(fx.return_block.unwrap());
         let return_value = fx.bcx.phi(fx.i8_type, &fx.incoming_returns);
         if store_stack_length {
             let len = fx.stack_len.load(&mut fx.bcx, "stack_len");
@@ -834,16 +835,18 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
             op::POP => { /* Already handled in stack_io */ }
             op::MLOAD => {
-                let sp = self.sp_after_inputs();
-                self.call_fallible_builtin(Builtin::Mload, &[self.ecx, sp]);
+                let offset = self.pop();
+                let value = self.call_mload(offset);
+                self.push(value);
             }
             op::MSTORE => {
-                let sp = self.sp_after_inputs();
-                self.call_fallible_builtin(Builtin::Mstore, &[self.ecx, sp]);
+                let [offset, value] = self.popn();
+                self.call_mstore(offset, value);
             }
             op::MSTORE8 => {
-                let sp = self.sp_after_inputs();
-                self.call_fallible_builtin(Builtin::Mstore8, &[self.ecx, sp]);
+                let [offset, value] = self.popn();
+                let value = self.bcx.ireduce(self.i8_type, value);
+                self.call_mstore8(offset, value);
             }
             op::SLOAD => {
                 let sp = self.sp_after_inputs();
@@ -867,7 +870,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                         debug_assert_eq!(*data, op::JUMPI);
                         // The jump target is invalid, but we still need to account for the stack.
                         self.len_offset -= 1;
-                        self.return_block
+                        self.return_block.unwrap()
                     } else if data.flags.contains(InstFlags::STATIC_JUMP) {
                         let target_inst = data.data as usize;
                         debug_assert_eq!(
@@ -889,7 +892,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                         let cond_word = self.pop();
                         let cond = self.bcx.icmp_imm(IntCC::NotEqual, cond_word, 0);
                         let next = self.inst_entries[inst + 1];
-                        if target == self.return_block {
+                        if target == self.return_block.unwrap() {
                             self.add_invalid_jump();
                         }
                         self.bcx.brif(cond, target, next);
@@ -1147,7 +1150,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         self.bcx.iconst(self.i8_type, self.bytecode.spec_id as i64)
     }
 
-    /// Gets the environment field at the given offset.
+    /// Gets a field at the given offset.
     fn get_field(&mut self, ptr: B::Value, offset: usize, name: &str) -> B::Value {
         get_field(&mut self.bcx, ptr, offset, name)
     }
@@ -1232,6 +1235,13 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     }
     */
 
+    /// Builds a check, failing if `ret` is not `InstructionResult::Continue`.
+    fn build_check_instruction_result(&mut self, ret: B::Value) {
+        let failure = self.bcx.icmp_imm(IntCC::NotEqual, ret, InstructionResult::Continue as i64);
+        let target = self.build_check_inner(true, failure, ret);
+        self.bcx.switch_to_block(target);
+    }
+
     /// Builds a check, failing if the condition is true.
     ///
     /// `if failure_cond { return ret } else { ... }`
@@ -1258,11 +1268,20 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let current_block = self.current_block();
         let target = self.create_block_after(current_block, "contd");
 
-        self.incoming_returns.push((ret, current_block));
-        let return_block = self.return_block;
+        let return_block = if let Some(return_block) = self.return_block {
+            self.incoming_returns.push((ret, current_block));
+            return_block
+        } else {
+            self.create_block_after(target, "return")
+        };
         let then_block = if is_failure { return_block } else { target };
         let else_block = if is_failure { target } else { return_block };
         self.bcx.brif_cold(cond, then_block, else_block, is_failure);
+
+        if self.return_block.is_none() {
+            self.bcx.switch_to_block(return_block);
+            self.bcx.ret(&[ret]);
+        }
 
         target
     }
@@ -1278,8 +1297,12 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
     /// Builds a branch to the failure block.
     fn build_fail(&mut self, ret: B::Value) {
-        self.incoming_failures.push((ret, self.bcx.current_block().unwrap()));
-        self.bcx.br(self.failure_block);
+        if let Some(block) = self.failure_block {
+            self.incoming_failures.push((ret, self.bcx.current_block().unwrap()));
+            self.bcx.br(block);
+        } else {
+            self.bcx.ret(&[ret]);
+        }
     }
 
     /// Builds a branch to the return block.
@@ -1293,8 +1316,12 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
     /// Builds a branch to the return block.
     fn build_return(&mut self, ret: B::Value) {
-        self.incoming_returns.push((ret, self.bcx.current_block().unwrap()));
-        self.bcx.br(self.return_block);
+        if let Some(block) = self.return_block {
+            self.incoming_returns.push((ret, self.bcx.current_block().unwrap()));
+            self.bcx.br(block);
+        } else {
+            self.bcx.ret(&[ret]);
+        }
     }
 
     fn add_invalid_jump(&mut self) {
@@ -1345,12 +1372,19 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         self.bcx.unreachable();
     }
 
+    #[cfg(any())]
+    fn call_printf(&mut self, template: &std::ffi::CStr, values: &[B::Value]) {
+        let mut args = Vec::with_capacity(values.len() + 1);
+        args.push(self.bcx.cstr_const(template));
+        args.extend_from_slice(values);
+        let printf = self.bcx.get_printf_function();
+        let _ = self.bcx.call(printf, &args);
+    }
+
     /// Build a call to a builtin that returns an [`InstructionResult`].
     fn call_fallible_builtin(&mut self, builtin: Builtin, args: &[B::Value]) {
         let ret = self.call_builtin(builtin, args).expect("builtin does not return a value");
-        let failure = self.bcx.icmp_imm(IntCC::NotEqual, ret, InstructionResult::Continue as i64);
-        let target = self.build_check_inner(true, failure, ret);
-        self.bcx.switch_to_block(target);
+        self.build_check_instruction_result(ret);
     }
 
     /// Build a call to a builtin.
@@ -1420,24 +1454,24 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     }
 
     /// Builds: `fn byte(index: u256, value: u256) -> u256`
-    fn build_byte(bcx: &mut B::Builder<'_>) {
-        let index = bcx.fn_param(0);
-        let value = bcx.fn_param(1);
+    fn build_byte(&mut self) {
+        let index = self.bcx.fn_param(0);
+        let value = self.bcx.fn_param(1);
 
-        let cond = bcx.icmp_imm(IntCC::UnsignedLessThan, index, 32);
+        let cond = self.bcx.icmp_imm(IntCC::UnsignedLessThan, index, 32);
         let byte = {
             // (value >> (31 - index) * 8) & 0xFF
-            let thirty_one = bcx.iconst_256(U256::from(31));
-            let shift = bcx.isub(thirty_one, index);
-            let shift = bcx.imul_imm(shift, 8);
-            let shifted = bcx.ushr(value, shift);
-            let mask = bcx.iconst_256(U256::from(0xFF));
-            bcx.bitand(shifted, mask)
+            let thirty_one = self.bcx.iconst_256(U256::from(31));
+            let shift = self.bcx.isub(thirty_one, index);
+            let shift = self.bcx.imul_imm(shift, 8);
+            let shifted = self.bcx.ushr(value, shift);
+            let mask = self.bcx.iconst_256(U256::from(0xFF));
+            self.bcx.bitand(shifted, mask)
         };
-        let zero = bcx.iconst_256(U256::ZERO);
-        let r = bcx.select(cond, byte, zero);
+        let zero = self.bcx.iconst_256(U256::ZERO);
+        let r = self.bcx.select(cond, byte, zero);
 
-        bcx.ret(&[r]);
+        self.bcx.ret(&[r]);
     }
 
     fn call_signextend(&mut self, ext: B::Value, x: B::Value) -> B::Value {
@@ -1445,7 +1479,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     }
 
     /// Builds: `fn signextend(ext: u256, x: u256) -> u256`
-    fn build_signextend(bcx: &mut B::Builder<'_>) {
+    fn build_signextend(&mut self) {
         // From the yellow paper:
         /*
         let [ext, x] = stack.pop();
@@ -1454,14 +1488,14 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         result[..t] = [x[t]; t]; // Index by bits.
         */
 
-        let ext = bcx.fn_param(0);
-        let x = bcx.fn_param(1);
+        let ext = self.bcx.fn_param(0);
+        let x = self.bcx.fn_param(1);
 
         // For 31 we also don't need to do anything.
-        let might_do_something = bcx.icmp_imm(IntCC::UnsignedLessThan, ext, 31);
-        let r = bcx.lazy_select(
+        let might_do_something = self.bcx.icmp_imm(IntCC::UnsignedLessThan, ext, 31);
+        let r = self.bcx.lazy_select(
             might_do_something,
-            bcx.type_int(256),
+            self.bcx.type_int(256),
             |bcx| {
                 // Adapted from revm: https://github.com/bluealloy/revm/blob/fda371f73aba2c30a83c639608be78145fd1123b/crates/interpreter/src/instructions/arithmetic.rs#L89
                 // let bit_index = 8 * ext + 7;
@@ -1491,7 +1525,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             },
             |_bcx| x,
         );
-        bcx.ret(&[r]);
+        self.bcx.ret(&[r]);
     }
 
     fn call_calldataload(&mut self, index: B::Value) -> B::Value {
@@ -1505,38 +1539,36 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         .unwrap()
     }
 
-    /// Builds: `fn calldataload(index: u256, contract: &Contract) -> u256`
-    fn build_calldataload(bcx: &mut B::Builder<'_>) {
-        let index = bcx.fn_param(0);
-        let contract = bcx.fn_param(1);
+    /// Builds: `fn calldataload(index: u256, contract: ptr) -> u256`
+    fn build_calldataload(&mut self) {
+        let index = self.bcx.fn_param(0);
+        let contract = self.bcx.fn_param(1);
 
-        let isize_type = bcx.type_ptr_sized_int();
-        let i8_type = bcx.type_int(8);
-        let word_type = bcx.type_int(256);
+        let isize_type = self.isize_type;
+        let i8_type = self.i8_type;
+        let word_type = self.word_type;
 
         let input_offset = mem::offset_of!(Contract, input);
-        let ptr_ptr = get_field(
-            bcx,
+        let ptr_ptr = self.get_field(
             contract,
             input_offset + mem::offset_of!(pf::Bytes, ptr),
             "contract.input.ptr.addr",
         );
-        let ptr = bcx.load(bcx.type_ptr(), ptr_ptr, "contract.input.ptr");
+        let ptr = self.bcx.load(self.bcx.type_ptr(), ptr_ptr, "contract.input.ptr");
 
-        let len_ptr = get_field(
-            bcx,
+        let len_ptr = self.get_field(
             contract,
             input_offset + mem::offset_of!(pf::Bytes, len),
             "contract.input.len.addr",
         );
-        let len = bcx.load(isize_type, len_ptr, "contract.input.len");
+        let len = self.bcx.load(isize_type, len_ptr, "contract.input.len");
 
-        let len_256 = bcx.zext(word_type, len);
+        let len_256 = self.bcx.zext(word_type, len);
 
-        let in_bounds = bcx.icmp(IntCC::UnsignedLessThan, index, len_256);
+        let in_bounds = self.bcx.icmp(IntCC::UnsignedLessThan, index, len_256);
 
-        let zero = bcx.iconst_256(U256::ZERO);
-        let r = bcx.lazy_select(
+        let zero = self.bcx.iconst_256(U256::ZERO);
+        let r = self.bcx.lazy_select(
             in_bounds,
             word_type,
             |bcx| {
@@ -1560,9 +1592,143 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 }
                 value
             },
-            |_| zero,
+            |_bcx| zero,
         );
-        bcx.ret(&[r]);
+        self.bcx.ret(&[r]);
+    }
+
+    fn call_mload(&mut self, offset: B::Value) -> B::Value {
+        let out_slot = self.bcx.new_stack_slot(self.word_type, "mload.out.slot");
+        let out_addr = out_slot.addr(&mut self.bcx);
+        self.call_mem_op(offset, out_addr, MemOpKind::Load);
+        out_slot.load(&mut self.bcx, "mload.out")
+    }
+
+    fn call_mstore(&mut self, offset: B::Value, value: B::Value) {
+        self.call_mem_op(offset, value, MemOpKind::Store);
+    }
+
+    fn call_mstore8(&mut self, offset: B::Value, value: B::Value) {
+        self.call_mem_op(offset, value, MemOpKind::Store8);
+    }
+
+    fn call_mem_op(&mut self, offset: B::Value, value: B::Value, kind: MemOpKind) {
+        let name = match kind {
+            MemOpKind::Load => "mload",
+            MemOpKind::Store => "mstore",
+            MemOpKind::Store8 => "mstore8",
+        };
+        let value_ty = match kind {
+            MemOpKind::Load => self.bcx.type_ptr(),
+            MemOpKind::Store => self.word_type,
+            MemOpKind::Store8 => self.i8_type,
+        };
+        let ret = self
+            .call_ir_builtin(
+                name,
+                &[offset, value, self.ecx],
+                &[self.word_type, value_ty, self.bcx.type_ptr()],
+                Some(self.i8_type),
+                |this| this.build_mload_mstore_common(kind),
+            )
+            .expect("memory builtin returns a value");
+        self.build_check_instruction_result(ret);
+    }
+
+    fn build_mload_mstore_common(&mut self, kind: MemOpKind) {
+        let offset = self.bcx.fn_param(0);
+        let value = self.bcx.fn_param(1);
+        let ecx = self.bcx.fn_param(2);
+
+        let memory_ptr = {
+            let memory_ptr_ptr =
+                self.get_field(ecx, mem::offset_of!(EvmContext<'_>, memory), "ecx.memory.addr");
+            self.bcx.load(self.bcx.type_ptr(), memory_ptr_ptr, "ecx.memory")
+        };
+
+        let memory_buffer_offset = mem::offset_of!(pf::SharedMemory, buffer);
+        let len_ptr = self.get_field(
+            memory_ptr,
+            memory_buffer_offset + mem::offset_of!(pf::Vec<u8>, len),
+            "ecx.memory.len.addr",
+        );
+        let sm_len = self.bcx.load(self.isize_type, len_ptr, "ecx.memory.len");
+
+        // `memory.len() = memory.buffer.len() - memory.last_checkpoint`
+        // `new_size = offset + len`
+        // `if new_size > memory.len() { resize_memory(new_size) }`
+        let last_checkpoint = {
+            let last_checkpoint_ptr = self.get_field(
+                memory_ptr,
+                mem::offset_of!(pf::SharedMemory, last_checkpoint),
+                "ecx.memory.last_checkpoint.addr",
+            );
+            self.bcx.load(self.isize_type, last_checkpoint_ptr, "ecx.memory.last_checkpoint")
+        };
+        let buffer_len = self.bcx.isub(sm_len, last_checkpoint);
+        let max_isize = ((1u128 << self.bcx.type_bit_width(self.isize_type)) - 1u128) as u64;
+        let max_isize_u256 = self.bcx.iconst_256(U256::from(max_isize));
+        let max_isize = self.bcx.uconst(self.isize_type, max_isize);
+        let offset_too_big = self.bcx.icmp(IntCC::UnsignedGreaterThan, offset, max_isize_u256);
+        let offset = self.bcx.ireduce(self.isize_type, offset);
+        let (new_size, new_size_overflow) = {
+            let slot_size = match kind {
+                MemOpKind::Load | MemOpKind::Store => 32,
+                MemOpKind::Store8 => 1,
+            };
+            let slot_size = self.bcx.iconst(self.isize_type, slot_size as i64);
+            self.bcx.uadd_overflow(offset, slot_size)
+        };
+        let new_size_overflow = self.bcx.bitor(offset_too_big, new_size_overflow);
+        let new_size = self.bcx.select(new_size_overflow, max_isize, new_size);
+        let cond = self.bcx.icmp(IntCC::UnsignedGreaterThan, new_size, buffer_len);
+
+        let resize = self.bcx.create_block("resize");
+        let cont = self.bcx.create_block("contd");
+        self.bcx.brif_cold(cond, resize, cont, true);
+
+        self.bcx.switch_to_block(resize);
+        self.call_fallible_builtin(Builtin::ResizeMemory, &[ecx, new_size]);
+        self.bcx.br(cont);
+
+        // `ecx.memory.buffer[last_checkpoint + offset..]`
+        self.bcx.switch_to_block(cont);
+        let shared_buffer_ptr_ptr = self.get_field(
+            memory_ptr,
+            memory_buffer_offset + mem::offset_of!(pf::Vec<u8>, ptr),
+            "ecx.memory.buffer.ptr.shared.addr",
+        );
+        let shared_buffer_ptr = self.bcx.load(
+            self.bcx.type_ptr(),
+            shared_buffer_ptr_ptr,
+            "ecx.memory.buffer.ptr.shared",
+        );
+        let buffer_ptr = self.bcx.gep(
+            self.i8_type,
+            shared_buffer_ptr,
+            &[last_checkpoint],
+            "ecx.memory.buffer.ptr",
+        );
+        let slot = self.bcx.gep(self.i8_type, buffer_ptr, &[offset], "slot");
+        match kind {
+            MemOpKind::Load => {
+                let loaded = self.bcx.load(self.word_type, slot, "slot.value");
+                let loaded =
+                    if cfg!(target_endian = "little") { self.bcx.bswap(loaded) } else { loaded };
+                self.bcx.store(loaded, value);
+            }
+            MemOpKind::Store | MemOpKind::Store8 => {
+                let value = if matches!(kind, MemOpKind::Store) && cfg!(target_endian = "little") {
+                    self.bcx.bswap(value)
+                } else {
+                    value
+                };
+                self.bcx.store(value, slot);
+            }
+        }
+
+        let cont = self.bcx.iconst(self.i8_type, InstructionResult::Continue as i64);
+        self.bcx.ret(&[cont]);
     }
 
     fn call_ir_binop_builtin(
@@ -1570,23 +1736,33 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         name: &str,
         x1: B::Value,
         x2: B::Value,
-        build: fn(&mut B::Builder<'a>),
+        build: fn(&mut Self),
     ) -> B::Value {
         let word = self.word_type;
         self.call_ir_builtin(name, &[x1, x2], &[word, word], Some(word), build).unwrap()
     }
 
+    #[must_use]
     fn call_ir_builtin(
         &mut self,
         name: &str,
         args: &[B::Value],
         arg_types: &[B::Type],
         ret: Option<B::Type>,
-        build: fn(&mut B::Builder<'a>),
+        build: impl FnOnce(&mut Self),
     ) -> Option<B::Value> {
         debug_assert_eq!(args.len(), arg_types.len());
         let linkage = revmc_backend::Linkage::Private;
-        let f = self.bcx.get_or_build_function(name, arg_types, ret, linkage, build);
+        let this = unsafe { std::mem::transmute::<&mut Self, &mut Self>(self) };
+        let f = self.bcx.get_or_build_function(name, arg_types, ret, linkage, |bcx| {
+            let prev_return_block = this.return_block.take();
+            let prev_failure_block = this.failure_block.take();
+            mem::swap(&mut this.bcx, bcx);
+            build(this);
+            mem::swap(&mut this.bcx, bcx);
+            this.failure_block = prev_failure_block;
+            this.return_block = prev_return_block;
+        });
         self.bcx.add_function_attribute(
             Some(f),
             Attribute::AlwaysInline,
@@ -1594,6 +1770,12 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         );
         self.bcx.call(f, args)
     }
+}
+
+enum MemOpKind {
+    Load,
+    Store,
+    Store8,
 }
 
 // HACK: Need these structs' fields to be public for `offset_of!`.
@@ -1637,6 +1819,54 @@ mod pf {
         refunded: i64,
     }
     const _: [(); mem::size_of::<revm_interpreter::Gas>()] = [(); mem::size_of::<Gas>()];
+
+    #[allow(unexpected_cfgs)]
+    pub(super) struct SharedMemory {
+        pub(super) buffer: Vec<u8>,
+        checkpoints: Vec<usize>,
+        pub(super) last_checkpoint: usize,
+        #[cfg(feature = "memory_limit")]
+        memory_limit: u64,
+    }
+    const _: [(); mem::size_of::<revm_interpreter::SharedMemory>()] =
+        [(); mem::size_of::<SharedMemory>()];
+
+    #[test]
+    fn shared_memory_layout() {
+        let mem = revm_interpreter::SharedMemory::default();
+        let mem_ptr = &mem as *const _ as *const u8;
+        unsafe {
+            assert_eq!(
+                *mem_ptr
+                    .add(mem::offset_of!(SharedMemory, buffer) + mem::offset_of!(Vec<u8>, ptr))
+                    .cast::<usize>(),
+                mem.context_memory().as_ptr() as usize,
+            );
+        }
+    }
+
+    pub(super) struct Vec<T> {
+        pub(super) cap: usize,
+        pub(super) ptr: *mut T,
+        pub(super) len: usize,
+    }
+    const _: [(); mem::size_of::<std::vec::Vec<u8>>()] = [(); mem::size_of::<Vec<u8>>()];
+
+    #[test]
+    fn vec_layout() {
+        vec_layout_generic::<u8>();
+        vec_layout_generic::<usize>();
+    }
+
+    fn vec_layout_generic<T>() {
+        unsafe {
+            let vec = mem::ManuallyDrop::new(std::vec::Vec::from_raw_parts(1 as *mut T, 2, 3));
+            let vec_ptr = &*vec as *const std::vec::Vec<T> as *const u8;
+            assert_eq!(*vec_ptr.add(mem::offset_of!(Vec<T>, ptr)).cast::<usize>(), 1);
+            assert_eq!(*vec_ptr.add(mem::offset_of!(Vec<T>, len)).cast::<usize>(), 2);
+            assert_eq!(*vec_ptr.add(mem::offset_of!(Vec<T>, cap)).cast::<usize>(), 3);
+        }
+    }
 }
 
 fn op_block_name_with(op: Inst, data: &InstData, with: &str) -> String {

@@ -153,6 +153,7 @@ macro_rules! builtins {
                 const PANIC: u8 = 0;
                 const LOG: u8 = LOG0;
                 const DORETURN: u8 = RETURN;
+                const RESIZEMEMORY: u8 = 0;
 
                 match self {
                     $(Self::$ident => [<$ident:upper>]),*
@@ -231,9 +232,6 @@ builtins! {
     SelfBalance    = __revmc_builtin_self_balance(@[ecx] ptr, @[sp] ptr) Some(u8),
     BlobHash       = __revmc_builtin_blob_hash(@[ecx] ptr, @[sp] ptr) None,
     BlobBaseFee    = __revmc_builtin_blob_base_fee(@[ecx] ptr, @[sp] ptr) None,
-    Mload          = __revmc_builtin_mload(@[ecx] ptr, @[sp] ptr) Some(u8),
-    Mstore         = __revmc_builtin_mstore(@[ecx] ptr, @[sp] ptr) Some(u8),
-    Mstore8        = __revmc_builtin_mstore8(@[ecx] ptr, @[sp] ptr) Some(u8),
     Sload          = __revmc_builtin_sload(@[ecx] ptr, @[sp] ptr, u8) Some(u8),
     Sstore         = __revmc_builtin_sstore(@[ecx] ptr, @[sp] ptr, u8) Some(u8),
     Msize          = __revmc_builtin_msize(@[ecx] ptr) Some(usize),
@@ -246,4 +244,6 @@ builtins! {
     Call           = __revmc_builtin_call(@[ecx] ptr, @[sp_dyn] ptr, u8, u8) Some(u8),
     DoReturn       = __revmc_builtin_do_return(@[ecx] ptr, @[sp] ptr, u8) Some(u8),
     SelfDestruct   = __revmc_builtin_selfdestruct(@[ecx] ptr, @[sp] ptr, u8) Some(u8),
+
+    ResizeMemory   = __revmc_builtin_resize_memory(@[ecx] ptr, usize) Some(u8),
 }
