@@ -8,7 +8,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  LLVM_VERSION: "17" # Must be just the major version
+  LLVM_VERSION: "18" # Must be just the major version
   ALL_BACKENDS: "llvm,cranelift"
 
 concurrency:
