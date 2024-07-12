@@ -353,6 +353,10 @@ impl<'a> Builder for EvmCraneliftBuilder<'a> {
         self.bcx.block_params(block)[index]
     }
 
+    fn num_fn_params(&self) -> usize {
+        self.bcx.func.signature.params.len()
+    }
+
     fn bool_const(&mut self, value: bool) -> Self::Value {
         self.iconst(types::I8, value as i64)
     }

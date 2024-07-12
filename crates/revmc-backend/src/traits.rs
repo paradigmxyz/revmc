@@ -237,6 +237,7 @@ pub trait Builder: BackendTypes + TypeMethods {
     fn add_comment_to_current_inst(&mut self, comment: &str);
 
     fn fn_param(&mut self, index: usize) -> Self::Value;
+    fn num_fn_params(&self) -> usize;
 
     fn bool_const(&mut self, value: bool) -> Self::Value;
     /// Sign-extends negative values to `ty`.

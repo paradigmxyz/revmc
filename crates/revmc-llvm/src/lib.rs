@@ -627,6 +627,10 @@ impl<'a, 'ctx> Builder for EvmLlvmBuilder<'a, 'ctx> {
         self.function.get_nth_param(index as _).unwrap()
     }
 
+    fn num_fn_params(&self) -> usize {
+        self.function.count_params() as usize
+    }
+
     fn bool_const(&mut self, value: bool) -> Self::Value {
         self.ty_i1.const_int(value as u64, false).into()
     }

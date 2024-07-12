@@ -9,6 +9,8 @@ use revmc_backend::{Attribute, BackendTypes, FunctionAttributeLocation, Pointer,
 use revmc_builtins::{Builtin, Builtins, CallKind, CreateKind};
 use std::{fmt::Write, mem, sync::atomic::AtomicPtr};
 
+use super::default_attrs;
+
 const STACK_CAP: usize = 1024;
 // const WORD_SIZE: usize = 32;
 
@@ -1635,18 +1637,38 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 &[offset, value, self.ecx],
                 &[self.word_type, value_ty, self.bcx.type_ptr()],
                 Some(self.i8_type),
-                |this| this.build_mload_mstore_common(kind),
+                |this| this.build_mem_op(kind),
             )
             .expect("memory builtin returns a value");
         self.build_check_instruction_result(ret);
     }
 
-    fn build_mload_mstore_common(&mut self, kind: MemOpKind) {
-        self.bcx.add_function_attribute(
-            None,
-            Attribute::HintInline,
-            FunctionAttributeLocation::Function,
-        );
+    fn build_mem_op(&mut self, kind: MemOpKind) {
+        let is_load = matches!(kind, MemOpKind::Load);
+        if is_load {
+            self.bcx.add_function_attribute(
+                None,
+                Attribute::AlwaysInline,
+                FunctionAttributeLocation::Function,
+            );
+        }
+        let ptr_args = if is_load { &[1, 2][..] } else { &[2][..] };
+        for &ptr_arg in ptr_args {
+            for attr in default_attrs::for_ref() {
+                self.bcx.add_function_attribute(
+                    None,
+                    attr,
+                    FunctionAttributeLocation::Param(ptr_arg),
+                )
+            }
+        }
+        if is_load {
+            self.bcx.add_function_attribute(
+                None,
+                Attribute::WriteOnly,
+                FunctionAttributeLocation::Param(1),
+            );
+        }
 
         let offset = self.bcx.fn_param(0);
         let value = self.bcx.fn_param(1);
@@ -1770,6 +1792,9 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         ret: Option<B::Type>,
         build: impl FnOnce(&mut Self),
     ) -> Option<B::Value> {
+        let prefix = "__revmc_ir_builtin_";
+        let name = &format!("{prefix}{name}")[..];
+
         debug_assert_eq!(args.len(), arg_types.len());
         let linkage = revmc_backend::Linkage::Private;
         let this = unsafe { std::mem::transmute::<&mut Self, &mut Self>(self) };
@@ -1777,7 +1802,17 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             let prev_return_block = this.return_block.take();
             let prev_failure_block = this.failure_block.take();
             mem::swap(&mut this.bcx, bcx);
+
+            for attr in default_attrs::for_fn().chain(std::iter::once(Attribute::NoUnwind)) {
+                this.bcx.add_function_attribute(None, attr, FunctionAttributeLocation::Function)
+            }
+            for i in 0..this.bcx.num_fn_params() as u32 {
+                for attr in default_attrs::for_param() {
+                    this.bcx.add_function_attribute(None, attr, FunctionAttributeLocation::Param(i))
+                }
+            }
             build(this);
+
             mem::swap(&mut this.bcx, bcx);
             this.failure_block = prev_failure_block;
             this.return_block = prev_return_block;
