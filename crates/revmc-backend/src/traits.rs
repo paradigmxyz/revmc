@@ -358,6 +358,9 @@ pub trait Builder: BackendTypes + TypeMethods {
     #[must_use]
     fn call(&mut self, function: Self::Function, args: &[Self::Value]) -> Option<Self::Value>;
 
+    /// Returns `Some(is_value_compile_time)`, or `None` if unsupported.
+    fn is_compile_time_known(&mut self, value: Self::Value) -> Option<Self::Value>;
+
     fn memcpy(&mut self, dst: Self::Value, src: Self::Value, len: Self::Value);
     fn memcpy_inline(&mut self, dst: Self::Value, src: Self::Value, len: i64) {
         let len = self.iconst(self.type_int(64), len);

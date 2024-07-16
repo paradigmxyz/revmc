@@ -470,8 +470,11 @@ impl<'a, 'ctx> EvmLlvmBuilder<'a, 'ctx> {
         let src = src.into_pointer_value();
         let len = len.into_int_value();
         let volatile = self.bool_const(false);
-        let len_bits = len.get_type().get_bit_width();
-        let name = format!("llvm.memcpy{}.p0.p0.i{len_bits}", if inline { ".inline" } else { "" });
+        let name = format!(
+            "llvm.memcpy{}.p0.p0.{}",
+            if inline { ".inline" } else { "" },
+            fmt_ty(len.get_type().into()),
+        );
         let memcpy = self.get_or_add_function(&name, |this| {
             this.ty_void.fn_type(
                 &[this.ty_ptr.into(), this.ty_ptr.into(), this.ty_i64.into(), this.ty_i1.into()],
@@ -501,8 +504,7 @@ impl<'a, 'ctx> EvmLlvmBuilder<'a, 'ctx> {
         name: &str,
         ty: BasicTypeEnum<'ctx>,
     ) -> FunctionValue<'ctx> {
-        let bits = ty.into_int_type().get_bit_width();
-        let name = format!("llvm.{name}.with.overflow.i{bits}");
+        let name = format!("llvm.{name}.with.overflow.{}", fmt_ty(ty));
         self.get_or_add_function(&name, |this| {
             this.fn_type(
                 Some(this.cx.struct_type(&[ty, this.ty_i1.into()], false).into()),
@@ -512,8 +514,7 @@ impl<'a, 'ctx> EvmLlvmBuilder<'a, 'ctx> {
     }
 
     fn get_sat_function(&mut self, name: &str, ty: BasicTypeEnum<'ctx>) -> FunctionValue<'ctx> {
-        let bits = ty.into_int_type().get_bit_width();
-        let name = format!("llvm.{name}.sat.i{bits}");
+        let name = format!("llvm.{name}.sat.{}", fmt_ty(ty));
         self.get_or_add_function(&name, |this| this.fn_type(Some(ty), &[ty, ty]))
     }
 
@@ -889,25 +890,21 @@ impl<'a, 'ctx> Builder for EvmLlvmBuilder<'a, 'ctx> {
 
     fn umax(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
         let ty = lhs.get_type();
-        let bits = ty.into_int_type().get_bit_width();
-        let name = format!("llvm.umax.i{bits}");
+        let name = format!("llvm.umin.{}", fmt_ty(ty));
         let max = self.get_or_add_function(&name, |this| this.fn_type(Some(ty), &[ty, ty]));
         self.call(max, &[lhs, rhs]).unwrap()
     }
 
     fn umin(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
         let ty = lhs.get_type();
-        let bits = ty.into_int_type().get_bit_width();
-        let name = format!("llvm.umin.i{bits}");
+        let name = format!("llvm.umin.{}", fmt_ty(ty));
         let max = self.get_or_add_function(&name, |this| this.fn_type(Some(ty), &[ty, ty]));
         self.call(max, &[lhs, rhs]).unwrap()
     }
 
     fn bswap(&mut self, value: Self::Value) -> Self::Value {
         let ty = value.get_type();
-        let bits = ty.into_int_type().get_bit_width();
-        assert!(bits % 16 == 0);
-        let name = format!("llvm.bswap.i{bits}");
+        let name = format!("llvm.bswap.{}", fmt_ty(ty));
         let bswap = self.get_or_add_function(&name, |this| this.fn_type(Some(ty), &[ty]));
         self.call(bswap, &[value]).unwrap()
     }
@@ -990,6 +987,14 @@ impl<'a, 'ctx> Builder for EvmLlvmBuilder<'a, 'ctx> {
         let args = args.iter().copied().map(Into::into).collect::<Vec<_>>();
         let callsite = self.bcx.build_call(function, &args, "").unwrap();
         callsite.try_as_basic_value().left()
+    }
+
+    fn is_compile_time_known(&mut self, value: Self::Value) -> Option<Self::Value> {
+        let ty = value.get_type();
+        let name = format!("llvm.is.constant.{}", fmt_ty(ty));
+        let f =
+            self.get_or_add_function(&name, |this| this.fn_type(Some(this.ty_i1.into()), &[ty]));
+        Some(self.call(f, &[value]).unwrap())
     }
 
     fn memcpy(&mut self, dst: Self::Value, src: Self::Value, len: Self::Value) {
@@ -1243,4 +1248,8 @@ fn convert_linkage(linkage: revmc_backend::Linkage) -> inkwell::module::Linkage 
 
 fn error_msg(msg: inkwell::support::LLVMString) -> revmc_backend::Error {
     revmc_backend::Error::msg(msg.to_string_lossy().trim_end().to_string())
+}
+
+fn fmt_ty(ty: BasicTypeEnum<'_>) -> impl std::fmt::Display {
+    ty.print_to_string().to_str().unwrap().trim_matches('"').to_string()
 }

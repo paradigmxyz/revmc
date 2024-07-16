@@ -698,6 +698,10 @@ impl<'a> Builder for EvmCraneliftBuilder<'a> {
         self.bcx.inst_results(ins).first().copied()
     }
 
+    fn is_compile_time_known(&mut self, _value: Self::Value) -> Option<Self::Value> {
+        None
+    }
+
     fn memcpy(&mut self, dst: Self::Value, src: Self::Value, len: Self::Value) {
         let config = self.module.get().target_config();
         self.bcx.call_memcpy(config, dst, src, len)
