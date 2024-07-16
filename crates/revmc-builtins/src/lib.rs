@@ -263,7 +263,7 @@ pub unsafe extern "C" fn __revmc_builtin_blockhash(
     ecx: &mut EvmContext<'_>,
     number_ptr: &mut EvmWord,
 ) -> InstructionResult {
-    let hash = try_host!(ecx.host.block_hash(number_ptr.to_u256()));
+    let hash = try_host!(ecx.host.block_hash(as_u64_saturated!(number_ptr.to_u256())));
     *number_ptr = EvmWord::from_be_bytes(hash.0);
     InstructionResult::Continue
 }

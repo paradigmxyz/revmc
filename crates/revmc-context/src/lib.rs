@@ -803,7 +803,7 @@ mod tests {
             ) -> Option<revm_interpreter::LoadAccountResult> {
                 unimplemented!()
             }
-            fn block_hash(&mut self, number: U256) -> Option<revm_primitives::B256> {
+            fn block_hash(&mut self, number: u64) -> Option<revm_primitives::B256> {
                 unimplemented!()
             }
             fn balance(&mut self, address: Address) -> Option<(U256, bool)> {

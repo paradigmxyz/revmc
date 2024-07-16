@@ -151,6 +151,7 @@ pub fn def_env() -> &'static Env {
             gas_priority_fee: Some(U256::from(0x69)),
             blob_hashes: vec![B256::repeat_byte(0xb7), B256::repeat_byte(0xb8)],
             max_fee_per_blob_gas: None,
+            authorization_list: None,
             #[cfg(feature = "optimism")]
             optimism: Default::default(),
         },
@@ -241,8 +242,8 @@ impl Host for TestHost {
         self.host.load_account(address)
     }
 
-    fn block_hash(&mut self, number: U256) -> Option<B256> {
-        Some(number.into())
+    fn block_hash(&mut self, number: u64) -> Option<B256> {
+        Some(U256::from(number).into())
     }
 
     fn balance(&mut self, address: Address) -> Option<(U256, bool)> {
@@ -310,6 +311,7 @@ pub fn with_evm_context<F: FnOnce(&mut EvmContext<'_>, &mut EvmStack, &mut usize
             Bytes::copy_from_slice(bytecode),
         )),
         hash: None,
+        bytecode_address: None,
         target_address: DEF_ADDR,
         caller: DEF_CALLER,
         call_value: DEF_VALUE,
