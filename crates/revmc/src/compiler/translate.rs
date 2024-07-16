@@ -1543,12 +1543,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
     /// Builds: `fn calldataload(index: u256, contract: ptr) -> u256`
     fn build_calldataload(&mut self) {
-        self.bcx.add_function_attribute(
-            None,
-            Attribute::NoInline,
-            FunctionAttributeLocation::Function,
-        );
-
         let index = self.bcx.fn_param(0);
         let contract = self.bcx.fn_param(1);
 
@@ -1645,13 +1639,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
     fn build_mem_op(&mut self, kind: MemOpKind) {
         let is_load = matches!(kind, MemOpKind::Load);
-        // if is_load {
-        self.bcx.add_function_attribute(
-            None,
-            Attribute::NoInline,
-            FunctionAttributeLocation::Function,
-        );
-        // }
         let ptr_args = if is_load { &[1, 2][..] } else { &[2][..] };
         for &ptr_arg in ptr_args {
             for attr in default_attrs::for_ref() {
@@ -1772,15 +1759,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         build: fn(&mut Self),
     ) -> B::Value {
         let word = self.word_type;
-        self.call_ir_builtin(name, &[x1, x2], &[word, word], Some(word), |this| {
-            build(this);
-            this.bcx.add_function_attribute(
-                None,
-                Attribute::NoInline,
-                FunctionAttributeLocation::Function,
-            );
-        })
-        .unwrap()
+        self.call_ir_builtin(name, &[x1, x2], &[word, word], Some(word), build).unwrap()
     }
 
     #[must_use]
@@ -1836,7 +1815,6 @@ mod pf {
     pub(super) struct Bytes {
         pub(super) ptr: *const u8,
         pub(super) len: usize,
-        // inlined "trait object"
         data: AtomicPtr<()>,
         vtable: &'static Vtable,
     }
