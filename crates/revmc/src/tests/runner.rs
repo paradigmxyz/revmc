@@ -1,5 +1,4 @@
 use super::*;
-use arbitrary::Arbitrary;
 use interpreter::LoadAccountResult;
 use revm_interpreter::{opcode as op, Contract, DummyHost, Host};
 use revm_primitives::{
@@ -22,7 +21,8 @@ pub struct TestCase<'a> {
     pub assert_ecx: Option<fn(&EvmContext<'_>)>,
 }
 
-impl<'a> Arbitrary<'a> for TestCase<'a> {
+#[cfg(feature = "__fuzzing")]
+impl<'a> arbitrary::Arbitrary<'a> for TestCase<'a> {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
         let spec_id = SpecId::try_from_u8(u.arbitrary()?).unwrap_or(DEF_SPEC);
         Ok(Self::what_interpreter_says(u.arbitrary()?, spec_id))
@@ -34,7 +34,7 @@ impl<'a> Arbitrary<'a> for TestCase<'a> {
     }
 
     fn size_hint(depth: usize) -> (usize, Option<usize>) {
-        <(u8, &'static [u8]) as Arbitrary>::size_hint(depth)
+        <(u8, &'static [u8]) as arbitrary::Arbitrary>::size_hint(depth)
     }
 }
 

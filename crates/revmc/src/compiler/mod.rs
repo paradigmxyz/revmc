@@ -19,9 +19,7 @@ use std::{
 // emitted.
 // Use this when `stack` is passed in arguments.
 
-// TODO: Implement memory instructions in IR rather than as builtins.
-
-// TODO: Expose target configuration, and get rid of `cfg!(target_endian)` calls.
+// TODO: Get rid of `cfg!(target_endian)` calls.
 
 // TODO: Test on big-endian hardware.
 // It probably doesn't work when loading Rust U256 into native endianness.
@@ -384,8 +382,8 @@ impl<B: Backend> EvmCompiler<B> {
         config: &FcxConfig,
         name: &str,
     ) -> Result<(B::Builder<'a>, B::FuncId)> {
-        fn align_size<T>(i: usize) -> (usize, usize, usize) {
-            (i, mem::align_of::<T>(), mem::size_of::<T>())
+        fn size_align<T>(i: usize) -> (usize, usize, usize) {
+            (i, mem::size_of::<T>(), mem::align_of::<T>())
         }
 
         let i8 = backend.type_int(8);
@@ -402,12 +400,12 @@ impl<B: Backend> EvmCompiler<B> {
                 "arg.ecx.addr",
             ],
             &[
-                align_size::<Gas>(0),
-                align_size::<EvmStack>(1),
-                align_size::<usize>(2),
-                align_size::<Env>(3),
-                align_size::<Contract>(4),
-                align_size::<EvmContext<'_>>(5),
+                size_align::<Gas>(0),
+                size_align::<EvmStack>(1),
+                size_align::<usize>(2),
+                size_align::<Env>(3),
+                size_align::<Contract>(4),
+                size_align::<EvmContext<'_>>(5),
             ],
         );
         debug_assert_eq!(params.len(), param_names.len());
@@ -415,34 +413,20 @@ impl<B: Backend> EvmCompiler<B> {
         let (mut bcx, id) = backend.build_function(name, ret, params, param_names, linkage)?;
 
         // Function attributes.
-        let function_attributes = [
-            Attribute::WillReturn,      // Always returns.
-            Attribute::NoFree,          // No memory deallocation.
-            Attribute::NoSync,          // No thread synchronization.
-            Attribute::NativeTargetCpu, // Optimization.
-            Attribute::Speculatable,    // No undefined behavior.
-            Attribute::NoRecurse,       // Revm is not recursive.
-        ]
-        .into_iter()
-        .chain(config.frame_pointers.then_some(Attribute::AllFramePointers))
-        // We can unwind in panics, which are present only in debug assertions.
-        .chain((!config.debug_assertions).then_some(Attribute::NoUnwind));
+        let function_attributes = default_attrs::for_fn()
+            .chain(config.frame_pointers.then_some(Attribute::AllFramePointers))
+            // We can unwind in panics, which are present only in debug assertions.
+            .chain((!config.debug_assertions).then_some(Attribute::NoUnwind));
         for attr in function_attributes {
             bcx.add_function_attribute(None, attr, FunctionAttributeLocation::Function);
         }
 
         // Pointer argument attributes.
         if !config.debug_assertions {
-            for &(i, align, dereferenceable) in ptr_attrs {
-                let attrs = [
-                    Attribute::NoCapture,
-                    Attribute::NoUndef,
-                    Attribute::Align(align as u64),
-                    Attribute::Dereferenceable(dereferenceable as u64),
-                ]
-                .into_iter()
-                // `Gas` is aliased in `EvmContext`.
-                .chain((i != 0).then_some(Attribute::NoAlias));
+            for &(i, size, align) in ptr_attrs {
+                let attrs = default_attrs::for_sized_ptr((size, align))
+                    // `Gas` is aliased in `EvmContext`.
+                    .chain((i != 0).then_some(Attribute::NoAlias));
                 for attr in attrs {
                     let loc = FunctionAttributeLocation::Param(i as _);
                     bcx.add_function_attribute(None, attr, loc);
@@ -507,5 +491,52 @@ impl<B: Backend> EvmCompiler<B> {
             let _ = fs::create_dir_all(&dump_dir);
         }
         Some(dump_dir)
+    }
+}
+
+#[allow(dead_code)]
+mod default_attrs {
+    use revmc_backend::Attribute;
+
+    pub(crate) fn for_fn() -> impl Iterator<Item = Attribute> {
+        [
+            Attribute::WillReturn,      // Always returns.
+            Attribute::NoSync,          // No thread synchronization.
+            Attribute::NativeTargetCpu, // Optimization.
+            Attribute::Speculatable,    // No undefined behavior.
+            Attribute::NoRecurse,       // Revm is not recursive.
+        ]
+        .into_iter()
+    }
+
+    pub(crate) fn for_param() -> impl Iterator<Item = Attribute> {
+        [Attribute::NoUndef].into_iter()
+    }
+
+    pub(crate) fn for_ptr() -> impl Iterator<Item = Attribute> {
+        for_param().chain([Attribute::NoCapture])
+    }
+
+    pub(crate) fn for_sized_ptr((size, align): (usize, usize)) -> impl Iterator<Item = Attribute> {
+        for_ptr().chain([Attribute::Dereferenceable(size as u64), Attribute::Align(align as u64)])
+    }
+
+    pub(crate) fn for_ptr_t<T>() -> impl Iterator<Item = Attribute> {
+        for_sized_ptr(size_align::<T>())
+    }
+
+    pub(crate) fn for_ref() -> impl Iterator<Item = Attribute> {
+        for_ptr().chain([Attribute::NonNull, Attribute::NoAlias])
+    }
+
+    pub(crate) fn for_sized_ref((size, align): (usize, usize)) -> impl Iterator<Item = Attribute> {
+        for_ref().chain([Attribute::Dereferenceable(size as u64), Attribute::Align(align as u64)])
+    }
+
+    pub(crate) fn for_ref_t<T>() -> impl Iterator<Item = Attribute> {
+        for_sized_ref(size_align::<T>())
+    }
+    pub(crate) fn size_align<T>() -> (usize, usize) {
+        (std::mem::size_of::<T>(), std::mem::align_of::<T>())
     }
 }

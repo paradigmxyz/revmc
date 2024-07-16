@@ -113,7 +113,7 @@ pub unsafe extern "C" fn __revmc_builtin_keccak256(
     } else {
         gas_opt!(ecx, gas::dyn_keccak256_cost(len as u64));
         let offset = try_into_usize!(offset);
-        resize_memory!(ecx, offset, len);
+        ensure_memory!(ecx, offset, len);
         let data = ecx.memory.slice(offset, len);
         revm_primitives::keccak256(data).0
     });
@@ -208,7 +208,7 @@ pub unsafe extern "C" fn __revmc_builtin_extcodecopy(
         let memory_offset = try_into_usize!(memory_offset);
         let code_offset = code_offset.to_u256();
         let code_offset = as_usize_saturated!(code_offset).min(code.len());
-        resize_memory!(ecx, memory_offset, len);
+        ensure_memory!(ecx, memory_offset, len);
         ecx.memory.set_data(memory_offset, code_offset, len, &code);
     }
     InstructionResult::Continue
@@ -229,7 +229,7 @@ pub unsafe extern "C" fn __revmc_builtin_returndatacopy(
     }
     if len != 0 {
         let memory_offset = try_into_usize!(memory_offset);
-        resize_memory!(ecx, memory_offset, len);
+        ensure_memory!(ecx, memory_offset, len);
         ecx.memory.set(memory_offset, &ecx.return_data[data_offset..data_end]);
     }
     InstructionResult::Continue
@@ -318,39 +318,6 @@ pub unsafe extern "C" fn __revmc_builtin_blob_base_fee(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn __revmc_builtin_mload(
-    ecx: &mut EvmContext<'_>,
-    offset_ptr: &mut EvmWord,
-) -> InstructionResult {
-    let offset = try_into_usize!(offset_ptr);
-    resize_memory!(ecx, offset, 32);
-    *offset_ptr = EvmWord::from_be_bytes(ecx.memory.get_word(offset).0);
-    InstructionResult::Continue
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn __revmc_builtin_mstore(
-    ecx: &mut EvmContext<'_>,
-    rev![offset, value]: &mut [EvmWord; 2],
-) -> InstructionResult {
-    let offset = try_into_usize!(offset);
-    resize_memory!(ecx, offset, 32);
-    ecx.memory.set(offset, &value.to_be_bytes());
-    InstructionResult::Continue
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn __revmc_builtin_mstore8(
-    ecx: &mut EvmContext<'_>,
-    rev![offset, value]: &mut [EvmWord; 2],
-) -> InstructionResult {
-    let offset = try_into_usize!(offset);
-    resize_memory!(ecx, offset, 1);
-    ecx.memory.set_byte(offset, value.to_u256().byte(0));
-    InstructionResult::Continue
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn __revmc_builtin_sload(
     ecx: &mut EvmContext<'_>,
     index: &mut EvmWord,
@@ -405,7 +372,7 @@ pub unsafe extern "C" fn __revmc_builtin_mcopy(
     if len != 0 {
         let dst = try_into_usize!(dst);
         let src = try_into_usize!(src);
-        resize_memory!(ecx, dst.max(src), len);
+        ensure_memory!(ecx, dst.max(src), len);
         ecx.memory.copy(dst, src, len);
     }
     InstructionResult::Continue
@@ -424,7 +391,7 @@ pub unsafe extern "C" fn __revmc_builtin_log(
     gas_opt!(ecx, gas::dyn_log_cost(len as u64));
     let data = if len != 0 {
         let offset = try_into_usize!(offset);
-        resize_memory!(ecx, offset, len);
+        ensure_memory!(ecx, offset, len);
         Bytes::copy_from_slice(ecx.memory.slice(offset, len))
     } else {
         Bytes::new()
@@ -476,7 +443,7 @@ pub unsafe extern "C" fn __revmc_builtin_create(
         }
 
         let code_offset = try_into_usize!(code_offset);
-        resize_memory!(ecx, code_offset, len);
+        ensure_memory!(ecx, code_offset, len);
         Bytes::copy_from_slice(ecx.memory.slice(code_offset, len))
     } else {
         Bytes::new()
@@ -550,7 +517,7 @@ pub unsafe extern "C" fn __revmc_builtin_call(
     let in_len = try_into_usize!(in_len);
     let input = if in_len != 0 {
         let in_offset = try_into_usize!(in_offset);
-        resize_memory!(ecx, in_offset, in_len);
+        ensure_memory!(ecx, in_offset, in_len);
         Bytes::copy_from_slice(ecx.memory.slice(in_offset, in_len))
     } else {
         Bytes::new()
@@ -559,7 +526,7 @@ pub unsafe extern "C" fn __revmc_builtin_call(
     let out_len = try_into_usize!(out_len);
     let out_offset = if out_len != 0 {
         let out_offset = try_into_usize!(out_offset);
-        resize_memory!(ecx, out_offset, out_len);
+        ensure_memory!(ecx, out_offset, out_len);
         out_offset
     } else {
         usize::MAX // unrealistic value so we are sure it is not used
@@ -629,7 +596,7 @@ pub unsafe extern "C" fn __revmc_builtin_do_return(
     let len = try_into_usize!(len);
     let output = if len != 0 {
         let offset = try_into_usize!(offset);
-        resize_memory!(ecx, offset, len);
+        ensure_memory!(ecx, offset, len);
         ecx.memory.slice(offset, len).to_vec().into()
     } else {
         Bytes::new()
@@ -654,4 +621,12 @@ pub unsafe extern "C" fn __revmc_builtin_selfdestruct(
     gas!(ecx, gas::selfdestruct_cost(spec_id, res));
 
     InstructionResult::Continue
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn __revmc_builtin_resize_memory(
+    ecx: &mut EvmContext<'_>,
+    new_size: usize,
+) -> InstructionResult {
+    resize_memory(ecx, new_size)
 }

@@ -353,12 +353,20 @@ impl<'a> Builder for EvmCraneliftBuilder<'a> {
         self.bcx.block_params(block)[index]
     }
 
+    fn num_fn_params(&self) -> usize {
+        self.bcx.func.signature.params.len()
+    }
+
     fn bool_const(&mut self, value: bool) -> Self::Value {
         self.iconst(types::I8, value as i64)
     }
 
     fn iconst(&mut self, ty: Self::Type, value: i64) -> Self::Value {
         self.bcx.ins().iconst(ty, value)
+    }
+
+    fn uconst(&mut self, ty: Self::Type, value: u64) -> Self::Value {
+        self.iconst(ty, value as i64)
     }
 
     fn iconst_256(&mut self, value: U256) -> Self::Value {
@@ -605,6 +613,10 @@ impl<'a> Builder for EvmCraneliftBuilder<'a> {
         self.bcx.ins().usub_overflow(lhs, rhs)
     }
 
+    fn uadd_sat(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
+        self.bcx.ins().uadd_sat(lhs, rhs)
+    }
+
     fn umax(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
         self.bcx.ins().umax(lhs, rhs)
     }
@@ -686,6 +698,10 @@ impl<'a> Builder for EvmCraneliftBuilder<'a> {
         self.bcx.inst_results(ins).first().copied()
     }
 
+    fn is_compile_time_known(&mut self, _value: Self::Value) -> Option<Self::Value> {
+        None
+    }
+
     fn memcpy(&mut self, dst: Self::Value, src: Self::Value, len: Self::Value) {
         let config = self.module.get().target_config();
         self.bcx.call_memcpy(config, dst, src, len)
@@ -747,6 +763,14 @@ impl<'a> Builder for EvmCraneliftBuilder<'a> {
                 FuncOrDataId::Data(_) => None,
             })
             .map(|id| self.module.get_mut().declare_func_in_func(id, self.bcx.func))
+    }
+
+    fn get_printf_function(&mut self) -> Self::Function {
+        if let Some(f) = self.get_function("printf") {
+            return f;
+        }
+
+        unimplemented!()
     }
 
     fn add_function(

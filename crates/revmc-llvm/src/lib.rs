@@ -470,8 +470,11 @@ impl<'a, 'ctx> EvmLlvmBuilder<'a, 'ctx> {
         let src = src.into_pointer_value();
         let len = len.into_int_value();
         let volatile = self.bool_const(false);
-        let len_bits = len.get_type().get_bit_width();
-        let name = format!("llvm.memcpy{}.p0.p0.i{len_bits}", if inline { ".inline" } else { "" });
+        let name = format!(
+            "llvm.memcpy{}.p0.p0.{}",
+            if inline { ".inline" } else { "" },
+            fmt_ty(len.get_type().into()),
+        );
         let memcpy = self.get_or_add_function(&name, |this| {
             this.ty_void.fn_type(
                 &[this.ty_ptr.into(), this.ty_ptr.into(), this.ty_i64.into(), this.ty_i1.into()],
@@ -501,14 +504,18 @@ impl<'a, 'ctx> EvmLlvmBuilder<'a, 'ctx> {
         name: &str,
         ty: BasicTypeEnum<'ctx>,
     ) -> FunctionValue<'ctx> {
-        let bits = ty.into_int_type().get_bit_width();
-        let name = format!("llvm.{name}.with.overflow.i{bits}");
+        let name = format!("llvm.{name}.with.overflow.{}", fmt_ty(ty));
         self.get_or_add_function(&name, |this| {
             this.fn_type(
                 Some(this.cx.struct_type(&[ty, this.ty_i1.into()], false).into()),
                 &[ty, ty],
             )
         })
+    }
+
+    fn get_sat_function(&mut self, name: &str, ty: BasicTypeEnum<'ctx>) -> FunctionValue<'ctx> {
+        let name = format!("llvm.{name}.sat.{}", fmt_ty(ty));
+        self.get_or_add_function(&name, |this| this.fn_type(Some(ty), &[ty, ty]))
     }
 
     fn get_or_add_function(
@@ -621,13 +628,20 @@ impl<'a, 'ctx> Builder for EvmLlvmBuilder<'a, 'ctx> {
         self.function.get_nth_param(index as _).unwrap()
     }
 
+    fn num_fn_params(&self) -> usize {
+        self.function.count_params() as usize
+    }
+
     fn bool_const(&mut self, value: bool) -> Self::Value {
         self.ty_i1.const_int(value as u64, false).into()
     }
 
     fn iconst(&mut self, ty: Self::Type, value: i64) -> Self::Value {
-        // TODO: sign extend?
         ty.into_int_type().const_int(value as u64, value.is_negative()).into()
+    }
+
+    fn uconst(&mut self, ty: Self::Type, value: u64) -> Self::Value {
+        ty.into_int_type().const_int(value, false).into()
     }
 
     fn iconst_256(&mut self, value: U256) -> Self::Value {
@@ -869,27 +883,28 @@ impl<'a, 'ctx> Builder for EvmLlvmBuilder<'a, 'ctx> {
         (result, overflow)
     }
 
+    fn uadd_sat(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
+        let f = self.get_sat_function("uadd", lhs.get_type());
+        self.call(f, &[lhs, rhs]).unwrap()
+    }
+
     fn umax(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
         let ty = lhs.get_type();
-        let bits = ty.into_int_type().get_bit_width();
-        let name = format!("llvm.umax.i{bits}");
+        let name = format!("llvm.umin.{}", fmt_ty(ty));
         let max = self.get_or_add_function(&name, |this| this.fn_type(Some(ty), &[ty, ty]));
         self.call(max, &[lhs, rhs]).unwrap()
     }
 
     fn umin(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
         let ty = lhs.get_type();
-        let bits = ty.into_int_type().get_bit_width();
-        let name = format!("llvm.umin.i{bits}");
+        let name = format!("llvm.umin.{}", fmt_ty(ty));
         let max = self.get_or_add_function(&name, |this| this.fn_type(Some(ty), &[ty, ty]));
         self.call(max, &[lhs, rhs]).unwrap()
     }
 
     fn bswap(&mut self, value: Self::Value) -> Self::Value {
         let ty = value.get_type();
-        let bits = ty.into_int_type().get_bit_width();
-        assert!(bits % 16 == 0);
-        let name = format!("llvm.bswap.i{bits}");
+        let name = format!("llvm.bswap.{}", fmt_ty(ty));
         let bswap = self.get_or_add_function(&name, |this| this.fn_type(Some(ty), &[ty]));
         self.call(bswap, &[value]).unwrap()
     }
@@ -974,6 +989,14 @@ impl<'a, 'ctx> Builder for EvmLlvmBuilder<'a, 'ctx> {
         callsite.try_as_basic_value().left()
     }
 
+    fn is_compile_time_known(&mut self, value: Self::Value) -> Option<Self::Value> {
+        let ty = value.get_type();
+        let name = format!("llvm.is.constant.{}", fmt_ty(ty));
+        let f =
+            self.get_or_add_function(&name, |this| this.fn_type(Some(this.ty_i1.into()), &[ty]));
+        Some(self.call(f, &[value]).unwrap())
+    }
+
     fn memcpy(&mut self, dst: Self::Value, src: Self::Value, len: Self::Value) {
         self.memcpy_inner(dst, src, len, false);
     }
@@ -1019,6 +1042,16 @@ impl<'a, 'ctx> Builder for EvmLlvmBuilder<'a, 'ctx> {
 
     fn get_function(&mut self, name: &str) -> Option<Self::Function> {
         self.module.get_function(name)
+    }
+
+    fn get_printf_function(&mut self) -> Self::Function {
+        let name = "printf";
+        if let Some(function) = self.module.get_function(name) {
+            return function;
+        }
+
+        let ty = self.cx.void_type().fn_type(&[self.ty_ptr.into()], true);
+        self.module.add_function(name, ty, Some(inkwell::module::Linkage::External))
     }
 
     fn add_function(
@@ -1215,4 +1248,8 @@ fn convert_linkage(linkage: revmc_backend::Linkage) -> inkwell::module::Linkage 
 
 fn error_msg(msg: inkwell::support::LLVMString) -> revmc_backend::Error {
     revmc_backend::Error::msg(msg.to_string_lossy().trim_end().to_string())
+}
+
+fn fmt_ty(ty: BasicTypeEnum<'_>) -> impl std::fmt::Display {
+    ty.print_to_string().to_str().unwrap().trim_matches('"').to_string()
 }

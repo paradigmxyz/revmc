@@ -615,6 +615,36 @@ tests! {
             expected_memory: &[0; 96],
             expected_gas: 3 + (3 + gas::memory_gas(3)),
         }),
+        mload_overflow1(@raw {
+            bytecode: &[op::PUSH8, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, op::MLOAD],
+            expected_return: InstructionResult::MemoryOOG,
+            expected_stack: &[U256::from(u64::MAX)],
+            expected_gas: 3 + 3,
+        }),
+        mload_overflow2(@raw {
+            bytecode: &[op::PUSH8, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff - 1, op::MLOAD],
+            expected_return: InstructionResult::MemoryOOG,
+            expected_stack: &[U256::from(u64::MAX - 1)],
+            expected_gas: 3 + 3,
+        }),
+        mload_overflow3(@raw {
+            bytecode: &[op::PUSH8, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff - 31, op::MLOAD],
+            expected_return: InstructionResult::MemoryOOG,
+            expected_stack: &[U256::from(u64::MAX - 31)],
+            expected_gas: 3 + 3,
+        }),
+        mload_overflow4(@raw {
+            bytecode: &[op::PUSH8, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff - 32, op::MLOAD],
+            expected_return: InstructionResult::MemoryOOG,
+            expected_stack: &[U256::from(u64::MAX - 32)],
+            expected_gas: 3 + 3,
+        }),
+        mload_overflow5(@raw {
+            bytecode: &[op::PUSH8, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff - 33, op::MLOAD],
+            expected_return: InstructionResult::MemoryOOG,
+            expected_stack: &[U256::from(u64::MAX - 33)],
+            expected_gas: 3 + 3,
+        }),
         mstore1(@raw {
             bytecode: &[op::PUSH0, op::PUSH0, op::MSTORE],
             expected_memory: &[0; 32],
