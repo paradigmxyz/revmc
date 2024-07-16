@@ -48,7 +48,7 @@ tests! {
         }),
         invalid(@raw {
             bytecode: &[op::INVALID],
-            expected_return: InstructionResult::InvalidEFOpcode,
+            expected_return: InstructionResult::InvalidFEOpcode,
             expected_gas: 0,
         }),
         unknown(@raw {
