@@ -1066,7 +1066,7 @@ fn eof_data(code: &'static [u8], data: &'static [u8]) -> Bytes {
             outputs: 0x80,
             max_stack_size: 0,
         }],
-        code_section: vec![Bytes::from_static(code).into()],
+        code_section: vec![Bytes::from_static(code)],
         container_section: vec![],
         data_section: Bytes::from_static(data),
         is_data_filled: false,
@@ -1111,6 +1111,7 @@ fn bytecode_ternop(op: u8, a: U256, b: U256, c: U256) -> [u8; 100] {
 }
 
 #[rustfmt::skip]
+#[allow(clippy::erasing_op, clippy::identity_op)]
 fn rjumpv_code<const VALUE: u8>() -> Bytes {
     eof(&[
         op::PUSH1, VALUE,

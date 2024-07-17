@@ -194,7 +194,7 @@ impl<'ctx> EvmLlvmBackend<'ctx> {
     }
 
     fn id_to_name(&self, id: u32) -> &str {
-        &&self.functions[&id].0
+        &self.functions[&id].0
     }
 
     // Delete IR to lower memory consumption.
