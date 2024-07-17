@@ -348,7 +348,7 @@ const fn make_map(spec_id: SpecId) -> [OpcodeInfo; 256] {
         // 0xE9
         // 0xEA
         // 0xEB
-        EOFCREATE       = DYNAMIC, if PRAGUE_EOF;
+        EOFCREATE       = DYNAMIC, if PRAGUE_EOF; // TODO: EOF_CREATE_GAS | DYNAMIC is too big
         // 0xED
         RETURNCONTRACT  = DYNAMIC, if PRAGUE_EOF;
         // 0xEF

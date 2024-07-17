@@ -37,6 +37,8 @@ pub struct EvmContext<'a> {
     pub return_stack_len: usize,
     /// Whether the context is static.
     pub is_static: bool,
+    /// Whether the context is EOF init.
+    pub is_eof_init: bool,
     /// An index that is used internally to keep track of where execution should resume.
     /// `0` is the initial state.
     #[doc(hidden)]
@@ -72,6 +74,7 @@ impl<'a> EvmContext<'a> {
             return_data: &interpreter.return_data_buffer,
             return_stack_len: 0,
             is_static: interpreter.is_static,
+            is_eof_init: interpreter.is_eof_init,
             resume_at: ResumeAt::load(interpreter.instruction_pointer),
         };
         (this, stack, stack_len)
@@ -85,7 +88,7 @@ impl<'a> EvmContext<'a> {
             instruction_pointer: bytecode.as_ptr(),
             bytecode,
             function_stack: FunctionStack::new(),
-            is_eof_init: false, // TODO(EOF)
+            is_eof_init: self.is_eof_init,
             contract: self.contract.clone(),
             instruction_result: InstructionResult::Continue,
             gas: *self.gas,

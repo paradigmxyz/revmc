@@ -11,7 +11,7 @@ use revmc_backend::{
     eyre::ensure, Attribute, BackendTypes, FunctionAttributeLocation, Pointer, TailCallKind,
     TypeMethods,
 };
-use revmc_builtins::{Builtin, Builtins, CallKind, CreateKind, ExtCallKind};
+use revmc_builtins::{Builtin, Builtins, CallKind, CreateKind, ExtCallKind, EXTCALL_LIGHT_FAILURE};
 use std::{fmt::Write, mem, sync::atomic::AtomicPtr};
 
 const STACK_CAP: usize = 1024;
@@ -1114,7 +1114,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             op::EOFCREATE => {
                 let sp = self.sp_after_inputs();
                 let imm = self.bytecode.get_imm_of(data).unwrap()[0];
-                let idx: <B as BackendTypes>::Value = self.bcx.iconst(self.isize_type, imm as i64);
+                let idx = self.bcx.iconst(self.isize_type, imm as i64);
                 self.call_fallible_builtin(Builtin::EofCreate, &[self.ecx, sp, idx]);
                 self.suspend();
                 goto_return!(no_branch);
@@ -1311,7 +1311,20 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     fn ext_call_common(&mut self, call_kind: ExtCallKind) {
         let sp = self.sp_after_inputs();
         let call_kind = self.bcx.iconst(self.i8_type, call_kind as i64);
-        self.call_fallible_builtin(Builtin::ExtCall, &[self.ecx, sp, call_kind]);
+        let spec_id = self.const_spec_id();
+        let ret = self.call_builtin(Builtin::ExtCall, &[self.ecx, sp, call_kind, spec_id]).unwrap();
+        let cond = self.bcx.icmp_imm(IntCC::Equal, ret, EXTCALL_LIGHT_FAILURE as i64);
+        let fail = self.create_block_after_current("light_fail");
+        let cont = self.create_block_after_current("contd");
+        self.bcx.brif_cold(cond, fail, cont, true);
+
+        self.bcx.switch_to_block(fail);
+        let one = self.bcx.iconst_256(U256::from(1));
+        self.push(one);
+        self.bcx.br(self.inst_entries[self.current_inst + 1]);
+
+        self.bcx.switch_to_block(cont);
+        self.build_check_instruction_result(ret);
         self.suspend();
     }
 
