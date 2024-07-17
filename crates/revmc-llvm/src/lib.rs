@@ -199,13 +199,14 @@ impl<'ctx> EvmLlvmBackend<'ctx> {
 
     // Delete IR to lower memory consumption.
     // For some reason this does not happen when `Drop`ping either the `Module` or the engine.
-    fn clear_module(&self) {
+    fn clear_module(&mut self) {
         for function in self.module.get_functions() {
             unsafe { function.delete() };
         }
         for global in self.module.get_globals() {
             unsafe { global.delete() };
         }
+        self.functions.clear();
     }
 }
 

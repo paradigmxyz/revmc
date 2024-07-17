@@ -56,7 +56,6 @@ pub struct EvmCompiler<B: Backend> {
     dump_assembly: bool,
     dump_unopt_assembly: bool,
 
-    function_counter: u32,
     finalized: bool,
 }
 
@@ -68,7 +67,6 @@ impl<B: Backend> EvmCompiler<B> {
             backend,
             out_dir: None,
             config: FcxConfig::default(),
-            function_counter: 0,
             builtins: Builtins::new(),
             dump_assembly: true,
             dump_unopt_assembly: false,
@@ -302,7 +300,6 @@ impl<B: Backend> EvmCompiler<B> {
     /// none of the `fn` pointers are called afterwards.
     pub unsafe fn clear(&mut self) -> Result<()> {
         self.builtins.clear();
-        self.function_counter = 0;
         self.finalized = false;
         self.backend.free_all_functions()
     }
