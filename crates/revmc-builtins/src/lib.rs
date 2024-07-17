@@ -758,16 +758,16 @@ pub unsafe extern "C" fn __revmc_builtin_ext_call(
     spec_id: SpecId,
 ) -> InstructionResult {
     let (target_address, in_offset, in_len, value) = if call_kind == ExtCallKind::Call {
-        let rev![target_address, offset, len, value] = &mut *sp.cast::<[EvmWord; 4]>();
-        (target_address, offset, len, value.to_u256())
+        let rev![target_address, in_offset, in_len, value] = &mut *sp.cast::<[EvmWord; 4]>();
+        (target_address, in_offset, in_len, value.to_u256())
     } else {
-        let rev![target_address, offset, len] = &mut *sp.cast::<[EvmWord; 3]>();
-        (target_address, offset, len, U256::ZERO)
+        let rev![target_address, in_offset, in_len] = &mut *sp.cast::<[EvmWord; 3]>();
+        (target_address, in_offset, in_len, U256::ZERO)
     };
 
     let target_address_bytes = target_address.to_be_bytes();
     let (pad, target_address) = target_address_bytes.split_last_chunk::<20>().unwrap();
-    if pad.iter().any(|i| *i != 0) {
+    if !pad.iter().all(|i| *i == 0) {
         return InstructionResult::InvalidEXTCALLTarget;
     }
     let target_address = Address::new(*target_address);
