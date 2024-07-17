@@ -257,6 +257,7 @@ impl<B: Backend> EvmCompiler<B> {
         ensure!(self.is_jit(), "cannot JIT functions during AOT compilation");
         self.finalize()?;
         let addr = self.backend.jit_function(id)?;
+        debug_assert!(addr != 0);
         Ok(EvmCompilerFn::new(unsafe { std::mem::transmute::<usize, RawEvmCompilerFn>(addr) }))
     }
 

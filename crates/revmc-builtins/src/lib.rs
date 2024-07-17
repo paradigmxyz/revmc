@@ -484,7 +484,7 @@ pub unsafe extern "C" fn __revmc_builtin_eof_create(
         .expect("EOF is set")
         .body
         .container_section
-        .get(initcontainer_index as usize)
+        .get(initcontainer_index)
         .cloned()
         .expect("EOF is checked");
 
@@ -541,7 +541,7 @@ pub unsafe extern "C" fn __revmc_builtin_return_contract(
         .expect("EOF is set")
         .body
         .container_section
-        .get(deploy_container_index as usize)
+        .get(deploy_container_index)
         .expect("EOF is checked");
     let (eof_header, _) = EofHeader::decode(container).expect("valid EOF header");
 
