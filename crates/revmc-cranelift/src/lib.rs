@@ -342,6 +342,10 @@ impl<'a> Builder for EvmCraneliftBuilder<'a> {
         self.bcx.current_block()
     }
 
+    fn block_addr(&mut self, _block: Self::BasicBlock) -> Option<Self::Value> {
+        None
+    }
+
     fn add_comment_to_current_inst(&mut self, comment: &str) {
         let Some(block) = self.bcx.current_block() else { return };
         let Some(inst) = self.bcx.func.layout.last_inst(block) else { return };
@@ -508,6 +512,10 @@ impl<'a> Builder for EvmCraneliftBuilder<'a> {
             switch.set_entry(*value as u128, *block);
         }
         switch.emit(&mut self.bcx, index, default)
+    }
+
+    fn br_indirect(&mut self, _address: Self::Value, _destinations: &[Self::BasicBlock]) {
+        unimplemented!()
     }
 
     fn phi(&mut self, ty: Self::Type, incoming: &[(Self::Value, Self::BasicBlock)]) -> Self::Value {
