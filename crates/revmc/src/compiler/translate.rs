@@ -1,8 +1,9 @@
 //! EVM to IR translation.
 
+use super::{default_attrs, section_mangled_name};
 use crate::{
-    Backend, Builder, EvmContext, Inst, InstData, InstFlags, IntCC, LegacyBytecode, Result,
-    I256_MIN,
+    Backend, Builder, EofBytecode, EvmContext, Inst, InstData, InstFlags, IntCC, LegacyBytecode,
+    Result, I256_MIN,
 };
 use revm_interpreter::{opcode as op, Contract, InstructionResult, OPCODE_INFO_JUMPTABLE};
 use revm_primitives::{BlockEnv, CfgEnv, Env, Eof, TxEnv, U256};
@@ -12,8 +13,6 @@ use revmc_backend::{
 };
 use revmc_builtins::{Builtin, Builtins, CallKind, CreateKind, ExtCallKind};
 use std::{fmt::Write, mem, sync::atomic::AtomicPtr};
-
-use super::{default_attrs, section_mangled_name};
 
 const STACK_CAP: usize = 1024;
 // const WORD_SIZE: usize = 32;
@@ -87,7 +86,7 @@ pub(super) struct FunctionCx<'a, B: Backend> {
     /// The bytecode being translated.
     bytecode: &'a LegacyBytecode<'a>,
     /// The full EOF bytecode, if any.
-    eof: Option<&'a Eof>,
+    eof: Option<&'a EofBytecode<'a>>,
     /// All entry blocks for each instruction.
     inst_entries: Vec<B::BasicBlock>,
     /// The current instruction being translated.
@@ -125,7 +124,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     /// Example pseudo-code:
     ///
     /// ```ignore (pseudo-code)
-    /// // `cfg(will_suspend) = bytecode.will_suspend()`: `true` if it contains a
+    /// // `cfg(may_suspend) = bytecode.may_suspend()`: `true` if it contains a
     /// // `*CALL*` or `CREATE*` instruction.
     /// fn evm_bytecode(args: ...) {
     ///     setup_locals();
@@ -135,7 +134,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     ///
     ///     load_arguments();
     ///
-    ///     #[cfg(will_suspend)]
+    ///     #[cfg(may_suspend)]
     ///     resume: {
     ///         goto match ecx.resume_at {
     ///             0 => inst0,
@@ -149,7 +148,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     ///     op.inst0: { /* ... */ };
     ///     op.inst1: { /* ... */ };
     ///     // ...
-    ///     #[cfg(will_suspend)]
+    ///     #[cfg(may_suspend)]
     ///     first_call_or_create_inst: {
     ///          // ...
     ///          goto suspend(1);
@@ -160,7 +159,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     ///         goto return(InstructionResult::Stop);
     ///     };
     ///
-    ///     #[cfg(will_suspend)]
+    ///     #[cfg(may_suspend)]
     ///     suspend(resume_at: u32): {
     ///         ecx.resume_at = resume_at;
     ///         goto return(InstructionResult::CallOrCreate);
@@ -180,9 +179,11 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         config: FcxConfig,
         builtins: &'a mut Builtins<B>,
         bytecode: &'a LegacyBytecode<'a>,
-        eof: Option<&'a Eof>,
+        eof: Option<&'a EofBytecode<'a>>,
         main_name: &'a str,
     ) -> Result<()> {
+        let entry_block = bcx.current_block().unwrap();
+
         // Get common types.
         let isize_type = bcx.type_ptr_sized_int();
         let i8_type = bcx.type_int(8);
@@ -207,7 +208,11 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
         let stack_len_arg = bcx.fn_param(2);
         // This is initialized later in `post_entry_block`.
-        let stack_len = bcx.new_stack_slot(isize_type, "len.addr");
+        let stack_len = if !bytecode.is_main_section() {
+            Pointer::new_address(isize_type, stack_len_arg)
+        } else {
+            bcx.new_stack_slot(isize_type, "len.addr")
+        };
 
         let env = bcx.fn_param(3);
         let contract = bcx.fn_param(4);
@@ -271,10 +276,13 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         };
 
         // We store the stack length if requested or necessary due to the bytecode.
-        let store_stack_length = config.inspect_stack_length || bytecode.will_suspend();
+        let stack_length_observable = config.inspect_stack_length
+            || bytecode.may_suspend()
+            || (bytecode.is_eof()
+                && (!bytecode.is_main_section() || fx.expect_full_eof().any_may_suspend));
 
         // Add debug assertions for the parameters.
-        if config.debug_assertions {
+        if config.debug_assertions && bytecode.is_main_section() {
             fx.pointer_panic_with_bool(
                 config.gas_metering,
                 gas_ptr,
@@ -288,7 +296,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 "local stack is disabled",
             );
             fx.pointer_panic_with_bool(
-                store_stack_length,
+                stack_length_observable,
                 stack_len_arg,
                 "stack length pointer",
                 if config.inspect_stack_length {
@@ -304,12 +312,15 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
         // The bytecode is guaranteed to have at least one instruction.
         let first_inst_block = fx.inst_entries[0];
-        let current_block = fx.current_block();
-        let post_entry_block = fx.bcx.create_block_after(current_block, "entry.post");
+        let post_entry_block = fx.bcx.create_block_after(entry_block, "entry.post");
         let resume_block = fx.bcx.create_block_after(post_entry_block, "resume");
         fx.bcx.br(post_entry_block);
         // Important: set the first resume target to be the start of the instructions.
-        if fx.bytecode.will_suspend() {
+        let generate_resume = bytecode.may_suspend()
+            || (bytecode.is_eof()
+                && bytecode.eof_section == Some(0)
+                && fx.expect_full_eof().any_may_suspend);
+        if generate_resume {
             fx.add_resume_at(first_inst_block);
         }
 
@@ -325,8 +336,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         if bytecode.has_dynamic_jumps() {
             fx.bcx.switch_to_block(fx.dynamic_jump_table);
             // TODO: Manually reduce to i32?
-            let jumpdests =
-                fx.bytecode.iter_insts().filter(|(_, data)| data.opcode == op::JUMPDEST);
+            let jumpdests = bytecode.iter_insts().filter(|(_, data)| data.opcode == op::JUMPDEST);
             // let max_pc =
             //     jumpdests.clone().map(|(_, data)| data.pc).next_back().expect("no jumpdests");
             let targets = jumpdests
@@ -353,20 +363,39 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         // Also here is where the stack length is initialized.
         let load_len_at_start = |fx: &mut Self| {
             // Loaded from args only for the config.
-            if config.inspect_stack_length {
+            if stack_length_observable {
                 let stack_len = fx.bcx.load(fx.isize_type, stack_len_arg, "stack_len");
                 fx.stack_len.store(&mut fx.bcx, stack_len);
             } else {
                 fx.stack_len.store_imm(&mut fx.bcx, 0);
             }
         };
-        if bytecode.will_suspend() {
+        if generate_resume {
             let get_ecx_resume_at = |fx: &mut Self| {
                 let offset =
                     fx.bcx.iconst(fx.isize_type, mem::offset_of!(EvmContext<'_>, resume_at) as i64);
                 let name = "ecx.resume_at.addr";
                 fx.bcx.gep(fx.i8_type, fx.ecx, &[offset], name)
             };
+
+            // Dispatch to the relevant sections.
+            if bytecode.eof_section == Some(0)
+                && bytecode.is_eof()
+                && fx.expect_full_eof().any_may_suspend
+            {
+                let eof = fx.eof.take().unwrap();
+                for (i, bytecode) in eof.sections.iter().enumerate().skip(1) {
+                    let name = format!("resume.dispatch_to_section_{i}");
+                    let block = fx.bcx.create_block_after(resume_block, &name);
+                    fx.bcx.switch_to_block(block);
+                    fx.call_eof_section(i, true);
+                    for _ in 0..bytecode.n_resumes() {
+                        fx.add_resume_at(block);
+                    }
+                }
+                debug_assert_eq!(fx.resume_blocks.len(), 1 + eof.total_resumes);
+                fx.eof = Some(eof);
+            }
 
             // Resume block: load the `resume_at` value and switch to the corresponding block.
             // Invalid values are treated as unreachable.
@@ -422,18 +451,25 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
         // Finalize the failure block.
         fx.bcx.switch_to_block(fx.failure_block.unwrap());
-        let failure_value = fx.bcx.phi(fx.i8_type, &fx.incoming_failures);
-        fx.bcx.set_current_block_cold();
-        fx.build_return(failure_value);
+        if !fx.incoming_failures.is_empty() {
+            let failure_value = fx.bcx.phi(fx.i8_type, &fx.incoming_failures);
+            fx.bcx.set_current_block_cold();
+            fx.build_return(failure_value);
+        } else {
+            fx.bcx.unreachable();
+        }
 
         // Finalize the return block.
         fx.bcx.switch_to_block(fx.return_block.unwrap());
-        let return_value = fx.bcx.phi(fx.i8_type, &fx.incoming_returns);
-        if store_stack_length {
-            let len = fx.stack_len.load(&mut fx.bcx, "stack_len");
-            fx.bcx.store(len, stack_len_arg);
+        if !fx.incoming_returns.is_empty() {
+            let return_value = fx.bcx.phi(fx.i8_type, &fx.incoming_returns);
+            if stack_length_observable {
+                fx.save_stack_len();
+            }
+            fx.bcx.ret(&[return_value]);
+        } else {
+            fx.bcx.unreachable();
         }
-        fx.bcx.ret(&[return_value]);
 
         fx.bcx.seal_all_blocks();
 
@@ -582,7 +618,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 // HACK: For now all opcodes that suspend (minus the test one, which does not reach
                 // here) return exactly one value. This value is pushed onto the stack by the
                 // caller, so we don't account for it here.
-                if data.will_suspend(is_eof) {
+                if data.may_suspend(is_eof) {
                     diff -= 1;
                 }
                 let len_changed = self.bcx.iadd_imm(self.len_before, diff);
@@ -1043,7 +1079,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             op::CALLF => {
                 let imm = self.bytecode.get_imm_of(data).unwrap();
                 self.callf_common(imm, false);
-                goto_return!(no_branch);
             }
             op::RETF => {
                 let ptr = self.return_stack_len_ptr();
@@ -1253,7 +1288,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         self.build_return_imm(ir);
     }
 
-    /// `CREATE` or `CREATE2` instruction.
+    /// Builds a `CREATE` or `CREATE2` instruction.
     fn create_common(&mut self, create_kind: CreateKind) {
         self.fail_if_staticcall(InstructionResult::StateChangeDuringStaticCall);
         let sp = self.sp_after_inputs();
@@ -1263,7 +1298,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         self.suspend();
     }
 
-    /// `*CALL*` instruction.
+    /// Builds `*CALL*` instructions.
     fn call_common(&mut self, call_kind: CallKind) {
         let sp = self.sp_after_inputs();
         let spec_id = self.const_spec_id();
@@ -1272,7 +1307,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         self.suspend();
     }
 
-    /// `EXT*CALL*` instruction.
+    /// Builds `EXT*CALL*` instructions.
     fn ext_call_common(&mut self, call_kind: ExtCallKind) {
         let sp = self.sp_after_inputs();
         let call_kind = self.bcx.iconst(self.i8_type, call_kind as i64);
@@ -1280,6 +1315,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         self.suspend();
     }
 
+    /// Builds a `CALLF` or `JUMPF` instruction.
     fn callf_common(&mut self, imm: &[u8], is_jumpf: bool) {
         let op_name = if is_jumpf { "JUMPF" } else { "CALLF" };
 
@@ -1303,21 +1339,36 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             .get(idx)
             .unwrap_or_else(|| panic!("{op_name} section {idx}: types not found"));
         let max_height = types.max_stack_size - types.inputs as u16;
-        let len = self.len_before();
-        let added = self.bcx.iadd_imm(len, max_height as i64);
-        let cond = self.bcx.icmp_imm(IntCC::UnsignedGreaterThan, added, STACK_CAP as i64);
+        let mut max_len = self.len_before();
+        if max_height != 0 {
+            max_len = self.bcx.iadd_imm(max_len, max_height as i64);
+        }
+        let cond = self.bcx.icmp_imm(IntCC::UnsignedGreaterThan, max_len, STACK_CAP as i64);
         self.build_check(cond, InstructionResult::StackOverflow);
 
+        // Call the section function.
+        self.call_eof_section(idx, is_jumpf);
+    }
+
+    /// Calls the section `idx` function.
+    /// `tail_call` forces a tail call.
+    pub(crate) fn call_eof_section(&mut self, idx: usize, tail_call: bool) {
         let name = section_mangled_name(self.main_name, idx);
         let function = self
             .bcx
             .get_function(&name)
-            .unwrap_or_else(|| panic!("{op_name} section {idx}: function not found"));
-        let args = (0..self.bcx.num_fn_params()).map(|i| self.bcx.fn_param(i)).collect::<Vec<_>>();
-        let tail = if is_jumpf { TailCallKind::MustTail } else { TailCallKind::None };
+            .unwrap_or_else(|| panic!("section {idx}: function not found"));
+        let mut args =
+            (0..self.bcx.num_fn_params()).map(|i| self.bcx.fn_param(i)).collect::<Vec<_>>();
+        if tail_call {
+            self.save_stack_len();
+        } else {
+            args[2] = self.stack_len.addr(&mut self.bcx);
+        }
+        let tail = if tail_call { TailCallKind::MustTail } else { TailCallKind::None };
         let ret = self.bcx.tail_call(function, &args, tail).unwrap();
-        if is_jumpf {
-            // `musttail` must be followed by `ret`.
+        if tail_call {
+            // `musttail` must precede `ret`.
             self.bcx.ret(&[ret]);
         } else {
             self.build_check_instruction_result(ret);
@@ -1352,7 +1403,13 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     /// Returns the `Eof` container, panicking if it is not set.
     #[track_caller]
     fn expect_eof(&self) -> &Eof {
-        self.eof.unwrap_or_else(|| panic!("EOF container not set"))
+        &self.expect_full_eof().container
+    }
+
+    /// Returns the full `EofBytecode`, panicking if it is not set.
+    #[track_caller]
+    fn expect_full_eof(&self) -> &EofBytecode<'a> {
+        self.eof.expect("EOF container not set")
     }
 
     /// Gets the stack length before the current instruction.
@@ -1387,6 +1444,18 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     /// Stores the gas used.
     fn store_gas_remaining(&mut self, value: B::Value) {
         self.gas_remaining.store(&mut self.bcx, value);
+    }
+
+    /// Saves the local `stack_len` to `stack_len_arg`.
+    fn save_stack_len(&mut self) {
+        let len = self.stack_len.load(&mut self.bcx, "stack_len");
+        let ptr = self.stack_len_arg();
+        self.bcx.store(len, ptr);
+    }
+
+    /// Returns the stack length argument.
+    fn stack_len_arg(&mut self) -> B::Value {
+        self.bcx.fn_param(2)
     }
 
     /// Returns the stack pointer at the top (`&stack[stack.len]`).
@@ -1596,7 +1665,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         self.bcx.unreachable();
     }
 
-    #[cfg(any())]
+    #[allow(dead_code)]
     fn call_printf(&mut self, template: &std::ffi::CStr, values: &[B::Value]) {
         let mut args = Vec::with_capacity(values.len() + 1);
         args.push(self.bcx.cstr_const(template));

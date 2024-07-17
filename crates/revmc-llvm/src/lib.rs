@@ -304,6 +304,7 @@ impl<'ctx> Backend for EvmLlvmBackend<'ctx> {
         let (id, function) = if let Some((&id, &(_, function))) =
             self.functions.iter().find(|(_k, (fname, _f))| fname == name)
         {
+            self.bcx.position_at_end(function.get_first_basic_block().unwrap());
             (id, function)
         } else {
             let fn_type = self.fn_type(ret, params);
@@ -1274,7 +1275,7 @@ fn convert_tail_call_kind(kind: TailCallKind) -> inkwell::llvm_sys::LLVMTailCall
     }
 }
 
-#[track_caller]
+// No `#[track_caller]` because `map_err` doesn't propagate it.
 fn error_msg(msg: inkwell::support::LLVMString) -> revmc_backend::Error {
     revmc_backend::Error::msg(msg.to_string_lossy().trim_end().to_string())
 }

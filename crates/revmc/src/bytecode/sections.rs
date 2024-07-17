@@ -75,7 +75,7 @@ impl SectionAnalysis {
         // new one on the next instruction, if any.
         let is_eof = bytecode.is_eof();
         if (!is_eof && data.requires_gasleft(bytecode.spec_id))
-            || data.will_suspend(is_eof)
+            || data.may_suspend(is_eof)
             || data.is_branching(is_eof)
         {
             let next = inst + 1;

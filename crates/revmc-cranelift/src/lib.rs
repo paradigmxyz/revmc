@@ -213,13 +213,15 @@ impl Backend for EvmCraneliftBackend {
         )?;
         self.functions.push(id);
         let bcx = FunctionBuilder::new(&mut self.ctx.func, &mut self.builder_context);
-        let builder = EvmCraneliftBuilder {
+        let mut builder = EvmCraneliftBuilder {
             module: &mut self.module,
             comments: &mut self.comments,
             bcx,
             ptr_type,
             symbols: self.symbols.clone(),
         };
+        let entry = builder.bcx.create_block();
+        builder.bcx.append_block_params_for_function_params(entry);
         Ok((builder, id))
     }
 

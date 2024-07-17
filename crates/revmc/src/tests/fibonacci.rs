@@ -1,10 +1,11 @@
 use super::{with_evm_context, DEF_SPEC};
 use crate::{Backend, EvmCompiler};
+use paste::paste;
 use revm_interpreter::{opcode as op, InstructionResult};
-use revm_primitives::{uint, U256};
+use revm_primitives::U256;
 
 macro_rules! fibonacci_tests {
-    ($($i:expr),* $(,)?) => {paste::paste! {
+    ($($i:expr),* $(,)?) => {paste! {
         $(
             matrix_tests!([<native_ $i>] = |jit| run_fibonacci_test(jit, $i, false));
             matrix_tests!([<dynamic_ $i>] = |jit| run_fibonacci_test(jit, $i, true));
@@ -19,7 +20,7 @@ fn run_fibonacci_test<B: Backend>(compiler: &mut EvmCompiler<B>, input: u16, dyn
 
     unsafe { compiler.clear() }.unwrap();
     compiler.inspect_stack_length(true);
-    let f = unsafe { compiler.jit(None, &code, DEF_SPEC) }.unwrap();
+    let f = unsafe { compiler.jit("fib", &code, DEF_SPEC) }.unwrap();
 
     with_evm_context(&code, |ecx, stack, stack_len| {
         if dynamic {
@@ -102,7 +103,7 @@ fn fibonacci_rust(n: u16) -> U256 {
 
 #[test]
 fn test_fibonacci_rust() {
-    uint! {
+    revm_primitives::uint! {
         assert_eq!(fibonacci_rust(0), 0_U256);
         assert_eq!(fibonacci_rust(1), 1_U256);
         assert_eq!(fibonacci_rust(2), 1_U256);

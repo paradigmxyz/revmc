@@ -17,7 +17,7 @@ mod opcode;
 pub use opcode::*;
 
 /// Noop opcode used to test suspend-resume.
-#[cfg(test)]
+#[cfg(any(feature = "__fuzzing", test))]
 pub(crate) const TEST_SUSPEND: u8 = 0x25;
 
 // TODO: Use `indexvec`.
@@ -60,10 +60,10 @@ impl<'a> Bytecode<'a> {
         }
     }
 
-    pub(crate) fn as_eof(&self) -> Option<&Eof> {
+    pub(crate) fn as_eof(&self) -> Option<&EofBytecode<'a>> {
         match &self.0 {
             BytecodeInner::Legacy(_) => None,
-            BytecodeInner::Eof(eof) => Some(&eof.code),
+            BytecodeInner::Eof(eof) => Some(eof),
         }
     }
 }
@@ -98,8 +98,10 @@ pub(crate) struct LegacyBytecode<'a> {
     pub(crate) spec_id: SpecId,
     /// Whether the bytecode contains dynamic jumps. Always false in EOF.
     has_dynamic_jumps: bool,
-    /// Whether the bytecode will suspend execution.
-    will_suspend: bool,
+    /// Whether the bytecode may suspend execution.
+    may_suspend: bool,
+    /// The number of resumes in the bytecode.
+    n_resumes: usize,
     /// Mapping from program counter to instruction.
     pc_to_inst: FxHashMap<u32, u32>,
     /// The EOF section index, if any.
@@ -152,7 +154,8 @@ impl<'a> LegacyBytecode<'a> {
             jumpdests,
             spec_id,
             has_dynamic_jumps: false,
-            will_suspend: false,
+            may_suspend: false,
+            n_resumes: 0,
             pc_to_inst,
             eof_section,
         };
@@ -237,7 +240,7 @@ impl<'a> LegacyBytecode<'a> {
             self.mark_dead_code();
         }
 
-        self.calc_will_suspend();
+        self.calc_may_suspend();
         self.construct_sections();
 
         Ok(())
@@ -336,14 +339,25 @@ impl<'a> LegacyBytecode<'a> {
         }
     }
 
-    /// Calculates whether the bytecode will suspend execution.
+    /// Calculates whether the bytecode suspend suspend execution.
     ///
     /// This can only happen if the bytecode contains `*CALL*` or `*CREATE*` instructions.
     #[instrument(name = "suspend", level = "debug", skip_all)]
-    fn calc_will_suspend(&mut self) {
+    fn calc_may_suspend(&mut self) {
         let is_eof = self.is_eof();
-        let will_suspend = self.iter_insts().any(|(_, data)| data.will_suspend(is_eof));
-        self.will_suspend = will_suspend;
+        let may_suspend = self.iter_insts().any(|(_, data)| data.may_suspend(is_eof));
+        self.may_suspend = may_suspend;
+    }
+
+    /// Calculates the total number of resumes in the bytecode.
+    #[instrument(name = "resumes", level = "debug", skip_all)]
+    pub(crate) fn calc_total_resumes(&mut self) {
+        debug_assert!(self.is_eof());
+        let mut total = 0;
+        for (_, op) in self.iter_insts() {
+            total += op.may_suspend(true) as usize;
+        }
+        self.n_resumes = total;
     }
 
     /// Constructs the sections in the bytecode.
@@ -380,6 +394,11 @@ impl<'a> LegacyBytecode<'a> {
         &self.code[offset..offset + len]
     }
 
+    /// Returns `true` if this bytecode is not EOF or is the main (first) EOF section:
+    pub(crate) fn is_main_section(&self) -> bool {
+        self.eof_section.map_or(true, |section| section == 0)
+    }
+
     /// Returns `true` if the given program counter is a valid jump destination.
     fn is_valid_jump(&self, pc: usize) -> bool {
         self.jumpdests.get(pc).as_deref().copied() == Some(true)
@@ -390,9 +409,14 @@ impl<'a> LegacyBytecode<'a> {
         self.has_dynamic_jumps
     }
 
-    /// Returns `true` if the bytecode will suspend execution, to be resumed later.
-    pub(crate) fn will_suspend(&self) -> bool {
-        self.will_suspend
+    /// Returns `true` if the bytecode may suspend execution, to be resumed later.
+    pub(crate) fn may_suspend(&self) -> bool {
+        self.may_suspend
+    }
+
+    /// Returns the total number of resumes in the bytecode.
+    pub(crate) fn n_resumes(&self) -> usize {
+        self.n_resumes
     }
 
     /// Returns `true` if the bytecode is EOF.
@@ -448,32 +472,40 @@ impl fmt::Debug for LegacyBytecode<'_> {
             .field("jumpdests", &hex::encode(bitvec_as_bytes(&self.jumpdests)))
             .field("spec_id", &self.spec_id)
             .field("has_dynamic_jumps", &self.has_dynamic_jumps)
-            .field("will_suspend", &self.will_suspend)
+            .field("may_suspend", &self.may_suspend)
             .finish()
     }
 }
 
 #[derive(Debug)]
 pub(crate) struct EofBytecode<'a> {
-    pub(crate) code: Cow<'a, Eof>,
+    pub(crate) container: Cow<'a, Eof>,
     pub(crate) sections: Vec<LegacyBytecode<'a>>,
+    pub(crate) any_may_suspend: bool,
+    pub(crate) total_resumes: usize,
 }
 
 impl<'a> EofBytecode<'a> {
     // TODO: Accept revm Bytecode in the compiler
     #[allow(dead_code)]
-    fn new(code: &'a Eof, spec_id: SpecId) -> Self {
-        Self { code: Cow::Borrowed(code), sections: vec![] }.make_sections(spec_id)
+    fn new(container: &'a Eof, spec_id: SpecId) -> Self {
+        Self::new_inner(Cow::Borrowed(container), spec_id)
     }
 
     fn decode(code: &'a [u8], spec_id: SpecId) -> Result<Self> {
-        let code = Eof::decode(code.to_vec().into())?;
-        Ok(Self { code: Cow::Owned(code), sections: vec![] }.make_sections(spec_id))
+        let container = Eof::decode(code.to_vec().into())?;
+        Ok(Self::new_inner(Cow::Owned(container), spec_id))
+    }
+
+    #[instrument(name = "new_eof", level = "debug", skip_all)]
+    fn new_inner(container: Cow<'a, Eof>, spec_id: SpecId) -> Self {
+        Self { container, sections: vec![], any_may_suspend: false, total_resumes: 0 }
+            .make_sections(spec_id)
     }
 
     fn make_sections(mut self, spec_id: SpecId) -> Self {
         self.sections = self
-            .code
+            .container
             .body
             .code_section
             .iter()
@@ -487,11 +519,31 @@ impl<'a> EofBytecode<'a> {
         self
     }
 
+    #[instrument(name = "analyze_eof", level = "debug", skip_all)]
     fn analyze(&mut self) -> Result<()> {
         for section in &mut self.sections {
             section.analyze()?;
         }
+        self.calc_any_may_suspend();
+        if self.any_may_suspend {
+            self.calc_total_resumes();
+        }
         Ok(())
+    }
+
+    #[instrument(name = "any_suspend", level = "debug", skip_all)]
+    fn calc_any_may_suspend(&mut self) {
+        self.any_may_suspend = self.sections.iter().any(|section| section.may_suspend());
+    }
+
+    #[instrument(name = "total_resumes", level = "debug", skip_all)]
+    fn calc_total_resumes(&mut self) {
+        let mut total = 0;
+        for section in &mut self.sections {
+            section.calc_total_resumes();
+            total += section.n_resumes;
+        }
+        self.total_resumes = total;
     }
 }
 
@@ -673,12 +725,12 @@ impl InstData {
             || self.flags.contains(InstFlags::UNKNOWN)
             || matches!(self.opcode, op::STOP | op::RETURN | op::REVERT | op::INVALID)
             || (!is_eof && matches!(self.opcode, op::SELFDESTRUCT))
-            || (is_eof && matches!(self.opcode, op::RETF | op::RETURNCONTRACT))
+            || (is_eof && matches!(self.opcode, op::JUMPF | op::RETF | op::RETURNCONTRACT))
     }
 
-    /// Returns `true` if this instruction will suspend execution.
+    /// Returns `true` if this instruction may suspend execution.
     #[inline]
-    pub(crate) const fn will_suspend(&self, is_eof: bool) -> bool {
+    pub(crate) const fn may_suspend(&self, is_eof: bool) -> bool {
         #[cfg(test)]
         if self.opcode == TEST_SUSPEND {
             return true;

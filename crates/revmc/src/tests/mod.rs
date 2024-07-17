@@ -20,9 +20,7 @@ mod macros;
 
 mod meta;
 
-#[cfg(not(feature = "__fuzzing"))]
 mod fibonacci;
-#[cfg(not(feature = "__fuzzing"))]
 mod resume;
 
 mod runner;
@@ -294,6 +292,38 @@ tests! {
             spec_id: SpecId::PRAGUE_EOF,
             expected_stack: &[10_U256],
             expected_gas: 10,
+        }),
+    }
+
+    subroutines {
+        callf(@raw {
+            bytecode: &eof_sections(&[
+                &[op::CALLF, 0x00, 0x01, op::PUSH1, 1, op::STOP],
+                &[op::CALLF, 0x00, 0x02, op::PUSH1, 2, op::RETF],
+                &[                       op::PUSH1, 3, op::RETF],
+            ]),
+            spec_id: SpecId::PRAGUE_EOF,
+            expected_stack: &[3_U256, 2_U256, 1_U256],
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+        }),
+        jumpf1(@raw {
+            bytecode: &eof_sections(&[
+                &[op::CALLF, 0x00, 0x01, op::PUSH1, 1, op::STOP],
+                &[op::JUMPF, 0x00, 0x02, op::PUSH1, 2, op::RETF],
+                &[                       op::PUSH1, 3, op::RETF],
+            ]),
+            spec_id: SpecId::PRAGUE_EOF,
+            expected_stack: &[3_U256, 1_U256],
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+        }),
+        jumpf2(@raw {
+            bytecode: &eof_sections_unchecked(&[
+                &[op::PUSH1, 1, op::JUMPF, 0x00, 0x01],
+                &[op::PUSH1, 2, op::STOP],
+            ]).raw,
+            spec_id: SpecId::PRAGUE_EOF,
+            expected_stack: &[1_U256, 2_U256],
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
         }),
     }
 
@@ -1055,32 +1085,50 @@ tests! {
     }
 }
 
+#[track_caller]
 fn eof(code: &'static [u8]) -> Bytes {
-    eof_data(code, DEF_DATA)
+    eof_sections(&[code])
 }
 
-fn eof_data(code: &'static [u8], data: &'static [u8]) -> Bytes {
-    let eof = revm_primitives::eof::EofBody {
-        types_section: vec![primitives::eof::TypesSection {
-            inputs: 0,
-            outputs: 0x80,
-            max_stack_size: 0,
-        }],
-        code_section: vec![Bytes::from_static(code)],
-        container_section: vec![],
-        data_section: Bytes::from_static(data),
-        is_data_filled: false,
-    }
-    .into_eof();
+#[track_caller]
+fn eof_sections(code: &[&'static [u8]]) -> Bytes {
+    let eof = eof_sections_unchecked(code);
     match revm_interpreter::analysis::validate_eof(&eof) {
         Ok(()) => {}
         Err(EofError::Decode(e)) => panic!("{e}"),
         Err(EofError::Validation(e)) => match e {
+            EofValidationError::UnknownOpcode
+                if code.iter().any(|code| code.contains(&TEST_SUSPEND)) => {}
+            EofValidationError::InvalidTypesSection => {}
             EofValidationError::MaxStackMismatch => {}
             e => panic!("validation error: {e:?}"),
         },
     }
     eof.raw
+}
+
+// We have to expose this because validation fails at invalid type sections
+#[track_caller]
+fn eof_sections_unchecked(code: &[&'static [u8]]) -> primitives::Eof {
+    revm_primitives::eof::EofBody {
+        types_section: {
+            let mut types =
+                vec![primitives::eof::TypesSection { inputs: 0, outputs: 0x80, max_stack_size: 0 }];
+            for _ in 1..code.len() {
+                types.push(primitives::eof::TypesSection {
+                    inputs: 0,
+                    outputs: 0,
+                    max_stack_size: 0,
+                });
+            }
+            types
+        },
+        code_section: code.iter().copied().map(Bytes::from_static).collect(),
+        container_section: vec![],
+        data_section: Bytes::from_static(DEF_DATA),
+        is_data_filled: false,
+    }
+    .into_eof()
 }
 
 fn bytecode_unop(op: u8, a: U256) -> [u8; 34] {

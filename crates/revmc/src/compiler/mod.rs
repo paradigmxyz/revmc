@@ -187,9 +187,9 @@ impl<B: Backend> EvmCompiler<B> {
 
     /// Sets whether to enable stack bound checks.
     ///
-    /// Defaults to `true`.
-    ///
     /// Ignored for EOF bytecodes, as they are assumed to be correct.
+    ///
+    /// Defaults to `true`.
     ///
     /// # Safety
     ///
