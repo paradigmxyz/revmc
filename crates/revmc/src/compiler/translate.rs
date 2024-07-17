@@ -385,7 +385,10 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             };
 
             let kind = fx.resume_kind;
-            let resume_ty = if kind == ResumeKind::Blocks { fx.bcx.type_ptr() } else { isize_type };
+            let resume_ty = match kind {
+                ResumeKind::Blocks => fx.bcx.type_ptr(),
+                ResumeKind::Indexes => fx.isize_type,
+            };
 
             // Dispatch to the relevant sections.
             // TODO: Doesn't work
