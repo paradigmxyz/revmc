@@ -348,14 +348,12 @@ impl<'ctx> Backend for EvmLlvmBackend<'ctx> {
             .write_to_memory_buffer(&self.module, FileType::Object)
             .map_err(error_msg)?;
         w.write_all(buffer.as_slice())?;
-        self.clear_module();
         Ok(())
     }
 
     fn jit_function(&mut self, id: Self::FuncId) -> Result<usize> {
         let name = self.id_to_name(id);
         let addr = self.exec_engine().get_function_address(name)?;
-        self.clear_module();
         Ok(addr)
     }
 
