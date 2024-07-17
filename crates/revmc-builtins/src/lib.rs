@@ -793,7 +793,7 @@ pub unsafe extern "C" fn __revmc_builtin_ext_call(
     let call_cost = gas::call_cost(spec_id, transfers_value, is_cold, is_empty);
     gas!(ecx, call_cost);
 
-    let gas_reduce = std::cmp::max(ecx.gas.remaining() / 64, 5000);
+    let gas_reduce = core::cmp::max(ecx.gas.remaining() / 64, 5000);
     let gas_limit = ecx.gas.remaining().saturating_sub(gas_reduce);
     if gas_limit < gas::MIN_CALLEE_GAS {
         ecx.return_data = &[];
