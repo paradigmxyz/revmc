@@ -33,6 +33,8 @@ pub struct EvmContext<'a> {
     pub next_action: &'a mut InterpreterAction,
     /// The return data.
     pub return_data: &'a [u8],
+    /// The length of the return stack.
+    pub return_stack_len: usize,
     /// Whether the context is static.
     pub is_static: bool,
     /// An index that is used internally to keep track of where execution should resume.
@@ -68,6 +70,7 @@ impl<'a> EvmContext<'a> {
             host,
             next_action: &mut interpreter.next_action,
             return_data: &interpreter.return_data_buffer,
+            return_stack_len: 0,
             is_static: interpreter.is_static,
             resume_at: ResumeAt::load(interpreter.instruction_pointer),
         };
@@ -82,7 +85,7 @@ impl<'a> EvmContext<'a> {
             instruction_pointer: bytecode.as_ptr(),
             bytecode,
             function_stack: FunctionStack::new(),
-            is_eof_init: false,
+            is_eof_init: false, // TODO(EOF)
             contract: self.contract.clone(),
             instruction_result: InstructionResult::Continue,
             gas: *self.gas,
@@ -296,7 +299,6 @@ impl EvmCompilerFn {
         stack_len: Option<&mut usize>,
         ecx: &mut EvmContext<'_>,
     ) -> InstructionResult {
-        assert!(!ecx.contract.bytecode.is_eof(), "EOF is not yet implemented");
         (self.0)(
             ecx.gas,
             option_as_mut_ptr(stack),

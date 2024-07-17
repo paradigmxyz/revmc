@@ -37,7 +37,6 @@ pub(crate) fn resize_memory(ecx: &mut EvmContext<'_>, new_size: usize) -> Instru
     InstructionResult::Continue
 }
 
-#[inline]
 pub(crate) unsafe fn copy_operation(
     ecx: &mut EvmContext<'_>,
     rev![memory_offset, data_offset, len]: &mut [EvmWord; 3],

@@ -239,9 +239,15 @@ builtins! {
     Tload          = __revmc_builtin_tload(@[ecx] ptr, @[sp] ptr) None,
     Mcopy          = __revmc_builtin_mcopy(@[ecx] ptr, @[sp] ptr) Some(u8),
     Log            = __revmc_builtin_log(@[ecx] ptr, @[sp_dyn] ptr, u8) Some(u8),
+    DataLoad       = __revmc_builtin_data_load(@[ecx] ptr, @[sp] ptr) None,
+    DataCopy       = __revmc_builtin_data_copy(@[ecx] ptr, @[sp] ptr) Some(u8),
+    ReturnDataLoad = __revmc_builtin_returndataload(@[ecx] ptr, @[sp] ptr) None,
 
+    EofCreate      = __revmc_builtin_eof_create(@[ecx] ptr, @[sp] ptr, u8) Some(u8),
+    ReturnContract = __revmc_builtin_return_contract(@[ecx] ptr, @[sp] ptr, u8) Some(u8),
     Create         = __revmc_builtin_create(@[ecx] ptr, @[sp_dyn] ptr, u8, u8) Some(u8),
     Call           = __revmc_builtin_call(@[ecx] ptr, @[sp_dyn] ptr, u8, u8) Some(u8),
+    ExtCall        = __revmc_builtin_ext_call(@[ecx] ptr, @[sp_dyn] ptr, u8) Some(u8),
     DoReturn       = __revmc_builtin_do_return(@[ecx] ptr, @[sp] ptr, u8) Some(u8),
     SelfDestruct   = __revmc_builtin_selfdestruct(@[ecx] ptr, @[sp] ptr, u8) Some(u8),
 

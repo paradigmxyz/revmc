@@ -26,7 +26,7 @@ use inkwell::{
     AddressSpace, IntPredicate, OptimizationLevel,
 };
 use revmc_backend::{
-    eyre, Backend, BackendTypes, Builder, Error, IntCC, Result, TypeMethods, U256,
+    eyre, Backend, BackendTypes, Builder, Error, IntCC, Result, TailCallKind, TypeMethods, U256,
 };
 use rustc_hash::FxHashMap;
 use std::{
@@ -78,9 +78,9 @@ pub struct EvmLlvmBackend<'ctx> {
     aot: bool,
     debug_assertions: bool,
     opt_level: OptimizationLevel,
-    /// Separate from `function_names` to have always increasing IDs.
+    /// Separate from `functions` to have always increasing IDs.
     function_counter: u32,
-    function_names: FxHashMap<u32, String>,
+    functions: FxHashMap<u32, (String, FunctionValue<'ctx>)>,
 }
 
 impl<'ctx> EvmLlvmBackend<'ctx> {
@@ -166,7 +166,7 @@ impl<'ctx> EvmLlvmBackend<'ctx> {
             debug_assertions: cfg!(debug_assertions),
             opt_level,
             function_counter: 0,
-            function_names: FxHashMap::default(),
+            functions: FxHashMap::default(),
         })
     }
 
@@ -194,7 +194,7 @@ impl<'ctx> EvmLlvmBackend<'ctx> {
     }
 
     fn id_to_name(&self, id: u32) -> &str {
-        &self.function_names[&id]
+        &&self.functions[&id].0
     }
 
     // Delete IR to lower memory consumption.
@@ -281,6 +281,10 @@ impl<'ctx> Backend for EvmLlvmBackend<'ctx> {
         self.aot
     }
 
+    fn function_name_is_unique(&self, name: &str) -> bool {
+        self.module.get_function(name).is_none()
+    }
+
     fn dump_ir(&mut self, path: &Path) -> Result<()> {
         self.module.print_to_file(path).map_err(error_msg)
     }
@@ -297,18 +301,25 @@ impl<'ctx> Backend for EvmLlvmBackend<'ctx> {
         param_names: &[&str],
         linkage: revmc_backend::Linkage,
     ) -> Result<(Self::Builder<'_>, Self::FuncId)> {
-        let fn_type = self.fn_type(ret, params);
-        let function = self.module.add_function(name, fn_type, Some(convert_linkage(linkage)));
-        for (i, &name) in param_names.iter().enumerate() {
-            function.get_nth_param(i as u32).expect(name).set_name(name);
-        }
+        let (id, function) = if let Some((&id, &(_, function))) =
+            self.functions.iter().find(|(_k, (fname, _f))| fname == name)
+        {
+            (id, function)
+        } else {
+            let fn_type = self.fn_type(ret, params);
+            let function = self.module.add_function(name, fn_type, Some(convert_linkage(linkage)));
+            for (i, &name) in param_names.iter().enumerate() {
+                function.get_nth_param(i as u32).expect(name).set_name(name);
+            }
 
-        let entry = self.cx.append_basic_block(function, "entry");
-        self.bcx.position_at_end(entry);
+            let entry = self.cx.append_basic_block(function, "entry");
+            self.bcx.position_at_end(entry);
 
-        let id = self.function_counter;
-        self.function_counter += 1;
-        self.function_names.insert(id, name.to_string());
+            let id = self.function_counter;
+            self.function_counter += 1;
+            self.functions.insert(id, (name.to_string(), function));
+            (id, function)
+        };
         let builder = EvmLlvmBuilder { backend: self, function };
         Ok((builder, id))
     }
@@ -350,7 +361,7 @@ impl<'ctx> Backend for EvmLlvmBackend<'ctx> {
         let name = self.id_to_name(id);
         let function = self.exec_engine().get_function_value(name)?;
         self.exec_engine().free_fn_machine_code(function);
-        self.function_names.clear();
+        self.functions.clear();
         Ok(())
     }
 
@@ -983,9 +994,17 @@ impl<'a, 'ctx> Builder for EvmLlvmBuilder<'a, 'ctx> {
             .into()
     }
 
-    fn call(&mut self, function: Self::Function, args: &[Self::Value]) -> Option<Self::Value> {
+    fn tail_call(
+        &mut self,
+        function: Self::Function,
+        args: &[Self::Value],
+        tail_call: TailCallKind,
+    ) -> Option<Self::Value> {
         let args = args.iter().copied().map(Into::into).collect::<Vec<_>>();
         let callsite = self.bcx.build_call(function, &args, "").unwrap();
+        if tail_call != TailCallKind::None {
+            callsite.set_tail_call_kind(convert_tail_call_kind(tail_call));
+        }
         callsite.try_as_basic_value().left()
     }
 
@@ -1246,6 +1265,16 @@ fn convert_linkage(linkage: revmc_backend::Linkage) -> inkwell::module::Linkage 
     }
 }
 
+fn convert_tail_call_kind(kind: TailCallKind) -> inkwell::llvm_sys::LLVMTailCallKind {
+    match kind {
+        TailCallKind::None => inkwell::llvm_sys::LLVMTailCallKind::LLVMTailCallKindNone,
+        TailCallKind::Tail => inkwell::llvm_sys::LLVMTailCallKind::LLVMTailCallKindTail,
+        TailCallKind::MustTail => inkwell::llvm_sys::LLVMTailCallKind::LLVMTailCallKindMustTail,
+        TailCallKind::NoTail => inkwell::llvm_sys::LLVMTailCallKind::LLVMTailCallKindNoTail,
+    }
+}
+
+#[track_caller]
 fn error_msg(msg: inkwell::support::LLVMString) -> revmc_backend::Error {
     revmc_backend::Error::msg(msg.to_string_lossy().trim_end().to_string())
 }

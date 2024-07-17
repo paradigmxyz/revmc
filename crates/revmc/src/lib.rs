@@ -53,18 +53,6 @@ const I256_MIN: U256 = U256::from_limbs([
     0x8000000000000000,
 ]);
 
-/// Creates a new LLVM backend with the default builtin functions.
-#[cfg(feature = "llvm")]
-#[inline]
-#[deprecated = "use `EvmLlvmBackend::new` instead"]
-pub fn new_llvm_backend(
-    cx: &llvm::inkwell::context::Context,
-    aot: bool,
-    opt_level: OptimizationLevel,
-) -> Result<EvmLlvmBackend<'_>> {
-    EvmLlvmBackend::new(cx, aot, opt_level)
-}
-
 /// Enable for `cargo asm -p revmc --lib`.
 #[cfg(any())]
 pub fn generate_all_assembly() -> EvmCompiler<EvmLlvmBackend<'static>> {

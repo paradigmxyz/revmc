@@ -58,6 +58,18 @@ impl From<CallKind> for CallScheme {
     }
 }
 
+/// The kind of a `EXT*CALL` instruction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ExtCallKind {
+    /// `EXTCALL`.
+    Call,
+    /// `EXTDELEGATECALL`.
+    DelegateCall,
+    /// `EXTSTATICCALL`.
+    StaticCall,
+}
+
 /// The kind of a `CREATE*` instruction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -409,8 +421,60 @@ pub unsafe extern "C" fn __revmc_builtin_log(
     InstructionResult::Continue
 }
 
+pub unsafe extern "C" fn __revmc_builtin_data_load(ecx: &mut EvmContext<'_>, slot: &mut EvmWord) {
+    let offset = as_usize_saturated!(slot.to_u256());
+    let slice = ecx.contract.bytecode.eof().unwrap().data_slice(offset, 32);
+    let mut word = [0u8; 32];
+    word[..slice.len()].copy_from_slice(slice);
+    *slot = EvmWord::from_be_bytes(word);
+}
+
+pub unsafe extern "C" fn __revmc_builtin_data_copy(
+    ecx: &mut EvmContext<'_>,
+    sp: &mut [EvmWord; 3],
+) -> InstructionResult {
+    let data = decouple_lt(ecx.contract.bytecode.eof().unwrap().data());
+    copy_operation(ecx, sp, data)
+}
+
+pub unsafe extern "C" fn __revmc_builtin_returndataload(
+    ecx: &mut EvmContext<'_>,
+    slot: &mut EvmWord,
+) {
+    let offset = as_usize_saturated!(slot.to_u256());
+    let mut output = [0u8; 32];
+    if let Some(available) = ecx.return_data.len().checked_sub(offset) {
+        let copy_len = available.min(32);
+        output[..copy_len].copy_from_slice(&ecx.return_data[offset..offset + copy_len]);
+    }
+    *slot = EvmWord::from_be_bytes(output);
+}
+
 // NOTE: Return `InstructionResult::Continue` here to indicate success, not the final result of
 // the execution.
+
+#[no_mangle]
+pub unsafe extern "C" fn __revmc_builtin_eof_create(
+    ecx: &mut EvmContext<'_>,
+    rev![value, salt, offset, len]: &mut [EvmWord; 4],
+    idx: usize,
+) -> InstructionResult {
+    // TODO
+    let _ = (ecx, value, salt, offset, len, idx);
+    InstructionResult::Continue
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn __revmc_builtin_return_contract(
+    ecx: &mut EvmContext<'_>,
+    rev![offset, len]: &mut [EvmWord; 2],
+    idx: usize,
+) -> InstructionResult {
+    // TODO
+    let _ = (ecx, offset, len, idx);
+    InstructionResult::ReturnContract
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn __revmc_builtin_create(
     ecx: &mut EvmContext<'_>,
@@ -584,6 +648,18 @@ pub unsafe extern "C" fn __revmc_builtin_call(
         }),
     };
 
+    InstructionResult::Continue
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn __revmc_builtin_ext_call(
+    ecx: &mut EvmContext<'_>,
+    sp: *mut EvmWord,
+    spec_id: SpecId,
+    call_kind: CallKind,
+) -> InstructionResult {
+    // TODO
+    let _ = (ecx, sp, spec_id, call_kind);
     InstructionResult::Continue
 }
 

@@ -19,7 +19,7 @@ fn main() -> Result<()> {
     let context = revmc::llvm::inkwell::context::Context::create();
     let backend = EvmLlvmBackend::new(&context, true, OptimizationLevel::Aggressive)?;
     let mut compiler = EvmCompiler::new(backend);
-    compiler.translate(Some(name), bytecode, SpecId::CANCUN)?;
+    compiler.translate(name, bytecode, SpecId::CANCUN)?;
     let object = out_dir.join(name).with_extension("o");
     compiler.write_object_to_file(&object)?;
 

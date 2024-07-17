@@ -2,10 +2,10 @@
 
 use bitvec::vec::BitVec;
 use revm_interpreter::opcode as op;
-use revm_primitives::{hex, SpecId};
-use revmc_backend::{eyre::ensure, Result};
+use revm_primitives::{hex, Eof, SpecId, EOF_MAGIC_BYTES};
+use revmc_backend::Result;
 use rustc_hash::FxHashMap;
-use std::fmt;
+use std::{borrow::Cow, fmt};
 
 mod sections;
 use sections::{Section, SectionAnalysis};
@@ -28,9 +28,66 @@ pub(crate) const TEST_SUSPEND: u8 = 0x25;
 /// Also known as `ic`, or instruction counter; not to be confused with SSA `inst`s.
 pub(crate) type Inst = usize;
 
-/// EVM bytecode.
 #[doc(hidden)] // Not public API.
-pub struct Bytecode<'a> {
+pub struct Bytecode<'a>(pub(crate) BytecodeInner<'a>);
+
+#[derive(Debug)]
+pub(crate) enum BytecodeInner<'a> {
+    Legacy(LegacyBytecode<'a>),
+    Eof(EofBytecode<'a>),
+}
+
+impl<'a> Bytecode<'a> {
+    pub(crate) fn new(code: &'a [u8], spec_id: SpecId) -> Result<Self> {
+        if spec_id.is_enabled_in(SpecId::PRAGUE_EOF) && code.starts_with(&EOF_MAGIC_BYTES) {
+            Ok(Self(BytecodeInner::Eof(EofBytecode::decode(code, spec_id)?)))
+        } else {
+            Ok(Self(BytecodeInner::Legacy(LegacyBytecode::new(code, spec_id, None))))
+        }
+    }
+
+    pub(crate) fn analyze(&mut self) -> Result<()> {
+        match &mut self.0 {
+            BytecodeInner::Legacy(bytecode) => bytecode.analyze(),
+            BytecodeInner::Eof(bytecode) => bytecode.analyze(),
+        }
+    }
+
+    pub(crate) fn as_legacy_slice(&self) -> &[LegacyBytecode<'a>] {
+        match &self.0 {
+            BytecodeInner::Legacy(bytecode) => std::slice::from_ref(bytecode),
+            BytecodeInner::Eof(eof) => &eof.sections,
+        }
+    }
+
+    pub(crate) fn as_eof(&self) -> Option<&Eof> {
+        match &self.0 {
+            BytecodeInner::Legacy(_) => None,
+            BytecodeInner::Eof(eof) => Some(&eof.code),
+        }
+    }
+}
+
+impl fmt::Debug for Bytecode<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.0 {
+            BytecodeInner::Legacy(bytecode) => bytecode.fmt(f),
+            BytecodeInner::Eof(bytecode) => bytecode.fmt(f),
+        }
+    }
+}
+
+impl fmt::Display for Bytecode<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.0 {
+            BytecodeInner::Legacy(bytecode) => bytecode.fmt(f),
+            BytecodeInner::Eof(bytecode) => bytecode.fmt(f),
+        }
+    }
+}
+
+/// EVM bytecode.
+pub(crate) struct LegacyBytecode<'a> {
     /// The original bytecode slice.
     pub(crate) code: &'a [u8],
     /// The instructions.
@@ -39,56 +96,24 @@ pub struct Bytecode<'a> {
     jumpdests: BitVec,
     /// The [`SpecId`].
     pub(crate) spec_id: SpecId,
-    /// Whether the bytecode contains dynamic jumps.
+    /// Whether the bytecode contains dynamic jumps. Always false in EOF.
     has_dynamic_jumps: bool,
     /// Whether the bytecode will suspend execution.
     will_suspend: bool,
     /// Mapping from program counter to instruction.
     pc_to_inst: FxHashMap<u32, u32>,
+    /// The EOF section index, if any.
+    pub(crate) eof_section: Option<usize>,
 }
 
-impl fmt::Display for Bytecode<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let header = format!("{:^6} | {:^6} | {:^80} | {}", "ic", "pc", "opcode", "instruction");
-        writeln!(f, "{header}")?;
-        writeln!(f, "{}", "-".repeat(header.len()))?;
-        for (inst, (pc, opcode)) in self.opcodes().with_pc().enumerate() {
-            let data = self.inst(inst);
-            let opcode = opcode.to_string();
-            writeln!(f, "{inst:>6} | {pc:>6} | {opcode:<80} | {data:?}")?;
-        }
-        Ok(())
-    }
-}
-
-impl fmt::Debug for Bytecode<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Bytecode")
-            .field("code", &hex::encode(self.code))
-            .field("insts", &self.insts)
-            .field("jumpdests", &hex::encode(bitvec_as_bytes(&self.jumpdests)))
-            .field("spec_id", &self.spec_id)
-            .field("has_dynamic_jumps", &self.has_dynamic_jumps)
-            .field("will_suspend", &self.will_suspend)
-            .finish()
-    }
-}
-
-fn bitvec_as_bytes<T: bitvec::store::BitStore, O: bitvec::order::BitOrder>(
-    bitvec: &BitVec<T, O>,
-) -> &[u8] {
-    slice_as_bytes(bitvec.as_raw_slice())
-}
-
-fn slice_as_bytes<T>(a: &[T]) -> &[u8] {
-    unsafe { std::slice::from_raw_parts(a.as_ptr().cast(), std::mem::size_of_val(a)) }
-}
-
-impl<'a> Bytecode<'a> {
+impl<'a> LegacyBytecode<'a> {
     #[instrument(name = "new_bytecode", level = "debug", skip_all)]
-    pub(crate) fn new(code: &'a [u8], spec_id: SpecId) -> Self {
+    pub(crate) fn new(code: &'a [u8], spec_id: SpecId, eof_section: Option<usize>) -> Self {
+        let is_eof = eof_section.is_some();
+
         let mut insts = Vec::with_capacity(code.len() + 8);
-        let mut jumpdests = BitVec::repeat(false, code.len());
+        // JUMPDEST analysis is not done in EOF.
+        let mut jumpdests = if is_eof { BitVec::new() } else { BitVec::repeat(false, code.len()) };
         let mut pc_to_inst = FxHashMap::with_capacity_and_hasher(code.len(), Default::default());
         let op_infos = op_info_map(spec_id);
         for (inst, (pc, Opcode { opcode, immediate })) in
@@ -96,15 +121,14 @@ impl<'a> Bytecode<'a> {
         {
             pc_to_inst.insert(pc as u32, inst as u32);
 
+            if opcode == op::JUMPDEST && !is_eof {
+                jumpdests.set(pc, true)
+            }
+
             let mut data = 0;
-            match opcode {
-                op::JUMPDEST => jumpdests.set(pc, true),
-                _ => {
-                    if let Some(imm) = immediate {
-                        // `pc` is at `opcode` right now, add 1 for the data.
-                        data = Immediate::pack(pc + 1, imm.len());
-                    }
-                }
+            if let Some(imm) = immediate {
+                // `pc` is at `opcode` right now, add 1 for the data.
+                data = Immediate::pack(pc + 1, imm.len());
             }
 
             let mut flags = InstFlags::empty();
@@ -130,10 +154,11 @@ impl<'a> Bytecode<'a> {
             has_dynamic_jumps: false,
             will_suspend: false,
             pc_to_inst,
+            eof_section,
         };
 
         // Pad code to ensure there is at least one diverging instruction.
-        if bytecode.insts.last().map_or(true, |last| !last.is_diverging(bytecode.is_eof())) {
+        if !is_eof && bytecode.insts.last().map_or(true, |last| !last.is_diverging(false)) {
             bytecode.insts.push(InstData::new(op::STOP));
         }
 
@@ -205,12 +230,13 @@ impl<'a> Bytecode<'a> {
     /// Runs a list of analysis passes on the instructions.
     #[instrument(level = "debug", skip_all)]
     pub(crate) fn analyze(&mut self) -> Result<()> {
-        ensure!(!self.spec_id.is_enabled_in(SpecId::PRAGUE), "EOF is not yet implemented");
+        if !self.is_eof() {
+            self.static_jump_analysis();
+            // NOTE: `mark_dead_code` must run after `static_jump_analysis` as it can mark
+            // unreachable `JUMPDEST`s as dead code.
+            self.mark_dead_code();
+        }
 
-        self.static_jump_analysis();
-        // NOTE: `mark_dead_code` must run after `static_jump_analysis` as it can mark unreachable
-        // `JUMPDEST`s as dead code.
-        self.mark_dead_code();
         self.calc_will_suspend();
         self.construct_sections();
 
@@ -220,6 +246,8 @@ impl<'a> Bytecode<'a> {
     /// Mark `PUSH<N>` followed by `JUMP[I]` as `STATIC_JUMP` and resolve the target.
     #[instrument(name = "sj", level = "debug", skip_all)]
     fn static_jump_analysis(&mut self) {
+        debug_assert!(!self.is_eof());
+
         for jump_inst in 0..self.insts.len() {
             let jump = &self.insts[jump_inst];
             let Some(push_inst) = jump_inst.checked_sub(1) else {
@@ -263,15 +291,13 @@ impl<'a> Bytecode<'a> {
             let target = self.pc_to_inst(target_pc);
 
             // Mark the `JUMPDEST` as reachable.
-            if !self.is_eof() {
-                debug_assert_eq!(
-                    self.insts[target],
-                    op::JUMPDEST,
-                    "is_valid_jump returned true for non-JUMPDEST: \
-                     jump_inst={jump_inst} target_pc={target_pc} target={target}",
-                );
-                self.insts[target].data = 1;
-            }
+            debug_assert_eq!(
+                self.insts[target],
+                op::JUMPDEST,
+                "is_valid_jump returned true for non-JUMPDEST: \
+                 jump_inst={jump_inst} target_pc={target_pc} target={target}",
+            );
+            self.insts[target].data = 1;
 
             // Set the target on the `JUMP` instruction.
             trace!(jump_inst, target, "found jump");
@@ -285,16 +311,15 @@ impl<'a> Bytecode<'a> {
     /// unreachable code that we generate, but this is trivial for us to do and significantly speeds
     /// up code generation.
     ///
-    /// Before EOF, we can simply mark all instructions that are between diverging instructions and
+    /// We can simply mark all instructions that are between diverging instructions and
     /// `JUMPDEST`s.
-    ///
-    /// After EOF, TODO.
     #[instrument(name = "dce", level = "debug", skip_all)]
     fn mark_dead_code(&mut self) {
-        let is_eof = self.is_eof();
+        debug_assert!(!self.is_eof());
+
         let mut iter = self.insts.iter_mut().enumerate();
         while let Some((i, data)) = iter.next() {
-            if data.is_diverging(is_eof) {
+            if data.is_diverging(false) {
                 let mut end = i;
                 for (j, data) in &mut iter {
                     end = j;
@@ -313,10 +338,11 @@ impl<'a> Bytecode<'a> {
 
     /// Calculates whether the bytecode will suspend execution.
     ///
-    /// This can only happen if the bytecode contains `*CALL*` or `CREATE*` instructions.
+    /// This can only happen if the bytecode contains `*CALL*` or `*CREATE*` instructions.
     #[instrument(name = "suspend", level = "debug", skip_all)]
     fn calc_will_suspend(&mut self) {
-        let will_suspend = self.iter_insts().any(|(_, data)| data.will_suspend());
+        let is_eof = self.is_eof();
+        let will_suspend = self.iter_insts().any(|(_, data)| data.will_suspend(is_eof));
         self.will_suspend = will_suspend;
     }
 
@@ -371,7 +397,7 @@ impl<'a> Bytecode<'a> {
 
     /// Returns `true` if the bytecode is EOF.
     pub(crate) fn is_eof(&self) -> bool {
-        false
+        self.eof_section.is_some()
     }
 
     /// Returns `true` if the bytecode is small.
@@ -388,7 +414,7 @@ impl<'a> Bytecode<'a> {
 
     /// Converts a program counter (`self.code[ic]`) to an instruction (`self.inst(pc)`).
     #[inline]
-    fn pc_to_inst(&self, pc: usize) -> usize {
+    pub(crate) fn pc_to_inst(&self, pc: usize) -> usize {
         self.pc_to_inst[&(pc as u32)] as usize
     }
 
@@ -398,6 +424,85 @@ impl<'a> Bytecode<'a> {
         self.insts[inst].pc as usize
     }
     */
+}
+
+impl fmt::Display for LegacyBytecode<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let header = format!("{:^6} | {:^6} | {:^80} | {}", "ic", "pc", "opcode", "instruction");
+        writeln!(f, "{header}")?;
+        writeln!(f, "{}", "-".repeat(header.len()))?;
+        for (inst, (pc, opcode)) in self.opcodes().with_pc().enumerate() {
+            let data = self.inst(inst);
+            let opcode = opcode.to_string();
+            writeln!(f, "{inst:>6} | {pc:>6} | {opcode:<80} | {data:?}")?;
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Debug for LegacyBytecode<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Bytecode")
+            .field("code", &hex::encode(self.code))
+            .field("insts", &self.insts)
+            .field("jumpdests", &hex::encode(bitvec_as_bytes(&self.jumpdests)))
+            .field("spec_id", &self.spec_id)
+            .field("has_dynamic_jumps", &self.has_dynamic_jumps)
+            .field("will_suspend", &self.will_suspend)
+            .finish()
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct EofBytecode<'a> {
+    pub(crate) code: Cow<'a, Eof>,
+    pub(crate) sections: Vec<LegacyBytecode<'a>>,
+}
+
+impl<'a> EofBytecode<'a> {
+    // TODO: Accept revm Bytecode in the compiler
+    #[allow(dead_code)]
+    fn new(code: &'a Eof, spec_id: SpecId) -> Self {
+        Self { code: Cow::Borrowed(code), sections: vec![] }.make_sections(spec_id)
+    }
+
+    fn decode(code: &'a [u8], spec_id: SpecId) -> Result<Self> {
+        let code = Eof::decode(code.to_vec().into())?;
+        Ok(Self { code: Cow::Owned(code), sections: vec![] }.make_sections(spec_id))
+    }
+
+    fn make_sections(mut self, spec_id: SpecId) -> Self {
+        self.sections = self
+            .code
+            .body
+            .code_section
+            .iter()
+            .enumerate()
+            .map(|(section, code)| {
+                // SAFETY: Code section `Bytes` outlives `self`.
+                let code = unsafe { std::mem::transmute::<&[u8], &[u8]>(&code[..]) };
+                LegacyBytecode::new(code, spec_id, Some(section))
+            })
+            .collect();
+        self
+    }
+
+    fn analyze(&mut self) -> Result<()> {
+        for section in &mut self.sections {
+            section.analyze()?;
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Display for EofBytecode<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (i, section) in self.sections.iter().enumerate() {
+            writeln!(f, "# Section {i}")?;
+            writeln!(f, "{section}")?;
+        }
+        Ok(())
+    }
 }
 
 /// A single instruction in the bytecode.
@@ -460,7 +565,7 @@ impl InstData {
     /// Returns the length of the immediate data of this instruction.
     #[inline]
     pub(crate) const fn imm_len(&self) -> u8 {
-        imm_len(self.opcode)
+        min_imm_len(self.opcode)
     }
 
     /// Returns the number of input and output stack elements of this instruction.
@@ -484,22 +589,41 @@ impl InstData {
     /// Converts this instruction to a raw opcode in the given bytecode.
     #[inline]
     #[allow(dead_code)]
-    pub(crate) fn to_op_in<'a>(&self, bytecode: &Bytecode<'a>) -> Opcode<'a> {
+    pub(crate) fn to_op_in<'a>(&self, bytecode: &LegacyBytecode<'a>) -> Opcode<'a> {
         Opcode { opcode: self.opcode, immediate: bytecode.get_imm_of(self) }
     }
 
     /// Returns `true` if this instruction is a push instruction.
+    #[inline]
     pub(crate) fn is_push(&self) -> bool {
         matches!(self.opcode, op::PUSH0..=op::PUSH32)
     }
 
+    /// Returns `true` if this instruction is a jump instruction.
+    #[inline]
+    fn is_jump(&self, is_eof: bool) -> bool {
+        if is_eof {
+            self.is_eof_jump()
+        } else {
+            self.is_legacy_jump()
+        }
+    }
+
+    /// Returns `true` if this instruction is an EOF jump instruction (`RJUMP`/`RJUMPI`/`RJUMPV`).
+    #[inline]
+    fn is_eof_jump(&self) -> bool {
+        matches!(self.opcode, op::RJUMP | op::RJUMPI | op::RJUMPV)
+    }
+
     /// Returns `true` if this instruction is a legacy jump instruction (`JUMP`/`JUMPI`).
+    #[inline]
     pub(crate) fn is_legacy_jump(&self) -> bool {
         matches!(self.opcode, op::JUMP | op::JUMPI)
     }
 
     /// Returns `true` if this instruction is a legacy jump instruction (`JUMP`/`JUMPI`), and the
     /// target known statically.
+    #[inline]
     pub(crate) fn is_legacy_static_jump(&self) -> bool {
         self.is_legacy_jump() && self.flags.contains(InstFlags::STATIC_JUMP)
     }
@@ -532,13 +656,13 @@ impl InstData {
 
     /// Returns `true` if we know that this instruction will branch or stop execution.
     #[inline]
-    pub(crate) const fn is_branching(&self, is_eof: bool) -> bool {
-        matches!(self.opcode, op::JUMP | op::JUMPI) || self.is_diverging(is_eof)
+    pub(crate) fn is_branching(&self, is_eof: bool) -> bool {
+        self.is_jump(is_eof) || self.is_diverging(is_eof)
     }
 
     /// Returns `true` if we know that this instruction will stop execution.
     #[inline]
-    pub(crate) const fn is_diverging(&self, is_eof: bool) -> bool {
+    pub(crate) fn is_diverging(&self, is_eof: bool) -> bool {
         #[cfg(test)]
         if self.opcode == TEST_SUSPEND {
             return false;
@@ -548,21 +672,34 @@ impl InstData {
             || self.flags.contains(InstFlags::DISABLED)
             || self.flags.contains(InstFlags::UNKNOWN)
             || matches!(self.opcode, op::STOP | op::RETURN | op::REVERT | op::INVALID)
-            || (self.opcode == op::SELFDESTRUCT && !is_eof)
+            || (!is_eof && matches!(self.opcode, op::SELFDESTRUCT))
+            || (is_eof && matches!(self.opcode, op::RETF | op::RETURNCONTRACT))
     }
 
     /// Returns `true` if this instruction will suspend execution.
     #[inline]
-    pub(crate) const fn will_suspend(&self) -> bool {
+    pub(crate) const fn will_suspend(&self, is_eof: bool) -> bool {
         #[cfg(test)]
         if self.opcode == TEST_SUSPEND {
             return true;
         }
 
-        matches!(
-            self.opcode,
-            op::CALL | op::CALLCODE | op::DELEGATECALL | op::STATICCALL | op::CREATE | op::CREATE2
-        )
+        if is_eof {
+            matches!(
+                self.opcode,
+                op::EXTCALL | op::EXTDELEGATECALL | op::EXTSTATICCALL | op::EOFCREATE
+            )
+        } else {
+            matches!(
+                self.opcode,
+                op::CALL
+                    | op::CALLCODE
+                    | op::DELEGATECALL
+                    | op::STATICCALL
+                    | op::CREATE
+                    | op::CREATE2
+            )
+        }
     }
 }
 
@@ -607,6 +744,16 @@ impl Immediate {
     }
 }
 
+fn bitvec_as_bytes<T: bitvec::store::BitStore, O: bitvec::order::BitOrder>(
+    bitvec: &BitVec<T, O>,
+) -> &[u8] {
+    slice_as_bytes(bitvec.as_raw_slice())
+}
+
+fn slice_as_bytes<T>(a: &[T]) -> &[u8] {
+    unsafe { std::slice::from_raw_parts(a.as_ptr().cast(), std::mem::size_of_val(a)) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -625,5 +772,10 @@ mod tests {
         assert(1, 1);
         assert(1, 31);
         assert(1, 32);
+    }
+
+    #[test]
+    fn test_suspend_is_free() {
+        assert_eq!(op::OPCODE_INFO_JUMPTABLE[TEST_SUSPEND as usize], None);
     }
 }

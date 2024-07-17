@@ -320,10 +320,10 @@ const fn make_map(spec_id: SpecId) -> [OpcodeInfo; 256] {
         // 0xCD
         // 0xCE
         // 0xCF
-        // 0xD0
-        // 0xD1
-        // 0xD2
-        // 0xD3
+        DATALOAD  = 4, if PRAGUE_EOF;
+        DATALOADN = 3, if PRAGUE_EOF;
+        DATASIZE  = 2, if PRAGUE_EOF;
+        DATACOPY  = 3 | DYNAMIC, if PRAGUE_EOF; // [2]
         // 0xD4
         // 0xD5
         // 0xD6
@@ -336,38 +336,38 @@ const fn make_map(spec_id: SpecId) -> [OpcodeInfo; 256] {
         // 0xDD
         // 0xDE
         // 0xDF
-        // 0xE0
-        // 0xE1
-        // 0xE2
-        // 0xE3
-        // 0xE4
-        // 0xE5
-        // 0xE6
-        // 0xE7
-        // 0xE8
+        RJUMP           = 2, if PRAGUE_EOF;
+        RJUMPI          = 4, if PRAGUE_EOF;
+        RJUMPV          = 4, if PRAGUE_EOF;
+        CALLF           = 5, if PRAGUE_EOF;
+        RETF            = 3, if PRAGUE_EOF;
+        JUMPF           = 5, if PRAGUE_EOF;
+        DUPN            = 3, if PRAGUE_EOF;
+        SWAPN           = 3, if PRAGUE_EOF;
+        EXCHANGE        = 3, if PRAGUE_EOF;
         // 0xE9
         // 0xEA
         // 0xEB
-        // 0xEC
+        EOFCREATE       = DYNAMIC, if PRAGUE_EOF;
         // 0xED
-        // 0xEE
+        RETURNCONTRACT  = DYNAMIC, if PRAGUE_EOF;
         // 0xEF
-        CREATE       = DYNAMIC;
-        CALL         = DYNAMIC;
-        CALLCODE     = DYNAMIC;
-        RETURN       = DYNAMIC;
-        DELEGATECALL = DYNAMIC, if HOMESTEAD;
-        CREATE2      = DYNAMIC, if PETERSBURG;
+        CREATE          = DYNAMIC;
+        CALL            = DYNAMIC;
+        CALLCODE        = DYNAMIC;
+        RETURN          = DYNAMIC;
+        DELEGATECALL    = DYNAMIC, if HOMESTEAD;
+        CREATE2         = DYNAMIC, if PETERSBURG;
         // 0xF6
-        // 0xF7
-        // 0xF8
-        // 0xF9
-        STATICCALL   = DYNAMIC, if BYZANTIUM;
-        // 0xFB
+        RETURNDATALOAD  = 3, if PRAGUE_EOF;
+        EXTCALL         = DYNAMIC, if PRAGUE_EOF;
+        EXTDELEGATECALL = DYNAMIC, if PRAGUE_EOF;
+        STATICCALL      = DYNAMIC, if BYZANTIUM;
+        EXTSTATICCALL   = DYNAMIC, if PRAGUE_EOF;
         // 0xFC
-        REVERT       = DYNAMIC, if BYZANTIUM;
-        INVALID      = 0;
-        SELFDESTRUCT = DYNAMIC;
+        REVERT          = DYNAMIC, if BYZANTIUM;
+        INVALID         = 0;
+        SELFDESTRUCT    = DYNAMIC;
     }
     map
 }

@@ -3,10 +3,13 @@
 use crate::{Backend, Builder, Bytecode, EvmCompilerFn, EvmContext, EvmStack, Result};
 use revm_interpreter::{Contract, Gas};
 use revm_primitives::{Env, SpecId};
-use revmc_backend::{eyre::ensure, Attribute, FunctionAttributeLocation, OptimizationLevel};
+use revmc_backend::{
+    eyre::ensure, Attribute, FunctionAttributeLocation, Linkage, OptimizationLevel,
+};
 use revmc_builtins::Builtins;
 use revmc_context::RawEvmCompilerFn;
 use std::{
+    borrow::Cow,
     fs,
     io::{self, Write},
     mem,
@@ -186,6 +189,8 @@ impl<B: Backend> EvmCompiler<B> {
     ///
     /// Defaults to `true`.
     ///
+    /// Ignored for EOF bytecodes, as they are assumed to be correct.
+    ///
     /// # Safety
     ///
     /// Removing stack length checks may improve compilation speed and performance, but will result
@@ -216,13 +221,8 @@ impl<B: Backend> EvmCompiler<B> {
     /// Translates the given EVM bytecode into an internal function.
     ///
     /// NOTE: `name` must be unique for each function, as it is used as the name of the final
-    /// symbol. Use `None` for a default unique name.
-    pub fn translate(
-        &mut self,
-        name: Option<&str>,
-        bytecode: &[u8],
-        spec_id: SpecId,
-    ) -> Result<B::FuncId> {
+    /// symbol.
+    pub fn translate(&mut self, name: &str, bytecode: &[u8], spec_id: SpecId) -> Result<B::FuncId> {
         ensure!(cfg!(target_endian = "little"), "only little-endian is supported");
         ensure!(!self.finalized, "cannot compile more functions after finalizing the module");
         let bytecode = self.parse(bytecode, spec_id)?;
@@ -239,7 +239,7 @@ impl<B: Backend> EvmCompiler<B> {
     /// module is cleared or the function is freed.
     pub unsafe fn jit(
         &mut self,
-        name: Option<&str>,
+        name: &str,
         bytecode: &[u8],
         spec_id: SpecId,
     ) -> Result<EvmCompilerFn> {
@@ -310,7 +310,7 @@ impl<B: Backend> EvmCompiler<B> {
     /// Parses the given EVM bytecode. Not public API.
     #[doc(hidden)]
     pub fn parse<'a>(&mut self, bytecode: &'a [u8], spec_id: SpecId) -> Result<Bytecode<'a>> {
-        let mut bytecode = Bytecode::new(bytecode, spec_id);
+        let mut bytecode = Bytecode::new(bytecode, spec_id)?;
         bytecode.analyze()?;
         if let Some(dump_dir) = &self.dump_dir() {
             Self::dump_bytecode(dump_dir, &bytecode)?;
@@ -319,24 +319,46 @@ impl<B: Backend> EvmCompiler<B> {
     }
 
     #[instrument(name = "translate", level = "debug", skip_all)]
-    fn translate_inner(
-        &mut self,
-        name: Option<&str>,
-        bytecode: &Bytecode<'_>,
-    ) -> Result<B::FuncId> {
-        let storage;
-        let name = match name {
-            Some(name) => name,
-            None => {
-                storage = self.default_name();
-                &storage
+    fn translate_inner(&mut self, main_name: &str, bytecode: &Bytecode<'_>) -> Result<B::FuncId> {
+        let bytecodes = bytecode.as_legacy_slice();
+        assert!(!bytecodes.is_empty());
+        let eof = bytecode.as_eof();
+
+        ensure!(
+            self.backend.function_name_is_unique(main_name),
+            "function name `{main_name}` is not unique"
+        );
+
+        if let [bytecode] = bytecodes {
+            let linkage = Linkage::Public;
+            let (bcx, id) =
+                Self::make_builder(&mut self.backend, &self.config, main_name, linkage)?;
+            FunctionCx::translate(bcx, self.config, &mut self.builtins, bytecode, eof, main_name)?;
+            return Ok(id);
+        }
+
+        let make_name = |i: usize| section_mangled_name(main_name, i);
+
+        // First declare all functions.
+        let mut id = None;
+        for i in 0..bytecodes.len() {
+            let linkage = if i == 0 { Linkage::Public } else { Linkage::Private };
+            let (_, local_id) =
+                Self::make_builder(&mut self.backend, &self.config, &make_name(i), linkage)?;
+            if i == 0 {
+                id = Some(local_id);
             }
-        };
+        }
 
-        let (bcx, id) = Self::make_builder(&mut self.backend, &self.config, name)?;
-        FunctionCx::translate(bcx, self.config, &mut self.builtins, bytecode)?;
+        // Then translate them.
+        for (i, bytecode) in bytecodes.iter().enumerate() {
+            let linkage = if i == 0 { Linkage::Public } else { Linkage::Private };
+            let (bcx, _) =
+                Self::make_builder(&mut self.backend, &self.config, &make_name(i), linkage)?;
+            FunctionCx::translate(bcx, self.config, &mut self.builtins, bytecode, eof, main_name)?;
+        }
 
-        Ok(id)
+        Ok(id.unwrap())
     }
 
     #[instrument(level = "debug", skip_all)]
@@ -381,6 +403,7 @@ impl<B: Backend> EvmCompiler<B> {
         backend: &'a mut B,
         config: &FcxConfig,
         name: &str,
+        linkage: Linkage,
     ) -> Result<(B::Builder<'a>, B::FuncId)> {
         fn size_align<T>(i: usize) -> (usize, usize, usize) {
             (i, mem::size_of::<T>(), mem::align_of::<T>())
@@ -409,7 +432,6 @@ impl<B: Backend> EvmCompiler<B> {
             ],
         );
         debug_assert_eq!(params.len(), param_names.len());
-        let linkage = revmc_backend::Linkage::Public;
         let (mut bcx, id) = backend.build_function(name, ret, params, param_names, linkage)?;
 
         // Function attributes.
@@ -476,12 +498,6 @@ impl<B: Backend> EvmCompiler<B> {
         Ok(())
     }
 
-    fn default_name(&mut self) -> String {
-        let name = format!("__evm_compiler_{}", self.function_counter);
-        self.function_counter += 1;
-        name
-    }
-
     fn dump_dir(&self) -> Option<PathBuf> {
         let mut dump_dir = self.out_dir.clone()?;
         if let Some(name) = &self.name {
@@ -536,7 +552,16 @@ mod default_attrs {
     pub(crate) fn for_ref_t<T>() -> impl Iterator<Item = Attribute> {
         for_sized_ref(size_align::<T>())
     }
+
     pub(crate) fn size_align<T>() -> (usize, usize) {
         (std::mem::size_of::<T>(), std::mem::align_of::<T>())
+    }
+}
+
+fn section_mangled_name(main_name: &str, i: usize) -> Cow<'_, str> {
+    if i == 0 {
+        Cow::Borrowed(main_name)
+    } else {
+        Cow::Owned(format!("{main_name}_section_{i}"))
     }
 }

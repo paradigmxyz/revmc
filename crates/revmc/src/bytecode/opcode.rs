@@ -1,4 +1,4 @@
-use revm_interpreter::OPCODE_INFO_JUMPTABLE;
+use revm_interpreter::{opcode as op, OPCODE_INFO_JUMPTABLE};
 use std::{fmt, slice};
 
 /// A bytecode iterator that yields opcodes and their immediate data, alongside the program counter.
@@ -93,8 +93,13 @@ impl<'a> Iterator for OpcodesIter<'a> {
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
-        self.iter.next().copied().map(|opcode| {
-            let len = imm_len(opcode) as usize;
+        self.iter.next().map(|&opcode| {
+            let mut len = min_imm_len(opcode) as usize;
+            if opcode == op::RJUMPV {
+                if let Some(&max_case) = self.iter.as_slice().first() {
+                    len += (max_case as usize + 1) * 2;
+                }
+            }
             let immediate = if len > 0 {
                 let r = self.iter.as_slice().get(..len);
                 // TODO: Use `advance_by` when stable.
@@ -145,8 +150,11 @@ impl fmt::Display for Opcode<'_> {
 }
 
 /// Returns the length of the immediate data for the given opcode, or `0` if none.
+///
+/// This is the full length for all opcodes that have an immediate, except for `RJUMPV`, which
+/// currently is the only opcode which has a variable length immediate.
 #[inline]
-pub const fn imm_len(op: u8) -> u8 {
+pub const fn min_imm_len(op: u8) -> u8 {
     if let Some(info) = &OPCODE_INFO_JUMPTABLE[op as usize] {
         info.immediate_size()
     } else {

@@ -157,7 +157,7 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let f_id = compiler.translate(Some(name), bytecode, spec_id)?;
+    let f_id = compiler.translate(name, bytecode, spec_id)?;
 
     let mut load = cli.load;
     if cli.aot {
@@ -292,6 +292,7 @@ pub enum SpecIdValueEnum {
     SHANGHAI,
     CANCUN,
     PRAGUE,
+    PRAGUE_EOF,
     LATEST,
 }
 
@@ -317,6 +318,7 @@ impl From<SpecIdValueEnum> for SpecId {
             SpecIdValueEnum::SHANGHAI => Self::SHANGHAI,
             SpecIdValueEnum::CANCUN => Self::CANCUN,
             SpecIdValueEnum::PRAGUE => Self::PRAGUE,
+            SpecIdValueEnum::PRAGUE_EOF => Self::PRAGUE_EOF,
             SpecIdValueEnum::LATEST => Self::LATEST,
         }
     }

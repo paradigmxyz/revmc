@@ -12,7 +12,8 @@ use cranelift_module::{DataDescription, FuncId, FuncOrDataId, Linkage, Module, M
 use cranelift_object::{ObjectBuilder, ObjectModule};
 use pretty_clif::CommentWriter;
 use revmc_backend::{
-    eyre::eyre, Backend, BackendTypes, Builder, OptimizationLevel, Result, TypeMethods, U256,
+    eyre::eyre, Backend, BackendTypes, Builder, OptimizationLevel, Result, TailCallKind,
+    TypeMethods, U256,
 };
 use std::{
     collections::HashMap,
@@ -167,6 +168,10 @@ impl Backend for EvmCraneliftBackend {
         self.module.is_aot()
     }
 
+    fn function_name_is_unique(&self, name: &str) -> bool {
+        self.module.get().get_name(name).is_none()
+    }
+
     fn dump_ir(&mut self, path: &Path) -> Result<()> {
         crate::pretty_clif::write_clif_file(
             path,
@@ -192,6 +197,7 @@ impl Backend for EvmCraneliftBackend {
         param_names: &[&str],
         linkage: revmc_backend::Linkage,
     ) -> Result<(Self::Builder<'_>, FuncId)> {
+        self.ctx.func.clear();
         if let Some(ret) = ret {
             self.ctx.func.signature.returns.push(AbiParam::new(ret));
         }
@@ -693,7 +699,15 @@ impl<'a> Builder for EvmCraneliftBuilder<'a> {
         self.bcx.ins().iadd(ptr, offset)
     }
 
-    fn call(&mut self, function: Self::Function, args: &[Self::Value]) -> Option<Self::Value> {
+    fn tail_call(
+        &mut self,
+        function: Self::Function,
+        args: &[Self::Value],
+        tail_call: TailCallKind,
+    ) -> Option<Self::Value> {
+        if tail_call != TailCallKind::None {
+            todo!();
+        }
         let ins = self.bcx.ins().call(function, args);
         self.bcx.inst_results(ins).first().copied()
     }

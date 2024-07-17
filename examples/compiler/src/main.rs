@@ -35,7 +35,7 @@ fn main() -> eyre::Result<()> {
     let context = revmc::llvm::inkwell::context::Context::create();
     let backend = EvmLlvmBackend::new(&context, false, OptimizationLevel::Aggressive)?;
     let mut compiler = EvmCompiler::new(backend);
-    let f = unsafe { compiler.jit(Some("test"), &bytecode, SpecId::CANCUN) }
+    let f = unsafe { compiler.jit("test", &bytecode, SpecId::CANCUN) }
         .wrap_err("Failed to JIT-compile code")?;
 
     // Set up runtime context and run the function.
