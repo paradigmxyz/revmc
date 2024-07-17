@@ -38,7 +38,7 @@ pub struct EvmContext<'a> {
     /// An index that is used internally to keep track of where execution should resume.
     /// `0` is the initial state.
     #[doc(hidden)]
-    pub resume_at: u32,
+    pub resume_at: usize,
 }
 
 impl fmt::Debug for EvmContext<'_> {
@@ -61,6 +61,10 @@ impl<'a> EvmContext<'a> {
         host: &'b mut dyn HostExt,
     ) -> (Self, &'a mut EvmStack, &'a mut usize) {
         let (stack, stack_len) = EvmStack::from_interpreter_stack(&mut interpreter.stack);
+        let resume_at = ResumeAt::load(
+            interpreter.instruction_pointer,
+            interpreter.contract.bytecode.original_byte_slice(),
+        );
         let this = Self {
             memory: &mut interpreter.shared_memory,
             contract: &mut interpreter.contract,
@@ -69,7 +73,7 @@ impl<'a> EvmContext<'a> {
             next_action: &mut interpreter.next_action,
             return_data: &interpreter.return_data_buffer,
             is_static: interpreter.is_static,
-            resume_at: ResumeAt::load(interpreter.instruction_pointer),
+            resume_at,
         };
         (this, stack, stack_len)
     }
@@ -264,7 +268,13 @@ impl EvmCompilerFn {
         }
 
         let resume_at = ecx.resume_at;
+        // Set in EXTCALL soft failure.
+        let return_data_is_empty = ecx.return_data.is_empty();
+
         ResumeAt::store(&mut interpreter.instruction_pointer, resume_at);
+        if return_data_is_empty {
+            interpreter.return_data_buffer.clear();
+        }
 
         interpreter.instruction_result = result;
         if interpreter.next_action.is_some() {
@@ -285,6 +295,8 @@ impl EvmCompilerFn {
     /// - `ecx`: The context object.
     ///
     /// These conditions are enforced at runtime if `debug_assertions` is set to `true`.
+    ///
+    /// Use of this method is discouraged, as setup and cleanup need to be done manually.
     ///
     /// # Safety
     ///
@@ -308,6 +320,8 @@ impl EvmCompilerFn {
     }
 
     /// Same as [`call`](Self::call) but with `#[inline(never)]`.
+    ///
+    /// Use of this method is discouraged, as setup and cleanup need to be done manually.
     ///
     /// # Safety
     ///
@@ -718,18 +732,16 @@ impl EvmWord {
 struct ResumeAt;
 
 impl ResumeAt {
-    fn load(ip: *const u8) -> u32 {
-        // Arbitrary limit.
-        // TODO: Use upper bits?
-        if (ip as usize) <= u16::MAX as usize {
-            ip as u32
-        } else {
+    fn load(ip: *const u8, code: &[u8]) -> usize {
+        if code.as_ptr_range().contains(&ip) {
             0
+        } else {
+            ip as usize
         }
     }
 
-    fn store(ip: &mut *const u8, value: u32) {
-        *ip = value as _;
+    fn store(ip: &mut *const u8, value: usize) {
+        *ip = value as *const u8;
     }
 }
 
