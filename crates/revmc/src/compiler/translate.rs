@@ -47,7 +47,14 @@ impl Default for FcxConfig {
 type Incoming<B> = Vec<(<B as BackendTypes>::Value, <B as BackendTypes>::BasicBlock)>;
 
 /// A list of `switch` targets.
+#[allow(dead_code)]
 type SwitchTargets<B> = Vec<(u64, <B as BackendTypes>::BasicBlock)>;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ResumeKind {
+    Blocks,
+    Indexes,
+}
 
 pub(super) struct FunctionCx<'a, B: Backend> {
     // Configuration.
@@ -107,8 +114,10 @@ pub(super) struct FunctionCx<'a, B: Backend> {
     /// The return block that all return instructions branch to.
     return_block: Option<B::BasicBlock>,
 
+    /// The kind of resume mechanism to use.
+    resume_kind: ResumeKind,
     /// `resume_block` switch values.
-    resume_blocks: SwitchTargets<B>,
+    resume_blocks: Vec<B::BasicBlock>,
     /// `suspend_block` incoming values.
     suspend_blocks: Incoming<B>,
     /// The suspend block that all suspend instructions branch to.
@@ -268,6 +277,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             incoming_returns: Vec::new(),
             return_block: Some(return_block),
 
+            resume_kind: ResumeKind::Indexes,
             resume_blocks: Vec::new(),
             suspend_blocks: Vec::new(),
             suspend_block,
@@ -315,14 +325,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let post_entry_block = fx.bcx.create_block_after(entry_block, "entry.post");
         let resume_block = fx.bcx.create_block_after(post_entry_block, "resume");
         fx.bcx.br(post_entry_block);
-        // Important: set the first resume target to be the start of the instructions.
-        let generate_resume = bytecode.may_suspend()
-            || (bytecode.is_eof()
-                && bytecode.eof_section == Some(0)
-                && fx.expect_full_eof().any_may_suspend);
-        if generate_resume {
-            fx.add_resume_at(first_inst_block);
-        }
 
         // Translate individual instructions into their respective blocks.
         for (inst, _) in bytecode.iter_insts() {
@@ -332,7 +334,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         // Finalize the dynamic jump table.
         fx.bcx.switch_to_block(unreachable_block);
         fx.bcx.unreachable();
-        let i32_type = fx.bcx.type_int(32);
         if bytecode.has_dynamic_jumps() {
             fx.bcx.switch_to_block(fx.dynamic_jump_table);
             // TODO: Manually reduce to i32?
@@ -370,16 +371,26 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 fx.stack_len.store_imm(&mut fx.bcx, 0);
             }
         };
+        let generate_resume = bytecode.may_suspend()
+            || (bytecode.is_eof()
+                && bytecode.eof_section == Some(0)
+                && fx.expect_full_eof().any_may_suspend);
         if generate_resume {
-            let get_ecx_resume_at = |fx: &mut Self| {
-                let offset =
-                    fx.bcx.iconst(fx.isize_type, mem::offset_of!(EvmContext<'_>, resume_at) as i64);
-                let name = "ecx.resume_at.addr";
-                fx.bcx.gep(fx.i8_type, fx.ecx, &[offset], name)
+            let get_ecx_resume_at_ptr = |fx: &mut Self| {
+                fx.get_field(
+                    fx.ecx,
+                    mem::offset_of!(EvmContext<'_>, resume_at),
+                    "ecx.resume_at.addr",
+                )
             };
 
+            let kind = fx.resume_kind;
+            let resume_ty = if kind == ResumeKind::Blocks { fx.bcx.type_ptr() } else { isize_type };
+
             // Dispatch to the relevant sections.
-            if bytecode.eof_section == Some(0)
+            // TODO: Doesn't work
+            if cfg!(any())
+                && bytecode.eof_section == Some(0)
                 && bytecode.is_eof()
                 && fx.expect_full_eof().any_may_suspend
             {
@@ -393,28 +404,26 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                         fx.add_resume_at(block);
                     }
                 }
-                debug_assert_eq!(fx.resume_blocks.len(), 1 + eof.total_resumes);
+                debug_assert_eq!(fx.resume_blocks.len(), eof.total_resumes);
                 fx.eof = Some(eof);
             }
 
             // Resume block: load the `resume_at` value and switch to the corresponding block.
             // Invalid values are treated as unreachable.
             {
-                let default = fx.bcx.create_block_after(resume_block, "resume_invalid");
-                fx.bcx.switch_to_block(default);
-                fx.call_panic("invalid `resume_at` value");
-
-                // Special-case the zero block to load 0 into the length if possible.
-                let resume_is_zero_block =
-                    fx.bcx.create_block_after(resume_block, "resume_is_zero");
+                // Special-case the no resume case to load 0 into the length if possible.
+                let no_resume_block = fx.bcx.create_block_after(resume_block, "no_resume");
 
                 fx.bcx.switch_to_block(post_entry_block);
-                let resume_at = get_ecx_resume_at(&mut fx);
-                let resume_at = fx.bcx.load(i32_type, resume_at, "resume_at");
-                let is_resume_zero = fx.bcx.icmp_imm(IntCC::Equal, resume_at, 0);
-                fx.bcx.brif(is_resume_zero, resume_is_zero_block, resume_block);
+                let resume_at = get_ecx_resume_at_ptr(&mut fx);
+                let resume_at = fx.bcx.load(resume_ty, resume_at, "ecx.resume_at");
+                let no_resume = match kind {
+                    ResumeKind::Blocks => fx.bcx.is_null(resume_at),
+                    ResumeKind::Indexes => fx.bcx.icmp_imm(IntCC::Equal, resume_at, 0),
+                };
+                fx.bcx.brif(no_resume, no_resume_block, resume_block);
 
-                fx.bcx.switch_to_block(resume_is_zero_block);
+                fx.bcx.switch_to_block(no_resume_block);
                 load_len_at_start(&mut fx);
                 fx.bcx.br(first_inst_block);
 
@@ -422,15 +431,32 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 fx.bcx.switch_to_block(resume_block);
                 let stack_len = fx.bcx.load(fx.isize_type, stack_len_arg, "stack_len");
                 fx.stack_len.store(&mut fx.bcx, stack_len);
-                let targets = &fx.resume_blocks[1..]; // Zero case is handled above.
-                fx.bcx.switch(resume_at, default, targets, true);
+                match kind {
+                    ResumeKind::Blocks => {
+                        fx.bcx.br_indirect(resume_at, &fx.resume_blocks);
+                    }
+                    ResumeKind::Indexes => {
+                        let default = fx.bcx.create_block_after(resume_block, "resume_invalid");
+                        fx.bcx.switch_to_block(default);
+                        fx.call_panic("invalid `resume_at` value");
+
+                        fx.bcx.switch_to_block(resume_block);
+                        let targets = fx
+                            .resume_blocks
+                            .iter()
+                            .enumerate()
+                            .map(|(i, b)| (i as u64 + 1, *b))
+                            .collect::<Vec<_>>();
+                        fx.bcx.switch(resume_at, default, &targets, true);
+                    }
+                }
             }
 
             // Suspend block: store the `resume_at` value and return `CallOrCreate`.
             {
                 fx.bcx.switch_to_block(fx.suspend_block);
-                let resume_value = fx.bcx.phi(i32_type, &fx.suspend_blocks);
-                let resume_at = get_ecx_resume_at(&mut fx);
+                let resume_value = fx.bcx.phi(resume_ty, &fx.suspend_blocks);
+                let resume_at = get_ecx_resume_at_ptr(&mut fx);
                 fx.bcx.store(resume_value, resume_at);
 
                 fx.build_return_imm(InstructionResult::CallOrCreate);
@@ -1391,10 +1417,14 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     /// Suspend execution, storing the resume point in the context.
     fn suspend(&mut self) {
         // Register the next instruction as the resume block.
+        let idx = self.resume_blocks.len();
         let value = self.add_resume_at(self.inst_entries[self.current_inst + 1]);
 
         // Register the current block as the suspend block.
-        let value = self.bcx.iconst(self.bcx.type_int(32), value as i64);
+        let value = match value {
+            Some(value) => value,
+            None => self.bcx.iconst(self.isize_type, idx as i64 + 1),
+        };
         self.suspend_blocks.push((value, self.bcx.current_block().unwrap()));
 
         // Branch to the suspend block.
@@ -1402,9 +1432,13 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     }
 
     /// Adds a resume point and returns its index.
-    fn add_resume_at(&mut self, block: B::BasicBlock) -> usize {
-        let value = self.resume_blocks.len();
-        self.resume_blocks.push((value as u64, block));
+    fn add_resume_at(&mut self, block: B::BasicBlock) -> Option<B::Value> {
+        let value = self.bcx.block_addr(block);
+        if self.resume_blocks.is_empty() {
+            self.resume_kind =
+                if value.is_some() { ResumeKind::Blocks } else { ResumeKind::Indexes };
+        }
+        self.resume_blocks.push(block);
         value
     }
 

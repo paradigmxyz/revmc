@@ -627,6 +627,10 @@ impl<'a, 'ctx> Builder for EvmLlvmBuilder<'a, 'ctx> {
         self.bcx.get_insert_block()
     }
 
+    fn block_addr(&mut self, block: Self::BasicBlock) -> Option<Self::Value> {
+        unsafe { block.get_address().map(Into::into) }
+    }
+
     fn add_comment_to_current_inst(&mut self, comment: &str) {
         let Some(block) = self.current_block() else { return };
         let Some(ins) = block.get_last_instruction() else { return };
@@ -772,6 +776,10 @@ impl<'a, 'ctx> Builder for EvmLlvmBuilder<'a, 'ctx> {
             let weights = iter::once(1).chain(iter::repeat(DEFAULT_WEIGHT).take(targets.len()));
             self.set_branch_weights(inst, weights);
         }
+    }
+
+    fn br_indirect(&mut self, address: Self::Value, destinations: &[Self::BasicBlock]) {
+        let _ = self.bcx.build_indirect_branch(address, destinations).unwrap();
     }
 
     fn phi(&mut self, ty: Self::Type, incoming: &[(Self::Value, Self::BasicBlock)]) -> Self::Value {

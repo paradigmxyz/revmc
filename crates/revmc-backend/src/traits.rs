@@ -245,6 +245,7 @@ pub trait Builder: BackendTypes + TypeMethods {
     fn seal_all_blocks(&mut self);
     fn set_current_block_cold(&mut self);
     fn current_block(&mut self) -> Option<Self::BasicBlock>;
+    fn block_addr(&mut self, block: Self::BasicBlock) -> Option<Self::Value>;
 
     fn add_comment_to_current_inst(&mut self, comment: &str);
 
@@ -304,6 +305,7 @@ pub trait Builder: BackendTypes + TypeMethods {
         targets: &[(u64, Self::BasicBlock)],
         default_is_cold: bool,
     );
+    fn br_indirect(&mut self, address: Self::Value, destinations: &[Self::BasicBlock]);
     fn phi(&mut self, ty: Self::Type, incoming: &[(Self::Value, Self::BasicBlock)]) -> Self::Value;
     fn select(
         &mut self,

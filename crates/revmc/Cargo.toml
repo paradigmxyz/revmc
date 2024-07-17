@@ -32,7 +32,7 @@ revm-interpreter.workspace = true
 revm-primitives.workspace = true
 
 bitflags = "2.5"
-bitvec = "1"
+bitvec = "1.0"
 rustc-hash.workspace = true
 tracing.workspace = true
 
