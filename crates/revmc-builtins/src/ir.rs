@@ -235,7 +235,7 @@ builtins! {
     Sload          = __revmc_builtin_sload(@[ecx] ptr, @[sp] ptr, u8) Some(u8),
     Sstore         = __revmc_builtin_sstore(@[ecx] ptr, @[sp] ptr, u8) Some(u8),
     Msize          = __revmc_builtin_msize(@[ecx] ptr) Some(usize),
-    Tstore         = __revmc_builtin_tstore(@[ecx] ptr, @[sp] ptr) None,
+    Tstore         = __revmc_builtin_tstore(@[ecx] ptr, @[sp] ptr) Some(u8),
     Tload          = __revmc_builtin_tload(@[ecx] ptr, @[sp] ptr) None,
     Mcopy          = __revmc_builtin_mcopy(@[ecx] ptr, @[sp] ptr) Some(u8),
     Log            = __revmc_builtin_log(@[ecx] ptr, @[sp_dyn] ptr, u8) Some(u8),
