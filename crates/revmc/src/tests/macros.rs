@@ -3,6 +3,8 @@ macro_rules! matrix_tests {
         #[cfg(feature = "llvm")]
         mod llvm {
             use super::*;
+            #[allow(unused_imports)]
+            use similar_asserts::assert_eq;
 
             fn run_llvm(compiler: &mut EvmCompiler<crate::llvm::EvmLlvmBackend<'_>>) {
                 crate::tests::set_test_dump(compiler, module_path!());
@@ -24,6 +26,8 @@ macro_rules! matrix_tests {
     ($name:ident = | $compiler:ident | $e:expr) => {
         mod $name {
             use super::*;
+            #[allow(unused_imports)]
+            use similar_asserts::assert_eq;
 
             fn run_generic<B: Backend>($compiler: &mut EvmCompiler<B>) {
                 $e;
@@ -35,6 +39,8 @@ macro_rules! matrix_tests {
     ($name:ident = $run:ident) => {
         mod $name {
             use super::*;
+            #[allow(unused_imports)]
+            use similar_asserts::assert_eq;
 
             matrix_tests!($run);
         }
@@ -55,6 +61,8 @@ macro_rules! tests {
         $(
             mod $group {
                 use super::*;
+                #[allow(unused_imports)]
+                use similar_asserts::assert_eq;
 
                 tests!(@cases $($t)*);
             }

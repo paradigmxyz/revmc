@@ -28,8 +28,6 @@ use std::{
 // TODO: Test on big-endian hardware.
 // It probably doesn't work when loading Rust U256 into native endianness.
 
-// TODO(EOF): Return stack and `return_stack_len` don't work across suspends.
-
 mod translate;
 use translate::{FcxConfig, FunctionCx};
 

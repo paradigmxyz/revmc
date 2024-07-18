@@ -188,7 +188,7 @@ tests! {
             expected_stack: &[0_U256],
             expected_gas: 2 + 10,
         }),
-        // TODO: Doesn't pass on aarch64
+        // TODO: Doesn't pass on aarch64 (???)
         // bad_jumpi3(@raw {
         //     bytecode: &[op::JUMPDEST, op::PUSH0, op::JUMPI],
         //     expected_return: InstructionResult::StackUnderflow,
@@ -959,8 +959,56 @@ tests! {
                 }]);
             }),
         }),
-        // TODO: eofcreate
-        // TODO: returncontract
+        eofcreate(@raw {
+            bytecode: &eof(&[
+                op::PUSH1, 0x69, op::PUSH0, op::MSTORE,
+                op::PUSH1, 32, op::PUSH0, op::PUSH1, 0x70, op::PUSH1, 0x42,
+                op::EOFCREATE, 0x00,
+                op::STOP,
+            ]),
+            spec_id: SpecId::PRAGUE_EOF,
+            expected_return: InstructionResult::CallOrCreate,
+            expected_memory: &0x69_U256.to_be_bytes::<32>(),
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+            expected_next_action: InterpreterAction::EOFCreate {
+                inputs: Box::new(revm_interpreter::EOFCreateInputs {
+                    caller: DEF_ADDR,
+                    value: 0x42_U256,
+                    gas_limit: 66899,
+                    kind: revm_interpreter::EOFCreateKind::Opcode {
+                        initcode: primitives::Eof::decode(eof_subcontainer()).unwrap(),
+                        input: 0x69_U256.to_be_bytes::<32>().into(),
+                        created_address: DEF_ADDR.create2_from_code(0x70_U256.to_be_bytes::<32>(), &eof_subcontainer()),
+                    },
+                }),
+            },
+        }),
+        returncontract(@raw {
+            bytecode: &eof(&[op::PUSH1, 32, op::PUSH0, op::RETURNCONTRACT, 0x00]),
+            spec_id: SpecId::PRAGUE_EOF,
+            expected_return: InstructionResult::ReturnContract,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+            expected_memory: &[0; 32],
+            expected_next_action: InterpreterAction::Return {
+                result: InterpreterResult {
+                    gas: {
+                        let mut gas = Gas::new(DEF_GAS_LIMIT);
+                        let _ = gas.record_cost(8);
+                        gas
+                    },
+                    result: InstructionResult::ReturnContract,
+                    output: [&{
+                        // ef00010100040200010001040040000080000000
+                        let mut sub = eof_subcontainer().to_vec();
+                        sub[13] += 32;
+                        sub
+                    }[..], &[0u8; 32][..]].concat().into(),
+                }
+            },
+            modify_ecx: Some(|ecx| {
+                ecx.is_eof_init = true;
+            }),
+        }),
         create(@raw {
             bytecode: &[op::PUSH1, 0x69, op::PUSH0, op::MSTORE, op::PUSH1, 32, op::PUSH0, op::PUSH1, 0x42, op::CREATE],
             expected_return: InstructionResult::CallOrCreate,
@@ -1026,12 +1074,95 @@ tests! {
                 }),
             },
         }),
-        // TODO: callcode
-        // TODO: delegatecall
-        // TODO: extcall
-        // TODO: extdelegatecall
-        // TODO: staticcall
-        // TODO: extstaticcall
+        callcode(@raw {
+            bytecode: &[
+                op::PUSH1, 1, // ret length
+                op::PUSH1, 2, // ret offset
+                op::PUSH1, 3, // args length
+                op::PUSH1, 4, // args offset
+                op::PUSH1, 5, // value
+                op::PUSH1, 6, // address
+                op::PUSH1, 7, // gas
+                op::CALLCODE,
+            ],
+            expected_return: InstructionResult::CallOrCreate,
+            expected_memory: MEMORY_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+            expected_next_action: ACTION_WHAT_INTERPRETER_SAYS,
+        }),
+        delegatecall(@raw {
+            bytecode: &[
+                op::PUSH1, 1, // ret length
+                op::PUSH1, 2, // ret offset
+                op::PUSH1, 3, // args length
+                op::PUSH1, 4, // args offset
+                op::PUSH1, 5, // address
+                op::PUSH1, 6, // gas
+                op::DELEGATECALL,
+            ],
+            expected_return: InstructionResult::CallOrCreate,
+            expected_memory: MEMORY_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+            expected_next_action: ACTION_WHAT_INTERPRETER_SAYS,
+        }),
+        extcall(@raw {
+            bytecode: &eof(&[
+                op::PUSH1, 1, // value
+                op::PUSH1, 2, // args length
+                op::PUSH1, 3, // args offset
+                op::PUSH1, 4, // address
+                op::EXTCALL,
+                op::STOP,
+            ]),
+            spec_id: SpecId::PRAGUE_EOF,
+            expected_return: InstructionResult::CallOrCreate,
+            expected_memory: MEMORY_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+            expected_next_action: ACTION_WHAT_INTERPRETER_SAYS,
+        }),
+        extdelegatecall(@raw {
+            bytecode: &eof(&[
+                op::PUSH1, 1, // args length
+                op::PUSH1, 2, // args offset
+                op::PUSH1, 3, // address
+                op::EXTDELEGATECALL,
+                op::STOP,
+            ]),
+            spec_id: SpecId::PRAGUE_EOF,
+            expected_return: InstructionResult::CallOrCreate,
+            expected_memory: MEMORY_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+            expected_next_action: ACTION_WHAT_INTERPRETER_SAYS,
+        }),
+        staticcall(@raw {
+            bytecode: &[
+                op::PUSH1, 1, // ret length
+                op::PUSH1, 2, // ret offset
+                op::PUSH1, 3, // args length
+                op::PUSH1, 4, // args offset
+                op::PUSH1, 5, // address
+                op::PUSH1, 6, // gas
+                op::STATICCALL,
+            ],
+            expected_return: InstructionResult::CallOrCreate,
+            expected_memory: MEMORY_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+            expected_next_action: ACTION_WHAT_INTERPRETER_SAYS,
+        }),
+        extstaticcall(@raw {
+            bytecode: &eof(&[
+                op::PUSH1, 1, // args length
+                op::PUSH1, 2, // args offset
+                op::PUSH1, 3, // address
+                op::EXTSTATICCALL,
+                op::STOP,
+            ]),
+            spec_id: SpecId::PRAGUE_EOF,
+            expected_return: InstructionResult::CallOrCreate,
+            expected_memory: MEMORY_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+            expected_next_action: ACTION_WHAT_INTERPRETER_SAYS,
+        }),
         ret(@raw {
             bytecode: &[op::PUSH1, 0x69, op::PUSH0, op::MSTORE, op::PUSH1, 32, op::PUSH0, op::RETURN],
             expected_return: InstructionResult::Return,
@@ -1127,8 +1258,11 @@ fn eof_sections(code: &[&'static [u8]]) -> Bytes {
 }
 
 // We have to expose this because validation fails at invalid type sections
-#[track_caller]
 fn eof_sections_unchecked(code: &[&'static [u8]]) -> primitives::Eof {
+    eof_body(code, vec![eof_subcontainer()]).into_eof()
+}
+
+fn eof_body(code: &[&'static [u8]], containers: Vec<Bytes>) -> primitives::eof::EofBody {
     revm_primitives::eof::EofBody {
         types_section: {
             let mut types =
@@ -1143,11 +1277,14 @@ fn eof_sections_unchecked(code: &[&'static [u8]]) -> primitives::Eof {
             types
         },
         code_section: code.iter().copied().map(Bytes::from_static).collect(),
-        container_section: vec![],
+        container_section: containers,
         data_section: Bytes::from_static(DEF_DATA),
         is_data_filled: false,
     }
-    .into_eof()
+}
+
+fn eof_subcontainer() -> Bytes {
+    eof_body(&[&[op::STOP]], vec![]).into_eof().raw
 }
 
 fn bytecode_unop(op: u8, a: U256) -> [u8; 34] {

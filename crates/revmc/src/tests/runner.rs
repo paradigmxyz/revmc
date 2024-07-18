@@ -4,6 +4,7 @@ use revm_interpreter::{opcode as op, Contract, DummyHost, Host};
 use revm_primitives::{
     spec_to_generic, BlobExcessGasAndPrice, BlockEnv, CfgEnv, Env, HashMap, TxEnv,
 };
+use similar_asserts::assert_eq;
 use std::{fmt, path::Path, sync::OnceLock};
 
 pub struct TestCase<'a> {
