@@ -910,7 +910,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 self.call_fallible_builtin(Builtin::Sload, &[self.ecx, sp, spec_id]);
             }
             op::SSTORE => {
-                self.fail_if_staticcall(InstructionResult::StateChangeDuringStaticCall);
                 let sp = self.sp_after_inputs();
                 let spec_id = self.const_spec_id();
                 self.call_fallible_builtin(Builtin::Sstore, &[self.ecx, sp, spec_id]);
@@ -982,9 +981,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 let _ = self.call_builtin(Builtin::Tload, &[self.ecx, sp]);
             }
             op::TSTORE => {
-                self.fail_if_staticcall(InstructionResult::StateChangeDuringStaticCall);
                 let sp = self.sp_after_inputs();
-                let _ = self.call_builtin(Builtin::Tstore, &[self.ecx, sp]);
+                self.call_fallible_builtin(Builtin::Tstore, &[self.ecx, sp]);
             }
             op::MCOPY => {
                 let sp = self.sp_after_inputs();
@@ -1008,7 +1006,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             op::SWAP1..=op::SWAP16 => self.swap((opcode - op::SWAP1 + 1) as usize),
 
             op::LOG0..=op::LOG4 => {
-                self.fail_if_staticcall(InstructionResult::StateChangeDuringStaticCall);
                 let n = opcode - op::LOG0;
                 let sp = self.sp_after_inputs();
                 let n = self.bcx.iconst(self.i8_type, n as i64);
@@ -1165,7 +1162,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             }
             op::INVALID => goto_return!(fail InstructionResult::InvalidFEOpcode),
             op::SELFDESTRUCT => {
-                self.fail_if_staticcall(InstructionResult::StateChangeDuringStaticCall);
                 let sp = self.sp_after_inputs();
                 let spec_id = self.const_spec_id();
                 self.call_fallible_builtin(Builtin::SelfDestruct, &[self.ecx, sp, spec_id]);
@@ -1223,15 +1219,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         })
     }
 
-    /// Returns an error if the current context is a static call.
-    fn fail_if_staticcall(&mut self, ret: InstructionResult) {
-        let ptr =
-            self.get_field(self.ecx, mem::offset_of!(EvmContext<'_>, is_static), "ecx.is_static");
-        let bool = self.bcx.type_int(1);
-        let is_static = self.bcx.load(bool, ptr, "is_static");
-        self.build_check(is_static, ret)
-    }
-
     /// Duplicates the `n`th value from the top of the stack.
     /// `n` cannot be `0`.
     fn dup(&mut self, n: usize) {
@@ -1275,7 +1262,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
     /// Builds a `CREATE` or `CREATE2` instruction.
     fn create_common(&mut self, create_kind: CreateKind) {
-        self.fail_if_staticcall(InstructionResult::StateChangeDuringStaticCall);
         let sp = self.sp_after_inputs();
         let spec_id = self.const_spec_id();
         let create_kind = self.bcx.iconst(self.i8_type, create_kind as i64);
