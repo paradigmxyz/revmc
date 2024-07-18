@@ -43,6 +43,14 @@ macro_rules! gas_opt {
     };
 }
 
+macro_rules! ensure_non_staticcall {
+    ($ecx:expr) => {
+        if $ecx.is_static {
+            return InstructionResult::StateChangeDuringStaticCall;
+        }
+    };
+}
+
 macro_rules! ensure_memory {
     ($ecx:expr, $offset:expr, $len:expr) => {
         match ensure_memory($ecx, $offset, $len) {

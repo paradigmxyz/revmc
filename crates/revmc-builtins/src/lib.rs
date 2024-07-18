@@ -336,6 +336,8 @@ pub unsafe extern "C" fn __revmc_builtin_sstore(
     rev![index, value]: &mut [EvmWord; 2],
     spec_id: SpecId,
 ) -> InstructionResult {
+    ensure_non_staticcall!(ecx);
+
     let SStoreResult { original_value: original, present_value: old, new_value: new, is_cold } =
         try_opt!(ecx.host.sstore(ecx.contract.target_address, index.to_u256(), value.to_u256()));
 
@@ -353,8 +355,10 @@ pub unsafe extern "C" fn __revmc_builtin_msize(ecx: &mut EvmContext<'_>) -> usiz
 pub unsafe extern "C" fn __revmc_builtin_tstore(
     ecx: &mut EvmContext<'_>,
     rev![key, value]: &mut [EvmWord; 2],
-) {
+) -> InstructionResult {
+    ensure_non_staticcall!(ecx);
     ecx.host.tstore(ecx.contract.target_address, key.to_u256(), value.to_u256());
+    InstructionResult::Continue
 }
 
 #[no_mangle]
@@ -384,6 +388,7 @@ pub unsafe extern "C" fn __revmc_builtin_log(
     sp: *mut EvmWord,
     n: u8,
 ) -> InstructionResult {
+    ensure_non_staticcall!(ecx);
     assume!(n <= 4, "invalid log topic count: {n}");
     let sp = sp.add(n as usize);
     read_words!(sp, offset, len);
@@ -418,6 +423,8 @@ pub unsafe extern "C" fn __revmc_builtin_create(
     spec_id: SpecId,
     create_kind: CreateKind,
 ) -> InstructionResult {
+    ensure_non_staticcall!(ecx);
+
     let len = match create_kind {
         CreateKind::Create => 3,
         CreateKind::Create2 => 4,
@@ -612,6 +619,8 @@ pub unsafe extern "C" fn __revmc_builtin_selfdestruct(
     target: &mut EvmWord,
     spec_id: SpecId,
 ) -> InstructionResult {
+    ensure_non_staticcall!(ecx);
+
     let res = try_host!(ecx.host.selfdestruct(ecx.contract.target_address, target.to_address()));
 
     // EIP-3529: Reduction in refunds
