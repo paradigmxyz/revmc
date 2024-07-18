@@ -355,7 +355,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         // Also here is where the stack length is initialized.
         let load_len_at_start = |fx: &mut Self| {
             // Loaded from args only for the config.
-            if stack_length_observable {
+            if config.inspect_stack_length {
                 let stack_len = fx.bcx.load(fx.isize_type, stack_len_arg, "stack_len");
                 fx.stack_len.store(&mut fx.bcx, stack_len);
             } else {
@@ -1428,7 +1428,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
     /// Loads the gas used.
     fn load_gas_remaining(&mut self) -> B::Value {
-        self.gas_remaining.load(&mut self.bcx, "gas_remaining")
+        self.gas_remaining.load(&mut self.bcx, "gas.remaining")
     }
 
     /// Stores the gas used.
