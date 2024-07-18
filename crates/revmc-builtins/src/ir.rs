@@ -250,7 +250,7 @@ builtins! {
     ReturnContract = __revmc_builtin_return_contract(@[ecx] ptr, @[sp] ptr, usize) Some(u8),
     Create         = __revmc_builtin_create(@[ecx] ptr, @[sp_dyn] ptr, u8, u8) Some(u8),
     Call           = __revmc_builtin_call(@[ecx] ptr, @[sp_dyn] ptr, u8, u8) Some(u8),
-    ExtCall        = __revmc_builtin_ext_call(@[ecx] ptr, @[sp_dyn] ptr, u8) Some(u8),
+    ExtCall        = __revmc_builtin_ext_call(@[ecx] ptr, @[sp_dyn] ptr, u8, u8) Some(u8),
     DoReturn       = __revmc_builtin_do_return(@[ecx] ptr, @[sp] ptr, u8) Some(u8),
     SelfDestruct   = __revmc_builtin_selfdestruct(@[ecx] ptr, @[sp] ptr, u8) Some(u8),
 

@@ -1,6 +1,7 @@
 //! Internal EVM bytecode and opcode representation.
 
 use bitvec::vec::BitVec;
+use either::Either;
 use revm_interpreter::opcode as op;
 use revm_primitives::{hex, Eof, SpecId};
 use revmc_backend::{eyre::ensure, Result};
@@ -70,20 +71,16 @@ impl<'a> Bytecode<'a> {
         let mut jumpdests = if is_eof { BitVec::new() } else { BitVec::repeat(false, code.len()) };
         let mut pc_to_inst = FxHashMap::with_capacity_and_hasher(code.len(), Default::default());
         let op_infos = op_info_map(spec_id);
-        for (inst, (absolute_pc, Opcode { opcode, immediate })) in
-            OpcodesIter::new(code).with_pc().enumerate()
+        for (inst, (pc, Opcode { opcode, immediate: _ })) in
+            OpcodesIter::new(code, spec_id).with_pc().enumerate()
         {
-            pc_to_inst.insert(absolute_pc as u32, inst as u32);
+            pc_to_inst.insert(pc as u32, inst as u32);
 
             if !is_eof && opcode == op::JUMPDEST {
-                jumpdests.set(absolute_pc, true)
+                jumpdests.set(pc, true)
             }
 
-            let mut data = 0;
-            if let Some(imm) = immediate {
-                // `absolute_pc` is at `opcode` right now, add 1 for the data.
-                data = Immediate::pack(absolute_pc + 1, imm.len());
-            }
+            let data = 0;
 
             let mut flags = InstFlags::empty();
             let info = op_infos[opcode as usize];
@@ -97,7 +94,7 @@ impl<'a> Bytecode<'a> {
 
             let section = Section::default();
 
-            insts.push(InstData { opcode, flags, base_gas, data, pc: absolute_pc as u32, section });
+            insts.push(InstData { opcode, flags, base_gas, data, pc: pc as u32, section });
         }
 
         let mut bytecode = Self {
@@ -124,7 +121,7 @@ impl<'a> Bytecode<'a> {
     /// Returns an iterator over the opcodes.
     #[inline]
     pub(crate) fn opcodes(&self) -> OpcodesIter<'a> {
-        OpcodesIter::new(self.code)
+        OpcodesIter::new(self.code, self.spec_id)
     }
 
     /// Returns the instruction at the given instruction counter.
@@ -194,11 +191,13 @@ impl<'a> Bytecode<'a> {
         }
 
         self.calc_may_suspend();
-        self.construct_sections();
 
         if self.is_eof() {
             self.calc_eof_called_by()?;
+            self.eof_mark_jumpdests();
         }
+
+        self.construct_sections();
 
         Ok(())
     }
@@ -227,8 +226,11 @@ impl<'a> Bytecode<'a> {
                 continue;
             }
 
-            let imm_data = push.data;
-            let imm = self.get_imm(imm_data);
+            let imm_opt = self.get_imm(push);
+            if push.opcode != op::PUSH0 && imm_opt.is_none() {
+                continue;
+            }
+            let imm = imm_opt.unwrap_or(&[]);
             self.insts[jump_inst].flags |= InstFlags::STATIC_JUMP;
 
             const USIZE_SIZE: usize = std::mem::size_of::<usize>();
@@ -265,6 +267,22 @@ impl<'a> Bytecode<'a> {
         }
     }
 
+    /// Mark `RJUMP*` targets with `EOF_JUMPDEST` flag.
+    #[instrument(name = "eof_sj", level = "debug", skip_all)]
+    fn eof_mark_jumpdests(&mut self) {
+        debug_assert!(self.is_eof());
+
+        for inst in 0..self.insts.len() {
+            let data = self.inst(inst);
+            if data.is_eof_jump() {
+                for (_, pc) in self.iter_rjump_targets(data) {
+                    let target_inst = self.pc_to_inst(pc as usize);
+                    self.inst_mut(target_inst).flags |= InstFlags::EOF_JUMPDEST;
+                }
+            }
+        }
+    }
+
     /// Mark unreachable instructions as `DEAD_CODE` to not generate any code for them.
     ///
     /// This pass is technically unnecessary as the backend will very likely optimize any
@@ -283,7 +301,7 @@ impl<'a> Bytecode<'a> {
                 let mut end = i;
                 for (j, data) in &mut iter {
                     end = j;
-                    if data.is_reachable_jumpdest(self.has_dynamic_jumps) {
+                    if data.is_reachable_jumpdest(false, self.has_dynamic_jumps) {
                         break;
                     }
                     data.flags |= InstFlags::DEAD_CODE;
@@ -344,7 +362,7 @@ impl<'a> Bytecode<'a> {
         let mut eof_called_by = vec![Vec::new(); code_sections_len];
         for (inst, data) in self.iter_all_insts() {
             if data.opcode == op::CALLF {
-                let imm = self.get_imm(data.data);
+                let imm = self.get_imm(data).unwrap();
                 let target_section = u16::from_be_bytes(imm.try_into().unwrap()) as usize;
                 eof_called_by[target_section].push(inst);
             }
@@ -363,7 +381,7 @@ impl<'a> Bytecode<'a> {
                     let source_section = self.pc_to_eof_section(data.pc as usize);
                     debug_assert!(source_section != 0);
 
-                    let imm = self.get_imm(data.data);
+                    let imm = self.get_imm(data).unwrap();
                     let target_section = u16::from_be_bytes(imm.try_into().unwrap()) as usize;
 
                     let (source_section, target_section) =
@@ -394,13 +412,17 @@ impl<'a> Bytecode<'a> {
     }
 
     /// Returns the immediate value of the given instruction data, if any.
-    pub(crate) fn get_imm_of(&self, instr_data: &InstData) -> Option<&'a [u8]> {
-        (instr_data.imm_len() > 0).then(|| self.get_imm(instr_data.data))
-    }
-
-    fn get_imm(&self, data: u32) -> &'a [u8] {
-        let (offset, len) = Immediate::unpack(data);
-        &self.code[offset..offset + len]
+    /// Returns `None` if out of bounds too.
+    pub(crate) fn get_imm(&self, data: &InstData) -> Option<&'a [u8]> {
+        let mut imm_len = data.imm_len() as usize;
+        if imm_len == 0 {
+            return None;
+        }
+        let start = data.pc as usize + 1;
+        if data.opcode == op::RJUMPV {
+            imm_len += (*self.code.get(start)? as usize + 1) * 2;
+        }
+        self.code.get(start..start + imm_len)
     }
 
     /// Returns `true` if the given program counter is a valid jump destination.
@@ -435,10 +457,13 @@ impl<'a> Bytecode<'a> {
         self.insts[inst].is_diverging(self.is_eof())
     }
 
-    /// Converts a program counter (`self.code[ic]`) to an instruction (`self.inst(pc)`).
+    /// Converts a program counter (`self.code[pc]`) to an instruction (`self.inst(inst)`).
     #[inline]
     pub(crate) fn pc_to_inst(&self, pc: usize) -> usize {
-        self.pc_to_inst[&(pc as u32)] as usize
+        match self.pc_to_inst.get(&(pc as u32)) {
+            Some(&inst) => inst as usize,
+            None => panic!("pc out of bounds: {pc}"),
+        }
     }
 
     /*
@@ -461,20 +486,60 @@ impl<'a> Bytecode<'a> {
         self.pc_to_inst(self.eof_section_pc(section))
     }
 
-    /// Asserts that the given jump target is in bounds.
-    pub(crate) fn eof_assert_jump_in_bounds(&self, from: usize, to: usize) {
-        assert_eq!(
-            self.pc_to_eof_section(from),
-            self.pc_to_eof_section(to),
-            "RJUMP* target out of bounds: {from} -> {to}"
-        );
-    }
-
     pub(crate) fn pc_to_eof_section(&self, pc: usize) -> usize {
         (0..self.expect_eof().body.code_section.len())
             .rev()
             .find(|&section| pc >= self.eof_section_pc(section))
             .unwrap()
+    }
+
+    /// Iterates over the index and `RJUMP` target instructions of the given instruction.
+    pub(crate) fn iter_rjump_target_insts(
+        &self,
+        data: &InstData,
+    ) -> impl Iterator<Item = (usize, Inst)> + '_ {
+        let from = data.pc;
+        self.iter_rjump_targets(data).map(move |(i, pc)| {
+            self.eof_assert_jump_in_bounds(from as usize, pc);
+            (i, self.pc_to_inst(pc))
+        })
+    }
+
+    /// Iterates over the index and `RJUMP` target PCs of the given instruction.
+    pub(crate) fn iter_rjump_targets(
+        &self,
+        data: &InstData,
+    ) -> impl Iterator<Item = (usize, usize)> + 'a {
+        let opcode = data.opcode;
+        let pc = data.pc;
+        let imm = self.get_imm(data).unwrap();
+
+        debug_assert!(InstData::new(opcode).is_eof_jump());
+        if matches!(opcode, op::RJUMP | op::RJUMPI) {
+            let offset = i16::from_be_bytes(imm.try_into().unwrap());
+            let base_pc = pc + 3;
+            let target_pc = (base_pc as usize).wrapping_add(offset as usize);
+            return Either::Left(std::iter::once((0, target_pc)));
+        }
+
+        let max_index = imm[0] as usize;
+        let base_pc = pc + 2 + (max_index as u32 + 1) * 2;
+        Either::Right(imm[1..].chunks(2).enumerate().map(move |(i, chunk)| {
+            debug_assert!(i <= max_index);
+            debug_assert_eq!(chunk.len(), 2);
+            let offset = i16::from_be_bytes(chunk.try_into().unwrap());
+            let target_pc = (base_pc as usize).wrapping_add(offset as usize);
+            (i, target_pc)
+        }))
+    }
+
+    /// Asserts that the given jump target is in bounds.
+    pub(crate) fn eof_assert_jump_in_bounds(&self, from: usize, to: usize) {
+        debug_assert_eq!(
+            self.pc_to_eof_section(from),
+            self.pc_to_eof_section(to),
+            "RJUMP* target out of bounds: {from} -> {to}"
+        );
     }
 
     /// Returns the `Eof` container, panicking if it is not set.
@@ -529,6 +594,7 @@ impl fmt::Debug for Bytecode<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Bytecode")
             .field("code", &hex::encode(self.code))
+            .field("eof", &self.eof)
             .field("insts", &self.insts)
             .field("jumpdests", &hex::encode(bitvec_as_bytes(&self.jumpdests)))
             .field("spec_id", &self.spec_id)
@@ -623,7 +689,7 @@ impl InstData {
     #[inline]
     #[allow(dead_code)]
     pub(crate) fn to_op_in<'a>(&self, bytecode: &Bytecode<'a>) -> Opcode<'a> {
-        Opcode { opcode: self.opcode, immediate: bytecode.get_imm_of(self) }
+        Opcode { opcode: self.opcode, immediate: bytecode.get_imm(self) }
     }
 
     /// Returns `true` if this instruction is a push instruction.
@@ -669,8 +735,16 @@ impl InstData {
 
     /// Returns `true` if this instruction is a reachable `JUMPDEST`.
     #[inline]
-    pub(crate) const fn is_reachable_jumpdest(&self, has_dynamic_jumps: bool) -> bool {
-        self.is_jumpdest() && (has_dynamic_jumps || self.data == 1)
+    pub(crate) const fn is_reachable_jumpdest(
+        &self,
+        is_eof: bool,
+        has_dynamic_jumps: bool,
+    ) -> bool {
+        if is_eof {
+            self.flags.contains(InstFlags::EOF_JUMPDEST)
+        } else {
+            self.is_jumpdest() && (has_dynamic_jumps || self.data == 1)
+        }
     }
 
     /// Returns `true` if this instruction is dead code.
@@ -746,34 +820,20 @@ bitflags::bitflags! {
         /// The jump target is known to be invalid.
         /// Always returns [`InstructionResult::InvalidJump`] at runtime.
         const INVALID_JUMP = 1 << 1;
+        /// The instruction is a target of at least one `RJUMP*` instruction.
+        const EOF_JUMPDEST = 1 << 2;
 
         /// The instruction is disabled in this EVM version.
         /// Always returns [`InstructionResult::NotActivated`] at runtime.
-        const DISABLED = 1 << 2;
+        const DISABLED = 1 << 3;
         /// The instruction is unknown.
         /// Always returns [`InstructionResult::NotFound`] at runtime.
-        const UNKNOWN = 1 << 3;
+        const UNKNOWN = 1 << 4;
 
         /// Skip generating instruction logic, but keep the gas calculation.
-        const SKIP_LOGIC = 1 << 4;
+        const SKIP_LOGIC = 1 << 5;
         /// Don't generate any code.
-        const DEAD_CODE = 1 << 5;
-    }
-}
-
-/// Packed representation of an immediate value.
-struct Immediate;
-
-impl Immediate {
-    fn pack(offset: usize, len: usize) -> u32 {
-        debug_assert!(offset <= 1 << 26, "imm offset overflow: {offset} > (1 << 26)");
-        debug_assert!(len <= 1 << 6, "imm length overflow: {len} > (1 << 6)");
-        ((offset as u32) << 6) | len as u32
-    }
-
-    // `(offset, len)`
-    fn unpack(data: u32) -> (usize, usize) {
-        ((data >> 6) as usize, (data & ((1 << 6) - 1)) as usize)
+        const DEAD_CODE = 1 << 6;
     }
 }
 
@@ -796,22 +856,6 @@ fn get_two_mut<T>(sl: &mut [T], idx_1: usize, idx_2: usize) -> (&mut T, &mut T) 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn imm_packing() {
-        let assert = |offset, len| {
-            let packed = Immediate::pack(offset, len);
-            assert_eq!(Immediate::unpack(packed), (offset, len), "packed: {packed}");
-        };
-        assert(0, 0);
-        assert(0, 1);
-        assert(0, 31);
-        assert(0, 32);
-        assert(1, 0);
-        assert(1, 1);
-        assert(1, 31);
-        assert(1, 32);
-    }
 
     #[test]
     fn test_suspend_is_free() {

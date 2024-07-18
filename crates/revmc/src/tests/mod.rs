@@ -294,6 +294,12 @@ tests! {
             expected_stack: &[10_U256],
             expected_gas: 10,
         }),
+        rjumpv_overflow(@raw {
+            // RJUMPV 0x0200030000fff6
+            bytecode: &eof(&hex!("6000e20200030000fff65b5b0061201560015500")),
+            spec_id: SpecId::PRAGUE_EOF,
+            expected_gas: 113,
+        }),
     }
 
     subroutines {
@@ -584,6 +590,18 @@ tests! {
     }
 
     returndata {
+        returndataload(@raw {
+            bytecode: &eof(&[op::PUSH0, op::RETURNDATALOAD, op::STOP]),
+            spec_id: SpecId::PRAGUE_EOF,
+            expected_stack: &[U256::from_be_slice(&DEF_RD[..32])],
+            expected_gas: 2 + 3,
+        }),
+        returndataload2(@raw {
+            bytecode: &eof(&[op::PUSH1, 63, op::RETURNDATALOAD, op::STOP]),
+            spec_id: SpecId::PRAGUE_EOF,
+            expected_stack: &[0xbb00000000000000000000000000000000000000000000000000000000000000_U256],
+            expected_gas: 3 + 3,
+        }),
         returndatasize(@raw {
             bytecode: &[op::RETURNDATASIZE, op::RETURNDATASIZE],
             expected_stack: &[64_U256, 64_U256],

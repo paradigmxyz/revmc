@@ -366,10 +366,10 @@ impl<'ctx> Backend for EvmLlvmBackend<'ctx> {
     }
 
     unsafe fn free_all_functions(&mut self) -> Result<()> {
+        self.clear_module();
         if let Some(exec_engine) = &self.exec_engine {
             exec_engine.remove_module(&self.module).map_err(|e| Error::msg(e.to_string()))?;
         }
-        self.clear_module();
         self.module = create_module(self.cx, &self.machine)?;
         if self.exec_engine.is_some() {
             self.exec_engine =

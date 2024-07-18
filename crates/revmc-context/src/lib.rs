@@ -198,7 +198,7 @@ pub type RawEvmCompilerFn = unsafe extern "C" fn(
 ) -> InstructionResult;
 
 /// An EVM bytecode function.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct EvmCompilerFn(RawEvmCompilerFn);
 
 impl From<RawEvmCompilerFn> for EvmCompilerFn {

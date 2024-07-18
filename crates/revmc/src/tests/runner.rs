@@ -58,7 +58,7 @@ impl Default for TestCase<'_> {
 impl fmt::Debug for TestCase<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("TestCase")
-            .field("bytecode", &format_bytecode(self.bytecode))
+            .field("bytecode", &format_bytecode(self.bytecode, self.spec_id))
             .field("spec_id", &self.spec_id)
             .field("modify_ecx", &self.modify_ecx.is_some())
             .field("expected_return", &self.expected_return)

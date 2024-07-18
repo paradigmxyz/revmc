@@ -481,6 +481,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         self.bcx.switch_to_block(entry_block);
 
         let opcode = data.opcode;
+        // self.call_printf(format_printf!("{}\n", data.to_op_in(self.bytecode)), &[]);
 
         let branch_to_next_opcode = |this: &mut Self| {
             debug_assert!(
@@ -838,7 +839,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 self.call_fallible_builtin(Builtin::ExtCodeCopy, &[self.ecx, sp, spec_id]);
             }
             op::RETURNDATASIZE => {
-                field!(ecx; @push self.isize_type, EvmContext<'_>, pf::Slice; return_data.len)
+                field!(ecx; @push self.isize_type, EvmContext<'_>, pf::Slice; return_data.len);
             }
             op::RETURNDATACOPY => {
                 let sp = self.sp_after_inputs();
@@ -996,7 +997,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             }
             op::PUSH1..=op::PUSH32 => {
                 // NOTE: This can be None if the bytecode is invalid.
-                let imm = self.bytecode.get_imm_of(data);
+                let imm = self.bytecode.get_imm(data);
                 let value = imm.map(U256::from_be_slice).unwrap_or_default();
                 let value = self.bcx.iconst_256(value);
                 self.push(value);
@@ -1019,7 +1020,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 let _ = self.call_builtin(Builtin::DataLoad, &[self.ecx, sp]);
             }
             op::DATALOADN => {
-                let imm = self.bytecode.get_imm_of(data).unwrap();
+                let imm = self.bytecode.get_imm(data).unwrap();
                 let offset = u16::from_be_bytes(imm.try_into().unwrap());
                 let slice = self.expect_eof().data_slice(offset as usize, 32);
                 let value = self.bcx.iconst_256(U256::from_be_slice(slice));
@@ -1035,14 +1036,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             }
 
             op::RJUMP | op::RJUMPI => {
-                let imm = self.bytecode.get_imm_of(data).unwrap();
-                let offset = i16::from_be_bytes(imm.try_into().unwrap());
-                let base_pc = data.pc + 3;
-                let target_pc = base_pc.wrapping_add(offset as u16 as u32);
-                if cfg!(debug_assertions) {
-                    self.bytecode.eof_assert_jump_in_bounds(base_pc as usize, target_pc as usize);
-                }
-                let target_inst = self.bytecode.pc_to_inst(target_pc as usize);
+                let (_, target_inst) = self.bytecode.iter_rjump_target_insts(data).next().unwrap();
                 let target = self.inst_entries[target_inst];
                 if opcode == op::RJUMP {
                     self.bcx.br(target);
@@ -1057,30 +1051,16 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             op::RJUMPV => {
                 let index = self.pop();
                 let default = self.inst_entries[inst + 1];
-                let (&max_index, imm) =
-                    self.bytecode.get_imm_of(data).unwrap().split_first().unwrap();
-                let base_pc = data.pc + 2 + (max_index as u32 + 1) * 2;
-                let targets = imm
-                    .chunks(2)
-                    .enumerate()
-                    .map(|(i, chunk)| {
-                        debug_assert!(i <= max_index as usize);
-                        assert_eq!(chunk.len(), 2);
-                        let offset = i16::from_be_bytes(chunk.try_into().unwrap());
-                        let target_pc = base_pc.wrapping_add(offset as u16 as u32);
-                        if cfg!(debug_assertions) {
-                            self.bytecode
-                                .eof_assert_jump_in_bounds(base_pc as usize, target_pc as usize);
-                        }
-                        let target_inst = self.bytecode.pc_to_inst(target_pc as usize);
-                        (i as u64, self.inst_entries[target_inst])
-                    })
+                let targets = self
+                    .bytecode
+                    .iter_rjump_target_insts(data)
+                    .map(|(i, inst)| (i as u64, self.inst_entries[inst]))
                     .collect::<Vec<_>>();
                 self.bcx.switch(index, default, &targets, false);
                 goto_return!(no_branch);
             }
             op::CALLF => {
-                let imm = self.bytecode.get_imm_of(data).unwrap();
+                let imm = self.bytecode.get_imm(data).unwrap();
                 self.callf_common(imm, false);
                 goto_return!(no_branch);
             }
@@ -1097,20 +1077,20 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 goto_return!(no_branch);
             }
             op::JUMPF => {
-                let imm = self.bytecode.get_imm_of(data).unwrap();
+                let imm = self.bytecode.get_imm(data).unwrap();
                 self.callf_common(imm, true);
                 goto_return!(no_branch);
             }
             op::DUPN => {
-                let imm = self.bytecode.get_imm_of(data).unwrap()[0];
+                let imm = self.bytecode.get_imm(data).unwrap()[0];
                 self.dup(imm as usize + 1);
             }
             op::SWAPN => {
-                let imm = self.bytecode.get_imm_of(data).unwrap()[0];
+                let imm = self.bytecode.get_imm(data).unwrap()[0];
                 self.swap(imm as usize + 1);
             }
             op::EXCHANGE => {
-                let imm = self.bytecode.get_imm_of(data).unwrap()[0];
+                let imm = self.bytecode.get_imm(data).unwrap()[0];
                 let n = (imm >> 4) + 1;
                 let m = (imm & 0x0F) + 1;
                 self.exchange(n as usize, m as usize);
@@ -1118,7 +1098,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
             op::EOFCREATE => {
                 let sp = self.sp_after_inputs();
-                let imm = self.bytecode.get_imm_of(data).unwrap()[0];
+                let imm = self.bytecode.get_imm(data).unwrap()[0];
                 let idx = self.bcx.iconst(self.isize_type, imm as i64);
                 self.call_fallible_builtin(Builtin::EofCreate, &[self.ecx, sp, idx]);
                 self.suspend();
@@ -1126,7 +1106,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             }
             op::RETURNCONTRACT => {
                 let sp = self.sp_after_inputs();
-                let imm = self.bytecode.get_imm_of(data).unwrap()[0];
+                let imm = self.bytecode.get_imm(data).unwrap()[0];
                 let idx = self.bcx.iconst(self.isize_type, imm as i64);
                 let ret = self.call_builtin(Builtin::ReturnContract, &[self.ecx, sp, idx]).unwrap();
                 self.build_return(ret);
@@ -1159,7 +1139,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             }
 
             op::RETURNDATALOAD => {
-                let sp = self.sp_at_top();
+                let sp = self.sp_after_inputs();
                 let _ = self.call_builtin(Builtin::ReturnDataLoad, &[self.ecx, sp]);
             }
             op::EXTCALL => {
@@ -1318,6 +1298,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let call_kind = self.bcx.iconst(self.i8_type, call_kind as i64);
         let spec_id = self.const_spec_id();
         let ret = self.call_builtin(Builtin::ExtCall, &[self.ecx, sp, call_kind, spec_id]).unwrap();
+
         let cond = self.bcx.icmp_imm(IntCC::Equal, ret, EXTCALL_LIGHT_FAILURE as i64);
         let fail = self.create_block_after_current("light_fail");
         let cont = self.create_block_after_current("contd");
@@ -1697,6 +1678,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     #[must_use]
     fn call_builtin(&mut self, builtin: Builtin, args: &[B::Value]) -> Option<B::Value> {
         let function = self.builtin_function(builtin);
+        // self.call_printf(format_printf!("calling {}\n", builtin.name()), &[]);
         self.bcx.call(function, args)
     }
 
@@ -2228,6 +2210,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let prefix = "__revmc_ir_builtin_";
         let name = &format!("{prefix}{name}")[..];
 
+        // self.call_printf(format_printf!("calling {name}\n"), &[]);
+
         debug_assert_eq!(args.len(), arg_types.len());
         let linkage = revmc_backend::Linkage::Private;
         let this = unsafe { std::mem::transmute::<&mut Self, &mut Self>(self) };
@@ -2354,3 +2338,12 @@ fn get_field<B: Builder>(bcx: &mut B, ptr: B::Value, offset: usize, name: &str) 
     let offset = bcx.iconst(bcx.type_ptr_sized_int(), offset as i64);
     bcx.gep(bcx.type_int(8), ptr, &[offset], name)
 }
+
+#[allow(unused)]
+macro_rules! format_printf {
+    ($($t:tt)*) => {
+        &std::ffi::CString::new(format!($($t)*)).unwrap()
+    };
+}
+#[allow(unused)]
+use format_printf;

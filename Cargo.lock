@@ -2080,6 +2080,7 @@ dependencies = [
  "arbitrary",
  "bitflags 2.6.0",
  "bitvec",
+ "either",
  "paste",
  "revm-interpreter",
  "revm-primitives",
