@@ -276,7 +276,7 @@ impl<'a> Bytecode<'a> {
             let data = self.inst(inst);
             if data.is_eof_jump() {
                 for (_, pc) in self.iter_rjump_targets(data) {
-                    let target_inst = self.pc_to_inst(pc as usize);
+                    let target_inst = self.pc_to_inst(pc);
                     self.inst_mut(target_inst).flags |= InstFlags::EOF_JUMPDEST;
                 }
             }
