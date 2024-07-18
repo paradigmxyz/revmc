@@ -66,6 +66,9 @@ struct Cli {
     /// Short-hand for `--spec-id pragueeof`.
     #[arg(long, conflicts_with = "spec_id")]
     eof: bool,
+    /// Skip validating EOF code.
+    #[arg(long, requires = "eof")]
+    no_validate: bool,
     #[arg(long)]
     debug_assertions: bool,
     #[arg(long)]
@@ -95,6 +98,7 @@ fn main() -> Result<()> {
     unsafe { compiler.stack_bound_checks(!cli.no_len_checks) };
     compiler.frame_pointers(true);
     compiler.debug_assertions(cli.debug_assertions);
+    compiler.validate_eof(!cli.no_validate);
 
     let Bench { name, bytecode, calldata, stack_input, native: _ } = if cli.bench_name == "custom" {
         Bench {
