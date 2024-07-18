@@ -9,7 +9,7 @@ use inkwell::{
     attributes::{Attribute, AttributeLoc},
     basic_block::BasicBlock,
     execution_engine::ExecutionEngine,
-    module::Module,
+    module::{FlagBehavior, Module},
     passes::PassBuilderOptions,
     support::error_handling::install_fatal_error_handler,
     targets::{
@@ -1141,6 +1141,16 @@ fn create_module<'ctx>(cx: &'ctx Context, machine: &TargetMachine) -> Result<Mod
     module.set_source_file_name(module_name);
     module.set_data_layout(&machine.get_target_data().get_data_layout());
     module.set_triple(&machine.get_triple());
+    module.add_basic_value_flag(
+        "PIC Level",
+        FlagBehavior::Error, // TODO: Min
+        cx.i32_type().const_int(2, false),
+    );
+    module.add_basic_value_flag(
+        "RtLibUseGOT",
+        FlagBehavior::Warning,
+        cx.i32_type().const_int(1, false),
+    );
     Ok(module)
 }
 
