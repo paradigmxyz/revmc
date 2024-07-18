@@ -590,7 +590,7 @@ tests! {
     }
 
     returndata {
-        returndataload(@raw {
+        returndataload1(@raw {
             bytecode: &eof(&[op::PUSH0, op::RETURNDATALOAD, op::STOP]),
             spec_id: SpecId::PRAGUE_EOF,
             expected_stack: &[U256::from_be_slice(&DEF_RD[..32])],
