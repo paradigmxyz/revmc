@@ -481,6 +481,7 @@ pub unsafe extern "C" fn __revmc_builtin_eof_create(
     initcontainer_index: usize,
     _spec_id: SpecId,
 ) -> InstructionResult {
+    ensure_non_staticcall!(ecx);
     gas!(ecx, gas::EOF_CREATE_GAS);
     let sub_container = ecx
         .contract
