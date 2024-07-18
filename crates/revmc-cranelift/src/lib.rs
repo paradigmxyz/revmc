@@ -403,6 +403,10 @@ impl<'a> Builder for EvmCraneliftBuilder<'a> {
         self.bcx.ins().global_value(self.ptr_type, local_msg_id)
     }
 
+    fn nullptr(&mut self) -> Self::Value {
+        self.iconst(self.ptr_type, 0)
+    }
+
     fn new_stack_slot_raw(&mut self, ty: Self::Type, name: &str) -> Self::StackSlot {
         // https://github.com/rust-lang/rustc_codegen_cranelift/blob/1122338eb88648ec36a2eb2b1c27031fa897964d/src/common.rs#L388
 

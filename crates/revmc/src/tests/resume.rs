@@ -1,18 +1,17 @@
-use super::{eof, with_evm_context, DEF_SPEC};
+use super::{eof, eof_sections_unchecked, with_evm_context, DEF_SPEC};
 use crate::{Backend, EvmCompiler, TEST_SUSPEND};
 use revm_interpreter::{opcode as op, InstructionResult};
 use revm_primitives::{SpecId, U256};
 
 matrix_tests!(legacy = |compiler| run(compiler, TEST, DEF_SPEC));
 matrix_tests!(eof_one_section = |compiler| run(compiler, &eof(TEST), SpecId::PRAGUE_EOF));
-// TODO
-// matrix_tests!(
-//     eof_two_sections = |compiler| run(
-//         compiler,
-//         &eof_sections_unchecked(&[&[op::JUMPF, 0x00, 0x01], TEST]).raw,
-//         SpecId::PRAGUE_EOF
-//     )
-// );
+matrix_tests!(
+    eof_two_sections = |compiler| run(
+        compiler,
+        &eof_sections_unchecked(&[&[op::JUMPF, 0x00, 0x01], TEST]).raw,
+        SpecId::PRAGUE_EOF
+    )
+);
 
 #[rustfmt::skip]
 const TEST: &[u8] = &[
@@ -33,6 +32,8 @@ const TEST: &[u8] = &[
 ];
 
 fn run<B: Backend>(compiler: &mut EvmCompiler<B>, code: &[u8], spec_id: SpecId) {
+    // Done manually in `fn eof` and friends.
+    compiler.validate_eof(false);
     let f = unsafe { compiler.jit("resume", code, spec_id) }.unwrap();
 
     with_evm_context(code, |ecx, stack, stack_len| {

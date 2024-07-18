@@ -153,7 +153,7 @@ fn main() -> Result<()> {
     }
 
     if cli.parse_only {
-        let _ = compiler.parse(bytecode, spec_id)?;
+        let _ = compiler.parse(bytecode.into(), spec_id)?;
         return Ok(());
     }
 

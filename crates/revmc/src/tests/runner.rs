@@ -355,6 +355,8 @@ pub fn set_test_dump<B: Backend>(compiler: &mut EvmCompiler<B>, module_path: &st
 pub fn run_test_case<B: Backend>(test_case: &TestCase<'_>, compiler: &mut EvmCompiler<B>) {
     let TestCase { bytecode, spec_id, .. } = *test_case;
     compiler.inspect_stack_length(true);
+    // Done manually in `fn eof` and friends.
+    compiler.validate_eof(false);
     // compiler.debug_assertions(false);
     let f = unsafe { compiler.jit("test", bytecode, spec_id) }.unwrap();
     run_compiled_test_case(test_case, f);

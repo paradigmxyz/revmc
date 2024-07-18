@@ -33,8 +33,8 @@ pub struct EvmContext<'a> {
     pub next_action: &'a mut InterpreterAction,
     /// The return data.
     pub return_data: &'a [u8],
-    /// The length of the return stack.
-    pub return_stack_len: usize,
+    /// The function stack.
+    pub func_stack: &'a mut FunctionStack,
     /// Whether the context is static.
     pub is_static: bool,
     /// Whether the context is EOF init.
@@ -76,7 +76,7 @@ impl<'a> EvmContext<'a> {
             host,
             next_action: &mut interpreter.next_action,
             return_data: &interpreter.return_data_buffer,
-            return_stack_len: 0,
+            func_stack: &mut interpreter.function_stack,
             is_static: interpreter.is_static,
             is_eof_init: interpreter.is_eof_init,
             resume_at,
@@ -91,7 +91,10 @@ impl<'a> EvmContext<'a> {
             is_eof: self.contract.bytecode.is_eof(),
             instruction_pointer: bytecode.as_ptr(),
             bytecode,
-            function_stack: FunctionStack::new(),
+            function_stack: FunctionStack {
+                return_stack: self.func_stack.return_stack.clone(),
+                current_code_idx: self.func_stack.current_code_idx,
+            },
             is_eof_init: self.is_eof_init,
             contract: self.contract.clone(),
             instruction_result: InstructionResult::Continue,

@@ -13,7 +13,7 @@ mod bytecode;
 pub use bytecode::*;
 
 mod compiler;
-pub use compiler::EvmCompiler;
+pub use compiler::{EvmCompiler, EvmCompilerInput};
 
 mod linker;
 pub use linker::Linker;

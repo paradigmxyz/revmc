@@ -1,4 +1,4 @@
-use super::LegacyBytecode;
+use super::Bytecode;
 use core::fmt;
 
 // TODO: Separate gas sections from stack length sections.
@@ -55,7 +55,7 @@ pub(crate) struct SectionAnalysis {
 
 impl SectionAnalysis {
     /// Process a single instruction.
-    pub(crate) fn process(&mut self, bytecode: &mut LegacyBytecode<'_>, inst: usize) {
+    pub(crate) fn process(&mut self, bytecode: &mut Bytecode<'_>, inst: usize) {
         // JUMPDEST starts a section.
         if bytecode.inst(inst).is_reachable_jumpdest(bytecode.has_dynamic_jumps()) {
             self.save_to(bytecode, inst);
@@ -85,7 +85,7 @@ impl SectionAnalysis {
     }
 
     /// Finishes the analysis.
-    pub(crate) fn finish(self, bytecode: &mut LegacyBytecode<'_>) {
+    pub(crate) fn finish(self, bytecode: &mut Bytecode<'_>) {
         self.save_to(bytecode, bytecode.insts.len() - 1);
         if enabled!(tracing::Level::DEBUG) {
             let mut max_len = 0;
@@ -105,7 +105,7 @@ impl SectionAnalysis {
     }
 
     /// Saves the current section to the bytecode.
-    fn save_to(&self, bytecode: &mut LegacyBytecode<'_>, next_section_inst: usize) {
+    fn save_to(&self, bytecode: &mut Bytecode<'_>, next_section_inst: usize) {
         if self.start_inst >= bytecode.insts.len() {
             return;
         }

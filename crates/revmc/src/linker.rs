@@ -102,7 +102,7 @@ mod tests {
         let opt_level = revmc_backend::OptimizationLevel::Aggressive;
         let backend = crate::EvmLlvmBackend::new(&cx, true, opt_level).unwrap();
         let mut compiler = crate::EvmCompiler::new(backend);
-        if let Err(e) = compiler.translate("link_test_basic", &[], SpecId::CANCUN) {
+        if let Err(e) = compiler.translate("link_test_basic", &[][..], SpecId::CANCUN) {
             panic!("failed to compile: {e}");
         }
 

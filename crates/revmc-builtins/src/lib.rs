@@ -13,8 +13,8 @@ extern crate tracing;
 use alloc::{boxed::Box, vec::Vec};
 use revm_interpreter::{
     as_u64_saturated, as_usize_saturated, CallInputs, CallScheme, CallValue, CreateInputs,
-    EOFCreateInputs, InstructionResult, InterpreterAction, InterpreterResult, LoadAccountResult,
-    SStoreResult,
+    EOFCreateInputs, FunctionStack, InstructionResult, InterpreterAction, InterpreterResult,
+    LoadAccountResult, SStoreResult,
 };
 use revm_primitives::{
     eof::EofHeader, Address, Bytes, CreateScheme, Eof, Log, LogData, SpecId, KECCAK_EMPTY,
@@ -865,6 +865,29 @@ pub unsafe extern "C" fn __revmc_builtin_selfdestruct(
     gas!(ecx, gas::selfdestruct_cost(spec_id, res));
 
     InstructionResult::Continue
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn __revmc_builtin_func_stack_push(
+    ecx: &mut EvmContext<'_>,
+    pc: usize,
+    new_idx: usize,
+) -> InstructionResult {
+    if ecx.func_stack.return_stack_len() >= 1024 {
+        return InstructionResult::EOFFunctionStackOverflow;
+    }
+    ecx.func_stack.push(pc, new_idx);
+    InstructionResult::Continue
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn __revmc_builtin_func_stack_pop(ecx: &mut EvmContext<'_>) -> usize {
+    ecx.func_stack.pop().expect("RETF with empty return stack").pc
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn __revmc_builtin_func_stack_grow(func_stack: &mut FunctionStack) {
+    func_stack.return_stack.reserve(1);
 }
 
 #[no_mangle]

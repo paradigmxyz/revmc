@@ -154,6 +154,9 @@ macro_rules! builtins {
                 const LOG: u8 = LOG0;
                 const DORETURN: u8 = RETURN;
                 const RESIZEMEMORY: u8 = 0;
+                const FUNCSTACKPUSH: u8 = 0;
+                const FUNCSTACKPOP: u8 = 0;
+                const FUNCSTACKGROW: u8 = 0;
 
                 match self {
                     $(Self::$ident => [<$ident:upper>]),*
@@ -250,6 +253,10 @@ builtins! {
     ExtCall        = __revmc_builtin_ext_call(@[ecx] ptr, @[sp_dyn] ptr, u8) Some(u8),
     DoReturn       = __revmc_builtin_do_return(@[ecx] ptr, @[sp] ptr, u8) Some(u8),
     SelfDestruct   = __revmc_builtin_selfdestruct(@[ecx] ptr, @[sp] ptr, u8) Some(u8),
+
+    FuncStackPush  = __revmc_builtin_func_stack_push(@[ecx] ptr, ptr, usize) Some(u8),
+    FuncStackPop   = __revmc_builtin_func_stack_pop(@[ecx] ptr) Some(ptr),
+    FuncStackGrow  = __revmc_builtin_func_stack_grow(@[ecx] ptr) None,
 
     ResizeMemory   = __revmc_builtin_resize_memory(@[ecx] ptr, usize) Some(u8),
 }

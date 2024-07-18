@@ -671,6 +671,10 @@ impl<'a, 'ctx> Builder for EvmLlvmBuilder<'a, 'ctx> {
         self.bcx.build_global_string_ptr(value, "").unwrap().as_pointer_value().into()
     }
 
+    fn nullptr(&mut self) -> Self::Value {
+        self.ty_ptr.const_null().into()
+    }
+
     fn new_stack_slot_raw(&mut self, ty: Self::Type, name: &str) -> Self::StackSlot {
         // let ty = self.ty_i8.array_type(size);
         // let ptr = self.bcx.build_alloca(ty, name).unwrap();

@@ -2,9 +2,10 @@
 
 use crate::{Backend, Builder, Bytecode, EvmCompilerFn, EvmContext, EvmStack, Result};
 use revm_interpreter::{Contract, Gas};
-use revm_primitives::{Env, SpecId};
+use revm_primitives::{Bytes, Env, Eof, SpecId, EOF_MAGIC_BYTES};
 use revmc_backend::{
-    eyre::ensure, Attribute, FunctionAttributeLocation, Linkage, OptimizationLevel,
+    eyre::{ensure, eyre},
+    Attribute, FunctionAttributeLocation, Linkage, OptimizationLevel,
 };
 use revmc_builtins::Builtins;
 use revmc_context::RawEvmCompilerFn;
@@ -157,6 +158,15 @@ impl<B: Backend> EvmCompiler<B> {
         self.config.frame_pointers = yes;
     }
 
+    /// Sets whether to validate input EOF containers.
+    ///
+    /// **An invalid EOF container will likely results in a panic.**
+    ///
+    /// Defaults to `true`.
+    pub fn validate_eof(&mut self, yes: bool) {
+        self.config.validate_eof = yes;
+    }
+
     /// Sets whether to allocate the stack locally.
     ///
     /// If this is set to `true`, the stack pointer argument will be ignored and the stack will be
@@ -222,10 +232,15 @@ impl<B: Backend> EvmCompiler<B> {
     ///
     /// NOTE: `name` must be unique for each function, as it is used as the name of the final
     /// symbol.
-    pub fn translate(&mut self, name: &str, bytecode: &[u8], spec_id: SpecId) -> Result<B::FuncId> {
+    pub fn translate<'a>(
+        &mut self,
+        name: &str,
+        input: impl Into<EvmCompilerInput<'a>>,
+        spec_id: SpecId,
+    ) -> Result<B::FuncId> {
         ensure!(cfg!(target_endian = "little"), "only little-endian is supported");
         ensure!(!self.finalized, "cannot compile more functions after finalizing the module");
-        let bytecode = self.parse(bytecode, spec_id)?;
+        let bytecode = self.parse(input.into(), spec_id)?;
         self.translate_inner(name, &bytecode)
     }
 
@@ -237,13 +252,13 @@ impl<B: Backend> EvmCompiler<B> {
     ///
     /// The returned function pointer is owned by the module, and must not be called after the
     /// module is cleared or the function is freed.
-    pub unsafe fn jit(
+    pub unsafe fn jit<'a>(
         &mut self,
         name: &str,
-        bytecode: &[u8],
+        bytecode: impl Into<EvmCompilerInput<'a>>,
         spec_id: SpecId,
     ) -> Result<EvmCompilerFn> {
-        let id = self.translate(name, bytecode, spec_id)?;
+        let id = self.translate(name, bytecode.into(), spec_id)?;
         unsafe { self.jit_function(id) }
     }
 
@@ -308,9 +323,33 @@ impl<B: Backend> EvmCompiler<B> {
     }
 
     /// Parses the given EVM bytecode. Not public API.
-    #[doc(hidden)]
-    pub fn parse<'a>(&mut self, bytecode: &'a [u8], spec_id: SpecId) -> Result<Bytecode<'a>> {
-        let mut bytecode = Bytecode::new(bytecode, spec_id)?;
+    #[doc(hidden)] // Not public API.
+    pub fn parse<'a>(
+        &mut self,
+        input: EvmCompilerInput<'a>,
+        spec_id: SpecId,
+    ) -> Result<Bytecode<'a>> {
+        let bytecode;
+        let eof;
+        match input {
+            EvmCompilerInput::Code(code) => {
+                bytecode = code;
+                if spec_id.is_enabled_in(SpecId::PRAGUE_EOF) && code.starts_with(&EOF_MAGIC_BYTES) {
+                    eof = Some(Cow::Owned(Eof::decode(Bytes::copy_from_slice(code))?));
+                } else {
+                    eof = None;
+                }
+            }
+            EvmCompilerInput::Eof(e) => {
+                bytecode = &e.raw[..];
+                eof = Some(Cow::Borrowed(e));
+            }
+        }
+        if let Some(eof) = &eof {
+            self.do_validate_eof(eof)?;
+        }
+
+        let mut bytecode = Bytecode::new(bytecode, eof, spec_id);
         bytecode.analyze()?;
         if let Some(dump_dir) = &self.dump_dir() {
             Self::dump_bytecode(dump_dir, &bytecode)?;
@@ -318,47 +357,25 @@ impl<B: Backend> EvmCompiler<B> {
         Ok(bytecode)
     }
 
-    #[instrument(name = "translate", level = "debug", skip_all)]
-    fn translate_inner(&mut self, main_name: &str, bytecode: &Bytecode<'_>) -> Result<B::FuncId> {
-        let bytecodes = bytecode.as_legacy_slice();
-        assert!(!bytecodes.is_empty());
-        let eof = bytecode.as_eof();
-
-        ensure!(
-            self.backend.function_name_is_unique(main_name),
-            "function name `{main_name}` is not unique"
-        );
-
-        if let [bytecode] = bytecodes {
-            let linkage = Linkage::Public;
-            let (bcx, id) =
-                Self::make_builder(&mut self.backend, &self.config, main_name, linkage)?;
-            FunctionCx::translate(bcx, self.config, &mut self.builtins, bytecode, eof, main_name)?;
-            return Ok(id);
+    fn do_validate_eof(&self, eof: &Eof) -> Result<()> {
+        if !self.config.validate_eof {
+            return Ok(());
         }
-
-        let make_name = |i: usize| section_mangled_name(main_name, i);
-
-        // First declare all functions.
-        let mut id = None;
-        for i in 0..bytecodes.len() {
-            let linkage = if i == 0 { Linkage::Public } else { Linkage::Private };
-            let (_, local_id) =
-                Self::make_builder(&mut self.backend, &self.config, &make_name(i), linkage)?;
-            if i == 0 {
-                id = Some(local_id);
+        revm_interpreter::analysis::validate_eof(eof).map_err(|e| match e {
+            revm_interpreter::analysis::EofError::Decode(e) => e.into(),
+            revm_interpreter::analysis::EofError::Validation(e) => {
+                eyre!("validation error: {e:?}")
             }
-        }
+        })
+    }
 
-        // Then translate them.
-        for (i, bytecode) in bytecodes.iter().enumerate() {
-            let linkage = if i == 0 { Linkage::Public } else { Linkage::Private };
-            let (bcx, _) =
-                Self::make_builder(&mut self.backend, &self.config, &make_name(i), linkage)?;
-            FunctionCx::translate(bcx, self.config, &mut self.builtins, bytecode, eof, main_name)?;
-        }
-
-        Ok(id.unwrap())
+    #[instrument(name = "translate", level = "debug", skip_all)]
+    fn translate_inner(&mut self, name: &str, bytecode: &Bytecode<'_>) -> Result<B::FuncId> {
+        ensure!(self.backend.function_name_is_unique(name), "function name `{name}` is not unique");
+        let linkage = Linkage::Public;
+        let (bcx, id) = Self::make_builder(&mut self.backend, &self.config, name, linkage)?;
+        FunctionCx::translate(bcx, self.config, &mut self.builtins, bytecode)?;
+        Ok(id)
     }
 
     #[instrument(level = "debug", skip_all)]
@@ -510,6 +527,39 @@ impl<B: Backend> EvmCompiler<B> {
     }
 }
 
+/// [`EvmCompiler`] input.
+#[allow(missing_debug_implementations)]
+pub enum EvmCompilerInput<'a> {
+    /// EVM bytecode. Can also be raw EOF code, which will be parsed.
+    Code(&'a [u8]),
+    /// Already-parsed EOF container.
+    Eof(&'a Eof),
+}
+
+impl<'a> From<&'a [u8]> for EvmCompilerInput<'a> {
+    fn from(code: &'a [u8]) -> Self {
+        EvmCompilerInput::Code(code)
+    }
+}
+
+impl<'a> From<&'a Vec<u8>> for EvmCompilerInput<'a> {
+    fn from(code: &'a Vec<u8>) -> Self {
+        EvmCompilerInput::Code(code)
+    }
+}
+
+impl<'a> From<&'a Bytes> for EvmCompilerInput<'a> {
+    fn from(code: &'a Bytes) -> Self {
+        EvmCompilerInput::Code(code)
+    }
+}
+
+impl<'a> From<&'a Eof> for EvmCompilerInput<'a> {
+    fn from(eof: &'a Eof) -> Self {
+        EvmCompilerInput::Eof(eof)
+    }
+}
+
 #[allow(dead_code)]
 mod default_attrs {
     use revmc_backend::Attribute;
@@ -555,13 +605,5 @@ mod default_attrs {
 
     pub(crate) fn size_align<T>() -> (usize, usize) {
         (std::mem::size_of::<T>(), std::mem::align_of::<T>())
-    }
-}
-
-fn section_mangled_name(main_name: &str, i: usize) -> Cow<'_, str> {
-    if i == 0 {
-        Cow::Borrowed(main_name)
-    } else {
-        Cow::Owned(format!("{main_name}_section_{i}"))
     }
 }
