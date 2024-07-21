@@ -978,7 +978,7 @@ tests! {
                     kind: revm_interpreter::EOFCreateKind::Opcode {
                         initcode: primitives::Eof::decode(eof_subcontainer()).unwrap(),
                         input: 0x69_U256.to_be_bytes::<32>().into(),
-                        created_address: DEF_ADDR.create2_from_code(0x70_U256.to_be_bytes::<32>(), &eof_subcontainer()),
+                        created_address: DEF_ADDR.create2_from_code(0x70_U256.to_be_bytes::<32>(), eof_subcontainer()),
                     },
                 }),
             },
