@@ -1,5 +1,5 @@
 use crate::gas;
-use revm_interpreter::{as_usize_saturated, InstructionResult};
+use revm_interpreter::{as_usize_saturated, Gas, InstructionResult, SharedMemory};
 use revmc_context::{EvmContext, EvmWord};
 
 /// Splits the stack pointer into `N` elements by casting it to an array.
@@ -22,22 +22,40 @@ pub(crate) fn ensure_memory(
     offset: usize,
     len: usize,
 ) -> InstructionResult {
-    let new_size = offset.saturating_add(len);
-    if new_size > ecx.memory.len() {
-        return resize_memory(ecx, new_size);
-    }
-    InstructionResult::Continue
+    ensure_memory_inner(ecx.memory, ecx.gas, offset, len)
 }
 
-pub(crate) fn resize_memory(ecx: &mut EvmContext<'_>, new_size: usize) -> InstructionResult {
-    // TODO: Memory limit
-    if !revm_interpreter::interpreter::resize_memory(ecx.memory, ecx.gas, new_size) {
-        return InstructionResult::MemoryOOG;
+#[inline]
+pub(crate) fn ensure_memory_inner(
+    memory: &mut SharedMemory,
+    gas: &mut Gas,
+    offset: usize,
+    len: usize,
+) -> InstructionResult {
+    let new_size = offset.saturating_add(len);
+    if new_size > memory.len() {
+        return resize_memory_inner(memory, gas, new_size);
     }
     InstructionResult::Continue
 }
 
 #[inline]
+pub(crate) fn resize_memory(ecx: &mut EvmContext<'_>, new_size: usize) -> InstructionResult {
+    resize_memory_inner(ecx.memory, ecx.gas, new_size)
+}
+
+fn resize_memory_inner(
+    memory: &mut SharedMemory,
+    gas: &mut Gas,
+    new_size: usize,
+) -> InstructionResult {
+    // TODO: Memory limit
+    if !revm_interpreter::interpreter::resize_memory(memory, gas, new_size) {
+        return InstructionResult::MemoryOOG;
+    }
+    InstructionResult::Continue
+}
+
 pub(crate) unsafe fn copy_operation(
     ecx: &mut EvmContext<'_>,
     rev![memory_offset, data_offset, len]: &mut [EvmWord; 3],

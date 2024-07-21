@@ -1,13 +1,12 @@
 #![allow(missing_docs)]
 
-use std::{hint::black_box, path::PathBuf};
-
 use iai_callgrind::{library_benchmark, library_benchmark_group, main};
-use revmc_cli::{get_bench, Bench};
 use revm_primitives::{Env, SpecId};
 use revmc::{
     llvm::with_llvm_context, Backend, EvmCompiler, EvmContext, EvmLlvmBackend, OptimizationLevel,
 };
+use revmc_cli::{get_bench, Bench};
+use std::{hint::black_box, path::PathBuf};
 
 const SPEC_ID: SpecId = SpecId::CANCUN;
 const GAS_LIMIT: u64 = 100_000_000;

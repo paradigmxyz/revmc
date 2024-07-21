@@ -1,4 +1,6 @@
-use revm_interpreter::OPCODE_INFO_JUMPTABLE;
+use crate::{op_info_map, OpcodeInfo};
+use revm_interpreter::{opcode as op, OPCODE_INFO_JUMPTABLE};
+use revm_primitives::SpecId;
 use std::{fmt, slice};
 
 /// A bytecode iterator that yields opcodes and their immediate data, alongside the program counter.
@@ -41,6 +43,7 @@ impl std::iter::FusedIterator for OpcodesIterWithPc<'_> {}
 #[derive(Clone, Debug)]
 pub struct OpcodesIter<'a> {
     iter: slice::Iter<'a, u8>,
+    info: &'static [OpcodeInfo; 256],
 }
 
 impl fmt::Display for OpcodesIter<'_> {
@@ -58,8 +61,8 @@ impl fmt::Display for OpcodesIter<'_> {
 impl<'a> OpcodesIter<'a> {
     /// Create a new iterator over the given bytecode slice.
     #[inline]
-    pub fn new(slice: &'a [u8]) -> Self {
-        Self { iter: slice.iter() }
+    pub fn new(slice: &'a [u8], spec_id: SpecId) -> Self {
+        Self { iter: slice.iter(), info: op_info_map(spec_id) }
     }
 
     /// Returns a new iterator that also yields the program counter alongside the opcode and
@@ -93,8 +96,18 @@ impl<'a> Iterator for OpcodesIter<'a> {
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
-        self.iter.next().copied().map(|opcode| {
-            let len = imm_len(opcode) as usize;
+        self.iter.next().map(|&opcode| {
+            let info = self.info[opcode as usize];
+            if info.is_unknown() || info.is_disabled() {
+                return Opcode { opcode, immediate: None };
+            }
+
+            let mut len = min_imm_len(opcode) as usize;
+            if opcode == op::RJUMPV {
+                if let Some(&max_case) = self.iter.as_slice().first() {
+                    len += (max_case as usize + 1) * 2;
+                }
+            }
             let immediate = if len > 0 {
                 let r = self.iter.as_slice().get(..len);
                 // TODO: Use `advance_by` when stable.
@@ -145,8 +158,11 @@ impl fmt::Display for Opcode<'_> {
 }
 
 /// Returns the length of the immediate data for the given opcode, or `0` if none.
+///
+/// This is the full length for all opcodes that have an immediate, except for `RJUMPV`, which
+/// currently is the only opcode which has a variable length immediate.
 #[inline]
-pub const fn imm_len(op: u8) -> u8 {
+pub const fn min_imm_len(op: u8) -> u8 {
     if let Some(info) = &OPCODE_INFO_JUMPTABLE[op as usize] {
         info.immediate_size()
     } else {
@@ -165,13 +181,17 @@ pub const fn stack_io(op: u8) -> (u8, u8) {
 }
 
 /// Returns a string representation of the given bytecode.
-pub fn format_bytecode(bytecode: &[u8]) -> String {
-    OpcodesIter::new(bytecode).to_string()
+pub fn format_bytecode(bytecode: &[u8], spec_id: SpecId) -> String {
+    OpcodesIter::new(bytecode, spec_id).to_string()
 }
 
 /// Formats an EVM bytecode to the given writer.
-pub fn format_bytecode_to<W: fmt::Write + ?Sized>(bytecode: &[u8], w: &mut W) -> fmt::Result {
-    write!(w, "{}", OpcodesIter::new(bytecode))
+pub fn format_bytecode_to<W: fmt::Write + ?Sized>(
+    bytecode: &[u8],
+    spec_id: SpecId,
+    w: &mut W,
+) -> fmt::Result {
+    write!(w, "{}", OpcodesIter::new(bytecode, spec_id))
 }
 
 #[cfg(test)]
@@ -179,10 +199,12 @@ mod tests {
     use super::*;
     use revm_interpreter::opcode as op;
 
+    const DEF_SPEC: SpecId = SpecId::ARROW_GLACIER;
+
     #[test]
     fn iter_basic() {
         let bytecode = [0x01, 0x02, 0x03, 0x04, 0x05];
-        let mut iter = OpcodesIter::new(&bytecode);
+        let mut iter = OpcodesIter::new(&bytecode, DEF_SPEC);
 
         assert_eq!(iter.next(), Some(Opcode { opcode: 0x01, immediate: None }));
         assert_eq!(iter.next(), Some(Opcode { opcode: 0x02, immediate: None }));
@@ -195,7 +217,7 @@ mod tests {
     #[test]
     fn iter_with_imm() {
         let bytecode = [op::PUSH0, op::PUSH1, 0x69, op::PUSH2, 0x01, 0x02];
-        let mut iter = OpcodesIter::new(&bytecode);
+        let mut iter = OpcodesIter::new(&bytecode, DEF_SPEC);
 
         assert_eq!(iter.next(), Some(Opcode { opcode: op::PUSH0, immediate: None }));
         assert_eq!(iter.next(), Some(Opcode { opcode: op::PUSH1, immediate: Some(&[0x69]) }));
@@ -206,7 +228,7 @@ mod tests {
     #[test]
     fn iter_with_imm_too_short() {
         let bytecode = [op::PUSH2, 0x69];
-        let mut iter = OpcodesIter::new(&bytecode);
+        let mut iter = OpcodesIter::new(&bytecode, DEF_SPEC);
 
         assert_eq!(iter.next(), Some(Opcode { opcode: op::PUSH2, immediate: None }));
         assert_eq!(iter.next(), None);
@@ -215,7 +237,7 @@ mod tests {
     #[test]
     fn display() {
         let bytecode = [op::PUSH0, op::PUSH1, 0x69, op::PUSH2, 0x01, 0x02];
-        let s = format_bytecode(&bytecode);
+        let s = format_bytecode(&bytecode, DEF_SPEC);
         assert_eq!(s, "PUSH0 PUSH1 0x69 PUSH2 0x0102");
     }
 }

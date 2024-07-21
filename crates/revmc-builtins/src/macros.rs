@@ -26,6 +26,15 @@ macro_rules! try_host {
     };
 }
 
+macro_rules! try_ir {
+    ($e:expr) => {
+        match $e {
+            InstructionResult::Continue => {}
+            ir => return ir,
+        }
+    };
+}
+
 macro_rules! gas {
     ($ecx:expr, $gas:expr) => {
         if !$ecx.gas.record_cost($gas) {
@@ -53,10 +62,7 @@ macro_rules! ensure_non_staticcall {
 
 macro_rules! ensure_memory {
     ($ecx:expr, $offset:expr, $len:expr) => {
-        match ensure_memory($ecx, $offset, $len) {
-            InstructionResult::Continue => {}
-            ir => return ir,
-        }
+        try_ir!(ensure_memory($ecx, $offset, $len))
     };
 }
 

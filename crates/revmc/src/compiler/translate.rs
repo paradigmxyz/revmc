@@ -1,15 +1,19 @@
 //! EVM to IR translation.
 
+use super::default_attrs;
 use crate::{
     Backend, Builder, Bytecode, EvmContext, Inst, InstData, InstFlags, IntCC, Result, I256_MIN,
 };
-use revm_interpreter::{opcode as op, Contract, InstructionResult};
-use revm_primitives::{BlockEnv, CfgEnv, Env, TxEnv, U256};
-use revmc_backend::{Attribute, BackendTypes, FunctionAttributeLocation, Pointer, TypeMethods};
-use revmc_builtins::{Builtin, Builtins, CallKind, CreateKind};
+use revm_interpreter::{
+    opcode as op, Contract, FunctionReturnFrame, FunctionStack, InstructionResult,
+    OPCODE_INFO_JUMPTABLE,
+};
+use revm_primitives::{BlockEnv, CfgEnv, Env, Eof, TxEnv, U256};
+use revmc_backend::{
+    eyre::ensure, Attribute, BackendTypes, FunctionAttributeLocation, Pointer, TypeMethods,
+};
+use revmc_builtins::{Builtin, Builtins, CallKind, CreateKind, ExtCallKind, EXTCALL_LIGHT_FAILURE};
 use std::{fmt::Write, mem, sync::atomic::AtomicPtr};
-
-use super::default_attrs;
 
 const STACK_CAP: usize = 1024;
 // const WORD_SIZE: usize = 32;
@@ -19,6 +23,7 @@ pub(super) struct FcxConfig {
     pub(super) comments: bool,
     pub(super) debug_assertions: bool,
     pub(super) frame_pointers: bool,
+    pub(super) validate_eof: bool,
 
     pub(super) local_stack: bool,
     pub(super) inspect_stack_length: bool,
@@ -32,6 +37,7 @@ impl Default for FcxConfig {
             debug_assertions: cfg!(debug_assertions),
             comments: false,
             frame_pointers: cfg!(debug_assertions),
+            validate_eof: true,
             local_stack: false,
             inspect_stack_length: false,
             stack_bound_checks: true,
@@ -61,6 +67,7 @@ pub(super) struct FunctionCx<'a, B: Backend> {
     bcx: B::Builder<'a>,
 
     // Common types.
+    ptr_type: B::Type,
     isize_type: B::Type,
     word_type: B::Type,
     address_type: B::Type,
@@ -126,7 +133,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     /// Example pseudo-code:
     ///
     /// ```ignore (pseudo-code)
-    /// // `cfg(will_suspend) = bytecode.will_suspend()`: `true` if it contains a
+    /// // `cfg(may_suspend) = bytecode.may_suspend()`: `true` if it contains a
     /// // `*CALL*` or `CREATE*` instruction.
     /// fn evm_bytecode(args: ...) {
     ///     setup_locals();
@@ -136,7 +143,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     ///
     ///     load_arguments();
     ///
-    ///     #[cfg(will_suspend)]
+    ///     #[cfg(may_suspend)]
     ///     resume: {
     ///         goto match ecx.resume_at {
     ///             0 => inst0,
@@ -150,7 +157,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     ///     op.inst0: { /* ... */ };
     ///     op.inst1: { /* ... */ };
     ///     // ...
-    ///     #[cfg(will_suspend)]
+    ///     #[cfg(may_suspend)]
     ///     first_call_or_create_inst: {
     ///          // ...
     ///          goto suspend(1);
@@ -161,7 +168,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     ///         goto return(InstructionResult::Stop);
     ///     };
     ///
-    ///     #[cfg(will_suspend)]
+    ///     #[cfg(may_suspend)]
     ///     suspend(resume_at: u32): {
     ///         ecx.resume_at = resume_at;
     ///         goto return(InstructionResult::CallOrCreate);
@@ -182,7 +189,10 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         builtins: &'a mut Builtins<B>,
         bytecode: &'a Bytecode<'a>,
     ) -> Result<()> {
+        let entry_block = bcx.current_block().unwrap();
+
         // Get common types.
+        let ptr_type = bcx.type_ptr();
         let isize_type = bcx.type_ptr_sized_int();
         let i8_type = bcx.type_int(8);
         let i64_type = bcx.type_int(64);
@@ -220,7 +230,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 if data.is_dead_code() {
                     unreachable_block
                 } else {
-                    bcx.create_block(&op_block_name_with(i, data, ""))
+                    bcx.create_block(&bytecode.op_block_name(i, ""))
                 }
             })
             .collect();
@@ -234,6 +244,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let mut fx = FunctionCx {
             config,
 
+            ptr_type,
             isize_type,
             address_type,
             word_type,
@@ -269,7 +280,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         };
 
         // We store the stack length if requested or necessary due to the bytecode.
-        let store_stack_length = config.inspect_stack_length || bytecode.will_suspend();
+        let stack_length_observable = config.inspect_stack_length || bytecode.may_suspend();
 
         // Add debug assertions for the parameters.
         if config.debug_assertions {
@@ -286,7 +297,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 "local stack is disabled",
             );
             fx.pointer_panic_with_bool(
-                store_stack_length,
+                stack_length_observable,
                 stack_len_arg,
                 "stack length pointer",
                 if config.inspect_stack_length {
@@ -302,8 +313,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
         // The bytecode is guaranteed to have at least one instruction.
         let first_inst_block = fx.inst_entries[0];
-        let current_block = fx.current_block();
-        let post_entry_block = fx.bcx.create_block_after(current_block, "entry.post");
+        let post_entry_block = fx.bcx.create_block_after(entry_block, "entry.post");
         let resume_block = fx.bcx.create_block_after(post_entry_block, "resume");
         fx.bcx.br(post_entry_block);
 
@@ -318,8 +328,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         if bytecode.has_dynamic_jumps() {
             fx.bcx.switch_to_block(fx.dynamic_jump_table);
             // TODO: Manually reduce to i32?
-            let jumpdests =
-                fx.bytecode.iter_insts().filter(|(_, data)| data.opcode == op::JUMPDEST);
+            let jumpdests = bytecode.iter_insts().filter(|(_, data)| data.opcode == op::JUMPDEST);
             // let max_pc =
             //     jumpdests.clone().map(|(_, data)| data.pc).next_back().expect("no jumpdests");
             let targets = jumpdests
@@ -353,7 +362,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 fx.stack_len.store_imm(&mut fx.bcx, 0);
             }
         };
-        if bytecode.will_suspend() {
+        let generate_resume = bytecode.may_suspend();
+        if generate_resume {
             let get_ecx_resume_at_ptr = |fx: &mut Self| {
                 fx.get_field(
                     fx.ecx,
@@ -364,7 +374,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
             let kind = fx.resume_kind;
             let resume_ty = match kind {
-                ResumeKind::Blocks => fx.bcx.type_ptr(),
+                ResumeKind::Blocks => fx.ptr_type,
                 ResumeKind::Indexes => fx.isize_type,
             };
 
@@ -437,18 +447,25 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
         // Finalize the failure block.
         fx.bcx.switch_to_block(fx.failure_block.unwrap());
-        let failure_value = fx.bcx.phi(fx.i8_type, &fx.incoming_failures);
-        fx.bcx.set_current_block_cold();
-        fx.build_return(failure_value);
+        if !fx.incoming_failures.is_empty() {
+            let failure_value = fx.bcx.phi(fx.i8_type, &fx.incoming_failures);
+            fx.bcx.set_current_block_cold();
+            fx.build_return(failure_value);
+        } else {
+            fx.bcx.unreachable();
+        }
 
         // Finalize the return block.
         fx.bcx.switch_to_block(fx.return_block.unwrap());
-        let return_value = fx.bcx.phi(fx.i8_type, &fx.incoming_returns);
-        if store_stack_length {
-            let len = fx.stack_len.load(&mut fx.bcx, "stack_len");
-            fx.bcx.store(len, stack_len_arg);
+        if !fx.incoming_returns.is_empty() {
+            let return_value = fx.bcx.phi(fx.i8_type, &fx.incoming_returns);
+            if stack_length_observable {
+                fx.save_stack_len();
+            }
+            fx.bcx.ret(&[return_value]);
+        } else {
+            fx.bcx.unreachable();
         }
-        fx.bcx.ret(&[return_value]);
 
         fx.bcx.seal_all_blocks();
 
@@ -457,12 +474,14 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
     #[instrument(level = "debug", skip_all, fields(inst = %self.bytecode.inst(inst).to_op()))]
     fn translate_inst(&mut self, inst: Inst) -> Result<()> {
+        let is_eof = self.bytecode.is_eof();
         self.current_inst = inst;
         let data = self.bytecode.inst(inst);
         let entry_block = self.inst_entries[inst];
         self.bcx.switch_to_block(entry_block);
 
         let opcode = data.opcode;
+        // self.call_printf(format_printf!("{}\n", data.to_op_in(self.bytecode)), &[]);
 
         let branch_to_next_opcode = |this: &mut Self| {
             debug_assert!(
@@ -519,7 +538,14 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             goto_return!(fail InstructionResult::NotActivated);
         }
         if data.flags.contains(InstFlags::UNKNOWN) {
+            ensure!(!is_eof, "Unknown opcode in EOF bytecode: {data:?}");
             goto_return!(fail InstructionResult::OpcodeNotFound);
+        }
+
+        if is_eof {
+            if let Some(info) = OPCODE_INFO_JUMPTABLE[opcode as usize] {
+                ensure!(!info.is_disabled_in_eof(), "Disabled opcode in EOF bytecode: {data:?}");
+            }
         }
 
         // Pay static gas for the current section.
@@ -534,7 +560,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         self.len_before = self.stack_len.load(&mut self.bcx, "stack_len");
 
         // Check stack length for the current section.
-        if self.config.stack_bound_checks {
+        // Skip doing this for EOF bytecode, as it is done at deploy time.
+        if !is_eof && self.config.stack_bound_checks {
             let inp = data.section.inputs;
             let diff = data.section.max_growth as i64;
 
@@ -588,7 +615,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 // HACK: For now all opcodes that suspend (minus the test one, which does not reach
                 // here) return exactly one value. This value is pushed onto the stack by the
                 // caller, so we don't account for it here.
-                if data.will_suspend() {
+                if data.may_suspend(is_eof) {
                     diff -= 1;
                 }
                 let len_changed = self.bcx.iadd_imm(self.len_before, diff);
@@ -812,7 +839,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 self.call_fallible_builtin(Builtin::ExtCodeCopy, &[self.ecx, sp, spec_id]);
             }
             op::RETURNDATASIZE => {
-                field!(ecx; @push self.isize_type, EvmContext<'_>, pf::Slice; return_data.len)
+                field!(ecx; @push self.isize_type, EvmContext<'_>, pf::Slice; return_data.len);
             }
             op::RETURNDATACOPY => {
                 let sp = self.sp_after_inputs();
@@ -968,21 +995,119 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             }
             op::PUSH1..=op::PUSH32 => {
                 // NOTE: This can be None if the bytecode is invalid.
-                let imm = self.bytecode.get_imm_of(data);
+                let imm = self.bytecode.get_imm(data);
                 let value = imm.map(U256::from_be_slice).unwrap_or_default();
                 let value = self.bcx.iconst_256(value);
                 self.push(value);
             }
 
-            op::DUP1..=op::DUP16 => self.dup(opcode - op::DUP1 + 1),
+            op::DUP1..=op::DUP16 => self.dup((opcode - op::DUP1 + 1) as usize),
 
-            op::SWAP1..=op::SWAP16 => self.swap(opcode - op::SWAP1 + 1),
+            op::SWAP1..=op::SWAP16 => self.swap((opcode - op::SWAP1 + 1) as usize),
 
             op::LOG0..=op::LOG4 => {
                 let n = opcode - op::LOG0;
                 let sp = self.sp_after_inputs();
                 let n = self.bcx.iconst(self.i8_type, n as i64);
                 self.call_fallible_builtin(Builtin::Log, &[self.ecx, sp, n]);
+            }
+
+            op::DATALOAD => {
+                let sp = self.sp_after_inputs();
+                let _ = self.call_builtin(Builtin::DataLoad, &[self.ecx, sp]);
+            }
+            op::DATALOADN => {
+                let imm = self.bytecode.get_imm(data).unwrap();
+                let offset = u16::from_be_bytes(imm.try_into().unwrap());
+                let slice = self.expect_eof().data_slice(offset as usize, 32);
+                let value = self.bcx.iconst_256(U256::from_be_slice(slice));
+                self.push(value);
+            }
+            op::DATASIZE => {
+                let value = self.bcx.iconst_256(U256::from(self.expect_eof().header.data_size));
+                self.push(value);
+            }
+            op::DATACOPY => {
+                let sp = self.sp_after_inputs();
+                self.call_fallible_builtin(Builtin::DataCopy, &[self.ecx, sp]);
+            }
+
+            op::RJUMP | op::RJUMPI => {
+                let (_, target_inst) = self.bytecode.iter_rjump_target_insts(data).next().unwrap();
+                let target = self.inst_entries[target_inst];
+                if opcode == op::RJUMP {
+                    self.bcx.br(target);
+                } else {
+                    let next = self.inst_entries[inst + 1];
+                    let value = self.pop();
+                    let cond = self.bcx.icmp_imm(IntCC::NotEqual, value, 0);
+                    self.bcx.brif(cond, target, next);
+                }
+                goto_return!(no_branch);
+            }
+            op::RJUMPV => {
+                let index = self.pop();
+                let default = self.inst_entries[inst + 1];
+                let targets = self
+                    .bytecode
+                    .iter_rjump_target_insts(data)
+                    .map(|(i, inst)| (i as u64, self.inst_entries[inst]))
+                    .collect::<Vec<_>>();
+                self.bcx.switch(index, default, &targets, false);
+                goto_return!(no_branch);
+            }
+            op::CALLF => {
+                let imm = self.bytecode.get_imm(data).unwrap();
+                self.callf_common(imm, false);
+                goto_return!(no_branch);
+            }
+            op::RETF => {
+                let address = self.call_func_stack_pop();
+                let section = self.bytecode.pc_to_eof_section(data.pc as usize);
+                let destinations = self
+                    .bytecode
+                    .eof_section_called_by(section)
+                    .iter()
+                    .map(|inst| self.inst_entries[*inst + 1])
+                    .collect::<Vec<_>>();
+                self.bcx.br_indirect(address, &destinations);
+                goto_return!(no_branch);
+            }
+            op::JUMPF => {
+                let imm = self.bytecode.get_imm(data).unwrap();
+                self.callf_common(imm, true);
+                goto_return!(no_branch);
+            }
+            op::DUPN => {
+                let imm = self.bytecode.get_imm(data).unwrap()[0];
+                self.dup(imm as usize + 1);
+            }
+            op::SWAPN => {
+                let imm = self.bytecode.get_imm(data).unwrap()[0];
+                self.swap(imm as usize + 1);
+            }
+            op::EXCHANGE => {
+                let imm = self.bytecode.get_imm(data).unwrap()[0];
+                let n = (imm >> 4) + 1;
+                let m = (imm & 0x0F) + 1;
+                self.exchange(n as usize, m as usize);
+            }
+
+            op::EOFCREATE => {
+                let sp = self.sp_after_inputs();
+                let imm = self.bytecode.get_imm(data).unwrap()[0];
+                let idx = self.bcx.iconst(self.isize_type, imm as i64);
+                self.call_fallible_builtin(Builtin::EofCreate, &[self.ecx, sp, idx]);
+                self.suspend();
+                goto_return!(no_branch);
+            }
+            op::RETURNCONTRACT => {
+                let sp = self.sp_after_inputs();
+                let imm = self.bytecode.get_imm(data).unwrap()[0];
+                let idx = self.bcx.iconst(self.isize_type, imm as i64);
+                let ret = self.call_builtin(Builtin::ReturnContract, &[self.ecx, sp, idx]).unwrap();
+                self.build_return(ret);
+                goto_return!(no_branch);
             }
 
             op::CREATE => {
@@ -1010,8 +1135,24 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 goto_return!(no_branch);
             }
 
+            op::RETURNDATALOAD => {
+                let sp = self.sp_after_inputs();
+                let _ = self.call_builtin(Builtin::ReturnDataLoad, &[self.ecx, sp]);
+            }
+            op::EXTCALL => {
+                self.ext_call_common(ExtCallKind::Call);
+                goto_return!(no_branch);
+            }
+            op::EXTDELEGATECALL => {
+                self.ext_call_common(ExtCallKind::DelegateCall);
+                goto_return!(no_branch);
+            }
             op::STATICCALL => {
                 self.call_common(CallKind::StaticCall);
+                goto_return!(no_branch);
+            }
+            op::EXTSTATICCALL => {
+                self.ext_call_common(ExtCallKind::StaticCall);
                 goto_return!(no_branch);
             }
 
@@ -1080,25 +1221,32 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
     /// Duplicates the `n`th value from the top of the stack.
     /// `n` cannot be `0`.
-    fn dup(&mut self, n: u8) {
+    fn dup(&mut self, n: usize) {
         debug_assert_ne!(n, 0);
         let len = self.len_before();
-        let sp = self.sp_from_top(len, n as usize);
+        let sp = self.sp_from_top(len, n);
         let value = self.load_word(sp, &format!("dup{n}"));
         self.push(value);
     }
 
     /// Swaps the topmost value with the `n`th value from the top.
     /// `n` cannot be `0`.
-    fn swap(&mut self, n: u8) {
-        debug_assert_ne!(n, 0);
+    fn swap(&mut self, n: usize) {
+        self.exchange(0, n);
+    }
+
+    /// Exchange two values on the stack.
+    /// `n` is the first index, and the second index is calculated as `n + m`.
+    /// `m` cannot be `0`.
+    fn exchange(&mut self, n: usize, m: usize) {
+        debug_assert_ne!(m, 0);
         let len = self.len_before();
         // Load a.
-        let a_sp = self.sp_from_top(len, n as usize + 1);
+        let a_sp = self.sp_from_top(len, n + 1);
         let a = self.load_word(a_sp, "swap.a");
         // Load b.
-        let b_sp = self.sp_from_top(len, 1);
-        let b = self.load_word(b_sp, "swap.top");
+        let b_sp = self.sp_from_top(len, n + m + 1);
+        let b = self.load_word(b_sp, "swap.b");
         // Store.
         self.bcx.store(a, b_sp);
         self.bcx.store(b, a_sp);
@@ -1112,7 +1260,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         self.build_return_imm(ir);
     }
 
-    /// `CREATE` or `CREATE2` instruction.
+    /// Builds a `CREATE` or `CREATE2` instruction.
     fn create_common(&mut self, create_kind: CreateKind) {
         let sp = self.sp_after_inputs();
         let spec_id = self.const_spec_id();
@@ -1121,13 +1269,93 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         self.suspend();
     }
 
-    /// `*CALL*` instruction.
+    /// Builds `*CALL*` instructions.
     fn call_common(&mut self, call_kind: CallKind) {
         let sp = self.sp_after_inputs();
         let spec_id = self.const_spec_id();
         let call_kind = self.bcx.iconst(self.i8_type, call_kind as i64);
         self.call_fallible_builtin(Builtin::Call, &[self.ecx, sp, spec_id, call_kind]);
         self.suspend();
+    }
+
+    /// Builds `EXT*CALL*` instructions.
+    fn ext_call_common(&mut self, call_kind: ExtCallKind) {
+        let sp = self.sp_after_inputs();
+        let call_kind = self.bcx.iconst(self.i8_type, call_kind as i64);
+        let spec_id = self.const_spec_id();
+        let ret = self.call_builtin(Builtin::ExtCall, &[self.ecx, sp, call_kind, spec_id]).unwrap();
+
+        let cond = self.bcx.icmp_imm(IntCC::Equal, ret, EXTCALL_LIGHT_FAILURE as i64);
+        let fail = self.create_block_after_current("light_fail");
+        let cont = self.create_block_after_current("contd");
+        self.bcx.brif_cold(cond, fail, cont, true);
+
+        self.bcx.switch_to_block(fail);
+        let one = self.bcx.iconst_256(U256::from(1));
+        self.push(one);
+        self.bcx.br(self.inst_entries[self.current_inst + 1]);
+
+        self.bcx.switch_to_block(cont);
+        self.build_check_instruction_result(ret);
+        self.suspend();
+    }
+
+    /// Builds a `CALLF` or `JUMPF` instruction.
+    fn callf_common(&mut self, imm: &[u8], is_jumpf: bool) {
+        let op_name = if is_jumpf { "JUMPF" } else { "CALLF" };
+
+        let idx = u16::from_be_bytes(imm.try_into().unwrap()) as usize;
+
+        // Check stack max height.
+        let types = self
+            .expect_eof()
+            .body
+            .types_section
+            .get(idx)
+            .unwrap_or_else(|| panic!("{op_name} section {idx}: types not found"));
+        let max_height = types.max_stack_size - types.inputs as u16;
+        let mut max_len = self.len_before();
+        if max_height != 0 {
+            max_len = self.bcx.iadd_imm(max_len, max_height as i64);
+        }
+        let cond = self.bcx.icmp_imm(IntCC::UnsignedGreaterThan, max_len, STACK_CAP as i64);
+        self.build_check(cond, InstructionResult::StackOverflow);
+
+        // Push the return address to the function stack.
+        let next_block = self.inst_entries[self.current_inst + 1];
+        if is_jumpf {
+            self.func_stack_set(idx);
+        } else {
+            let value = match self.bcx.block_addr(next_block) {
+                Some(addr) => addr,
+                None => todo!(),
+            };
+            self.call_func_stack_push(value, idx);
+        }
+
+        let inst = self.bytecode.eof_section_inst(idx);
+        self.bcx.br(self.inst_entries[inst]);
+    }
+
+    fn func_stack_set(&mut self, idx: usize) {
+        let func_stack = self.func_stack(self.ecx);
+        let idx_ptr = self.get_field(
+            func_stack,
+            mem::offset_of!(FunctionStack, current_code_idx),
+            "ecx.func_stack.current_code_idx",
+        );
+        let value = self.bcx.iconst(self.isize_type, idx as i64);
+        self.bcx.store(value, idx_ptr);
+    }
+
+    /// Loads `ecx.func_stack`.
+    fn func_stack(&mut self, ecx: B::Value) -> B::Value {
+        let ptr = self.get_field(
+            ecx,
+            mem::offset_of!(EvmContext<'_>, func_stack),
+            "ecx.func_stack.addr.addr",
+        );
+        self.bcx.load(self.ptr_type, ptr, "ecx.func_stack.addr")
     }
 
     /// Suspend execution, storing the resume point in the context.
@@ -1163,6 +1391,12 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         self.bcx.load(self.word_type, ptr, name)
     }
 
+    /// Returns the `Eof` container, panicking if it is not set.
+    #[track_caller]
+    fn expect_eof(&self) -> &Eof {
+        self.bytecode.expect_eof()
+    }
+
     /// Gets the stack length before the current instruction.
     fn len_before(&mut self) -> B::Value {
         self.len_before
@@ -1180,12 +1414,24 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
     /// Loads the gas used.
     fn load_gas_remaining(&mut self) -> B::Value {
-        self.gas_remaining.load(&mut self.bcx, "gas_remaining")
+        self.gas_remaining.load(&mut self.bcx, "gas.remaining")
     }
 
     /// Stores the gas used.
     fn store_gas_remaining(&mut self, value: B::Value) {
         self.gas_remaining.store(&mut self.bcx, value);
+    }
+
+    /// Saves the local `stack_len` to `stack_len_arg`.
+    fn save_stack_len(&mut self) {
+        let len = self.stack_len.load(&mut self.bcx, "stack_len");
+        let ptr = self.stack_len_arg();
+        self.bcx.store(len, ptr);
+    }
+
+    /// Returns the stack length argument.
+    fn stack_len_arg(&mut self) -> B::Value {
+        self.bcx.fn_param(2)
     }
 
     /// Returns the stack pointer at the top (`&stack[stack.len]`).
@@ -1347,6 +1593,10 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         }
     }
 
+    fn const_continue(&mut self) -> B::Value {
+        self.bcx.iconst(self.i8_type, InstructionResult::Continue as i64)
+    }
+
     fn add_invalid_jump(&mut self) {
         self.incoming_returns.push((
             self.bcx.iconst(self.i8_type, InstructionResult::InvalidJump as i64),
@@ -1370,10 +1620,10 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         if !extra.is_empty() {
             write!(msg, " ({extra})").unwrap();
         }
-        self.build_panic_cond(panic_cond, &msg);
+        self.build_assertion(panic_cond, &msg);
     }
 
-    fn build_panic_cond(&mut self, cond: B::Value, msg: &str) {
+    fn build_assertion(&mut self, cond: B::Value, msg: &str) {
         let failure = self.create_block_after_current("panic");
         let target = self.create_block_after(failure, "contd");
         self.bcx.brif(cond, failure, target);
@@ -1395,7 +1645,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         self.bcx.unreachable();
     }
 
-    #[cfg(any())]
+    #[allow(dead_code)]
     fn call_printf(&mut self, template: &std::ffi::CStr, values: &[B::Value]) {
         let mut args = Vec::with_capacity(values.len() + 1);
         args.push(self.bcx.cstr_const(template));
@@ -1414,6 +1664,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     #[must_use]
     fn call_builtin(&mut self, builtin: Builtin, args: &[B::Value]) -> Option<B::Value> {
         let function = self.builtin_function(builtin);
+        // self.call_printf(format_printf!("calling {}\n", builtin.name()), &[]);
         self.bcx.call(function, args)
     }
 
@@ -1463,10 +1714,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
     /// Returns the block name for the current opcode with the given suffix.
     fn op_block_name(&self, name: &str) -> String {
-        if self.current_inst == usize::MAX {
-            return format!("entry.{name}");
-        }
-        op_block_name_with(self.current_inst, self.bytecode.inst(self.current_inst), name)
+        self.bytecode.op_block_name(self.current_inst, name)
     }
 }
 
@@ -1555,7 +1803,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         self.call_ir_builtin(
             "calldataload",
             &[index, self.contract],
-            &[self.word_type, self.bcx.type_ptr()],
+            &[self.word_type, self.ptr_type],
             Some(self.word_type),
             Self::build_calldataload,
         )
@@ -1577,7 +1825,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             input_offset + mem::offset_of!(pf::Bytes, ptr),
             "contract.input.ptr.addr",
         );
-        let ptr = self.bcx.load(self.bcx.type_ptr(), ptr_ptr, "contract.input.ptr");
+        let ptr = self.bcx.load(self.ptr_type, ptr_ptr, "contract.input.ptr");
 
         let len_ptr = self.get_field(
             contract,
@@ -1642,7 +1890,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             MemOpKind::Store8 => "mstore8",
         };
         let value_ty = match kind {
-            MemOpKind::Load => self.bcx.type_ptr(),
+            MemOpKind::Load => self.ptr_type,
             MemOpKind::Store => self.word_type,
             MemOpKind::Store8 => self.i8_type,
         };
@@ -1650,7 +1898,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             .call_ir_builtin(
                 name,
                 &[offset, value, self.ecx],
-                &[self.word_type, value_ty, self.bcx.type_ptr()],
+                &[self.word_type, value_ty, self.ptr_type],
                 Some(self.i8_type),
                 |this| this.build_mem_op(kind),
             )
@@ -1685,7 +1933,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let memory_ptr = {
             let memory_ptr_ptr =
                 self.get_field(ecx, mem::offset_of!(EvmContext<'_>, memory), "ecx.memory.addr");
-            self.bcx.load(self.bcx.type_ptr(), memory_ptr_ptr, "ecx.memory")
+            self.bcx.load(self.ptr_type, memory_ptr_ptr, "ecx.memory")
         };
 
         let memory_buffer_offset = mem::offset_of!(pf::SharedMemory, buffer);
@@ -1742,7 +1990,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 memory_buffer_offset + mem::offset_of!(pf::Vec<u8>, ptr),
                 "ecx.memory.buffer.ptr.shared.addr",
             );
-            self.bcx.load(self.bcx.type_ptr(), ptr, "ecx.memory.buffer.ptr.shared")
+            self.bcx.load(self.ptr_type, ptr, "ecx.memory.buffer.ptr.shared")
         };
         let buffer_ptr = self.bcx.gep(
             self.i8_type,
@@ -1768,8 +2016,161 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             }
         }
 
-        let cont = self.bcx.iconst(self.i8_type, InstructionResult::Continue as i64);
+        let cont = self.const_continue();
         self.bcx.ret(&[cont]);
+    }
+
+    fn call_func_stack_push(&mut self, pc: B::Value, new_idx: usize) {
+        let new_idx = self.bcx.iconst(self.isize_type, new_idx as i64);
+        self.call_fallible_builtin(Builtin::FuncStackPush, &[self.ecx, pc, new_idx]);
+        /*
+        let ret = self
+            .call_ir_builtin(
+                "func_stack_push",
+                &[self.ecx, pc, new_idx],
+                &[self.ptr_type, self.ptr_type, self.isize_type],
+                Some(self.i8_type),
+                Self::build_func_stack_push,
+            )
+            .unwrap();
+        self.build_check_instruction_result(ret);
+        */
+    }
+
+    #[allow(dead_code)]
+    fn build_func_stack_push(&mut self) {
+        let ecx = self.bcx.fn_param(0);
+        let value = self.bcx.fn_param(1);
+        let new_idx = self.bcx.fn_param(2);
+
+        let func_stack = self.func_stack(ecx);
+        let return_stack_offset = mem::offset_of!(FunctionStack, return_stack);
+
+        // Increment the length.
+        let len_ptr = self.get_field(
+            func_stack,
+            return_stack_offset + mem::offset_of!(pf::Vec<FunctionReturnFrame>, len),
+            "ecx.func_stack.return_stack.len.addr",
+        );
+        let old_len = self.bcx.load(self.isize_type, len_ptr, "ecx.func_stack.return_stack.len");
+        let len = self.bcx.iadd_imm(old_len, 1);
+        let cond = self.bcx.icmp_imm(IntCC::UnsignedGreaterThan, len, STACK_CAP as i64);
+        self.build_check(cond, InstructionResult::StackOverflow);
+
+        // Grow the capacity if needed.
+        let cap = {
+            let cap_ptr = self.get_field(
+                func_stack,
+                return_stack_offset + mem::offset_of!(pf::Vec<FunctionReturnFrame>, cap),
+                "ecx.func_stack.return_stack.cap.addr",
+            );
+            self.bcx.load(self.isize_type, cap_ptr, "ecx.func_stack.return_stack.capacity")
+        };
+        let cond = self.bcx.icmp(IntCC::Equal, len, cap);
+        let grow = self.create_block_after_current("grow");
+        let cont = self.create_block_after_current("contd");
+        self.bcx.brif_cold(cond, grow, cont, true);
+
+        self.bcx.switch_to_block(grow);
+        let _ = self.call_builtin(Builtin::FuncStackGrow, &[func_stack]);
+        self.bcx.br(cont);
+
+        self.bcx.switch_to_block(cont);
+
+        // Store the length.
+        self.bcx.store(len, len_ptr);
+
+        // Store the element.
+        let ptr = {
+            let ptr_ptr = self.get_field(
+                func_stack,
+                return_stack_offset + mem::offset_of!(pf::Vec<FunctionReturnFrame>, ptr),
+                "ecx.func_stack.return_stack.ptr.addr",
+            );
+            self.bcx.load(self.ptr_type, ptr_ptr, "ecx.func_stack.return_stack.ptr")
+        };
+        let frame_ty = self.bcx.type_array(self.ptr_type, 2);
+        let frame = self.bcx.gep(frame_ty, ptr, &[old_len], "frame.addr");
+
+        // Store the return address into the frame.
+        let frame_pc = {
+            let idx = &[self.bcx.iconst(self.isize_type, 0), self.bcx.iconst(self.isize_type, 1)];
+            self.bcx.gep(frame_ty, frame, idx, "frame.pc")
+        };
+        self.bcx.store(value, frame_pc);
+
+        // Store the current index into the frame.
+        let current_idx_ptr = self.get_field(
+            func_stack,
+            mem::offset_of!(FunctionStack, current_code_idx),
+            "ecx.func_stack.current_code_idx",
+        );
+        let current_idx =
+            self.bcx.load(self.isize_type, current_idx_ptr, "ecx.func_stack.current_code_idx");
+        let frame_idx = {
+            let idx = &[self.bcx.iconst(self.isize_type, 0), self.bcx.iconst(self.isize_type, 0)];
+            self.bcx.gep(frame_ty, frame, idx, "frame.idx")
+        };
+        self.bcx.store(current_idx, frame_idx);
+
+        // Store the new index.
+        self.bcx.store(new_idx, current_idx_ptr);
+
+        let cont = self.const_continue();
+        self.bcx.ret(&[cont]);
+    }
+
+    fn call_func_stack_pop(&mut self) -> B::Value {
+        self.call_builtin(Builtin::FuncStackPop, &[self.ecx]).unwrap()
+        /*
+        self.call_ir_builtin(
+            "func_stack_pop",
+            &[self.ecx],
+            &[self.ptr_type],
+            Some(self.ptr_type),
+            Self::build_func_stack_pop,
+        )
+        .unwrap()
+        */
+    }
+
+    #[allow(dead_code)]
+    fn build_func_stack_pop(&mut self) {
+        let ecx = self.bcx.fn_param(0);
+
+        let func_stack = self.func_stack(ecx);
+        let return_stack_offset = mem::offset_of!(FunctionStack, return_stack);
+
+        // Decrement the length.
+        // This is a debug assertion because EOF validation should have caught this.
+        let len_ptr = self.get_field(
+            func_stack,
+            return_stack_offset + mem::offset_of!(pf::Vec<FunctionReturnFrame>, len),
+            "ecx.func_stack.return_stack.len",
+        );
+        let len = self.bcx.load(self.isize_type, len_ptr, "ecx.func_stack.return_stack.len");
+        if self.config.debug_assertions {
+            let cond = self.bcx.icmp_imm(IntCC::Equal, len, 0);
+            self.build_assertion(cond, "RETF with empty function stack");
+        }
+        let len = self.bcx.isub_imm(len, 1);
+        self.bcx.store(len, len_ptr);
+
+        // Get the address from the frame.
+        let ptr = {
+            let ptr_ptr = self.get_field(
+                func_stack,
+                return_stack_offset + mem::offset_of!(pf::Vec<FunctionReturnFrame>, ptr),
+                "ecx.func_stack.return_stack.ptr.addr",
+            );
+            self.bcx.load(self.ptr_type, ptr_ptr, "ecx.func_stack.return_stack.ptr")
+        };
+        let pc = {
+            let frame_type = self.bcx.type_array(self.ptr_type, 2);
+            let idx = self.bcx.iconst(self.isize_type, 1);
+            self.bcx.gep(frame_type, ptr, &[len, idx], "frame.pc")
+        };
+        self.bcx.ret(&[pc]);
     }
 
     fn call_ir_binop_builtin(
@@ -1794,6 +2195,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     ) -> Option<B::Value> {
         let prefix = "__revmc_ir_builtin_";
         let name = &format!("{prefix}{name}")[..];
+
+        // self.call_printf(format_printf!("calling {name}\n"), &[]);
 
         debug_assert_eq!(args.len(), arg_types.len());
         let linkage = revmc_backend::Linkage::Private;
@@ -1917,16 +2320,16 @@ mod pf {
     }
 }
 
-fn op_block_name_with(op: Inst, data: &InstData, with: &str) -> String {
-    let data = data.to_op();
-    if with.is_empty() {
-        format!("op.{op}.{data}")
-    } else {
-        format!("op.{op}.{data}.{with}")
-    }
-}
-
 fn get_field<B: Builder>(bcx: &mut B, ptr: B::Value, offset: usize, name: &str) -> B::Value {
     let offset = bcx.iconst(bcx.type_ptr_sized_int(), offset as i64);
     bcx.gep(bcx.type_int(8), ptr, &[offset], name)
 }
+
+#[allow(unused)]
+macro_rules! format_printf {
+    ($($t:tt)*) => {
+        &std::ffi::CString::new(format!($($t)*)).unwrap()
+    };
+}
+#[allow(unused)]
+use format_printf;

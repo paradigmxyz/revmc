@@ -56,8 +56,10 @@ pub(crate) struct SectionAnalysis {
 impl SectionAnalysis {
     /// Process a single instruction.
     pub(crate) fn process(&mut self, bytecode: &mut Bytecode<'_>, inst: usize) {
+        let is_eof = bytecode.is_eof();
+
         // JUMPDEST starts a section.
-        if bytecode.inst(inst).is_reachable_jumpdest(bytecode.has_dynamic_jumps()) {
+        if bytecode.inst(inst).is_reachable_jumpdest(is_eof, bytecode.has_dynamic_jumps()) {
             self.save_to(bytecode, inst);
             self.reset(inst);
         }
@@ -73,9 +75,9 @@ impl SectionAnalysis {
 
         // Instructions that require `gasleft` and branching instructions end a section, starting a
         // new one on the next instruction, if any.
-        if data.requires_gasleft(bytecode.spec_id)
-            || data.is_branching(bytecode.is_eof())
-            || data.will_suspend()
+        if (!is_eof && data.requires_gasleft(bytecode.spec_id))
+            || data.may_suspend(is_eof)
+            || data.is_branching(is_eof)
         {
             let next = inst + 1;
             self.save_to(bytecode, next);

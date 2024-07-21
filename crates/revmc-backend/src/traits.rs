@@ -167,6 +167,16 @@ pub enum FunctionAttributeLocation {
     Function,
 }
 
+/// Tail call kind.
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub enum TailCallKind {
+    #[default]
+    None,
+    Tail,
+    MustTail,
+    NoTail,
+}
+
 pub trait BackendTypes: Sized {
     type Type: Copy + Eq + fmt::Debug;
     type Value: Copy + Eq + fmt::Debug;
@@ -200,6 +210,8 @@ pub trait Backend: BackendTypes + TypeMethods {
     fn dump_disasm(&mut self, path: &Path) -> Result<()>;
 
     fn is_aot(&self) -> bool;
+
+    fn function_name_is_unique(&self, name: &str) -> bool;
 
     fn build_function(
         &mut self,
@@ -249,6 +261,7 @@ pub trait Builder: BackendTypes + TypeMethods {
         self.str_const(value.to_str().unwrap())
     }
     fn str_const(&mut self, value: &str) -> Self::Value;
+    fn nullptr(&mut self) -> Self::Value;
 
     fn new_stack_slot(&mut self, ty: Self::Type, name: &str) -> Pointer<Self> {
         Pointer::new_stack_slot(self, ty, name)
@@ -358,7 +371,16 @@ pub trait Builder: BackendTypes + TypeMethods {
     ) -> Self::Value;
 
     #[must_use]
-    fn call(&mut self, function: Self::Function, args: &[Self::Value]) -> Option<Self::Value>;
+    fn call(&mut self, function: Self::Function, args: &[Self::Value]) -> Option<Self::Value> {
+        self.tail_call(function, args, TailCallKind::None)
+    }
+    #[must_use]
+    fn tail_call(
+        &mut self,
+        function: Self::Function,
+        args: &[Self::Value],
+        tail_call: TailCallKind,
+    ) -> Option<Self::Value>;
 
     /// Returns `Some(is_value_compile_time)`, or `None` if unsupported.
     fn is_compile_time_known(&mut self, value: Self::Value) -> Option<Self::Value>;

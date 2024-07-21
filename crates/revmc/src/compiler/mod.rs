@@ -2,11 +2,15 @@
 
 use crate::{Backend, Builder, Bytecode, EvmCompilerFn, EvmContext, EvmStack, Result};
 use revm_interpreter::{Contract, Gas};
-use revm_primitives::{Env, SpecId};
-use revmc_backend::{eyre::ensure, Attribute, FunctionAttributeLocation, OptimizationLevel};
+use revm_primitives::{Bytes, Env, Eof, SpecId, EOF_MAGIC_BYTES};
+use revmc_backend::{
+    eyre::{ensure, eyre},
+    Attribute, FunctionAttributeLocation, Linkage, OptimizationLevel,
+};
 use revmc_builtins::Builtins;
 use revmc_context::RawEvmCompilerFn;
 use std::{
+    borrow::Cow,
     fs,
     io::{self, Write},
     mem,
@@ -53,7 +57,6 @@ pub struct EvmCompiler<B: Backend> {
     dump_assembly: bool,
     dump_unopt_assembly: bool,
 
-    function_counter: u32,
     finalized: bool,
 }
 
@@ -65,7 +68,6 @@ impl<B: Backend> EvmCompiler<B> {
             backend,
             out_dir: None,
             config: FcxConfig::default(),
-            function_counter: 0,
             builtins: Builtins::new(),
             dump_assembly: true,
             dump_unopt_assembly: false,
@@ -154,6 +156,15 @@ impl<B: Backend> EvmCompiler<B> {
         self.config.frame_pointers = yes;
     }
 
+    /// Sets whether to validate input EOF containers.
+    ///
+    /// **An invalid EOF container will likely results in a panic.**
+    ///
+    /// Defaults to `true`.
+    pub fn validate_eof(&mut self, yes: bool) {
+        self.config.validate_eof = yes;
+    }
+
     /// Sets whether to allocate the stack locally.
     ///
     /// If this is set to `true`, the stack pointer argument will be ignored and the stack will be
@@ -183,6 +194,8 @@ impl<B: Backend> EvmCompiler<B> {
     }
 
     /// Sets whether to enable stack bound checks.
+    ///
+    /// Ignored for EOF bytecodes, as they are assumed to be correct.
     ///
     /// Defaults to `true`.
     ///
@@ -216,16 +229,16 @@ impl<B: Backend> EvmCompiler<B> {
     /// Translates the given EVM bytecode into an internal function.
     ///
     /// NOTE: `name` must be unique for each function, as it is used as the name of the final
-    /// symbol. Use `None` for a default unique name.
-    pub fn translate(
+    /// symbol.
+    pub fn translate<'a>(
         &mut self,
-        name: Option<&str>,
-        bytecode: &[u8],
+        name: &str,
+        input: impl Into<EvmCompilerInput<'a>>,
         spec_id: SpecId,
     ) -> Result<B::FuncId> {
         ensure!(cfg!(target_endian = "little"), "only little-endian is supported");
         ensure!(!self.finalized, "cannot compile more functions after finalizing the module");
-        let bytecode = self.parse(bytecode, spec_id)?;
+        let bytecode = self.parse(input.into(), spec_id)?;
         self.translate_inner(name, &bytecode)
     }
 
@@ -237,13 +250,13 @@ impl<B: Backend> EvmCompiler<B> {
     ///
     /// The returned function pointer is owned by the module, and must not be called after the
     /// module is cleared or the function is freed.
-    pub unsafe fn jit(
+    pub unsafe fn jit<'a>(
         &mut self,
-        name: Option<&str>,
-        bytecode: &[u8],
+        name: &str,
+        bytecode: impl Into<EvmCompilerInput<'a>>,
         spec_id: SpecId,
     ) -> Result<EvmCompilerFn> {
-        let id = self.translate(name, bytecode, spec_id)?;
+        let id = self.translate(name, bytecode.into(), spec_id)?;
         unsafe { self.jit_function(id) }
     }
 
@@ -257,6 +270,7 @@ impl<B: Backend> EvmCompiler<B> {
         ensure!(self.is_jit(), "cannot JIT functions during AOT compilation");
         self.finalize()?;
         let addr = self.backend.jit_function(id)?;
+        debug_assert!(addr != 0);
         Ok(EvmCompilerFn::new(unsafe { std::mem::transmute::<usize, RawEvmCompilerFn>(addr) }))
     }
 
@@ -302,15 +316,38 @@ impl<B: Backend> EvmCompiler<B> {
     /// none of the `fn` pointers are called afterwards.
     pub unsafe fn clear(&mut self) -> Result<()> {
         self.builtins.clear();
-        self.function_counter = 0;
         self.finalized = false;
         self.backend.free_all_functions()
     }
 
     /// Parses the given EVM bytecode. Not public API.
-    #[doc(hidden)]
-    pub fn parse<'a>(&mut self, bytecode: &'a [u8], spec_id: SpecId) -> Result<Bytecode<'a>> {
-        let mut bytecode = Bytecode::new(bytecode, spec_id);
+    #[doc(hidden)] // Not public API.
+    pub fn parse<'a>(
+        &mut self,
+        input: EvmCompilerInput<'a>,
+        spec_id: SpecId,
+    ) -> Result<Bytecode<'a>> {
+        let bytecode;
+        let eof;
+        match input {
+            EvmCompilerInput::Code(code) => {
+                bytecode = code;
+                if spec_id.is_enabled_in(SpecId::PRAGUE_EOF) && code.starts_with(&EOF_MAGIC_BYTES) {
+                    eof = Some(Cow::Owned(Eof::decode(Bytes::copy_from_slice(code))?));
+                } else {
+                    eof = None;
+                }
+            }
+            EvmCompilerInput::Eof(e) => {
+                bytecode = &e.raw[..];
+                eof = Some(Cow::Borrowed(e));
+            }
+        }
+        if let Some(eof) = &eof {
+            self.do_validate_eof(eof)?;
+        }
+
+        let mut bytecode = Bytecode::new(bytecode, eof, spec_id);
         bytecode.analyze()?;
         if let Some(dump_dir) = &self.dump_dir() {
             Self::dump_bytecode(dump_dir, &bytecode)?;
@@ -318,24 +355,24 @@ impl<B: Backend> EvmCompiler<B> {
         Ok(bytecode)
     }
 
-    #[instrument(name = "translate", level = "debug", skip_all)]
-    fn translate_inner(
-        &mut self,
-        name: Option<&str>,
-        bytecode: &Bytecode<'_>,
-    ) -> Result<B::FuncId> {
-        let storage;
-        let name = match name {
-            Some(name) => name,
-            None => {
-                storage = self.default_name();
-                &storage
+    fn do_validate_eof(&self, eof: &Eof) -> Result<()> {
+        if !self.config.validate_eof {
+            return Ok(());
+        }
+        revm_interpreter::analysis::validate_eof(eof).map_err(|e| match e {
+            revm_interpreter::analysis::EofError::Decode(e) => e.into(),
+            revm_interpreter::analysis::EofError::Validation(e) => {
+                eyre!("validation error: {e:?}")
             }
-        };
+        })
+    }
 
-        let (bcx, id) = Self::make_builder(&mut self.backend, &self.config, name)?;
+    #[instrument(name = "translate", level = "debug", skip_all)]
+    fn translate_inner(&mut self, name: &str, bytecode: &Bytecode<'_>) -> Result<B::FuncId> {
+        ensure!(self.backend.function_name_is_unique(name), "function name `{name}` is not unique");
+        let linkage = Linkage::Public;
+        let (bcx, id) = Self::make_builder(&mut self.backend, &self.config, name, linkage)?;
         FunctionCx::translate(bcx, self.config, &mut self.builtins, bytecode)?;
-
         Ok(id)
     }
 
@@ -381,6 +418,7 @@ impl<B: Backend> EvmCompiler<B> {
         backend: &'a mut B,
         config: &FcxConfig,
         name: &str,
+        linkage: Linkage,
     ) -> Result<(B::Builder<'a>, B::FuncId)> {
         fn size_align<T>(i: usize) -> (usize, usize, usize) {
             (i, mem::size_of::<T>(), mem::align_of::<T>())
@@ -409,7 +447,6 @@ impl<B: Backend> EvmCompiler<B> {
             ],
         );
         debug_assert_eq!(params.len(), param_names.len());
-        let linkage = revmc_backend::Linkage::Public;
         let (mut bcx, id) = backend.build_function(name, ret, params, param_names, linkage)?;
 
         // Function attributes.
@@ -476,12 +513,6 @@ impl<B: Backend> EvmCompiler<B> {
         Ok(())
     }
 
-    fn default_name(&mut self) -> String {
-        let name = format!("__evm_compiler_{}", self.function_counter);
-        self.function_counter += 1;
-        name
-    }
-
     fn dump_dir(&self) -> Option<PathBuf> {
         let mut dump_dir = self.out_dir.clone()?;
         if let Some(name) = &self.name {
@@ -491,6 +522,39 @@ impl<B: Backend> EvmCompiler<B> {
             let _ = fs::create_dir_all(&dump_dir);
         }
         Some(dump_dir)
+    }
+}
+
+/// [`EvmCompiler`] input.
+#[allow(missing_debug_implementations)]
+pub enum EvmCompilerInput<'a> {
+    /// EVM bytecode. Can also be raw EOF code, which will be parsed.
+    Code(&'a [u8]),
+    /// Already-parsed EOF container.
+    Eof(&'a Eof),
+}
+
+impl<'a> From<&'a [u8]> for EvmCompilerInput<'a> {
+    fn from(code: &'a [u8]) -> Self {
+        EvmCompilerInput::Code(code)
+    }
+}
+
+impl<'a> From<&'a Vec<u8>> for EvmCompilerInput<'a> {
+    fn from(code: &'a Vec<u8>) -> Self {
+        EvmCompilerInput::Code(code)
+    }
+}
+
+impl<'a> From<&'a Bytes> for EvmCompilerInput<'a> {
+    fn from(code: &'a Bytes) -> Self {
+        EvmCompilerInput::Code(code)
+    }
+}
+
+impl<'a> From<&'a Eof> for EvmCompilerInput<'a> {
+    fn from(eof: &'a Eof) -> Self {
+        EvmCompilerInput::Eof(eof)
     }
 }
 
@@ -536,6 +600,7 @@ mod default_attrs {
     pub(crate) fn for_ref_t<T>() -> impl Iterator<Item = Attribute> {
         for_sized_ref(size_align::<T>())
     }
+
     pub(crate) fn size_align<T>() -> (usize, usize) {
         (std::mem::size_of::<T>(), std::mem::align_of::<T>())
     }

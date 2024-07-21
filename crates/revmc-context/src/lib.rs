@@ -33,8 +33,12 @@ pub struct EvmContext<'a> {
     pub next_action: &'a mut InterpreterAction,
     /// The return data.
     pub return_data: &'a [u8],
+    /// The function stack.
+    pub func_stack: &'a mut FunctionStack,
     /// Whether the context is static.
     pub is_static: bool,
+    /// Whether the context is EOF init.
+    pub is_eof_init: bool,
     /// An index that is used internally to keep track of where execution should resume.
     /// `0` is the initial state.
     #[doc(hidden)]
@@ -72,7 +76,9 @@ impl<'a> EvmContext<'a> {
             host,
             next_action: &mut interpreter.next_action,
             return_data: &interpreter.return_data_buffer,
+            func_stack: &mut interpreter.function_stack,
             is_static: interpreter.is_static,
+            is_eof_init: interpreter.is_eof_init,
             resume_at,
         };
         (this, stack, stack_len)
@@ -85,8 +91,11 @@ impl<'a> EvmContext<'a> {
             is_eof: self.contract.bytecode.is_eof(),
             instruction_pointer: bytecode.as_ptr(),
             bytecode,
-            function_stack: FunctionStack::new(),
-            is_eof_init: false,
+            function_stack: FunctionStack {
+                return_stack: self.func_stack.return_stack.clone(),
+                current_code_idx: self.func_stack.current_code_idx,
+            },
+            is_eof_init: self.is_eof_init,
             contract: self.contract.clone(),
             instruction_result: InstructionResult::Continue,
             gas: *self.gas,
@@ -189,7 +198,7 @@ pub type RawEvmCompilerFn = unsafe extern "C" fn(
 ) -> InstructionResult;
 
 /// An EVM bytecode function.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct EvmCompilerFn(RawEvmCompilerFn);
 
 impl From<RawEvmCompilerFn> for EvmCompilerFn {
@@ -308,7 +317,6 @@ impl EvmCompilerFn {
         stack_len: Option<&mut usize>,
         ecx: &mut EvmContext<'_>,
     ) -> InstructionResult {
-        assert!(!ecx.contract.bytecode.is_eof(), "EOF is not yet implemented");
         (self.0)(
             ecx.gas,
             option_as_mut_ptr(stack),

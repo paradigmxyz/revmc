@@ -13,10 +13,12 @@ extern crate tracing;
 use alloc::{boxed::Box, vec::Vec};
 use revm_interpreter::{
     as_u64_saturated, as_usize_saturated, CallInputs, CallScheme, CallValue, CreateInputs,
-    InstructionResult, InterpreterAction, InterpreterResult, LoadAccountResult, SStoreResult,
+    EOFCreateInputs, FunctionStack, InstructionResult, InterpreterAction, InterpreterResult,
+    LoadAccountResult, SStoreResult,
 };
 use revm_primitives::{
-    Bytes, CreateScheme, Log, LogData, SpecId, KECCAK_EMPTY, MAX_INITCODE_SIZE, U256,
+    eof::EofHeader, Address, Bytes, CreateScheme, Eof, Log, LogData, SpecId, KECCAK_EMPTY,
+    MAX_INITCODE_SIZE, U256,
 };
 use revmc_context::{EvmContext, EvmWord};
 
@@ -32,6 +34,10 @@ mod macros;
 
 mod utils;
 use utils::*;
+
+/// The result of a `EXT*CALL` instruction if the gas limit is less than `MIN_CALLEE_GAS`.
+// NOTE: This is just a random value that cannot happen normally.
+pub const EXTCALL_LIGHT_FAILURE: InstructionResult = InstructionResult::PrecompileError;
 
 /// The kind of a `*CALL*` instruction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -54,6 +60,28 @@ impl From<CallKind> for CallScheme {
             CallKind::CallCode => Self::CallCode,
             CallKind::DelegateCall => Self::DelegateCall,
             CallKind::StaticCall => Self::StaticCall,
+        }
+    }
+}
+
+/// The kind of a `EXT*CALL` instruction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ExtCallKind {
+    /// `EXTCALL`.
+    Call,
+    /// `EXTDELEGATECALL`.
+    DelegateCall,
+    /// `EXTSTATICCALL`.
+    StaticCall,
+}
+
+impl From<ExtCallKind> for CallScheme {
+    fn from(kind: ExtCallKind) -> Self {
+        match kind {
+            ExtCallKind::Call => Self::ExtCall,
+            ExtCallKind::DelegateCall => Self::ExtDelegateCall,
+            ExtCallKind::StaticCall => Self::ExtStaticCall,
         }
     }
 }
@@ -414,8 +442,144 @@ pub unsafe extern "C" fn __revmc_builtin_log(
     InstructionResult::Continue
 }
 
+pub unsafe extern "C" fn __revmc_builtin_data_load(ecx: &mut EvmContext<'_>, slot: &mut EvmWord) {
+    let offset = as_usize_saturated!(slot.to_u256());
+    let slice = ecx.contract.bytecode.eof().unwrap().data_slice(offset, 32);
+    let mut word = [0u8; 32];
+    word[..slice.len()].copy_from_slice(slice);
+    *slot = EvmWord::from_be_bytes(word);
+}
+
+pub unsafe extern "C" fn __revmc_builtin_data_copy(
+    ecx: &mut EvmContext<'_>,
+    sp: &mut [EvmWord; 3],
+) -> InstructionResult {
+    let data = decouple_lt(ecx.contract.bytecode.eof().unwrap().data());
+    copy_operation(ecx, sp, data)
+}
+
+pub unsafe extern "C" fn __revmc_builtin_returndataload(
+    ecx: &mut EvmContext<'_>,
+    slot: &mut EvmWord,
+) {
+    let offset = as_usize_saturated!(slot.to_u256());
+    let mut output = [0u8; 32];
+    if let Some(available) = ecx.return_data.len().checked_sub(offset) {
+        let copy_len = available.min(32);
+        output[..copy_len].copy_from_slice(&ecx.return_data[offset..offset + copy_len]);
+    }
+    *slot = EvmWord::from_be_bytes(output);
+}
+
 // NOTE: Return `InstructionResult::Continue` here to indicate success, not the final result of
 // the execution.
+
+#[no_mangle]
+pub unsafe extern "C" fn __revmc_builtin_eof_create(
+    ecx: &mut EvmContext<'_>,
+    rev![value, salt, in_offset, in_len]: &mut [EvmWord; 4],
+    initcontainer_index: usize,
+    _spec_id: SpecId,
+) -> InstructionResult {
+    ensure_non_staticcall!(ecx);
+    gas!(ecx, gas::EOF_CREATE_GAS);
+    let sub_container = ecx
+        .contract
+        .bytecode
+        .eof()
+        .expect("EOF is set")
+        .body
+        .container_section
+        .get(initcontainer_index)
+        .cloned()
+        .expect("EOF is checked");
+
+    let in_len = try_into_usize!(in_len);
+    let input = if in_len != 0 {
+        let in_offset = try_into_usize!(in_offset);
+        ensure_memory!(ecx, in_offset, in_len);
+        Bytes::copy_from_slice(ecx.memory.slice(in_offset, in_len))
+    } else {
+        Bytes::new()
+    };
+
+    let eof = Eof::decode(sub_container.clone()).expect("Subcontainer is verified");
+    assert!(eof.body.is_data_filled);
+
+    gas_opt!(ecx, gas::cost_per_word(sub_container.len() as u64, gas::KECCAK256WORD));
+
+    let created_address = ecx
+        .contract
+        .target_address
+        .create2(salt.to_be_bytes(), revm_primitives::keccak256(sub_container));
+
+    let gas_limit = ecx.gas.remaining_63_of_64_parts();
+    gas!(ecx, gas_limit);
+    *ecx.next_action = InterpreterAction::EOFCreate {
+        inputs: Box::new(EOFCreateInputs::new_opcode(
+            ecx.contract.target_address,
+            created_address,
+            value.to_u256(),
+            eof,
+            gas_limit,
+            input,
+        )),
+    };
+
+    InstructionResult::Continue
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn __revmc_builtin_return_contract(
+    ecx: &mut EvmContext<'_>,
+    rev![aux_data_offset, aux_data_len]: &mut [EvmWord; 2],
+    deploy_container_index: usize,
+    _spec_id: SpecId,
+) -> InstructionResult {
+    if !ecx.is_eof_init {
+        return InstructionResult::ReturnContractInNotInitEOF;
+    }
+    let aux_data_len = try_into_usize!(aux_data_len);
+    let container = ecx
+        .contract
+        .bytecode
+        .eof()
+        .expect("EOF is set")
+        .body
+        .container_section
+        .get(deploy_container_index)
+        .expect("EOF is checked");
+    let (eof_header, _) = EofHeader::decode(container).expect("valid EOF header");
+
+    let aux_slice = if aux_data_len != 0 {
+        let aux_data_offset = try_into_usize!(aux_data_offset);
+        try_ir!(ensure_memory_inner(ecx.memory, ecx.gas, aux_data_offset, aux_data_len));
+        ecx.memory.slice(aux_data_offset, aux_data_len)
+    } else {
+        &[]
+    };
+
+    let static_aux_size = eof_header.eof_size() - container.len();
+
+    let new_data_size = eof_header.data_size as usize - static_aux_size + aux_slice.len();
+    if new_data_size > 0xFFFF {
+        return InstructionResult::EofAuxDataOverflow;
+    }
+    if new_data_size < eof_header.data_size as usize {
+        return InstructionResult::EofAuxDataTooSmall;
+    }
+    let new_data_size = (new_data_size as u16).to_be_bytes();
+
+    let mut output = [container, aux_slice].concat();
+    output[eof_header.data_size_raw_i()..][..2].copy_from_slice(&new_data_size);
+
+    let result = InstructionResult::ReturnContract;
+    *ecx.next_action = crate::InterpreterAction::Return {
+        result: InterpreterResult { output: output.into(), gas: *ecx.gas, result },
+    };
+    result
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn __revmc_builtin_create(
     ecx: &mut EvmContext<'_>,
@@ -511,13 +675,14 @@ pub unsafe extern "C" fn __revmc_builtin_call(
         CallKind::Call | CallKind::CallCode => {
             pop!(sp; value);
             let value = value.to_u256();
-            if matches!(call_kind, CallKind::Call) && ecx.is_static && value != U256::ZERO {
+            if call_kind == CallKind::Call && ecx.is_static && value != U256::ZERO {
                 return InstructionResult::CallNotAllowedInsideStatic;
             }
             value
         }
         CallKind::DelegateCall | CallKind::StaticCall => U256::ZERO,
     };
+    let transfers_value = value != U256::ZERO;
 
     pop!(sp; in_offset, in_len, out_offset, out_len);
 
@@ -541,11 +706,11 @@ pub unsafe extern "C" fn __revmc_builtin_call(
 
     // Load account and calculate gas cost.
     let LoadAccountResult { is_cold, mut is_empty } = try_host!(ecx.host.load_account(to));
-    if !matches!(call_kind, CallKind::Call) {
+    if call_kind != CallKind::Call {
         is_empty = false;
     }
 
-    gas!(ecx, gas::call_cost(spec_id, value != U256::ZERO, is_cold, is_empty));
+    gas!(ecx, gas::call_cost(spec_id, transfers_value, is_cold, is_empty));
 
     // EIP-150: Gas cost changes for IO-heavy operations
     let mut gas_limit = if spec_id.is_enabled_in(SpecId::TANGERINE) {
@@ -559,7 +724,7 @@ pub unsafe extern "C" fn __revmc_builtin_call(
     gas!(ecx, gas_limit);
 
     // Add call stipend if there is value to be transferred.
-    if matches!(call_kind, CallKind::Call | CallKind::CallCode) && value != U256::ZERO {
+    if matches!(call_kind, CallKind::Call | CallKind::CallCode) && transfers_value {
         gas_limit = gas_limit.saturating_add(gas::CALL_STIPEND);
     }
 
@@ -579,18 +744,98 @@ pub unsafe extern "C" fn __revmc_builtin_call(
             } else {
                 ecx.contract.target_address
             },
-            value: if matches!(call_kind, CallKind::DelegateCall) {
+            value: if call_kind == CallKind::DelegateCall {
                 CallValue::Apparent(ecx.contract.call_value)
             } else {
                 CallValue::Transfer(value)
             },
             scheme: call_kind.into(),
-            is_static: ecx.is_static || matches!(call_kind, CallKind::StaticCall),
-            // TODO(EOF)
+            is_static: ecx.is_static || call_kind == CallKind::StaticCall,
             is_eof: false,
         }),
     };
 
+    InstructionResult::Continue
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn __revmc_builtin_ext_call(
+    ecx: &mut EvmContext<'_>,
+    sp: *mut EvmWord,
+    call_kind: ExtCallKind,
+    spec_id: SpecId,
+) -> InstructionResult {
+    let (target_address, in_offset, in_len, value) = if call_kind == ExtCallKind::Call {
+        let rev![target_address, in_offset, in_len, value] = &mut *sp.cast::<[EvmWord; 4]>();
+        (target_address, in_offset, in_len, value.to_u256())
+    } else {
+        let rev![target_address, in_offset, in_len] = &mut *sp.cast::<[EvmWord; 3]>();
+        (target_address, in_offset, in_len, U256::ZERO)
+    };
+
+    let target_address_bytes = target_address.to_be_bytes();
+    let (pad, target_address) = target_address_bytes.split_last_chunk::<20>().unwrap();
+    if !pad.iter().all(|i| *i == 0) {
+        return InstructionResult::InvalidEXTCALLTarget;
+    }
+    let target_address = Address::new(*target_address);
+
+    let in_len = try_into_usize!(in_len);
+    let input = if in_len != 0 {
+        let in_offset = try_into_usize!(in_offset);
+        ensure_memory!(ecx, in_offset, in_len);
+        Bytes::copy_from_slice(ecx.memory.slice(in_offset, in_len))
+    } else {
+        Bytes::new()
+    };
+
+    let transfers_value = value != U256::ZERO;
+    if ecx.is_static && transfers_value {
+        return InstructionResult::CallNotAllowedInsideStatic;
+    }
+
+    let Some(LoadAccountResult { is_cold, is_empty }) = ecx.host.load_account(target_address)
+    else {
+        return InstructionResult::FatalExternalError;
+    };
+    let call_cost = gas::call_cost(spec_id, transfers_value, is_cold, is_empty);
+    gas!(ecx, call_cost);
+
+    let gas_reduce = core::cmp::max(ecx.gas.remaining() / 64, 5000);
+    let gas_limit = ecx.gas.remaining().saturating_sub(gas_reduce);
+    if gas_limit < gas::MIN_CALLEE_GAS {
+        ecx.return_data = &[];
+        return EXTCALL_LIGHT_FAILURE;
+    }
+    gas!(ecx, gas_limit);
+
+    // Call host to interact with target contract
+    *ecx.next_action = InterpreterAction::Call {
+        inputs: Box::new(CallInputs {
+            input,
+            gas_limit,
+            target_address: if call_kind == ExtCallKind::DelegateCall {
+                ecx.contract.target_address
+            } else {
+                target_address
+            },
+            caller: if call_kind == ExtCallKind::DelegateCall {
+                ecx.contract.caller
+            } else {
+                ecx.contract.target_address
+            },
+            bytecode_address: target_address,
+            value: if call_kind == ExtCallKind::DelegateCall {
+                CallValue::Apparent(ecx.contract.call_value)
+            } else {
+                CallValue::Transfer(value)
+            },
+            scheme: call_kind.into(),
+            is_static: ecx.is_static || call_kind == ExtCallKind::StaticCall,
+            is_eof: true,
+            return_memory_offset: 0..0,
+        }),
+    };
     InstructionResult::Continue
 }
 
@@ -630,6 +875,29 @@ pub unsafe extern "C" fn __revmc_builtin_selfdestruct(
     gas!(ecx, gas::selfdestruct_cost(spec_id, res));
 
     InstructionResult::Continue
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn __revmc_builtin_func_stack_push(
+    ecx: &mut EvmContext<'_>,
+    pc: usize,
+    new_idx: usize,
+) -> InstructionResult {
+    if ecx.func_stack.return_stack_len() >= 1024 {
+        return InstructionResult::EOFFunctionStackOverflow;
+    }
+    ecx.func_stack.push(pc, new_idx);
+    InstructionResult::Continue
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn __revmc_builtin_func_stack_pop(ecx: &mut EvmContext<'_>) -> usize {
+    ecx.func_stack.pop().expect("RETF with empty return stack").pc
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn __revmc_builtin_func_stack_grow(func_stack: &mut FunctionStack) {
+    func_stack.return_stack.reserve(1);
 }
 
 #[no_mangle]

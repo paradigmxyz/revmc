@@ -33,14 +33,18 @@ revm-primitives.workspace = true
 
 bitflags = "2.5"
 bitvec = "1.0"
+either = "1.13"
 rustc-hash.workspace = true
 tracing.workspace = true
 
 arbitrary = { version = "1.3", optional = true }
+paste = { workspace = true, optional = true }
+similar-asserts = { version = "1.5", optional = true }
 
 [dev-dependencies]
 revmc-context = { workspace = true, features = ["host-ext-any"] }
 paste.workspace = true
+similar-asserts = "1.5"
 tempfile = "3.10"
 
 [features]
@@ -57,4 +61,4 @@ asm-keccak = ["alloy-primitives/asm-keccak"]
 optimism = ["revm-primitives/optimism", "revm-interpreter/optimism"]
 
 # Internal features.
-__fuzzing = ["dep:arbitrary"]
+__fuzzing = ["dep:arbitrary", "dep:paste", "dep:similar-asserts"]

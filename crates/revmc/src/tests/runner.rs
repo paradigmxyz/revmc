@@ -4,6 +4,7 @@ use revm_interpreter::{opcode as op, Contract, DummyHost, Host};
 use revm_primitives::{
     spec_to_generic, BlobExcessGasAndPrice, BlockEnv, CfgEnv, Env, HashMap, TxEnv,
 };
+use similar_asserts::assert_eq;
 use std::{fmt, path::Path, sync::OnceLock};
 
 pub struct TestCase<'a> {
@@ -58,7 +59,7 @@ impl Default for TestCase<'_> {
 impl fmt::Debug for TestCase<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("TestCase")
-            .field("bytecode", &format_bytecode(self.bytecode))
+            .field("bytecode", &format_bytecode(self.bytecode, self.spec_id))
             .field("spec_id", &self.spec_id)
             .field("modify_ecx", &self.modify_ecx.is_some())
             .field("expected_return", &self.expected_return)
@@ -101,6 +102,7 @@ pub const DEF_ADDR: Address = Address::repeat_byte(0xba);
 pub const DEF_CALLER: Address = Address::repeat_byte(0xca);
 pub static DEF_CD: &[u8] = &[0xaa; 64];
 pub static DEF_RD: &[u8] = &[0xbb; 64];
+pub static DEF_DATA: &[u8] = &[0xcc; 64];
 pub const DEF_VALUE: U256 = uint!(123_456_789_U256);
 pub static DEF_ENV: OnceLock<Env> = OnceLock::new();
 pub static DEF_STORAGE: OnceLock<HashMap<U256, U256>> = OnceLock::new();
@@ -354,14 +356,17 @@ pub fn set_test_dump<B: Backend>(compiler: &mut EvmCompiler<B>, module_path: &st
 pub fn run_test_case<B: Backend>(test_case: &TestCase<'_>, compiler: &mut EvmCompiler<B>) {
     let TestCase { bytecode, spec_id, .. } = *test_case;
     compiler.inspect_stack_length(true);
-    let f = unsafe { compiler.jit(None, bytecode, spec_id) }.unwrap();
+    // Done manually in `fn eof` and friends.
+    compiler.validate_eof(false);
+    // compiler.debug_assertions(false);
+    let f = unsafe { compiler.jit("test", bytecode, spec_id) }.unwrap();
     run_compiled_test_case(test_case, f);
 }
 
 fn run_compiled_test_case(test_case: &TestCase<'_>, f: EvmCompilerFn) {
     let TestCase {
         bytecode,
-        spec_id: _,
+        spec_id,
         modify_ecx,
         expected_return,
         expected_stack,
@@ -372,9 +377,19 @@ fn run_compiled_test_case(test_case: &TestCase<'_>, f: EvmCompilerFn) {
         assert_ecx,
     } = *test_case;
 
+    let is_eof_enabled = spec_id.is_enabled_in(SpecId::PRAGUE_EOF);
+
+    if !is_eof_enabled && bytecode.starts_with(&primitives::EOF_MAGIC_BYTES) {
+        panic!("EOF is not enabled in the current spec, forgot to set `spec_id`?");
+    }
+
     with_evm_context(bytecode, |ecx, stack, stack_len| {
         if let Some(modify_ecx) = modify_ecx {
             modify_ecx(ecx);
+        }
+
+        if is_eof_enabled && !ecx.contract.bytecode.is_eof() {
+            eprintln!("!!! WARNING: running legacy code under EOF !!!");
         }
 
         // Interpreter.

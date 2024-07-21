@@ -3,7 +3,7 @@
 use clap::{Parser, ValueEnum};
 use color_eyre::{eyre::eyre, Result};
 use revm_interpreter::{opcode::make_instruction_table, SharedMemory};
-use revm_primitives::{address, spec_to_generic, Env, SpecId};
+use revm_primitives::{address, spec_to_generic, Env, SpecId, TransactTo};
 use revmc::{eyre::ensure, EvmCompiler, EvmContext, EvmLlvmBackend, OptimizationLevel};
 use revmc_cli::{get_benches, read_code, Bench};
 use std::{
@@ -63,6 +63,12 @@ struct Cli {
     opt_level: OptimizationLevel,
     #[arg(long, value_enum, default_value = "cancun")]
     spec_id: SpecIdValueEnum,
+    /// Short-hand for `--spec-id pragueeof`.
+    #[arg(long, conflicts_with = "spec_id")]
+    eof: bool,
+    /// Skip validating EOF code.
+    #[arg(long, requires = "eof")]
+    no_validate: bool,
     #[arg(long)]
     debug_assertions: bool,
     #[arg(long)]
@@ -92,6 +98,7 @@ fn main() -> Result<()> {
     unsafe { compiler.stack_bound_checks(!cli.no_len_checks) };
     compiler.frame_pointers(true);
     compiler.debug_assertions(cli.debug_assertions);
+    compiler.validate_eof(!cli.no_validate);
 
     let Bench { name, bytecode, calldata, stack_input, native: _ } = if cli.bench_name == "custom" {
         Bench {
@@ -135,7 +142,8 @@ fn main() -> Result<()> {
     let gas_limit = cli.gas_limit;
 
     let mut env = Env::default();
-    env.tx.caller = address!("1000000000000000000000000000000000000001");
+    env.tx.caller = address!("0000000000000000000000000000000000000001");
+    env.tx.transact_to = TransactTo::Call(address!("0000000000000000000000000000000000000002"));
     env.tx.data = calldata;
     env.tx.gas_limit = gas_limit;
 
@@ -147,17 +155,17 @@ fn main() -> Result<()> {
 
     let bytecode = contract.bytecode.original_byte_slice();
 
-    let spec_id = cli.spec_id.into();
+    let spec_id = if cli.eof { SpecId::PRAGUE_EOF } else { cli.spec_id.into() };
     if !stack_input.is_empty() {
         compiler.inspect_stack_length(true);
     }
 
     if cli.parse_only {
-        let _ = compiler.parse(bytecode, spec_id)?;
+        let _ = compiler.parse(bytecode.into(), spec_id)?;
         return Ok(());
     }
 
-    let f_id = compiler.translate(Some(name), bytecode, spec_id)?;
+    let f_id = compiler.translate(name, bytecode, spec_id)?;
 
     let mut load = cli.load;
     if cli.aot {
@@ -292,6 +300,7 @@ pub enum SpecIdValueEnum {
     SHANGHAI,
     CANCUN,
     PRAGUE,
+    PRAGUE_EOF,
     LATEST,
 }
 
@@ -317,6 +326,7 @@ impl From<SpecIdValueEnum> for SpecId {
             SpecIdValueEnum::SHANGHAI => Self::SHANGHAI,
             SpecIdValueEnum::CANCUN => Self::CANCUN,
             SpecIdValueEnum::PRAGUE => Self::PRAGUE,
+            SpecIdValueEnum::PRAGUE_EOF => Self::PRAGUE_EOF,
             SpecIdValueEnum::LATEST => Self::LATEST,
         }
     }
