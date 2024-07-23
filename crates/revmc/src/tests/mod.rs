@@ -123,6 +123,21 @@ tests! {
             expected_stack: &[U256::ZERO],
             expected_gas: 2,
         }),
+
+        pre_eof_in_legacy(@raw {
+            bytecode: &[op::PUSH0, op::PUSH0, op::SWAPN, 0],
+            spec_id: SpecId::CANCUN,
+            expected_return: InstructionResult::EOFOpcodeDisabledInLegacy,
+            expected_stack: &[U256::ZERO, U256::ZERO],
+            expected_gas: 2 + 2,
+        }),
+        eof_in_legacy(@raw {
+            bytecode: &[op::PUSH0, op::PUSH0, op::SWAPN, 0],
+            spec_id: SpecId::PRAGUE_EOF,
+            expected_return: InstructionResult::EOFOpcodeDisabledInLegacy,
+            expected_stack: &[U256::ZERO, U256::ZERO],
+            expected_gas: 2 + 2,
+        }),
     }
 
     stack {
@@ -1236,12 +1251,12 @@ tests! {
 }
 
 #[track_caller]
-fn eof(code: &'static [u8]) -> Bytes {
+fn eof(code: &[u8]) -> Bytes {
     eof_sections(&[code])
 }
 
 #[track_caller]
-fn eof_sections(code: &[&'static [u8]]) -> Bytes {
+fn eof_sections(code: &[&[u8]]) -> Bytes {
     let eof = eof_sections_unchecked(code);
     match revm_interpreter::analysis::validate_eof(&eof) {
         Ok(()) => {}
@@ -1258,11 +1273,11 @@ fn eof_sections(code: &[&'static [u8]]) -> Bytes {
 }
 
 // We have to expose this because validation fails at invalid type sections
-fn eof_sections_unchecked(code: &[&'static [u8]]) -> primitives::Eof {
+fn eof_sections_unchecked(code: &[&[u8]]) -> primitives::Eof {
     eof_body(code, vec![eof_subcontainer()]).into_eof()
 }
 
-fn eof_body(code: &[&'static [u8]], containers: Vec<Bytes>) -> primitives::eof::EofBody {
+fn eof_body(code: &[&[u8]], containers: Vec<Bytes>) -> primitives::eof::EofBody {
     revm_primitives::eof::EofBody {
         types_section: {
             let mut types =
@@ -1276,7 +1291,7 @@ fn eof_body(code: &[&'static [u8]], containers: Vec<Bytes>) -> primitives::eof::
             }
             types
         },
-        code_section: code.iter().copied().map(Bytes::from_static).collect(),
+        code_section: code.iter().copied().map(Bytes::copy_from_slice).collect(),
         container_section: containers,
         data_section: Bytes::from_static(DEF_DATA),
         is_data_filled: false,

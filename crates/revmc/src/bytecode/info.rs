@@ -12,8 +12,10 @@ impl OpcodeInfo {
     pub const DYNAMIC: u16 = 0b0100_0000_0000_0000;
     /// The disabled flag.
     pub const DISABLED: u16 = 0b0010_0000_0000_0000;
+    /// The EOF flag.
+    pub const EOF: u16 = 0b0001_0000_0000_0000;
     /// The mask for the gas cost.
-    pub const MASK: u16 = 0b0001_1111_1111_1111;
+    pub const MASK: u16 = 0b0000_1111_1111_1111;
 
     /// Creates a new gas info with the given gas cost.
     #[inline]
@@ -33,10 +35,18 @@ impl OpcodeInfo {
         self.0 & Self::DYNAMIC != 0
     }
 
-    /// Returns `true` if the opcode is known, but disabled in the current EVM version.
+    /// Returns `true` if the opcode is known, but disabled in the current EVM
+    /// version.
     #[inline]
     pub const fn is_disabled(self) -> bool {
         self.0 & Self::DISABLED != 0
+    }
+
+    /// Returns `true` if the opcode is an EOF opcode, meaning it is disallowed in
+    /// legacy bytecode.
+    #[inline]
+    pub const fn is_eof_only(self) -> bool {
+        self.0 & Self::EOF != 0
     }
 
     /// Returns the base gas cost of the opcode.
@@ -65,6 +75,12 @@ impl OpcodeInfo {
         self.0 |= Self::DISABLED;
     }
 
+    /// Sets the EOF flag.
+    #[inline]
+    pub fn set_eof(&mut self) {
+        self.0 |= Self::EOF;
+    }
+
     /// Sets the gas cost.
     ///
     /// # Panics
@@ -87,6 +103,7 @@ pub const fn op_info_map(spec_id: SpecId) -> &'static [OpcodeInfo; 256] {
 #[allow(unused_mut)]
 const fn make_map(spec_id: SpecId) -> [OpcodeInfo; 256] {
     const DYNAMIC: u16 = OpcodeInfo::DYNAMIC;
+    const EOF: u16 = OpcodeInfo::EOF;
 
     let mut map = [OpcodeInfo(OpcodeInfo::UNKNOWN); 256];
     macro_rules! set {
@@ -169,20 +186,20 @@ const fn make_map(spec_id: SpecId) -> [OpcodeInfo; 256] {
         GASPRICE       = 2;
         EXTCODESIZE    = DYNAMIC; // [1]
         EXTCODECOPY    = DYNAMIC;
-        RETURNDATASIZE = 2, if BYZANTIUM;
-        RETURNDATACOPY = 3 | DYNAMIC, if BYZANTIUM; // [2]
-        EXTCODEHASH    = DYNAMIC, if CONSTANTINOPLE; // [1]
+        RETURNDATASIZE = 2,              if BYZANTIUM;
+        RETURNDATACOPY = 3 | DYNAMIC,    if BYZANTIUM; // [2]
+        EXTCODEHASH    = DYNAMIC,        if CONSTANTINOPLE; // [1]
         BLOCKHASH      = 20;
         COINBASE       = 2;
         TIMESTAMP      = 2;
         NUMBER         = 2;
         DIFFICULTY     = 2;
         GASLIMIT       = 2;
-        CHAINID        = 2, if ISTANBUL;
-        SELFBALANCE    = 5, if ISTANBUL;
-        BASEFEE        = 2, if LONDON;
-        BLOBHASH       = 3, if CANCUN;
-        BLOBBASEFEE    = 2, if CANCUN;
+        CHAINID        = 2,              if ISTANBUL;
+        SELFBALANCE    = 5,              if ISTANBUL;
+        BASEFEE        = 2,              if LONDON;
+        BLOBHASH       = 3,              if CANCUN;
+        BLOBBASEFEE    = 2,              if CANCUN;
         // 0x4B
         // 0x4C
         // 0x4D
@@ -200,11 +217,11 @@ const fn make_map(spec_id: SpecId) -> [OpcodeInfo; 256] {
         MSIZE    = 2;
         GAS      = 2;
         JUMPDEST = 1;
-        TLOAD    = 100, if CANCUN;
-        TSTORE   = 100, if CANCUN;
-        MCOPY    = 3 | DYNAMIC, if CANCUN; // [2]
+        TLOAD    = 100,                  if CANCUN;
+        TSTORE   = 100,                  if CANCUN;
+        MCOPY    = 3 | DYNAMIC,          if CANCUN; // [2]
 
-        PUSH0  = 2, if SHANGHAI;
+        PUSH0  = 2,                      if SHANGHAI;
         PUSH1  = 3;
         PUSH2  = 3;
         PUSH3  = 3;
@@ -320,10 +337,10 @@ const fn make_map(spec_id: SpecId) -> [OpcodeInfo; 256] {
         // 0xCD
         // 0xCE
         // 0xCF
-        DATALOAD  = 4, if PRAGUE_EOF;
-        DATALOADN = 3, if PRAGUE_EOF;
-        DATASIZE  = 2, if PRAGUE_EOF;
-        DATACOPY  = 3 | DYNAMIC, if PRAGUE_EOF; // [2]
+        DATALOAD  = 4 | EOF,             if PRAGUE_EOF;
+        DATALOADN = 3 | EOF,             if PRAGUE_EOF;
+        DATASIZE  = 2 | EOF,             if PRAGUE_EOF;
+        DATACOPY  = 3 | DYNAMIC | EOF,   if PRAGUE_EOF; // [2]
         // 0xD4
         // 0xD5
         // 0xD6
@@ -336,36 +353,36 @@ const fn make_map(spec_id: SpecId) -> [OpcodeInfo; 256] {
         // 0xDD
         // 0xDE
         // 0xDF
-        RJUMP           = 2, if PRAGUE_EOF;
-        RJUMPI          = 4, if PRAGUE_EOF;
-        RJUMPV          = 4, if PRAGUE_EOF;
-        CALLF           = 5, if PRAGUE_EOF;
-        RETF            = 3, if PRAGUE_EOF;
-        JUMPF           = 5, if PRAGUE_EOF;
-        DUPN            = 3, if PRAGUE_EOF;
-        SWAPN           = 3, if PRAGUE_EOF;
-        EXCHANGE        = 3, if PRAGUE_EOF;
+        RJUMP           = 2 | EOF,       if PRAGUE_EOF;
+        RJUMPI          = 4 | EOF,       if PRAGUE_EOF;
+        RJUMPV          = 4 | EOF,       if PRAGUE_EOF;
+        CALLF           = 5 | EOF,       if PRAGUE_EOF;
+        RETF            = 3 | EOF,       if PRAGUE_EOF;
+        JUMPF           = 5 | EOF,       if PRAGUE_EOF;
+        DUPN            = 3 | EOF,       if PRAGUE_EOF;
+        SWAPN           = 3 | EOF,       if PRAGUE_EOF;
+        EXCHANGE        = 3 | EOF,       if PRAGUE_EOF;
         // 0xE9
         // 0xEA
         // 0xEB
-        EOFCREATE       = DYNAMIC, if PRAGUE_EOF; // TODO: EOF_CREATE_GAS | DYNAMIC is too big
+        EOFCREATE       = DYNAMIC | EOF, if PRAGUE_EOF; // TODO: EOF_CREATE_GAS | DYNAMIC is too big
         // 0xED
-        RETURNCONTRACT  = DYNAMIC, if PRAGUE_EOF;
+        RETURNCONTRACT  = DYNAMIC | EOF, if PRAGUE_EOF;
         // 0xEF
         CREATE          = DYNAMIC;
         CALL            = DYNAMIC;
         CALLCODE        = DYNAMIC;
         RETURN          = DYNAMIC;
-        DELEGATECALL    = DYNAMIC, if HOMESTEAD;
-        CREATE2         = DYNAMIC, if PETERSBURG;
+        DELEGATECALL    = DYNAMIC,       if HOMESTEAD;
+        CREATE2         = DYNAMIC,       if PETERSBURG;
         // 0xF6
-        RETURNDATALOAD  = 3, if PRAGUE_EOF;
-        EXTCALL         = DYNAMIC, if PRAGUE_EOF;
-        EXTDELEGATECALL = DYNAMIC, if PRAGUE_EOF;
-        STATICCALL      = DYNAMIC, if BYZANTIUM;
-        EXTSTATICCALL   = DYNAMIC, if PRAGUE_EOF;
+        RETURNDATALOAD  = 3 | EOF,       if PRAGUE_EOF;
+        EXTCALL         = DYNAMIC | EOF, if PRAGUE_EOF;
+        EXTDELEGATECALL = DYNAMIC | EOF, if PRAGUE_EOF;
+        STATICCALL      = DYNAMIC,       if BYZANTIUM;
+        EXTSTATICCALL   = DYNAMIC | EOF, if PRAGUE_EOF;
         // 0xFC
-        REVERT          = DYNAMIC, if BYZANTIUM;
+        REVERT          = DYNAMIC,       if BYZANTIUM;
         INVALID         = 0;
         SELFDESTRUCT    = DYNAMIC;
     }

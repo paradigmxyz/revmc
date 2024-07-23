@@ -90,6 +90,9 @@ impl<'a> Bytecode<'a> {
             if info.is_disabled() {
                 flags |= InstFlags::DISABLED;
             }
+            if info.is_eof_only() {
+                flags |= InstFlags::EOF_ONLY;
+            }
             let base_gas = info.base_gas();
 
             let section = Section::default();
@@ -829,11 +832,14 @@ bitflags::bitflags! {
         /// The instruction is unknown.
         /// Always returns [`InstructionResult::NotFound`] at runtime.
         const UNKNOWN = 1 << 4;
+        /// The instruction is only enabled in EOF bytecodes.
+        /// Always returns [`InstructionResult::EOFOpcodeDisabledInLegacy`] at runtime.
+        const EOF_ONLY = 1 << 5;
 
         /// Skip generating instruction logic, but keep the gas calculation.
-        const SKIP_LOGIC = 1 << 5;
+        const SKIP_LOGIC = 1 << 6;
         /// Don't generate any code.
-        const DEAD_CODE = 1 << 6;
+        const DEAD_CODE = 1 << 7;
     }
 }
 
