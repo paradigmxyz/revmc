@@ -8,7 +8,7 @@ use revm_interpreter::{
     opcode as op, Contract, FunctionReturnFrame, FunctionStack, InstructionResult,
     OPCODE_INFO_JUMPTABLE,
 };
-use revm_primitives::{BlockEnv, CfgEnv, Env, Eof, TxEnv, U256};
+use revm_primitives::{BlockEnv, CfgEnv, Env, Eof, SpecId, TxEnv, U256};
 use revmc_backend::{
     eyre::ensure, Attribute, BackendTypes, FunctionAttributeLocation, Pointer, TypeMethods,
 };
@@ -474,13 +474,18 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
     #[instrument(level = "debug", skip_all, fields(inst = %self.bytecode.inst(inst).to_op()))]
     fn translate_inst(&mut self, inst: Inst) -> Result<()> {
-        let is_eof = self.bytecode.is_eof();
         self.current_inst = inst;
         let data = self.bytecode.inst(inst);
+        let opcode = data.opcode;
         let entry_block = self.inst_entries[inst];
         self.bcx.switch_to_block(entry_block);
 
-        let opcode = data.opcode;
+        let is_eof = self.bytecode.is_eof();
+        let is_eof_enabled = self.bytecode.spec_id.is_enabled_in(SpecId::PRAGUE_EOF);
+        if is_eof {
+            ensure!(is_eof_enabled, "EOF bytecode in non-EOF spec");
+        }
+
         // self.call_printf(format_printf!("{}\n", data.to_op_in(self.bytecode)), &[]);
 
         let branch_to_next_opcode = |this: &mut Self| {
@@ -531,6 +536,29 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         if opcode == crate::TEST_SUSPEND {
             self.suspend();
             goto_return!(no_branch);
+        }
+
+        // This is a compile error because it should've been validated as per EOF.
+        if is_eof_enabled && is_eof {
+            if let Some(info) = OPCODE_INFO_JUMPTABLE[opcode as usize] {
+                ensure!(
+                    !info.is_disabled_in_eof(),
+                    "disabled opcode in EOF bytecode: {}",
+                    data.to_op_in(self.bytecode),
+                );
+            }
+        }
+
+        // Revm doesn't consider spec ID when checking for EOF-only opcodes,
+        // so don't check for `is_eof_enabled`.
+        if !is_eof && data.flags.contains(InstFlags::EOF_ONLY) {
+            // Match Revm output.
+            let ret = if opcode == op::RETURNCONTRACT {
+                InstructionResult::ReturnContractInNotInitEOF
+            } else {
+                InstructionResult::EOFOpcodeDisabledInLegacy
+            };
+            goto_return!(fail ret);
         }
 
         // Disabled instructions don't pay gas.

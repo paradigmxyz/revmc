@@ -10,12 +10,6 @@ use revmc::{
 use std::path::PathBuf;
 
 fuzz_target!(|test_case: TestCase<'_>| {
-    let mut test_case = test_case;
-    // EOF is not yet implemented.
-    if test_case.spec_id > revmc::primitives::SpecId::CANCUN {
-        test_case.spec_id = revmc::primitives::SpecId::CANCUN;
-    }
-
     if should_skip(test_case.bytecode, test_case.spec_id) {
         return;
     }
@@ -32,10 +26,6 @@ fuzz_target!(|test_case: TestCase<'_>| {
 fn should_skip(bytecode: &[u8], spec_id: SpecId) -> bool {
     OpcodesIter::new(bytecode, spec_id).any(|op| {
         let Some(info) = OPCODE_INFO_JUMPTABLE[op.opcode as usize] else { return true };
-        // Skip all EOF opcodes since they might have different error codes in the interpreter.
-        if is_eof(op.opcode) {
-            return true;
-        }
         // Skip if the immediate is incomplete.
         // TODO: What is the expected behavior here?
         if info.immediate_size() > 0 && op.immediate.is_none() {
@@ -43,31 +33,4 @@ fn should_skip(bytecode: &[u8], spec_id: SpecId) -> bool {
         }
         false
     })
-}
-
-// https://github.com/ipsilon/eof/blob/53e0e987e10bedee36d6c6ad0a6d1cfe806905e2/spec/eof.md?plain=1#L159
-fn is_eof(op: u8) -> bool {
-    use revmc::interpreter::opcode::*;
-    matches!(
-        op,
-        RJUMP
-            | RJUMPI
-            | RJUMPV
-            | CALLF
-            | RETF
-            | JUMPF
-            | EOFCREATE
-            | RETURNCONTRACT
-            | DATALOAD
-            | DATALOADN
-            | DATASIZE
-            | DATACOPY
-            | DUPN
-            | SWAPN
-            | EXCHANGE
-            | RETURNDATALOAD
-            | EXTCALL
-            | EXTDELEGATECALL
-            | EXTSTATICCALL
-    )
 }

@@ -2,7 +2,7 @@ use super::*;
 use interpreter::LoadAccountResult;
 use revm_interpreter::{opcode as op, Contract, DummyHost, Host};
 use revm_primitives::{
-    spec_to_generic, BlobExcessGasAndPrice, BlockEnv, CfgEnv, Env, HashMap, TxEnv,
+    spec_to_generic, BlobExcessGasAndPrice, BlockEnv, CfgEnv, Env, HashMap, TxEnv, EOF_MAGIC_BYTES,
 };
 use similar_asserts::assert_eq;
 use std::{fmt, path::Path, sync::OnceLock};
@@ -25,17 +25,27 @@ pub struct TestCase<'a> {
 #[cfg(feature = "__fuzzing")]
 impl<'a> arbitrary::Arbitrary<'a> for TestCase<'a> {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
-        let spec_id = SpecId::try_from_u8(u.arbitrary()?).unwrap_or(DEF_SPEC);
-        Ok(Self::what_interpreter_says(u.arbitrary()?, spec_id))
-    }
+        let is_eof_enabled = u.arbitrary::<bool>()?;
+        let spec_id_range = if is_eof_enabled {
+            SpecId::PRAGUE_EOF as u8..=SpecId::PRAGUE_EOF as u8
+        } else {
+            0..=(SpecId::PRAGUE_EOF as u8 - 1)
+        };
+        let spec_id = SpecId::try_from_u8(u.int_in_range(spec_id_range)?).unwrap_or(DEF_SPEC);
 
-    fn arbitrary_take_rest(mut u: arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
-        let spec_id = SpecId::try_from_u8(u.arbitrary()?).unwrap_or(DEF_SPEC);
-        Ok(Self::what_interpreter_says(u.take_rest(), spec_id))
-    }
+        let mut bytecode: &'a [u8] = u.arbitrary()?;
+        if is_eof_enabled && !bytecode.starts_with(&EOF_MAGIC_BYTES) && u.arbitrary()? {
+            let code = eof_sections_unchecked(&[bytecode]);
+            if revm_interpreter::analysis::validate_eof(&code).is_ok() {
+                static mut STORAGE: Bytes = Bytes::new();
+                unsafe {
+                    STORAGE = code.raw;
+                    bytecode = &STORAGE[..];
+                }
+            }
+        }
 
-    fn size_hint(depth: usize) -> (usize, Option<usize>) {
-        <(u8, &'static [u8]) as arbitrary::Arbitrary>::size_hint(depth)
+        Ok(Self::what_interpreter_says(bytecode, spec_id))
     }
 }
 
@@ -388,7 +398,7 @@ fn run_compiled_test_case(test_case: &TestCase<'_>, f: EvmCompilerFn) {
             modify_ecx(ecx);
         }
 
-        if is_eof_enabled && !ecx.contract.bytecode.is_eof() {
+        if !cfg!(feature = "__fuzzing") && is_eof_enabled && !ecx.contract.bytecode.is_eof() {
             eprintln!("!!! WARNING: running legacy code under EOF !!!");
         }
 
@@ -459,15 +469,17 @@ fn run_compiled_test_case(test_case: &TestCase<'_>, f: EvmCompilerFn) {
 
         let actual_return = unsafe { f.call(Some(stack), Some(stack_len), ecx) };
 
-        // We can have a stack overflow/underflow before other error codes due to sections.
         if matches!(
             actual_return,
-            InstructionResult::StackOverflow | InstructionResult::StackUnderflow
+            // We can have a stack overflow/underflow before other error codes due to sections.
+            |InstructionResult::StackOverflow| InstructionResult::StackUnderflow
+            // Any OOG is equivalent. We skip `InvalidOperand` sometimes.
+            | InstructionResult::OutOfGas | InstructionResult::MemoryOOG | InstructionResult::InvalidOperandOOG
         ) {
             assert_eq!(
                 actual_return.is_error(),
                 expected_return.is_error(),
-                "return value mismatch"
+                "return value mismatch: {actual_return:?} != {expected_return:?}"
             );
         } else {
             assert_eq!(actual_return, expected_return, "return value mismatch");

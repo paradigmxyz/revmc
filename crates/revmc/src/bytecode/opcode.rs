@@ -1,6 +1,6 @@
 use crate::{op_info_map, OpcodeInfo};
 use revm_interpreter::{opcode as op, OPCODE_INFO_JUMPTABLE};
-use revm_primitives::SpecId;
+use revm_primitives::{Bytes, Eof, SpecId, EOF_MAGIC_BYTES};
 use std::{fmt, slice};
 
 /// A bytecode iterator that yields opcodes and their immediate data, alongside the program counter.
@@ -182,7 +182,9 @@ pub const fn stack_io(op: u8) -> (u8, u8) {
 
 /// Returns a string representation of the given bytecode.
 pub fn format_bytecode(bytecode: &[u8], spec_id: SpecId) -> String {
-    OpcodesIter::new(bytecode, spec_id).to_string()
+    let mut w = String::new();
+    format_bytecode_to(bytecode, spec_id, &mut w).unwrap();
+    w
 }
 
 /// Formats an EVM bytecode to the given writer.
@@ -191,7 +193,11 @@ pub fn format_bytecode_to<W: fmt::Write + ?Sized>(
     spec_id: SpecId,
     w: &mut W,
 ) -> fmt::Result {
-    write!(w, "{}", OpcodesIter::new(bytecode, spec_id))
+    if spec_id.is_enabled_in(SpecId::PRAGUE_EOF) && bytecode.starts_with(&EOF_MAGIC_BYTES) {
+        write!(w, "{:#?}", Eof::decode(Bytes::copy_from_slice(bytecode)))
+    } else {
+        write!(w, "{}", OpcodesIter::new(bytecode, spec_id))
+    }
 }
 
 #[cfg(test)]
