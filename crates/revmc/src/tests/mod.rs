@@ -138,6 +138,12 @@ tests! {
             expected_stack: &[U256::ZERO, U256::ZERO],
             expected_gas: 2 + 2,
         }),
+        eof_in_legacy_returncontract(@raw {
+            bytecode: &[op::PUSH0, op::PUSH0, op::RETURNCONTRACT, 0],
+            expected_return: InstructionResult::ReturnContractInNotInitEOF,
+            expected_stack: &[U256::ZERO, U256::ZERO],
+            expected_gas: 2 + 2,
+        }),
     }
 
     stack {
@@ -831,6 +837,12 @@ tests! {
             expected_return: InstructionResult::MemoryOOG,
             expected_stack: &[U256::from(u64::MAX - 33)],
             expected_gas: 3 + 3,
+        }),
+        mload_overflow6(@raw {
+            bytecode: &[op::ADDRESS, op::MLOAD],
+            expected_return: InstructionResult::InvalidOperandOOG,
+            expected_stack: &[DEF_ADDR.into_word().into()],
+            expected_gas: 5,
         }),
         mstore1(@raw {
             bytecode: &[op::PUSH0, op::PUSH0, op::MSTORE],

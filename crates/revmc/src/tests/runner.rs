@@ -49,11 +49,6 @@ impl<'a> arbitrary::Arbitrary<'a> for TestCase<'a> {
     }
 }
 
-#[cfg(feature = "__fuzzing")]
-fn arbitrary_spec_id(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<SpecId> {
-    Ok(SpecId::try_from_u8(u.arbitrary::<u8>()? % 32).unwrap_or(DEF_SPEC))
-}
-
 impl Default for TestCase<'_> {
     fn default() -> Self {
         Self {
