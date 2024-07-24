@@ -59,11 +59,11 @@ paste = "1.0"
 
 [profile.release]
 opt-level = 3
-lto = "thin"
+lto = true
 debug = "line-tables-only"
 strip = true
 panic = "abort"
-codegen-units = 16
+codegen-units = 1
 
 # Use the `--profile profiling` flag to show symbols in release mode.
 # e.g. `cargo build --profile profiling`

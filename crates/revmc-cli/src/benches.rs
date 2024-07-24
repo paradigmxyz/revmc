@@ -70,6 +70,13 @@ pub fn get_benches() -> Vec<Bench> {
             ..Default::default()
         },
         Bench {
+            name: "snailtracer-eof",
+            bytecode: include_code_str!("../../../data/snailtracer-eof.rt.hex").unwrap(),
+            // `Benchmark()`
+            calldata: hex!("30627b7c").to_vec(),
+            ..Default::default()
+        },
+        Bench {
             name: "weth",
             bytecode: include_code_str!("../../../data/weth.rt.hex").unwrap(),
             ..Default::default()
@@ -77,6 +84,13 @@ pub fn get_benches() -> Vec<Bench> {
         Bench {
             name: "hash_10k",
             bytecode: include_code_str!("../../../data/hash_10k.rt.hex").unwrap(),
+            // `Benchmark()`
+            calldata: hex!("30627b7c").to_vec(),
+            ..Default::default()
+        },
+        Bench {
+            name: "hash_10k-eof",
+            bytecode: include_code_str!("../../../data/hash_10k-eof.rt.hex").unwrap(),
             // `Benchmark()`
             calldata: hex!("30627b7c").to_vec(),
             ..Default::default()

@@ -9,12 +9,12 @@ use revmc::{llvm, EvmCompiler, EvmCompilerFn, EvmContext, EvmLlvmBackend, EvmSta
 use revmc_cli::Bench;
 use std::time::Duration;
 
-const SPEC_ID: SpecId = SpecId::CANCUN;
+const SPEC_ID: SpecId = SpecId::PRAGUE_EOF;
 
 fn bench(c: &mut Criterion) {
     for bench in &revmc_cli::get_benches() {
         run_bench(c, bench);
-        if matches!(bench.name, "hash_10k") {
+        if matches!(bench.name, "hash_10k-eof") {
             break;
         }
     }
@@ -110,9 +110,9 @@ fn run_bench(c: &mut Criterion, bench: &Bench) {
 
 fn mk_group<'a>(c: &'a mut Criterion, name: &str) -> BenchmarkGroup<'a, WallTime> {
     let mut g = c.benchmark_group(name);
-    g.sample_size(50);
-    g.warm_up_time(Duration::from_secs(5));
-    g.measurement_time(Duration::from_secs(15));
+    g.sample_size(20);
+    g.warm_up_time(Duration::from_secs(2));
+    g.measurement_time(Duration::from_secs(5));
     g
 }
 

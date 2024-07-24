@@ -61,7 +61,7 @@ struct Cli {
     out_dir: Option<PathBuf>,
     #[arg(short = 'O', long, default_value = "3")]
     opt_level: OptimizationLevel,
-    #[arg(long, value_enum, default_value = "cancun")]
+    #[arg(long, value_enum, default_value = "pragueeof")]
     spec_id: SpecIdValueEnum,
     /// Short-hand for `--spec-id pragueeof`.
     #[arg(long, conflicts_with = "spec_id")]
