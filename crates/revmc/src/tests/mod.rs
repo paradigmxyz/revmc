@@ -167,6 +167,16 @@ tests! {
             expected_stack: &[2_U256, 1_U256],
             expected_gas: 3 + 3 + 3,
         }),
+        swap2(@raw {
+            bytecode: &[op::PUSH1, 1, op::PUSH1, 2, op::PUSH1, 3, op::SWAP2],
+            expected_stack: &[3_U256, 2_U256, 1_U256],
+            expected_gas: 3 + 3 + 3 + 3,
+        }),
+        swap3(@raw {
+            bytecode: &[op::PUSH1, 1, op::PUSH1, 2, op::PUSH1, 3, op::PUSH1, 4, op::SWAP3],
+            expected_stack: &[4_U256, 2_U256, 3_U256, 1_U256],
+            expected_gas: 3 + 3 + 3 + 3 + 3,
+        }),
         swapn(@raw {
             bytecode: &eof(&[op::PUSH1, 1, op::PUSH1, 2, op::SWAPN, 0, op::STOP]),
             spec_id: SpecId::PRAGUE_EOF,

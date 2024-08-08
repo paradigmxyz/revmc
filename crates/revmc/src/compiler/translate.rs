@@ -55,7 +55,9 @@ type SwitchTargets<B> = Vec<(u64, <B as BackendTypes>::BasicBlock)>;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ResumeKind {
+    /// Use `indirectbr`.
     Blocks,
+    /// Use a switch over `0..N`.
     Indexes,
 }
 
@@ -486,7 +488,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             ensure!(is_eof_enabled, "EOF bytecode in non-EOF spec");
         }
 
-        // self.call_printf(format_printf!("{}\n", data.to_op_in(self.bytecode)), &[]);
+        // self.call_printf(format_printf!("{}\n", self.op_block_name("")), &[]);
 
         let branch_to_next_opcode = |this: &mut Self| {
             debug_assert!(
@@ -1692,7 +1694,10 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     #[must_use]
     fn call_builtin(&mut self, builtin: Builtin, args: &[B::Value]) -> Option<B::Value> {
         let function = self.builtin_function(builtin);
-        // self.call_printf(format_printf!("calling {}\n", builtin.name()), &[]);
+        // self.call_printf(
+        //     format_printf!("{} - calling {}\n", self.op_block_name(""), builtin.name()),
+        //     &[],
+        // );
         self.bcx.call(function, args)
     }
 
@@ -1934,8 +1939,20 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         self.build_check_instruction_result(ret);
     }
 
+    /// Builds:
+    /// - `Load` => `fn mload(offset: u256, out: ptr, ecx: ptr) -> InstructionResult`
+    /// - `Store` => `fn mstore(offset: u256, value: u256, ecx: ptr) -> InstructionResult`
+    /// - `Store8` => `fn mstore(offset: u256, value: u8, ecx: ptr) -> InstructionResult`
     fn build_mem_op(&mut self, kind: MemOpKind) {
         let is_load = matches!(kind, MemOpKind::Load);
+        // TODO: If `store` is inlined it can cause segfaults. https://github.com/paradigmxyz/revmc/issues/61
+        if !is_load {
+            self.bcx.add_function_attribute(
+                None,
+                Attribute::NoInline,
+                FunctionAttributeLocation::Function,
+            );
+        }
         let ptr_args = if is_load { &[1, 2][..] } else { &[2][..] };
         for &ptr_arg in ptr_args {
             for attr in default_attrs::for_ref() {
@@ -2224,7 +2241,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let prefix = "__revmc_ir_builtin_";
         let name = &format!("{prefix}{name}")[..];
 
-        // self.call_printf(format_printf!("calling {name}\n"), &[]);
+        // self.call_printf(format_printf!("{} - calling {name}\n", self.op_block_name("")), &[]);
 
         debug_assert_eq!(args.len(), arg_types.len());
         let linkage = revmc_backend::Linkage::Private;
