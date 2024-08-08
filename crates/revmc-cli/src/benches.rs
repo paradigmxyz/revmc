@@ -63,6 +63,13 @@ pub fn get_benches() -> Vec<Bench> {
             ..Default::default()
         },
         Bench {
+            name: "counter-eof",
+            bytecode: include_code_str!("../../../data/counter-eof.rt.hex").unwrap(),
+            // `increment()`
+            calldata: hex!("d09de08a").to_vec(),
+            ..Default::default()
+        },
+        Bench {
             name: "snailtracer",
             bytecode: include_code_str!("../../../data/snailtracer.rt.hex").unwrap(),
             // `Benchmark()`
