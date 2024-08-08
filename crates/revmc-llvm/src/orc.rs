@@ -1476,13 +1476,13 @@ fn panic_payload(any: &dyn std::any::Any) -> Option<&str> {
  * must explicitly retain each of the elements for themselves.
  */
 struct ManuallyDropElements<T> {
-    value: mem::ManuallyDrop<Vec<T>>,
+    vec: Vec<T>,
 }
 
 impl<T> ManuallyDropElements<T> {
     #[inline(always)]
-    fn new(list: Vec<T>) -> Self {
-        Self { value: mem::ManuallyDrop::new(list) }
+    fn new(vec: Vec<T>) -> Self {
+        Self { vec }
     }
 }
 
@@ -1491,23 +1491,21 @@ impl<T> std::ops::Deref for ManuallyDropElements<T> {
 
     #[inline(always)]
     fn deref(&self) -> &Vec<T> {
-        &self.value
+        &self.vec
     }
 }
 
 impl<T> std::ops::DerefMut for ManuallyDropElements<T> {
     #[inline(always)]
     fn deref_mut(&mut self) -> &mut Vec<T> {
-        &mut self.value
+        &mut self.vec
     }
 }
 
 impl<T> Drop for ManuallyDropElements<T> {
     #[inline(always)]
     fn drop(&mut self) {
-        unsafe {
-            ptr::drop_in_place(&mut *self.value as *mut Vec<T> as *mut Vec<mem::ManuallyDrop<T>>)
-        };
+        unsafe { self.vec.set_len(0) };
     }
 }
 
