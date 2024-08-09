@@ -664,7 +664,7 @@ tests! {
             expected_stack: &[U256::from_be_slice(&DEF_DATA[..32])],
             expected_gas: 3,
         }),
-        // TODO: Revm does not allow out-of-bounds `DATALOADN`. Is this right?
+        // NOTE: out-of-bounds `DATALOADN` is not allowed.
         // dataloadn2(@raw {
         //     bytecode: &eof(&[op::DATALOADN, 0x00, 63, op::STOP]),
         //     spec_id: SpecId::PRAGUE_EOF,

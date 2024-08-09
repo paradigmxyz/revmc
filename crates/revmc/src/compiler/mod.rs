@@ -359,7 +359,7 @@ impl<B: Backend> EvmCompiler<B> {
         if !self.config.validate_eof {
             return Ok(());
         }
-        revm_interpreter::analysis::validate_eof(eof).map_err(|e| match e {
+        revm_interpreter::analysis::validate_eof_inner(eof, None).map_err(|e| match e {
             revm_interpreter::analysis::EofError::Decode(e) => e.into(),
             revm_interpreter::analysis::EofError::Validation(e) => {
                 eyre!("validation error: {e:?}")
