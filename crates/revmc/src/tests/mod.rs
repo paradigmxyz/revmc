@@ -1280,14 +1280,13 @@ fn eof(code: &[u8]) -> Bytes {
 #[track_caller]
 fn eof_sections(code: &[&[u8]]) -> Bytes {
     let eof = eof_sections_unchecked(code);
-    match revm_interpreter::analysis::validate_eof(&eof) {
+    match revm_interpreter::analysis::validate_eof_inner(&eof, None) {
         Ok(()) => {}
         Err(EofError::Decode(e)) => panic!("{e}"),
         Err(EofError::Validation(e)) => match e {
             EofValidationError::UnknownOpcode
                 if code.iter().any(|code| code.contains(&TEST_SUSPEND)) => {}
-            EofValidationError::InvalidTypesSection => {}
-            EofValidationError::MaxStackMismatch => {}
+            EofValidationError::InvalidTypesSection | EofValidationError::MaxStackMismatch => {}
             e => panic!("validation error: {e:?}"),
         },
     }
@@ -1316,7 +1315,7 @@ fn eof_body(code: &[&[u8]], containers: Vec<Bytes>) -> primitives::eof::EofBody 
         code_section: code.iter().copied().map(Bytes::copy_from_slice).collect(),
         container_section: containers,
         data_section: Bytes::from_static(DEF_DATA),
-        is_data_filled: false,
+        is_data_filled: true,
     }
 }
 
