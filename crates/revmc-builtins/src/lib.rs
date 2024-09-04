@@ -14,7 +14,6 @@ use alloc::{boxed::Box, vec::Vec};
 use revm_interpreter::{
     as_u64_saturated, as_usize_saturated, CallInputs, CallScheme, CallValue, CreateInputs,
     EOFCreateInputs, FunctionStack, InstructionResult, InterpreterAction, InterpreterResult,
-    LoadAccountResult, SStoreResult,
 };
 use revm_primitives::{
     eof::EofHeader, Address, Bytes, CreateScheme, Eof, Log, LogData, SpecId, KECCAK_EMPTY,
@@ -154,10 +153,10 @@ pub unsafe extern "C" fn __revmc_builtin_balance(
     address: &mut EvmWord,
     spec_id: SpecId,
 ) -> InstructionResult {
-    let (balance, is_cold) = try_host!(ecx.host.balance(address.to_address()));
-    *address = balance.into();
+    let state = try_host!(ecx.host.balance(address.to_address()));
+    *address = state.data.into();
     let gas = if spec_id.is_enabled_in(SpecId::BERLIN) {
-        gas::warm_cold_cost(is_cold)
+        gas::warm_cold_cost(state.is_cold)
     } else if spec_id.is_enabled_in(SpecId::ISTANBUL) {
         // EIP-1884: Repricing for trie-size-dependent opcodes
         700
@@ -206,10 +205,10 @@ pub unsafe extern "C" fn __revmc_builtin_extcodesize(
     address: &mut EvmWord,
     spec_id: SpecId,
 ) -> InstructionResult {
-    let (code, is_cold) = try_host!(ecx.host.code(address.to_address()));
+    let (code, state) = try_host!(ecx.host.code(address.to_address())).into_components();
     *address = code.len().into();
     let gas = if spec_id.is_enabled_in(SpecId::BERLIN) {
-        if is_cold {
+        if state.is_cold {
             gas::COLD_ACCOUNT_ACCESS_COST
         } else {
             gas::WARM_STORAGE_READ_COST
@@ -229,9 +228,10 @@ pub unsafe extern "C" fn __revmc_builtin_extcodecopy(
     rev![address, memory_offset, code_offset, len]: &mut [EvmWord; 4],
     spec_id: SpecId,
 ) -> InstructionResult {
-    let (code, is_cold) = try_host!(ecx.host.code(address.to_address()));
+    let (code, state) = try_host!(ecx.host.code(address.to_address())).into_components();
+
     let len = try_into_usize!(len);
-    gas_opt!(ecx, gas::extcodecopy_cost(spec_id, len as u64, is_cold));
+    gas_opt!(ecx, gas::extcodecopy_cost(spec_id, len as u64, state));
     if len != 0 {
         let memory_offset = try_into_usize!(memory_offset);
         let code_offset = code_offset.to_u256();
@@ -269,10 +269,10 @@ pub unsafe extern "C" fn __revmc_builtin_extcodehash(
     address: &mut EvmWord,
     spec_id: SpecId,
 ) -> InstructionResult {
-    let (hash, is_cold) = try_host!(ecx.host.code_hash(address.to_address()));
+    let (hash, state) = try_host!(ecx.host.code_hash(address.to_address())).into_components();
     *address = EvmWord::from_be_bytes(hash.0);
     let gas = if spec_id.is_enabled_in(SpecId::BERLIN) {
-        if is_cold {
+        if state.is_cold {
             gas::COLD_ACCOUNT_ACCESS_COST
         } else {
             gas::WARM_STORAGE_READ_COST
@@ -314,8 +314,8 @@ pub unsafe extern "C" fn __revmc_builtin_self_balance(
     ecx: &mut EvmContext<'_>,
     slot: &mut EvmWord,
 ) -> InstructionResult {
-    let (balance, _) = try_host!(ecx.host.balance(ecx.contract.target_address));
-    *slot = balance.into();
+    let state = try_host!(ecx.host.balance(ecx.contract.target_address));
+    *slot = state.data.into();
     InstructionResult::Continue
 }
 
@@ -352,9 +352,9 @@ pub unsafe extern "C" fn __revmc_builtin_sload(
     spec_id: SpecId,
 ) -> InstructionResult {
     let address = ecx.contract.target_address;
-    let (res, is_cold) = try_opt!(ecx.host.sload(address, index.to_u256()));
-    gas!(ecx, gas::sload_cost(spec_id, is_cold));
-    *index = res.into();
+    let state = try_opt!(ecx.host.sload(address, index.to_u256()));
+    gas!(ecx, gas::sload_cost(spec_id, state.is_cold));
+    *index = state.data.into();
     InstructionResult::Continue
 }
 
@@ -366,11 +366,11 @@ pub unsafe extern "C" fn __revmc_builtin_sstore(
 ) -> InstructionResult {
     ensure_non_staticcall!(ecx);
 
-    let SStoreResult { original_value: original, present_value: old, new_value: new, is_cold } =
+    let state =
         try_opt!(ecx.host.sstore(ecx.contract.target_address, index.to_u256(), value.to_u256()));
 
-    gas_opt!(ecx, gas::sstore_cost(spec_id, original, old, new, ecx.gas.remaining(), is_cold));
-    ecx.gas.record_refund(gas::sstore_refund(spec_id, original, old, new));
+    gas_opt!(ecx, gas::sstore_cost(spec_id, &state.data, ecx.gas.remaining(), state.is_cold));
+    ecx.gas.record_refund(gas::sstore_refund(spec_id, &state.data));
     InstructionResult::Continue
 }
 
@@ -705,12 +705,13 @@ pub unsafe extern "C" fn __revmc_builtin_call(
     };
 
     // Load account and calculate gas cost.
-    let LoadAccountResult { is_cold, mut is_empty } = try_host!(ecx.host.load_account(to));
+    let mut account_load = try_host!(ecx.host.load_account_delegated(to));
+
     if call_kind != CallKind::Call {
-        is_empty = false;
+        account_load.is_empty = false;
     }
 
-    gas!(ecx, gas::call_cost(spec_id, transfers_value, is_cold, is_empty));
+    gas!(ecx, gas::call_cost(spec_id, transfers_value, account_load));
 
     // EIP-150: Gas cost changes for IO-heavy operations
     let mut gas_limit = if spec_id.is_enabled_in(SpecId::TANGERINE) {
@@ -794,11 +795,10 @@ pub unsafe extern "C" fn __revmc_builtin_ext_call(
         return InstructionResult::CallNotAllowedInsideStatic;
     }
 
-    let Some(LoadAccountResult { is_cold, is_empty }) = ecx.host.load_account(target_address)
-    else {
+    let Some(account_load) = ecx.host.load_account_delegated(target_address) else {
         return InstructionResult::FatalExternalError;
     };
-    let call_cost = gas::call_cost(spec_id, transfers_value, is_cold, is_empty);
+    let call_cost = gas::call_cost(spec_id, transfers_value, account_load);
     gas!(ecx, call_cost);
 
     let gas_reduce = core::cmp::max(ecx.gas.remaining() / 64, 5000);

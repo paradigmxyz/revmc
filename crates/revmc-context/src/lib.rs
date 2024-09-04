@@ -817,25 +817,36 @@ mod tests {
             fn env_mut(&mut self) -> &mut Env {
                 self.0
             }
-            fn load_account(
+            fn load_account_delegated(
                 &mut self,
                 address: Address,
-            ) -> Option<revm_interpreter::LoadAccountResult> {
+            ) -> Option<revm_interpreter::AccountLoad> {
                 unimplemented!()
             }
             fn block_hash(&mut self, number: u64) -> Option<revm_primitives::B256> {
                 unimplemented!()
             }
-            fn balance(&mut self, address: Address) -> Option<(U256, bool)> {
+            fn balance(&mut self, address: Address) -> Option<revm_interpreter::StateLoad<U256>> {
                 unimplemented!()
             }
-            fn code(&mut self, address: Address) -> Option<(revm_primitives::Bytes, bool)> {
+            fn code(
+                &mut self,
+                address: Address,
+            ) -> Option<revm_interpreter::Eip7702CodeLoad<Bytes>> {
                 unimplemented!()
             }
-            fn code_hash(&mut self, address: Address) -> Option<(revm_primitives::B256, bool)> {
+            fn code_hash(
+                &mut self,
+                address: Address,
+            ) -> Option<revm_interpreter::Eip7702CodeLoad<revm_primitives::FixedBytes<32>>>
+            {
                 unimplemented!()
             }
-            fn sload(&mut self, address: Address, index: U256) -> Option<(U256, bool)> {
+            fn sload(
+                &mut self,
+                address: Address,
+                index: U256,
+            ) -> Option<revm_interpreter::StateLoad<U256>> {
                 unimplemented!()
             }
             fn sstore(
@@ -843,7 +854,7 @@ mod tests {
                 address: Address,
                 index: U256,
                 value: U256,
-            ) -> Option<revm_interpreter::SStoreResult> {
+            ) -> Option<revm_interpreter::StateLoad<revm_interpreter::SStoreResult>> {
                 unimplemented!()
             }
             fn tload(&mut self, address: Address, index: U256) -> U256 {
@@ -859,7 +870,8 @@ mod tests {
                 &mut self,
                 address: Address,
                 target: Address,
-            ) -> Option<revm_interpreter::SelfDestructResult> {
+            ) -> Option<revm_interpreter::StateLoad<revm_interpreter::SelfDestructResult>>
+            {
                 unimplemented!()
             }
         }
