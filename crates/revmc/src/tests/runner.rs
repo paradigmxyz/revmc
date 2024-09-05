@@ -263,7 +263,7 @@ impl Host for TestHost {
     }
 
     fn code(&mut self, address: Address) -> Option<Eip7702CodeLoad<Bytes>> {
-        let code = self.code_map.get(&address).map(|b| b.original_bytes()).unwrap_or(Bytes::new());
+        let code = self.code_map.get(&address).map(|b| b.original_bytes()).unwrap_or_default();
         let state_load = StateLoad::new(code, false);
         Some(Eip7702CodeLoad::new(state_load, false))
     }
