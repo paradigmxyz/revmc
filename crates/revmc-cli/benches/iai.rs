@@ -55,16 +55,15 @@ fn setup_group(group: &mut BinaryBenchmarkGroup, is_ct: bool) {
         run
     };
     let benches = [
-        // ("fibonacci", true),
-        // ("counter", true),
-        // ("hash_10k", true),
-        // ("bswap64", true),
-        // ("usdc_proxy", false),
-        // ("weth", false),
+        ("fibonacci", true),
+        ("counter", true),
         ("hash_10k", true),
         ("hash_10k-eof", true),
-        ("snailtracer", true),
-        ("snailtracer-eof", true),
+        ("bswap64", true),
+        ("usdc_proxy", false),
+        ("weth", false),
+        ("snailtracer", false),
+        ("snailtracer-eof", false),
     ];
     for (bench, small) in benches {
         if !is_ct && !small {
