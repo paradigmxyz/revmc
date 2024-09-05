@@ -1,6 +1,6 @@
 use super::*;
-use interpreter::LoadAccountResult;
-use revm_interpreter::{opcode as op, Contract, DummyHost, Host};
+use interpreter::{AccountLoad, Eip7702CodeLoad, SStoreResult, StateLoad};
+use revm_interpreter::{opcode as op, Contract, DummyHost, Host, SelfDestructResult};
 use revm_primitives::{
     spec_to_generic, BlobExcessGasAndPrice, BlockEnv, CfgEnv, Env, HashMap, TxEnv, EOF_MAGIC_BYTES,
 };
@@ -250,30 +250,29 @@ impl Host for TestHost {
         self.host.env_mut()
     }
 
-    fn load_account(&mut self, address: Address) -> Option<LoadAccountResult> {
-        self.host.load_account(address)
+    fn load_account_delegated(&mut self, address: Address) -> Option<AccountLoad> {
+        self.host.load_account_delegated(address)
     }
 
     fn block_hash(&mut self, number: u64) -> Option<B256> {
         Some(U256::from(number).into())
     }
 
-    fn balance(&mut self, address: Address) -> Option<(U256, bool)> {
-        Some((U256::from(*address.last().unwrap()), false))
+    fn balance(&mut self, address: Address) -> Option<StateLoad<U256>> {
+        Some(StateLoad::new(U256::from(*address.last().unwrap()), false))
     }
 
-    fn code(&mut self, address: Address) -> Option<(Bytes, bool)> {
-        self.code_map
-            .get(&address)
-            .map(|b| (b.original_bytes(), false))
-            .or_else(|| Some((Bytes::new(), false)))
+    fn code(&mut self, address: Address) -> Option<Eip7702CodeLoad<Bytes>> {
+        let code = self.code_map.get(&address).map(|b| b.original_bytes()).unwrap_or_default();
+        Some(Eip7702CodeLoad::new_not_delegated(code, false))
     }
 
-    fn code_hash(&mut self, address: Address) -> Option<(B256, bool)> {
-        self.code_map.get(&address).map(|b| (b.hash_slow(), false)).or(Some((KECCAK_EMPTY, false)))
+    fn code_hash(&mut self, address: Address) -> Option<Eip7702CodeLoad<B256>> {
+        let code_hash = self.code_map.get(&address).map(|b| b.hash_slow()).unwrap_or(KECCAK_EMPTY);
+        Some(Eip7702CodeLoad::new_not_delegated(code_hash, false))
     }
 
-    fn sload(&mut self, address: Address, index: U256) -> Option<(U256, bool)> {
+    fn sload(&mut self, address: Address, index: U256) -> Option<StateLoad<U256>> {
         self.host.sload(address, index)
     }
 
@@ -282,7 +281,7 @@ impl Host for TestHost {
         address: Address,
         index: U256,
         value: U256,
-    ) -> Option<interpreter::SStoreResult> {
+    ) -> Option<StateLoad<SStoreResult>> {
         self.host.sstore(address, index, value)
     }
 
@@ -302,14 +301,17 @@ impl Host for TestHost {
         &mut self,
         address: Address,
         target: Address,
-    ) -> Option<interpreter::SelfDestructResult> {
+    ) -> Option<StateLoad<SelfDestructResult>> {
         self.selfdestructs.push((address, target));
-        Some(interpreter::SelfDestructResult {
-            had_value: false,
-            target_exists: true,
-            is_cold: false,
-            previously_destroyed: false,
-        })
+
+        Some(StateLoad::new(
+            SelfDestructResult {
+                had_value: false,
+                target_exists: true,
+                previously_destroyed: false,
+            },
+            false,
+        ))
     }
 }
 
