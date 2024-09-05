@@ -62,8 +62,8 @@ fn setup_group(group: &mut BinaryBenchmarkGroup, is_ct: bool) {
         ("bswap64", true),
         ("usdc_proxy", false),
         ("weth", false),
-        ("snailtracer", false),
-        ("snailtracer-eof", false),
+        // ("snailtracer", false),
+        // ("snailtracer-eof", false),
     ];
     for (bench, small) in benches {
         if !is_ct && !small {
