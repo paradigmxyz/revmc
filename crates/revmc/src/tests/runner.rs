@@ -264,14 +264,12 @@ impl Host for TestHost {
 
     fn code(&mut self, address: Address) -> Option<Eip7702CodeLoad<Bytes>> {
         let code = self.code_map.get(&address).map(|b| b.original_bytes()).unwrap_or_default();
-        let state_load = StateLoad::new(code, false);
-        Some(Eip7702CodeLoad::new(state_load, false))
+        Some(Eip7702CodeLoad::new_not_delegated(code, false))
     }
 
     fn code_hash(&mut self, address: Address) -> Option<Eip7702CodeLoad<B256>> {
         let code_hash = self.code_map.get(&address).map(|b| b.hash_slow()).unwrap_or(KECCAK_EMPTY);
-        let state_load = StateLoad::new(code_hash, false);
-        Some(Eip7702CodeLoad::new(state_load, false))
+        Some(Eip7702CodeLoad::new_not_delegated(code_hash, false))
     }
 
     fn sload(&mut self, address: Address, index: U256) -> Option<StateLoad<U256>> {

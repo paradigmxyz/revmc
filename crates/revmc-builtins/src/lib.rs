@@ -208,11 +208,7 @@ pub unsafe extern "C" fn __revmc_builtin_extcodesize(
     let (code, state) = try_host!(ecx.host.code(address.to_address())).into_components();
     *address = code.len().into();
     let gas = if spec_id.is_enabled_in(SpecId::BERLIN) {
-        if state.is_cold {
-            gas::COLD_ACCOUNT_ACCESS_COST
-        } else {
-            gas::WARM_STORAGE_READ_COST
-        }
+        gas::warm_cold_cost_with_delegation(state)
     } else if spec_id.is_enabled_in(SpecId::TANGERINE) {
         700
     } else {
@@ -272,11 +268,7 @@ pub unsafe extern "C" fn __revmc_builtin_extcodehash(
     let (hash, state) = try_host!(ecx.host.code_hash(address.to_address())).into_components();
     *address = EvmWord::from_be_bytes(hash.0);
     let gas = if spec_id.is_enabled_in(SpecId::BERLIN) {
-        if state.is_cold {
-            gas::COLD_ACCOUNT_ACCESS_COST
-        } else {
-            gas::WARM_STORAGE_READ_COST
-        }
+        gas::warm_cold_cost_with_delegation(state)
     } else if spec_id.is_enabled_in(SpecId::ISTANBUL) {
         700
     } else {
