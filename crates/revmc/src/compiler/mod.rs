@@ -4,8 +4,7 @@ use crate::{Backend, Builder, Bytecode, EvmCompilerFn, EvmContext, EvmStack, Res
 use revm_interpreter::{Contract, Gas};
 use revm_primitives::{Bytes, Env, Eof, SpecId, EOF_MAGIC_BYTES};
 use revmc_backend::{
-    eyre::{ensure, eyre},
-    Attribute, FunctionAttributeLocation, Linkage, OptimizationLevel,
+    eyre::ensure, Attribute, FunctionAttributeLocation, Linkage, OptimizationLevel,
 };
 use revmc_builtins::Builtins;
 use revmc_context::RawEvmCompilerFn;
@@ -165,7 +164,7 @@ impl<B: Backend> EvmCompiler<B> {
         self.config.validate_eof = yes;
     }
 
-    /// Sets whether to allocate the stack locally.
+    /// Forces the stack to be allocated inside of the function, instead of passed as an argument.
     ///
     /// If this is set to `true`, the stack pointer argument will be ignored and the stack will be
     /// allocated in the function.
@@ -359,12 +358,7 @@ impl<B: Backend> EvmCompiler<B> {
         if !self.config.validate_eof {
             return Ok(());
         }
-        revm_interpreter::analysis::validate_eof_inner(eof, None).map_err(|e| match e {
-            revm_interpreter::analysis::EofError::Decode(e) => e.into(),
-            revm_interpreter::analysis::EofError::Validation(e) => {
-                eyre!("validation error: {e:?}")
-            }
-        })
+        revm_interpreter::analysis::validate_eof_inner(eof, None).map_err(Into::into)
     }
 
     #[instrument(name = "translate", level = "debug", skip_all)]

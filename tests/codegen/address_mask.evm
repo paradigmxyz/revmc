@@ -2,8 +2,12 @@ ADDRESS
 PUSH20 0xffffffffffffffffffffffffffffffffffffffff
 AND
 
+PUSH0 MSTORE
+PUSH1 0x20 PUSH0 RETURN
+
 ; CHECK: load i160
-; CHECK: [[ADDR:%.*]] = zext i160 {{.*}} to i256
+; CHECK: zext i160 {{.*}} to i256
 ; CHECK-NOT: and
-; CHECK: store i256 [[ADDR]]
+; CHECK: call {{.*}}mstore
+; CHECK: call {{.*}}return
 ; CHECK: ret i8

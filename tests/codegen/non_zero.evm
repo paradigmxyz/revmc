@@ -2,8 +2,12 @@ CALLVALUE
 ISZERO
 ISZERO
 
+PUSH0 MSTORE
+PUSH1 0x20 PUSH0 RETURN
+
 ; CHECK: [[VALUE:%.*value.*]] = load i256
 ; CHECK-NEXT: [[NON_ZERO:%.*]] = icmp ne i256 [[VALUE]], 0
 ; CHECK-NEXT: [[EXTENDED:%.*]] = zext i1 [[NON_ZERO]] to i256
-; CHECK-NEXT: store i256 [[EXTENDED]]
-; CHECK-NEXT: br label %return
+; CHECK: call {{.*}}mstore
+; CHECK: call {{.*}}return
+; CHECK: ret i8
