@@ -27,9 +27,9 @@ impl<'a> arbitrary::Arbitrary<'a> for TestCase<'a> {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
         let is_eof_enabled = u.arbitrary::<bool>()?;
         let spec_id_range = if is_eof_enabled {
-            SpecId::PRAGUE_EOF as u8..=SpecId::PRAGUE_EOF as u8
+            SpecId::OSAKA as u8..=SpecId::OSAKA as u8
         } else {
-            0..=(SpecId::PRAGUE_EOF as u8 - 1)
+            0..=(SpecId::OSAKA as u8 - 1)
         };
         let spec_id = SpecId::try_from_u8(u.int_in_range(spec_id_range)?).unwrap_or(DEF_SPEC);
 
@@ -389,7 +389,7 @@ fn run_compiled_test_case(test_case: &TestCase<'_>, f: EvmCompilerFn) {
         assert_ecx,
     } = *test_case;
 
-    let is_eof_enabled = spec_id.is_enabled_in(SpecId::PRAGUE_EOF);
+    let is_eof_enabled = spec_id.is_enabled_in(SpecId::OSAKA);
 
     if !is_eof_enabled && bytecode.starts_with(&primitives::EOF_MAGIC_BYTES) {
         panic!("EOF is not enabled in the current spec, forgot to set `spec_id`?");

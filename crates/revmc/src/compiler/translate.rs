@@ -483,7 +483,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         self.bcx.switch_to_block(entry_block);
 
         let is_eof = self.bytecode.is_eof();
-        let is_eof_enabled = self.bytecode.spec_id.is_enabled_in(SpecId::PRAGUE_EOF);
+        let is_eof_enabled = self.bytecode.spec_id.is_enabled_in(SpecId::OSAKA);
         if is_eof {
             ensure!(is_eof_enabled, "EOF bytecode in non-EOF spec");
         }
@@ -1752,7 +1752,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 }
 
 /// IR builtins.
-impl<'a, B: Backend> FunctionCx<'a, B> {
+impl<B: Backend> FunctionCx<'_, B> {
     fn call_byte(&mut self, index: B::Value, value: B::Value) -> B::Value {
         self.call_ir_binop_builtin("byte", index, value, Self::build_byte)
     }

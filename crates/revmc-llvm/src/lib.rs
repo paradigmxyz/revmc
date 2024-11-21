@@ -218,7 +218,7 @@ impl<'ctx> BackendTypes for EvmLlvmBackend<'ctx> {
     type Function = FunctionValue<'ctx>;
 }
 
-impl<'ctx> TypeMethods for EvmLlvmBackend<'ctx> {
+impl TypeMethods for EvmLlvmBackend<'_> {
     fn type_ptr(&self) -> Self::Type {
         self.ty_ptr.into()
     }
@@ -251,7 +251,10 @@ impl<'ctx> TypeMethods for EvmLlvmBackend<'ctx> {
 }
 
 impl<'ctx> Backend for EvmLlvmBackend<'ctx> {
-    type Builder<'a> = EvmLlvmBuilder<'a, 'ctx> where Self: 'a;
+    type Builder<'a>
+        = EvmLlvmBuilder<'a, 'ctx>
+    where
+        Self: 'a;
     type FuncId = u32;
 
     fn ir_extension(&self) -> &'static str {
@@ -443,7 +446,7 @@ pub struct EvmLlvmBuilder<'a, 'ctx> {
     function: FunctionValue<'ctx>,
 }
 
-impl<'a, 'ctx> std::ops::Deref for EvmLlvmBuilder<'a, 'ctx> {
+impl<'ctx> std::ops::Deref for EvmLlvmBuilder<'_, 'ctx> {
     type Target = EvmLlvmBackend<'ctx>;
 
     #[inline]
@@ -452,14 +455,14 @@ impl<'a, 'ctx> std::ops::Deref for EvmLlvmBuilder<'a, 'ctx> {
     }
 }
 
-impl<'a, 'ctx> std::ops::DerefMut for EvmLlvmBuilder<'a, 'ctx> {
+impl std::ops::DerefMut for EvmLlvmBuilder<'_, '_> {
     #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.backend
     }
 }
 
-impl<'a, 'ctx> EvmLlvmBuilder<'a, 'ctx> {
+impl<'ctx> EvmLlvmBuilder<'_, 'ctx> {
     #[allow(dead_code)]
     fn extract_value(
         &mut self,
@@ -561,7 +564,7 @@ impl<'a, 'ctx> EvmLlvmBuilder<'a, 'ctx> {
     }
 }
 
-impl<'a, 'ctx> BackendTypes for EvmLlvmBuilder<'a, 'ctx> {
+impl<'ctx> BackendTypes for EvmLlvmBuilder<'_, 'ctx> {
     type Type = <EvmLlvmBackend<'ctx> as BackendTypes>::Type;
     type Value = <EvmLlvmBackend<'ctx> as BackendTypes>::Value;
     type StackSlot = <EvmLlvmBackend<'ctx> as BackendTypes>::StackSlot;
@@ -569,7 +572,7 @@ impl<'a, 'ctx> BackendTypes for EvmLlvmBuilder<'a, 'ctx> {
     type Function = <EvmLlvmBackend<'ctx> as BackendTypes>::Function;
 }
 
-impl<'a, 'ctx> TypeMethods for EvmLlvmBuilder<'a, 'ctx> {
+impl TypeMethods for EvmLlvmBuilder<'_, '_> {
     fn type_ptr(&self) -> Self::Type {
         self.backend.type_ptr()
     }
@@ -591,7 +594,7 @@ impl<'a, 'ctx> TypeMethods for EvmLlvmBuilder<'a, 'ctx> {
     }
 }
 
-impl<'a, 'ctx> Builder for EvmLlvmBuilder<'a, 'ctx> {
+impl Builder for EvmLlvmBuilder<'_, '_> {
     fn create_block(&mut self, name: &str) -> Self::BasicBlock {
         self.cx.append_basic_block(self.function, name)
     }

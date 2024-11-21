@@ -25,7 +25,7 @@ fn setup_group(group: &mut BinaryBenchmarkGroup) {
             args.push("1");
             // args.extend(["1", "--shared-library", so.to_str().unwrap()]);
         }
-        let mut bench = Bench::new(name);
+        let mut bench = Bench::new(name.replace('-', "_"));
         bench.command(Command::new(CMD).args(&args)).config(BinaryBenchmarkConfig::default());
 
         if !is_ct {
@@ -53,7 +53,7 @@ fn setup_group(group: &mut BinaryBenchmarkGroup) {
         ("fibonacci", true),
         ("counter", true),
         ("hash_10k", true),
-        ("hash_10k-eof", true),
+        // ("hash_10k-eof", true),
         ("bswap64", true),
         ("usdc_proxy", false),
         ("weth", false),

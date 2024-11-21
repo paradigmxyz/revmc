@@ -61,9 +61,9 @@ struct Cli {
     out_dir: Option<PathBuf>,
     #[arg(short = 'O', long, default_value = "3")]
     opt_level: OptimizationLevel,
-    #[arg(long, value_enum, default_value = "pragueeof")]
+    #[arg(long, value_enum, default_value = "osaka")]
     spec_id: SpecIdValueEnum,
-    /// Short-hand for `--spec-id pragueeof`.
+    /// Short-hand for `--spec-id osaka`.
     #[arg(long, conflicts_with = "spec_id")]
     eof: bool,
     /// Skip validating EOF code.
@@ -155,7 +155,7 @@ fn main() -> Result<()> {
 
     let bytecode = contract.bytecode.original_byte_slice();
 
-    let spec_id = if cli.eof { SpecId::PRAGUE_EOF } else { cli.spec_id.into() };
+    let spec_id = if cli.eof { SpecId::OSAKA } else { cli.spec_id.into() };
     if !stack_input.is_empty() {
         compiler.inspect_stack_length(true);
     }
@@ -300,7 +300,7 @@ pub enum SpecIdValueEnum {
     SHANGHAI,
     CANCUN,
     PRAGUE,
-    PRAGUE_EOF,
+    OSAKA,
     LATEST,
 }
 
@@ -326,7 +326,7 @@ impl From<SpecIdValueEnum> for SpecId {
             SpecIdValueEnum::SHANGHAI => Self::SHANGHAI,
             SpecIdValueEnum::CANCUN => Self::CANCUN,
             SpecIdValueEnum::PRAGUE => Self::PRAGUE,
-            SpecIdValueEnum::PRAGUE_EOF => Self::PRAGUE_EOF,
+            SpecIdValueEnum::OSAKA => Self::OSAKA,
             SpecIdValueEnum::LATEST => Self::LATEST,
         }
     }
