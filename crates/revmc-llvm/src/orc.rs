@@ -789,7 +789,7 @@ pub struct ExecutionSessionRef<'ee> {
     _marker: PhantomData<&'ee ()>,
 }
 
-impl<'ee> ExecutionSessionRef<'ee> {
+impl ExecutionSessionRef<'_> {
     /// Wraps a raw pointer.
     pub unsafe fn from_inner(es: LLVMOrcExecutionSessionRef) -> Self {
         Self { es, _marker: PhantomData }

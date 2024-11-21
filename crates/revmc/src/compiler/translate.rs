@@ -1752,7 +1752,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 }
 
 /// IR builtins.
-impl<'a, B: Backend> FunctionCx<'a, B> {
+impl<B: Backend> FunctionCx<'_, B> {
     fn call_byte(&mut self, index: B::Value, value: B::Value) -> B::Value {
         self.call_ir_binop_builtin("byte", index, value, Self::build_byte)
     }

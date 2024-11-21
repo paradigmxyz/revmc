@@ -285,7 +285,7 @@ pub struct EvmCraneliftBuilder<'a> {
     symbols: Symbols,
 }
 
-impl<'a> BackendTypes for EvmCraneliftBuilder<'a> {
+impl BackendTypes for EvmCraneliftBuilder<'_> {
     type Type = <EvmCraneliftBackend as BackendTypes>::Type;
     type Value = <EvmCraneliftBackend as BackendTypes>::Value;
     type StackSlot = <EvmCraneliftBackend as BackendTypes>::StackSlot;
@@ -293,7 +293,7 @@ impl<'a> BackendTypes for EvmCraneliftBuilder<'a> {
     type Function = <EvmCraneliftBackend as BackendTypes>::Function;
 }
 
-impl<'a> TypeMethods for EvmCraneliftBuilder<'a> {
+impl TypeMethods for EvmCraneliftBuilder<'_> {
     fn type_ptr(&self) -> Self::Type {
         self.ptr_type
     }
