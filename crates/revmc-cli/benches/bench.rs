@@ -9,7 +9,7 @@ use revmc::{llvm, EvmCompiler, EvmCompilerFn, EvmContext, EvmLlvmBackend, EvmSta
 use revmc_cli::Bench;
 use std::time::Duration;
 
-const SPEC_ID: SpecId = SpecId::PRAGUE_EOF;
+const SPEC_ID: SpecId = SpecId::OSAKA;
 
 fn bench(c: &mut Criterion) {
     for bench in &revmc_cli::get_benches() {

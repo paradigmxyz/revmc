@@ -4,12 +4,12 @@ use revm_interpreter::{opcode as op, InstructionResult};
 use revm_primitives::{SpecId, U256};
 
 matrix_tests!(legacy = |compiler| run(compiler, TEST, DEF_SPEC));
-matrix_tests!(eof_one_section = |compiler| run(compiler, &eof(TEST), SpecId::PRAGUE_EOF));
+matrix_tests!(eof_one_section = |compiler| run(compiler, &eof(TEST), SpecId::OSAKA));
 matrix_tests!(
     eof_two_sections = |compiler| run(
         compiler,
         &eof_sections_unchecked(&[&[op::JUMPF, 0x00, 0x01], TEST]).raw,
-        SpecId::PRAGUE_EOF
+        SpecId::OSAKA
     )
 );
 

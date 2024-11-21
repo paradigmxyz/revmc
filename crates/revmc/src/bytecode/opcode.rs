@@ -193,7 +193,7 @@ pub fn format_bytecode_to<W: fmt::Write + ?Sized>(
     spec_id: SpecId,
     w: &mut W,
 ) -> fmt::Result {
-    if spec_id.is_enabled_in(SpecId::PRAGUE_EOF) && bytecode.starts_with(&EOF_MAGIC_BYTES) {
+    if spec_id.is_enabled_in(SpecId::OSAKA) && bytecode.starts_with(&EOF_MAGIC_BYTES) {
         write!(w, "{:#?}", Eof::decode(Bytes::copy_from_slice(bytecode)))
     } else {
         write!(w, "{}", OpcodesIter::new(bytecode, spec_id))

@@ -251,7 +251,10 @@ impl<'ctx> TypeMethods for EvmLlvmBackend<'ctx> {
 }
 
 impl<'ctx> Backend for EvmLlvmBackend<'ctx> {
-    type Builder<'a> = EvmLlvmBuilder<'a, 'ctx> where Self: 'a;
+    type Builder<'a>
+        = EvmLlvmBuilder<'a, 'ctx>
+    where
+        Self: 'a;
     type FuncId = u32;
 
     fn ir_extension(&self) -> &'static str {

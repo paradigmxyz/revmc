@@ -332,7 +332,7 @@ impl<B: Backend> EvmCompiler<B> {
         match input {
             EvmCompilerInput::Code(code) => {
                 bytecode = code;
-                if spec_id.is_enabled_in(SpecId::PRAGUE_EOF) && code.starts_with(&EOF_MAGIC_BYTES) {
+                if spec_id.is_enabled_in(SpecId::OSAKA) && code.starts_with(&EOF_MAGIC_BYTES) {
                     eof = Some(Cow::Owned(Eof::decode(Bytes::copy_from_slice(code))?));
                 } else {
                     eof = None;

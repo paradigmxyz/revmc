@@ -337,10 +337,10 @@ const fn make_map(spec_id: SpecId) -> [OpcodeInfo; 256] {
         // 0xCD
         // 0xCE
         // 0xCF
-        DATALOAD  = 4 | EOF,             if PRAGUE_EOF;
-        DATALOADN = 3 | EOF,             if PRAGUE_EOF;
-        DATASIZE  = 2 | EOF,             if PRAGUE_EOF;
-        DATACOPY  = 3 | DYNAMIC | EOF,   if PRAGUE_EOF; // [2]
+        DATALOAD  = 4 | EOF,             if OSAKA;
+        DATALOADN = 3 | EOF,             if OSAKA;
+        DATASIZE  = 2 | EOF,             if OSAKA;
+        DATACOPY  = 3 | DYNAMIC | EOF,   if OSAKA; // [2]
         // 0xD4
         // 0xD5
         // 0xD6
@@ -353,21 +353,21 @@ const fn make_map(spec_id: SpecId) -> [OpcodeInfo; 256] {
         // 0xDD
         // 0xDE
         // 0xDF
-        RJUMP           = 2 | EOF,       if PRAGUE_EOF;
-        RJUMPI          = 4 | EOF,       if PRAGUE_EOF;
-        RJUMPV          = 4 | EOF,       if PRAGUE_EOF;
-        CALLF           = 5 | EOF,       if PRAGUE_EOF;
-        RETF            = 3 | EOF,       if PRAGUE_EOF;
-        JUMPF           = 5 | EOF,       if PRAGUE_EOF;
-        DUPN            = 3 | EOF,       if PRAGUE_EOF;
-        SWAPN           = 3 | EOF,       if PRAGUE_EOF;
-        EXCHANGE        = 3 | EOF,       if PRAGUE_EOF;
+        RJUMP           = 2 | EOF,       if OSAKA;
+        RJUMPI          = 4 | EOF,       if OSAKA;
+        RJUMPV          = 4 | EOF,       if OSAKA;
+        CALLF           = 5 | EOF,       if OSAKA;
+        RETF            = 3 | EOF,       if OSAKA;
+        JUMPF           = 5 | EOF,       if OSAKA;
+        DUPN            = 3 | EOF,       if OSAKA;
+        SWAPN           = 3 | EOF,       if OSAKA;
+        EXCHANGE        = 3 | EOF,       if OSAKA;
         // 0xE9
         // 0xEA
         // 0xEB
-        EOFCREATE       = DYNAMIC | EOF, if PRAGUE_EOF; // TODO: EOF_CREATE_GAS | DYNAMIC is too big
+        EOFCREATE       = DYNAMIC | EOF, if OSAKA; // TODO: EOF_CREATE_GAS | DYNAMIC is too big
         // 0xED
-        RETURNCONTRACT  = DYNAMIC | EOF, if PRAGUE_EOF;
+        RETURNCONTRACT  = DYNAMIC | EOF, if OSAKA;
         // 0xEF
         CREATE          = DYNAMIC;
         CALL            = DYNAMIC;
@@ -376,11 +376,11 @@ const fn make_map(spec_id: SpecId) -> [OpcodeInfo; 256] {
         DELEGATECALL    = DYNAMIC,       if HOMESTEAD;
         CREATE2         = DYNAMIC,       if PETERSBURG;
         // 0xF6
-        RETURNDATALOAD  = 3 | EOF,       if PRAGUE_EOF;
-        EXTCALL         = DYNAMIC | EOF, if PRAGUE_EOF;
-        EXTDELEGATECALL = DYNAMIC | EOF, if PRAGUE_EOF;
+        RETURNDATALOAD  = 3 | EOF,       if OSAKA;
+        EXTCALL         = DYNAMIC | EOF, if OSAKA;
+        EXTDELEGATECALL = DYNAMIC | EOF, if OSAKA;
         STATICCALL      = DYNAMIC,       if BYZANTIUM;
-        EXTSTATICCALL   = DYNAMIC | EOF, if PRAGUE_EOF;
+        EXTSTATICCALL   = DYNAMIC | EOF, if OSAKA;
         // 0xFC
         REVERT          = DYNAMIC,       if BYZANTIUM;
         INVALID         = 0;

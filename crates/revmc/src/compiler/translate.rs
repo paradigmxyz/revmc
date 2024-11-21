@@ -483,7 +483,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         self.bcx.switch_to_block(entry_block);
 
         let is_eof = self.bytecode.is_eof();
-        let is_eof_enabled = self.bytecode.spec_id.is_enabled_in(SpecId::PRAGUE_EOF);
+        let is_eof_enabled = self.bytecode.spec_id.is_enabled_in(SpecId::OSAKA);
         if is_eof {
             ensure!(is_eof_enabled, "EOF bytecode in non-EOF spec");
         }

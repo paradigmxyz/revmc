@@ -736,7 +736,7 @@ impl<'a> Builder for EvmCraneliftBuilder<'a> {
     }
 
     fn unreachable(&mut self) {
-        self.bcx.ins().trap(TrapCode::UnreachableCodeReached);
+        self.bcx.ins().trap(TrapCode::user(0).unwrap());
     }
 
     fn get_or_build_function(
