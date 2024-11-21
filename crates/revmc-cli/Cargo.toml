@@ -34,7 +34,7 @@ tracing-tracy = { workspace = true, optional = true }
 
 [dev-dependencies]
 criterion = "0.5"
-iai-callgrind = "0.11"
+iai-callgrind = "0.14"
 revmc-cli-tests = { path = "../revmc-cli-tests/" }
 
 [build-dependencies]

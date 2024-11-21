@@ -1,24 +1,19 @@
 #![allow(missing_docs)]
 
 use iai_callgrind::{
-    binary_benchmark_group, main, Arg, BinaryBenchmarkGroup, EventKind, FlamegraphConfig,
-    RegressionConfig, Run,
+    binary_benchmark_group, main, Bench, BinaryBenchmark, BinaryBenchmarkConfig,
+    BinaryBenchmarkGroup, Command, EventKind, FlamegraphConfig, RegressionConfig,
 };
 
 const CMD: &str = env!("CARGO_BIN_EXE_revmc-cli");
 
 binary_benchmark_group!(
-    name = compile_time;
-    benchmark = |group: &mut BinaryBenchmarkGroup| setup_group(group, true)
+    name = revmc;
+    benchmarks = |group: &mut BinaryBenchmarkGroup| setup_group(group)
 );
 
-binary_benchmark_group!(
-    name = run_time;
-    benchmark = |group: &mut BinaryBenchmarkGroup| setup_group(group, false)
-);
-
-fn setup_group(group: &mut BinaryBenchmarkGroup, is_ct: bool) {
-    let make_run = |name: &str, small: bool| {
+fn setup_group(group: &mut BinaryBenchmarkGroup) {
+    let make_bench = |name: &str, small: bool, is_ct: bool| {
         let mut args = Vec::with_capacity(3);
         args.push(name);
         // let out_dir = std::env::temp_dir().join("revmc-cli-iai");
@@ -30,11 +25,11 @@ fn setup_group(group: &mut BinaryBenchmarkGroup, is_ct: bool) {
             args.push("1");
             // args.extend(["1", "--shared-library", so.to_str().unwrap()]);
         }
-        let arg = Arg::new(name, args);
-        let mut run = Run::with_cmd(CMD, arg);
+        let mut bench = Bench::new(name);
+        bench.command(Command::new(CMD).args(&args)).config(BinaryBenchmarkConfig::default());
 
         if !is_ct {
-            run.entry_point("*EvmCompilerFn::call*");
+            bench.config.as_mut().unwrap().entry_point = Some("*EvmCompilerFn::call*".into());
         }
 
         let mut regression = RegressionConfig::default();
@@ -44,15 +39,15 @@ fn setup_group(group: &mut BinaryBenchmarkGroup, is_ct: bool) {
         } else {
             regression.limits([(EventKind::EstimatedCycles, 5.0)]);
         }
-        run.regression(regression);
+        bench.config.as_mut().unwrap().regression_config = Some(regression.into());
 
         // Uses an insane amount of memory (???)
         if cfg!(any()) && small && !is_ci() {
             let flamegraph = FlamegraphConfig::default();
-            run.flamegraph(flamegraph);
+            bench.config.as_mut().unwrap().flamegraph_config = Some(flamegraph.into());
         }
 
-        run
+        bench
     };
     let benches = [
         ("fibonacci", true),
@@ -65,11 +60,15 @@ fn setup_group(group: &mut BinaryBenchmarkGroup, is_ct: bool) {
         // ("snailtracer", false),
         // ("snailtracer-eof", false),
     ];
-    for (bench, small) in benches {
-        if !is_ct && !small {
-            continue;
+    for is_ct in [false, true] {
+        let mut bench = BinaryBenchmark::new(if is_ct { "compile_time" } else { "run_time" });
+        for (bench_name, small) in benches {
+            if !is_ct && !small {
+                continue;
+            }
+            bench.bench(make_bench(bench_name, small, is_ct));
         }
-        group.bench(make_run(bench, small));
+        group.binary_benchmark(bench);
     }
 }
 
@@ -77,4 +76,4 @@ fn is_ci() -> bool {
     std::env::var_os("CI").is_some()
 }
 
-main!(binary_benchmark_groups = compile_time, run_time);
+main!(binary_benchmark_groups = revmc);
