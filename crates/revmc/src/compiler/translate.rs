@@ -1945,14 +1945,6 @@ impl<B: Backend> FunctionCx<'_, B> {
     /// - `Store8` => `fn mstore(offset: u256, value: u8, ecx: ptr) -> InstructionResult`
     fn build_mem_op(&mut self, kind: MemOpKind) {
         let is_load = matches!(kind, MemOpKind::Load);
-        // TODO: If `store` is inlined it can cause segfaults. https://github.com/paradigmxyz/revmc/issues/61
-        if !is_load {
-            self.bcx.add_function_attribute(
-                None,
-                Attribute::NoInline,
-                FunctionAttributeLocation::Function,
-            );
-        }
         let ptr_args = if is_load { &[1, 2][..] } else { &[2][..] };
         for &ptr_arg in ptr_args {
             for attr in default_attrs::for_ref() {
@@ -2046,7 +2038,7 @@ impl<B: Backend> FunctionCx<'_, B> {
         let slot = self.bcx.gep(self.i8_type, buffer_ptr, &[offset], "slot");
         match kind {
             MemOpKind::Load => {
-                let loaded = self.bcx.load(self.word_type, slot, "slot.value");
+                let loaded = self.bcx.load_unaligned(self.word_type, slot, "slot.value");
                 let loaded =
                     if cfg!(target_endian = "little") { self.bcx.bswap(loaded) } else { loaded };
                 self.bcx.store(loaded, value);
@@ -2057,7 +2049,7 @@ impl<B: Backend> FunctionCx<'_, B> {
                 } else {
                     value
                 };
-                self.bcx.store(value, slot);
+                self.bcx.store_unaligned(value, slot);
             }
         }
 

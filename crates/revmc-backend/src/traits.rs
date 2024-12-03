@@ -271,8 +271,14 @@ pub trait Builder: BackendTypes + TypeMethods {
     fn stack_store(&mut self, value: Self::Value, slot: Self::StackSlot);
     fn stack_addr(&mut self, ty: Self::Type, slot: Self::StackSlot) -> Self::Value;
 
-    fn load(&mut self, ty: Self::Type, ptr: Self::Value, name: &str) -> Self::Value;
-    fn store(&mut self, value: Self::Value, ptr: Self::Value);
+    fn load(&mut self, ty: Self::Type, ptr: Self::Value, name: &str) -> Self::Value {
+        self.load_unaligned(ty, ptr, name)
+    }
+    fn load_unaligned(&mut self, ty: Self::Type, ptr: Self::Value, name: &str) -> Self::Value;
+    fn store(&mut self, value: Self::Value, ptr: Self::Value) {
+        self.store_unaligned(value, ptr);
+    }
+    fn store_unaligned(&mut self, value: Self::Value, ptr: Self::Value);
 
     fn nop(&mut self);
     fn ret(&mut self, values: &[Self::Value]);
