@@ -209,9 +209,17 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             Pointer::new_address(i64_type, bcx.gep(i8_type, gas_ptr, &[offset], name))
         };
 
+        // We store the stack length if requested or necessary due to the bytecode.
+        let stack_length_observable = config.inspect_stack_length || bytecode.may_suspend();
+        let local_stack = config.local_stack || !stack_length_observable;
         let sp_arg = bcx.fn_param(1);
-        let stack = if config.local_stack {
-            bcx.new_stack_slot(word_type, "stack.addr")
+        let stack = if local_stack {
+            let max_size = bytecode
+                .eof()
+                .map(|eof| eof.body.types_section.iter().map(|s| s.max_stack_size).max().unwrap())
+                .unwrap_or(STACK_CAP as _);
+            let size = max_size.next_power_of_two().min(STACK_CAP as _);
+            bcx.new_stack_slot(bcx.type_array(word_type, size as u32), "stack.addr")
         } else {
             Pointer::new_address(word_type, sp_arg)
         };
@@ -281,9 +289,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             builtins,
         };
 
-        // We store the stack length if requested or necessary due to the bytecode.
-        let stack_length_observable = config.inspect_stack_length || bytecode.may_suspend();
-
         // Add debug assertions for the parameters.
         if config.debug_assertions {
             fx.pointer_panic_with_bool(
@@ -293,7 +298,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 "gas metering is enabled",
             );
             fx.pointer_panic_with_bool(
-                !config.local_stack,
+                !local_stack,
                 sp_arg,
                 "stack pointer",
                 "local stack is disabled",
