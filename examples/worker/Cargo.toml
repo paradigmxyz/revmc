@@ -1,0 +1,19 @@
+[package]
+name = "revmc-examples-worker"
+publish = false
+
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+categories.workspace = true
+keywords.workspace = true
+repository.workspace = true
+exclude.workspace = true
+
+[dependencies]
+revmc = { workspace = true, features = ["llvm-prefer-dynamic"] }
+revmc-worker.workspace = true
+
+revm = { workspace = true, default-features = false }

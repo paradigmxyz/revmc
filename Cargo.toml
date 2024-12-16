@@ -1,6 +1,6 @@
 [workspace]
 members = ["crates/*", "examples/*", "fuzz"]
-default-members = ["crates/revmc-cli"]
+default-members = ["crates/revmc-cli", "crates/revmc-worker"]
 resolver = "2"
 
 [workspace.package]
@@ -42,6 +42,7 @@ revmc-builtins = { version = "0.1.0", path = "crates/revmc-builtins", default-fe
 revmc-context = { version = "0.1.0", path = "crates/revmc-context", default-features = false }
 revmc-cranelift = { version = "0.1.0", path = "crates/revmc-cranelift", default-features = false }
 revmc-llvm = { version = "0.1.0", path = "crates/revmc-llvm", default-features = false }
+revmc-worker = { version = "0.1.0", path = "crates/revmc-worker", default-features = false }
 
 alloy-primitives = { version = "0.8", default-features = false }
 revm = { version = "19.0", default-features = false }
