@@ -13,7 +13,8 @@ extern crate tracing;
 use alloc::{boxed::Box, vec::Vec};
 use revm_interpreter::{
     as_u64_saturated, as_usize_saturated, CallInputs, CallScheme, CallValue, CreateInputs,
-    EOFCreateInputs, FunctionStack, InstructionResult, InterpreterAction, InterpreterResult,
+    EOFCreateInputs, Eip7702CodeLoad, FunctionStack, InstructionResult, InterpreterAction,
+    InterpreterResult,
 };
 use revm_primitives::{
     eof::EofHeader, Address, Bytes, CreateScheme, Eof, Log, LogData, SpecId, KECCAK_EMPTY,
@@ -205,7 +206,9 @@ pub unsafe extern "C" fn __revmc_builtin_extcodesize(
     address: &mut EvmWord,
     spec_id: SpecId,
 ) -> InstructionResult {
-    let (code, state) = try_host!(ecx.host.code(address.to_address())).into_components();
+    let (code, state) =
+        Eip7702CodeLoad::new_state_load(try_host!(ecx.host.code(address.to_address())))
+            .into_components();
     *address = code.len().into();
     let gas = if spec_id.is_enabled_in(SpecId::BERLIN) {
         gas::warm_cold_cost_with_delegation(state)
@@ -224,16 +227,16 @@ pub unsafe extern "C" fn __revmc_builtin_extcodecopy(
     rev![address, memory_offset, code_offset, len]: &mut [EvmWord; 4],
     spec_id: SpecId,
 ) -> InstructionResult {
-    let (code, state) = try_host!(ecx.host.code(address.to_address())).into_components();
+    let state_load = try_host!(ecx.host.code(address.to_address()));
 
     let len = try_into_usize!(len);
-    gas_opt!(ecx, gas::extcodecopy_cost(spec_id, len as u64, state));
+    gas_opt!(ecx, gas::extcodecopy_cost(spec_id, len as u64, state_load.is_cold));
     if len != 0 {
         let memory_offset = try_into_usize!(memory_offset);
         let code_offset = code_offset.to_u256();
-        let code_offset = as_usize_saturated!(code_offset).min(code.len());
+        let code_offset = as_usize_saturated!(code_offset).min(state_load.data.len());
         ensure_memory!(ecx, memory_offset, len);
-        ecx.memory.set_data(memory_offset, code_offset, len, &code);
+        ecx.memory.set_data(memory_offset, code_offset, len, &state_load.data);
     }
     InstructionResult::Continue
 }
@@ -265,7 +268,9 @@ pub unsafe extern "C" fn __revmc_builtin_extcodehash(
     address: &mut EvmWord,
     spec_id: SpecId,
 ) -> InstructionResult {
-    let (hash, state) = try_host!(ecx.host.code_hash(address.to_address())).into_components();
+    let (hash, state) =
+        Eip7702CodeLoad::new_state_load(try_host!(ecx.host.code_hash(address.to_address())))
+            .into_components();
     *address = EvmWord::from_be_bytes(hash.0);
     let gas = if spec_id.is_enabled_in(SpecId::BERLIN) {
         gas::warm_cold_cost_with_delegation(state)

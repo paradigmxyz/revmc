@@ -44,14 +44,14 @@ revmc-cranelift = { version = "0.1.0", path = "crates/revmc-cranelift", default-
 revmc-llvm = { version = "0.1.0", path = "crates/revmc-llvm", default-features = false }
 
 alloy-primitives = { version = "0.8", default-features = false }
-revm = { version = "18.0", default-features = false }
-revm-primitives = { version = "14.0", default-features = false }
-revm-interpreter = { version = "14.0", default-features = false }
+revm = { version = "19.0", default-features = false }
+revm-primitives = { version = "15.1", default-features = false }
+revm-interpreter = { version = "15.0", default-features = false }
 ruint = { version = "1.12", default-features = false }
 
 color-eyre = "0.6"
 eyre = "0.6"
-rustc-hash = "2.0"
+rustc-hash = "2.1"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 tracing-tracy = "0.11"

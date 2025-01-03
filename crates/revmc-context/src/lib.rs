@@ -832,14 +832,13 @@ mod tests {
             fn code(
                 &mut self,
                 address: Address,
-            ) -> Option<revm_interpreter::Eip7702CodeLoad<Bytes>> {
+            ) -> Option<revm_interpreter::StateLoad<revm_primitives::Bytes>> {
                 unimplemented!()
             }
             fn code_hash(
                 &mut self,
                 address: Address,
-            ) -> Option<revm_interpreter::Eip7702CodeLoad<revm_primitives::FixedBytes<32>>>
-            {
+            ) -> Option<revm_interpreter::StateLoad<revm_primitives::FixedBytes<32>>> {
                 unimplemented!()
             }
             fn sload(
