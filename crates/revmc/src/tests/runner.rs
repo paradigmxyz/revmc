@@ -148,7 +148,7 @@ pub fn def_env() -> &'static Env {
             basefee: U256::from(0x1231),
             difficulty: U256::from(0xcdef),
             prevrandao: Some(U256::from(0x0123).into()),
-            blob_excess_gas_and_price: Some(BlobExcessGasAndPrice::new(50)),
+            blob_excess_gas_and_price: Some(BlobExcessGasAndPrice::new(50, false)),
         },
         tx: TxEnv {
             caller: Address::repeat_byte(0xcc),
@@ -262,14 +262,14 @@ impl Host for TestHost {
         Some(StateLoad::new(U256::from(*address.last().unwrap()), false))
     }
 
-    fn code(&mut self, address: Address) -> Option<Eip7702CodeLoad<Bytes>> {
+    fn code(&mut self, address: Address) -> Option<StateLoad<Bytes>> {
         let code = self.code_map.get(&address).map(|b| b.original_bytes()).unwrap_or_default();
-        Some(Eip7702CodeLoad::new_not_delegated(code, false))
+        Some(StateLoad::new(code, false))
     }
 
-    fn code_hash(&mut self, address: Address) -> Option<Eip7702CodeLoad<B256>> {
+    fn code_hash(&mut self, address: Address) -> Option<StateLoad<B256>> {
         let code_hash = self.code_map.get(&address).map(|b| b.hash_slow()).unwrap_or(KECCAK_EMPTY);
-        Some(Eip7702CodeLoad::new_not_delegated(code_hash, false))
+        Some(StateLoad::new(code_hash, false))
     }
 
     fn sload(&mut self, address: Address, index: U256) -> Option<StateLoad<U256>> {
