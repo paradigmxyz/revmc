@@ -1,5 +1,5 @@
 use super::*;
-use interpreter::{AccountLoad, Eip7702CodeLoad, SStoreResult, StateLoad};
+use interpreter::{AccountLoad, SStoreResult, StateLoad};
 use revm_interpreter::{opcode as op, Contract, DummyHost, Host, SelfDestructResult};
 use revm_primitives::{
     spec_to_generic, BlobExcessGasAndPrice, BlockEnv, CfgEnv, Env, HashMap, TxEnv, EOF_MAGIC_BYTES,
