@@ -33,7 +33,7 @@ tracing-subscriber = { workspace = true, features = ["fmt", "env-filter"] }
 tracing-tracy = { workspace = true, optional = true }
 
 [dev-dependencies]
-criterion = "0.5"
+criterion = { version = "0.5", default-features = false }
 iai-callgrind = "0.14"
 revmc-cli-tests = { path = "../revmc-cli-tests/" }
 
