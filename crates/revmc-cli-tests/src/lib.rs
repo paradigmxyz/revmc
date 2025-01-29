@@ -22,6 +22,7 @@ pub fn run_tests(cmd: &'static Path) -> i32 {
         }
         None => return 0,
     };
+
     /*
     // Condense output if not explicitly requested.
     let requested_pretty = || args.iter().any(|x| x.contains("--format"));
@@ -38,6 +39,12 @@ pub fn run_tests(cmd: &'static Path) -> i32 {
     let mut tests = Vec::new();
     make_tests(cmd, &mut tests);
     tests.sort_by(|a, b| a.desc.name.as_slice().cmp(b.desc.name.as_slice()));
+
+    if opts.list {
+        // The only way to call `list_tests_console` is through `test_main`.
+        test::test_main(&args, tests, Some(opts.options));
+        return 0;
+    }
 
     match test::run_tests_console(&opts, tests) {
         Ok(true) => 0,

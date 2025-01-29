@@ -52,8 +52,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
+      - uses: taiki-e/install-action@nextest
       - name: test
-        run: cargo test --workspace --profile ${{ matrix.profile }} --features ${{ env.ALL_BACKENDS }}
+        run: cargo nextest run --workspace --cargo-profile ${{ matrix.profile }} --features ${{ env.ALL_BACKENDS }}
 
   feature-checks:
     runs-on: ubuntu-latest
