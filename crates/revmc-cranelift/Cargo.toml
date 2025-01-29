@@ -19,8 +19,8 @@ workspace = true
 [dependencies]
 revmc-backend.workspace = true
 
-cranelift = "0.114"
-cranelift-jit = "0.114"
-cranelift-module = "0.114"
-cranelift-native = "0.114"
-cranelift-object = "0.114"
+cranelift = "0.116"
+cranelift-jit = "0.116"
+cranelift-module = "0.116"
+cranelift-native = "0.116"
+cranelift-object = "0.116"
