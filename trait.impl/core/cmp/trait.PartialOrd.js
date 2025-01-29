@@ -1,0 +1,9 @@
+(function() {
+    var implementors = Object.fromEntries([["revmc",[["impl&lt;'a&gt; <a class=\"trait\" href=\"revmc/cranelift/cranelift/prelude/codegen/entity/__core/cmp/trait.PartialOrd.html\" title=\"trait revmc::cranelift::cranelift::prelude::codegen::entity::__core::cmp::PartialOrd\">PartialOrd</a> for <a class=\"struct\" href=\"revmc/struct.Opcode.html\" title=\"struct revmc::Opcode\">Opcode</a>&lt;'a&gt;"],["impl&lt;'a&gt; <a class=\"trait\" href=\"revmc/cranelift/cranelift/prelude/codegen/entity/__core/cmp/trait.PartialOrd.html\" title=\"trait revmc::cranelift::cranelift::prelude::codegen::entity::__core::cmp::PartialOrd\">PartialOrd</a> for <a class=\"struct\" href=\"revmc/tests/runner/struct.MemDisplay.html\" title=\"struct revmc::tests::runner::MemDisplay\">MemDisplay</a>&lt;'a&gt;"]]],["revmc_backend",[["impl <a class=\"trait\" href=\"https://doc.rust-lang.org/nightly/core/cmp/trait.PartialOrd.html\" title=\"trait core::cmp::PartialOrd\">PartialOrd</a> for <a class=\"enum\" href=\"revmc_backend/enum.IntCC.html\" title=\"enum revmc_backend::IntCC\">IntCC</a>"],["impl <a class=\"trait\" href=\"https://doc.rust-lang.org/nightly/core/cmp/trait.PartialOrd.html\" title=\"trait core::cmp::PartialOrd\">PartialOrd</a> for <a class=\"enum\" href=\"revmc_backend/enum.OptimizationLevel.html\" title=\"enum revmc_backend::OptimizationLevel\">OptimizationLevel</a>"],["impl <a class=\"trait\" href=\"https://doc.rust-lang.org/nightly/core/cmp/trait.PartialOrd.html\" title=\"trait core::cmp::PartialOrd\">PartialOrd</a> for <a class=\"enum\" href=\"revmc_backend/enum.Target.html\" title=\"enum revmc_backend::Target\">Target</a>"]]]]);
+    if (window.register_implementors) {
+        window.register_implementors(implementors);
+    } else {
+        window.pending_implementors = implementors;
+    }
+})()
+//{"start":57,"fragment_lengths":[749,845]}

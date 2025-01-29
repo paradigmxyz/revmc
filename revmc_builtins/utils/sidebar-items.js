@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["copy_operation","decouple_lt","ensure_memory","ensure_memory_inner","read_words_rev","resize_memory","resize_memory_inner"]};

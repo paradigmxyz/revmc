@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["vec_layout_generic"],"struct":["Bytes","Gas","SharedMemory","Slice","Vec","Vtable"]};

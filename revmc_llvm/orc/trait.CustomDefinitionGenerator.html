@@ -1,0 +1,44 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="A custom definition generator."><title>CustomDefinitionGenerator in revmc_llvm::orc - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2" crossorigin href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-e7950ecc.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="revmc_llvm" data-themes="" data-resource-suffix="" data-rustdoc-version="1.86.0-nightly (bf1b174e7 2025-01-28)" data-channel="nightly" data-search-js="search-ccb196c1.js" data-settings-js="settings-0f613d39.js" ><script src="../../static.files/storage-59e33391.js"></script><script defer src="sidebar-items.js"></script><script defer src="../../static.files/main-5f194d8c.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-893ab5e7.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-6580c154.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc trait"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="mobile-topbar"><button class="sidebar-menu-toggle" title="show sidebar"></button></nav><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../revmc_llvm/index.html">revmc_<wbr>llvm</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Custom<wbr>Definition<wbr>Generator</a></h2><h3><a href="#required-methods">Required Methods</a></h3><ul class="block"><li><a href="#tymethod.try_to_generate" title="try_to_generate">try_to_generate</a></li></ul><h3><a href="#implementors">Implementors</a></h3></section><div id="rustdoc-modnav"><h2><a href="index.html">In revmc_<wbr>llvm::<wbr>orc</a></h2></div></div></nav><div class="sidebar-resizer"></div><main><div class="width-limiter"><rustdoc-search></rustdoc-search><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">revmc_llvm</a>::<wbr><a href="index.html">orc</a></div><h1>Trait <span class="trait">CustomDefinitionGenerator</span><button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/revmc_llvm/orc.rs.html#1013-1053">Source</a> </span></div><pre class="rust item-decl"><code>pub trait CustomDefinitionGenerator {
+    // Required method
+    fn <a href="#tymethod.try_to_generate" class="fn">try_to_generate</a>(
+        &amp;mut self,
+        generator_obj: LLVMOrcDefinitionGeneratorRef,
+        lookup_state: &amp;mut LLVMOrcLookupStateRef,
+        kind: LLVMOrcLookupKind,
+        jd: <a class="struct" href="struct.JITDylibRef.html" title="struct revmc_llvm::orc::JITDylibRef">JITDylibRef</a>,
+        jd_lookup_flags: LLVMOrcJITDylibLookupFlags,
+        lookup_set: &amp;[LLVMOrcCLookupSetElement],
+    ) -&gt; <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/nightly/std/primitive.unit.html">()</a>, <a class="struct" href="https://doc.rust-lang.org/nightly/alloc/string/struct.String.html" title="struct alloc::string::String">String</a>&gt;;
+}</code></pre><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>A custom definition generator.</p>
+</div></details><h2 id="required-methods" class="section-header">Required Methods<a href="#required-methods" class="anchor">§</a></h2><div class="methods"><details class="toggle method-toggle" open><summary><section id="tymethod.try_to_generate" class="method"><a class="src rightside" href="../../src/revmc_llvm/orc.rs.html#1044-1052">Source</a><h4 class="code-header">fn <a href="#tymethod.try_to_generate" class="fn">try_to_generate</a>(
+    &amp;mut self,
+    generator_obj: LLVMOrcDefinitionGeneratorRef,
+    lookup_state: &amp;mut LLVMOrcLookupStateRef,
+    kind: LLVMOrcLookupKind,
+    jd: <a class="struct" href="struct.JITDylibRef.html" title="struct revmc_llvm::orc::JITDylibRef">JITDylibRef</a>,
+    jd_lookup_flags: LLVMOrcJITDylibLookupFlags,
+    lookup_set: &amp;[LLVMOrcCLookupSetElement],
+) -&gt; <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/nightly/std/primitive.unit.html">()</a>, <a class="struct" href="https://doc.rust-lang.org/nightly/alloc/string/struct.String.html" title="struct alloc::string::String">String</a>&gt;</h4></section></summary><div class="docblock"><p>A custom generator function.</p>
+<p>This can be used to create a custom generator object using
+LLVMOrcCreateCustomCAPIDefinitionGenerator. The resulting object can be attached to a
+JITDylib, via LLVMOrcJITDylibAddGenerator, to receive callbacks when lookups fail to match
+existing definitions.</p>
+<p>GeneratorObj will contain the address of the custom generator object.</p>
+<p>Ctx will contain the context object passed to LLVMOrcCreateCustomCAPIDefinitionGenerator.</p>
+<p>LookupState will contain a pointer to an LLVMOrcLookupStateRef object. This can optionally
+be modified to make the definition generation process asynchronous: If the LookupStateRef
+value is copied, and the original LLVMOrcLookupStateRef set to null, the lookup will be
+suspended. Once the asynchronous definition process has been completed clients must call
+LLVMOrcLookupStateContinueLookup to continue the lookup (this should be done
+unconditionally, even if errors have occurred in the mean time, to free the lookup state
+memory and notify the query object of the failures). If LookupState is captured this
+function must return LLVMErrorSuccess.</p>
+<p>The Kind argument can be inspected to determine the lookup kind (e.g.
+as-if-during-static-link, or as-if-during-dlsym).</p>
+<p>The JD argument specifies which JITDylib the definitions should be generated into.</p>
+<p>The JDLookupFlags argument can be inspected to determine whether the original lookup
+included non-exported symbols.</p>
+<p>Finally, the LookupSet argument contains the set of symbols that could not be found in JD
+already (the set of generation candidates).</p>
+</div></details></div><h2 id="implementors" class="section-header">Implementors<a href="#implementors" class="anchor">§</a></h2><div id="implementors-list"><section id="impl-CustomDefinitionGenerator-for-T" class="impl"><a class="src rightside" href="../../src/revmc_llvm/orc.rs.html#1055-1078">Source</a><a href="#impl-CustomDefinitionGenerator-for-T" class="anchor">§</a><h3 class="code-header">impl&lt;T&gt; <a class="trait" href="trait.CustomDefinitionGenerator.html" title="trait revmc_llvm::orc::CustomDefinitionGenerator">CustomDefinitionGenerator</a> for T<div class="where">where
+    T: <a class="trait" href="https://doc.rust-lang.org/nightly/core/ops/function/trait.FnMut.html" title="trait core::ops::function::FnMut">FnMut</a>(LLVMOrcDefinitionGeneratorRef, &amp;mut LLVMOrcLookupStateRef, LLVMOrcLookupKind, <a class="struct" href="struct.JITDylibRef.html" title="struct revmc_llvm::orc::JITDylibRef">JITDylibRef</a>, LLVMOrcJITDylibLookupFlags, &amp;[LLVMOrcCLookupSetElement]) -&gt; <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/nightly/std/primitive.unit.html">()</a>, <a class="struct" href="https://doc.rust-lang.org/nightly/alloc/string/struct.String.html" title="struct alloc::string::String">String</a>&gt;,</div></h3></section></div><script src="../../trait.impl/revmc_llvm/orc/trait.CustomDefinitionGenerator.js" async></script></section></div></main></body></html>

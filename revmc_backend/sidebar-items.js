@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["Attribute","FunctionAttributeLocation","IntCC","Linkage","OptimizationLevel","PointerBase","TailCallKind","Target"],"mod":["pointer","traits"],"struct":["Pointer"],"trait":["Backend","BackendTypes","Builder","TypeMethods"],"type":["Error","Result"]};

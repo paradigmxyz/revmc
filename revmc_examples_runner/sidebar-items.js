@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["FIBONACCI_CODE","FIBONACCI_HASH"],"fn":["build_evm","fibonacci","register_handler"],"struct":["ExternalContext"]};

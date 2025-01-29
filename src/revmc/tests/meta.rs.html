@@ -1,0 +1,49 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `crates/revmc/src/tests/meta.rs`."><title>meta.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2" crossorigin href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-e7950ecc.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="revmc" data-themes="" data-resource-suffix="" data-rustdoc-version="1.86.0-nightly (bf1b174e7 2025-01-28)" data-channel="nightly" data-search-js="search-ccb196c1.js" data-settings-js="settings-0f613d39.js" ><script src="../../../static.files/storage-59e33391.js"></script><script defer src="../../../static.files/src-script-56102188.js"></script><script defer src="../../../src-files.js"></script><script defer src="../../../static.files/main-5f194d8c.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-893ab5e7.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-6580c154.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer"></div><main><rustdoc-search></rustdoc-search><section id="main-content" class="content"><div class="main-heading"><h1><div class="sub-heading">revmc/tests/</div>meta.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap"><div data-nosnippet><pre class="src-line-numbers">
+<a href="#1" id="1">1</a>
+<a href="#2" id="2">2</a>
+<a href="#3" id="3">3</a>
+<a href="#4" id="4">4</a>
+<a href="#5" id="5">5</a>
+<a href="#6" id="6">6</a>
+<a href="#7" id="7">7</a>
+<a href="#8" id="8">8</a>
+<a href="#9" id="9">9</a>
+<a href="#10" id="10">10</a>
+<a href="#11" id="11">11</a>
+<a href="#12" id="12">12</a>
+<a href="#13" id="13">13</a>
+<a href="#14" id="14">14</a>
+<a href="#15" id="15">15</a>
+<a href="#16" id="16">16</a>
+<a href="#17" id="17">17</a>
+<a href="#18" id="18">18</a>
+<a href="#19" id="19">19</a>
+<a href="#20" id="20">20</a>
+<a href="#21" id="21">21</a>
+<a href="#22" id="22">22</a>
+<a href="#23" id="23">23</a>
+<a href="#24" id="24">24</a></pre></div><pre class="rust"><code><span class="kw">use </span><a href="runner.rs.html#318-342"><span class="kw">super</span>::with_evm_context</a>;
+<span class="kw">use crate</span>::{<a href="../../../revmc/trait.Backend.html">Backend</a>, <a href="../compiler/mod.rs.html#50-61">EvmCompiler</a>};
+<span class="kw">use </span>revm_interpreter::InstructionResult;
+<span class="kw">use </span>revm_primitives::SpecId;
+
+<a class="macro" href="macros.rs.html#1-48">matrix_tests!</a>(translate_then_compile);
+
+<span class="comment">// Also tests multiple functions in the same module.
+</span><span class="kw">fn </span><a href="../../../revmc/tests/meta/fn.translate_then_compile.html">translate_then_compile</a>&lt;B: <a href="../../../revmc/trait.Backend.html">Backend</a>&gt;(compiler: <span class="kw-2">&amp;mut </span><a href="../compiler/mod.rs.html#50-61">EvmCompiler</a>&lt;B&gt;) {
+    <span class="kw">let </span>bytecode: <span class="kw-2">&amp;</span>[<a href="https://doc.rust-lang.org/nightly/std/primitive.u8.html">u8</a>] = <span class="kw-2">&amp;</span>[];
+    <span class="kw">let </span>spec_id = SpecId::CANCUN;
+    <a href="#9">compiler</a>.<a href="../compiler/mod.rs.html#225-227">gas_metering</a>(<span class="bool-val">false</span>);
+    <span class="kw">let </span>gas_id = <a href="#9">compiler</a>.<a href="../compiler/mod.rs.html#233-243">translate</a>(<span class="string">"test1"</span>, <a href="#10">bytecode</a>, <a href="#11">spec_id</a>).<a href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html#method.unwrap">unwrap</a>();
+    <a href="#9">compiler</a>.<a href="../compiler/mod.rs.html#225-227">gas_metering</a>(<span class="bool-val">true</span>);
+    <span class="kw">let </span>no_gas_id = <a href="#9">compiler</a>.<a href="../compiler/mod.rs.html#233-243">translate</a>(<span class="string">"test2"</span>, <a href="#10">bytecode</a>, <a href="#11">spec_id</a>).<a href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html#method.unwrap">unwrap</a>();
+    <span class="kw">let </span>gas_fn = <span class="kw">unsafe </span>{ <a href="#9">compiler</a>.<a href="../compiler/mod.rs.html#269-275">jit_function</a>(<a href="#13">gas_id</a>) }.<a href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html#method.unwrap">unwrap</a>();
+    <span class="kw">let </span>no_gas_fn = <span class="kw">unsafe </span>{ <a href="#9">compiler</a>.<a href="../compiler/mod.rs.html#269-275">jit_function</a>(<a href="#15">no_gas_id</a>) }.<a href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html#method.unwrap">unwrap</a>();
+    <a href="runner.rs.html#318-342">with_evm_context</a>(<a href="#10">bytecode</a>, |ecx, stack, stack_len| {
+        <span class="kw">let </span>r = <span class="kw">unsafe </span>{ <a href="#16">gas_fn</a>.<a href="../../../revmc_context/struct.EvmCompilerFn.html#method.call">call</a>(<a class="prelude-val" href="../../../revmc/cranelift/cranelift/prelude/codegen/entity/__core/option/enum.Option.html">Some</a>(<a href="#18">stack</a>), <a class="prelude-val" href="../../../revmc/cranelift/cranelift/prelude/codegen/entity/__core/option/enum.Option.html">Some</a>(<a href="#18">stack_len</a>), <a href="#18">ecx</a>) };
+        <a class="macro" href="../../../revmc/cranelift/cranelift/prelude/codegen/entity/__core/macro.assert_eq.html">assert_eq!</a>(r, InstructionResult::Stop);
+        <span class="kw">let </span>r = <span class="kw">unsafe </span>{ <a href="#17">no_gas_fn</a>.<a href="../../../revmc_context/struct.EvmCompilerFn.html#method.call">call</a>(<a class="prelude-val" href="../../../revmc/cranelift/cranelift/prelude/codegen/entity/__core/option/enum.Option.html">Some</a>(<a href="#18">stack</a>), <a class="prelude-val" href="../../../revmc/cranelift/cranelift/prelude/codegen/entity/__core/option/enum.Option.html">Some</a>(<a href="#18">stack_len</a>), <a href="#18">ecx</a>) };
+        <a class="macro" href="../../../revmc/cranelift/cranelift/prelude/codegen/entity/__core/macro.assert_eq.html">assert_eq!</a>(r, InstructionResult::Stop);
+    });
+}
+</code></pre></div></section></main></body></html>

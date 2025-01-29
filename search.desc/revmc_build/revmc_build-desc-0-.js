@@ -1,0 +1,1 @@
+searchState.loadedDescShard("revmc_build", 0, "revmc-build\nEmits the linker flag to export all the necessary symbols.")

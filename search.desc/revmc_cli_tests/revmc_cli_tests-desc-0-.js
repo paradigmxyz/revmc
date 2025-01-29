@@ -1,0 +1,1 @@
+searchState.loadedDescShard("revmc_cli_tests", 0, "CLI tests runner.\nReturns the argument unchanged.\nCalls <code>U::from(self)</code>.\nRun all tests with the given command.")

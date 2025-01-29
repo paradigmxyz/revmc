@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["Attribute","FunctionAttributeLocation","IntCC","Linkage","OptimizationLevel","TailCallKind","Target"],"trait":["Backend","BackendTypes","Builder","TypeMethods"]};
