@@ -545,11 +545,17 @@ impl<'a> Bytecode<'a> {
         );
     }
 
+    /// Returns the EOF container, if any.
+    #[inline]
+    pub fn eof(&self) -> Option<&Eof> {
+        self.eof.as_deref()
+    }
+
     /// Returns the `Eof` container, panicking if it is not set.
     #[track_caller]
     #[inline]
     pub(crate) fn expect_eof(&self) -> &Eof {
-        self.eof.as_deref().expect("EOF container not set")
+        self.eof().expect("EOF container not set")
     }
 
     /// Returns the name for a basic block.
