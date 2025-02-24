@@ -18,5 +18,5 @@ exclude.workspace = true
 workspace = true
 
 [dependencies]
-walkdir = "2.5"
-tester = "0.9"
+walkdir = { workspace = true }
+tester = { workspace = true }

@@ -19,7 +19,7 @@ workspace = true
 [dependencies]
 revmc-backend.workspace = true
 
-inkwell = { version = "0.5", features = [ "llvm18-0" ] }
+inkwell = { workspace = true, features = ["llvm18-0"] }
 rustc-hash.workspace = true
 tracing.workspace = true
 

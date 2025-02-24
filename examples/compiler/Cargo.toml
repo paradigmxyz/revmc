@@ -18,5 +18,5 @@ revmc-build.workspace = true
 [dependencies]
 revmc = { workspace = true, features = ["llvm-prefer-dynamic"] }
 
-clap = { version = "4", features = ["derive"] }
+clap = { workspace = true, features = ["derive"] }
 eyre.workspace = true

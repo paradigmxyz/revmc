@@ -26,16 +26,16 @@ revmc.workspace = true
 revm-interpreter = { workspace = true, features = ["parse"] }
 revm-primitives.workspace = true
 
-clap = { version = "4", features = ["derive"] }
+clap = { workspace = true, features = ["derive"] }
 color-eyre.workspace = true
-libloading = "0.8"
+libloading = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["fmt", "env-filter"] }
 tracing-tracy = { workspace = true, optional = true }
 
 [dev-dependencies]
-criterion = { version = "0.5", default-features = false }
-iai-callgrind = "0.14"
-revmc-cli-tests = { path = "../revmc-cli-tests/" }
+criterion = { workspace = true }
+iai-callgrind = { workspace = true }
+revmc-cli-tests = { workspace = true }
 
 [build-dependencies]
 revmc-build.workspace = true
