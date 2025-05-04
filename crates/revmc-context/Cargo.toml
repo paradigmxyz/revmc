@@ -19,6 +19,8 @@ workspace = true
 [dependencies]
 revm-interpreter.workspace = true
 revm-primitives.workspace = true
+revm-context = { git = "https://github.com/0xDmtri/revm.git", default-features = false }
+revm-context-interface = { git = "https://github.com/0xDmtri/revm.git", default-features = false }
 
 [features]
 default = ["std"]
