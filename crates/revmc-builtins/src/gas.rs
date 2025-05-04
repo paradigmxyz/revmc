@@ -1,6 +1,6 @@
 //! Gas calculation utilities.
 
-use revm_primitives::{SpecId, U256};
+use revm_primitives::{hardfork::SpecId, U256};
 
 pub use revm_interpreter::gas::*;
 
@@ -62,13 +62,13 @@ pub const fn dyn_log_cost(len: u64) -> Option<u64> {
 
 /// `KECCAK256` opcode cost calculation.
 #[inline]
-pub const fn dyn_keccak256_cost(len: u64) -> Option<u64> {
+pub const fn dyn_keccak256_cost(len: usize) -> Option<u64> {
     cost_per_word(len, KECCAK256WORD)
 }
 
 /// `*COPY` opcodes cost calculation.
 #[inline]
-pub const fn dyn_verylowcopy_cost(len: u64) -> Option<u64> {
+pub const fn dyn_verylowcopy_cost(len: usize) -> Option<u64> {
     cost_per_word(len, COPY)
 }
 
@@ -116,7 +116,7 @@ mod tests {
     fn verylowcopy_cost() {
         for len in [0, 1, 69] {
             assert_eq!(
-                super::verylowcopy_cost(len).unwrap(),
+                super::copy_cost_verylow(len).unwrap(),
                 VERYLOW + dyn_verylowcopy_cost(len).unwrap(),
             );
         }

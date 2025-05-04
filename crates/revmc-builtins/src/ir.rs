@@ -149,7 +149,7 @@ macro_rules! builtins {
             }
 
             fn op(self) -> u8 {
-                use revm_interpreter::opcode::*;
+                use revm_bytecode::opcode::*;
                 const PANIC: u8 = 0;
                 const LOG: u8 = LOG0;
                 const DORETURN: u8 = RETURN;
@@ -192,7 +192,7 @@ builtins! {
         }
 
         let op = op.op();
-        let (inputs, outputs) = if let Some(info) = revm_interpreter::opcode::OPCODE_INFO_JUMPTABLE[op as usize] {
+        let (inputs, outputs) = if let Some(info) = revm_bytecode::opcode::OPCODE_INFO[op as usize] {
             (info.inputs(), info.outputs())
         } else {
             (0, 0)

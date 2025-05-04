@@ -21,6 +21,7 @@ revmc-context.workspace = true
 
 revm-primitives.workspace = true
 revm-interpreter.workspace = true
+revm-bytecode.workspace = true
 paste.workspace = true
 
 revmc-backend = { workspace = true, optional = true }

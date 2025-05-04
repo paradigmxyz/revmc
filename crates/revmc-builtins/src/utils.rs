@@ -1,5 +1,5 @@
 use crate::gas;
-use revm_interpreter::{as_usize_saturated, Gas, InstructionResult, SharedMemory};
+use revm_interpreter::{as_usize_saturated, interpreter_types::MemoryTr, InstructionResult};
 use revmc_context::{EvmContext, EvmWord};
 
 /// Splits the stack pointer into `N` elements by casting it to an array.
@@ -22,35 +22,31 @@ pub(crate) fn ensure_memory(
     offset: usize,
     len: usize,
 ) -> InstructionResult {
-    ensure_memory_inner(ecx.memory, ecx.gas, offset, len)
+    ensure_memory_inner(ecx.memory, offset, len)
 }
 
 #[inline]
 pub(crate) fn ensure_memory_inner(
-    memory: &mut SharedMemory,
-    gas: &mut Gas,
+    memory: &mut impl MemoryTr,
     offset: usize,
     len: usize,
 ) -> InstructionResult {
     let new_size = offset.saturating_add(len);
-    if new_size > memory.len() {
-        return resize_memory_inner(memory, gas, new_size);
+    if new_size > memory.size() {
+        return resize_memory_inner(memory, new_size);
     }
     InstructionResult::Continue
 }
 
 #[inline]
 pub(crate) fn resize_memory(ecx: &mut EvmContext<'_>, new_size: usize) -> InstructionResult {
-    resize_memory_inner(ecx.memory, ecx.gas, new_size)
+    resize_memory_inner(ecx.memory, new_size)
 }
 
-fn resize_memory_inner(
-    memory: &mut SharedMemory,
-    gas: &mut Gas,
-    new_size: usize,
-) -> InstructionResult {
+// FIXME: not sure whats the resize_memory in the current revm version
+fn resize_memory_inner(memory: &mut impl MemoryTr, new_size: usize) -> InstructionResult {
     // TODO: Memory limit
-    if !revm_interpreter::interpreter::resize_memory(memory, gas, new_size) {
+    if !memory.resize(new_size) {
         return InstructionResult::MemoryOOG;
     }
     InstructionResult::Continue
@@ -63,7 +59,7 @@ pub(crate) unsafe fn copy_operation(
 ) -> InstructionResult {
     let len = try_into_usize!(len);
     if len != 0 {
-        gas_opt!(ecx, gas::dyn_verylowcopy_cost(len as u64));
+        gas_opt!(ecx, gas::dyn_verylowcopy_cost(len));
         let memory_offset = try_into_usize!(memory_offset);
         ensure_memory!(ecx, memory_offset, len);
         let data_offset = data_offset.to_u256();
