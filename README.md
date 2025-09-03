@@ -54,6 +54,19 @@ fn main() {
 
 You can check out the [examples](/examples) directory for example usage.
 
+## Benchmark
+
+```bash
+# Install benchmark dependencies
+cargo install cargo-binstall
+bash .github/scripts/install_iai_callgrind_runner.sh
+sudo apt-get update && sudo apt-get install -y valgrind
+
+# Run benchmarks
+cd crates/revmc-cli
+cargo bench
+```
+
 ## Credits
 
 The initial compiler implementation was inspired by [`paradigmxyz/jitevm`](https://github.com/paradigmxyz/jitevm).
