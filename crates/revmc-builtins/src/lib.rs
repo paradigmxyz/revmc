@@ -232,15 +232,13 @@ pub unsafe extern "C" fn __revmc_builtin_codesize(ecx: &mut EvmContext<'_>) -> u
     ecx.bytecode_len
 }
 
-// TODO: CODECOPY needs access to bytecode slice which is not available in EvmContext
-// due to borrow conflicts. For now, return empty data.
 #[no_mangle]
 pub unsafe extern "C" fn __revmc_builtin_codecopy(
     ecx: &mut EvmContext<'_>,
     sp: &mut [EvmWord; 3],
 ) -> InstructionResult {
-    // Bytecode slice is not available - this is a limitation of the current context design
-    copy_operation(ecx, sp, &[])
+    let bytecode = core::slice::from_raw_parts(ecx.bytecode_ptr, ecx.bytecode_len);
+    copy_operation(ecx, sp, bytecode)
 }
 
 #[no_mangle]

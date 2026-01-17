@@ -34,6 +34,8 @@ pub struct EvmContext<'a> {
     pub next_action: &'a mut Option<InterpreterAction>,
     /// The return data.
     pub return_data: &'a [u8],
+    /// The bytecode pointer (for CODECOPY).
+    pub bytecode_ptr: *const u8,
     /// The bytecode length (for CODESIZE).
     pub bytecode_len: usize,
     /// Whether the context is static.
@@ -66,9 +68,10 @@ impl<'a> EvmContext<'a> {
         use revm_interpreter::interpreter_types::LegacyBytecode;
 
         let (stack, stack_len) = EvmStack::from_interpreter_stack(&mut interpreter.stack);
-        let bytecode_len = interpreter.bytecode.bytecode_len();
-        let resume_at =
-            ResumeAt::load(interpreter.bytecode.pc(), interpreter.bytecode.bytecode_slice());
+        let bytecode_slice = interpreter.bytecode.bytecode_slice();
+        let bytecode_ptr = bytecode_slice.as_ptr();
+        let bytecode_len = bytecode_slice.len();
+        let resume_at = ResumeAt::load(interpreter.bytecode.pc(), bytecode_slice);
         let this = Self {
             memory: &mut interpreter.memory,
             input: &mut interpreter.input,
@@ -76,6 +79,7 @@ impl<'a> EvmContext<'a> {
             host,
             next_action: &mut interpreter.bytecode.action,
             return_data: interpreter.return_data.buffer(),
+            bytecode_ptr,
             bytecode_len,
             is_static: interpreter.runtime_flag.is_static,
             resume_at,
