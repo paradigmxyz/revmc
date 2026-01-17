@@ -87,9 +87,9 @@ pub fn op_info_map(spec_id: SpecId) -> &'static [OpcodeInfo; 256] {
     static MAPS: OnceLock<[[OpcodeInfo; 256]; 32]> = OnceLock::new();
     let maps = MAPS.get_or_init(|| {
         let mut maps = [[OpcodeInfo(OpcodeInfo::UNKNOWN); 256]; 32];
-        for i in 0..32 {
+        for (i, map) in maps.iter_mut().enumerate() {
             if let Ok(spec) = SpecId::try_from(i as u8) {
-                maps[i] = make_map(spec);
+                *map = make_map(spec);
             }
         }
         maps
