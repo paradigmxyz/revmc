@@ -63,12 +63,6 @@ struct Cli {
     opt_level: OptimizationLevel,
     #[arg(long, value_enum, default_value = "osaka")]
     spec_id: SpecIdValueEnum,
-    /// Short-hand for `--spec-id osaka`.
-    #[arg(long, conflicts_with = "spec_id")]
-    eof: bool,
-    /// Skip validating EOF code.
-    #[arg(long, requires = "eof")]
-    no_validate: bool,
     #[arg(long)]
     debug_assertions: bool,
     #[arg(long)]
@@ -98,7 +92,6 @@ fn main() -> Result<()> {
     unsafe { compiler.stack_bound_checks(!cli.no_len_checks) };
     compiler.frame_pointers(true);
     compiler.debug_assertions(cli.debug_assertions);
-    compiler.validate_eof(!cli.no_validate);
 
     let Bench { name, bytecode, calldata, stack_input, native: _ } = if cli.bench_name == "custom" {
         Bench {
@@ -155,7 +148,7 @@ fn main() -> Result<()> {
 
     let bytecode = contract.bytecode.original_byte_slice();
 
-    let spec_id = if cli.eof { SpecId::OSAKA } else { cli.spec_id.into() };
+    let spec_id = cli.spec_id.into();
     if !stack_input.is_empty() {
         compiler.inspect_stack_length(true);
     }

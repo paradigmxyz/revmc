@@ -36,8 +36,6 @@ pub struct EvmContext<'a> {
     pub return_data: &'a [u8],
     /// The bytecode length (for CODESIZE).
     pub bytecode_len: usize,
-    /// Whether the bytecode is EOF.
-    pub is_eof: bool,
     /// Whether the context is static.
     pub is_static: bool,
     /// An index that is used internally to keep track of where execution should resume.
@@ -69,8 +67,6 @@ impl<'a> EvmContext<'a> {
         
         let (stack, stack_len) = EvmStack::from_interpreter_stack(&mut interpreter.stack);
         let bytecode_len = interpreter.bytecode.bytecode_len();
-        // EOF bytecode format is no longer represented in revm v34's Bytecode enum
-        let is_eof = false;
         let resume_at = ResumeAt::load(
             interpreter.bytecode.pc(),
             interpreter.bytecode.bytecode_slice(),
@@ -83,7 +79,6 @@ impl<'a> EvmContext<'a> {
             next_action: &mut interpreter.bytecode.action,
             return_data: interpreter.return_data.buffer(),
             bytecode_len,
-            is_eof,
             is_static: interpreter.runtime_flag.is_static,
             resume_at,
         };

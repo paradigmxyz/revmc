@@ -4,19 +4,13 @@ use super::default_attrs;
 use crate::{
     Backend, Builder, Bytecode, EvmContext, Inst, InstData, InstFlags, IntCC, Result, I256_MIN,
 };
-use crate::{
-    Eof, CALLF, DATACOPY, DATALOAD, DATALOADN, DATASIZE, DUPN, EOFCREATE, EXCHANGE, EXTCALL,
-    EXTDELEGATECALL, EXTSTATICCALL, JUMPF, RETF, RETURNCONTRACT, RETURNDATALOAD, RJUMP, RJUMPI,
-    RJUMPV, SWAPN,
-};
 use revm_bytecode::opcode as op;
 use revm_interpreter::{InputsImpl, InstructionResult};
-use revm_primitives::hardfork::SpecId;
 use revm_primitives::U256;
 use revmc_backend::{
-    eyre::ensure, Attribute, BackendTypes, FunctionAttributeLocation, Pointer, TypeMethods,
+    Attribute, BackendTypes, FunctionAttributeLocation, Pointer, TypeMethods,
 };
-use revmc_builtins::{Builtin, Builtins, CallKind, CreateKind, ExtCallKind, EXTCALL_LIGHT_FAILURE};
+use revmc_builtins::{Builtin, Builtins, CallKind, CreateKind};
 use std::{fmt::Write, mem, sync::atomic::AtomicPtr};
 
 const STACK_CAP: usize = 1024;
@@ -27,7 +21,6 @@ pub(super) struct FcxConfig {
     pub(super) comments: bool,
     pub(super) debug_assertions: bool,
     pub(super) frame_pointers: bool,
-    pub(super) validate_eof: bool,
 
     pub(super) local_stack: bool,
     pub(super) inspect_stack_length: bool,
@@ -41,7 +34,6 @@ impl Default for FcxConfig {
             debug_assertions: cfg!(debug_assertions),
             comments: false,
             frame_pointers: cfg!(debug_assertions),
-            validate_eof: true,
             local_stack: false,
             inspect_stack_length: false,
             stack_bound_checks: true,
@@ -482,12 +474,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let entry_block = self.inst_entries[inst];
         self.bcx.switch_to_block(entry_block);
 
-        let is_eof = self.bytecode.is_eof();
-        let is_eof_enabled = self.bytecode.spec_id.is_enabled_in(SpecId::OSAKA);
-        if is_eof {
-            ensure!(is_eof_enabled, "EOF bytecode in non-EOF spec");
-        }
-
         // self.call_printf(format_printf!("{}\n", self.op_block_name("")), &[]);
 
         let branch_to_next_opcode = |this: &mut Self| {
@@ -540,22 +526,13 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             goto_return!(no_branch);
         }
 
-        // EOF is not supported in revm v34 - EOF opcodes are disabled
-        if !is_eof && data.flags.contains(InstFlags::EOF_ONLY) {
-            // EOF opcodes in legacy bytecode are not activated
-            goto_return!(fail InstructionResult::NotActivated);
-        }
-
         // Disabled instructions don't pay gas.
         if data.flags.contains(InstFlags::DISABLED) {
             goto_return!(fail InstructionResult::NotActivated);
         }
         if data.flags.contains(InstFlags::UNKNOWN) {
-            ensure!(!is_eof, "Unknown opcode in EOF bytecode: {data:?}");
             goto_return!(fail InstructionResult::OpcodeNotFound);
         }
-
-        // EOF validation removed in revm v34 - EOF is not supported
 
         // Pay static gas for the current section.
         self.gas_cost_imm(data.section.gas_cost as u64);
@@ -569,8 +546,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         self.len_before = self.stack_len.load(&mut self.bcx, "stack_len");
 
         // Check stack length for the current section.
-        // Skip doing this for EOF bytecode, as it is done at deploy time.
-        if !is_eof && self.config.stack_bound_checks {
+        if self.config.stack_bound_checks {
             let inp = data.section.inputs;
             let diff = data.section.max_growth as i64;
 
@@ -624,7 +600,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 // HACK: For now all opcodes that suspend (minus the test one, which does not reach
                 // here) return exactly one value. This value is pushed onto the stack by the
                 // caller, so we don't account for it here.
-                if data.may_suspend(is_eof) {
+                if data.may_suspend() {
                     diff -= 1;
                 }
                 let len_changed = self.bcx.iadd_imm(self.len_before, diff);
@@ -1028,104 +1004,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 self.call_fallible_builtin(Builtin::Log, &[self.ecx, sp, n]);
             }
 
-            DATALOAD => {
-                let sp = self.sp_after_inputs();
-                let _ = self.call_builtin(Builtin::DataLoad, &[self.ecx, sp]);
-            }
-            DATALOADN => {
-                let imm = self.bytecode.get_imm(data).unwrap();
-                let offset = u16::from_be_bytes(imm.try_into().unwrap());
-                let slice = self.expect_eof().data_slice(offset as usize, 32);
-                let value = self.bcx.iconst_256(U256::from_be_slice(slice));
-                self.push(value);
-            }
-            DATASIZE => {
-                let value = self.bcx.iconst_256(U256::from(self.expect_eof().header.data_size));
-                self.push(value);
-            }
-            DATACOPY => {
-                let sp = self.sp_after_inputs();
-                self.call_fallible_builtin(Builtin::DataCopy, &[self.ecx, sp]);
-            }
-
-            RJUMP | RJUMPI => {
-                let (_, target_inst) = self.bytecode.iter_rjump_target_insts(data).next().unwrap();
-                let target = self.inst_entries[target_inst];
-                if opcode == RJUMP {
-                    self.bcx.br(target);
-                } else {
-                    let next = self.inst_entries[inst + 1];
-                    let value = self.pop();
-                    let cond = self.bcx.icmp_imm(IntCC::NotEqual, value, 0);
-                    self.bcx.brif(cond, target, next);
-                }
-                goto_return!(no_branch);
-            }
-            RJUMPV => {
-                let index = self.pop();
-                let default = self.inst_entries[inst + 1];
-                let targets = self
-                    .bytecode
-                    .iter_rjump_target_insts(data)
-                    .map(|(i, inst)| (i as u64, self.inst_entries[inst]))
-                    .collect::<Vec<_>>();
-                self.bcx.switch(index, default, &targets, false);
-                goto_return!(no_branch);
-            }
-            CALLF => {
-                let imm = self.bytecode.get_imm(data).unwrap();
-                self.callf_common(imm, false);
-                goto_return!(no_branch);
-            }
-            RETF => {
-                let address = self.call_func_stack_pop();
-                let section = self.bytecode.pc_to_eof_section(data.pc as usize);
-                let destinations = self
-                    .bytecode
-                    .eof_section_called_by(section)
-                    .iter()
-                    .map(|inst| self.inst_entries[*inst + 1])
-                    .collect::<Vec<_>>();
-                self.bcx.br_indirect(address, &destinations);
-                goto_return!(no_branch);
-            }
-            JUMPF => {
-                let imm = self.bytecode.get_imm(data).unwrap();
-                self.callf_common(imm, true);
-                goto_return!(no_branch);
-            }
-            DUPN => {
-                let imm = self.bytecode.get_imm(data).unwrap()[0];
-                self.dup(imm as usize + 1);
-            }
-            SWAPN => {
-                let imm = self.bytecode.get_imm(data).unwrap()[0];
-                self.swap(imm as usize + 1);
-            }
-            EXCHANGE => {
-                let imm = self.bytecode.get_imm(data).unwrap()[0];
-                let n = (imm >> 4) + 1;
-                let m = (imm & 0x0F) + 1;
-                self.exchange(n as usize, m as usize);
-            }
-
-            EOFCREATE => {
-                let sp = self.sp_after_inputs();
-                let imm = self.bytecode.get_imm(data).unwrap()[0];
-                let idx = self.bcx.iconst(self.isize_type, imm as i64);
-                self.call_fallible_builtin(Builtin::EofCreate, &[self.ecx, sp, idx]);
-                self.suspend();
-                goto_return!(no_branch);
-            }
-            RETURNCONTRACT => {
-                let sp = self.sp_after_inputs();
-                let imm = self.bytecode.get_imm(data).unwrap()[0];
-                let idx = self.bcx.iconst(self.isize_type, imm as i64);
-                let ret = self.call_builtin(Builtin::ReturnContract, &[self.ecx, sp, idx]).unwrap();
-                self.build_return(ret);
-                goto_return!(no_branch);
-            }
-
             op::CREATE => {
                 self.create_common(CreateKind::Create);
                 goto_return!(no_branch);
@@ -1151,24 +1029,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 goto_return!(no_branch);
             }
 
-            RETURNDATALOAD => {
-                let sp = self.sp_after_inputs();
-                let _ = self.call_builtin(Builtin::ReturnDataLoad, &[self.ecx, sp]);
-            }
-            EXTCALL => {
-                self.ext_call_common(ExtCallKind::Call);
-                goto_return!(no_branch);
-            }
-            EXTDELEGATECALL => {
-                self.ext_call_common(ExtCallKind::DelegateCall);
-                goto_return!(no_branch);
-            }
             op::STATICCALL => {
                 self.call_common(CallKind::StaticCall);
-                goto_return!(no_branch);
-            }
-            EXTSTATICCALL => {
-                self.ext_call_common(ExtCallKind::StaticCall);
                 goto_return!(no_branch);
             }
 
@@ -1294,71 +1156,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         self.suspend();
     }
 
-    /// Builds `EXT*CALL*` instructions.
-    fn ext_call_common(&mut self, call_kind: ExtCallKind) {
-        let sp = self.sp_after_inputs();
-        let call_kind = self.bcx.iconst(self.i8_type, call_kind as i64);
-        let spec_id = self.const_spec_id();
-        let ret = self.call_builtin(Builtin::ExtCall, &[self.ecx, sp, call_kind, spec_id]).unwrap();
-
-        let cond = self.bcx.icmp_imm(IntCC::Equal, ret, EXTCALL_LIGHT_FAILURE as i64);
-        let fail = self.create_block_after_current("light_fail");
-        let cont = self.create_block_after_current("contd");
-        self.bcx.brif_cold(cond, fail, cont, true);
-
-        self.bcx.switch_to_block(fail);
-        let one = self.bcx.iconst_256(U256::from(1));
-        self.push(one);
-        self.bcx.br(self.inst_entries[self.current_inst + 1]);
-
-        self.bcx.switch_to_block(cont);
-        self.build_check_instruction_result(ret);
-        self.suspend();
-    }
-
-    /// Builds a `CALLF` or `JUMPF` instruction.
-    fn callf_common(&mut self, imm: &[u8], is_jumpf: bool) {
-        let op_name = if is_jumpf { "JUMPF" } else { "CALLF" };
-
-        let idx = u16::from_be_bytes(imm.try_into().unwrap()) as usize;
-
-        // Check stack max height.
-        let types = self
-            .expect_eof()
-            .body
-            .types_section
-            .get(idx)
-            .unwrap_or_else(|| panic!("{op_name} section {idx}: types not found"));
-        let max_height = types.max_stack_size - types.inputs as u16;
-        let mut max_len = self.len_before();
-        if max_height != 0 {
-            max_len = self.bcx.iadd_imm(max_len, max_height as i64);
-        }
-        let cond = self.bcx.icmp_imm(IntCC::UnsignedGreaterThan, max_len, STACK_CAP as i64);
-        self.build_check(cond, InstructionResult::StackOverflow);
-
-        // Push the return address to the function stack.
-        let next_block = self.inst_entries[self.current_inst + 1];
-        if is_jumpf {
-            self.func_stack_set(idx);
-        } else {
-            let value = match self.bcx.block_addr(next_block) {
-                Some(addr) => addr,
-                None => todo!(),
-            };
-            self.call_func_stack_push(value, idx);
-        }
-
-        let inst = self.bytecode.eof_section_inst(idx);
-        self.bcx.br(self.inst_entries[inst]);
-    }
-
-    fn func_stack_set(&mut self, _idx: usize) {
-        // TODO: EOF function stack handling needs to be updated for revm v34
-        // The function stack is now managed differently in the new interpreter model
-        todo!("EOF function stack set needs update for revm v34")
-    }
-
     /// Suspend execution, storing the resume point in the context.
     fn suspend(&mut self) {
         // Register the next instruction as the resume block.
@@ -1390,12 +1187,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     /// Loads the word at the given pointer.
     fn load_word(&mut self, ptr: B::Value, name: &str) -> B::Value {
         self.bcx.load(self.word_type, ptr, name)
-    }
-
-    /// Returns the `Eof` container, panicking if it is not set.
-    #[track_caller]
-    fn expect_eof(&self) -> &Eof {
-        self.bytecode.expect_eof()
     }
 
     /// Gets the stack length before the current instruction.
@@ -1959,49 +1750,6 @@ impl<B: Backend> FunctionCx<'_, B> {
 
         let cont = self.const_continue();
         self.bcx.ret(&[cont]);
-    }
-
-    fn call_func_stack_push(&mut self, pc: B::Value, new_idx: usize) {
-        let new_idx = self.bcx.iconst(self.isize_type, new_idx as i64);
-        self.call_fallible_builtin(Builtin::FuncStackPush, &[self.ecx, pc, new_idx]);
-        /*
-        let ret = self
-            .call_ir_builtin(
-                "func_stack_push",
-                &[self.ecx, pc, new_idx],
-                &[self.ptr_type, self.ptr_type, self.isize_type],
-                Some(self.i8_type),
-                Self::build_func_stack_push,
-            )
-            .unwrap();
-        self.build_check_instruction_result(ret);
-        */
-    }
-
-    #[allow(dead_code)]
-    fn build_func_stack_push(&mut self) {
-        // TODO: EOF function stack handling needs to be updated for revm v34
-        todo!("EOF func_stack_push needs update for revm v34")
-    }
-
-    fn call_func_stack_pop(&mut self) -> B::Value {
-        self.call_builtin(Builtin::FuncStackPop, &[self.ecx]).unwrap()
-        /*
-        self.call_ir_builtin(
-            "func_stack_pop",
-            &[self.ecx],
-            &[self.ptr_type],
-            Some(self.ptr_type),
-            Self::build_func_stack_pop,
-        )
-        .unwrap()
-        */
-    }
-
-    #[allow(dead_code)]
-    fn build_func_stack_pop(&mut self) {
-        // TODO: EOF function stack handling needs to be updated for revm v34
-        todo!("EOF func_stack_pop needs update for revm v34")
     }
 
     fn call_ir_binop_builtin(

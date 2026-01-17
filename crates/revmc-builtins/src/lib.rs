@@ -228,7 +228,6 @@ pub unsafe extern "C" fn __revmc_builtin_calldatacopy(
 
 #[no_mangle]
 pub unsafe extern "C" fn __revmc_builtin_codesize(ecx: &mut EvmContext<'_>) -> usize {
-    assume!(!ecx.is_eof);
     ecx.bytecode_len
 }
 
@@ -239,7 +238,6 @@ pub unsafe extern "C" fn __revmc_builtin_codecopy(
     ecx: &mut EvmContext<'_>,
     sp: &mut [EvmWord; 3],
 ) -> InstructionResult {
-    assume!(!ecx.is_eof);
     // Bytecode slice is not available - this is a limitation of the current context design
     copy_operation(ecx, sp, &[])
 }
@@ -858,26 +856,7 @@ pub unsafe extern "C" fn __revmc_builtin_selfdestruct(
     InstructionResult::Stop
 }
 
-// NOTE: EOF function stack removed in revm v34
-#[no_mangle]
-pub unsafe extern "C" fn __revmc_builtin_func_stack_push(
-    _ecx: &mut EvmContext<'_>,
-    _pc: usize,
-    _new_idx: usize,
-) -> InstructionResult {
-    InstructionResult::NotActivated
-}
 
-// NOTE: EOF function stack removed in revm v34
-#[no_mangle]
-pub unsafe extern "C" fn __revmc_builtin_func_stack_pop(_ecx: &mut EvmContext<'_>) -> usize {
-    0
-}
-
-// NOTE: EOF function stack removed in revm v34
-#[no_mangle]
-pub unsafe extern "C" fn __revmc_builtin_func_stack_grow(_func_stack: *mut core::ffi::c_void) {
-}
 
 #[no_mangle]
 pub unsafe extern "C" fn __revmc_builtin_resize_memory(

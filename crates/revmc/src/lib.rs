@@ -9,15 +9,6 @@ extern crate tracing;
 // For features.
 use alloy_primitives as _;
 
-mod eof;
-pub use eof::{
-    Eof, EofBody, EofDecodeError, EofHeader, TypesSection, EOF_MAGIC_BYTES,
-    // EOF opcode constants (removed from revm-bytecode in v34)
-    CALLF, DATACOPY, DATALOAD, DATALOADN, DATASIZE, DUPN, EOFCREATE, EXCHANGE,
-    EXTCALL, EXTDELEGATECALL, EXTSTATICCALL, JUMPF, RETF, RETURNCONTRACT,
-    RETURNDATALOAD, RJUMP, RJUMPI, RJUMPV, SWAPN,
-};
-
 mod bytecode;
 pub use bytecode::*;
 

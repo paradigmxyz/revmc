@@ -1,7 +1,6 @@
-use crate::{op_info_map, Eof, OpcodeInfo, EOF_MAGIC_BYTES, RJUMPV};
+use crate::{op_info_map, OpcodeInfo};
 use revm_bytecode::opcode::OPCODE_INFO;
 use revm_primitives::hardfork::SpecId;
-use revm_primitives::Bytes;
 use std::{fmt, slice};
 
 /// A bytecode iterator that yields opcodes and their immediate data, alongside the program counter.
@@ -103,12 +102,7 @@ impl<'a> Iterator for OpcodesIter<'a> {
                 return Opcode { opcode, immediate: None };
             }
 
-            let mut len = min_imm_len(opcode) as usize;
-            if opcode == RJUMPV {
-                if let Some(&max_case) = self.iter.as_slice().first() {
-                    len += (max_case as usize + 1) * 2;
-                }
-            }
+            let len = min_imm_len(opcode) as usize;
             let immediate = if len > 0 {
                 let r = self.iter.as_slice().get(..len);
                 // TODO: Use `advance_by` when stable.
@@ -194,11 +188,7 @@ pub fn format_bytecode_to<W: fmt::Write + ?Sized>(
     spec_id: SpecId,
     w: &mut W,
 ) -> fmt::Result {
-    if spec_id.is_enabled_in(SpecId::OSAKA) && bytecode.starts_with(&EOF_MAGIC_BYTES) {
-        write!(w, "{:#?}", Eof::decode(Bytes::copy_from_slice(bytecode)))
-    } else {
-        write!(w, "{}", OpcodesIter::new(bytecode, spec_id))
-    }
+    write!(w, "{}", OpcodesIter::new(bytecode, spec_id))
 }
 
 #[cfg(test)]

@@ -17,8 +17,6 @@ use revm_interpreter::{
 use revmc_builtins::gas::{keccak256_cost, log_cost, verylowcopy_cost};
 use revm_primitives::{hex, keccak256, Address, Bytes, LogData, B256, KECCAK_EMPTY};
 
-// EOF opcodes are re-exported from crate root
-
 #[macro_use]
 mod macros;
 
@@ -128,8 +126,6 @@ tests! {
             expected_gas: 2,
         }),
 
-        // EOF-in-legacy tests removed - EOFOpcodeDisabledInLegacy and ReturnContractInNotInitEOF
-        // variants no longer exist in revm v34
     }
 
     stack {
@@ -142,12 +138,7 @@ tests! {
             expected_stack: &[1_U256, 1_U256],
             expected_gas: 3 + 3,
         }),
-        dupn(@raw {
-            bytecode: &eof(&[op::PUSH1, 1, DUPN, 0, op::STOP]),
-            spec_id: SpecId::OSAKA,
-            expected_stack: &[1_U256, 1_U256],
-            expected_gas: 3 + 3,
-        }),
+
         swap(@raw {
             bytecode: &[op::PUSH1, 1, op::PUSH1, 2, op::SWAP1],
             expected_stack: &[2_U256, 1_U256],
@@ -163,18 +154,7 @@ tests! {
             expected_stack: &[4_U256, 2_U256, 3_U256, 1_U256],
             expected_gas: 3 + 3 + 3 + 3 + 3,
         }),
-        swapn(@raw {
-            bytecode: &eof(&[op::PUSH1, 1, op::PUSH1, 2, SWAPN, 0, op::STOP]),
-            spec_id: SpecId::OSAKA,
-            expected_stack: &[2_U256, 1_U256],
-            expected_gas: 3 + 3 + 3,
-        }),
-        exchange(@raw {
-            bytecode: &eof(&[op::PUSH1, 1, op::PUSH1, 2, op::PUSH1, 3, EXCHANGE, 0, op::STOP]),
-            spec_id: SpecId::OSAKA,
-            expected_stack: &[2_U256, 1_U256, 3_U256],
-            expected_gas: 3 + 3 + 3 + 3,
-        }),
+
     }
 
     control_flow {
@@ -263,92 +243,6 @@ tests! {
             expected_gas: 2 + 2 + 3 + 2 + 2 + 2,
         }),
 
-        rjump1(@raw {
-            bytecode: &eof(&[RJUMP, 0x00, 0x00, op::PUSH1, 69, op::STOP]),
-            spec_id: SpecId::OSAKA,
-            expected_stack: &[69_U256],
-            expected_gas: 2 + 3,
-        }),
-        rjumpi1(@raw {
-            bytecode: &eof(&[op::PUSH0, RJUMPI, 0x00, 0x03, op::PUSH1, 69, op::STOP, op::PUSH1, 42, op::STOP]),
-            spec_id: SpecId::OSAKA,
-            expected_stack: &[69_U256],
-            expected_gas: 2 + 4 + 3,
-        }),
-        rjumpi2(@raw {
-            bytecode: &eof(&[op::PUSH1, 1, RJUMPI, 0x00, 0x03, op::PUSH1, 69, op::STOP, op::PUSH1, 42, op::STOP]),
-            spec_id: SpecId::OSAKA,
-            expected_stack: &[42_U256],
-            expected_gas: 3 + 4 + 3,
-        }),
-        rjumpv1(@raw {
-            bytecode: &rjumpv_code::<0>(),
-            spec_id: SpecId::OSAKA,
-            expected_stack: &[20_U256],
-            expected_gas: 10,
-        }),
-        rjumpv2(@raw {
-            bytecode: &rjumpv_code::<1>(),
-            spec_id: SpecId::OSAKA,
-            expected_stack: &[30_U256],
-            expected_gas: 10,
-        }),
-        rjumpv3(@raw {
-            bytecode: &rjumpv_code::<2>(),
-            spec_id: SpecId::OSAKA,
-            expected_stack: &[40_U256],
-            expected_gas: 10,
-        }),
-        rjumpv4(@raw {
-            bytecode: &rjumpv_code::<3>(),
-            spec_id: SpecId::OSAKA,
-            expected_stack: &[10_U256],
-            expected_gas: 10,
-        }),
-        rjumpv5(@raw {
-            bytecode: &rjumpv_code::<69>(),
-            spec_id: SpecId::OSAKA,
-            expected_stack: &[10_U256],
-            expected_gas: 10,
-        }),
-        rjumpv_overflow(@raw {
-            // RJUMPV 0x0200030000fff6
-            bytecode: &eof(&hex!("6000e20200030000fff65b5b0061201560015500")),
-            spec_id: SpecId::OSAKA,
-            expected_gas: 113,
-        }),
-    }
-
-    subroutines {
-        callf(@raw {
-            bytecode: &eof_sections(&[
-                &[CALLF, 0x00, 0x01, op::PUSH1, 1, op::STOP],
-                &[CALLF, 0x00, 0x02, op::PUSH1, 2, RETF],
-                &[                       op::PUSH1, 3, RETF],
-            ]),
-            spec_id: SpecId::OSAKA,
-            expected_stack: &[3_U256, 2_U256, 1_U256],
-            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
-        }),
-        jumpf1(@raw {
-            bytecode: &eof_sections(&[
-                &[CALLF, 0x00, 0x01, op::PUSH1, 1, op::STOP],
-                &[JUMPF, 0x00, 0x02, op::PUSH1, 2, RETF],
-                &[                       op::PUSH1, 3, RETF],
-            ]),
-            spec_id: SpecId::OSAKA,
-            expected_stack: &[3_U256, 1_U256],
-            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
-        }),
-        jumpf2(@raw {
-            bytecode: &eof_sections_unchecked(&[
-                &[op::PUSH1, 1, JUMPF, 0x00, 0x01],
-                &[op::PUSH1, 2, op::STOP],
-            ]).raw,
-            spec_id: SpecId::OSAKA,
-            expected_stack: &[1_U256, 2_U256],
-            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
-        }),
     }
 
     arith {
@@ -607,18 +501,6 @@ tests! {
     }
 
     returndata {
-        returndataload1(@raw {
-            bytecode: &eof(&[op::PUSH0, RETURNDATALOAD, op::STOP]),
-            spec_id: SpecId::OSAKA,
-            expected_stack: &[U256::from_be_slice(&DEF_RD[..32])],
-            expected_gas: 2 + 3,
-        }),
-        returndataload2(@raw {
-            bytecode: &eof(&[op::PUSH1, 63, RETURNDATALOAD, op::STOP]),
-            spec_id: SpecId::OSAKA,
-            expected_stack: &[0xbb00000000000000000000000000000000000000000000000000000000000000_U256],
-            expected_gas: 3 + 3,
-        }),
         returndatasize(@raw {
             bytecode: &[op::RETURNDATASIZE, op::RETURNDATASIZE],
             expected_stack: &[64_U256, 64_U256],
@@ -627,46 +509,6 @@ tests! {
         returndatacopy(@raw {
             bytecode: &[op::PUSH1, 32, op::PUSH0, op::PUSH0, op::RETURNDATACOPY],
             expected_memory: &DEF_RD[..32],
-            expected_gas: 3 + 2 + 2 + (verylowcopy_cost(32).unwrap() + memory_gas_cost(1)),
-        }),
-    }
-
-    data {
-        dataload1(@raw {
-            bytecode: &eof(&[op::PUSH0, DATALOAD, op::STOP]),
-            spec_id: SpecId::OSAKA,
-            expected_stack: &[U256::from_be_slice(&DEF_DATA[..32])],
-            expected_gas: 2 + 4,
-        }),
-        dataload2(@raw {
-            bytecode: &eof(&[op::PUSH1, 63, DATALOAD, op::STOP]),
-            spec_id: SpecId::OSAKA,
-            expected_stack: &[0xcc00000000000000000000000000000000000000000000000000000000000000_U256],
-            expected_gas: 3 + 4,
-        }),
-        dataloadn1(@raw {
-            bytecode: &eof(&[DATALOADN, 0x00, 0x00, op::STOP]),
-            spec_id: SpecId::OSAKA,
-            expected_stack: &[U256::from_be_slice(&DEF_DATA[..32])],
-            expected_gas: 3,
-        }),
-        // NOTE: out-of-bounds `DATALOADN` is not allowed.
-        // dataloadn2(@raw {
-        //     bytecode: &eof(&[DATALOADN, 0x00, 63, op::STOP]),
-        //     spec_id: SpecId::OSAKA,
-        //     expected_stack: &[0xcc00000000000000000000000000000000000000000000000000000000000000_U256],
-        //     expected_gas: 3,
-        // }),
-        datasize(@raw {
-            bytecode: &eof(&[DATASIZE, DATASIZE, op::STOP]),
-            spec_id: SpecId::OSAKA,
-            expected_stack: &[U256::from(DEF_DATA.len()), U256::from(DEF_DATA.len())],
-            expected_gas: 4,
-        }),
-        datacopy(@raw {
-            bytecode: &eof(&[op::PUSH1, 32, op::PUSH0, op::PUSH0, DATACOPY, op::STOP]),
-            spec_id: SpecId::OSAKA,
-            expected_memory: &DEF_DATA[..32],
             expected_gas: 3 + 2 + 2 + (verylowcopy_cost(32).unwrap() + memory_gas_cost(1)),
         }),
     }
@@ -982,21 +824,6 @@ tests! {
                 }]);
             }),
         }),
-        eofcreate(@raw {
-            bytecode: &eof(&[
-                op::PUSH1, 0x69, op::PUSH0, op::MSTORE,
-                op::PUSH1, 32, op::PUSH0, op::PUSH1, 0x70, op::PUSH1, 0x42,
-                EOFCREATE, 0x00,
-                op::STOP,
-            ]),
-            spec_id: SpecId::OSAKA,
-            expected_return: InstructionResult::Stop,
-            expected_memory: &0x69_U256.to_be_bytes::<32>(),
-            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
-            // EOF create is not supported in revm v34
-            expected_next_action: ACTION_WHAT_INTERPRETER_SAYS,
-        }),
-        // returncontract test removed - is_eof_init field no longer exists in EvmContext
         create(@raw {
             bytecode: &[op::PUSH1, 0x69, op::PUSH0, op::MSTORE, op::PUSH1, 32, op::PUSH0, op::PUSH1, 0x42, op::CREATE],
             expected_return: InstructionResult::Stop,
@@ -1087,35 +914,6 @@ tests! {
             expected_gas: GAS_WHAT_INTERPRETER_SAYS,
             expected_next_action: ACTION_WHAT_INTERPRETER_SAYS,
         }),
-        extcall(@raw {
-            bytecode: &eof(&[
-                op::PUSH1, 1, // value
-                op::PUSH1, 2, // args length
-                op::PUSH1, 3, // args offset
-                op::PUSH1, 4, // address
-                EXTCALL,
-                op::STOP,
-            ]),
-            spec_id: SpecId::OSAKA,
-            expected_return: InstructionResult::Stop,
-            expected_memory: MEMORY_WHAT_INTERPRETER_SAYS,
-            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
-            expected_next_action: ACTION_WHAT_INTERPRETER_SAYS,
-        }),
-        extdelegatecall(@raw {
-            bytecode: &eof(&[
-                op::PUSH1, 1, // args length
-                op::PUSH1, 2, // args offset
-                op::PUSH1, 3, // address
-                EXTDELEGATECALL,
-                op::STOP,
-            ]),
-            spec_id: SpecId::OSAKA,
-            expected_return: InstructionResult::Stop,
-            expected_memory: MEMORY_WHAT_INTERPRETER_SAYS,
-            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
-            expected_next_action: ACTION_WHAT_INTERPRETER_SAYS,
-        }),
         staticcall(@raw {
             bytecode: &[
                 op::PUSH1, 1, // ret length
@@ -1126,20 +924,6 @@ tests! {
                 op::PUSH1, 6, // gas
                 op::STATICCALL,
             ],
-            expected_return: InstructionResult::Stop,
-            expected_memory: MEMORY_WHAT_INTERPRETER_SAYS,
-            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
-            expected_next_action: ACTION_WHAT_INTERPRETER_SAYS,
-        }),
-        extstaticcall(@raw {
-            bytecode: &eof(&[
-                op::PUSH1, 1, // args length
-                op::PUSH1, 2, // args offset
-                op::PUSH1, 3, // address
-                EXTSTATICCALL,
-                op::STOP,
-            ]),
-            spec_id: SpecId::OSAKA,
             expected_return: InstructionResult::Stop,
             expected_memory: MEMORY_WHAT_INTERPRETER_SAYS,
             expected_gas: GAS_WHAT_INTERPRETER_SAYS,
@@ -1217,51 +1001,6 @@ tests! {
     }
 }
 
-/// Creates an EOF container with a single code section.
-/// EOF validation is skipped since it's removed in revm v34.
-#[track_caller]
-fn eof(code: &[u8]) -> Bytes {
-    eof_sections(&[code])
-}
-
-/// Creates an EOF container with multiple code sections.
-/// EOF validation is skipped since it's removed in revm v34.
-#[track_caller]
-fn eof_sections(code: &[&[u8]]) -> Bytes {
-    let eof = eof_sections_unchecked(code);
-    // EOF validation removed in revm v34, skip validation
-    eof.raw
-}
-
-/// Creates an unchecked EOF container (no validation).
-fn eof_sections_unchecked(code: &[&[u8]]) -> crate::Eof {
-    eof_body(code, vec![eof_subcontainer()]).into_eof()
-}
-
-fn eof_body(code: &[&[u8]], containers: Vec<Bytes>) -> crate::EofBody {
-    crate::EofBody {
-        types_section: {
-            let mut types =
-                vec![crate::TypesSection { inputs: 0, outputs: 0x80, max_stack_size: 0 }];
-            for _ in 1..code.len() {
-                types.push(crate::TypesSection {
-                    inputs: 0,
-                    outputs: 0,
-                    max_stack_size: 0,
-                });
-            }
-            types
-        },
-        code_section: code.iter().copied().map(Bytes::copy_from_slice).collect(),
-        container_section: containers,
-        data_section: Bytes::from_static(DEF_DATA),
-    }
-}
-
-fn eof_subcontainer() -> Bytes {
-    eof_body(&[&[op::STOP]], vec![]).into_eof().raw
-}
-
 fn bytecode_unop(op: u8, a: U256) -> [u8; 34] {
     let mut code = [0; 34];
     let mut i = 0;
@@ -1287,20 +1026,4 @@ fn bytecode_ternop(op: u8, a: U256, b: U256, c: U256) -> [u8; 100] {
     build_push32!(code[i], a);
     code[i] = op;
     code
-}
-
-#[rustfmt::skip]
-#[allow(clippy::erasing_op, clippy::identity_op)]
-fn rjumpv_code<const VALUE: u8>() -> Bytes {
-    eof(&[
-        op::PUSH1, VALUE,
-        RJUMPV, 0x02,
-        0x00, 3 + 0 * 3,
-        0x00, 3 + 1 * 3,
-        0x00, 3 + 2 * 3,
-        /* _ => */ op::PUSH1, 10, op::STOP,
-        /* 0 => */ op::PUSH1, 20, op::STOP,
-        /* 1 => */ op::PUSH1, 30, op::STOP,
-        /* 2 => */ op::PUSH1, 40, op::STOP,
-    ])
 }

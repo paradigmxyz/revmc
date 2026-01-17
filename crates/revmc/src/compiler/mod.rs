@@ -1,9 +1,9 @@
 //! EVM bytecode compiler implementation.
 
-use crate::{Backend, Builder, Bytecode, Eof, EvmCompilerFn, EvmContext, EvmStack, Result, EOF_MAGIC_BYTES};
+use crate::{Backend, Builder, Bytecode, EvmCompilerFn, EvmContext, EvmStack, Result};
+use revm_primitives::Bytes;
 use revm_interpreter::{Gas, InputsImpl};
 use revm_primitives::hardfork::SpecId;
-use revm_primitives::Bytes;
 use revmc_backend::{
     eyre::ensure,
     Attribute, FunctionAttributeLocation, Linkage, OptimizationLevel,
@@ -11,7 +11,6 @@ use revmc_backend::{
 use revmc_builtins::Builtins;
 use revmc_context::RawEvmCompilerFn;
 use std::{
-    borrow::Cow,
     fs,
     io::{self, Write},
     mem,
@@ -157,15 +156,6 @@ impl<B: Backend> EvmCompiler<B> {
         self.config.frame_pointers = yes;
     }
 
-    /// Sets whether to validate input EOF containers.
-    ///
-    /// **An invalid EOF container will likely results in a panic.**
-    ///
-    /// Defaults to `true`.
-    pub fn validate_eof(&mut self, yes: bool) {
-        self.config.validate_eof = yes;
-    }
-
     /// Sets whether to allocate the stack locally.
     ///
     /// If this is set to `true`, the stack pointer argument will be ignored and the stack will be
@@ -195,8 +185,6 @@ impl<B: Backend> EvmCompiler<B> {
     }
 
     /// Sets whether to enable stack bound checks.
-    ///
-    /// Ignored for EOF bytecodes, as they are assumed to be correct.
     ///
     /// Defaults to `true`.
     ///
@@ -328,38 +316,16 @@ impl<B: Backend> EvmCompiler<B> {
         input: EvmCompilerInput<'a>,
         spec_id: SpecId,
     ) -> Result<Bytecode<'a>> {
-        let bytecode;
-        let eof;
-        match input {
-            EvmCompilerInput::Code(code) => {
-                bytecode = code;
-                if spec_id.is_enabled_in(SpecId::OSAKA) && code.starts_with(&EOF_MAGIC_BYTES) {
-                    eof = Some(Cow::Owned(Eof::decode(Bytes::copy_from_slice(code))?));
-                } else {
-                    eof = None;
-                }
-            }
-            EvmCompilerInput::Eof(e) => {
-                bytecode = &e.raw[..];
-                eof = Some(Cow::Borrowed(e));
-            }
-        }
-        if let Some(eof) = &eof {
-            self.do_validate_eof(eof)?;
-        }
+        let bytecode = match input {
+            EvmCompilerInput::Code(code) => code,
+        };
 
-        let mut bytecode = Bytecode::new(bytecode, eof, spec_id);
+        let mut bytecode = Bytecode::new(bytecode, spec_id);
         bytecode.analyze()?;
         if let Some(dump_dir) = &self.dump_dir() {
             Self::dump_bytecode(dump_dir, &bytecode)?;
         }
         Ok(bytecode)
-    }
-
-    fn do_validate_eof(&self, _eof: &Eof) -> Result<()> {
-        // EOF validation was removed in revm v34.
-        // EOF is now handled by stub types and will fail at decode time.
-        Ok(())
     }
 
     #[instrument(name = "translate", level = "debug", skip_all)]
@@ -521,10 +487,8 @@ impl<B: Backend> EvmCompiler<B> {
 /// [`EvmCompiler`] input.
 #[allow(missing_debug_implementations)]
 pub enum EvmCompilerInput<'a> {
-    /// EVM bytecode. Can also be raw EOF code, which will be parsed.
+    /// EVM bytecode.
     Code(&'a [u8]),
-    /// Already-parsed EOF container.
-    Eof(&'a Eof),
 }
 
 impl<'a> From<&'a [u8]> for EvmCompilerInput<'a> {
@@ -542,12 +506,6 @@ impl<'a> From<&'a Vec<u8>> for EvmCompilerInput<'a> {
 impl<'a> From<&'a Bytes> for EvmCompilerInput<'a> {
     fn from(code: &'a Bytes) -> Self {
         EvmCompilerInput::Code(code)
-    }
-}
-
-impl<'a> From<&'a Eof> for EvmCompilerInput<'a> {
-    fn from(eof: &'a Eof) -> Self {
-        EvmCompilerInput::Eof(eof)
     }
 }
 

@@ -153,24 +153,10 @@ pub struct TestCase<'a> {
 #[cfg(feature = "__fuzzing")]
 impl<'a> arbitrary::Arbitrary<'a> for TestCase<'a> {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
-        let is_eof_enabled = u.arbitrary::<bool>()?;
-        let spec_id_range = if is_eof_enabled {
-            SpecId::OSAKA as u8..=SpecId::OSAKA as u8
-        } else {
-            0..=(SpecId::OSAKA as u8 - 1)
-        };
+        let spec_id_range = 0..=(SpecId::OSAKA as u8 - 1);
         let spec_id = SpecId::try_from_u8(u.int_in_range(spec_id_range)?).unwrap_or(DEF_SPEC);
 
-        let mut bytecode: &'a [u8] = u.arbitrary()?;
-        if is_eof_enabled && !bytecode.starts_with(&crate::EOF_MAGIC_BYTES) && u.arbitrary()? {
-            let code = eof_sections_unchecked(&[bytecode]);
-            // EOF validation removed in revm v34, skip validation
-            static mut STORAGE: Bytes = Bytes::new();
-            unsafe {
-                STORAGE = code.raw;
-                bytecode = &STORAGE[..];
-            }
-        }
+        let bytecode: &'a [u8] = u.arbitrary()?;
 
         Ok(Self::what_interpreter_says(bytecode, spec_id))
     }
@@ -506,8 +492,6 @@ pub fn set_test_dump<B: Backend>(compiler: &mut EvmCompiler<B>, module_path: &st
 pub fn run_test_case<B: Backend>(test_case: &TestCase<'_>, compiler: &mut EvmCompiler<B>) {
     let TestCase { bytecode, spec_id, .. } = *test_case;
     compiler.inspect_stack_length(true);
-    // Done manually in `fn eof` and friends.
-    compiler.validate_eof(false);
     // compiler.debug_assertions(false);
     let f = unsafe { compiler.jit("test", bytecode, spec_id) }.unwrap();
     run_compiled_test_case(test_case, f);
@@ -527,20 +511,9 @@ fn run_compiled_test_case(test_case: &TestCase<'_>, f: EvmCompilerFn) {
         assert_ecx,
     } = *test_case;
 
-    let is_eof_enabled = spec_id.is_enabled_in(SpecId::OSAKA);
-
-    if !is_eof_enabled && bytecode.starts_with(&crate::EOF_MAGIC_BYTES) {
-        panic!("EOF is not enabled in the current spec, forgot to set `spec_id`?");
-    }
-
     with_evm_context(bytecode, |ecx, stack, stack_len| {
         if let Some(modify_ecx) = modify_ecx {
             modify_ecx(ecx);
-        }
-
-        // EOF removed in revm v34, skip EOF checks
-        if !cfg!(feature = "__fuzzing") && is_eof_enabled && !ecx.is_eof {
-            eprintln!("!!! WARNING: running legacy code under EOF !!!");
         }
 
         // Interpreter - run via instruction table

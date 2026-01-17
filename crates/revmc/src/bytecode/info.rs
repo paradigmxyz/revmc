@@ -12,8 +12,6 @@ impl OpcodeInfo {
     pub const DYNAMIC: u16 = 0b0100_0000_0000_0000;
     /// The disabled flag.
     pub const DISABLED: u16 = 0b0010_0000_0000_0000;
-    /// The EOF flag.
-    pub const EOF: u16 = 0b0001_0000_0000_0000;
     /// The mask for the gas cost.
     pub const MASK: u16 = 0b0000_1111_1111_1111;
 
@@ -42,12 +40,7 @@ impl OpcodeInfo {
         self.0 & Self::DISABLED != 0
     }
 
-    /// Returns `true` if the opcode is an EOF opcode, meaning it is disallowed in
-    /// legacy bytecode.
-    #[inline]
-    pub const fn is_eof_only(self) -> bool {
-        self.0 & Self::EOF != 0
-    }
+
 
     /// Returns the base gas cost of the opcode.
     ///
@@ -75,11 +68,7 @@ impl OpcodeInfo {
         self.0 |= Self::DISABLED;
     }
 
-    /// Sets the EOF flag.
-    #[inline]
-    pub fn set_eof(&mut self) {
-        self.0 |= Self::EOF;
-    }
+
 
     /// Sets the gas cost.
     ///
@@ -115,8 +104,6 @@ pub fn op_info_map(spec_id: SpecId) -> &'static [OpcodeInfo; 256] {
 #[allow(unused_mut)]
 const fn make_map(spec_id: SpecId) -> [OpcodeInfo; 256] {
     const DYNAMIC: u16 = OpcodeInfo::DYNAMIC;
-    #[allow(dead_code)]
-    const EOF: u16 = OpcodeInfo::EOF;
 
     let mut map = [OpcodeInfo(OpcodeInfo::UNKNOWN); 256];
     macro_rules! set {
