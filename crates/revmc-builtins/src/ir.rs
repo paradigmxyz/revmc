@@ -110,7 +110,7 @@ macro_rules! builtins {
 
             pub fn addr(self) -> usize {
                 match self {
-                    $(Self::$ident => crate::$name as usize,)*
+                    $(Self::$ident => crate::$name as *const () as usize,)*
                 }
             }
 

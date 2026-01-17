@@ -516,7 +516,7 @@ pub unsafe extern "C" fn __revmc_builtin_log(
     let data = if len != 0 {
         let offset = try_into_usize!(offset);
         ensure_memory!(ecx, offset, len);
-        Bytes::copy_from_slice(&*ecx.memory.slice(offset..offset + len))
+        Bytes::copy_from_slice(&ecx.memory.slice(offset..offset + len))
     } else {
         Bytes::new()
     };
@@ -593,7 +593,7 @@ pub unsafe extern "C" fn __revmc_builtin_create(
 
         let code_offset = try_into_usize!(code_offset);
         ensure_memory!(ecx, code_offset, len);
-        Bytes::copy_from_slice(&*ecx.memory.slice(code_offset..code_offset + len))
+        Bytes::copy_from_slice(&ecx.memory.slice(code_offset..code_offset + len))
     } else {
         Bytes::new()
     };
@@ -663,7 +663,7 @@ pub unsafe extern "C" fn __revmc_builtin_call(
     let input = if in_len != 0 {
         let in_offset = try_into_usize!(in_offset);
         ensure_memory!(ecx, in_offset, in_len);
-        Bytes::copy_from_slice(&*ecx.memory.slice(in_offset..in_offset + in_len))
+        Bytes::copy_from_slice(&ecx.memory.slice(in_offset..in_offset + in_len))
     } else {
         Bytes::new()
     };
@@ -759,7 +759,7 @@ pub unsafe extern "C" fn __revmc_builtin_ext_call(
     let input = if in_len != 0 {
         let in_offset = try_into_usize!(in_offset);
         ensure_memory!(ecx, in_offset, in_len);
-        Bytes::copy_from_slice(&*ecx.memory.slice(in_offset..in_offset + in_len))
+        Bytes::copy_from_slice(&ecx.memory.slice(in_offset..in_offset + in_len))
     } else {
         Bytes::new()
     };
