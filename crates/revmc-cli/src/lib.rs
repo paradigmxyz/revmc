@@ -1,6 +1,6 @@
 #![allow(missing_docs)]
 
-use revm_interpreter::OpCode;
+use revm_bytecode::opcode::OpCode;
 use revm_primitives::hex;
 use revmc::{
     eyre::{bail, eyre, Result, WrapErr},
@@ -104,7 +104,7 @@ fn parse_imm(s: &str, size: Option<u8>) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use revm_interpreter::opcode as op;
+    use revm_bytecode::opcode as op;
 
     #[test]
     fn test_evm_dsl() {

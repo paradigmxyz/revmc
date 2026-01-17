@@ -1,9 +1,14 @@
 //! Internal EVM bytecode and opcode representation.
 
+use crate::{
+    Eof, CALLF, EOFCREATE, EXTCALL, EXTDELEGATECALL, EXTSTATICCALL, JUMPF, RETF, RETURNCONTRACT,
+    RJUMP, RJUMPI, RJUMPV,
+};
 use bitvec::vec::BitVec;
 use either::Either;
-use revm_interpreter::opcode as op;
-use revm_primitives::{hex, Eof, SpecId};
+use revm_bytecode::opcode as op;
+use revm_primitives::hardfork::SpecId;
+use revm_primitives::hex;
 use revmc_backend::{eyre::ensure, Result};
 use rustc_hash::FxHashMap;
 use std::{borrow::Cow, fmt};
@@ -364,7 +369,7 @@ impl<'a> Bytecode<'a> {
         // First, collect all `CALLF` targets.
         let mut eof_called_by = vec![Vec::new(); code_sections_len];
         for (inst, data) in self.iter_all_insts() {
-            if data.opcode == op::CALLF {
+            if data.opcode == CALLF {
                 let imm = self.get_imm(data).unwrap();
                 let target_section = u16::from_be_bytes(imm.try_into().unwrap()) as usize;
                 eof_called_by[target_section].push(inst);
@@ -380,7 +385,7 @@ impl<'a> Bytecode<'a> {
             any_progress = false;
 
             for (_inst, data) in self.iter_all_insts().skip(first_section_inst) {
-                if data.opcode == op::JUMPF {
+                if data.opcode == JUMPF {
                     let source_section = self.pc_to_eof_section(data.pc as usize);
                     debug_assert!(source_section != 0);
 
@@ -422,7 +427,7 @@ impl<'a> Bytecode<'a> {
             return None;
         }
         let start = data.pc as usize + 1;
-        if data.opcode == op::RJUMPV {
+        if data.opcode == RJUMPV {
             imm_len += (*self.code.get(start)? as usize + 1) * 2;
         }
         self.code.get(start..start + imm_len)
@@ -518,7 +523,7 @@ impl<'a> Bytecode<'a> {
         let imm = self.get_imm(data).unwrap();
 
         debug_assert!(InstData::new(opcode).is_eof_jump());
-        if matches!(opcode, op::RJUMP | op::RJUMPI) {
+        if matches!(opcode, RJUMP | RJUMPI) {
             let offset = i16::from_be_bytes(imm.try_into().unwrap());
             let base_pc = pc + 3;
             let target_pc = (base_pc as usize).wrapping_add(offset as usize);
@@ -714,7 +719,7 @@ impl InstData {
     /// Returns `true` if this instruction is an EOF jump instruction (`RJUMP`/`RJUMPI`/`RJUMPV`).
     #[inline]
     fn is_eof_jump(&self) -> bool {
-        matches!(self.opcode, op::RJUMP | op::RJUMPI | op::RJUMPV)
+        matches!(self.opcode, RJUMP | RJUMPI | RJUMPV)
     }
 
     /// Returns `true` if this instruction is a legacy jump instruction (`JUMP`/`JUMPI`).
@@ -783,7 +788,7 @@ impl InstData {
             || self.flags.contains(InstFlags::UNKNOWN)
             || matches!(self.opcode, op::STOP | op::RETURN | op::REVERT | op::INVALID)
             || (!is_eof && matches!(self.opcode, op::SELFDESTRUCT))
-            || (is_eof && matches!(self.opcode, op::JUMPF | op::RETF | op::RETURNCONTRACT))
+            || (is_eof && matches!(self.opcode, JUMPF | RETF | RETURNCONTRACT))
     }
 
     /// Returns `true` if this instruction may suspend execution.
@@ -797,7 +802,7 @@ impl InstData {
         if is_eof {
             matches!(
                 self.opcode,
-                op::EXTCALL | op::EXTDELEGATECALL | op::EXTSTATICCALL | op::EOFCREATE
+                EXTCALL | EXTDELEGATECALL | EXTSTATICCALL | EOFCREATE
             )
         } else {
             matches!(
@@ -833,7 +838,7 @@ bitflags::bitflags! {
         /// Always returns [`InstructionResult::NotFound`] at runtime.
         const UNKNOWN = 1 << 4;
         /// The instruction is only enabled in EOF bytecodes.
-        /// Always returns [`InstructionResult::EOFOpcodeDisabledInLegacy`] at runtime.
+        /// Always returns [`InstructionResult::NotActivated`] at runtime.
         const EOF_ONLY = 1 << 5;
 
         /// Skip generating instruction logic, but keep the gas calculation.
@@ -862,9 +867,10 @@ fn get_two_mut<T>(sl: &mut [T], idx_1: usize, idx_2: usize) -> (&mut T, &mut T) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use revm_bytecode::opcode::OPCODE_INFO;
 
     #[test]
     fn test_suspend_is_free() {
-        assert_eq!(op::OPCODE_INFO_JUMPTABLE[TEST_SUSPEND as usize], None);
+        assert_eq!(OPCODE_INFO[TEST_SUSPEND as usize], None);
     }
 }

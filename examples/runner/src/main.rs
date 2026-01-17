@@ -1,6 +1,10 @@
 use revm::{
-    db::{CacheDB, EmptyDB},
-    primitives::{address, hex, AccountInfo, Bytecode, TransactTo, U256},
+    bytecode::Bytecode,
+    context::TxEnv,
+    database::{CacheDB, EmptyDB},
+    handler::ExecuteEvm,
+    primitives::{address, hex, TxKind, U256},
+    state::AccountInfo,
 };
 use revmc_examples_runner::build_evm;
 
@@ -15,17 +19,26 @@ fn main() {
     let db = CacheDB::new(EmptyDB::new());
     let mut evm = build_evm(db);
     let fibonacci_address = address!("0000000000000000000000000000000000001234");
-    evm.db_mut().insert_account_info(
+
+    // Insert the account with fibonacci bytecode
+    evm.ctx.journaled_state.database.insert_account_info(
         fibonacci_address,
         AccountInfo {
             code_hash: FIBONACCI_HASH.into(),
-            code: Some(Bytecode::new_raw(FIBONACCI_CODE.into())),
+            code: Some(Bytecode::new_legacy(FIBONACCI_CODE.into())),
             ..Default::default()
         },
     );
-    evm.context.evm.env.tx.transact_to = TransactTo::Call(fibonacci_address);
-    evm.context.evm.env.tx.data = actual_num.to_be_bytes_vec().into();
-    let result = evm.transact().unwrap();
+
+    // Build transaction
+    let tx = TxEnv::builder()
+        .gas_limit(100_000)
+        .kind(TxKind::Call(fibonacci_address))
+        .data(actual_num.to_be_bytes_vec().into())
+        .build()
+        .unwrap();
+
+    let result = evm.transact(tx).unwrap();
     // eprintln!("{:#?}", result.result);
 
     println!("fib({num}) = {}", U256::from_be_slice(result.result.output().unwrap()));

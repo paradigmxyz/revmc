@@ -23,8 +23,9 @@ workspace = true
 [dependencies]
 revmc.workspace = true
 
-revm-interpreter = { workspace = true, features = ["parse"] }
+revm-interpreter.workspace = true
 revm-primitives.workspace = true
+revm-bytecode.workspace = true
 
 clap = { version = "4", features = ["derive"] }
 color-eyre.workspace = true

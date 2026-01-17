@@ -1,5 +1,5 @@
-use revm_interpreter::{gas, opcode as op};
-use revm_primitives::{spec_to_generic, SpecId};
+use revm_bytecode::opcode as op;
+use revm_primitives::hardfork::SpecId;
 
 /// Opcode information.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -96,13 +96,26 @@ impl OpcodeInfo {
 
 /// Returns the static info map for the given `SpecId`.
 #[allow(unused_parens)]
-pub const fn op_info_map(spec_id: SpecId) -> &'static [OpcodeInfo; 256] {
-    spec_to_generic!(spec_id, (const { &make_map(<SPEC as revm_primitives::Spec>::SPEC_ID) }))
+pub fn op_info_map(spec_id: SpecId) -> &'static [OpcodeInfo; 256] {
+    // Use a static cache for each SpecId to avoid recomputing
+    use std::sync::OnceLock;
+    static MAPS: OnceLock<[[OpcodeInfo; 256]; 32]> = OnceLock::new();
+    let maps = MAPS.get_or_init(|| {
+        let mut maps = [[OpcodeInfo(OpcodeInfo::UNKNOWN); 256]; 32];
+        for i in 0..32 {
+            if let Ok(spec) = SpecId::try_from(i as u8) {
+                maps[i] = make_map(spec);
+            }
+        }
+        maps
+    });
+    &maps[spec_id as usize]
 }
 
 #[allow(unused_mut)]
 const fn make_map(spec_id: SpecId) -> [OpcodeInfo; 256] {
     const DYNAMIC: u16 = OpcodeInfo::DYNAMIC;
+    #[allow(dead_code)]
     const EOF: u16 = OpcodeInfo::EOF;
 
     let mut map = [OpcodeInfo(OpcodeInfo::UNKNOWN); 256];
@@ -337,37 +350,12 @@ const fn make_map(spec_id: SpecId) -> [OpcodeInfo; 256] {
         // 0xCD
         // 0xCE
         // 0xCF
-        DATALOAD  = 4 | EOF,             if OSAKA;
-        DATALOADN = 3 | EOF,             if OSAKA;
-        DATASIZE  = 2 | EOF,             if OSAKA;
-        DATACOPY  = 3 | DYNAMIC | EOF,   if OSAKA; // [2]
-        // 0xD4
-        // 0xD5
-        // 0xD6
-        // 0xD7
-        // 0xD8
-        // 0xD9
-        // 0xDA
-        // 0xDB
-        // 0xDC
-        // 0xDD
-        // 0xDE
-        // 0xDF
-        RJUMP           = 2 | EOF,       if OSAKA;
-        RJUMPI          = 4 | EOF,       if OSAKA;
-        RJUMPV          = 4 | EOF,       if OSAKA;
-        CALLF           = 5 | EOF,       if OSAKA;
-        RETF            = 3 | EOF,       if OSAKA;
-        JUMPF           = 5 | EOF,       if OSAKA;
-        DUPN            = 3 | EOF,       if OSAKA;
-        SWAPN           = 3 | EOF,       if OSAKA;
-        EXCHANGE        = 3 | EOF,       if OSAKA;
-        // 0xE9
-        // 0xEA
-        // 0xEB
-        EOFCREATE       = DYNAMIC | EOF, if OSAKA; // TODO: EOF_CREATE_GAS | DYNAMIC is too big
-        // 0xED
-        RETURNCONTRACT  = DYNAMIC | EOF, if OSAKA;
+        // EOF opcodes removed in revm v34:
+        // DATALOAD, DATALOADN, DATASIZE, DATACOPY (0xD0-0xD3)
+        // RJUMP, RJUMPI, RJUMPV, CALLF, RETF, JUMPF (0xE0-0xE5)
+        // DUPN, SWAPN, EXCHANGE (0xE6-0xE8)
+        // EOFCREATE, RETURNCONTRACT (0xEC, 0xEE)
+        // RETURNDATALOAD, EXTCALL, EXTDELEGATECALL, EXTSTATICCALL (0xF7-0xFB)
         // 0xEF
         CREATE          = DYNAMIC;
         CALL            = DYNAMIC;
@@ -376,11 +364,7 @@ const fn make_map(spec_id: SpecId) -> [OpcodeInfo; 256] {
         DELEGATECALL    = DYNAMIC,       if HOMESTEAD;
         CREATE2         = DYNAMIC,       if PETERSBURG;
         // 0xF6
-        RETURNDATALOAD  = 3 | EOF,       if OSAKA;
-        EXTCALL         = DYNAMIC | EOF, if OSAKA;
-        EXTDELEGATECALL = DYNAMIC | EOF, if OSAKA;
         STATICCALL      = DYNAMIC,       if BYZANTIUM;
-        EXTSTATICCALL   = DYNAMIC | EOF, if OSAKA;
         // 0xFC
         REVERT          = DYNAMIC,       if BYZANTIUM;
         INVALID         = 0;
@@ -390,11 +374,11 @@ const fn make_map(spec_id: SpecId) -> [OpcodeInfo; 256] {
 }
 
 const fn log_cost(n: u8) -> u16 {
-    match gas::log_cost(n, 0) {
-        Some(gas) => {
-            assert!(gas <= u16::MAX as u64);
-            gas as u16
-        }
-        None => unreachable!(),
-    }
+    // LOG base cost + n topics * LOGTOPIC cost
+    // From revm-context-interface: LOG = 375, LOGTOPIC = 375
+    const LOG_BASE: u64 = 375;
+    const LOGTOPIC: u64 = 375;
+    let cost = LOG_BASE + (n as u64 * LOGTOPIC);
+    assert!(cost <= u16::MAX as u64);
+    cost as u16
 }

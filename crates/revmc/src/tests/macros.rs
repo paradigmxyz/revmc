@@ -93,7 +93,7 @@ macro_rules! tests {
     (@gas $op:expr; $($args:expr),+) => {
         tests!(@gas
             $op,
-            DEF_OPINFOS[$op as usize].base_gas() as u64;
+            get_opcode_gas($op);
             $($args),+
         )
     };

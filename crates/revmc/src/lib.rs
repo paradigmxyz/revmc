@@ -9,6 +9,15 @@ extern crate tracing;
 // For features.
 use alloy_primitives as _;
 
+mod eof;
+pub use eof::{
+    Eof, EofBody, EofDecodeError, EofHeader, TypesSection, EOF_MAGIC_BYTES,
+    // EOF opcode constants (removed from revm-bytecode in v34)
+    CALLF, DATACOPY, DATALOAD, DATALOADN, DATASIZE, DUPN, EOFCREATE, EXCHANGE,
+    EXTCALL, EXTDELEGATECALL, EXTSTATICCALL, JUMPF, RETF, RETURNCONTRACT,
+    RETURNDATALOAD, RJUMP, RJUMPI, RJUMPV, SWAPN,
+};
+
 mod bytecode;
 pub use bytecode::*;
 
@@ -44,7 +53,15 @@ pub use cranelift::EvmCraneliftBackend;
 pub use revmc_cranelift as cranelift;
 
 #[doc(no_inline)]
-pub use revm_interpreter::{self as interpreter, primitives};
+pub use revm_bytecode;
+#[doc(no_inline)]
+pub use revm_context_interface as context_interface;
+#[doc(no_inline)]
+pub use revm_interpreter::{self as interpreter};
+#[doc(no_inline)]
+pub use revm_primitives as primitives;
+#[doc(no_inline)]
+pub use revm_primitives::hardfork::SpecId;
 
 const I256_MIN: U256 = U256::from_limbs([
     0x0000000000000000,

@@ -7,7 +7,7 @@ resolver = "2"
 version = "0.1.0"
 authors = ["DaniPopes <57450786+DaniPopes@users.noreply.github.com>"]
 edition = "2021"
-rust-version = "1.79"
+rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 categories = ["compilers", "cryptography::cryptocurrencies"]
 keywords = ["compile", "compiler", "jit", "evm", "ethereum"]
@@ -44,9 +44,11 @@ revmc-cranelift = { version = "0.1.0", path = "crates/revmc-cranelift", default-
 revmc-llvm = { version = "0.1.0", path = "crates/revmc-llvm", default-features = false }
 
 alloy-primitives = { version = "0.8", default-features = false }
-revm = { version = "19.0", default-features = false }
-revm-primitives = { version = "15.1", default-features = false }
-revm-interpreter = { version = "15.0", default-features = false }
+revm = { version = "34.0", default-features = false }
+revm-primitives = { version = "22.0", default-features = false }
+revm-interpreter = { version = "32.0", default-features = false }
+revm-bytecode = { version = "8.0", default-features = false, features = ["parse"] }
+revm-context-interface = { version = "14.0", default-features = false }
 ruint = { version = "1.12", default-features = false }
 
 color-eyre = "0.6"

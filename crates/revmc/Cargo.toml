@@ -28,6 +28,8 @@ revmc-cranelift = { workspace = true, optional = true }
 revmc-llvm = { workspace = true, optional = true }
 
 alloy-primitives = { workspace = true, features = ["std"] }
+revm-bytecode.workspace = true
+revm-context-interface.workspace = true
 revm-interpreter.workspace = true
 revm-primitives.workspace = true
 
@@ -56,9 +58,9 @@ cranelift = ["dep:revmc-cranelift"]
 
 asm-keccak = ["alloy-primitives/asm-keccak"]
 
-# I don't think this is supported, but it's necessary for --all-features to work in workspaces which
-# also have this feature.
-optimism = ["revm-primitives/optimism", "revm-interpreter/optimism"]
+# Optimism support was moved to op-revm in revm v34.
+# This feature is kept for compatibility but is a no-op.
+optimism = []
 
 # Internal features.
 __fuzzing = ["dep:arbitrary", "dep:paste", "dep:similar-asserts"]

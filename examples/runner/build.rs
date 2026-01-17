@@ -1,6 +1,6 @@
 use revmc::{
-    primitives::{hex, SpecId},
-    EvmCompiler, EvmLlvmBackend, OptimizationLevel, Result,
+    primitives::hex,
+    EvmCompiler, EvmLlvmBackend, OptimizationLevel, Result, SpecId,
 };
 use std::path::PathBuf;
 

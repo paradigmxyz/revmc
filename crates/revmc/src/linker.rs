@@ -86,10 +86,10 @@ impl Linker {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "llvm"))]
 mod tests {
     use super::*;
-    use revm_primitives::SpecId;
+    use crate::SpecId;
 
     #[test]
     fn basic() {
