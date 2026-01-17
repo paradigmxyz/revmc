@@ -14,9 +14,6 @@ const SPEC_ID: SpecId = SpecId::OSAKA;
 fn bench(c: &mut Criterion) {
     for bench in &revmc_cli::get_benches() {
         run_bench(c, bench);
-        if matches!(bench.name, "hash_10k-eof") {
-            break;
-        }
     }
 }
 

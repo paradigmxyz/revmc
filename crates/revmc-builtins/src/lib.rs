@@ -539,28 +539,6 @@ pub unsafe extern "C" fn __revmc_builtin_returndataload(
 // NOTE: Return `InstructionResult::Stop` here to indicate success, not the final result of
 // the execution.
 
-// NOTE: EOF support removed in revm v34
-#[no_mangle]
-pub unsafe extern "C" fn __revmc_builtin_eof_create(
-    _ecx: &mut EvmContext<'_>,
-    _sp: &mut [EvmWord; 4],
-    _initcontainer_index: usize,
-    _spec_id: SpecId,
-) -> InstructionResult {
-    InstructionResult::NotActivated
-}
-
-// NOTE: EOF support removed in revm v34
-#[no_mangle]
-pub unsafe extern "C" fn __revmc_builtin_return_contract(
-    _ecx: &mut EvmContext<'_>,
-    _sp: &mut [EvmWord; 2],
-    _deploy_container_index: usize,
-    _spec_id: SpecId,
-) -> InstructionResult {
-    InstructionResult::NotActivated
-}
-
 #[no_mangle]
 pub unsafe extern "C" fn __revmc_builtin_create(
     ecx: &mut EvmContext<'_>,
