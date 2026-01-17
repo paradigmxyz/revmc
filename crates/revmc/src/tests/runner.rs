@@ -578,7 +578,7 @@ fn run_compiled_test_case(test_case: &TestCase<'_>, f: EvmCompilerFn) {
             expected_memory = &*interpreter_memory;
         } else {
             assert_eq!(
-                MemDisplay(&*interpreter_memory),
+                MemDisplay(&interpreter_memory),
                 MemDisplay(expected_memory),
                 "interpreter memory mismatch"
             );
@@ -636,7 +636,7 @@ fn run_compiled_test_case(test_case: &TestCase<'_>, f: EvmCompilerFn) {
             assert_eq!(actual_stack, *expected_stack, "stack mismatch");
 
             assert_eq!(
-                MemDisplay(&*ecx.memory.context_memory()),
+                MemDisplay(&ecx.memory.context_memory()),
                 MemDisplay(expected_memory),
                 "interpreter memory mismatch"
             );

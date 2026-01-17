@@ -314,9 +314,7 @@ impl<B: Backend> EvmCompiler<B> {
         input: EvmCompilerInput<'a>,
         spec_id: SpecId,
     ) -> Result<Bytecode<'a>> {
-        let bytecode = match input {
-            EvmCompilerInput::Code(code) => code,
-        };
+        let EvmCompilerInput::Code(bytecode) = input;
 
         let mut bytecode = Bytecode::new(bytecode, spec_id);
         bytecode.analyze()?;

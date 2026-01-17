@@ -77,10 +77,7 @@ impl Linker {
         trace!(?cmd, "full linking command");
         let output = cmd.output()?;
         if !output.status.success() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("cc failed with {output:#?}"),
-            ));
+            return Err(std::io::Error::other(format!("cc failed with {output:#?}")));
         }
         Ok(())
     }
