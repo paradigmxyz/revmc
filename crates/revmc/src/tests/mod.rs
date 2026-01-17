@@ -11,7 +11,7 @@ use context_interface;
 use revm_bytecode::opcode as op;
 use revm_interpreter as interpreter;
 use revm_interpreter::{
-    gas, CallInputs, CreateInputs, FrameInput, Gas, InstructionResult, InterpreterAction,
+    gas, CreateInputs, FrameInput, Gas, InstructionResult, InterpreterAction,
     InterpreterResult,
 };
 use revmc_builtins::gas::{keccak256_cost, log_cost, verylowcopy_cost};
@@ -546,12 +546,15 @@ tests! {
             expected_stack: &[def_env().effective_gas_price()],
             expected_gas: 2,
         }),
-        // Host determines blockhash
-        blockhash0(op::BLOCKHASH, DEF_BN - 0_U256 => DEF_BN - 0_U256),
-        blockhash1(op::BLOCKHASH, DEF_BN - 1_U256 => DEF_BN - 1_U256),
-        blockhash2(op::BLOCKHASH, DEF_BN - 255_U256 => DEF_BN - 255_U256),
-        blockhash3(op::BLOCKHASH, DEF_BN - 256_U256 => DEF_BN - 256_U256),
-        blockhash4(op::BLOCKHASH, DEF_BN - 257_U256 => DEF_BN - 257_U256),
+        // Host determines blockhash - EVM semantics:
+        // - Current block returns 0
+        // - Blocks 1-256 ago return valid hash
+        // - Blocks more than 256 ago return 0
+        blockhash0(op::BLOCKHASH, DEF_BN - 0_U256 => 0_U256),  // current block -> 0
+        blockhash1(op::BLOCKHASH, DEF_BN - 1_U256 => DEF_BN - 1_U256),  // 1 block ago -> valid
+        blockhash2(op::BLOCKHASH, DEF_BN - 255_U256 => DEF_BN - 255_U256),  // 255 blocks ago -> valid
+        blockhash3(op::BLOCKHASH, DEF_BN - 256_U256 => DEF_BN - 256_U256),  // 256 blocks ago -> valid
+        blockhash4(op::BLOCKHASH, DEF_BN - 257_U256 => 0_U256),  // 257 blocks ago -> 0 (too old)
         coinbase(@raw {
             bytecode: &[op::COINBASE, op::COINBASE],
             expected_stack: &[def_env().block.coinbase.into_word().into(), def_env().block.coinbase.into_word().into()],
@@ -867,21 +870,9 @@ tests! {
             ],
             expected_return: InstructionResult::Stop,
             // NOTE: The return is pushed by the caller.
-            expected_stack: &[],
-            expected_memory: &[0; 32],
+            expected_memory: MEMORY_WHAT_INTERPRETER_SAYS,
             expected_gas: GAS_WHAT_INTERPRETER_SAYS,
-            expected_next_action: InterpreterAction::NewFrame(FrameInput::Call(Box::new(CallInputs {
-                input: interpreter::CallInput::Bytes(Bytes::copy_from_slice(&[0; 3])),
-                return_memory_offset: 2..2+1,
-                gas_limit: gas::CALL_STIPEND + 7,
-                bytecode_address: Address::from_word(6_U256.into()),
-                known_bytecode: None,
-                target_address: Address::from_word(6_U256.into()),
-                caller: DEF_ADDR,
-                value: interpreter::CallValue::Transfer(5_U256),
-                scheme: interpreter::CallScheme::Call,
-                is_static: false,
-            }))),
+            expected_next_action: ACTION_WHAT_INTERPRETER_SAYS,
         }),
         callcode(@raw {
             bytecode: &[

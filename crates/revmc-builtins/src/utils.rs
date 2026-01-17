@@ -49,7 +49,7 @@ fn resize_memory_inner(
     gas: &mut Gas,
     new_size: usize,
 ) -> InstructionResult {
-    // Calculate words needed
+    // Calculate words needed (memory is always word-aligned)
     let new_num_words = revm_interpreter::interpreter::num_words(new_size);
     let current_words = gas.memory().words_num;
     
@@ -68,8 +68,8 @@ fn resize_memory_inner(
         // Update memory words tracking
         gas.memory_mut().words_num = new_num_words;
         
-        // Resize the actual memory
-        memory.resize(new_size);
+        // Resize the actual memory (must be word-aligned, as per EVM spec)
+        memory.resize(new_num_words * 32);
     }
     InstructionResult::Stop
 }

@@ -2596,6 +2596,7 @@ dependencies = [
  "revm-context-interface",
  "revm-interpreter",
  "revm-primitives",
+ "revm-state",
  "revmc-backend",
  "revmc-builtins",
  "revmc-context",

@@ -331,8 +331,34 @@ pub unsafe extern "C" fn __revmc_builtin_blockhash(
     ecx: &mut EvmContext<'_>,
     number_ptr: &mut EvmWord,
 ) -> InstructionResult {
-    let hash = try_host!(ecx.host.block_hash(as_u64_saturated!(number_ptr.to_u256())));
-    *number_ptr = EvmWord::from_be_bytes(hash.0);
+    let requested_number = number_ptr.to_u256();
+    let block_number = ecx.host.block_number();
+    
+    // Check if requested block is in the future
+    let Some(diff) = block_number.checked_sub(requested_number) else {
+        *number_ptr = EvmWord::ZERO;
+        return InstructionResult::Stop;
+    };
+    
+    let diff = as_u64_saturated!(diff);
+    
+    // Current block returns 0
+    if diff == 0 {
+        *number_ptr = EvmWord::ZERO;
+        return InstructionResult::Stop;
+    }
+    
+    // BLOCK_HASH_HISTORY is 256
+    const BLOCK_HASH_HISTORY: u64 = 256;
+    
+    if diff <= BLOCK_HASH_HISTORY {
+        let hash = try_host!(ecx.host.block_hash(as_u64_saturated!(requested_number)));
+        *number_ptr = EvmWord::from_be_bytes(hash.0);
+    } else {
+        // Too old, return 0
+        *number_ptr = EvmWord::ZERO;
+    }
+    
     InstructionResult::Stop
 }
 

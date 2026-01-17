@@ -222,6 +222,7 @@ impl Backend for EvmCraneliftBackend {
         };
         let entry = builder.bcx.create_block();
         builder.bcx.append_block_params_for_function_params(entry);
+        builder.bcx.switch_to_block(entry);
         Ok((builder, id))
     }
 
