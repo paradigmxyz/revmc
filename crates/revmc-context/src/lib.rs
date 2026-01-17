@@ -51,6 +51,17 @@ pub struct EvmContext<'a> {
     pub resume_at: usize,
 }
 
+// Static assertions to ensure the struct layout matches expectations.
+// These offsets are used by the JIT compiler to access fields.
+const _: () = {
+    use core::mem::offset_of;
+    // EvmContext should be 96 bytes with #[repr(C)]
+    assert!(core::mem::size_of::<EvmContext<'_>>() == 96);
+    // Key fields accessed by JIT code
+    assert!(offset_of!(EvmContext<'_>, memory) == 0);
+    assert!(offset_of!(EvmContext<'_>, resume_at) == 88);
+};
+
 impl fmt::Debug for EvmContext<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("EvmContext").field("memory", &self.memory).finish_non_exhaustive()
