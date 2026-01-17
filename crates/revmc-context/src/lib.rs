@@ -21,6 +21,11 @@ use core::any::Any;
 ///
 /// This is a simple wrapper around the interpreter's resources, allowing the compiled function to
 /// access the memory, input, gas, host, and other resources.
+///
+/// # Safety
+/// This struct uses `#[repr(C)]` to ensure a stable field layout since the JIT compiler
+/// generates code that accesses fields by offset using `offset_of!`.
+#[repr(C)]
 pub struct EvmContext<'a> {
     /// The memory.
     pub memory: &'a mut SharedMemory,
