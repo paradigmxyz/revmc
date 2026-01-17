@@ -918,6 +918,7 @@ impl ModuleWrapper {
         }
     }
 
+    #[allow(clippy::result_large_err)]
     fn finalize_definitions(&mut self) -> Result<(), ModuleError> {
         match self {
             Self::Jit(module) => module.finalize_definitions(),
