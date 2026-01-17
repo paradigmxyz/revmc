@@ -711,6 +711,11 @@ impl<'a> Builder for EvmCraneliftBuilder<'a> {
         self.bcx.ins().ireduce(to, value)
     }
 
+    fn inttoptr(&mut self, value: Self::Value, _ty: Self::Type) -> Self::Value {
+        // Cranelift uses the same representation for integers and pointers
+        value
+    }
+
     fn gep(
         &mut self,
         ty: Self::Type,

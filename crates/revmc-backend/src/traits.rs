@@ -363,6 +363,9 @@ pub trait Builder: BackendTypes + TypeMethods {
     #[doc(alias = "trunc")]
     fn ireduce(&mut self, to: Self::Type, value: Self::Value) -> Self::Value;
 
+    /// Converts an integer value to a pointer.
+    fn inttoptr(&mut self, value: Self::Value, ty: Self::Type) -> Self::Value;
+
     fn gep(
         &mut self,
         ty: Self::Type,

@@ -228,16 +228,18 @@ pub unsafe extern "C" fn __revmc_builtin_calldatacopy(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn __revmc_builtin_codesize(ecx: &mut EvmContext<'_>) -> usize {
-    ecx.bytecode_len
+pub unsafe extern "C" fn __revmc_builtin_codesize(bytecode_len: usize) -> usize {
+    bytecode_len
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn __revmc_builtin_codecopy(
     ecx: &mut EvmContext<'_>,
     sp: &mut [EvmWord; 3],
+    bytecode_ptr: *const u8,
+    bytecode_len: usize,
 ) -> InstructionResult {
-    let bytecode = core::slice::from_raw_parts(ecx.bytecode_ptr, ecx.bytecode_len);
+    let bytecode = core::slice::from_raw_parts(bytecode_ptr, bytecode_len);
     copy_operation(ecx, sp, bytecode)
 }
 

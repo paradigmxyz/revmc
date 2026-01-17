@@ -39,10 +39,6 @@ pub struct EvmContext<'a> {
     pub next_action: &'a mut Option<InterpreterAction>,
     /// The return data.
     pub return_data: &'a [u8],
-    /// The bytecode pointer (for CODECOPY).
-    pub bytecode_ptr: *const u8,
-    /// The bytecode length (for CODESIZE).
-    pub bytecode_len: usize,
     /// Whether the context is static.
     pub is_static: bool,
     /// An index that is used internally to keep track of where execution should resume.
@@ -55,11 +51,11 @@ pub struct EvmContext<'a> {
 // These offsets are used by the JIT compiler to access fields.
 const _: () = {
     use core::mem::offset_of;
-    // EvmContext should be 96 bytes with #[repr(C)]
-    assert!(core::mem::size_of::<EvmContext<'_>>() == 96);
+    // EvmContext should be 80 bytes with #[repr(C)] (removed bytecode_ptr and bytecode_len)
+    assert!(core::mem::size_of::<EvmContext<'_>>() == 80);
     // Key fields accessed by JIT code
     assert!(offset_of!(EvmContext<'_>, memory) == 0);
-    assert!(offset_of!(EvmContext<'_>, resume_at) == 88);
+    assert!(offset_of!(EvmContext<'_>, resume_at) == 72);
 };
 
 impl fmt::Debug for EvmContext<'_> {
@@ -85,8 +81,6 @@ impl<'a> EvmContext<'a> {
 
         let (stack, stack_len) = EvmStack::from_interpreter_stack(&mut interpreter.stack);
         let bytecode_slice = interpreter.bytecode.bytecode_slice();
-        let bytecode_ptr = bytecode_slice.as_ptr();
-        let bytecode_len = bytecode_slice.len();
         let resume_at = ResumeAt::load(interpreter.bytecode.pc(), bytecode_slice);
         let this = Self {
             memory: &mut interpreter.memory,
@@ -95,8 +89,6 @@ impl<'a> EvmContext<'a> {
             host,
             next_action: &mut interpreter.bytecode.action,
             return_data: interpreter.return_data.buffer(),
-            bytecode_ptr,
-            bytecode_len,
             is_static: interpreter.runtime_flag.is_static,
             resume_at,
         };

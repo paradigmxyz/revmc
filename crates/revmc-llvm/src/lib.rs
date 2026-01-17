@@ -1007,6 +1007,13 @@ impl Builder for EvmLlvmBuilder<'_, '_> {
         self.bcx.build_int_truncate(value.into_int_value(), to.into_int_type(), "").unwrap().into()
     }
 
+    fn inttoptr(&mut self, value: Self::Value, ty: Self::Type) -> Self::Value {
+        self.bcx
+            .build_int_to_ptr(value.into_int_value(), ty.into_pointer_type(), "")
+            .unwrap()
+            .into()
+    }
+
     fn gep(
         &mut self,
         elem_ty: Self::Type,
