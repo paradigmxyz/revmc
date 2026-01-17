@@ -4,10 +4,12 @@ use clap::{Parser, ValueEnum};
 use color_eyre::{eyre::eyre, Result};
 use revm_bytecode::Bytecode;
 use revm_interpreter::{
-    instruction_table, interpreter::ExtBytecode, host::DummyHost, InputsImpl, SharedMemory,
+    host::DummyHost, instruction_table, interpreter::ExtBytecode, InputsImpl, SharedMemory,
 };
-use revmc::primitives::hardfork::SpecId;
-use revmc::{eyre::ensure, EvmCompiler, EvmContext, EvmLlvmBackend, OptimizationLevel};
+use revmc::{
+    eyre::ensure, primitives::hardfork::SpecId, EvmCompiler, EvmContext, EvmLlvmBackend,
+    OptimizationLevel,
+};
 use revmc_cli::{get_benches, read_code, Bench};
 use std::{
     hint::black_box,
@@ -221,7 +223,8 @@ fn main() -> Result<()> {
 
         if cli.interpret {
             let action = interpreter.run_plain(&table, &mut host);
-            let result = action.instruction_result().unwrap_or(revm_interpreter::InstructionResult::Stop);
+            let result =
+                action.instruction_result().unwrap_or(revm_interpreter::InstructionResult::Stop);
             (result, action)
         } else {
             let (mut ecx, stack, stack_len) =

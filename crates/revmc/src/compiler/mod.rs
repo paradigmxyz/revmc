@@ -2,8 +2,7 @@
 
 use crate::{Backend, Builder, Bytecode, EvmCompilerFn, EvmContext, EvmStack, Result};
 use revm_interpreter::{Gas, InputsImpl};
-use revm_primitives::hardfork::SpecId;
-use revm_primitives::Bytes;
+use revm_primitives::{hardfork::SpecId, Bytes};
 use revmc_backend::{
     eyre::ensure, Attribute, FunctionAttributeLocation, Linkage, OptimizationLevel,
 };

@@ -5,11 +5,15 @@ use criterion::{
 };
 use revm_bytecode::Bytecode;
 use revm_interpreter::{
-    host::DummyHost, instruction_table, interpreter::EthInterpreter, interpreter::ExtBytecode,
+    host::DummyHost,
+    instruction_table,
+    interpreter::{EthInterpreter, ExtBytecode},
     InputsImpl, SharedMemory,
 };
-use revmc::primitives::hardfork::SpecId;
-use revmc::{llvm, EvmCompiler, EvmCompilerFn, EvmContext, EvmLlvmBackend, EvmStack};
+use revmc::{
+    llvm, primitives::hardfork::SpecId, EvmCompiler, EvmCompilerFn, EvmContext, EvmLlvmBackend,
+    EvmStack,
+};
 use revmc_cli::Bench;
 use std::time::Duration;
 

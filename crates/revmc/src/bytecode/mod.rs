@@ -2,8 +2,7 @@
 
 use bitvec::vec::BitVec;
 use revm_bytecode::opcode as op;
-use revm_primitives::hardfork::SpecId;
-use revm_primitives::hex;
+use revm_primitives::{hardfork::SpecId, hex};
 use revmc_backend::Result;
 use rustc_hash::FxHashMap;
 use std::fmt;
