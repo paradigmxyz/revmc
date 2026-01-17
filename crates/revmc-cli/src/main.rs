@@ -2,8 +2,11 @@
 
 use clap::{Parser, ValueEnum};
 use color_eyre::{eyre::eyre, Result};
-use revm_interpreter::{opcode::make_instruction_table, SharedMemory};
-use revm_primitives::{address, spec_to_generic, Env, SpecId, TransactTo};
+use revm_bytecode::Bytecode;
+use revm_interpreter::{
+    instruction_table, interpreter::ExtBytecode, host::DummyHost, InputsImpl, SharedMemory,
+};
+use revmc::primitives::hardfork::SpecId;
 use revmc::{eyre::ensure, EvmCompiler, EvmContext, EvmLlvmBackend, OptimizationLevel};
 use revmc_cli::{get_benches, read_code, Bench};
 use std::{
@@ -127,38 +130,30 @@ fn main() -> Result<()> {
     };
     compiler.set_module_name(name);
 
-    let calldata = if let Some(calldata) = cli.calldata {
+    let calldata: revmc::primitives::Bytes = if let Some(calldata) = cli.calldata {
         revmc::primitives::hex::decode(calldata)?.into()
     } else {
         calldata.into()
     };
     let gas_limit = cli.gas_limit;
 
-    let mut env = Env::default();
-    env.tx.caller = address!("0000000000000000000000000000000000000001");
-    env.tx.transact_to = TransactTo::Call(address!("0000000000000000000000000000000000000002"));
-    env.tx.data = calldata;
-    env.tx.gas_limit = gas_limit;
-
-    let bytecode = revm_interpreter::analysis::to_analysed(revm_primitives::Bytecode::new_raw(
-        revm_primitives::Bytes::copy_from_slice(&bytecode),
-    ));
-    let contract = revm_interpreter::Contract::new_env(&env, bytecode, None);
-    let mut host = revm_interpreter::DummyHost::new(env);
-
-    let bytecode = contract.bytecode.original_byte_slice();
-
     let spec_id = cli.spec_id.into();
+
+    let bytecode_raw = Bytecode::new_raw(revmc::primitives::Bytes::copy_from_slice(&bytecode));
+    let bytecode_slice = bytecode_raw.original_byte_slice();
+
+    let mut host = DummyHost::new(spec_id);
+
     if !stack_input.is_empty() {
         compiler.inspect_stack_length(true);
     }
 
     if cli.parse_only {
-        let _ = compiler.parse(bytecode.into(), spec_id)?;
+        let _ = compiler.parse(bytecode_slice.into(), spec_id)?;
         return Ok(());
     }
 
-    let f_id = compiler.translate(name, bytecode, spec_id)?;
+    let f_id = compiler.translate(name, bytecode_slice, spec_id)?;
 
     let mut load = cli.load;
     if cli.aot {
@@ -207,27 +202,39 @@ fn main() -> Result<()> {
         unsafe { compiler.jit_function(f_id)? }
     };
 
-    #[allow(unused_parens)]
-    let table = spec_to_generic!(spec_id, (const { &make_instruction_table::<_, SPEC>() }));
+    use revm_interpreter::interpreter::EthInterpreter;
+    let table = instruction_table::<EthInterpreter, DummyHost>();
     let mut run = |f: revmc::EvmCompilerFn| {
-        let mut interpreter =
-            revm_interpreter::Interpreter::new(contract.clone(), gas_limit, false);
-        host.clear();
+        let ext_bytecode = ExtBytecode::new(bytecode_raw.clone());
+        let input = InputsImpl {
+            input: revm_interpreter::CallInput::Bytes(calldata.clone()),
+            ..Default::default()
+        };
+        let mut interpreter = revm_interpreter::Interpreter::new(
+            SharedMemory::new(),
+            ext_bytecode,
+            input,
+            false,
+            spec_id,
+            gas_limit,
+        );
 
         if cli.interpret {
-            let action = interpreter.run(SharedMemory::new(), table, &mut host);
-            (interpreter.instruction_result, action)
+            let action = interpreter.run_plain(&table, &mut host);
+            let result = action.instruction_result().unwrap_or(revm_interpreter::InstructionResult::Stop);
+            (result, action)
         } else {
             let (mut ecx, stack, stack_len) =
                 EvmContext::from_interpreter_with_stack(&mut interpreter, &mut host);
 
             for (i, input) in stack_input.iter().enumerate() {
-                stack.as_mut_slice()[i] = input.into();
+                stack.as_mut_slice()[i] = (*input).into();
             }
             *stack_len = stack_input.len();
 
             let r = unsafe { f.call_noinline(Some(stack), Some(stack_len), &mut ecx) };
-            (r, interpreter.next_action)
+            let action = interpreter.take_next_action();
+            (r, action)
         }
     };
 
@@ -320,7 +327,7 @@ impl From<SpecIdValueEnum> for SpecId {
             SpecIdValueEnum::CANCUN => Self::CANCUN,
             SpecIdValueEnum::PRAGUE => Self::PRAGUE,
             SpecIdValueEnum::OSAKA => Self::OSAKA,
-            SpecIdValueEnum::LATEST => Self::LATEST,
+            SpecIdValueEnum::LATEST => Self::OSAKA,
         }
     }
 }

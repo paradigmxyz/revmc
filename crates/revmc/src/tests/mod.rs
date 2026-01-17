@@ -11,11 +11,10 @@ use context_interface;
 use revm_bytecode::opcode as op;
 use revm_interpreter as interpreter;
 use revm_interpreter::{
-    gas, CreateInputs, FrameInput, Gas, InstructionResult, InterpreterAction,
-    InterpreterResult,
+    gas, CreateInputs, FrameInput, Gas, InstructionResult, InterpreterAction, InterpreterResult,
 };
-use revmc_builtins::gas::{keccak256_cost, log_cost, verylowcopy_cost};
 use revm_primitives::{hex, keccak256, Address, Bytes, LogData, B256, KECCAK_EMPTY};
+use revmc_builtins::gas::{keccak256_cost, log_cost, verylowcopy_cost};
 
 #[macro_use]
 mod macros;

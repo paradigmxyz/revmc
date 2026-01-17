@@ -52,7 +52,7 @@ fn resize_memory_inner(
     // Calculate words needed (memory is always word-aligned)
     let new_num_words = revm_interpreter::interpreter::num_words(new_size);
     let current_words = gas.memory().words_num;
-    
+
     if new_num_words > current_words {
         // Calculate gas cost for memory expansion
         // memory_gas(num_words, linear_cost, quadratic_cost)
@@ -60,14 +60,14 @@ fn resize_memory_inner(
         let new_cost = crate::gas::memory_gas(new_num_words, 3, 512);
         let old_cost = crate::gas::memory_gas(current_words, 3, 512);
         let cost = new_cost.saturating_sub(old_cost);
-        
+
         if !gas.record_cost(cost) {
             return InstructionResult::MemoryOOG;
         }
-        
+
         // Update memory words tracking
         gas.memory_mut().words_num = new_num_words;
-        
+
         // Resize the actual memory (must be word-aligned, as per EVM spec)
         memory.resize(new_num_words * 32);
     }

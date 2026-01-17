@@ -40,8 +40,6 @@ impl OpcodeInfo {
         self.0 & Self::DISABLED != 0
     }
 
-
-
     /// Returns the base gas cost of the opcode.
     ///
     /// This may not be the final/full gas cost of the opcode as it may also have a dynamic cost.
@@ -67,8 +65,6 @@ impl OpcodeInfo {
     pub fn set_disabled(&mut self) {
         self.0 |= Self::DISABLED;
     }
-
-
 
     /// Sets the gas cost.
     ///

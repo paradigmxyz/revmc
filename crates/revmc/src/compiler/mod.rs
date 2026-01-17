@@ -1,12 +1,11 @@
 //! EVM bytecode compiler implementation.
 
 use crate::{Backend, Builder, Bytecode, EvmCompilerFn, EvmContext, EvmStack, Result};
-use revm_primitives::Bytes;
 use revm_interpreter::{Gas, InputsImpl};
 use revm_primitives::hardfork::SpecId;
+use revm_primitives::Bytes;
 use revmc_backend::{
-    eyre::ensure,
-    Attribute, FunctionAttributeLocation, Linkage, OptimizationLevel,
+    eyre::ensure, Attribute, FunctionAttributeLocation, Linkage, OptimizationLevel,
 };
 use revmc_builtins::Builtins;
 use revmc_context::RawEvmCompilerFn;

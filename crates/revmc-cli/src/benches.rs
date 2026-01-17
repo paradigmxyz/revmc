@@ -63,7 +63,6 @@ pub fn get_benches() -> Vec<Bench> {
             calldata: hex!("d09de08a").to_vec(),
             ..Default::default()
         },
-
         Bench {
             name: "snailtracer",
             bytecode: include_code_str!("../../../data/snailtracer.rt.hex").unwrap(),
@@ -71,7 +70,6 @@ pub fn get_benches() -> Vec<Bench> {
             calldata: hex!("30627b7c").to_vec(),
             ..Default::default()
         },
-
         Bench {
             name: "weth",
             bytecode: include_code_str!("../../../data/weth.rt.hex").unwrap(),
@@ -84,7 +82,6 @@ pub fn get_benches() -> Vec<Bench> {
             calldata: hex!("30627b7c").to_vec(),
             ..Default::default()
         },
-
         Bench {
             name: "erc20_transfer",
             bytecode: include_code_str!("../../../data/erc20_transfer.rt.hex").unwrap(),

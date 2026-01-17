@@ -7,9 +7,7 @@ use crate::{
 use revm_bytecode::opcode as op;
 use revm_interpreter::{InputsImpl, InstructionResult};
 use revm_primitives::U256;
-use revmc_backend::{
-    Attribute, BackendTypes, FunctionAttributeLocation, Pointer, TypeMethods,
-};
+use revmc_backend::{Attribute, BackendTypes, FunctionAttributeLocation, Pointer, TypeMethods};
 use revmc_builtins::{Builtin, Builtins, CallKind, CreateKind};
 use std::{fmt::Write, mem, sync::atomic::AtomicPtr};
 
@@ -1861,7 +1859,7 @@ mod pf {
     #[allow(unexpected_cfgs, dead_code)]
     #[repr(C)]
     pub(super) struct SharedMemory {
-        /// The underlying buffer (Option<Rc<RefCell<Vec<u8>>>>).
+        /// The underlying buffer (`Option<Rc<RefCell<Vec<u8>>>>`).
         pub(super) buffer: usize, // Rc pointer
         /// Memory checkpoint for this depth.
         pub(super) my_checkpoint: usize,

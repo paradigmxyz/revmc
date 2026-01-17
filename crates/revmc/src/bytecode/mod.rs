@@ -543,7 +543,10 @@ impl InstData {
         (self.opcode == op::JUMP && self.flags.contains(InstFlags::INVALID_JUMP))
             || self.flags.contains(InstFlags::DISABLED)
             || self.flags.contains(InstFlags::UNKNOWN)
-            || matches!(self.opcode, op::STOP | op::RETURN | op::REVERT | op::INVALID | op::SELFDESTRUCT)
+            || matches!(
+                self.opcode,
+                op::STOP | op::RETURN | op::REVERT | op::INVALID | op::SELFDESTRUCT
+            )
     }
 
     /// Returns `true` if this instruction may suspend execution.
@@ -556,12 +559,7 @@ impl InstData {
 
         matches!(
             self.opcode,
-            op::CALL
-                | op::CALLCODE
-                | op::DELEGATECALL
-                | op::STATICCALL
-                | op::CREATE
-                | op::CREATE2
+            op::CALL | op::CALLCODE | op::DELEGATECALL | op::STATICCALL | op::CREATE | op::CREATE2
         )
     }
 }

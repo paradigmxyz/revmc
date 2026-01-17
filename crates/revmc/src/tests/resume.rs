@@ -34,7 +34,10 @@ fn run<B: Backend>(compiler: &mut EvmCompiler<B>, code: &[u8], spec_id: SpecId) 
 
         // op::PUSH1, 0x42,
         let r = unsafe { f.call(Some(stack), Some(stack_len), ecx) };
-        assert!(is_suspended(ecx) || r == InstructionResult::Stop, "expected suspended or stop, got {r:?}");
+        assert!(
+            is_suspended(ecx) || r == InstructionResult::Stop,
+            "expected suspended or stop, got {r:?}"
+        );
         assert_eq!(*stack_len, 1);
         assert_eq!(stack.as_slice()[0].to_u256(), U256::from(0x42));
         let resume_1 = ecx.resume_at;
@@ -44,7 +47,10 @@ fn run<B: Backend>(compiler: &mut EvmCompiler<B>, code: &[u8], spec_id: SpecId) 
 
         // op::PUSH1, 0x69,
         let r = unsafe { f.call(Some(stack), Some(stack_len), ecx) };
-        assert!(is_suspended(ecx) || r == InstructionResult::Stop, "expected suspended or stop, got {r:?}");
+        assert!(
+            is_suspended(ecx) || r == InstructionResult::Stop,
+            "expected suspended or stop, got {r:?}"
+        );
         assert_eq!(*stack_len, 2);
         assert_eq!(stack.as_slice()[0].to_u256(), U256::from(0x42));
         assert_eq!(stack.as_slice()[1].to_u256(), U256::from(0x69));
@@ -55,7 +61,10 @@ fn run<B: Backend>(compiler: &mut EvmCompiler<B>, code: &[u8], spec_id: SpecId) 
 
         // op::ADD,
         let r = unsafe { f.call(Some(stack), Some(stack_len), ecx) };
-        assert!(is_suspended(ecx) || r == InstructionResult::Stop, "expected suspended or stop, got {r:?}");
+        assert!(
+            is_suspended(ecx) || r == InstructionResult::Stop,
+            "expected suspended or stop, got {r:?}"
+        );
         assert_eq!(*stack_len, 1);
         assert_eq!(stack.as_slice()[0].to_u256(), U256::from(0x42 + 0x69));
         let resume_3 = ecx.resume_at;
@@ -84,7 +93,10 @@ fn run<B: Backend>(compiler: &mut EvmCompiler<B>, code: &[u8], spec_id: SpecId) 
         // op::ADD,
         ecx.resume_at = resume_2;
         let r = unsafe { f.call(Some(stack), Some(stack_len), ecx) };
-        assert!(is_suspended(ecx) || r == InstructionResult::Stop, "expected suspended or stop, got {r:?}");
+        assert!(
+            is_suspended(ecx) || r == InstructionResult::Stop,
+            "expected suspended or stop, got {r:?}"
+        );
         assert_eq!(*stack_len, 1);
         assert_eq!(stack.as_slice()[0].to_u256(), U256::from(0x42 + 0x69 + 2));
         assert_eq!(ecx.resume_at, resume_3);
@@ -92,7 +104,10 @@ fn run<B: Backend>(compiler: &mut EvmCompiler<B>, code: &[u8], spec_id: SpecId) 
         // op::PUSH1, 0x69,
         ecx.resume_at = resume_1;
         let r = unsafe { f.call(Some(stack), Some(stack_len), ecx) };
-        assert!(is_suspended(ecx) || r == InstructionResult::Stop, "expected suspended or stop, got {r:?}");
+        assert!(
+            is_suspended(ecx) || r == InstructionResult::Stop,
+            "expected suspended or stop, got {r:?}"
+        );
         assert_eq!(*stack_len, 2);
         assert_eq!(stack.as_slice()[0].to_u256(), U256::from(0x42 + 0x69 + 2));
         assert_eq!(stack.as_slice()[1].to_u256(), U256::from(0x69));
@@ -100,7 +115,10 @@ fn run<B: Backend>(compiler: &mut EvmCompiler<B>, code: &[u8], spec_id: SpecId) 
 
         // op::ADD,
         let r = unsafe { f.call(Some(stack), Some(stack_len), ecx) };
-        assert!(is_suspended(ecx) || r == InstructionResult::Stop, "expected suspended or stop, got {r:?}");
+        assert!(
+            is_suspended(ecx) || r == InstructionResult::Stop,
+            "expected suspended or stop, got {r:?}"
+        );
         assert_eq!(*stack_len, 1);
         assert_eq!(stack.as_slice()[0].to_u256(), U256::from(0x42 + 0x69 + 2 + 0x69));
         assert_eq!(ecx.resume_at, resume_3);

@@ -2,10 +2,9 @@
 
 use libfuzzer_sys::fuzz_target;
 use revmc::{
-    interpreter::OPCODE_INFO_JUMPTABLE,
-    primitives::SpecId,
+    revm_bytecode::opcode::OPCODE_INFO,
     tests::{run_test_case, TestCase},
-    EvmCompiler, EvmLlvmBackend, OpcodesIter, OptimizationLevel,
+    EvmCompiler, EvmLlvmBackend, OpcodesIter, OptimizationLevel, SpecId,
 };
 use std::path::PathBuf;
 
@@ -25,7 +24,7 @@ fuzz_target!(|test_case: TestCase<'_>| {
 
 fn should_skip(bytecode: &[u8], spec_id: SpecId) -> bool {
     OpcodesIter::new(bytecode, spec_id).any(|op| {
-        let Some(info) = OPCODE_INFO_JUMPTABLE[op.opcode as usize] else { return true };
+        let Some(info) = OPCODE_INFO[op.opcode as usize] else { return true };
         // Skip if the immediate is incomplete.
         // TODO: What is the expected behavior here?
         if info.immediate_size() > 0 && op.immediate.is_none() {

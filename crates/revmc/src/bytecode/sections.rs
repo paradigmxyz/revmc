@@ -73,10 +73,7 @@ impl SectionAnalysis {
 
         // Instructions that require `gasleft` and branching instructions end a section, starting a
         // new one on the next instruction, if any.
-        if data.requires_gasleft(bytecode.spec_id)
-            || data.may_suspend()
-            || data.is_branching()
-        {
+        if data.requires_gasleft(bytecode.spec_id) || data.may_suspend() || data.is_branching() {
             let next = inst + 1;
             self.save_to(bytecode, next);
             self.reset(next);

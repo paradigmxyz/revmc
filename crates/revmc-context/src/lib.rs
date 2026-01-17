@@ -64,13 +64,11 @@ impl<'a> EvmContext<'a> {
         host: &'b mut dyn HostExt,
     ) -> (Self, &'a mut EvmStack, &'a mut usize) {
         use revm_interpreter::interpreter_types::LegacyBytecode;
-        
+
         let (stack, stack_len) = EvmStack::from_interpreter_stack(&mut interpreter.stack);
         let bytecode_len = interpreter.bytecode.bytecode_len();
-        let resume_at = ResumeAt::load(
-            interpreter.bytecode.pc(),
-            interpreter.bytecode.bytecode_slice(),
-        );
+        let resume_at =
+            ResumeAt::load(interpreter.bytecode.pc(), interpreter.bytecode.bytecode_slice());
         let this = Self {
             memory: &mut interpreter.memory,
             input: &mut interpreter.input,
@@ -227,9 +225,8 @@ impl EvmCompilerFn {
 
     /// Calls the function by re-using the interpreter's resources.
     ///
-    /// This behaves the same as [`Interpreter::run`], returning an [`InstructionResult`] in the
-    /// interpreter's [`instruction_result`](Interpreter::instruction_result) field and the next
-    /// action in the [`next_action`](Interpreter::next_action) field.
+    /// This behaves similarly to `Interpreter::run_plain`, returning an [`InstructionResult`]
+    /// and the next action in an [`InterpreterAction`].
     ///
     /// # Safety
     ///
@@ -292,13 +289,7 @@ impl EvmCompilerFn {
         stack_len: Option<&mut usize>,
         ecx: &mut EvmContext<'_>,
     ) -> InstructionResult {
-        (self.0)(
-            ecx.gas,
-            option_as_mut_ptr(stack),
-            option_as_mut_ptr(stack_len),
-            ecx.input,
-            ecx,
-        )
+        (self.0)(ecx.gas, option_as_mut_ptr(stack), option_as_mut_ptr(stack_len), ecx.input, ecx)
     }
 
     /// Same as [`call`](Self::call) but with `#[inline(never)]`.
@@ -723,7 +714,6 @@ impl ResumeAt {
             pc
         }
     }
-
 }
 
 #[inline(always)]

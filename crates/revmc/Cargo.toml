@@ -32,6 +32,7 @@ revm-bytecode.workspace = true
 revm-context-interface.workspace = true
 revm-interpreter.workspace = true
 revm-primitives.workspace = true
+revm-state.workspace = true
 
 bitflags = "2.5"
 bitvec = "1.0"
@@ -46,7 +47,6 @@ similar-asserts = { version = "1.5", optional = true }
 [dev-dependencies]
 revmc-context = { workspace = true, features = ["host-ext-any"] }
 paste.workspace = true
-revm-state = "9.0"
 similar-asserts = "1.5"
 tempfile = "3.10"
 

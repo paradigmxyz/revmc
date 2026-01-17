@@ -1,6 +1,6 @@
 //! Gas calculation utilities.
 
-use revm_interpreter::{SStoreResult, StateLoad, SelfDestructResult};
+use revm_interpreter::{SStoreResult, SelfDestructResult, StateLoad};
 use revm_primitives::{hardfork::SpecId, U256};
 
 pub use revm_context_interface::journaled_state::AccountLoad;
@@ -135,7 +135,8 @@ pub fn sstore_cost(
 pub fn sstore_refund(spec_id: SpecId, result: &SStoreResult) -> i64 {
     if spec_id.is_enabled_in(SpecId::BERLIN) {
         let mut refund = 0i64;
-        if result.original_value != result.present_value && result.original_value == result.new_value
+        if result.original_value != result.present_value
+            && result.original_value == result.new_value
         {
             if result.original_value.is_zero() {
                 refund += (SSTORE_SET - WARM_STORAGE_READ_COST) as i64;
@@ -155,7 +156,8 @@ pub fn sstore_refund(spec_id: SpecId, result: &SStoreResult) -> i64 {
         refund
     } else if spec_id.is_enabled_in(SpecId::ISTANBUL) {
         let mut refund = 0i64;
-        if result.original_value != result.present_value && result.original_value == result.new_value
+        if result.original_value != result.present_value
+            && result.original_value == result.new_value
         {
             if result.original_value.is_zero() {
                 refund += (SSTORE_SET - ISTANBUL_SLOAD_GAS) as i64;
@@ -182,7 +184,11 @@ pub fn sstore_refund(spec_id: SpecId, result: &SStoreResult) -> i64 {
 
 /// Calculate CALL gas cost.
 #[inline]
-pub fn call_cost(spec_id: SpecId, transfers_value: bool, account_load: StateLoad<AccountLoad>) -> u64 {
+pub fn call_cost(
+    spec_id: SpecId,
+    transfers_value: bool,
+    account_load: StateLoad<AccountLoad>,
+) -> u64 {
     let mut gas = if spec_id.is_enabled_in(SpecId::BERLIN) {
         warm_cold_cost(account_load.is_cold)
             + if let Some(is_cold) = account_load.data.is_delegate_account_cold {
@@ -200,7 +206,9 @@ pub fn call_cost(spec_id: SpecId, transfers_value: bool, account_load: StateLoad
         gas += CALLVALUE;
     }
 
-    if account_load.data.is_empty && (transfers_value || !spec_id.is_enabled_in(SpecId::SPURIOUS_DRAGON)) {
+    if account_load.data.is_empty
+        && (transfers_value || !spec_id.is_enabled_in(SpecId::SPURIOUS_DRAGON))
+    {
         gas += NEWACCOUNT;
     }
 

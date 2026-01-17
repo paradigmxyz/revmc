@@ -7,8 +7,8 @@ use context_interface::{
 };
 use revm_bytecode::opcode as op;
 use revm_interpreter::{
-    instructions::instruction_table_gas_changes_spec, interpreter::ExtBytecode, CallInput, Host, InputsImpl,
-    Interpreter, SharedMemory,
+    instructions::instruction_table_gas_changes_spec, interpreter::ExtBytecode, CallInput, Host,
+    InputsImpl, Interpreter, SharedMemory,
 };
 use revm_primitives::{HashMap, B256};
 use similar_asserts::assert_eq;
@@ -61,10 +61,7 @@ pub fn def_env() -> DefEnv {
     DefEnv {
         tx: DefTx {
             caller: Address::repeat_byte(0xcc),
-            blob_hashes: vec![
-                B256::repeat_byte(0x01),
-                B256::repeat_byte(0x02),
-            ],
+            blob_hashes: vec![B256::repeat_byte(0x01), B256::repeat_byte(0x02)],
         },
         block: DefBlock {
             coinbase: Address::repeat_byte(0xcb),
@@ -75,9 +72,7 @@ pub fn def_env() -> DefEnv {
             gas_limit: U256::from(0x5678),
             basefee: U256::from(0x1231),
         },
-        cfg: DefCfg {
-            chain_id: 69,
-        },
+        cfg: DefCfg { chain_id: 69 },
     }
 }
 
@@ -87,14 +82,15 @@ pub fn get_opcode_gas(op: u8) -> u64 {
     use revm_bytecode::opcode::*;
     match op {
         STOP => 0,
-        ADD | SUB | NOT | LT | GT | SLT | SGT | EQ | ISZERO | AND | OR | XOR | BYTE | SHL | SHR | SAR | POP => 3,
+        ADD | SUB | NOT | LT | GT | SLT | SGT | EQ | ISZERO | AND | OR | XOR | BYTE | SHL | SHR
+        | SAR | POP => 3,
         MUL | DIV | SDIV | MOD | SMOD | SIGNEXTEND => 5,
         ADDMOD | MULMOD => 8,
         EXP => 10,
         KECCAK256 => 30,
-        ADDRESS | ORIGIN | CALLER | CALLVALUE | CALLDATASIZE | CODESIZE | GASPRICE | COINBASE |
-        TIMESTAMP | NUMBER | DIFFICULTY | GASLIMIT | CHAINID | SELFBALANCE | BASEFEE |
-        BLOBBASEFEE | RETURNDATASIZE | MSIZE | GAS | PC => 2,
+        ADDRESS | ORIGIN | CALLER | CALLVALUE | CALLDATASIZE | CODESIZE | GASPRICE | COINBASE
+        | TIMESTAMP | NUMBER | DIFFICULTY | GASLIMIT | CHAINID | SELFBALANCE | BASEFEE
+        | BLOBBASEFEE | RETURNDATASIZE | MSIZE | GAS | PC => 2,
         BALANCE | EXTCODESIZE | EXTCODEHASH => 100,
         CALLDATALOAD => 3,
         CALLDATACOPY | CODECOPY | RETURNDATACOPY => 3,
@@ -237,23 +233,20 @@ pub const STACK_WHAT_INTERPRETER_SAYS: &[U256] =
     &[U256::from_be_slice(&GAS_WHAT_INTERPRETER_SAYS.to_be_bytes())];
 pub const MEMORY_WHAT_INTERPRETER_SAYS: &[u8] = &GAS_WHAT_INTERPRETER_SAYS.to_be_bytes();
 pub const GAS_WHAT_INTERPRETER_SAYS: u64 = 0x4682e332d6612de1;
-pub const ACTION_WHAT_INTERPRETER_SAYS: InterpreterAction = InterpreterAction::Return(
-    InterpreterResult {
+pub const ACTION_WHAT_INTERPRETER_SAYS: InterpreterAction =
+    InterpreterAction::Return(InterpreterResult {
         gas: Gas::new(GAS_WHAT_INTERPRETER_SAYS),
         output: Bytes::from_static(MEMORY_WHAT_INTERPRETER_SAYS),
         result: RETURN_WHAT_INTERPRETER_SAYS,
-    }
-);
+    });
 
 pub fn def_storage() -> &'static HashMap<U256, U256> {
     DEF_STORAGE.get_or_init(|| {
-{
-            let mut map = HashMap::default();
-            map.insert(U256::from(0), U256::from(1));
-            map.insert(U256::from(1), U256::from(2));
-            map.insert(U256::from(69), U256::from(42));
-            map
-        }
+        let mut map = HashMap::default();
+        map.insert(U256::from(0), U256::from(1));
+        map.insert(U256::from(1), U256::from(2));
+        map.insert(U256::from(69), U256::from(42));
+        map
     })
 }
 
@@ -405,41 +398,31 @@ impl Host for TestHost {
     ) -> Result<AccountInfoLoad<'_>, LoadError> {
         use revm_state::AccountInfo;
         use std::borrow::Cow;
-        
+
         let code = if load_code {
             // Return actual code if found, otherwise empty bytecode
             Some(self.code_map.get(&address).cloned().unwrap_or_default())
         } else {
             None
         };
-        
+
         // Return address byte as balance (test convention)
         // The balance is the last byte of the address
         let balance = U256::from(address.0[19]);
-        
+
         // Calculate code hash from the actual bytecode
         let code_hash = if let Some(bytecode) = self.code_map.get(&address) {
             keccak256(bytecode.original_byte_slice())
-        } else { 
-            KECCAK_EMPTY 
+        } else {
+            KECCAK_EMPTY
         };
-        
+
         // Create owned account info
-        let info = AccountInfo {
-            balance,
-            nonce: 0,
-            code_hash,
-            account_id: None,
-            code,
-        };
-        
+        let info = AccountInfo { balance, nonce: 0, code_hash, account_id: None, code };
+
         let is_empty = info.code.is_none() && info.balance.is_zero() && info.nonce == 0;
-        
-        Ok(AccountInfoLoad {
-            account: Cow::Owned(info),
-            is_cold: false,
-            is_empty,
-        })
+
+        Ok(AccountInfoLoad { account: Cow::Owned(info), is_cold: false, is_empty })
     }
 
     fn sstore_skip_cold_load(
@@ -452,11 +435,7 @@ impl Host for TestHost {
         let original = self.storage.get(&key).copied().unwrap_or(U256::ZERO);
         self.storage.insert(key, value);
         Ok(StateLoad::new(
-            SStoreResult {
-                original_value: original,
-                present_value: original,
-                new_value: value,
-            },
+            SStoreResult { original_value: original, present_value: original, new_value: value },
             false,
         ))
     }
@@ -487,14 +466,8 @@ pub fn with_evm_context<F: FnOnce(&mut EvmContext<'_>, &mut EvmStack, &mut usize
     let bytecode_obj = revm_bytecode::Bytecode::new_raw(Bytes::copy_from_slice(bytecode));
     let ext_bytecode = ExtBytecode::new(bytecode_obj);
 
-    let mut interpreter = Interpreter::new(
-        SharedMemory::new(),
-        ext_bytecode,
-        input,
-        false,
-        DEF_SPEC,
-        DEF_GAS_LIMIT,
-    );
+    let mut interpreter =
+        Interpreter::new(SharedMemory::new(), ext_bytecode, input, false, DEF_SPEC, DEF_GAS_LIMIT);
 
     let mut host = TestHost::new();
 
@@ -573,7 +546,10 @@ fn run_compiled_test_case(test_case: &TestCase<'_>, f: EvmCompilerFn) {
             DEF_GAS_LIMIT,
         );
 
-        let table = instruction_table_gas_changes_spec::<revm_interpreter::interpreter::EthInterpreter, TestHost>(spec_id);
+        let table = instruction_table_gas_changes_spec::<
+            revm_interpreter::interpreter::EthInterpreter,
+            TestHost,
+        >(spec_id);
         let mut int_host = TestHost::new();
         let interpreter_action = interpreter.run_plain(&table, &mut int_host);
 
@@ -586,10 +562,7 @@ fn run_compiled_test_case(test_case: &TestCase<'_>, f: EvmCompilerFn) {
         if expected_return == RETURN_WHAT_INTERPRETER_SAYS {
             expected_return = int_result;
         } else {
-            assert_eq!(
-                int_result, expected_return,
-                "interpreter return value mismatch"
-            );
+            assert_eq!(int_result, expected_return, "interpreter return value mismatch");
         }
 
         let mut expected_stack = expected_stack;
@@ -619,13 +592,11 @@ fn run_compiled_test_case(test_case: &TestCase<'_>, f: EvmCompilerFn) {
         }
 
         // This is what the interpreter returns when the internal action is None in `run`.
-        let default_action = InterpreterAction::Return(
-            InterpreterResult {
-                result: int_result,
-                output: Bytes::new(),
-                gas: interpreter.gas,
-            }
-        );
+        let default_action = InterpreterAction::Return(InterpreterResult {
+            result: int_result,
+            output: Bytes::new(),
+            gas: interpreter.gas,
+        });
         let mut expected_next_action = expected_next_action;
         if *expected_next_action == ACTION_WHAT_INTERPRETER_SAYS {
             expected_next_action = &interpreter_action;
@@ -702,10 +673,7 @@ impl fmt::Debug for MemDisplay<'_> {
 #[track_caller]
 fn assert_actions(actual: &InterpreterAction, expected: &InterpreterAction) {
     match (actual, expected) {
-        (
-            InterpreterAction::Return(result),
-            InterpreterAction::Return(expected_result),
-        ) => {
+        (InterpreterAction::Return(result), InterpreterAction::Return(expected_result)) => {
             assert_eq!(result.result, expected_result.result, "result mismatch");
             assert_eq!(result.output, expected_result.output, "result output mismatch");
             if expected_result.gas.limit() != GAS_WHAT_INTERPRETER_SAYS {
@@ -718,10 +686,19 @@ fn assert_actions(actual: &InterpreterAction, expected: &InterpreterAction) {
         ) => {
             // Compare CallInputs fields, allowing for differences in input representation
             // and known_bytecode (JIT doesn't preload, interpreter may)
-            assert_eq!(actual_call.return_memory_offset, expected_call.return_memory_offset, "return_memory_offset mismatch");
+            assert_eq!(
+                actual_call.return_memory_offset, expected_call.return_memory_offset,
+                "return_memory_offset mismatch"
+            );
             assert_eq!(actual_call.gas_limit, expected_call.gas_limit, "gas_limit mismatch");
-            assert_eq!(actual_call.bytecode_address, expected_call.bytecode_address, "bytecode_address mismatch");
-            assert_eq!(actual_call.target_address, expected_call.target_address, "target_address mismatch");
+            assert_eq!(
+                actual_call.bytecode_address, expected_call.bytecode_address,
+                "bytecode_address mismatch"
+            );
+            assert_eq!(
+                actual_call.target_address, expected_call.target_address,
+                "target_address mismatch"
+            );
             assert_eq!(actual_call.caller, expected_call.caller, "caller mismatch");
             assert_eq!(actual_call.value, expected_call.value, "value mismatch");
             assert_eq!(actual_call.scheme, expected_call.scheme, "scheme mismatch");
@@ -737,8 +714,16 @@ fn assert_actions(actual: &InterpreterAction, expected: &InterpreterAction) {
             assert_eq!(actual_create.caller(), expected_create.caller(), "caller mismatch");
             assert_eq!(actual_create.scheme(), expected_create.scheme(), "scheme mismatch");
             assert_eq!(actual_create.value(), expected_create.value(), "value mismatch");
-            assert_eq!(actual_create.init_code(), expected_create.init_code(), "init_code mismatch");
-            assert_eq!(actual_create.gas_limit(), expected_create.gas_limit(), "gas_limit mismatch");
+            assert_eq!(
+                actual_create.init_code(),
+                expected_create.init_code(),
+                "init_code mismatch"
+            );
+            assert_eq!(
+                actual_create.gas_limit(),
+                expected_create.gas_limit(),
+                "gas_limit mismatch"
+            );
         }
         (a, b) => assert_eq!(a, b, "next action mismatch"),
     }

@@ -12,14 +12,12 @@ extern crate tracing;
 
 use alloc::{boxed::Box, vec::Vec};
 use revm_interpreter::{
-    as_u64_saturated, as_usize_saturated, 
+    as_u64_saturated, as_usize_saturated,
     interpreter_types::{InputsTr, MemoryTr},
-    CallInput, CallInputs, CallScheme, CallValue, CreateInputs,
-    CreateScheme, InstructionResult, InterpreterAction, InterpreterResult,
+    CallInput, CallInputs, CallScheme, CallValue, CreateInputs, CreateScheme, InstructionResult,
+    InterpreterAction, InterpreterResult,
 };
-use revm_primitives::{
-    hardfork::SpecId, Address, Bytes, Log, LogData, KECCAK_EMPTY, U256,
-};
+use revm_primitives::{hardfork::SpecId, Address, Bytes, Log, LogData, KECCAK_EMPTY, U256};
 use revmc_context::{EvmContext, EvmWord};
 
 pub mod gas;
@@ -181,7 +179,10 @@ pub unsafe extern "C" fn __revmc_builtin_origin(ecx: &mut EvmContext<'_>, slot: 
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn __revmc_builtin_calldataload(ecx: &mut EvmContext<'_>, offset: &mut EvmWord) {
+pub unsafe extern "C" fn __revmc_builtin_calldataload(
+    ecx: &mut EvmContext<'_>,
+    offset: &mut EvmWord,
+) {
     let offset_usize = as_usize_saturated!(offset.to_u256());
     match ecx.input.input() {
         CallInput::Bytes(bytes) => {
@@ -333,24 +334,24 @@ pub unsafe extern "C" fn __revmc_builtin_blockhash(
 ) -> InstructionResult {
     let requested_number = number_ptr.to_u256();
     let block_number = ecx.host.block_number();
-    
+
     // Check if requested block is in the future
     let Some(diff) = block_number.checked_sub(requested_number) else {
         *number_ptr = EvmWord::ZERO;
         return InstructionResult::Stop;
     };
-    
+
     let diff = as_u64_saturated!(diff);
-    
+
     // Current block returns 0
     if diff == 0 {
         *number_ptr = EvmWord::ZERO;
         return InstructionResult::Stop;
     }
-    
+
     // BLOCK_HASH_HISTORY is 256
     const BLOCK_HASH_HISTORY: u64 = 256;
-    
+
     if diff <= BLOCK_HASH_HISTORY {
         let hash = try_host!(ecx.host.block_hash(as_u64_saturated!(requested_number)));
         *number_ptr = EvmWord::from_be_bytes(hash.0);
@@ -358,7 +359,7 @@ pub unsafe extern "C" fn __revmc_builtin_blockhash(
         // Too old, return 0
         *number_ptr = EvmWord::ZERO;
     }
-    
+
     InstructionResult::Stop
 }
 
@@ -615,15 +616,10 @@ pub unsafe extern "C" fn __revmc_builtin_create(
     }
     gas!(ecx, gas_limit);
 
-    *ecx.next_action = Some(InterpreterAction::NewFrame(
-        revm_interpreter::FrameInput::Create(Box::new(CreateInputs::new(
-            ecx.input.target_address,
-            scheme,
-            value.to_u256(),
-            code,
-            gas_limit,
-        ))),
-    ));
+    *ecx.next_action =
+        Some(InterpreterAction::NewFrame(revm_interpreter::FrameInput::Create(Box::new(
+            CreateInputs::new(ecx.input.target_address, scheme, value.to_u256(), code, gas_limit),
+        ))));
 
     InstructionResult::Stop
 }
@@ -708,8 +704,8 @@ pub unsafe extern "C" fn __revmc_builtin_call(
         gas_limit = gas_limit.saturating_add(gas::CALL_STIPEND);
     }
 
-    *ecx.next_action = Some(InterpreterAction::NewFrame(
-        revm_interpreter::FrameInput::Call(Box::new(CallInputs {
+    *ecx.next_action = Some(InterpreterAction::NewFrame(revm_interpreter::FrameInput::Call(
+        Box::new(CallInputs {
             input: CallInput::Bytes(input),
             return_memory_offset: out_offset..out_offset + out_len,
             gas_limit,
@@ -732,8 +728,8 @@ pub unsafe extern "C" fn __revmc_builtin_call(
             },
             scheme: call_kind.into(),
             is_static: ecx.is_static || call_kind == CallKind::StaticCall,
-        })),
-    ));
+        }),
+    )));
 
     InstructionResult::Stop
 }
@@ -790,8 +786,8 @@ pub unsafe extern "C" fn __revmc_builtin_ext_call(
     gas!(ecx, gas_limit);
 
     // Call host to interact with target contract
-    *ecx.next_action = Some(InterpreterAction::NewFrame(
-        revm_interpreter::FrameInput::Call(Box::new(CallInputs {
+    *ecx.next_action = Some(InterpreterAction::NewFrame(revm_interpreter::FrameInput::Call(
+        Box::new(CallInputs {
             input: CallInput::Bytes(input),
             gas_limit,
             target_address: if call_kind == ExtCallKind::DelegateCall {
@@ -814,8 +810,8 @@ pub unsafe extern "C" fn __revmc_builtin_ext_call(
             scheme: call_kind.into(),
             is_static: ecx.is_static || call_kind == ExtCallKind::StaticCall,
             return_memory_offset: 0..0,
-        })),
-    ));
+        }),
+    )));
     InstructionResult::Stop
 }
 
@@ -859,8 +855,6 @@ pub unsafe extern "C" fn __revmc_builtin_selfdestruct(
 
     InstructionResult::Stop
 }
-
-
 
 #[no_mangle]
 pub unsafe extern "C" fn __revmc_builtin_resize_memory(
