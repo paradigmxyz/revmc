@@ -3,9 +3,10 @@ use ruint::aliases::U256;
 use std::{fmt, path::Path};
 
 /// Target machine.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Target {
     /// The host machine.
+    #[default]
     Native,
     /// LLVM-style target triple.
     ///
@@ -18,12 +19,6 @@ pub enum Target {
         /// The target features string.
         features: Option<String>,
     },
-}
-
-impl Default for Target {
-    fn default() -> Self {
-        Self::Native
-    }
 }
 
 impl std::str::FromStr for Target {
