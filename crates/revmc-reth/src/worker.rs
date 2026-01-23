@@ -4,11 +4,15 @@ use crate::{cache::CompiledCache, detector::HotBytecode, RevmcConfig};
 use alloy_primitives::B256;
 use crossbeam_channel::{bounded, Receiver, Sender};
 use parking_lot::Mutex;
-use revmc::llvm::{inkwell::context::Context, EvmLlvmBackend};
-use revmc::{EvmCompiler, OptimizationLevel};
+use revmc::{
+    llvm::{inkwell::context::Context, EvmLlvmBackend},
+    EvmCompiler, OptimizationLevel,
+};
 use revmc_context::EvmCompilerFn;
-use std::sync::Arc;
-use std::thread::{self, JoinHandle};
+use std::{
+    sync::Arc,
+    thread::{self, JoinHandle},
+};
 use tracing::{debug, error, info, warn};
 
 /// Message sent to compilation workers.
