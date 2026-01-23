@@ -15,8 +15,8 @@
 
 use crate::llvm_string;
 use inkwell::{
-    context::ContextRef,
     llvm_sys::{
+        core::{LLVMContextCreate, LLVMModuleCreateWithNameInContext},
         error::*,
         orc2::{lljit::*, *},
         prelude::*,
@@ -59,13 +59,6 @@ impl ThreadSafeContext {
         self.ctx
     }
 
-    /// Get a reference to the wrapped LLVMContext.
-    pub fn get_context(&self) -> ContextRef<'_> {
-        let ptr = unsafe { LLVMOrcThreadSafeContextGetContext(self.as_inner()) };
-        // `ContextRef::new` is private.
-        unsafe { std::mem::transmute(ptr) }
-    }
-
     /// Create a ThreadSafeModule wrapper around the given LLVM module.
     pub fn create_module<'ctx>(&'ctx self, module: Module<'ctx>) -> ThreadSafeModule {
         ThreadSafeModule::create_in_context(module, self)
@@ -91,12 +84,26 @@ pub struct ThreadSafeModule {
     ptr: LLVMOrcThreadSafeModuleRef,
 }
 
+extern "C" {
+    fn LLVMOrcCreateNewThreadSafeContextFromLLVMContext(
+        Ctx: LLVMContextRef,
+    ) -> LLVMOrcThreadSafeContextRef;
+}
+
 impl ThreadSafeModule {
     /// Creates a new module with the given name in a new context.
-    pub fn create(name: &str) -> (Self, ThreadSafeContext) {
-        let cx = ThreadSafeContext::new();
-        let m = cx.get_context().create_module(name);
-        (Self::create_in_context(m, &cx), cx)
+    ///
+    /// Use [`Self::with_module`] to access and modify the module.
+    pub fn create(name: &str) -> Self {
+        let name_cstr = CString::new(name).unwrap();
+        unsafe {
+            let ctx = LLVMContextCreate();
+            let module = LLVMModuleCreateWithNameInContext(name_cstr.as_ptr(), ctx);
+            let tsc = LLVMOrcCreateNewThreadSafeContextFromLLVMContext(ctx);
+            let ptr = LLVMOrcCreateNewThreadSafeModule(module, tsc);
+            LLVMOrcDisposeThreadSafeContext(tsc);
+            Self { ptr }
+        }
     }
 
     /// Create a ThreadSafeModule wrapper around the given LLVM module.
@@ -695,8 +702,20 @@ impl<'mr> MaterializationResponsibilityRef<'mr> {
     /// Notifies the target JITDylib (and any pending queries on that JITDylib)
     /// that all symbols covered by this MaterializationResponsibility instance
     /// have been emitted.
-    pub fn notify_emitted(&self) -> Result<(), LLVMString> {
-        cvt(unsafe { LLVMOrcMaterializationResponsibilityNotifyEmitted(self.as_inner()) })
+    ///
+    /// `symbol_dep_groups` specifies the symbol dependency groups for this materialization unit.
+    /// Pass an empty slice if there are no dependencies.
+    pub fn notify_emitted(
+        &self,
+        symbol_dep_groups: &mut [LLVMOrcCSymbolDependenceGroup],
+    ) -> Result<(), LLVMString> {
+        cvt(unsafe {
+            LLVMOrcMaterializationResponsibilityNotifyEmitted(
+                self.as_inner(),
+                symbol_dep_groups.as_mut_ptr(),
+                symbol_dep_groups.len(),
+            )
+        })
     }
 
     /// Notify all not-yet-emitted covered by this MaterializationResponsibility instance that an
@@ -1517,10 +1536,10 @@ mod tests {
     #[test]
     #[ignore = "ci fails idk"]
     fn e2e() {
-        let (tsm, tscx) = ThreadSafeModule::create("test");
+        let tsm = ThreadSafeModule::create("test");
         let fn_name = "my_fn";
         tsm.with_module(|m| {
-            let cx = tscx.get_context();
+            let cx = m.get_context();
             let bcx = cx.create_builder();
             let ty = cx.i64_type().fn_type(&[], false);
 

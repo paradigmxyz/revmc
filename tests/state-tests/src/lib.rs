@@ -968,7 +968,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(target_arch = "x86_64")]
     fn test_simple_jit_execution() {
         // Simple bytecode: PUSH1 0x42, PUSH1 0x00, MSTORE, PUSH1 0x20, PUSH1 0x00, RETURN
         // Returns 0x42 in 32 bytes
@@ -1018,7 +1017,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(target_arch = "x86_64")]
     fn test_compile_multiple_bytecodes() {
         // Test that we can compile multiple different bytecodes
         let code1: &[u8] = &[0x60, 0x01, 0x60, 0x02, 0x01, 0x00]; // PUSH1 1, PUSH1 2, ADD, STOP
