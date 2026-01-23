@@ -1,0 +1,48 @@
+[package]
+name = "revmc-reth"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+categories.workspace = true
+keywords.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+description = "revmc integration for reth, OP-reth, and Tempo - hot contract JIT compilation"
+
+[lints]
+workspace = true
+
+[dependencies]
+# revmc
+revmc = { workspace = true, features = ["llvm"] }
+revmc-builtins.workspace = true
+revmc-context.workspace = true
+
+# revm
+revm.workspace = true
+revm-primitives.workspace = true
+revm-interpreter.workspace = true
+revm-bytecode.workspace = true
+
+# alloy
+alloy-primitives.workspace = true
+
+# async/sync
+parking_lot = "0.12"
+crossbeam-channel = "0.5"
+
+# caching
+lru = "0.12"
+
+# utils
+tracing.workspace = true
+rustc-hash.workspace = true
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+
+[features]
+default = []
