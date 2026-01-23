@@ -376,14 +376,22 @@ fn run_with_interpreter(
                 });
             }
             InterpreterAction::NewFrame(frame_input) => {
-                let (call_result, return_memory_offset) = match frame_input {
-                    FrameInput::Call(ref call_inputs) => {
+                let (call_result, return_memory_offset) = match &frame_input {
+                    FrameInput::Call(call_inputs) => {
                         let offset = call_inputs.return_memory_offset.clone();
-                        let result = execute_frame_interpreter(&mut ctx, frame_input, spec_id);
+                        // Create child memory context that shares the buffer
+                        let child_memory = interpreter.memory.new_child_context();
+                        let result =
+                            execute_frame_interpreter(&mut ctx, frame_input, spec_id, child_memory);
+                        // Free the child memory context
+                        interpreter.memory.free_child_context();
                         (result, Some(offset))
                     }
                     FrameInput::Create(_) => {
-                        let result = execute_frame_interpreter(&mut ctx, frame_input, spec_id);
+                        let child_memory = interpreter.memory.new_child_context();
+                        let result =
+                            execute_frame_interpreter(&mut ctx, frame_input, spec_id, child_memory);
+                        interpreter.memory.free_child_context();
                         (result, None)
                     }
                     FrameInput::Empty => {
@@ -446,6 +454,7 @@ fn execute_frame_interpreter<DB: revm::Database>(
     ctx: &mut Context<BlockEnv, TxEnv, CfgEnv, DB, Journal<DB>, ()>,
     frame_input: FrameInput,
     spec_id: SpecId,
+    memory: SharedMemory,
 ) -> InterpreterResult
 where
     DB::Error: std::fmt::Debug,
@@ -473,6 +482,7 @@ where
 
             let bytecode = Bytecode::new_legacy(code_bytes);
             let ext_bytecode = ExtBytecode::new(bytecode);
+
             let input = InputsImpl {
                 target_address: call_inputs.target_address,
                 bytecode_address: Some(call_inputs.bytecode_address),
@@ -485,7 +495,7 @@ where
             };
 
             let mut nested_interpreter = Interpreter::new(
-                SharedMemory::new(),
+                memory,
                 ext_bytecode,
                 input,
                 call_inputs.is_static,
@@ -506,14 +516,28 @@ where
                         };
                     }
                     InterpreterAction::NewFrame(inner_frame) => {
-                        let (inner_result, inner_return_offset) = match inner_frame {
-                            FrameInput::Call(ref inner_call) => {
+                        let (inner_result, inner_return_offset) = match &inner_frame {
+                            FrameInput::Call(inner_call) => {
                                 let offset = inner_call.return_memory_offset.clone();
-                                let result = execute_frame_interpreter(ctx, inner_frame, spec_id);
+                                let child_memory = nested_interpreter.memory.new_child_context();
+                                let result = execute_frame_interpreter(
+                                    ctx,
+                                    inner_frame,
+                                    spec_id,
+                                    child_memory,
+                                );
+                                nested_interpreter.memory.free_child_context();
                                 (result, Some(offset))
                             }
                             FrameInput::Create(_) => {
-                                let result = execute_frame_interpreter(ctx, inner_frame, spec_id);
+                                let child_memory = nested_interpreter.memory.new_child_context();
+                                let result = execute_frame_interpreter(
+                                    ctx,
+                                    inner_frame,
+                                    spec_id,
+                                    child_memory,
+                                );
+                                nested_interpreter.memory.free_child_context();
                                 (result, None)
                             }
                             FrameInput::Empty => {
