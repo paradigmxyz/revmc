@@ -3128,6 +3128,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "revmc-examples-reth-jit"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives 0.8.19",
+ "revm",
+ "revm-primitives",
+ "revmc-context",
+ "revmc-reth",
+ "tracing",
+ "tracing-subscriber 0.3.19",
+]
+
+[[package]]
 name = "revmc-examples-runner"
 version = "0.1.0"
 dependencies = [

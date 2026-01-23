@@ -1,0 +1,29 @@
+[package]
+name = "revmc-examples-reth-jit"
+publish = false
+
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+categories.workspace = true
+keywords.workspace = true
+repository.workspace = true
+exclude.workspace = true
+
+[[bin]]
+name = "reth-jit"
+path = "src/main.rs"
+
+[dependencies]
+revmc-reth.workspace = true
+revmc-context.workspace = true
+
+revm = { workspace = true, features = ["std"] }
+revm-primitives.workspace = true
+
+alloy-primitives.workspace = true
+
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
