@@ -62,10 +62,11 @@ paste = "1.0"
 
 [profile.release]
 opt-level = 3
-# LTO is disabled because it causes segfaults when using LLVM's JIT execution engine.
-# The crash occurs in LLVM's module/context cleanup during drop, likely due to
-# complex interactions between Rust's LTO and LLVM's internal data structures.
-lto = false
+# Use ThinLTO as a balance between optimization and stability.
+# Full LTO was causing segfaults in LLVM's JIT execution engine during cleanup.
+# ThinLTO provides most benefits with less risk. Builtin symbols are retained
+# via #[used] static array in revmc-builtins.
+lto = "thin"
 debug = "line-tables-only"
 strip = true
 panic = "abort"

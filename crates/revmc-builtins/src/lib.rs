@@ -788,11 +788,70 @@ pub unsafe extern "C" fn __revmc_builtin_mstore8(
     InstructionResult::Stop
 }
 
+/// Wrapper for function pointer to make it `Sync` for static storage.
+#[repr(transparent)]
+struct SyncFnPtr(*const ());
+
+// SAFETY: Function pointers are immutable and safe to share across threads.
+unsafe impl Sync for SyncFnPtr {}
+
+/// Static array of all builtin function pointers.
+///
+/// The `#[used]` attribute ensures LTO cannot eliminate these symbols, even under
+/// aggressive dead code elimination. This is critical for AOT mode where dynamically
+/// loaded code resolves these symbols from the host executable.
+#[used]
+static BUILTIN_FUNCTIONS: [SyncFnPtr; 43] = [
+    SyncFnPtr(__revmc_builtin_panic as *const ()),
+    SyncFnPtr(__revmc_builtin_addmod as *const ()),
+    SyncFnPtr(__revmc_builtin_mulmod as *const ()),
+    SyncFnPtr(__revmc_builtin_exp as *const ()),
+    SyncFnPtr(__revmc_builtin_keccak256 as *const ()),
+    SyncFnPtr(__revmc_builtin_balance as *const ()),
+    SyncFnPtr(__revmc_builtin_origin as *const ()),
+    SyncFnPtr(__revmc_builtin_calldataload as *const ()),
+    SyncFnPtr(__revmc_builtin_calldatasize as *const ()),
+    SyncFnPtr(__revmc_builtin_calldatacopy as *const ()),
+    SyncFnPtr(__revmc_builtin_codesize as *const ()),
+    SyncFnPtr(__revmc_builtin_codecopy as *const ()),
+    SyncFnPtr(__revmc_builtin_gas_price as *const ()),
+    SyncFnPtr(__revmc_builtin_extcodesize as *const ()),
+    SyncFnPtr(__revmc_builtin_extcodecopy as *const ()),
+    SyncFnPtr(__revmc_builtin_returndatacopy as *const ()),
+    SyncFnPtr(__revmc_builtin_extcodehash as *const ()),
+    SyncFnPtr(__revmc_builtin_blockhash as *const ()),
+    SyncFnPtr(__revmc_builtin_coinbase as *const ()),
+    SyncFnPtr(__revmc_builtin_timestamp as *const ()),
+    SyncFnPtr(__revmc_builtin_number as *const ()),
+    SyncFnPtr(__revmc_builtin_gaslimit as *const ()),
+    SyncFnPtr(__revmc_builtin_chainid as *const ()),
+    SyncFnPtr(__revmc_builtin_basefee as *const ()),
+    SyncFnPtr(__revmc_builtin_difficulty as *const ()),
+    SyncFnPtr(__revmc_builtin_self_balance as *const ()),
+    SyncFnPtr(__revmc_builtin_blob_hash as *const ()),
+    SyncFnPtr(__revmc_builtin_blob_base_fee as *const ()),
+    SyncFnPtr(__revmc_builtin_sload as *const ()),
+    SyncFnPtr(__revmc_builtin_sstore as *const ()),
+    SyncFnPtr(__revmc_builtin_msize as *const ()),
+    SyncFnPtr(__revmc_builtin_tstore as *const ()),
+    SyncFnPtr(__revmc_builtin_tload as *const ()),
+    SyncFnPtr(__revmc_builtin_mcopy as *const ()),
+    SyncFnPtr(__revmc_builtin_log as *const ()),
+    SyncFnPtr(__revmc_builtin_create as *const ()),
+    SyncFnPtr(__revmc_builtin_call as *const ()),
+    SyncFnPtr(__revmc_builtin_do_return as *const ()),
+    SyncFnPtr(__revmc_builtin_selfdestruct as *const ()),
+    SyncFnPtr(__revmc_builtin_resize_memory as *const ()),
+    SyncFnPtr(__revmc_builtin_mload as *const ()),
+    SyncFnPtr(__revmc_builtin_mstore as *const ()),
+    SyncFnPtr(__revmc_builtin_mstore8 as *const ()),
+];
+
 /// Force the linker to include all builtin symbols.
 ///
 /// This function should be called from binaries that need to export the builtins
-/// for dynamically loaded code (AOT mode). The function itself does nothing, but
-/// by taking references to all builtins, it prevents the linker from stripping them.
+/// for dynamically loaded code (AOT mode). The function references the `#[used]`
+/// static array to ensure the symbols are retained even under LTO.
 ///
 /// # Example
 ///
@@ -802,37 +861,8 @@ pub unsafe extern "C" fn __revmc_builtin_mstore8(
 /// ```
 #[inline(never)]
 pub fn force_link() {
-    // Create an array of function pointers to all builtins.
-    // The compiler/linker must keep these symbols because they're "used".
-    let _builtins: &[*const ()] = &[
-        __revmc_builtin_panic as *const (),
-        __revmc_builtin_addmod as *const (),
-        __revmc_builtin_mulmod as *const (),
-        __revmc_builtin_exp as *const (),
-        __revmc_builtin_keccak256 as *const (),
-        __revmc_builtin_balance as *const (),
-        __revmc_builtin_self_balance as *const (),
-        __revmc_builtin_extcodesize as *const (),
-        __revmc_builtin_extcodehash as *const (),
-        __revmc_builtin_extcodecopy as *const (),
-        __revmc_builtin_blockhash as *const (),
-        __revmc_builtin_sload as *const (),
-        __revmc_builtin_sstore as *const (),
-        __revmc_builtin_tload as *const (),
-        __revmc_builtin_tstore as *const (),
-        __revmc_builtin_log as *const (),
-        __revmc_builtin_selfdestruct as *const (),
-        __revmc_builtin_call as *const (),
-        __revmc_builtin_create as *const (),
-        __revmc_builtin_do_return as *const (),
-        __revmc_builtin_calldataload as *const (),
-        __revmc_builtin_calldatacopy as *const (),
-        __revmc_builtin_codecopy as *const (),
-        __revmc_builtin_returndatacopy as *const (),
-        __revmc_builtin_mload as *const (),
-        __revmc_builtin_mstore as *const (),
-        __revmc_builtin_mstore8 as *const (),
-    ];
-    // Use black_box to prevent the compiler from optimizing this away
-    core::hint::black_box(_builtins);
+    // Reference the static array to ensure it's not optimized away.
+    // The #[used] attribute on BUILTIN_FUNCTIONS already prevents LTO elimination,
+    // but this provides a call site that guarantees the symbols are linked.
+    core::hint::black_box(&BUILTIN_FUNCTIONS);
 }
