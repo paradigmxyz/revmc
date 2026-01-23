@@ -98,38 +98,39 @@ fn main() -> Result<()> {
     compiler.frame_pointers(true);
     compiler.debug_assertions(cli.debug_assertions);
 
-    let Bench { name, bytecode, calldata, stack_input, native: _, requires_storage: _ } = if cli.bench_name == "custom" {
-        Bench {
-            name: "custom",
-            bytecode: read_code(cli.code.as_deref(), cli.code_path.as_deref())?,
-            ..Default::default()
-        }
-    } else if Path::new(&cli.bench_name).exists() {
-        let path = Path::new(&cli.bench_name);
-        ensure!(path.is_file(), "argument must be a file");
-        ensure!(cli.code.is_none(), "--code is not allowed with a file argument");
-        ensure!(cli.code_path.is_none(), "--code-path is not allowed with a file argument");
-        Bench {
-            name: path.file_stem().unwrap().to_str().unwrap().to_string().leak(),
-            bytecode: read_code(None, Some(path))?,
-            ..Default::default()
-        }
-    } else {
-        match get_benches().into_iter().find(|b| b.name == cli.bench_name) {
-            Some(b) => b,
-            None => {
-                if cli.load.is_some() {
-                    Bench {
-                        name: cli.bench_name.clone().leak(),
-                        bytecode: Vec::new(),
-                        ..Default::default()
+    let Bench { name, bytecode, calldata, stack_input, native: _, requires_storage: _ } =
+        if cli.bench_name == "custom" {
+            Bench {
+                name: "custom",
+                bytecode: read_code(cli.code.as_deref(), cli.code_path.as_deref())?,
+                ..Default::default()
+            }
+        } else if Path::new(&cli.bench_name).exists() {
+            let path = Path::new(&cli.bench_name);
+            ensure!(path.is_file(), "argument must be a file");
+            ensure!(cli.code.is_none(), "--code is not allowed with a file argument");
+            ensure!(cli.code_path.is_none(), "--code-path is not allowed with a file argument");
+            Bench {
+                name: path.file_stem().unwrap().to_str().unwrap().to_string().leak(),
+                bytecode: read_code(None, Some(path))?,
+                ..Default::default()
+            }
+        } else {
+            match get_benches().into_iter().find(|b| b.name == cli.bench_name) {
+                Some(b) => b,
+                None => {
+                    if cli.load.is_some() {
+                        Bench {
+                            name: cli.bench_name.clone().leak(),
+                            bytecode: Vec::new(),
+                            ..Default::default()
+                        }
+                    } else {
+                        return Err(eyre!("unknown benchmark: {}", cli.bench_name));
                     }
-                } else {
-                    return Err(eyre!("unknown benchmark: {}", cli.bench_name));
                 }
             }
-        }
-    };
+        };
     compiler.set_module_name(name);
 
     let calldata: revmc::primitives::Bytes = if let Some(calldata) = cli.calldata {
