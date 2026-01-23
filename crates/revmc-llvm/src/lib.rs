@@ -1047,7 +1047,7 @@ impl Builder for EvmLlvmBuilder<'_, '_> {
         if tail_call != TailCallKind::None {
             callsite.set_tail_call_kind(convert_tail_call_kind(tail_call));
         }
-        callsite.try_as_basic_value().left()
+        callsite.try_as_basic_value().basic()
     }
 
     fn is_compile_time_known(&mut self, value: Self::Value) -> Option<Self::Value> {
@@ -1273,7 +1273,7 @@ fn convert_attribute(bcx: &EvmLlvmBuilder<'_, '_>, attr: revmc_backend::Attribut
         OurAttr::Speculatable => ("speculatable", AttrValue::Enum(1)),
 
         OurAttr::NoAlias => ("noalias", AttrValue::Enum(1)),
-        OurAttr::NoCapture => ("nocapture", AttrValue::Enum(1)),
+        OurAttr::NoCapture => ("captures", AttrValue::Enum(0)), // captures(none) - no capture
         OurAttr::NoUndef => ("noundef", AttrValue::Enum(1)),
         OurAttr::Align(n) => ("align", AttrValue::Enum(n)),
         OurAttr::NonNull => ("nonnull", AttrValue::Enum(1)),
