@@ -98,7 +98,7 @@ fn main() -> Result<()> {
     compiler.frame_pointers(true);
     compiler.debug_assertions(cli.debug_assertions);
 
-    let Bench { name, bytecode, calldata, stack_input, native: _ } = if cli.bench_name == "custom" {
+    let Bench { name, bytecode, calldata, stack_input, native: _, requires_storage: _ } = if cli.bench_name == "custom" {
         Bench {
             name: "custom",
             bytecode: read_code(cli.code.as_deref(), cli.code_path.as_deref())?,
