@@ -1029,10 +1029,17 @@ mod tests {
             .expect("Failed to create backend");
         let mut compiler = EvmCompiler::new(backend);
 
-        let fn1 = unsafe { compiler.jit("contract1", code1, SpecId::CANCUN) }
-            .expect("Failed to compile contract 1");
-        let fn2 = unsafe { compiler.jit("contract2", code2, SpecId::CANCUN) }
-            .expect("Failed to compile contract 2");
+        // Phase 1: Translate both contracts BEFORE finalization
+        let id1 = compiler
+            .translate("contract1", code1, SpecId::CANCUN)
+            .expect("Failed to translate contract 1");
+        let id2 = compiler
+            .translate("contract2", code2, SpecId::CANCUN)
+            .expect("Failed to translate contract 2");
+
+        // Phase 2: JIT both functions (first call finalizes the module)
+        let fn1 = unsafe { compiler.jit_function(id1) }.expect("Failed to JIT contract 1");
+        let fn2 = unsafe { compiler.jit_function(id2) }.expect("Failed to JIT contract 2");
 
         // Both functions should be valid (different addresses)
         assert_ne!(fn1.into_inner() as usize, fn2.into_inner() as usize);
