@@ -261,7 +261,6 @@ impl EvmCompilerFn {
             ecx.gas.spend_all();
         }
 
-        // Set in EXTCALL soft failure.
         let return_data_is_empty = ecx.return_data.is_empty();
 
         if return_data_is_empty {

@@ -17,7 +17,7 @@ use revm_interpreter::{
     CallInput, CallInputs, CallScheme, CallValue, CreateInputs, CreateScheme, InstructionResult,
     InterpreterAction, InterpreterResult,
 };
-use revm_primitives::{hardfork::SpecId, Address, Bytes, Log, LogData, KECCAK_EMPTY, U256};
+use revm_primitives::{hardfork::SpecId, Bytes, Log, LogData, KECCAK_EMPTY, U256};
 use revmc_context::{EvmContext, EvmWord};
 
 pub mod gas;
@@ -32,10 +32,6 @@ mod macros;
 
 mod utils;
 use utils::*;
-
-/// The result of a `EXT*CALL` instruction if the gas limit is less than `MIN_CALLEE_GAS`.
-// NOTE: This is just a random value that cannot happen normally.
-pub const EXTCALL_LIGHT_FAILURE: InstructionResult = InstructionResult::PrecompileError;
 
 /// The kind of a `*CALL*` instruction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -58,29 +54,6 @@ impl From<CallKind> for CallScheme {
             CallKind::CallCode => Self::CallCode,
             CallKind::DelegateCall => Self::DelegateCall,
             CallKind::StaticCall => Self::StaticCall,
-        }
-    }
-}
-
-/// The kind of a `EXT*CALL` instruction.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(u8)]
-pub enum ExtCallKind {
-    /// `EXTCALL`.
-    Call,
-    /// `EXTDELEGATECALL`.
-    DelegateCall,
-    /// `EXTSTATICCALL`.
-    StaticCall,
-}
-
-impl From<ExtCallKind> for CallScheme {
-    fn from(kind: ExtCallKind) -> Self {
-        // ExtCall variants map to regular call schemes in revm v34
-        match kind {
-            ExtCallKind::Call => Self::Call,
-            ExtCallKind::DelegateCall => Self::DelegateCall,
-            ExtCallKind::StaticCall => Self::StaticCall,
         }
     }
 }
@@ -184,20 +157,26 @@ pub unsafe extern "C" fn __revmc_builtin_calldataload(
     offset: &mut EvmWord,
 ) {
     let offset_usize = as_usize_saturated!(offset.to_u256());
+    let mut word = [0u8; 32];
+
     match ecx.input.input() {
         CallInput::Bytes(bytes) => {
-            let mut word = [0u8; 32];
             let len = bytes.len().saturating_sub(offset_usize).min(32);
             if len > 0 && offset_usize < bytes.len() {
                 word[..len].copy_from_slice(&bytes[offset_usize..offset_usize + len]);
             }
-            *offset = EvmWord::from_be_bytes(word);
         }
-        CallInput::SharedBuffer(_range) => {
-            // SharedBuffer requires access to LocalContext which we don't have
-            *offset = EvmWord::ZERO;
+        CallInput::SharedBuffer(range) => {
+            let input_slice = ecx.memory.global_slice(range.clone());
+            let input_len = input_slice.len();
+            if offset_usize < input_len {
+                let count = 32.min(input_len - offset_usize);
+                word[..count].copy_from_slice(&input_slice[offset_usize..offset_usize + count]);
+            }
         }
     }
+
+    *offset = EvmWord::from_be_bytes(word);
 }
 
 #[no_mangle]
@@ -208,23 +187,28 @@ pub unsafe extern "C" fn __revmc_builtin_calldatasize(ecx: &mut EvmContext<'_>) 
     }
 }
 
-// TODO: CallInput is now an enum (Bytes or SharedBuffer), needs proper handling
 #[no_mangle]
 pub unsafe extern "C" fn __revmc_builtin_calldatacopy(
     ecx: &mut EvmContext<'_>,
-    sp: &mut [EvmWord; 3],
+    rev![memory_offset, data_offset, len]: &mut [EvmWord; 3],
 ) -> InstructionResult {
-    match ecx.input.input() {
-        CallInput::Bytes(bytes) => {
-            let data = decouple_lt(&bytes[..]);
-            copy_operation(ecx, sp, data)
-        }
-        CallInput::SharedBuffer(_range) => {
-            // SharedBuffer requires access to LocalContext which we don't have
-            // For now, treat as empty
-            copy_operation(ecx, sp, &[])
+    let len = try_into_usize!(len);
+    if len != 0 {
+        gas_opt!(ecx, gas::dyn_verylowcopy_cost(len as u64));
+        let memory_offset = try_into_usize!(memory_offset);
+        ensure_memory!(ecx, memory_offset, len);
+        let data_offset = as_usize_saturated!(data_offset.to_u256());
+
+        match ecx.input.input() {
+            CallInput::Bytes(bytes) => {
+                ecx.memory.set_data(memory_offset, data_offset, len, bytes.as_ref());
+            }
+            CallInput::SharedBuffer(range) => {
+                ecx.memory.set_data_from_global(memory_offset, data_offset, len, range.clone());
+            }
         }
     }
+    InstructionResult::Stop
 }
 
 #[no_mangle]
@@ -535,34 +519,6 @@ pub unsafe extern "C" fn __revmc_builtin_log(
     InstructionResult::Stop
 }
 
-// TODO: EOF data access needs to be updated for revm v34
-pub unsafe extern "C" fn __revmc_builtin_data_load(_ecx: &mut EvmContext<'_>, slot: &mut EvmWord) {
-    // EOF bytecode data access is not currently supported
-    *slot = EvmWord::ZERO;
-}
-
-// TODO: EOF data access needs to be updated for revm v34
-pub unsafe extern "C" fn __revmc_builtin_data_copy(
-    _ecx: &mut EvmContext<'_>,
-    _sp: &mut [EvmWord; 3],
-) -> InstructionResult {
-    // EOF bytecode data access is not currently supported
-    InstructionResult::NotActivated
-}
-
-pub unsafe extern "C" fn __revmc_builtin_returndataload(
-    ecx: &mut EvmContext<'_>,
-    slot: &mut EvmWord,
-) {
-    let offset = as_usize_saturated!(slot.to_u256());
-    let mut output = [0u8; 32];
-    if let Some(available) = ecx.return_data.len().checked_sub(offset) {
-        let copy_len = available.min(32);
-        output[..copy_len].copy_from_slice(&ecx.return_data[offset..offset + copy_len]);
-    }
-    *slot = EvmWord::from_be_bytes(output);
-}
-
 // NOTE: Return `InstructionResult::Stop` here to indicate success, not the final result of
 // the execution.
 
@@ -731,87 +687,6 @@ pub unsafe extern "C" fn __revmc_builtin_call(
         }),
     )));
 
-    InstructionResult::Stop
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn __revmc_builtin_ext_call(
-    ecx: &mut EvmContext<'_>,
-    sp: *mut EvmWord,
-    call_kind: ExtCallKind,
-    spec_id: SpecId,
-) -> InstructionResult {
-    let (target_address, in_offset, in_len, value) = if call_kind == ExtCallKind::Call {
-        let rev![target_address, in_offset, in_len, value] = &mut *sp.cast::<[EvmWord; 4]>();
-        (target_address, in_offset, in_len, value.to_u256())
-    } else {
-        let rev![target_address, in_offset, in_len] = &mut *sp.cast::<[EvmWord; 3]>();
-        (target_address, in_offset, in_len, U256::ZERO)
-    };
-
-    let target_address_bytes = target_address.to_be_bytes();
-    let (pad, target_address) = target_address_bytes.split_last_chunk::<20>().unwrap();
-    if !pad.iter().all(|i| *i == 0) {
-        // Invalid EXTCALL target - address has non-zero padding bytes
-        return InstructionResult::Revert;
-    }
-    let target_address = Address::new(*target_address);
-
-    let in_len = try_into_usize!(in_len);
-    let input = if in_len != 0 {
-        let in_offset = try_into_usize!(in_offset);
-        ensure_memory!(ecx, in_offset, in_len);
-        Bytes::copy_from_slice(&ecx.memory.slice(in_offset..in_offset + in_len))
-    } else {
-        Bytes::new()
-    };
-
-    let transfers_value = value != U256::ZERO;
-    if ecx.is_static && transfers_value {
-        return InstructionResult::CallNotAllowedInsideStatic;
-    }
-
-    let Some(account_load) = ecx.host.load_account_delegated(target_address) else {
-        return InstructionResult::FatalExternalError;
-    };
-    let call_cost = gas::call_cost(spec_id, transfers_value, account_load);
-    gas!(ecx, call_cost);
-
-    let gas_reduce = core::cmp::max(ecx.gas.remaining() / 64, 5000);
-    let gas_limit = ecx.gas.remaining().saturating_sub(gas_reduce);
-    if gas_limit < gas::MIN_CALLEE_GAS {
-        ecx.return_data = &[];
-        return EXTCALL_LIGHT_FAILURE;
-    }
-    gas!(ecx, gas_limit);
-
-    // Call host to interact with target contract
-    *ecx.next_action = Some(InterpreterAction::NewFrame(revm_interpreter::FrameInput::Call(
-        Box::new(CallInputs {
-            input: CallInput::Bytes(input),
-            gas_limit,
-            target_address: if call_kind == ExtCallKind::DelegateCall {
-                ecx.input.target_address
-            } else {
-                target_address
-            },
-            caller: if call_kind == ExtCallKind::DelegateCall {
-                ecx.input.caller_address
-            } else {
-                ecx.input.target_address
-            },
-            bytecode_address: target_address,
-            known_bytecode: None,
-            value: if call_kind == ExtCallKind::DelegateCall {
-                CallValue::Apparent(ecx.input.call_value)
-            } else {
-                CallValue::Transfer(value)
-            },
-            scheme: call_kind.into(),
-            is_static: ecx.is_static || call_kind == ExtCallKind::StaticCall,
-            return_memory_offset: 0..0,
-        }),
-    )));
     InstructionResult::Stop
 }
 

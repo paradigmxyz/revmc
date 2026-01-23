@@ -90,8 +90,3 @@ pub(crate) unsafe fn copy_operation(
     }
     InstructionResult::Stop
 }
-
-#[inline(always)]
-pub(crate) const unsafe fn decouple_lt<'b, T: ?Sized>(x: &T) -> &'b T {
-    core::mem::transmute(x)
-}

@@ -153,9 +153,6 @@ impl fmt::Display for Opcode<'_> {
 }
 
 /// Returns the length of the immediate data for the given opcode, or `0` if none.
-///
-/// This is the full length for all opcodes that have an immediate, except for `RJUMPV`, which
-/// currently is the only opcode which has a variable length immediate.
 #[inline]
 pub const fn min_imm_len(op: u8) -> u8 {
     if let Some(info) = &OPCODE_INFO[op as usize] {

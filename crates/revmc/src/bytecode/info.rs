@@ -333,13 +333,6 @@ const fn make_map(spec_id: SpecId) -> [OpcodeInfo; 256] {
         // 0xCD
         // 0xCE
         // 0xCF
-        // EOF opcodes removed in revm v34:
-        // DATALOAD, DATALOADN, DATASIZE, DATACOPY (0xD0-0xD3)
-        // RJUMP, RJUMPI, RJUMPV, CALLF, RETF, JUMPF (0xE0-0xE5)
-        // DUPN, SWAPN, EXCHANGE (0xE6-0xE8)
-        // EOFCREATE, RETURNCONTRACT (0xEC, 0xEE)
-        // RETURNDATALOAD, EXTCALL, EXTDELEGATECALL, EXTSTATICCALL (0xF7-0xFB)
-        // 0xEF
         CREATE          = DYNAMIC;
         CALL            = DYNAMIC;
         CALLCODE        = DYNAMIC;
