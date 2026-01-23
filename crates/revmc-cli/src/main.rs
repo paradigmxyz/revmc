@@ -240,13 +240,11 @@ fn main() -> Result<()> {
             // The JIT code may not set an action (e.g., for STOP), so we need to handle that.
             // If action is None, create a default action based on the return result.
             let action = ecx.next_action.take().unwrap_or_else(|| {
-                revm_interpreter::InterpreterAction::Return(
-                    revm_interpreter::InterpreterResult {
-                        result: r,
-                        output: revm_primitives::Bytes::new(),
-                        gas: *ecx.gas,
-                    },
-                )
+                revm_interpreter::InterpreterAction::Return(revm_interpreter::InterpreterResult {
+                    result: r,
+                    output: revm_primitives::Bytes::new(),
+                    gas: *ecx.gas,
+                })
             });
             (r, action)
         }
