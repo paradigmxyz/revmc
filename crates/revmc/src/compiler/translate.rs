@@ -759,6 +759,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 let zero = self.bcx.iconst_256(U256::ZERO);
                 self.bcx.select(is_negative, max, zero)
             }),
+            op::CLZ => unop!(clz),
 
             op::KECCAK256 => {
                 let sp = self.sp_after_inputs();

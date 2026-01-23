@@ -1,6 +1,6 @@
 //! Gas calculation utilities.
 
-use revm_interpreter::{SStoreResult, SelfDestructResult, StateLoad};
+use revm_interpreter::{SStoreResult, StateLoad};
 use revm_primitives::{hardfork::SpecId, U256};
 
 pub use revm_context_interface::journaled_state::AccountLoad;
@@ -226,31 +226,6 @@ pub fn create2_cost(len: u64) -> Option<u64> {
 pub const fn initcode_cost(len: u64) -> u64 {
     let words = len.div_ceil(32);
     words.saturating_mul(INITCODE_WORD_COST)
-}
-
-/// Calculate SELFDESTRUCT gas cost.
-#[inline]
-pub fn selfdestruct_cost(spec_id: SpecId, result: StateLoad<SelfDestructResult>) -> u64 {
-    let mut gas = if spec_id.is_enabled_in(SpecId::BERLIN) {
-        if result.is_cold {
-            COLD_ACCOUNT_ACCESS_COST
-        } else {
-            0
-        }
-    } else if spec_id.is_enabled_in(SpecId::TANGERINE) {
-        5000
-    } else {
-        0
-    };
-
-    if spec_id.is_enabled_in(SpecId::TANGERINE)
-        && result.data.had_value
-        && result.data.target_exists
-    {
-        gas += NEWACCOUNT;
-    }
-
-    gas
 }
 
 // These are overridden to only account for the dynamic cost.

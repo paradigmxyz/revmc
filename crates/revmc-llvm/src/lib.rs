@@ -962,6 +962,15 @@ impl Builder for EvmLlvmBuilder<'_, '_> {
         self.bcx.build_not(value.into_int_value(), "").unwrap().into()
     }
 
+    fn clz(&mut self, value: Self::Value) -> Self::Value {
+        let ty = value.get_type();
+        let i1_ty = self.type_int(1);
+        let name = format!("llvm.ctlz.{}", fmt_ty(ty));
+        let ctlz = self.get_or_add_function(&name, |this| this.fn_type(Some(ty), &[ty, i1_ty]));
+        let is_poison_on_zero = self.bool_const(false);
+        self.call(ctlz, &[value, is_poison_on_zero]).unwrap()
+    }
+
     fn bitor_imm(&mut self, lhs: Self::Value, rhs: i64) -> Self::Value {
         let rhs = self.iconst(lhs.get_type(), rhs);
         self.bitor(lhs, rhs)

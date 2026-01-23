@@ -286,13 +286,17 @@ impl Default for TestHost {
 
 impl TestHost {
     pub fn new() -> Self {
+        Self::with_spec(DEF_SPEC)
+    }
+
+    pub fn with_spec(spec_id: SpecId) -> Self {
         Self {
             storage: def_storage().clone(),
             transient_storage: HashMap::default(),
             code_map: def_codemap(),
             selfdestructs: Vec::new(),
             logs: Vec::new(),
-            gas_params: GasParams::new_spec(DEF_SPEC),
+            gas_params: GasParams::new_spec(spec_id),
         }
     }
 }
@@ -550,7 +554,7 @@ fn run_compiled_test_case(test_case: &TestCase<'_>, f: EvmCompilerFn) {
             revm_interpreter::interpreter::EthInterpreter,
             TestHost,
         >(spec_id);
-        let mut int_host = TestHost::new();
+        let mut int_host = TestHost::with_spec(spec_id);
         let interpreter_action = interpreter.run_plain(&table, &mut int_host);
 
         let int_result = match &interpreter_action {
@@ -561,22 +565,37 @@ fn run_compiled_test_case(test_case: &TestCase<'_>, f: EvmCompilerFn) {
         let mut expected_return = expected_return;
         if expected_return == RETURN_WHAT_INTERPRETER_SAYS {
             expected_return = int_result;
-        } else {
+        } else if modify_ecx.is_none() {
+            // Only check interpreter return if modify_ecx is not set.
+            // When modify_ecx is used, it only modifies the JIT context, not the interpreter's
+            // input, so the interpreter may return a different result.
             assert_eq!(int_result, expected_return, "interpreter return value mismatch");
         }
 
+        // When modify_ecx is set, the interpreter runs with different inputs than the JIT,
+        // so we cannot use interpreter results as expected values or compare against them.
+        let skip_interpreter_checks = modify_ecx.is_some();
+
         let mut expected_stack = expected_stack;
         if expected_stack == STACK_WHAT_INTERPRETER_SAYS {
-            expected_stack = interpreter.stack.data();
-        } else {
+            if skip_interpreter_checks {
+                expected_stack = &[]; // Will skip comparison below
+            } else {
+                expected_stack = interpreter.stack.data();
+            }
+        } else if !skip_interpreter_checks {
             assert_eq!(interpreter.stack.data(), expected_stack, "interpreter stack mismatch");
         }
 
         let interpreter_memory = interpreter.memory.context_memory();
         let mut expected_memory = expected_memory;
         if expected_memory == MEMORY_WHAT_INTERPRETER_SAYS {
-            expected_memory = &*interpreter_memory;
-        } else {
+            if skip_interpreter_checks {
+                expected_memory = &[]; // Will skip comparison below
+            } else {
+                expected_memory = &*interpreter_memory;
+            }
+        } else if !skip_interpreter_checks {
             assert_eq!(
                 MemDisplay(&interpreter_memory),
                 MemDisplay(expected_memory),
@@ -586,10 +605,22 @@ fn run_compiled_test_case(test_case: &TestCase<'_>, f: EvmCompilerFn) {
 
         let mut expected_gas = expected_gas;
         if expected_gas == GAS_WHAT_INTERPRETER_SAYS {
-            expected_gas = interpreter.gas.spent();
-        } else {
+            if skip_interpreter_checks {
+                expected_gas = 0; // Will skip comparison below
+            } else {
+                expected_gas = interpreter.gas.spent();
+            }
+        } else if !skip_interpreter_checks {
             assert_eq!(interpreter.gas.spent(), expected_gas, "interpreter gas mismatch");
         }
+
+        // Track whether we should skip JIT stack/gas/memory comparisons
+        let skip_jit_stack =
+            skip_interpreter_checks && test_case.expected_stack == STACK_WHAT_INTERPRETER_SAYS;
+        let skip_jit_memory =
+            skip_interpreter_checks && test_case.expected_memory == MEMORY_WHAT_INTERPRETER_SAYS;
+        let skip_jit_gas =
+            skip_interpreter_checks && test_case.expected_gas == GAS_WHAT_INTERPRETER_SAYS;
 
         // This is what the interpreter returns when the internal action is None in `run`.
         let default_action = InterpreterAction::Return(InterpreterResult {
@@ -600,8 +631,10 @@ fn run_compiled_test_case(test_case: &TestCase<'_>, f: EvmCompilerFn) {
         let mut expected_next_action = expected_next_action;
         if *expected_next_action == ACTION_WHAT_INTERPRETER_SAYS {
             expected_next_action = &interpreter_action;
-        } else {
-            // Check if expected is the "none" equivalent (return with default output)
+        } else if modify_ecx.is_none() {
+            // Only check interpreter action if modify_ecx is not set.
+            // When modify_ecx is used, it only modifies the JIT context, not the interpreter's
+            // input, so the interpreter may return a different action.
             assert_actions(&interpreter_action, expected_next_action);
         }
 
@@ -633,15 +666,21 @@ fn run_compiled_test_case(test_case: &TestCase<'_>, f: EvmCompilerFn) {
         // On EVM halt all available gas is consumed, so resulting stack, memory, and gas do not
         // matter. We do less work than the interpreter by bailing out earlier due to sections.
         if !actual_return.is_error() {
-            assert_eq!(actual_stack, *expected_stack, "stack mismatch");
+            if !skip_jit_stack {
+                assert_eq!(actual_stack, *expected_stack, "stack mismatch");
+            }
 
-            assert_eq!(
-                MemDisplay(&ecx.memory.context_memory()),
-                MemDisplay(expected_memory),
-                "interpreter memory mismatch"
-            );
+            if !skip_jit_memory {
+                assert_eq!(
+                    MemDisplay(&ecx.memory.context_memory()),
+                    MemDisplay(expected_memory),
+                    "memory mismatch"
+                );
+            }
 
-            assert_eq!(ecx.gas.spent(), expected_gas, "gas mismatch");
+            if !skip_jit_gas {
+                assert_eq!(ecx.gas.spent(), expected_gas, "gas mismatch");
+            }
         }
 
         let actual_next_action = match ecx.next_action.as_ref() {

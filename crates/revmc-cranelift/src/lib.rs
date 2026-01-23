@@ -675,6 +675,10 @@ impl<'a> Builder for EvmCraneliftBuilder<'a> {
         self.bcx.ins().bnot(value)
     }
 
+    fn clz(&mut self, value: Self::Value) -> Self::Value {
+        self.bcx.ins().clz(value)
+    }
+
     fn bitor_imm(&mut self, lhs: Self::Value, rhs: i64) -> Self::Value {
         self.bcx.ins().bor_imm(lhs, rhs)
     }
@@ -884,10 +888,14 @@ impl ModuleWrapper {
     }
 
     fn new_jit(opt_level: OptimizationLevel, symbols: Symbols) -> Result<Self> {
-        let mut builder = JITBuilder::with_flags(
-            &[("opt_level", opt_level_flag(opt_level))],
-            cranelift_module::default_libcall_names(),
-        )?;
+        // Build a custom ISA with is_pic=false to avoid PLT which isn't supported on ARM64
+        let mut flag_builder = settings::builder();
+        flag_builder.set("opt_level", opt_level_flag(opt_level))?;
+        flag_builder.set("is_pic", "false")?;
+        let isa_builder = cranelift_native::builder().map_err(|s| eyre!(s))?;
+        let isa = isa_builder.finish(settings::Flags::new(flag_builder))?;
+
+        let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
         builder.symbol_lookup_fn(Box::new(move |s| symbols.get(s)));
         Ok(Self::Jit(JITModule::new(builder)))
     }

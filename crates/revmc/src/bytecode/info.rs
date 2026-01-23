@@ -150,7 +150,7 @@ const fn make_map(spec_id: SpecId) -> [OpcodeInfo; 256] {
         SHL    = 3, if CONSTANTINOPLE;
         SHR    = 3, if CONSTANTINOPLE;
         SAR    = 3, if CONSTANTINOPLE;
-        // 0x1E
+        CLZ    = 5, if OSAKA;
         // 0x1F
         KECCAK256 = 30 | DYNAMIC; // [2]
         // 0x21
@@ -364,4 +364,46 @@ const fn log_cost(n: u8) -> u16 {
     let cost = LOG_BASE + (n as u64 * LOGTOPIC);
     assert!(cost <= u16::MAX as u64);
     cost as u16
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_clz_flags() {
+        let arrow_glacier = op_info_map(SpecId::ARROW_GLACIER);
+        let cancun = op_info_map(SpecId::CANCUN);
+        let osaka = op_info_map(SpecId::OSAKA);
+
+        let clz_ag = arrow_glacier[op::CLZ as usize];
+        let clz_cancun = cancun[op::CLZ as usize];
+        let clz_osaka = osaka[op::CLZ as usize];
+
+        eprintln!(
+            "CLZ on ARROW_GLACIER: is_unknown={}, is_disabled={}, raw={:#06x}",
+            clz_ag.is_unknown(),
+            clz_ag.is_disabled(),
+            clz_ag.0
+        );
+        eprintln!(
+            "CLZ on CANCUN: is_unknown={}, is_disabled={}, raw={:#06x}",
+            clz_cancun.is_unknown(),
+            clz_cancun.is_disabled(),
+            clz_cancun.0
+        );
+        eprintln!(
+            "CLZ on OSAKA: is_unknown={}, is_disabled={}, raw={:#06x}",
+            clz_osaka.is_unknown(),
+            clz_osaka.is_disabled(),
+            clz_osaka.0
+        );
+
+        assert!(!clz_ag.is_unknown(), "CLZ should not be unknown on pre-OSAKA");
+        assert!(clz_ag.is_disabled(), "CLZ should be disabled on ARROW_GLACIER");
+        assert!(!clz_cancun.is_unknown(), "CLZ should not be unknown on pre-OSAKA");
+        assert!(clz_cancun.is_disabled(), "CLZ should be disabled on CANCUN");
+        assert!(!clz_osaka.is_unknown(), "CLZ should not be unknown on OSAKA");
+        assert!(!clz_osaka.is_disabled(), "CLZ should not be disabled on OSAKA");
+    }
 }

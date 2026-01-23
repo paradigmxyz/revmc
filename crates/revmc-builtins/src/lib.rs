@@ -842,18 +842,30 @@ pub unsafe extern "C" fn __revmc_builtin_selfdestruct(
 ) -> InstructionResult {
     ensure_non_staticcall!(ecx);
 
+    // EIP-150: SELFDESTRUCT base cost is 5000 starting from TANGERINE
+    if spec_id.is_enabled_in(SpecId::TANGERINE) {
+        gas!(ecx, 5000);
+    }
+
     let res = match ecx.host.selfdestruct(ecx.input.target_address, target.to_address(), false) {
         Ok(r) => r,
         Err(_) => return InstructionResult::FatalExternalError,
     };
 
-    // EIP-3529: Reduction in refunds
-    if !spec_id.is_enabled_in(SpecId::LONDON) && !res.data.previously_destroyed {
-        ecx.gas.record_refund(gas::SELFDESTRUCT);
-    }
-    gas!(ecx, gas::selfdestruct_cost(spec_id, res));
+    // EIP-161: State trie clearing (invariant-preserving alternative)
+    let should_charge_topup = if spec_id.is_enabled_in(SpecId::SPURIOUS_DRAGON) {
+        res.data.had_value && !res.data.target_exists
+    } else {
+        !res.data.target_exists
+    };
 
-    InstructionResult::Stop
+    gas!(ecx, ecx.host.gas_params().selfdestruct_cost(should_charge_topup, res.is_cold));
+
+    if !res.data.previously_destroyed {
+        ecx.gas.record_refund(ecx.host.gas_params().selfdestruct_refund());
+    }
+
+    InstructionResult::SelfDestruct
 }
 
 #[no_mangle]
