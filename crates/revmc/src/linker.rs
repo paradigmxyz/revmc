@@ -1,4 +1,19 @@
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::OnceLock,
+};
+
+/// Check if lld is available in PATH.
+fn lld_available() -> bool {
+    static AVAILABLE: OnceLock<bool> = OnceLock::new();
+    *AVAILABLE.get_or_init(|| {
+        std::process::Command::new("ld.lld")
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    })
+}
 
 /// EVM bytecode compiler linker.
 #[derive(Debug)]
@@ -63,7 +78,7 @@ impl Linker {
         cmd.arg("-O3");
         if let Some(linker) = &self.linker {
             cmd.arg(format!("-fuse-ld={}", linker.display()));
-        } else if !cfg!(target_vendor = "apple") {
+        } else if !cfg!(target_vendor = "apple") && lld_available() {
             cmd.arg("-fuse-ld=lld");
         }
         if cfg!(target_vendor = "apple") {
