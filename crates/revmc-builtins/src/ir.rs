@@ -263,4 +263,7 @@ builtins! {
     SelfDestruct   = __revmc_builtin_selfdestruct(@[ecx] ptr, @[sp] ptr, u8) Some(u8),
 
     ResizeMemory   = __revmc_builtin_resize_memory(@[ecx] ptr, usize) Some(u8),
+    Mload          = __revmc_builtin_mload(@[ecx] ptr, @[sp] ptr) Some(u8),
+    Mstore         = __revmc_builtin_mstore(@[ecx] ptr, @[sp] ptr) Some(u8),
+    Mstore8        = __revmc_builtin_mstore8(@[ecx] ptr, @[sp] ptr) Some(u8),
 }

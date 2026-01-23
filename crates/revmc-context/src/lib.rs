@@ -776,6 +776,6 @@ mod tests {
     fn extern_macro() {
         let _f1 = EvmCompilerFn::new(test_fn);
         let _f2 = EvmCompilerFn::new(__test_fn);
-        assert_eq!(test_fn as usize, __test_fn as usize);
+        assert_eq!(test_fn as *const () as usize, __test_fn as *const () as usize);
     }
 }

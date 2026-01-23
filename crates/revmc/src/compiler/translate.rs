@@ -891,18 +891,16 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
             op::POP => { /* Already handled in stack_io */ }
             op::MLOAD => {
-                let offset = self.pop();
-                let value = self.call_mload(offset);
-                self.push(value);
+                let sp = self.sp_after_inputs();
+                self.call_fallible_builtin(Builtin::Mload, &[self.ecx, sp]);
             }
             op::MSTORE => {
-                let [offset, value] = self.popn();
-                self.call_mstore(offset, value);
+                let sp = self.sp_after_inputs();
+                self.call_fallible_builtin(Builtin::Mstore, &[self.ecx, sp]);
             }
             op::MSTORE8 => {
-                let [offset, value] = self.popn();
-                let value = self.bcx.ireduce(self.i8_type, value);
-                self.call_mstore8(offset, value);
+                let sp = self.sp_after_inputs();
+                self.call_fallible_builtin(Builtin::Mstore8, &[self.ecx, sp]);
             }
             op::SLOAD => {
                 let sp = self.sp_after_inputs();
@@ -1394,11 +1392,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         }
     }
 
-    fn const_continue(&mut self) -> B::Value {
-        // Use Stop as the "continue" equivalent - means no error/action
-        self.bcx.iconst(self.i8_type, InstructionResult::Stop as i64)
-    }
-
     fn add_invalid_jump(&mut self) {
         self.incoming_returns.push((
             self.bcx.iconst(self.i8_type, InstructionResult::InvalidJump as i64),
@@ -1604,162 +1597,6 @@ impl<B: Backend> FunctionCx<'_, B> {
         self.bcx.ret(&[r]);
     }
 
-    fn call_mload(&mut self, offset: B::Value) -> B::Value {
-        let out_slot = self.bcx.new_stack_slot(self.word_type, "mload.out.slot");
-        let out_addr = out_slot.addr(&mut self.bcx);
-        self.call_mem_op(offset, out_addr, MemOpKind::Load);
-        out_slot.load(&mut self.bcx, "mload.out")
-    }
-
-    fn call_mstore(&mut self, offset: B::Value, value: B::Value) {
-        self.call_mem_op(offset, value, MemOpKind::Store);
-    }
-
-    fn call_mstore8(&mut self, offset: B::Value, value: B::Value) {
-        self.call_mem_op(offset, value, MemOpKind::Store8);
-    }
-
-    fn call_mem_op(&mut self, offset: B::Value, value: B::Value, kind: MemOpKind) {
-        let name = match kind {
-            MemOpKind::Load => "mload",
-            MemOpKind::Store => "mstore",
-            MemOpKind::Store8 => "mstore8",
-        };
-        let value_ty = match kind {
-            MemOpKind::Load => self.ptr_type,
-            MemOpKind::Store => self.word_type,
-            MemOpKind::Store8 => self.i8_type,
-        };
-        let ret = self
-            .call_ir_builtin(
-                name,
-                &[offset, value, self.ecx],
-                &[self.word_type, value_ty, self.ptr_type],
-                Some(self.i8_type),
-                |this| this.build_mem_op(kind),
-            )
-            .expect("memory builtin returns a value");
-        self.build_check_instruction_result(ret);
-    }
-
-    /// Builds:
-    /// - `Load` => `fn mload(offset: u256, out: ptr, ecx: ptr) -> InstructionResult`
-    /// - `Store` => `fn mstore(offset: u256, value: u256, ecx: ptr) -> InstructionResult`
-    /// - `Store8` => `fn mstore(offset: u256, value: u8, ecx: ptr) -> InstructionResult`
-    fn build_mem_op(&mut self, kind: MemOpKind) {
-        let is_load = matches!(kind, MemOpKind::Load);
-        let ptr_args = if is_load { &[1, 2][..] } else { &[2][..] };
-        for &ptr_arg in ptr_args {
-            for attr in default_attrs::for_ref() {
-                self.bcx.add_function_attribute(
-                    None,
-                    attr,
-                    FunctionAttributeLocation::Param(ptr_arg),
-                )
-            }
-        }
-        if is_load {
-            self.bcx.add_function_attribute(
-                None,
-                Attribute::WriteOnly,
-                FunctionAttributeLocation::Param(1),
-            );
-        }
-
-        let offset = self.bcx.fn_param(0);
-        let value = self.bcx.fn_param(1);
-        let ecx = self.bcx.fn_param(2);
-
-        let memory_ptr = {
-            let memory_ptr_ptr =
-                self.get_field(ecx, mem::offset_of!(EvmContext<'_>, memory), "ecx.memory.addr");
-            self.bcx.load(self.ptr_type, memory_ptr_ptr, "ecx.memory")
-        };
-
-        let memory_buffer_offset = mem::offset_of!(pf::SharedMemory, buffer);
-        let len_ptr = self.get_field(
-            memory_ptr,
-            memory_buffer_offset + mem::offset_of!(pf::Vec<u8>, len),
-            "ecx.memory.len.addr",
-        );
-        let sm_len = self.bcx.load(self.isize_type, len_ptr, "ecx.memory.len");
-
-        // `memory.len() = memory.buffer.len() - memory.last_checkpoint`
-        // `new_size = offset + len`
-        // `if new_size > memory.len() { resize_memory(new_size) }`
-        let my_checkpoint = {
-            let ptr = self.get_field(
-                memory_ptr,
-                mem::offset_of!(pf::SharedMemory, my_checkpoint),
-                "ecx.memory.my_checkpoint.addr",
-            );
-            self.bcx.load(self.isize_type, ptr, "ecx.memory.my_checkpoint")
-        };
-        let buffer_len = self.bcx.isub(sm_len, my_checkpoint);
-        let max_isize = ((1u128 << self.bcx.type_bit_width(self.isize_type)) - 1u128) as u64;
-        let max_isize_u256 = self.bcx.iconst_256(U256::from(max_isize));
-        let max_isize = self.bcx.uconst(self.isize_type, max_isize);
-        let offset_too_big = self.bcx.icmp(IntCC::UnsignedGreaterThan, offset, max_isize_u256);
-        let offset = self.bcx.ireduce(self.isize_type, offset);
-        let (new_size, new_size_overflow) = {
-            let slot_size = match kind {
-                MemOpKind::Load | MemOpKind::Store => 32,
-                MemOpKind::Store8 => 1,
-            };
-            let slot_size = self.bcx.iconst(self.isize_type, slot_size as i64);
-            self.bcx.uadd_overflow(offset, slot_size)
-        };
-        let new_size_overflow = self.bcx.bitor(offset_too_big, new_size_overflow);
-        let new_size = self.bcx.select(new_size_overflow, max_isize, new_size);
-        let cond = self.bcx.icmp(IntCC::UnsignedGreaterThan, new_size, buffer_len);
-
-        let resize = self.bcx.create_block("resize");
-        let cont = self.bcx.create_block("contd");
-        self.bcx.brif_cold(cond, resize, cont, true);
-
-        self.bcx.switch_to_block(resize);
-        self.call_fallible_builtin(Builtin::ResizeMemory, &[ecx, new_size]);
-        self.bcx.br(cont);
-
-        // `ecx.memory.buffer[last_checkpoint + offset..]`
-        // Implemented as `ecx.memory.buffer[last_checkpoint..][offset..]`
-        self.bcx.switch_to_block(cont);
-        let shared_buffer_ptr = {
-            let ptr = self.get_field(
-                memory_ptr,
-                memory_buffer_offset + mem::offset_of!(pf::Vec<u8>, ptr),
-                "ecx.memory.buffer.ptr.shared.addr",
-            );
-            self.bcx.load(self.ptr_type, ptr, "ecx.memory.buffer.ptr.shared")
-        };
-        let buffer_ptr = self.bcx.gep(
-            self.i8_type,
-            shared_buffer_ptr,
-            &[my_checkpoint],
-            "ecx.memory.buffer.ptr",
-        );
-        let slot = self.bcx.gep(self.i8_type, buffer_ptr, &[offset], "slot");
-        match kind {
-            MemOpKind::Load => {
-                let loaded = self.bcx.load_unaligned(self.word_type, slot, "slot.value");
-                let loaded =
-                    if cfg!(target_endian = "little") { self.bcx.bswap(loaded) } else { loaded };
-                self.bcx.store(loaded, value);
-            }
-            MemOpKind::Store | MemOpKind::Store8 => {
-                let value = if matches!(kind, MemOpKind::Store) && cfg!(target_endian = "little") {
-                    self.bcx.bswap(value)
-                } else {
-                    value
-                };
-                self.bcx.store_unaligned(value, slot);
-            }
-        }
-
-        let cont = self.const_continue();
-        self.bcx.ret(&[cont]);
-    }
-
     fn call_ir_binop_builtin(
         &mut self,
         name: &str,
@@ -1811,12 +1648,6 @@ impl<B: Backend> FunctionCx<'_, B> {
     }
 }
 
-enum MemOpKind {
-    Load,
-    Store,
-    Store8,
-}
-
 // HACK: Need these structs' fields to be public for `offset_of!`.
 // `pf == private_fields`.
 #[allow(dead_code)]
@@ -1865,52 +1696,6 @@ mod pf {
         expansion_cost: u64,
     }
     const _: [(); mem::size_of::<revm_interpreter::Gas>()] = [(); mem::size_of::<Gas>()];
-
-    #[allow(unexpected_cfgs, dead_code)]
-    #[repr(C)]
-    pub(super) struct SharedMemory {
-        /// The underlying buffer (`Option<Rc<RefCell<Vec<u8>>>>`).
-        pub(super) buffer: usize, // Rc pointer
-        /// Memory checkpoint for this depth.
-        pub(super) my_checkpoint: usize,
-        /// Child checkpoint that we need to free context to.
-        child_checkpoint: Option<usize>,
-        #[cfg(feature = "memory_limit")]
-        memory_limit: u64,
-    }
-    const _: [(); mem::size_of::<revm_interpreter::SharedMemory>()] =
-        [(); mem::size_of::<SharedMemory>()];
-
-    #[test]
-    fn shared_memory_layout() {
-        // The compile-time size assertion above ensures our SharedMemory layout matches revm's.
-        // We just instantiate it here to ensure the type is usable at runtime.
-        let mem = revm_interpreter::SharedMemory::new();
-        let _ = &mem;
-    }
-
-    pub(super) struct Vec<T> {
-        pub(super) cap: usize,
-        pub(super) ptr: *mut T,
-        pub(super) len: usize,
-    }
-    const _: [(); mem::size_of::<std::vec::Vec<u8>>()] = [(); mem::size_of::<Vec<u8>>()];
-
-    #[test]
-    fn vec_layout() {
-        vec_layout_generic::<u8>();
-        vec_layout_generic::<usize>();
-    }
-
-    fn vec_layout_generic<T>() {
-        unsafe {
-            let vec = mem::ManuallyDrop::new(std::vec::Vec::from_raw_parts(1 as *mut T, 2, 3));
-            let vec_ptr = &*vec as *const std::vec::Vec<T> as *const u8;
-            assert_eq!(*vec_ptr.add(mem::offset_of!(Vec<T>, ptr)).cast::<usize>(), 1);
-            assert_eq!(*vec_ptr.add(mem::offset_of!(Vec<T>, len)).cast::<usize>(), 2);
-            assert_eq!(*vec_ptr.add(mem::offset_of!(Vec<T>, cap)).cast::<usize>(), 3);
-        }
-    }
 }
 
 fn get_field<B: Builder>(bcx: &mut B, ptr: B::Value, offset: usize, name: &str) -> B::Value {
