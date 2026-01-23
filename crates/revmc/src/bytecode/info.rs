@@ -1,5 +1,5 @@
-use revm_interpreter::{gas, opcode as op};
-use revm_primitives::{spec_to_generic, SpecId};
+use revm_bytecode::opcode as op;
+use revm_primitives::hardfork::SpecId;
 
 /// Opcode information.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -12,8 +12,6 @@ impl OpcodeInfo {
     pub const DYNAMIC: u16 = 0b0100_0000_0000_0000;
     /// The disabled flag.
     pub const DISABLED: u16 = 0b0010_0000_0000_0000;
-    /// The EOF flag.
-    pub const EOF: u16 = 0b0001_0000_0000_0000;
     /// The mask for the gas cost.
     pub const MASK: u16 = 0b0000_1111_1111_1111;
 
@@ -42,13 +40,6 @@ impl OpcodeInfo {
         self.0 & Self::DISABLED != 0
     }
 
-    /// Returns `true` if the opcode is an EOF opcode, meaning it is disallowed in
-    /// legacy bytecode.
-    #[inline]
-    pub const fn is_eof_only(self) -> bool {
-        self.0 & Self::EOF != 0
-    }
-
     /// Returns the base gas cost of the opcode.
     ///
     /// This may not be the final/full gas cost of the opcode as it may also have a dynamic cost.
@@ -75,12 +66,6 @@ impl OpcodeInfo {
         self.0 |= Self::DISABLED;
     }
 
-    /// Sets the EOF flag.
-    #[inline]
-    pub fn set_eof(&mut self) {
-        self.0 |= Self::EOF;
-    }
-
     /// Sets the gas cost.
     ///
     /// # Panics
@@ -96,14 +81,25 @@ impl OpcodeInfo {
 
 /// Returns the static info map for the given `SpecId`.
 #[allow(unused_parens)]
-pub const fn op_info_map(spec_id: SpecId) -> &'static [OpcodeInfo; 256] {
-    spec_to_generic!(spec_id, (const { &make_map(<SPEC as revm_primitives::Spec>::SPEC_ID) }))
+pub fn op_info_map(spec_id: SpecId) -> &'static [OpcodeInfo; 256] {
+    // Use a static cache for each SpecId to avoid recomputing
+    use std::sync::OnceLock;
+    static MAPS: OnceLock<[[OpcodeInfo; 256]; 32]> = OnceLock::new();
+    let maps = MAPS.get_or_init(|| {
+        let mut maps = [[OpcodeInfo(OpcodeInfo::UNKNOWN); 256]; 32];
+        for (i, map) in maps.iter_mut().enumerate() {
+            if let Ok(spec) = SpecId::try_from(i as u8) {
+                *map = make_map(spec);
+            }
+        }
+        maps
+    });
+    &maps[spec_id as usize]
 }
 
 #[allow(unused_mut)]
 const fn make_map(spec_id: SpecId) -> [OpcodeInfo; 256] {
     const DYNAMIC: u16 = OpcodeInfo::DYNAMIC;
-    const EOF: u16 = OpcodeInfo::EOF;
 
     let mut map = [OpcodeInfo(OpcodeInfo::UNKNOWN); 256];
     macro_rules! set {
@@ -154,7 +150,7 @@ const fn make_map(spec_id: SpecId) -> [OpcodeInfo; 256] {
         SHL    = 3, if CONSTANTINOPLE;
         SHR    = 3, if CONSTANTINOPLE;
         SAR    = 3, if CONSTANTINOPLE;
-        // 0x1E
+        CLZ    = 5, if OSAKA;
         // 0x1F
         KECCAK256 = 30 | DYNAMIC; // [2]
         // 0x21
@@ -337,38 +333,6 @@ const fn make_map(spec_id: SpecId) -> [OpcodeInfo; 256] {
         // 0xCD
         // 0xCE
         // 0xCF
-        DATALOAD  = 4 | EOF,             if OSAKA;
-        DATALOADN = 3 | EOF,             if OSAKA;
-        DATASIZE  = 2 | EOF,             if OSAKA;
-        DATACOPY  = 3 | DYNAMIC | EOF,   if OSAKA; // [2]
-        // 0xD4
-        // 0xD5
-        // 0xD6
-        // 0xD7
-        // 0xD8
-        // 0xD9
-        // 0xDA
-        // 0xDB
-        // 0xDC
-        // 0xDD
-        // 0xDE
-        // 0xDF
-        RJUMP           = 2 | EOF,       if OSAKA;
-        RJUMPI          = 4 | EOF,       if OSAKA;
-        RJUMPV          = 4 | EOF,       if OSAKA;
-        CALLF           = 5 | EOF,       if OSAKA;
-        RETF            = 3 | EOF,       if OSAKA;
-        JUMPF           = 5 | EOF,       if OSAKA;
-        DUPN            = 3 | EOF,       if OSAKA;
-        SWAPN           = 3 | EOF,       if OSAKA;
-        EXCHANGE        = 3 | EOF,       if OSAKA;
-        // 0xE9
-        // 0xEA
-        // 0xEB
-        EOFCREATE       = DYNAMIC | EOF, if OSAKA; // TODO: EOF_CREATE_GAS | DYNAMIC is too big
-        // 0xED
-        RETURNCONTRACT  = DYNAMIC | EOF, if OSAKA;
-        // 0xEF
         CREATE          = DYNAMIC;
         CALL            = DYNAMIC;
         CALLCODE        = DYNAMIC;
@@ -376,11 +340,7 @@ const fn make_map(spec_id: SpecId) -> [OpcodeInfo; 256] {
         DELEGATECALL    = DYNAMIC,       if HOMESTEAD;
         CREATE2         = DYNAMIC,       if PETERSBURG;
         // 0xF6
-        RETURNDATALOAD  = 3 | EOF,       if OSAKA;
-        EXTCALL         = DYNAMIC | EOF, if OSAKA;
-        EXTDELEGATECALL = DYNAMIC | EOF, if OSAKA;
         STATICCALL      = DYNAMIC,       if BYZANTIUM;
-        EXTSTATICCALL   = DYNAMIC | EOF, if OSAKA;
         // 0xFC
         REVERT          = DYNAMIC,       if BYZANTIUM;
         INVALID         = 0;
@@ -390,11 +350,53 @@ const fn make_map(spec_id: SpecId) -> [OpcodeInfo; 256] {
 }
 
 const fn log_cost(n: u8) -> u16 {
-    match gas::log_cost(n, 0) {
-        Some(gas) => {
-            assert!(gas <= u16::MAX as u64);
-            gas as u16
-        }
-        None => unreachable!(),
+    // LOG base cost + n topics * LOGTOPIC cost
+    // From revm-context-interface: LOG = 375, LOGTOPIC = 375
+    const LOG_BASE: u64 = 375;
+    const LOGTOPIC: u64 = 375;
+    let cost = LOG_BASE + (n as u64 * LOGTOPIC);
+    assert!(cost <= u16::MAX as u64);
+    cost as u16
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_clz_flags() {
+        let arrow_glacier = op_info_map(SpecId::ARROW_GLACIER);
+        let cancun = op_info_map(SpecId::CANCUN);
+        let osaka = op_info_map(SpecId::OSAKA);
+
+        let clz_ag = arrow_glacier[op::CLZ as usize];
+        let clz_cancun = cancun[op::CLZ as usize];
+        let clz_osaka = osaka[op::CLZ as usize];
+
+        eprintln!(
+            "CLZ on ARROW_GLACIER: is_unknown={}, is_disabled={}, raw={:#06x}",
+            clz_ag.is_unknown(),
+            clz_ag.is_disabled(),
+            clz_ag.0
+        );
+        eprintln!(
+            "CLZ on CANCUN: is_unknown={}, is_disabled={}, raw={:#06x}",
+            clz_cancun.is_unknown(),
+            clz_cancun.is_disabled(),
+            clz_cancun.0
+        );
+        eprintln!(
+            "CLZ on OSAKA: is_unknown={}, is_disabled={}, raw={:#06x}",
+            clz_osaka.is_unknown(),
+            clz_osaka.is_disabled(),
+            clz_osaka.0
+        );
+
+        assert!(!clz_ag.is_unknown(), "CLZ should not be unknown on pre-OSAKA");
+        assert!(clz_ag.is_disabled(), "CLZ should be disabled on ARROW_GLACIER");
+        assert!(!clz_cancun.is_unknown(), "CLZ should not be unknown on pre-OSAKA");
+        assert!(clz_cancun.is_disabled(), "CLZ should be disabled on CANCUN");
+        assert!(!clz_osaka.is_unknown(), "CLZ should not be unknown on OSAKA");
+        assert!(!clz_osaka.is_disabled(), "CLZ should not be disabled on OSAKA");
     }
 }

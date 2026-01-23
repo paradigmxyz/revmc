@@ -1,7 +1,7 @@
 #![allow(clippy::needless_doctest_main)]
 #![doc = include_str!("../README.md")]
 #![cfg_attr(not(test), warn(unused_extern_crates))]
-#![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 #[macro_use]
 extern crate tracing;
@@ -44,7 +44,15 @@ pub use cranelift::EvmCraneliftBackend;
 pub use revmc_cranelift as cranelift;
 
 #[doc(no_inline)]
-pub use revm_interpreter::{self as interpreter, primitives};
+pub use revm_bytecode;
+#[doc(no_inline)]
+pub use revm_context_interface as context_interface;
+#[doc(no_inline)]
+pub use revm_interpreter::{self as interpreter};
+#[doc(no_inline)]
+pub use revm_primitives as primitives;
+#[doc(no_inline)]
+pub use revm_primitives::hardfork::SpecId;
 
 const I256_MIN: U256 = U256::from_limbs([
     0x0000000000000000,

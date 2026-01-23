@@ -2,9 +2,14 @@
 
 use clap::{Parser, ValueEnum};
 use color_eyre::{eyre::eyre, Result};
-use revm_interpreter::{opcode::make_instruction_table, SharedMemory};
-use revm_primitives::{address, spec_to_generic, Env, SpecId, TransactTo};
-use revmc::{eyre::ensure, EvmCompiler, EvmContext, EvmLlvmBackend, OptimizationLevel};
+use revm_bytecode::Bytecode;
+use revm_interpreter::{
+    host::DummyHost, instruction_table, interpreter::ExtBytecode, InputsImpl, SharedMemory,
+};
+use revmc::{
+    eyre::ensure, primitives::hardfork::SpecId, EvmCompiler, EvmContext, EvmLlvmBackend,
+    OptimizationLevel,
+};
 use revmc_cli::{get_benches, read_code, Bench};
 use std::{
     hint::black_box,
@@ -63,12 +68,6 @@ struct Cli {
     opt_level: OptimizationLevel,
     #[arg(long, value_enum, default_value = "osaka")]
     spec_id: SpecIdValueEnum,
-    /// Short-hand for `--spec-id osaka`.
-    #[arg(long, conflicts_with = "spec_id")]
-    eof: bool,
-    /// Skip validating EOF code.
-    #[arg(long, requires = "eof")]
-    no_validate: bool,
     #[arg(long)]
     debug_assertions: bool,
     #[arg(long)]
@@ -98,74 +97,66 @@ fn main() -> Result<()> {
     unsafe { compiler.stack_bound_checks(!cli.no_len_checks) };
     compiler.frame_pointers(true);
     compiler.debug_assertions(cli.debug_assertions);
-    compiler.validate_eof(!cli.no_validate);
 
-    let Bench { name, bytecode, calldata, stack_input, native: _ } = if cli.bench_name == "custom" {
-        Bench {
-            name: "custom",
-            bytecode: read_code(cli.code.as_deref(), cli.code_path.as_deref())?,
-            ..Default::default()
-        }
-    } else if Path::new(&cli.bench_name).exists() {
-        let path = Path::new(&cli.bench_name);
-        ensure!(path.is_file(), "argument must be a file");
-        ensure!(cli.code.is_none(), "--code is not allowed with a file argument");
-        ensure!(cli.code_path.is_none(), "--code-path is not allowed with a file argument");
-        Bench {
-            name: path.file_stem().unwrap().to_str().unwrap().to_string().leak(),
-            bytecode: read_code(None, Some(path))?,
-            ..Default::default()
-        }
-    } else {
-        match get_benches().into_iter().find(|b| b.name == cli.bench_name) {
-            Some(b) => b,
-            None => {
-                if cli.load.is_some() {
-                    Bench {
-                        name: cli.bench_name.clone().leak(),
-                        bytecode: Vec::new(),
-                        ..Default::default()
+    let Bench { name, bytecode, calldata, stack_input, native: _, requires_storage: _ } =
+        if cli.bench_name == "custom" {
+            Bench {
+                name: "custom",
+                bytecode: read_code(cli.code.as_deref(), cli.code_path.as_deref())?,
+                ..Default::default()
+            }
+        } else if Path::new(&cli.bench_name).exists() {
+            let path = Path::new(&cli.bench_name);
+            ensure!(path.is_file(), "argument must be a file");
+            ensure!(cli.code.is_none(), "--code is not allowed with a file argument");
+            ensure!(cli.code_path.is_none(), "--code-path is not allowed with a file argument");
+            Bench {
+                name: path.file_stem().unwrap().to_str().unwrap().to_string().leak(),
+                bytecode: read_code(None, Some(path))?,
+                ..Default::default()
+            }
+        } else {
+            match get_benches().into_iter().find(|b| b.name == cli.bench_name) {
+                Some(b) => b,
+                None => {
+                    if cli.load.is_some() {
+                        Bench {
+                            name: cli.bench_name.clone().leak(),
+                            bytecode: Vec::new(),
+                            ..Default::default()
+                        }
+                    } else {
+                        return Err(eyre!("unknown benchmark: {}", cli.bench_name));
                     }
-                } else {
-                    return Err(eyre!("unknown benchmark: {}", cli.bench_name));
                 }
             }
-        }
-    };
+        };
     compiler.set_module_name(name);
 
-    let calldata = if let Some(calldata) = cli.calldata {
+    let calldata: revmc::primitives::Bytes = if let Some(calldata) = cli.calldata {
         revmc::primitives::hex::decode(calldata)?.into()
     } else {
         calldata.into()
     };
     let gas_limit = cli.gas_limit;
 
-    let mut env = Env::default();
-    env.tx.caller = address!("0000000000000000000000000000000000000001");
-    env.tx.transact_to = TransactTo::Call(address!("0000000000000000000000000000000000000002"));
-    env.tx.data = calldata;
-    env.tx.gas_limit = gas_limit;
+    let spec_id = cli.spec_id.into();
 
-    let bytecode = revm_interpreter::analysis::to_analysed(revm_primitives::Bytecode::new_raw(
-        revm_primitives::Bytes::copy_from_slice(&bytecode),
-    ));
-    let contract = revm_interpreter::Contract::new_env(&env, bytecode, None);
-    let mut host = revm_interpreter::DummyHost::new(env);
+    let bytecode_raw = Bytecode::new_raw(revmc::primitives::Bytes::copy_from_slice(&bytecode));
+    let bytecode_slice = bytecode_raw.original_byte_slice();
 
-    let bytecode = contract.bytecode.original_byte_slice();
+    let mut host = DummyHost::new(spec_id);
 
-    let spec_id = if cli.eof { SpecId::OSAKA } else { cli.spec_id.into() };
     if !stack_input.is_empty() {
         compiler.inspect_stack_length(true);
     }
 
     if cli.parse_only {
-        let _ = compiler.parse(bytecode.into(), spec_id)?;
+        let _ = compiler.parse(bytecode_slice.into(), spec_id)?;
         return Ok(());
     }
 
-    let f_id = compiler.translate(name, bytecode, spec_id)?;
+    let f_id = compiler.translate(name, bytecode_slice, spec_id)?;
 
     let mut load = cli.load;
     if cli.aot {
@@ -214,27 +205,48 @@ fn main() -> Result<()> {
         unsafe { compiler.jit_function(f_id)? }
     };
 
-    #[allow(unused_parens)]
-    let table = spec_to_generic!(spec_id, (const { &make_instruction_table::<_, SPEC>() }));
+    use revm_interpreter::interpreter::EthInterpreter;
+    let table = instruction_table::<EthInterpreter, DummyHost>();
     let mut run = |f: revmc::EvmCompilerFn| {
-        let mut interpreter =
-            revm_interpreter::Interpreter::new(contract.clone(), gas_limit, false);
-        host.clear();
+        let ext_bytecode = ExtBytecode::new(bytecode_raw.clone());
+        let input = InputsImpl {
+            input: revm_interpreter::CallInput::Bytes(calldata.clone()),
+            ..Default::default()
+        };
+        let mut interpreter = revm_interpreter::Interpreter::new(
+            SharedMemory::new(),
+            ext_bytecode,
+            input,
+            false,
+            spec_id,
+            gas_limit,
+        );
 
         if cli.interpret {
-            let action = interpreter.run(SharedMemory::new(), table, &mut host);
-            (interpreter.instruction_result, action)
+            let action = interpreter.run_plain(&table, &mut host);
+            let result =
+                action.instruction_result().unwrap_or(revm_interpreter::InstructionResult::Stop);
+            (result, action)
         } else {
             let (mut ecx, stack, stack_len) =
                 EvmContext::from_interpreter_with_stack(&mut interpreter, &mut host);
 
             for (i, input) in stack_input.iter().enumerate() {
-                stack.as_mut_slice()[i] = input.into();
+                stack.as_mut_slice()[i] = (*input).into();
             }
             *stack_len = stack_input.len();
 
             let r = unsafe { f.call_noinline(Some(stack), Some(stack_len), &mut ecx) };
-            (r, interpreter.next_action)
+            // The JIT code may not set an action (e.g., for STOP), so we need to handle that.
+            // If action is None, create a default action based on the return result.
+            let action = ecx.next_action.take().unwrap_or_else(|| {
+                revm_interpreter::InterpreterAction::Return(revm_interpreter::InterpreterResult {
+                    result: r,
+                    output: revm_primitives::Bytes::new(),
+                    gas: *ecx.gas,
+                })
+            });
+            (r, action)
         }
     };
 
@@ -327,7 +339,7 @@ impl From<SpecIdValueEnum> for SpecId {
             SpecIdValueEnum::CANCUN => Self::CANCUN,
             SpecIdValueEnum::PRAGUE => Self::PRAGUE,
             SpecIdValueEnum::OSAKA => Self::OSAKA,
-            SpecIdValueEnum::LATEST => Self::LATEST,
+            SpecIdValueEnum::LATEST => Self::OSAKA,
         }
     }
 }

@@ -3,9 +3,17 @@
 use criterion::{
     criterion_group, criterion_main, measurement::WallTime, BenchmarkGroup, Criterion,
 };
-use revm_interpreter::SharedMemory;
-use revm_primitives::{Env, SpecId};
-use revmc::{llvm, EvmCompiler, EvmCompilerFn, EvmContext, EvmLlvmBackend, EvmStack};
+use revm_bytecode::Bytecode;
+use revm_interpreter::{
+    host::DummyHost,
+    instruction_table,
+    interpreter::{EthInterpreter, ExtBytecode},
+    InputsImpl, SharedMemory,
+};
+use revmc::{
+    llvm, primitives::hardfork::SpecId, EvmCompiler, EvmCompilerFn, EvmContext, EvmLlvmBackend,
+    EvmStack,
+};
 use revmc_cli::Bench;
 use std::time::Duration;
 
@@ -14,35 +22,23 @@ const SPEC_ID: SpecId = SpecId::OSAKA;
 fn bench(c: &mut Criterion) {
     for bench in &revmc_cli::get_benches() {
         run_bench(c, bench);
-        if matches!(bench.name, "hash_10k-eof") {
-            break;
-        }
     }
 }
 
 fn run_bench(c: &mut Criterion, bench: &Bench) {
-    let Bench { name, bytecode, calldata, stack_input, native } = bench;
+    let Bench { name, bytecode, calldata, stack_input, native, requires_storage } = bench;
 
     let mut g = mk_group(c, name);
 
     let gas_limit = 1_000_000_000;
 
-    let mut env = Env::default();
-    env.tx.data = calldata.clone().into();
-    env.tx.gas_limit = gas_limit;
+    let calldata: revmc::primitives::Bytes = calldata.clone().into();
 
-    let bytecode = revm_interpreter::analysis::to_analysed(revm_primitives::Bytecode::new_raw(
-        revm_primitives::Bytes::copy_from_slice(bytecode),
-    ));
-    let contract = revm_interpreter::Contract::new_env(&env, bytecode, None);
-    let mut host = revm_interpreter::DummyHost::new(env);
+    let bytecode_raw = Bytecode::new_raw(revmc::primitives::Bytes::copy_from_slice(bytecode));
 
-    let bytecode = contract.bytecode.original_byte_slice();
+    let mut host = DummyHost::new(SPEC_ID);
 
-    let table = &revm_interpreter::opcode::make_instruction_table::<
-        revm_interpreter::DummyHost,
-        revm_primitives::CancunSpec,
-    >();
+    let table = instruction_table::<EthInterpreter, DummyHost>();
 
     // Set up the compiler.
     let context = llvm::inkwell::context::Context::create();
@@ -59,13 +55,23 @@ fn run_bench(c: &mut Criterion, bench: &Bench) {
     let mut stack = EvmStack::new();
     let mut call_jit = |f: EvmCompilerFn| {
         for (i, input) in stack_input.iter().enumerate() {
-            stack.as_mut_slice()[i] = input.into();
+            stack.as_mut_slice()[i] = (*input).into();
         }
         let mut stack_len = stack_input.len();
 
-        let mut interpreter =
-            revm_interpreter::Interpreter::new(contract.clone(), gas_limit, false);
-        host.clear();
+        let ext_bytecode = ExtBytecode::new(bytecode_raw.clone());
+        let input = InputsImpl {
+            input: revm_interpreter::CallInput::Bytes(calldata.clone()),
+            ..Default::default()
+        };
+        let mut interpreter = revm_interpreter::Interpreter::new(
+            SharedMemory::new(),
+            ext_bytecode,
+            input,
+            false,
+            SPEC_ID,
+            gas_limit,
+        );
         let mut ecx = EvmContext::from_interpreter(&mut interpreter, &mut host);
 
         unsafe { f.call(Some(&mut stack), Some(&mut stack_len), &mut ecx) }
@@ -80,30 +86,44 @@ fn run_bench(c: &mut Criterion, bench: &Bench) {
     let jit_ids = jit_matrix.map(|(name, (gas, stack))| {
         compiler.gas_metering(gas);
         unsafe { compiler.stack_bound_checks(stack) };
-        (name, compiler.translate(name, bytecode, SPEC_ID).expect(name))
+        (name, compiler.translate(name, bytecode_raw.original_byte_slice(), SPEC_ID).expect(name))
     });
     for &(name, fn_id) in &jit_ids {
         let jit = unsafe { compiler.jit_function(fn_id) }.expect(name);
         g.bench_function(format!("revmc/{name}"), |b| b.iter(|| call_jit(jit)));
     }
 
-    g.bench_function("revm-interpreter", |b| {
-        b.iter(|| {
-            let mut int = revm_interpreter::Interpreter::new(contract.clone(), gas_limit, false);
-            let mut host = host.clone();
+    // Skip interpreter benchmark for contracts that require storage (SLOAD/SSTORE)
+    // since DummyHost doesn't support storage operations.
+    if !requires_storage {
+        g.bench_function("revm-interpreter", |b| {
+            b.iter(|| {
+                let ext_bytecode = ExtBytecode::new(bytecode_raw.clone());
+                let input = InputsImpl {
+                    input: revm_interpreter::CallInput::Bytes(calldata.clone()),
+                    ..Default::default()
+                };
+                let mut interpreter = revm_interpreter::Interpreter::new(
+                    SharedMemory::new(),
+                    ext_bytecode,
+                    input,
+                    false,
+                    SPEC_ID,
+                    gas_limit,
+                );
 
-            int.stack.data_mut().extend_from_slice(stack_input);
+                interpreter.stack.data_mut().extend_from_slice(stack_input);
 
-            let action = int.run(SharedMemory::new(), table, &mut host);
-            assert!(
-                int.instruction_result.is_ok(),
-                "Interpreter failed with {:?}",
-                int.instruction_result
-            );
-            assert!(action.is_return(), "Interpreter bad action: {action:?}");
-            action
-        })
-    });
+                let action = interpreter.run_plain(&table, &mut host);
+                let result = action
+                    .instruction_result()
+                    .unwrap_or(revm_interpreter::InstructionResult::Stop);
+                assert!(result.is_ok(), "Interpreter failed with {result:?}");
+                assert!(action.is_return(), "Interpreter bad action: {action:?}");
+                action
+            })
+        });
+    }
 
     g.finish();
 }

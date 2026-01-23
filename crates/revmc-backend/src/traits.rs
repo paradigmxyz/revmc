@@ -3,9 +3,10 @@ use ruint::aliases::U256;
 use std::{fmt, path::Path};
 
 /// Target machine.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Target {
     /// The host machine.
+    #[default]
     Native,
     /// LLVM-style target triple.
     ///
@@ -18,12 +19,6 @@ pub enum Target {
         /// The target features string.
         features: Option<String>,
     },
-}
-
-impl Default for Target {
-    fn default() -> Self {
-        Self::Native
-    }
 }
 
 impl std::str::FromStr for Target {
@@ -354,6 +349,7 @@ pub trait Builder: BackendTypes + TypeMethods {
     fn bitand(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
     fn bitxor(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
     fn bitnot(&mut self, value: Self::Value) -> Self::Value;
+    fn clz(&mut self, value: Self::Value) -> Self::Value;
 
     fn bitor_imm(&mut self, lhs: Self::Value, rhs: i64) -> Self::Value;
     fn bitand_imm(&mut self, lhs: Self::Value, rhs: i64) -> Self::Value;
@@ -367,6 +363,9 @@ pub trait Builder: BackendTypes + TypeMethods {
     fn sext(&mut self, ty: Self::Type, value: Self::Value) -> Self::Value;
     #[doc(alias = "trunc")]
     fn ireduce(&mut self, to: Self::Type, value: Self::Value) -> Self::Value;
+
+    /// Converts an integer value to a pointer.
+    fn inttoptr(&mut self, value: Self::Value, ty: Self::Type) -> Self::Value;
 
     fn gep(
         &mut self,

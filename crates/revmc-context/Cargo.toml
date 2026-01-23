@@ -19,6 +19,7 @@ workspace = true
 [dependencies]
 revm-interpreter.workspace = true
 revm-primitives.workspace = true
+ruint.workspace = true
 
 [features]
 default = ["std"]

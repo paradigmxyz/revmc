@@ -53,12 +53,10 @@ fn setup_group(group: &mut BinaryBenchmarkGroup) {
         ("fibonacci", true),
         ("counter", true),
         ("hash_10k", true),
-        // ("hash_10k-eof", true),
         ("bswap64", true),
         ("usdc_proxy", false),
         ("weth", false),
         // ("snailtracer", false),
-        // ("snailtracer-eof", false),
     ];
     for is_ct in [false, true] {
         let mut bench = BinaryBenchmark::new(if is_ct { "compile_time" } else { "run_time" });

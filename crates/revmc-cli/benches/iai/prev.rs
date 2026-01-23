@@ -1,7 +1,9 @@
 #![allow(missing_docs)]
 
 use iai_callgrind::{library_benchmark, library_benchmark_group, main};
-use revm_primitives::{Env, SpecId};
+use revm_bytecode::Bytecode;
+use revm_interpreter::{host::DummyHost, interpreter::ExtBytecode, InputsImpl, SharedMemory};
+use revmc::primitives::hardfork::SpecId;
 use revmc::{
     llvm::with_llvm_context, Backend, EvmCompiler, EvmContext, EvmLlvmBackend, OptimizationLevel,
 };
@@ -59,23 +61,31 @@ fn run_time_setup_inner<B: Backend>(
     }
     let f = compiler.jit(Some(name), bytecode, SPEC_ID).unwrap();
 
-    let mut env = Env::default();
-    env.tx.data = calldata.clone().into();
+    let calldata: revmc::primitives::Bytes = calldata.clone().into();
+    let bytecode_raw = Bytecode::new_raw(revmc::primitives::Bytes::copy_from_slice(&bytecode));
 
-    let bytecode = revm_interpreter::analysis::to_analysed(revm_primitives::Bytecode::new_raw(
-        revm_primitives::Bytes::copy_from_slice(&bytecode),
-    ));
-    let contract = revm_interpreter::Contract::new_env(&env, bytecode, None);
-    let mut host = revm_interpreter::DummyHost::new(env);
+    let mut host = DummyHost::new(SPEC_ID);
 
-    let mut interpreter = revm_interpreter::Interpreter::new(contract, GAS_LIMIT, false);
+    let ext_bytecode = ExtBytecode::new(bytecode_raw);
+    let input = InputsImpl {
+        input: revm_interpreter::CallInput::Bytes(calldata),
+        ..Default::default()
+    };
+    let mut interpreter = revm_interpreter::Interpreter::new(
+        SharedMemory::new(),
+        ext_bytecode,
+        input,
+        false,
+        SPEC_ID,
+        GAS_LIMIT,
+    );
 
     Box::new(move || {
         let (mut ecx, stack, stack_len) =
             EvmContext::from_interpreter_with_stack(&mut interpreter, &mut host);
 
         for (i, input) in stack_input.iter().enumerate() {
-            stack.as_mut_slice()[i] = input.into();
+            stack.as_mut_slice()[i] = (*input).into();
         }
         *stack_len = stack_input.len();
 

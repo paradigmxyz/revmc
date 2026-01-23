@@ -1,4 +1,5 @@
-use revmc::{interpreter::opcode as op, primitives::hex, U256};
+use revm_bytecode::opcode as op;
+use revmc::{primitives::hex, U256};
 use std::hint::black_box;
 
 macro_rules! include_code_str {
@@ -17,6 +18,9 @@ pub struct Bench {
     pub calldata: Vec<u8>,
     pub stack_input: Vec<U256>,
     pub native: Option<fn()>,
+    /// Whether this benchmark requires storage (SLOAD/SSTORE) support from the host.
+    /// If true, interpreter benchmarks will be skipped since DummyHost doesn't support storage.
+    pub requires_storage: bool,
 }
 
 pub fn get_bench(name: &str) -> Option<Bench> {
@@ -60,25 +64,12 @@ pub fn get_benches() -> Vec<Bench> {
             bytecode: include_code_str!("../../../data/counter.rt.hex").unwrap(),
             // `increment()`
             calldata: hex!("d09de08a").to_vec(),
-            ..Default::default()
-        },
-        Bench {
-            name: "counter-eof",
-            bytecode: include_code_str!("../../../data/counter-eof.rt.hex").unwrap(),
-            // `increment()`
-            calldata: hex!("d09de08a").to_vec(),
+            requires_storage: true,
             ..Default::default()
         },
         Bench {
             name: "snailtracer",
             bytecode: include_code_str!("../../../data/snailtracer.rt.hex").unwrap(),
-            // `Benchmark()`
-            calldata: hex!("30627b7c").to_vec(),
-            ..Default::default()
-        },
-        Bench {
-            name: "snailtracer-eof",
-            bytecode: include_code_str!("../../../data/snailtracer-eof.rt.hex").unwrap(),
             // `Benchmark()`
             calldata: hex!("30627b7c").to_vec(),
             ..Default::default()
@@ -91,13 +82,6 @@ pub fn get_benches() -> Vec<Bench> {
         Bench {
             name: "hash_10k",
             bytecode: include_code_str!("../../../data/hash_10k.rt.hex").unwrap(),
-            // `Benchmark()`
-            calldata: hex!("30627b7c").to_vec(),
-            ..Default::default()
-        },
-        Bench {
-            name: "hash_10k-eof",
-            bytecode: include_code_str!("../../../data/hash_10k-eof.rt.hex").unwrap(),
             // `Benchmark()`
             calldata: hex!("30627b7c").to_vec(),
             ..Default::default()

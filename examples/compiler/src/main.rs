@@ -5,9 +5,13 @@
 use clap::Parser;
 use eyre::Context;
 use revmc::{
-    interpreter::{Contract, DummyHost, Interpreter},
-    primitives::SpecId,
-    EvmCompiler, EvmLlvmBackend, OptimizationLevel,
+    context_interface::host::DummyHost,
+    interpreter::{
+        interpreter::{ExtBytecode, InputsImpl, SharedMemory},
+        Interpreter,
+    },
+    revm_bytecode::Bytecode,
+    EvmCompiler, EvmLlvmBackend, OptimizationLevel, SpecId,
 };
 use std::path::PathBuf;
 
@@ -39,8 +43,13 @@ fn main() -> eyre::Result<()> {
         .wrap_err("Failed to JIT-compile code")?;
 
     // Set up runtime context and run the function.
-    let mut interpreter = Interpreter::new(Contract::default(), 1_000_000, false);
-    let mut host = DummyHost::default();
+    let bytecode_obj = Bytecode::new_legacy(bytecode.into());
+    let ext_bytecode = ExtBytecode::new(bytecode_obj);
+    let input = InputsImpl::default();
+    let memory = SharedMemory::new();
+    let mut interpreter =
+        Interpreter::new(memory, ext_bytecode, input, false, SpecId::CANCUN, 1_000_000);
+    let mut host = DummyHost::new(SpecId::CANCUN);
     let result = unsafe { f.call_with_interpreter(&mut interpreter, &mut host) };
     eprintln!("{result:#?}");
 

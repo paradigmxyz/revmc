@@ -1,6 +1,6 @@
 #![doc = include_str!("../README.md")]
 #![cfg_attr(not(test), warn(unused_extern_crates))]
-#![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(not(feature = "std"), no_std)]
 
 extern crate alloc;
@@ -8,10 +8,11 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::{fmt, mem::MaybeUninit, ptr};
 use revm_interpreter::{
-    Contract, FunctionStack, Gas, Host, InstructionResult, Interpreter, InterpreterAction,
-    InterpreterResult, SharedMemory, EMPTY_SHARED_MEMORY,
+    interpreter_types::{Jumps, ReturnData},
+    Gas, Host, InputsImpl, InstructionResult, Interpreter, InterpreterAction, InterpreterResult,
+    SharedMemory,
 };
-use revm_primitives::{Address, Bytes, Env, U256};
+use revm_primitives::{ruint, Address, Bytes, U256};
 
 #[cfg(feature = "host-ext-any")]
 use core::any::Any;
@@ -19,31 +20,43 @@ use core::any::Any;
 /// The EVM bytecode compiler runtime context.
 ///
 /// This is a simple wrapper around the interpreter's resources, allowing the compiled function to
-/// access the memory, contract, gas, host, and other resources.
+/// access the memory, input, gas, host, and other resources.
+///
+/// # Safety
+/// This struct uses `#[repr(C)]` to ensure a stable field layout since the JIT compiler
+/// generates code that accesses fields by offset using `offset_of!`.
+#[repr(C)]
 pub struct EvmContext<'a> {
     /// The memory.
     pub memory: &'a mut SharedMemory,
-    /// Contract information and call data.
-    pub contract: &'a mut Contract,
+    /// Input information (target address, caller, input data, call value).
+    pub input: &'a mut InputsImpl,
     /// The gas.
     pub gas: &'a mut Gas,
     /// The host.
     pub host: &'a mut dyn HostExt,
     /// The return action.
-    pub next_action: &'a mut InterpreterAction,
+    pub next_action: &'a mut Option<InterpreterAction>,
     /// The return data.
     pub return_data: &'a [u8],
-    /// The function stack.
-    pub func_stack: &'a mut FunctionStack,
     /// Whether the context is static.
     pub is_static: bool,
-    /// Whether the context is EOF init.
-    pub is_eof_init: bool,
     /// An index that is used internally to keep track of where execution should resume.
     /// `0` is the initial state.
     #[doc(hidden)]
     pub resume_at: usize,
 }
+
+// Static assertions to ensure the struct layout matches expectations.
+// These offsets are used by the JIT compiler to access fields.
+const _: () = {
+    use core::mem::offset_of;
+    // EvmContext should be 80 bytes with #[repr(C)] (removed bytecode_ptr and bytecode_len)
+    assert!(core::mem::size_of::<EvmContext<'_>>() == 80);
+    // Key fields accessed by JIT code
+    assert!(offset_of!(EvmContext<'_>, memory) == 0);
+    assert!(offset_of!(EvmContext<'_>, resume_at) == 72);
+};
 
 impl fmt::Debug for EvmContext<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -64,47 +77,22 @@ impl<'a> EvmContext<'a> {
         interpreter: &'a mut Interpreter,
         host: &'b mut dyn HostExt,
     ) -> (Self, &'a mut EvmStack, &'a mut usize) {
+        use revm_interpreter::interpreter_types::LegacyBytecode;
+
         let (stack, stack_len) = EvmStack::from_interpreter_stack(&mut interpreter.stack);
-        let resume_at = ResumeAt::load(
-            interpreter.instruction_pointer,
-            interpreter.contract.bytecode.original_byte_slice(),
-        );
+        let bytecode_slice = interpreter.bytecode.bytecode_slice();
+        let resume_at = ResumeAt::load(interpreter.bytecode.pc(), bytecode_slice);
         let this = Self {
-            memory: &mut interpreter.shared_memory,
-            contract: &mut interpreter.contract,
+            memory: &mut interpreter.memory,
+            input: &mut interpreter.input,
             gas: &mut interpreter.gas,
             host,
-            next_action: &mut interpreter.next_action,
-            return_data: &interpreter.return_data_buffer,
-            func_stack: &mut interpreter.function_stack,
-            is_static: interpreter.is_static,
-            is_eof_init: interpreter.is_eof_init,
+            next_action: &mut interpreter.bytecode.action,
+            return_data: interpreter.return_data.buffer(),
+            is_static: interpreter.runtime_flag.is_static,
             resume_at,
         };
         (this, stack, stack_len)
-    }
-
-    /// Creates a new interpreter by cloning the context.
-    pub fn to_interpreter(&self, stack: revm_interpreter::Stack) -> Interpreter {
-        let bytecode = self.contract.bytecode.bytecode().clone();
-        Interpreter {
-            is_eof: self.contract.bytecode.is_eof(),
-            instruction_pointer: bytecode.as_ptr(),
-            bytecode,
-            function_stack: FunctionStack {
-                return_stack: self.func_stack.return_stack.clone(),
-                current_code_idx: self.func_stack.current_code_idx,
-            },
-            is_eof_init: self.is_eof_init,
-            contract: self.contract.clone(),
-            instruction_result: InstructionResult::Continue,
-            gas: *self.gas,
-            shared_memory: self.memory.clone(),
-            stack,
-            return_data_buffer: self.return_data.to_vec().into(),
-            is_static: self.is_static,
-            next_action: self.next_action.clone(),
-        }
     }
 }
 
@@ -174,8 +162,7 @@ macro_rules! extern_revmc {
                     gas: *mut $crate::private::revm_interpreter::Gas,
                     stack: *mut $crate::EvmStack,
                     stack_len: *mut usize,
-                    env: *const $crate::private::revm_primitives::Env,
-                    contract: *const $crate::private::revm_interpreter::Contract,
+                    input: *const $crate::private::revm_interpreter::InputsImpl,
                     ecx: *mut $crate::EvmContext<'_>,
                 ) -> $crate::private::revm_interpreter::InstructionResult;
             )+
@@ -192,13 +179,12 @@ pub type RawEvmCompilerFn = unsafe extern "C" fn(
     gas: *mut Gas,
     stack: *mut EvmStack,
     stack_len: *mut usize,
-    env: *const Env,
-    contract: *const Contract,
+    input: *const InputsImpl,
     ecx: *mut EvmContext<'_>,
 ) -> InstructionResult;
 
 /// An EVM bytecode function.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Hash)]
 pub struct EvmCompilerFn(RawEvmCompilerFn);
 
 impl From<RawEvmCompilerFn> for EvmCompilerFn {
@@ -243,17 +229,16 @@ impl EvmCompilerFn {
         memory: &mut SharedMemory,
         host: &mut dyn HostExt,
     ) -> InterpreterAction {
-        interpreter.shared_memory = core::mem::replace(memory, EMPTY_SHARED_MEMORY);
+        interpreter.memory = core::mem::replace(memory, SharedMemory::invalid());
         let result = self.call_with_interpreter(interpreter, host);
-        *memory = interpreter.take_memory();
+        *memory = core::mem::replace(&mut interpreter.memory, SharedMemory::invalid());
         result
     }
 
     /// Calls the function by re-using the interpreter's resources.
     ///
-    /// This behaves the same as [`Interpreter::run`], returning an [`InstructionResult`] in the
-    /// interpreter's [`instruction_result`](Interpreter::instruction_result) field and the next
-    /// action in the [`next_action`](Interpreter::next_action) field.
+    /// This behaves similarly to `Interpreter::run_plain`, returning an [`InstructionResult`]
+    /// and the next action in an [`InterpreterAction`].
     ///
     /// # Safety
     ///
@@ -264,7 +249,7 @@ impl EvmCompilerFn {
         interpreter: &mut Interpreter,
         host: &mut dyn HostExt,
     ) -> InterpreterAction {
-        interpreter.next_action = InterpreterAction::None;
+        interpreter.bytecode.action = None;
 
         let (mut ecx, stack, stack_len) =
             EvmContext::from_interpreter_with_stack(interpreter, host);
@@ -276,22 +261,20 @@ impl EvmCompilerFn {
             ecx.gas.spend_all();
         }
 
-        let resume_at = ecx.resume_at;
-        // Set in EXTCALL soft failure.
         let return_data_is_empty = ecx.return_data.is_empty();
 
-        ResumeAt::store(&mut interpreter.instruction_pointer, resume_at);
         if return_data_is_empty {
-            interpreter.return_data_buffer.clear();
+            interpreter.return_data.0.clear();
         }
 
-        interpreter.instruction_result = result;
-        if interpreter.next_action.is_some() {
-            core::mem::take(&mut interpreter.next_action)
+        if let Some(action) = interpreter.bytecode.action.take() {
+            action
         } else {
-            InterpreterAction::Return {
-                result: InterpreterResult { result, output: Bytes::new(), gas: interpreter.gas },
-            }
+            InterpreterAction::Return(InterpreterResult {
+                result,
+                output: Bytes::new(),
+                gas: interpreter.gas,
+            })
         }
     }
 
@@ -317,14 +300,7 @@ impl EvmCompilerFn {
         stack_len: Option<&mut usize>,
         ecx: &mut EvmContext<'_>,
     ) -> InstructionResult {
-        (self.0)(
-            ecx.gas,
-            option_as_mut_ptr(stack),
-            option_as_mut_ptr(stack_len),
-            ecx.host.env(),
-            ecx.contract,
-            ecx,
-        )
+        (self.0)(ecx.gas, option_as_mut_ptr(stack), option_as_mut_ptr(stack_len), ecx.input, ecx)
     }
 
     /// Same as [`call`](Self::call) but with `#[inline(never)]`.
@@ -398,218 +374,244 @@ impl EvmStack {
 
     /// Creates a stack from a mutable vector's buffer.
     ///
-    /// The bytecode function will overwrite the internal contents of the vector, and will not
-    /// set the length. This is simply to have the stack allocated on the heap.
-    ///
     /// # Panics
     ///
     /// Panics if the vector's capacity is less than the required stack capacity.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use revmc_context::EvmStack;
-    /// let mut stack_buf = EvmStack::new_heap();
-    /// let stack = EvmStack::from_mut_vec(&mut stack_buf);
-    /// assert_eq!(stack.as_slice().len(), EvmStack::CAPACITY);
-    /// ```
     #[inline]
     pub fn from_mut_vec(vec: &mut Vec<EvmWord>) -> &mut Self {
         assert!(vec.capacity() >= Self::CAPACITY);
         unsafe { Self::from_mut_ptr(vec.as_mut_ptr()) }
     }
 
-    /// Creates a stack from a slice.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the slice's length is less than the required stack capacity.
-    #[inline]
-    pub const fn from_slice(slice: &[EvmWord]) -> &Self {
-        assert!(slice.len() >= Self::CAPACITY);
-        unsafe { Self::from_ptr(slice.as_ptr()) }
-    }
-
-    /// Creates a stack from a mutable slice.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the slice's length is less than the required stack capacity.
-    #[inline]
-    pub fn from_mut_slice(slice: &mut [EvmWord]) -> &mut Self {
-        assert!(slice.len() >= Self::CAPACITY);
-        unsafe { Self::from_mut_ptr(slice.as_mut_ptr()) }
-    }
-
-    /// Creates a stack from a pointer.
+    /// Creates a stack from a pointer to a buffer.
     ///
     /// # Safety
     ///
-    /// The caller must ensure that the pointer is valid and points to at least [`EvmStack::SIZE`]
-    /// bytes.
+    /// See [`from_vec`](Self::from_vec).
     #[inline]
-    pub const unsafe fn from_ptr<'a>(ptr: *const EvmWord) -> &'a Self {
-        &*ptr.cast()
+    pub const unsafe fn from_ptr(ptr: *const EvmWord) -> &'static Self {
+        &*ptr.cast::<Self>()
     }
 
-    /// Creates a stack from a mutable pointer.
+    /// Creates a stack from a mutable pointer to a buffer.
     ///
     /// # Safety
     ///
-    /// The caller must ensure that the pointer is valid and points to at least [`EvmStack::SIZE`]
-    /// bytes.
+    /// See [`from_mut_vec`](Self::from_mut_vec).
     #[inline]
-    pub unsafe fn from_mut_ptr<'a>(ptr: *mut EvmWord) -> &'a mut Self {
-        &mut *ptr.cast()
+    pub unsafe fn from_mut_ptr(ptr: *mut EvmWord) -> &'static mut Self {
+        &mut *ptr.cast::<Self>()
     }
 
-    /// Returns the stack as a byte array.
+    /// Returns a pointer to the stack.
     #[inline]
-    pub const fn as_bytes(&self) -> &[u8; Self::SIZE] {
-        unsafe { &*self.0.as_ptr().cast() }
+    pub const fn as_ptr(&self) -> *const EvmWord {
+        self.0.as_ptr().cast()
     }
 
-    /// Returns the stack as a byte array.
+    /// Returns a mutable pointer to the stack.
     #[inline]
-    pub fn as_bytes_mut(&mut self) -> &mut [u8; Self::SIZE] {
-        unsafe { &mut *self.0.as_mut_ptr().cast() }
+    pub fn as_mut_ptr(&mut self) -> *mut EvmWord {
+        self.0.as_mut_ptr().cast()
     }
 
-    /// Returns the stack as a slice.
+    /// Returns a slice of the stack.
     #[inline]
-    pub const fn as_slice(&self) -> &[EvmWord; Self::CAPACITY] {
-        unsafe { &*self.0.as_ptr().cast() }
+    pub fn as_slice(&self) -> &[EvmWord] {
+        // SAFETY: EvmWord is repr(C) and same layout as [u8; 32]
+        unsafe { core::slice::from_raw_parts(self.as_ptr(), Self::CAPACITY) }
     }
 
-    /// Returns the stack as a mutable slice.
+    /// Returns a mutable slice of the stack.
     #[inline]
-    pub fn as_mut_slice(&mut self) -> &mut [EvmWord; Self::CAPACITY] {
-        unsafe { &mut *self.0.as_mut_ptr().cast() }
+    pub fn as_mut_slice(&mut self) -> &mut [EvmWord] {
+        // SAFETY: EvmWord is repr(C) and same layout as [u8; 32]
+        unsafe { core::slice::from_raw_parts_mut(self.as_mut_ptr(), Self::CAPACITY) }
+    }
+
+    /// Returns the word at the given index as a reference.
+    #[inline]
+    pub fn get(&self, index: usize) -> Option<&EvmWord> {
+        self.0.get(index).map(|slot| unsafe { slot.assume_init_ref() })
+    }
+
+    /// Returns the word at the given index as a mutable reference.
+    #[inline]
+    pub fn get_mut(&mut self, index: usize) -> Option<&mut EvmWord> {
+        self.0.get_mut(index).map(|slot| unsafe { slot.assume_init_mut() })
+    }
+
+    /// Returns the word at the given index as a reference.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that the index is within bounds.
+    #[inline]
+    pub unsafe fn get_unchecked(&self, index: usize) -> &EvmWord {
+        self.0.get_unchecked(index).assume_init_ref()
+    }
+
+    /// Returns the word at the given index as a mutable reference.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that the index is within bounds.
+    #[inline]
+    pub unsafe fn get_unchecked_mut(&mut self, index: usize) -> &mut EvmWord {
+        self.0.get_unchecked_mut(index).assume_init_mut()
+    }
+
+    /// Sets the value at the top of the stack to `value`, and grows the stack by 1.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that the stack is not full.
+    #[inline]
+    pub unsafe fn push(&mut self, value: EvmWord, len: &mut usize) {
+        self.set_unchecked(*len, value);
+        *len += 1;
+    }
+
+    /// Returns the value at the top of the stack.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that the stack is not empty.
+    #[inline]
+    pub unsafe fn top_unchecked(&self, len: usize) -> &EvmWord {
+        self.get_unchecked(len - 1)
+    }
+
+    /// Returns the value at the top of the stack as a mutable reference.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that the stack is not empty.
+    #[inline]
+    pub unsafe fn top_unchecked_mut(&mut self, len: usize) -> &mut EvmWord {
+        self.get_unchecked_mut(len - 1)
+    }
+
+    /// Returns the value at the given index from the top of the stack.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that `len >= n + 1`.
+    #[inline]
+    pub unsafe fn from_top_unchecked(&self, len: usize, n: usize) -> &EvmWord {
+        self.get_unchecked(len - n - 1)
+    }
+
+    /// Returns the value at the given index from the top of the stack as a mutable reference.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that `len >= n + 1`.
+    #[inline]
+    pub unsafe fn from_top_unchecked_mut(&mut self, len: usize, n: usize) -> &mut EvmWord {
+        self.get_unchecked_mut(len - n - 1)
+    }
+
+    /// Sets the value at the given index.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that the index is within bounds.
+    #[inline]
+    pub unsafe fn set_unchecked(&mut self, index: usize, value: EvmWord) {
+        *self.0.get_unchecked_mut(index) = MaybeUninit::new(value);
     }
 }
 
-/// A native-endian 256-bit unsigned integer, aligned to 8 bytes.
-///
-/// This is a transparent wrapper around [`U256`] on little-endian targets.
+/// An EVM stack word, which is stored in native-endian order.
 #[repr(C, align(8))]
 #[derive(Clone, Copy, PartialEq, Eq)]
+#[allow(missing_debug_implementations)]
 pub struct EvmWord([u8; 32]);
 
-macro_rules! impl_fmt {
-    ($($trait:ident),* $(,)?) => {
-        $(
-            impl fmt::$trait for EvmWord {
-                #[inline]
-                fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                    self.to_u256().fmt(f)
-                }
-            }
-        )*
-    };
+impl Default for EvmWord {
+    #[inline]
+    fn default() -> Self {
+        Self::ZERO
+    }
 }
 
-impl_fmt!(Debug, Display, Binary, Octal, LowerHex, UpperHex);
-
-macro_rules! impl_conversions_through_u256 {
-    ($($ty:ty),*) => {
-        $(
-            impl From<$ty> for EvmWord {
-                #[inline]
-                fn from(value: $ty) -> Self {
-                    Self::from_u256(U256::from(value))
-                }
-            }
-
-            impl From<&$ty> for EvmWord {
-                #[inline]
-                fn from(value: &$ty) -> Self {
-                    Self::from(*value)
-                }
-            }
-
-            impl From<&mut $ty> for EvmWord {
-                #[inline]
-                fn from(value: &mut $ty) -> Self {
-                    Self::from(*value)
-                }
-            }
-
-            impl TryFrom<EvmWord> for $ty {
-                type Error = ();
-
-                #[inline]
-                fn try_from(value: EvmWord) -> Result<Self, Self::Error> {
-                    value.to_u256().try_into().map_err(drop)
-                }
-            }
-
-            impl TryFrom<&EvmWord> for $ty {
-                type Error = ();
-
-                #[inline]
-                fn try_from(value: &EvmWord) -> Result<Self, Self::Error> {
-                    (*value).try_into()
-                }
-            }
-
-            impl TryFrom<&mut EvmWord> for $ty {
-                type Error = ();
-
-                #[inline]
-                fn try_from(value: &mut EvmWord) -> Result<Self, Self::Error> {
-                    (*value).try_into()
-                }
-            }
-        )*
-    };
+impl fmt::Debug for EvmWord {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "0x")?;
+        for byte in &self.to_be_bytes() {
+            write!(f, "{byte:02x}")?;
+        }
+        Ok(())
+    }
 }
 
-impl_conversions_through_u256!(bool, u8, u16, u32, u64, usize, u128);
+impl TryFrom<EvmWord> for usize {
+    type Error = ruint::FromUintError<Self>;
+
+    #[inline]
+    fn try_from(w: EvmWord) -> Result<Self, Self::Error> {
+        Self::try_from(&w)
+    }
+}
+
+impl TryFrom<&EvmWord> for usize {
+    type Error = ruint::FromUintError<Self>;
+
+    #[inline]
+    fn try_from(w: &EvmWord) -> Result<Self, Self::Error> {
+        w.to_u256().try_into()
+    }
+}
+
+impl TryFrom<&mut EvmWord> for usize {
+    type Error = ruint::FromUintError<Self>;
+
+    #[inline]
+    fn try_from(w: &mut EvmWord) -> Result<Self, Self::Error> {
+        Self::try_from(&*w)
+    }
+}
 
 impl From<U256> for EvmWord {
     #[inline]
-    fn from(value: U256) -> Self {
-        Self::from_u256(value)
-    }
-}
-
-impl From<&U256> for EvmWord {
-    #[inline]
-    fn from(value: &U256) -> Self {
-        Self::from(*value)
-    }
-}
-
-impl From<&mut U256> for EvmWord {
-    #[inline]
-    fn from(value: &mut U256) -> Self {
-        Self::from(*value)
+    fn from(u: U256) -> Self {
+        Self::from_u256(u)
     }
 }
 
 impl EvmWord {
-    /// The zero value.
+    /// Zero.
     pub const ZERO: Self = Self([0; 32]);
 
-    /// Creates a new value from native-endian bytes.
+    /// Create a new word from big-endian bytes.
     #[inline]
-    pub const fn from_ne_bytes(x: [u8; 32]) -> Self {
-        Self(x)
+    pub fn from_be_bytes(bytes: [u8; 32]) -> Self {
+        Self::from_be(Self(bytes))
     }
 
-    /// Creates a new value from big-endian bytes.
+    /// Create a new word from little-endian bytes.
     #[inline]
-    pub fn from_be_bytes(x: [u8; 32]) -> Self {
-        Self::from_be(Self(x))
+    pub fn from_le_bytes(bytes: [u8; 32]) -> Self {
+        Self::from_le(Self(bytes))
     }
 
-    /// Creates a new value from little-endian bytes.
+    /// Create a new word from native-endian bytes.
     #[inline]
-    pub fn from_le_bytes(x: [u8; 32]) -> Self {
-        Self::from_le(Self(x))
+    pub const fn from_ne_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
     }
 
-    /// Converts an integer from big endian to the target's endianness.
+    /// Create a new word from a [`U256`]. This is a no-op on little-endian systems.
+    #[inline]
+    pub const fn from_u256(u: U256) -> Self {
+        #[cfg(target_endian = "little")]
+        return unsafe { core::mem::transmute::<U256, Self>(u) };
+        #[cfg(target_endian = "big")]
+        return Self(u.to_be_bytes());
+    }
+
+    /// Converts a big-endian representation into a native one.
     #[inline]
     pub fn from_be(x: Self) -> Self {
         #[cfg(target_endian = "little")]
@@ -618,7 +620,7 @@ impl EvmWord {
         return x;
     }
 
-    /// Converts an integer from little endian to the target's endianness.
+    /// Converts a little-endian representation into a native one.
     #[inline]
     pub fn from_le(x: Self) -> Self {
         #[cfg(target_endian = "little")]
@@ -627,31 +629,7 @@ impl EvmWord {
         return x.swap_bytes();
     }
 
-    /// Converts a [`U256`].
-    #[inline]
-    pub const fn from_u256(value: U256) -> Self {
-        #[cfg(target_endian = "little")]
-        return unsafe { core::mem::transmute::<U256, Self>(value) };
-        #[cfg(target_endian = "big")]
-        return Self(value.to_be_bytes());
-    }
-
-    /// Converts a [`U256`] reference to a [`U256`].
-    #[inline]
-    #[cfg(target_endian = "little")]
-    pub const fn from_u256_ref(value: &U256) -> &Self {
-        unsafe { &*(value as *const U256 as *const Self) }
-    }
-
-    /// Converts a [`U256`] mutable reference to a [`U256`].
-    #[inline]
-    #[cfg(target_endian = "little")]
-    pub fn from_u256_mut(value: &mut U256) -> &mut Self {
-        unsafe { &mut *(value as *mut U256 as *mut Self) }
-    }
-
-    /// Return the memory representation of this integer as a byte array in big-endian (network)
-    /// byte order.
+    /// Return the memory representation of this integer as a byte array in big-endian byte order.
     #[inline]
     pub fn to_be_bytes(self) -> [u8; 32] {
         self.to_be().to_ne_bytes()
@@ -736,20 +714,16 @@ impl EvmWord {
 
 /// Logic for handling the `resume_at` field.
 ///
-/// This is stored in the [`Interpreter::instruction_pointer`] field.
+/// This is stored in the bytecode's PC.
 struct ResumeAt;
 
 impl ResumeAt {
-    fn load(ip: *const u8, code: &[u8]) -> usize {
-        if code.as_ptr_range().contains(&ip) {
+    fn load(pc: usize, code: &[u8]) -> usize {
+        if pc < code.len() {
             0
         } else {
-            ip as usize
+            pc
         }
-    }
-
-    fn store(ip: &mut *const u8, value: usize) {
-        *ip = value as *const u8;
     }
 }
 
@@ -791,116 +765,16 @@ mod tests {
         _gas: *mut Gas,
         _stack: *mut EvmStack,
         _stack_len: *mut usize,
-        _env: *const Env,
-        _contract: *const Contract,
+        _input: *const InputsImpl,
         _ecx: *mut EvmContext<'_>,
     ) -> InstructionResult {
-        InstructionResult::Continue
+        InstructionResult::Stop
     }
 
     #[test]
     fn extern_macro() {
         let _f1 = EvmCompilerFn::new(test_fn);
         let _f2 = EvmCompilerFn::new(__test_fn);
-        assert_eq!(test_fn as usize, __test_fn as usize);
-    }
-
-    #[test]
-    fn borrowing_host() {
-        #[allow(unused)]
-        struct BHost<'a>(&'a mut Env);
-        #[allow(unused)]
-        impl Host for BHost<'_> {
-            fn env(&self) -> &Env {
-                self.0
-            }
-            fn env_mut(&mut self) -> &mut Env {
-                self.0
-            }
-            fn load_account_delegated(
-                &mut self,
-                address: Address,
-            ) -> Option<revm_interpreter::AccountLoad> {
-                unimplemented!()
-            }
-            fn block_hash(&mut self, number: u64) -> Option<revm_primitives::B256> {
-                unimplemented!()
-            }
-            fn balance(&mut self, address: Address) -> Option<revm_interpreter::StateLoad<U256>> {
-                unimplemented!()
-            }
-            fn code(
-                &mut self,
-                address: Address,
-            ) -> Option<revm_interpreter::StateLoad<revm_primitives::Bytes>> {
-                unimplemented!()
-            }
-            fn code_hash(
-                &mut self,
-                address: Address,
-            ) -> Option<revm_interpreter::StateLoad<revm_primitives::FixedBytes<32>>> {
-                unimplemented!()
-            }
-            fn sload(
-                &mut self,
-                address: Address,
-                index: U256,
-            ) -> Option<revm_interpreter::StateLoad<U256>> {
-                unimplemented!()
-            }
-            fn sstore(
-                &mut self,
-                address: Address,
-                index: U256,
-                value: U256,
-            ) -> Option<revm_interpreter::StateLoad<revm_interpreter::SStoreResult>> {
-                unimplemented!()
-            }
-            fn tload(&mut self, address: Address, index: U256) -> U256 {
-                unimplemented!()
-            }
-            fn tstore(&mut self, address: Address, index: U256, value: U256) {
-                unimplemented!()
-            }
-            fn log(&mut self, log: revm_primitives::Log) {
-                unimplemented!()
-            }
-            fn selfdestruct(
-                &mut self,
-                address: Address,
-                target: Address,
-            ) -> Option<revm_interpreter::StateLoad<revm_interpreter::SelfDestructResult>>
-            {
-                unimplemented!()
-            }
-        }
-
-        #[allow(unused_mut)]
-        let mut env = Env::default();
-        #[cfg(not(feature = "host-ext-any"))]
-        let env = &mut env;
-        #[cfg(feature = "host-ext-any")]
-        let env = Box::leak(Box::new(env));
-
-        let mut host = BHost(env);
-        let f = EvmCompilerFn::new(test_fn);
-        let mut interpreter = Interpreter::new(Contract::default(), u64::MAX, false);
-
-        let (mut ecx, stack, stack_len) =
-            EvmContext::from_interpreter_with_stack(&mut interpreter, &mut host);
-        let r = unsafe { f.call(Some(stack), Some(stack_len), &mut ecx) };
-        assert_eq!(r, InstructionResult::Continue);
-
-        let r = unsafe { f.call_with_interpreter(&mut interpreter, &mut host) };
-        assert_eq!(
-            r,
-            InterpreterAction::Return {
-                result: InterpreterResult {
-                    result: InstructionResult::Continue,
-                    output: Bytes::new(),
-                    gas: Gas::new(u64::MAX),
-                }
-            }
-        );
+        assert_eq!(test_fn as *const () as usize, __test_fn as *const () as usize);
     }
 }

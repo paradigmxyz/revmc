@@ -110,7 +110,7 @@ macro_rules! builtins {
 
             pub fn addr(self) -> usize {
                 match self {
-                    $(Self::$ident => crate::$name as usize,)*
+                    $(Self::$ident => crate::$name as *const () as usize,)*
                 }
             }
 
@@ -149,14 +149,11 @@ macro_rules! builtins {
             }
 
             fn op(self) -> u8 {
-                use revm_interpreter::opcode::*;
+                use revm_bytecode::opcode::*;
                 const PANIC: u8 = 0;
                 const LOG: u8 = LOG0;
                 const DORETURN: u8 = RETURN;
                 const RESIZEMEMORY: u8 = 0;
-                const FUNCSTACKPUSH: u8 = 0;
-                const FUNCSTACKPOP: u8 = 0;
-                const FUNCSTACKGROW: u8 = 0;
 
                 match self {
                     $(Self::$ident => [<$ident:upper>]),*
@@ -192,7 +189,7 @@ builtins! {
         }
 
         let op = op.op();
-        let (inputs, outputs) = if let Some(info) = revm_interpreter::opcode::OPCODE_INFO_JUMPTABLE[op as usize] {
+        let (inputs, outputs) = if let Some(info) = revm_bytecode::opcode::OPCODE_INFO[op as usize] {
             (info.inputs(), info.outputs())
         } else {
             (0, 0)
@@ -222,17 +219,26 @@ builtins! {
     Exp            = __revmc_builtin_exp(@[ecx] ptr, @[sp] ptr, u8) Some(u8),
     Keccak256      = __revmc_builtin_keccak256(@[ecx] ptr, @[sp] ptr) Some(u8),
     Balance        = __revmc_builtin_balance(@[ecx] ptr, @[sp] ptr, u8) Some(u8),
+    Origin         = __revmc_builtin_origin(@[ecx] ptr, @[sp] ptr) None,
+    CallDataLoad   = __revmc_builtin_calldataload(@[ecx] ptr, @[sp] ptr) None,
+    CallDataSize   = __revmc_builtin_calldatasize(@[ecx] ptr) Some(usize),
     CallDataCopy   = __revmc_builtin_calldatacopy(@[ecx] ptr, @[sp] ptr) Some(u8),
-    CodeSize       = __revmc_builtin_codesize(@[ecx] ptr) Some(usize),
-    CodeCopy       = __revmc_builtin_codecopy(@[ecx] ptr, @[sp] ptr) Some(u8),
+    CodeSize       = __revmc_builtin_codesize(usize) Some(usize),
+    CodeCopy       = __revmc_builtin_codecopy(@[ecx] ptr, @[sp] ptr, ptr, usize) Some(u8),
     GasPrice       = __revmc_builtin_gas_price(@[ecx] ptr, @[sp] ptr) None,
     ExtCodeSize    = __revmc_builtin_extcodesize(@[ecx] ptr, @[sp] ptr, u8) Some(u8),
     ExtCodeCopy    = __revmc_builtin_extcodecopy(@[ecx] ptr, @[sp] ptr, u8) Some(u8),
     ReturnDataCopy = __revmc_builtin_returndatacopy(@[ecx] ptr, @[sp] ptr) Some(u8),
     ExtCodeHash    = __revmc_builtin_extcodehash(@[ecx] ptr, @[sp] ptr, u8) Some(u8),
     BlockHash      = __revmc_builtin_blockhash(@[ecx] ptr, @[sp] ptr) Some(u8),
+    Coinbase       = __revmc_builtin_coinbase(@[ecx] ptr, @[sp] ptr) None,
+    Timestamp      = __revmc_builtin_timestamp(@[ecx] ptr, @[sp] ptr) None,
+    Number         = __revmc_builtin_number(@[ecx] ptr, @[sp] ptr) None,
     Difficulty     = __revmc_builtin_difficulty(@[ecx] ptr, @[sp] ptr, u8) None,
+    GasLimit       = __revmc_builtin_gaslimit(@[ecx] ptr, @[sp] ptr) None,
+    ChainId        = __revmc_builtin_chainid(@[ecx] ptr, @[sp] ptr) None,
     SelfBalance    = __revmc_builtin_self_balance(@[ecx] ptr, @[sp] ptr) Some(u8),
+    Basefee        = __revmc_builtin_basefee(@[ecx] ptr, @[sp] ptr) None,
     BlobHash       = __revmc_builtin_blob_hash(@[ecx] ptr, @[sp] ptr) None,
     BlobBaseFee    = __revmc_builtin_blob_base_fee(@[ecx] ptr, @[sp] ptr) None,
     Sload          = __revmc_builtin_sload(@[ecx] ptr, @[sp] ptr, u8) Some(u8),
@@ -242,21 +248,14 @@ builtins! {
     Tload          = __revmc_builtin_tload(@[ecx] ptr, @[sp] ptr) None,
     Mcopy          = __revmc_builtin_mcopy(@[ecx] ptr, @[sp] ptr) Some(u8),
     Log            = __revmc_builtin_log(@[ecx] ptr, @[sp_dyn] ptr, u8) Some(u8),
-    DataLoad       = __revmc_builtin_data_load(@[ecx] ptr, @[sp] ptr) None,
-    DataCopy       = __revmc_builtin_data_copy(@[ecx] ptr, @[sp] ptr) Some(u8),
-    ReturnDataLoad = __revmc_builtin_returndataload(@[ecx] ptr, @[sp] ptr) None,
 
-    EofCreate      = __revmc_builtin_eof_create(@[ecx] ptr, @[sp] ptr, usize) Some(u8),
-    ReturnContract = __revmc_builtin_return_contract(@[ecx] ptr, @[sp] ptr, usize) Some(u8),
     Create         = __revmc_builtin_create(@[ecx] ptr, @[sp_dyn] ptr, u8, u8) Some(u8),
     Call           = __revmc_builtin_call(@[ecx] ptr, @[sp_dyn] ptr, u8, u8) Some(u8),
-    ExtCall        = __revmc_builtin_ext_call(@[ecx] ptr, @[sp_dyn] ptr, u8, u8) Some(u8),
     DoReturn       = __revmc_builtin_do_return(@[ecx] ptr, @[sp] ptr, u8) Some(u8),
     SelfDestruct   = __revmc_builtin_selfdestruct(@[ecx] ptr, @[sp] ptr, u8) Some(u8),
 
-    FuncStackPush  = __revmc_builtin_func_stack_push(@[ecx] ptr, ptr, usize) Some(u8),
-    FuncStackPop   = __revmc_builtin_func_stack_pop(@[ecx] ptr) Some(ptr),
-    FuncStackGrow  = __revmc_builtin_func_stack_grow(@[ecx] ptr) None,
-
     ResizeMemory   = __revmc_builtin_resize_memory(@[ecx] ptr, usize) Some(u8),
+    Mload          = __revmc_builtin_mload(@[ecx] ptr, @[sp] ptr) Some(u8),
+    Mstore         = __revmc_builtin_mstore(@[ecx] ptr, @[sp] ptr) Some(u8),
+    Mstore8        = __revmc_builtin_mstore8(@[ecx] ptr, @[sp] ptr) Some(u8),
 }

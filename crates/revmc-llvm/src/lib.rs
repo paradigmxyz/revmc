@@ -1,6 +1,6 @@
 #![doc = include_str!("../README.md")]
 #![cfg_attr(not(test), warn(unused_extern_crates))]
-#![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 #[macro_use]
 extern crate tracing;
@@ -962,6 +962,15 @@ impl Builder for EvmLlvmBuilder<'_, '_> {
         self.bcx.build_not(value.into_int_value(), "").unwrap().into()
     }
 
+    fn clz(&mut self, value: Self::Value) -> Self::Value {
+        let ty = value.get_type();
+        let i1_ty = self.type_int(1);
+        let name = format!("llvm.ctlz.{}", fmt_ty(ty));
+        let ctlz = self.get_or_add_function(&name, |this| this.fn_type(Some(ty), &[ty, i1_ty]));
+        let is_poison_on_zero = self.bool_const(false);
+        self.call(ctlz, &[value, is_poison_on_zero]).unwrap()
+    }
+
     fn bitor_imm(&mut self, lhs: Self::Value, rhs: i64) -> Self::Value {
         let rhs = self.iconst(lhs.get_type(), rhs);
         self.bitor(lhs, rhs)
@@ -1005,6 +1014,13 @@ impl Builder for EvmLlvmBuilder<'_, '_> {
 
     fn ireduce(&mut self, to: Self::Type, value: Self::Value) -> Self::Value {
         self.bcx.build_int_truncate(value.into_int_value(), to.into_int_type(), "").unwrap().into()
+    }
+
+    fn inttoptr(&mut self, value: Self::Value, ty: Self::Type) -> Self::Value {
+        self.bcx
+            .build_int_to_ptr(value.into_int_value(), ty.into_pointer_type(), "")
+            .unwrap()
+            .into()
     }
 
     fn gep(

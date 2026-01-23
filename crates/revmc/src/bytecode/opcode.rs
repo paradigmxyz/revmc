@@ -1,6 +1,6 @@
 use crate::{op_info_map, OpcodeInfo};
-use revm_interpreter::{opcode as op, OPCODE_INFO_JUMPTABLE};
-use revm_primitives::{Bytes, Eof, SpecId, EOF_MAGIC_BYTES};
+use revm_bytecode::opcode::OPCODE_INFO;
+use revm_primitives::hardfork::SpecId;
 use std::{fmt, slice};
 
 /// A bytecode iterator that yields opcodes and their immediate data, alongside the program counter.
@@ -102,12 +102,7 @@ impl<'a> Iterator for OpcodesIter<'a> {
                 return Opcode { opcode, immediate: None };
             }
 
-            let mut len = min_imm_len(opcode) as usize;
-            if opcode == op::RJUMPV {
-                if let Some(&max_case) = self.iter.as_slice().first() {
-                    len += (max_case as usize + 1) * 2;
-                }
-            }
+            let len = min_imm_len(opcode) as usize;
             let immediate = if len > 0 {
                 let r = self.iter.as_slice().get(..len);
                 // TODO: Use `advance_by` when stable.
@@ -146,7 +141,7 @@ impl fmt::Debug for Opcode<'_> {
 
 impl fmt::Display for Opcode<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match OPCODE_INFO_JUMPTABLE[self.opcode as usize] {
+        match OPCODE_INFO[self.opcode as usize] {
             Some(s) => f.write_str(s.name()),
             None => write!(f, "UNKNOWN(0x{:02x})", self.opcode),
         }?;
@@ -158,12 +153,9 @@ impl fmt::Display for Opcode<'_> {
 }
 
 /// Returns the length of the immediate data for the given opcode, or `0` if none.
-///
-/// This is the full length for all opcodes that have an immediate, except for `RJUMPV`, which
-/// currently is the only opcode which has a variable length immediate.
 #[inline]
 pub const fn min_imm_len(op: u8) -> u8 {
-    if let Some(info) = &OPCODE_INFO_JUMPTABLE[op as usize] {
+    if let Some(info) = &OPCODE_INFO[op as usize] {
         info.immediate_size()
     } else {
         0
@@ -173,7 +165,7 @@ pub const fn min_imm_len(op: u8) -> u8 {
 /// Returns the number of input and output stack elements of the given opcode.
 #[inline]
 pub const fn stack_io(op: u8) -> (u8, u8) {
-    if let Some(info) = &OPCODE_INFO_JUMPTABLE[op as usize] {
+    if let Some(info) = &OPCODE_INFO[op as usize] {
         (info.inputs(), info.outputs())
     } else {
         (0, 0)
@@ -193,17 +185,13 @@ pub fn format_bytecode_to<W: fmt::Write + ?Sized>(
     spec_id: SpecId,
     w: &mut W,
 ) -> fmt::Result {
-    if spec_id.is_enabled_in(SpecId::OSAKA) && bytecode.starts_with(&EOF_MAGIC_BYTES) {
-        write!(w, "{:#?}", Eof::decode(Bytes::copy_from_slice(bytecode)))
-    } else {
-        write!(w, "{}", OpcodesIter::new(bytecode, spec_id))
-    }
+    write!(w, "{}", OpcodesIter::new(bytecode, spec_id))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use revm_interpreter::opcode as op;
+    use revm_bytecode::opcode as op;
 
     const DEF_SPEC: SpecId = SpecId::ARROW_GLACIER;
 

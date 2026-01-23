@@ -29,7 +29,7 @@ macro_rules! try_host {
 macro_rules! try_ir {
     ($e:expr) => {
         match $e {
-            InstructionResult::Continue => {}
+            InstructionResult::Stop => {}
             ir => return ir,
         }
     };
