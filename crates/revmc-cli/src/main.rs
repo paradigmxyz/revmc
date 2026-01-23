@@ -79,6 +79,10 @@ struct Cli {
 }
 
 fn main() -> Result<()> {
+    // Force the linker to include all builtins for AOT mode.
+    // This must be called before any dynamic loading happens.
+    revmc_builtins::force_link();
+
     if std::env::var_os("RUST_BACKTRACE").is_none() {
         std::env::set_var("RUST_BACKTRACE", "1");
     }
@@ -191,10 +195,22 @@ fn main() -> Result<()> {
         }
     }
 
-    let lib;
+    let lib: libloading::Library;
     let f = if let Some(load) = load {
         if let Some(load) = load {
-            lib = unsafe { libloading::Library::new(load) }?;
+            // Use RTLD_NOW | RTLD_GLOBAL to ensure symbols from the host executable
+            // (like __revmc_builtin_*) are resolved correctly.
+            #[cfg(unix)]
+            {
+                use libloading::os::unix::Library;
+                lib = unsafe {
+                    Library::open(Some(&load), libc::RTLD_NOW | libc::RTLD_GLOBAL)?.into()
+                };
+            }
+            #[cfg(not(unix))]
+            {
+                lib = unsafe { libloading::Library::new(load) }?;
+            }
             let f: libloading::Symbol<'_, revmc::EvmCompilerFn> =
                 unsafe { lib.get(name.as_bytes())? };
             *f

@@ -22,6 +22,7 @@ workspace = true
 
 [dependencies]
 revmc.workspace = true
+revmc-builtins.workspace = true
 
 revm-interpreter.workspace = true
 revm-primitives.workspace = true
@@ -29,6 +30,7 @@ revm-bytecode.workspace = true
 
 clap = { version = "4", features = ["derive"] }
 color-eyre.workspace = true
+libc = "0.2"
 libloading = "0.8"
 tracing-subscriber = { workspace = true, features = ["fmt", "env-filter"] }
 tracing-tracy = { workspace = true, optional = true }

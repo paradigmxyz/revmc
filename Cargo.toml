@@ -62,7 +62,10 @@ paste = "1.0"
 
 [profile.release]
 opt-level = 3
-lto = true
+# LTO is disabled because it causes segfaults when using LLVM's JIT execution engine.
+# The crash occurs in LLVM's module/context cleanup during drop, likely due to
+# complex interactions between Rust's LTO and LLVM's internal data structures.
+lto = false
 debug = "line-tables-only"
 strip = true
 panic = "abort"

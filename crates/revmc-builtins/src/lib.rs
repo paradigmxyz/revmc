@@ -787,3 +787,52 @@ pub unsafe extern "C" fn __revmc_builtin_mstore8(
     ecx.memory.set(offset, &[byte]);
     InstructionResult::Stop
 }
+
+/// Force the linker to include all builtin symbols.
+///
+/// This function should be called from binaries that need to export the builtins
+/// for dynamically loaded code (AOT mode). The function itself does nothing, but
+/// by taking references to all builtins, it prevents the linker from stripping them.
+///
+/// # Example
+///
+/// ```ignore
+/// // In your main.rs, before any AOT loading:
+/// revmc_builtins::force_link();
+/// ```
+#[inline(never)]
+pub fn force_link() {
+    // Create an array of function pointers to all builtins.
+    // The compiler/linker must keep these symbols because they're "used".
+    let _builtins: &[*const ()] = &[
+        __revmc_builtin_panic as *const (),
+        __revmc_builtin_addmod as *const (),
+        __revmc_builtin_mulmod as *const (),
+        __revmc_builtin_exp as *const (),
+        __revmc_builtin_keccak256 as *const (),
+        __revmc_builtin_balance as *const (),
+        __revmc_builtin_self_balance as *const (),
+        __revmc_builtin_extcodesize as *const (),
+        __revmc_builtin_extcodehash as *const (),
+        __revmc_builtin_extcodecopy as *const (),
+        __revmc_builtin_blockhash as *const (),
+        __revmc_builtin_sload as *const (),
+        __revmc_builtin_sstore as *const (),
+        __revmc_builtin_tload as *const (),
+        __revmc_builtin_tstore as *const (),
+        __revmc_builtin_log as *const (),
+        __revmc_builtin_selfdestruct as *const (),
+        __revmc_builtin_call as *const (),
+        __revmc_builtin_create as *const (),
+        __revmc_builtin_do_return as *const (),
+        __revmc_builtin_calldataload as *const (),
+        __revmc_builtin_calldatacopy as *const (),
+        __revmc_builtin_codecopy as *const (),
+        __revmc_builtin_returndatacopy as *const (),
+        __revmc_builtin_mload as *const (),
+        __revmc_builtin_mstore as *const (),
+        __revmc_builtin_mstore8 as *const (),
+    ];
+    // Use black_box to prevent the compiler from optimizing this away
+    core::hint::black_box(_builtins);
+}
