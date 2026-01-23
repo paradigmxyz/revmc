@@ -792,7 +792,7 @@ pub unsafe extern "C" fn __revmc_builtin_mstore8(
 #[repr(transparent)]
 struct SyncFnPtr(*const ());
 
-// SAFETY: Function pointers are immutable and safe to share across threads.
+// SAFETY: These are immutable function pointers, safe to share across threads.
 unsafe impl Sync for SyncFnPtr {}
 
 /// Static array of all builtin function pointers.
@@ -846,6 +846,10 @@ static BUILTIN_FUNCTIONS: [SyncFnPtr; 43] = [
     SyncFnPtr(__revmc_builtin_mstore as *const ()),
     SyncFnPtr(__revmc_builtin_mstore8 as *const ()),
 ];
+
+/// Compile-time check: ensure BUILTIN_FUNCTIONS stays in sync with Builtin::COUNT.
+#[cfg(feature = "ir")]
+const _: [(); BUILTIN_FUNCTIONS.len()] = [(); Builtin::COUNT];
 
 /// Force the linker to include all builtin symbols.
 ///
