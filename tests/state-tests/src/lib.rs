@@ -1075,30 +1075,41 @@ mod tests {
 
     #[test]
     fn test_run_general_state_tests() {
-        let mut path = get_ethtests_path().join("GeneralStateTests");
+        const STACK_SIZE: usize = 8 * 1024 * 1024; // 8MB stack for deeply nested calls
 
-        // Allow running a specific subdirectory via SUBDIR env var
-        if let Ok(subdir) = env::var("SUBDIR") {
-            path = path.join(subdir);
+        let result = std::thread::Builder::new()
+            .stack_size(STACK_SIZE)
+            .spawn(|| {
+                let mut path = get_ethtests_path().join("GeneralStateTests");
+
+                if let Ok(subdir) = env::var("SUBDIR") {
+                    path = path.join(subdir);
+                }
+
+                assert!(
+                    path.exists(),
+                    "ethereum-tests not found at {}. Run: git submodule update --init --recursive",
+                    path.display()
+                );
+
+                let results = run_general_state_tests(&path).unwrap();
+                let passed = results.iter().filter(|r| r.passed).count();
+                let failed = results.iter().filter(|r| !r.passed).count();
+                println!("Passed: {}, Failed: {}", passed, failed);
+
+                let failures: Vec<_> = results.iter().filter(|r| !r.passed).collect();
+                for result in &failures {
+                    println!("FAILED: {} ({}): {:?}", result.name, result.spec, result.error);
+                }
+
+                assert!(failures.is_empty(), "{} state tests failed", failures.len());
+            })
+            .expect("Failed to spawn test thread")
+            .join();
+
+        if let Err(e) = result {
+            std::panic::resume_unwind(e);
         }
-
-        assert!(
-            path.exists(),
-            "ethereum-tests not found at {}. Run: git submodule update --init --recursive",
-            path.display()
-        );
-
-        let results = run_general_state_tests(&path).unwrap();
-        let passed = results.iter().filter(|r| r.passed).count();
-        let failed = results.iter().filter(|r| !r.passed).count();
-        println!("Passed: {}, Failed: {}", passed, failed);
-
-        let failures: Vec<_> = results.iter().filter(|r| !r.passed).collect();
-        for result in &failures {
-            println!("FAILED: {} ({}): {:?}", result.name, result.spec, result.error);
-        }
-
-        assert!(failures.is_empty(), "{} state tests failed", failures.len());
     }
 
     /// Debug test for extcodecopy_dejavu to understand gas discrepancy
