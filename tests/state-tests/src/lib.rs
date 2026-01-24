@@ -1075,7 +1075,7 @@ mod tests {
 
     #[test]
     fn test_run_general_state_tests() {
-        const STACK_SIZE: usize = 8 * 1024 * 1024; // 8MB stack for deeply nested calls
+        const STACK_SIZE: usize = 16 * 1024 * 1024; // 16MB stack for deeply nested calls
 
         let result = std::thread::Builder::new()
             .stack_size(STACK_SIZE)
