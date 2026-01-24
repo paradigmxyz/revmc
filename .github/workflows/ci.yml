@@ -63,6 +63,8 @@ jobs:
       # Disable LTO for state tests to avoid JIT relocation overflow issues.
       # LTO changes memory layout causing >2GB distance between JIT code and host builtins.
       CARGO_PROFILE_RELEASE_LTO: "false"
+      # Increase stack size for deeply nested contract calls in state tests.
+      RUST_MIN_STACK: "8388608"
     steps:
       - uses: actions/checkout@v4
         with:
