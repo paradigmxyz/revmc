@@ -384,16 +384,15 @@ impl<'ctx> Backend for EvmLlvmBackend<'ctx> {
 
 impl Drop for EvmLlvmBackend<'_> {
     fn drop(&mut self) {
-        // Leak the execution engine to avoid LLVM teardown crashes under LTO.
-        // The engine's destructor triggers use-after-free when LTO reorders
-        // or inlines destructors. This is a known MCJIT ownership issue.
-        // Memory is reclaimed on process exit anyway.
-        if let Some(engine) = self.exec_engine.take() {
-            std::mem::forget(engine);
-        }
-        // Don't clear module under LTO - it may cause additional crashes.
-        // The Module drop will handle cleanup.
-        // self.clear_module();
+        // With dynamic LLVM linking (llvm-prefer-dynamic), the default, cleanup
+        // is safe because LLVM's code is not subject to Rust's LTO passes.
+        // inkwell's ownership model handles the engine/module relationship:
+        // - ExecutionEngine takes ownership of the module at the LLVM level
+        // - Module's Drop checks owned_by_ee and skips LLVMDisposeModule if owned
+        // - When exec_engine drops, it disposes its modules via LLVMDisposeExecutionEngine
+        //
+        // NOTE: If using static LLVM (llvm-prefer-static) with LTO, crashes may
+        // occur here. Use dynamic linking or disable LTO for static builds.
     }
 }
 

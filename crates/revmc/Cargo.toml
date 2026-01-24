@@ -51,7 +51,11 @@ similar-asserts = "1.5"
 tempfile = "3.10"
 
 [features]
-default = ["llvm"]
+# Default to dynamic LLVM linking. This is required when using Rust's LTO
+# (thin or fat) because static LLVM + LTO causes crashes in LLVM's context
+# cleanup routines. Dynamic linking keeps LLVM code separate from Rust's
+# LTO passes, avoiding the corruption.
+default = ["llvm-prefer-dynamic"]
 llvm = ["dep:revmc-llvm"]
 llvm-prefer-static = ["llvm", "revmc-llvm?/prefer-static"]
 llvm-prefer-dynamic = ["llvm", "revmc-llvm?/prefer-dynamic"]

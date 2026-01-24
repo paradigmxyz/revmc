@@ -62,7 +62,10 @@ paste = "1.0"
 
 [profile.release]
 opt-level = 3
-lto = "thin"
+# Full LTO is safe to use when LLVM is dynamically linked (llvm-prefer-dynamic).
+# If using static LLVM (llvm-prefer-static), LTO MUST be disabled to avoid
+# crashes in LLVM's context cleanup routines during JIT teardown.
+lto = "fat"
 debug = "line-tables-only"
 strip = true
 panic = "abort"
