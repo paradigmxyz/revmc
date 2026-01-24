@@ -766,13 +766,28 @@ fn call_jit_with_resume_nested<H: revmc::HostExt>(
     (result, new_resume_at)
 }
 
-/// Execute a nested call or create frame using JIT-compiled code.
-fn execute_frame<DB: revm::Database + 'static>(
+/// State for a single execution frame in the explicit call stack.
+struct FrameState {
+    interpreter: Interpreter<EthInterpreter>,
+    jit_fn: EvmCompilerFn,
+    resume_at: usize,
+    last_result: revm::interpreter::InstructionResult,
+    parent_return_offset: Option<Range<usize>>,
+}
+
+/// Result of preparing a new frame for execution.
+enum PreparedFrame {
+    Ready(FrameState),
+    Immediate(InterpreterResult),
+}
+
+/// Prepare a new frame for execution without actually executing it.
+fn prepare_frame<DB: revm::Database + 'static>(
     ctx: &mut Context<BlockEnv, TxEnv, CfgEnv, DB, Journal<DB>, ()>,
     frame_input: FrameInput,
     spec_id: SpecId,
     compiled: &CompiledContracts,
-) -> InterpreterResult
+) -> PreparedFrame
 where
     DB::Error: std::fmt::Debug,
 {
@@ -781,20 +796,20 @@ where
             let target = call_inputs.bytecode_address;
             let code_result = ctx.journaled_state.code(target);
             let Ok(state_load) = code_result else {
-                return InterpreterResult {
+                return PreparedFrame::Immediate(InterpreterResult {
                     result: revm::interpreter::InstructionResult::FatalExternalError,
                     output: Bytes::new(),
                     gas: revm::interpreter::Gas::new(0),
-                };
+                });
             };
             let code_bytes = state_load.data;
 
             if code_bytes.is_empty() {
-                return InterpreterResult {
+                return PreparedFrame::Immediate(InterpreterResult {
                     result: revm::interpreter::InstructionResult::Stop,
                     output: Bytes::new(),
                     gas: revm::interpreter::Gas::new(call_inputs.gas_limit),
-                };
+                });
             }
 
             let code_hash = keccak256(&code_bytes);
@@ -813,7 +828,7 @@ where
                     },
                 };
 
-                let mut nested_interpreter = Interpreter::new(
+                let interpreter = Interpreter::new(
                     SharedMemory::new(),
                     ext_bytecode,
                     input,
@@ -822,88 +837,132 @@ where
                     call_inputs.gas_limit,
                 );
 
-                // Track resume_at across nested call suspensions
-                let mut resume_at: usize = 0;
+                let parent_return_offset = Some(call_inputs.return_memory_offset.clone());
 
-                // Use call_jit_with_resume_nested instead of call_with_interpreter to properly
-                // track resume_at
-                let (result, new_resume_at) =
-                    call_jit_with_resume_nested(&mut nested_interpreter, ctx, jit_fn, resume_at);
-                resume_at = new_resume_at;
-                let mut last_result = result;
-
-                loop {
-                    let action = nested_interpreter.bytecode.action.take();
-                    match action {
-                        Some(InterpreterAction::Return(result)) => {
-                            return InterpreterResult {
-                                result: result.result,
-                                output: result.output,
-                                gas: nested_interpreter.gas,
-                            };
-                        }
-                        Some(InterpreterAction::NewFrame(inner_frame)) => {
-                            let (inner_result, inner_return_offset) = match inner_frame {
-                                FrameInput::Call(ref inner_call) => {
-                                    let offset = inner_call.return_memory_offset.clone();
-                                    let result = execute_frame(ctx, inner_frame, spec_id, compiled);
-                                    (result, Some(offset))
-                                }
-                                FrameInput::Create(_) => {
-                                    let result = execute_frame(ctx, inner_frame, spec_id, compiled);
-                                    (result, None)
-                                }
-                                FrameInput::Empty => {
-                                    return InterpreterResult {
-                                        result: revm::interpreter::InstructionResult::Stop,
-                                        output: Bytes::new(),
-                                        gas: nested_interpreter.gas,
-                                    };
-                                }
-                            };
-                            insert_call_outcome(
-                                &mut nested_interpreter,
-                                inner_result,
-                                inner_return_offset,
-                            );
-                            // Resume with preserved resume_at
-                            let (result, new_resume_at) = call_jit_with_resume_nested(
-                                &mut nested_interpreter,
-                                ctx,
-                                jit_fn,
-                                resume_at,
-                            );
-                            resume_at = new_resume_at;
-                            last_result = result;
-                        }
-                        None => {
-                            // JIT returned without setting an action - execution is done
-                            return InterpreterResult {
-                                result: last_result,
-                                output: Bytes::new(),
-                                gas: nested_interpreter.gas,
-                            };
-                        }
-                    }
-                }
+                PreparedFrame::Ready(FrameState {
+                    interpreter,
+                    jit_fn,
+                    resume_at: 0,
+                    last_result: revm::interpreter::InstructionResult::Stop,
+                    parent_return_offset,
+                })
             } else {
-                InterpreterResult {
+                PreparedFrame::Immediate(InterpreterResult {
                     result: revm::interpreter::InstructionResult::Stop,
                     output: Bytes::new(),
                     gas: revm::interpreter::Gas::new(call_inputs.gas_limit),
-                }
+                })
             }
         }
-        FrameInput::Create(create_inputs) => InterpreterResult {
+        FrameInput::Create(create_inputs) => PreparedFrame::Immediate(InterpreterResult {
             result: revm::interpreter::InstructionResult::CreateInitCodeStartingEF00,
             output: Bytes::new(),
             gas: revm::interpreter::Gas::new(create_inputs.gas_limit()),
-        },
-        FrameInput::Empty => InterpreterResult {
+        }),
+        FrameInput::Empty => PreparedFrame::Immediate(InterpreterResult {
             result: revm::interpreter::InstructionResult::Stop,
             output: Bytes::new(),
             gas: revm::interpreter::Gas::new(0),
-        },
+        }),
+    }
+}
+
+/// Execute frames iteratively using an explicit stack (no recursion).
+fn execute_frames_iterative<DB: revm::Database + 'static>(
+    ctx: &mut Context<BlockEnv, TxEnv, CfgEnv, DB, Journal<DB>, ()>,
+    initial_frame: FrameState,
+    spec_id: SpecId,
+    compiled: &CompiledContracts,
+) -> InterpreterResult
+where
+    DB::Error: std::fmt::Debug,
+{
+    let mut stack: Vec<FrameState> = vec![initial_frame];
+
+    loop {
+        let top = stack.last_mut().unwrap();
+
+        let (result, new_resume_at) =
+            call_jit_with_resume_nested(&mut top.interpreter, ctx, top.jit_fn, top.resume_at);
+        top.resume_at = new_resume_at;
+        top.last_result = result;
+
+        let action = top.interpreter.bytecode.action.take();
+
+        match action {
+            Some(InterpreterAction::NewFrame(child_input)) => {
+                let parent_return_offset = match &child_input {
+                    FrameInput::Call(call_inputs) => Some(call_inputs.return_memory_offset.clone()),
+                    _ => None,
+                };
+
+                match prepare_frame(ctx, child_input, spec_id, compiled) {
+                    PreparedFrame::Immediate(child_result) => {
+                        let top = stack.last_mut().unwrap();
+                        insert_call_outcome(&mut top.interpreter, child_result, parent_return_offset);
+                    }
+                    PreparedFrame::Ready(child_state) => {
+                        stack.push(child_state);
+                    }
+                }
+            }
+            Some(InterpreterAction::Return(ret)) => {
+                let finished = stack.pop().unwrap();
+                let finished_result = InterpreterResult {
+                    result: ret.result,
+                    output: ret.output,
+                    gas: finished.interpreter.gas,
+                };
+
+                if stack.is_empty() {
+                    return finished_result;
+                }
+
+                let parent = stack.last_mut().unwrap();
+                insert_call_outcome(
+                    &mut parent.interpreter,
+                    finished_result,
+                    finished.parent_return_offset,
+                );
+            }
+            None => {
+                let finished = stack.pop().unwrap();
+                let finished_result = InterpreterResult {
+                    result: finished.last_result,
+                    output: Bytes::new(),
+                    gas: finished.interpreter.gas,
+                };
+
+                if stack.is_empty() {
+                    return finished_result;
+                }
+
+                let parent = stack.last_mut().unwrap();
+                insert_call_outcome(
+                    &mut parent.interpreter,
+                    finished_result,
+                    finished.parent_return_offset,
+                );
+            }
+        }
+    }
+}
+
+/// Execute a nested call or create frame using JIT-compiled code (iterative, no recursion).
+fn execute_frame<DB: revm::Database + 'static>(
+    ctx: &mut Context<BlockEnv, TxEnv, CfgEnv, DB, Journal<DB>, ()>,
+    frame_input: FrameInput,
+    spec_id: SpecId,
+    compiled: &CompiledContracts,
+) -> InterpreterResult
+where
+    DB::Error: std::fmt::Debug,
+{
+    match prepare_frame(ctx, frame_input, spec_id, compiled) {
+        PreparedFrame::Immediate(result) => result,
+        PreparedFrame::Ready(initial_frame) => {
+            execute_frames_iterative(ctx, initial_frame, spec_id, compiled)
+        }
     }
 }
 
@@ -1075,41 +1134,29 @@ mod tests {
 
     #[test]
     fn test_run_general_state_tests() {
-        const STACK_SIZE: usize = 16 * 1024 * 1024; // 16MB stack for deeply nested calls
+        let mut path = get_ethtests_path().join("GeneralStateTests");
 
-        let result = std::thread::Builder::new()
-            .stack_size(STACK_SIZE)
-            .spawn(|| {
-                let mut path = get_ethtests_path().join("GeneralStateTests");
-
-                if let Ok(subdir) = env::var("SUBDIR") {
-                    path = path.join(subdir);
-                }
-
-                assert!(
-                    path.exists(),
-                    "ethereum-tests not found at {}. Run: git submodule update --init --recursive",
-                    path.display()
-                );
-
-                let results = run_general_state_tests(&path).unwrap();
-                let passed = results.iter().filter(|r| r.passed).count();
-                let failed = results.iter().filter(|r| !r.passed).count();
-                println!("Passed: {}, Failed: {}", passed, failed);
-
-                let failures: Vec<_> = results.iter().filter(|r| !r.passed).collect();
-                for result in &failures {
-                    println!("FAILED: {} ({}): {:?}", result.name, result.spec, result.error);
-                }
-
-                assert!(failures.is_empty(), "{} state tests failed", failures.len());
-            })
-            .expect("Failed to spawn test thread")
-            .join();
-
-        if let Err(e) = result {
-            std::panic::resume_unwind(e);
+        if let Ok(subdir) = env::var("SUBDIR") {
+            path = path.join(subdir);
         }
+
+        assert!(
+            path.exists(),
+            "ethereum-tests not found at {}. Run: git submodule update --init --recursive",
+            path.display()
+        );
+
+        let results = run_general_state_tests(&path).unwrap();
+        let passed = results.iter().filter(|r| r.passed).count();
+        let failed = results.iter().filter(|r| !r.passed).count();
+        println!("Passed: {}, Failed: {}", passed, failed);
+
+        let failures: Vec<_> = results.iter().filter(|r| !r.passed).collect();
+        for result in &failures {
+            println!("FAILED: {} ({}): {:?}", result.name, result.spec, result.error);
+        }
+
+        assert!(failures.is_empty(), "{} state tests failed", failures.len());
     }
 
     /// Debug test for extcodecopy_dejavu to understand gas discrepancy
