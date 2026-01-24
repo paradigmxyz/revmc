@@ -17,25 +17,19 @@ concurrency:
 
 jobs:
   test:
-    name: test +${{ matrix.runner }}-${{ matrix.arch }}-${{ matrix.toolchain }} ${{ matrix.profile }}
+    name: test +${{ matrix.runner }}-${{ matrix.toolchain }} ${{ matrix.profile }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        runner: ["ubuntu-latest", "macos-14"]
-        arch: ["x64", "arm64"]
+        runner: ["depot-ubuntu-latest-4", "macos-14"]
         toolchain: ["stable", "nightly"]
         profile: ["dev", "release"]
-        exclude:
-          - runner: "ubuntu-latest"
-            arch: "arm64"
-          - runner: "macos-14"
-            arch: "x64"
     steps:
       - uses: actions/checkout@v4
       - name: Install LLVM (apt)
-        if: ${{ !contains(matrix.runner, 'macos') }}
+        if: ${{ contains(matrix.runner, 'ubuntu') }}
         run: sudo .github/scripts/install_llvm_ubuntu.sh ${{ env.LLVM_VERSION }}
       - name: Install LLVM (brew)
         if: ${{ contains(matrix.runner, 'macos') }}
@@ -54,7 +48,33 @@ jobs:
           cache-on-failure: true
       - uses: taiki-e/install-action@nextest
       - name: test
-        run: cargo nextest run --workspace --cargo-profile ${{ matrix.profile }} --features ${{ env.ALL_BACKENDS }}
+        run: cargo nextest run --workspace --cargo-profile ${{ matrix.profile }} --features ${{ env.ALL_BACKENDS }} --exclude revmc-state-tests
+
+  state-tests:
+    name: state-tests ${{ matrix.profile }}
+    runs-on: depot-ubuntu-latest-4
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: ["dev", "release"]
+    env:
+      ETHTESTS: ${{ github.workspace }}/tests/ethereum-tests
+      # Disable LTO for state tests to avoid JIT relocation overflow issues.
+      # LTO changes memory layout causing >2GB distance between JIT code and host builtins.
+      CARGO_PROFILE_RELEASE_LTO: "false"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install LLVM
+        run: sudo .github/scripts/install_llvm_ubuntu.sh ${{ env.LLVM_VERSION }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - name: Run state tests
+        run: cargo test ${{ matrix.profile == 'release' && '--release' || '' }} -p revmc-state-tests -- --test-threads=1
 
   feature-checks:
     runs-on: ubuntu-latest
@@ -121,3 +141,15 @@ jobs:
         with:
           components: rustfmt
       - run: cargo fmt --all --check
+
+  ci-success:
+    name: ci success
+    runs-on: ubuntu-latest
+    if: always()
+    needs: [test, state-tests, feature-checks, clippy, docs, fmt]
+    timeout-minutes: 5
+    steps:
+      - name: Decide whether the needed jobs succeeded or failed
+        uses: re-actors/alls-green@release/v1
+        with:
+          jobs: ${{ toJSON(needs) }}
