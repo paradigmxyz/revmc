@@ -257,16 +257,46 @@ pub unsafe extern "C" fn __revmc_builtin_extcodecopy(
     rev![address, memory_offset, code_offset, len]: &mut [EvmWord; 4],
     spec_id: SpecId,
 ) -> InstructionResult {
+    let len = try_into_usize!(len);
+
+    // Charge base static cost first (matches interpreter's static_gas for EXTCODECOPY)
+    // Pre-Berlin: 20, Tangerine: 700, Berlin+: 100 (WARM_STORAGE_READ_COST)
+    let base_cost = if spec_id.is_enabled_in(SpecId::BERLIN) {
+        gas::WARM_STORAGE_READ_COST
+    } else if spec_id.is_enabled_in(SpecId::TANGERINE) {
+        700
+    } else {
+        20
+    };
+    gas!(ecx, base_cost);
+
+    // Charge copy cost (per-word cost for the length)
+    gas_opt!(ecx, gas::dyn_verylowcopy_cost(len as u64));
+
+    // Handle memory expansion BEFORE loading account
+    // This ensures we don't warm accounts or charge cold access on OOG
+    let memory_offset_usize = if len != 0 {
+        let memory_offset = try_into_usize!(memory_offset);
+        ensure_memory!(ecx, memory_offset, len);
+        memory_offset
+    } else {
+        0
+    };
+
+    // NOW load the account (this warms it and determines cold/warm cost)
     let state_load = try_opt!(ecx.host.load_account_code(address.to_address()));
 
-    let len = try_into_usize!(len);
-    gas_opt!(ecx, gas::extcodecopy_cost(spec_id, len as u64, state_load.is_cold));
+    // Charge cold account ADDITIONAL cost if cold (only for Berlin+)
+    // The base warm cost was already charged above; cold accounts need extra 2500
+    if spec_id.is_enabled_in(SpecId::BERLIN) && state_load.is_cold {
+        gas!(ecx, gas::COLD_ACCOUNT_ACCESS_COST - gas::WARM_STORAGE_READ_COST);
+    }
+
+    // Copy the data
     if len != 0 {
-        let memory_offset = try_into_usize!(memory_offset);
         let code_offset = code_offset.to_u256();
         let code_offset = as_usize_saturated!(code_offset).min(state_load.data.len());
-        ensure_memory!(ecx, memory_offset, len);
-        ecx.memory.set_data(memory_offset, code_offset, len, &state_load.data);
+        ecx.memory.set_data(memory_offset_usize, code_offset, len, &state_load.data);
     }
     InstructionResult::Stop
 }

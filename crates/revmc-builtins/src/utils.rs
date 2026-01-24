@@ -58,15 +58,18 @@ fn resize_memory_inner(
         // memory_gas(num_words, linear_cost, quadratic_cost)
         // MEMORY = 3 (linear cost per word), MEMORY_QUAD_COEFFICIENT = 512 (1/512 for quadratic)
         let new_cost = crate::gas::memory_gas(new_num_words, 3, 512);
-        let old_cost = crate::gas::memory_gas(current_words, 3, 512);
+        // Use cached expansion_cost from Gas struct to match interpreter's invariants
+        let old_cost = gas.memory().expansion_cost;
         let cost = new_cost.saturating_sub(old_cost);
 
         if !gas.record_cost(cost) {
             return InstructionResult::MemoryOOG;
         }
 
-        // Update memory words tracking
-        gas.memory_mut().words_num = new_num_words;
+        // Update memory words tracking AND expansion_cost to maintain invariant
+        let mem = gas.memory_mut();
+        mem.words_num = new_num_words;
+        mem.expansion_cost = new_cost;
 
         // Resize the actual memory (must be word-aligned, as per EVM spec)
         memory.resize(new_num_words * 32);

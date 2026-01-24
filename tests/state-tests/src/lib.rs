@@ -3,6 +3,8 @@
 //! Runs tests from ethereum/tests against the JIT compiler and compares
 //! results with the revm interpreter.
 
+#![allow(unused_imports)]
+
 use eyre::{eyre, Result};
 use revm::{
     bytecode::Bytecode,
@@ -13,7 +15,7 @@ use revm::{
     interpreter::{
         instructions::instruction_table_gas_changes_spec,
         interpreter::{EthInterpreter, ExtBytecode},
-        interpreter_types::ReturnData,
+        interpreter_types::{Jumps, ReturnData},
         FrameInput, InputsImpl, Interpreter, InterpreterAction, InterpreterResult, SharedMemory,
     },
     primitives::{hardfork::SpecId, keccak256, Bytes, TxKind, B256, U256},
@@ -720,7 +722,11 @@ where
 
     let result = unsafe { jit_fn.call(Some(stack), Some(stack_len), &mut ecx) };
 
-    if result == revm::interpreter::InstructionResult::OutOfGas {
+    // Only treat OutOfGas as "this frame OOG" if the JIT did not schedule an action.
+    // If an action exists (e.g., Return from child), the result code may be stale/propagated.
+    if result == revm::interpreter::InstructionResult::OutOfGas
+        && ecx.next_action.is_none()
+    {
         ecx.gas.spend_all();
     }
 
@@ -752,7 +758,11 @@ fn call_jit_with_resume_nested<H: revmc::HostExt>(
 
     let result = unsafe { jit_fn.call(Some(stack), Some(stack_len), &mut ecx) };
 
-    if result == revm::interpreter::InstructionResult::OutOfGas {
+    // Only treat OutOfGas as "this frame OOG" if the JIT did not schedule an action.
+    // If an action exists (e.g., Return from child), the result code may be stale/propagated.
+    if result == revm::interpreter::InstructionResult::OutOfGas
+        && ecx.next_action.is_none()
+    {
         ecx.gas.spend_all();
     }
 
@@ -1090,5 +1100,199 @@ mod tests {
         for result in results.iter().filter(|r| !r.passed) {
             println!("FAILED: {} ({}): {:?}", result.name, result.spec, result.error);
         }
+    }
+
+    /// Debug test for extcodecopy_dejavu to understand gas discrepancy
+    #[test]
+    fn debug_extcodecopy_dejavu() {
+        // Test bytecode: PUSH1 0xff, PUSH1 0xff, PUSH4 0x0fffffff, PUSH4 0x0fffffff, EXTCODECOPY
+        // Decoded:
+        // - PUSH1 0xff (len=255)
+        // - PUSH1 0xff (code_offset=255)
+        // - PUSH4 0x0fffffff (memory_offset=268435455)
+        // - PUSH4 0x0fffffff (address)
+        // - EXTCODECOPY
+        let bytecode: &[u8] = &[
+            0x60, 0xff,             // PUSH1 0xff (len=255)
+            0x60, 0xff,             // PUSH1 0xff (code_offset=255)
+            0x63, 0x0f, 0xff, 0xff, 0xff, // PUSH4 0x0fffffff (memory_offset)
+            0x63, 0x0f, 0xff, 0xff, 0xff, // PUSH4 0x0fffffff (address)
+            0x3c,                   // EXTCODECOPY
+        ];
+
+        let spec_id = SpecId::CANCUN;
+        let gas_limit = 42949672960u64; // 0x0a00000000
+
+        println!("\n=== Debug extcodecopy_dejavu ===");
+        println!("Bytecode: {:02x?}", bytecode);
+        println!("Gas limit: {}", gas_limit);
+        println!("memory_offset = 268435455 (0x0fffffff)");
+        println!("code_offset = 255 (0xff)");
+        println!("len = 255 (0xff)");
+
+        // Calculate expected gas costs
+        let len = 255u64;
+        let memory_offset = 268435455usize;
+        let new_size = memory_offset.saturating_add(len as usize);
+        let new_num_words = (new_size + 31) / 32;
+        
+        println!("\n--- Expected Gas Breakdown ---");
+        
+        // PUSH1 costs 3 gas each, PUSH4 costs 3 gas each
+        let push_gas = 3 * 4; // 4 push ops
+        println!("PUSH ops (4x): {} gas", push_gas);
+        
+        // EXTCODECOPY has:
+        // 1. Copy cost: 3 * ceil(len/32)
+        let copy_words = (len + 31) / 32;
+        let copy_cost = 3 * copy_words;
+        println!("Copy cost (3 * {} words): {} gas", copy_words, copy_cost);
+        
+        // 2. Memory expansion cost: 3*words + words²/512
+        let memory_cost = 3 * new_num_words as u64 + (new_num_words as u64 * new_num_words as u64) / 512;
+        println!("Memory size needed: {} bytes = {} words", new_size, new_num_words);
+        println!("Memory expansion cost: 3*{} + {}²/512 = {} + {} = {} gas", 
+            new_num_words, new_num_words,
+            3 * new_num_words as u64, 
+            (new_num_words as u64 * new_num_words as u64) / 512,
+            memory_cost);
+        
+        // 3. Warm/cold account access (cold = 2600 for Berlin+)
+        let access_cost = 2600u64; // cold access for Berlin+
+        println!("Cold account access: {} gas", access_cost);
+        
+        let total_expected = push_gas as u64 + copy_cost + memory_cost + access_cost;
+        println!("Total expected: {} gas (if memory expansion doesn't OOG first)", total_expected);
+
+        // Now run interpreter
+        println!("\n--- Running Interpreter ---");
+        let bytecode_obj = Bytecode::new_legacy(bytecode.to_vec().into());
+        let ext_bytecode = ExtBytecode::new(bytecode_obj);
+
+        let input = InputsImpl {
+            target_address: Address::ZERO,
+            bytecode_address: None,
+            caller_address: Address::ZERO,
+            input: revm::interpreter::CallInput::Bytes(Default::default()),
+            call_value: Default::default(),
+        };
+
+        let mut interpreter: Interpreter<EthInterpreter> =
+            Interpreter::new(SharedMemory::new(), ext_bytecode, input, false, spec_id, gas_limit);
+
+        let db = CacheDB::new(EmptyDB::new());
+        let mut cfg = CfgEnv::default();
+        cfg.spec = spec_id;
+        let block = BlockEnv::default();
+        let mut ctx = Context::<BlockEnv, TxEnv, CfgEnv, _, Journal<_>, ()>::new(db, spec_id)
+            .with_block(block)
+            .with_cfg(cfg);
+
+        let table = instruction_table_gas_changes_spec::<EthInterpreter, _>(spec_id);
+        
+        // Run step by step
+        let mut step = 0;
+        loop {
+            let pc = interpreter.bytecode.pc();
+            let gas_before = interpreter.gas.remaining();
+            let spent_before = interpreter.gas.spent();
+            
+            let action = interpreter.run_plain(&table, &mut ctx);
+            
+            let gas_after = interpreter.gas.remaining();
+            let spent_after = interpreter.gas.spent();
+            let gas_this_step = spent_after - spent_before;
+            
+            step += 1;
+            println!("Step {}: PC={}, gas_remaining={} -> {}, gas_spent_this_step={}", 
+                step, pc, gas_before, gas_after, gas_this_step);
+            
+            match action {
+                InterpreterAction::Return(result) => {
+                    println!("Interpreter finished: result={:?}, total_gas_spent={}", 
+                        result.result, interpreter.gas.spent());
+                    break;
+                }
+                InterpreterAction::NewFrame(_) => {
+                    println!("Interpreter spawned new frame (unexpected for this test)");
+                    break;
+                }
+            }
+        }
+
+        // Now run JIT
+        println!("\n--- Running JIT ---");
+        let context = LlvmContext::create();
+        let backend = EvmLlvmBackend::new(&context, false, OptimizationLevel::Default)
+            .expect("Failed to create backend");
+        let mut compiler = EvmCompiler::new(backend);
+
+        let jit_fn = unsafe { compiler.jit("test_extcodecopy", bytecode, spec_id) }
+            .expect("Failed to JIT compile");
+
+        let bytecode_obj2 = Bytecode::new_legacy(bytecode.to_vec().into());
+        let ext_bytecode2 = ExtBytecode::new(bytecode_obj2);
+        let input2 = InputsImpl {
+            target_address: Address::ZERO,
+            bytecode_address: None,
+            caller_address: Address::ZERO,
+            input: revm::interpreter::CallInput::Bytes(Default::default()),
+            call_value: Default::default(),
+        };
+
+        let mut interpreter2: Interpreter<EthInterpreter> =
+            Interpreter::new(SharedMemory::new(), ext_bytecode2, input2, false, spec_id, gas_limit);
+
+        let mut host = revm::context_interface::host::DummyHost::new(spec_id);
+        
+        println!("JIT gas before call: remaining={}, spent={}", 
+            interpreter2.gas.remaining(), interpreter2.gas.spent());
+        
+        let action = unsafe { jit_fn.call_with_interpreter(&mut interpreter2, &mut host) };
+
+        println!("JIT gas after call: remaining={}, spent={}", 
+            interpreter2.gas.remaining(), interpreter2.gas.spent());
+
+        match action {
+            revm::interpreter::InterpreterAction::Return(result) => {
+                println!("JIT finished: result={:?}, output_len={}", result.result, result.output.len());
+            }
+            other => {
+                println!("JIT action: {:?}", other);
+            }
+        }
+
+        println!("\n=== Summary ===");
+        println!("Interpreter gas spent: (run step-by-step above)");
+        println!("JIT gas spent: {}", interpreter2.gas.spent());
+        
+        println!("\n=== ROOT CAUSE ANALYSIS ===");
+        println!("Difference: 136 - 36 = 100 gas");
+        println!("");
+        println!("Interpreter gas breakdown:");
+        println!("  - 4 PUSH ops: 12 gas");
+        println!("  - EXTCODECOPY static gas (WARM_STORAGE_READ_COST): 100 gas");
+        println!("  - EXTCODECOPY copy cost (3 * ceil(255/32) = 3 * 8 = 24): 24 gas");
+        println!("  - Memory expansion: OOG (needs ~137 billion gas)");
+        println!("  Total before OOG: 12 + 100 + 24 = 136 gas");
+        println!("");
+        println!("JIT gas breakdown:");
+        println!("  - 4 PUSH ops: 12 gas");
+        println!("  - EXTCODECOPY copy cost only: 24 gas");
+        println!("  - Memory expansion: OOG");
+        println!("  Total before OOG: 12 + 24 = 36 gas");
+        println!("");
+        println!("MISSING: The JIT builtin __revmc_builtin_extcodecopy does NOT charge");
+        println!("the base access cost (100 gas = WARM_STORAGE_READ_COST) for Berlin+ specs.");
+        println!("");
+        println!("The interpreter's instruction table sets static_gas = WARM_STORAGE_READ_COST (100)");
+        println!("for EXTCODECOPY in Berlin+ (line 122 of revm-interpreter/instructions.rs).");
+        println!("This is charged BEFORE the dynamic costs.");
+        println!("");
+        println!("FIX: In __revmc_builtin_extcodecopy, add at the start:");
+        println!("  // Charge base access cost for Berlin+ (same as interpreter's static gas)");
+        println!("  if spec_id.is_enabled_in(SpecId::BERLIN) {{");
+        println!("      gas!(ecx, gas::WARM_STORAGE_READ_COST);");
+        println!("  }}");
     }
 }

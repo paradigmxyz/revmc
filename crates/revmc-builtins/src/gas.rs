@@ -50,6 +50,19 @@ pub fn warm_cold_cost_with_delegation(state: StateLoad<bool>) -> u64 {
     }
 }
 
+/// Returns warm/cold cost based on spec_id and is_cold flag.
+/// Pre-Berlin specs have different fixed costs.
+#[inline]
+pub fn warm_cold_cost_with_spec(spec_id: SpecId, is_cold: bool) -> u64 {
+    if spec_id.is_enabled_in(SpecId::BERLIN) {
+        warm_cold_cost(is_cold)
+    } else if spec_id.is_enabled_in(SpecId::TANGERINE) {
+        700
+    } else {
+        20
+    }
+}
+
 /// Calculate EXTCODECOPY gas cost.
 #[inline]
 pub fn extcodecopy_cost(spec_id: SpecId, len: u64, is_cold: bool) -> Option<u64> {

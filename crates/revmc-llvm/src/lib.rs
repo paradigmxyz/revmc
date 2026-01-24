@@ -384,7 +384,16 @@ impl<'ctx> Backend for EvmLlvmBackend<'ctx> {
 
 impl Drop for EvmLlvmBackend<'_> {
     fn drop(&mut self) {
-        self.clear_module();
+        // Leak the execution engine to avoid LLVM teardown crashes under LTO.
+        // The engine's destructor triggers use-after-free when LTO reorders
+        // or inlines destructors. This is a known MCJIT ownership issue.
+        // Memory is reclaimed on process exit anyway.
+        if let Some(engine) = self.exec_engine.take() {
+            std::mem::forget(engine);
+        }
+        // Don't clear module under LTO - it may cause additional crashes.
+        // The Module drop will handle cleanup.
+        // self.clear_module();
     }
 }
 
