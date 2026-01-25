@@ -568,7 +568,11 @@ where
                     PreparedInterpreterFrame::Immediate(child_result) => {
                         let top = stack.last_mut().unwrap();
                         top.interpreter.memory.free_child_context();
-                        insert_call_outcome(&mut top.interpreter, child_result, parent_return_offset);
+                        insert_call_outcome(
+                            &mut top.interpreter,
+                            child_result,
+                            parent_return_offset,
+                        );
                     }
                     PreparedInterpreterFrame::Ready(child_state) => {
                         stack.push(child_state);
@@ -940,7 +944,11 @@ where
                 match prepare_frame(ctx, child_input, spec_id, compiled) {
                     PreparedFrame::Immediate(child_result) => {
                         let top = stack.last_mut().unwrap();
-                        insert_call_outcome(&mut top.interpreter, child_result, parent_return_offset);
+                        insert_call_outcome(
+                            &mut top.interpreter,
+                            child_result,
+                            parent_return_offset,
+                        );
                     }
                     PreparedFrame::Ready(child_state) => {
                         stack.push(child_state);
