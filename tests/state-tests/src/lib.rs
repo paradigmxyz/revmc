@@ -683,13 +683,7 @@ fn run_with_jit(
 
     let mut last_result = result;
 
-    let mut iteration = 0;
     loop {
-        iteration += 1;
-        if iteration > 100 {
-            return Err(eyre::eyre!("Too many iterations"));
-        }
-
         // Check if there's a pending action
         let action = interpreter.bytecode.action.take();
 
@@ -723,6 +717,10 @@ fn run_with_jit(
                 last_result = result;
             }
             Some(InterpreterAction::Return(ret_result)) => {
+                // Canonical OOG handling: use ret_result.result as the terminal status
+                if ret_result.result == revm::interpreter::InstructionResult::OutOfGas {
+                    interpreter.gas.spend_all();
+                }
                 return Ok(ExecutionResult {
                     success: ret_result.result.is_ok(),
                     gas_used: interpreter.gas.spent(),
@@ -730,6 +728,10 @@ fn run_with_jit(
                 });
             }
             None => {
+                // Canonical OOG handling: use last_result as the terminal status
+                if last_result == revm::interpreter::InstructionResult::OutOfGas {
+                    interpreter.gas.spend_all();
+                }
                 return Ok(ExecutionResult {
                     success: last_result.is_ok(),
                     gas_used: interpreter.gas.spent(),
@@ -766,11 +768,9 @@ where
 
     let result = unsafe { jit_fn.call(Some(stack), Some(stack_len), &mut ecx) };
 
-    // Only treat OutOfGas as "this frame OOG" if the JIT did not schedule an action.
-    // If an action exists (e.g., Return from child), the result code may be stale/propagated.
-    if result == revm::interpreter::InstructionResult::OutOfGas && ecx.next_action.is_none() {
-        ecx.gas.spend_all();
-    }
+    // NOTE: OOG handling is done in the caller (execute_frames_iterative, run_with_jit)
+    // based on the canonical terminal result (action's result or raw result if no action).
+    // This avoids incorrect spend_all() when an action exists but result code is stale.
 
     let new_resume_at = ecx.resume_at;
     (result, new_resume_at)
@@ -800,11 +800,8 @@ fn call_jit_with_resume_nested<H: revmc::HostExt>(
 
     let result = unsafe { jit_fn.call(Some(stack), Some(stack_len), &mut ecx) };
 
-    // Only treat OutOfGas as "this frame OOG" if the JIT did not schedule an action.
-    // If an action exists (e.g., Return from child), the result code may be stale/propagated.
-    if result == revm::interpreter::InstructionResult::OutOfGas && ecx.next_action.is_none() {
-        ecx.gas.spend_all();
-    }
+    // NOTE: OOG handling is done in the caller (execute_frames_iterative)
+    // based on the canonical terminal result (action's result or raw result if no action).
 
     let new_resume_at = ecx.resume_at;
     (result, new_resume_at)
@@ -951,7 +948,13 @@ where
                 }
             }
             Some(InterpreterAction::Return(ret)) => {
-                let finished = stack.pop().unwrap();
+                let mut finished = stack.pop().unwrap();
+
+                // Canonical OOG handling: use ret.result as the terminal status
+                if ret.result == revm::interpreter::InstructionResult::OutOfGas {
+                    finished.interpreter.gas.spend_all();
+                }
+
                 let finished_result = InterpreterResult {
                     result: ret.result,
                     output: ret.output,
@@ -970,7 +973,13 @@ where
                 );
             }
             None => {
-                let finished = stack.pop().unwrap();
+                let mut finished = stack.pop().unwrap();
+
+                // Canonical OOG handling: use last_result as the terminal status
+                if finished.last_result == revm::interpreter::InstructionResult::OutOfGas {
+                    finished.interpreter.gas.spend_all();
+                }
+
                 let finished_result = InterpreterResult {
                     result: finished.last_result,
                     output: Bytes::new(),
