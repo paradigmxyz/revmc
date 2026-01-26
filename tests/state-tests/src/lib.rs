@@ -458,6 +458,7 @@ struct InterpreterFrameState {
 }
 
 /// Result of preparing a new interpreter frame for execution.
+#[allow(clippy::large_enum_variant)]
 enum PreparedInterpreterFrame {
     Ready(InterpreterFrameState),
     Immediate(InterpreterResult),
@@ -821,6 +822,7 @@ struct FrameState {
 }
 
 /// Result of preparing a new frame for execution.
+#[allow(clippy::large_enum_variant)]
 enum PreparedFrame {
     Ready(FrameState),
     Immediate(InterpreterResult),
