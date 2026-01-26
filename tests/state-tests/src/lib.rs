@@ -1224,6 +1224,7 @@ mod tests {
     /// Debug test for extcodecopy_dejavu to understand gas discrepancy
     #[test]
     #[ignore = "Debug test for gas accounting investigation"]
+    #[allow(clippy::manual_div_ceil, clippy::never_loop)]
     fn debug_extcodecopy_dejavu() {
         // Test bytecode: PUSH1 0xff, PUSH1 0xff, PUSH4 0x0fffffff, PUSH4 0x0fffffff, EXTCODECOPY
         // Decoded:
