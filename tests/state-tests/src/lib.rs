@@ -13,7 +13,7 @@ use revm::{
     interpreter::{
         instructions::instruction_table_gas_changes_spec,
         interpreter::{EthInterpreter, ExtBytecode},
-        interpreter_types::ReturnData,
+        interpreter_types::{LegacyBytecode, ReturnData},
         FrameInput, InputsImpl, Interpreter, InterpreterAction, InterpreterResult, SharedMemory,
     },
     primitives::{hardfork::SpecId, keccak256, Bytes, TxKind, B256, U256},
@@ -707,6 +707,9 @@ where
     interpreter.bytecode.action = None;
 
     let (stack, stack_len) = EvmStack::from_interpreter_stack(&mut interpreter.stack);
+    let bytecode_slice = interpreter.bytecode.bytecode_slice();
+    let bytecode_ptr = bytecode_slice.as_ptr();
+    let bytecode_len = bytecode_slice.len();
     let mut ecx = EvmContext {
         memory: &mut interpreter.memory,
         input: &mut interpreter.input,
@@ -716,6 +719,8 @@ where
         return_data: interpreter.return_data.buffer(),
         is_static: interpreter.runtime_flag.is_static,
         resume_at,
+        bytecode_ptr,
+        bytecode_len,
     };
 
     let result = unsafe { jit_fn.call(Some(stack), Some(stack_len), &mut ecx) };
@@ -739,6 +744,9 @@ fn call_jit_with_resume_nested<H: revmc::HostExt>(
     interpreter.bytecode.action = None;
 
     let (stack, stack_len) = EvmStack::from_interpreter_stack(&mut interpreter.stack);
+    let bytecode_slice = interpreter.bytecode.bytecode_slice();
+    let bytecode_ptr = bytecode_slice.as_ptr();
+    let bytecode_len = bytecode_slice.len();
     let mut ecx = EvmContext {
         memory: &mut interpreter.memory,
         input: &mut interpreter.input,
@@ -748,6 +756,8 @@ fn call_jit_with_resume_nested<H: revmc::HostExt>(
         return_data: interpreter.return_data.buffer(),
         is_static: interpreter.runtime_flag.is_static,
         resume_at,
+        bytecode_ptr,
+        bytecode_len,
     };
 
     let result = unsafe { jit_fn.call(Some(stack), Some(stack_len), &mut ecx) };

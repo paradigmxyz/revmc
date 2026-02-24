@@ -224,7 +224,7 @@ builtins! {
     CallDataSize   = __revmc_builtin_calldatasize(@[ecx] ptr) Some(usize),
     CallDataCopy   = __revmc_builtin_calldatacopy(@[ecx] ptr, @[sp] ptr) Some(u8),
     CodeSize       = __revmc_builtin_codesize(usize) Some(usize),
-    CodeCopy       = __revmc_builtin_codecopy(@[ecx] ptr, @[sp] ptr, ptr, usize) Some(u8),
+    CodeCopy       = __revmc_builtin_codecopy(@[ecx] ptr, @[sp] ptr) Some(u8),
     GasPrice       = __revmc_builtin_gas_price(@[ecx] ptr, @[sp] ptr) None,
     ExtCodeSize    = __revmc_builtin_extcodesize(@[ecx] ptr, @[sp] ptr, u8) Some(u8),
     ExtCodeCopy    = __revmc_builtin_extcodecopy(@[ecx] ptr, @[sp] ptr, u8) Some(u8),

@@ -45,17 +45,22 @@ pub struct EvmContext<'a> {
     /// `0` is the initial state.
     #[doc(hidden)]
     pub resume_at: usize,
+    /// Pointer to the contract bytecode (for CODECOPY in AOT-cached code).
+    pub bytecode_ptr: *const u8,
+    /// Length of the contract bytecode.
+    pub bytecode_len: usize,
 }
 
 // Static assertions to ensure the struct layout matches expectations.
 // These offsets are used by the JIT compiler to access fields.
 const _: () = {
     use core::mem::offset_of;
-    // EvmContext should be 80 bytes with #[repr(C)] (removed bytecode_ptr and bytecode_len)
-    assert!(core::mem::size_of::<EvmContext<'_>>() == 80);
+    assert!(core::mem::size_of::<EvmContext<'_>>() == 96);
     // Key fields accessed by JIT code
     assert!(offset_of!(EvmContext<'_>, memory) == 0);
     assert!(offset_of!(EvmContext<'_>, resume_at) == 72);
+    assert!(offset_of!(EvmContext<'_>, bytecode_ptr) == 80);
+    assert!(offset_of!(EvmContext<'_>, bytecode_len) == 88);
 };
 
 impl fmt::Debug for EvmContext<'_> {
@@ -82,6 +87,8 @@ impl<'a> EvmContext<'a> {
         let (stack, stack_len) = EvmStack::from_interpreter_stack(&mut interpreter.stack);
         let bytecode_slice = interpreter.bytecode.bytecode_slice();
         let resume_at = ResumeAt::load(interpreter.bytecode.pc(), bytecode_slice);
+        let bytecode_ptr = bytecode_slice.as_ptr();
+        let bytecode_len = bytecode_slice.len();
         let this = Self {
             memory: &mut interpreter.memory,
             input: &mut interpreter.input,
@@ -91,6 +98,8 @@ impl<'a> EvmContext<'a> {
             return_data: interpreter.return_data.buffer(),
             is_static: interpreter.runtime_flag.is_static,
             resume_at,
+            bytecode_ptr,
+            bytecode_len,
         };
         (this, stack, stack_len)
     }
