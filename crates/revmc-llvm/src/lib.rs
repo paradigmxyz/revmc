@@ -700,7 +700,15 @@ impl Builder for EvmLlvmBuilder<'_, '_> {
     }
 
     fn load(&mut self, ty: Self::Type, ptr: Self::Value, name: &str) -> Self::Value {
-        self.bcx.build_load(ty, ptr.into_pointer_value(), name).unwrap()
+        let value = self.bcx.build_load(ty, ptr.into_pointer_value(), name).unwrap();
+        // EVM stack words are 32 bytes with 8-byte alignment (`EvmWord`), while LLVM i256 defaults
+        // to a higher preferred alignment on some targets. Keep the IR alignment conservative.
+        if ty == self.ty_i256.into() {
+            let inst = self.current_block().unwrap().get_last_instruction().unwrap();
+            inst.set_alignment(8).unwrap();
+            let _ = inst.set_volatile(true);
+        }
+        value
     }
 
     fn load_unaligned(&mut self, ty: Self::Type, ptr: Self::Value, name: &str) -> Self::Value {
@@ -710,7 +718,11 @@ impl Builder for EvmLlvmBuilder<'_, '_> {
     }
 
     fn store(&mut self, value: Self::Value, ptr: Self::Value) {
-        self.bcx.build_store(ptr.into_pointer_value(), value).unwrap();
+        let inst = self.bcx.build_store(ptr.into_pointer_value(), value).unwrap();
+        if value.get_type() == self.ty_i256.into() {
+            inst.set_alignment(8).unwrap();
+            let _ = inst.set_volatile(true);
+        }
     }
 
     fn store_unaligned(&mut self, value: Self::Value, ptr: Self::Value) {
