@@ -417,8 +417,9 @@ impl<B: Backend> EvmCompiler<B> {
         if !config.debug_assertions {
             for &(i, size, align) in ptr_attrs {
                 let attrs = default_attrs::for_sized_ptr((size, align))
-                    // `Gas` is aliased in `EvmContext`.
-                    .chain((i != 0).then_some(Attribute::NoAlias));
+                    // `Gas` and `InputsImpl` are reachable through `EvmContext` and can alias
+                    // parameters 0 and 3. Keep `noalias` only for stack and stack_len.
+                    .chain(matches!(i, 1 | 2).then_some(Attribute::NoAlias));
                 for attr in attrs {
                     let loc = FunctionAttributeLocation::Param(i as _);
                     bcx.add_function_attribute(None, attr, loc);
@@ -514,7 +515,6 @@ mod default_attrs {
             Attribute::WillReturn,      // Always returns.
             Attribute::NoSync,          // No thread synchronization.
             Attribute::NativeTargetCpu, // Optimization.
-            Attribute::Speculatable,    // No undefined behavior.
             Attribute::NoRecurse,       // Revm is not recursive.
         ]
         .into_iter()
