@@ -985,6 +985,149 @@ tests! {
         }),
     }
 
+    // Tests for CALL gas accounting fix (4ae4db82).
+    // JIT CALL gas must match interpreter across specs and value-transfer scenarios.
+    call_gas {
+        // CALL with value transfer in CANCUN (post-Berlin): exercises warm_storage_read_cost,
+        // transfer_value_cost, load_account_delegated, and call_stipend from gas_params().
+        call_value_cancun(@raw {
+            bytecode: &[
+                op::PUSH1, 1,   // ret length
+                op::PUSH1, 2,   // ret offset
+                op::PUSH1, 3,   // args length
+                op::PUSH1, 4,   // args offset
+                op::PUSH1, 5,   // value (non-zero → triggers value transfer gas)
+                op::PUSH1, 6,   // address
+                op::PUSH1, 7,   // gas
+                op::CALL,
+            ],
+            spec_id: SpecId::CANCUN,
+            expected_return: RETURN_WHAT_INTERPRETER_SAYS,
+            expected_memory: MEMORY_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+            expected_next_action: ACTION_WHAT_INTERPRETER_SAYS,
+        }),
+        // CALL without value transfer in CANCUN: no transfer cost, no call stipend.
+        call_no_value_cancun(@raw {
+            bytecode: &[
+                op::PUSH1, 1,   // ret length
+                op::PUSH1, 2,   // ret offset
+                op::PUSH1, 3,   // args length
+                op::PUSH1, 4,   // args offset
+                op::PUSH0,      // value = 0 (no transfer)
+                op::PUSH1, 6,   // address
+                op::PUSH1, 7,   // gas
+                op::CALL,
+            ],
+            spec_id: SpecId::CANCUN,
+            expected_return: RETURN_WHAT_INTERPRETER_SAYS,
+            expected_memory: MEMORY_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+            expected_next_action: ACTION_WHAT_INTERPRETER_SAYS,
+        }),
+        // CALL with value transfer in pre-Berlin (ISTANBUL): different base cost path (40 gas).
+        call_value_istanbul(@raw {
+            bytecode: &[
+                op::PUSH1, 1,   // ret length
+                op::PUSH1, 2,   // ret offset
+                op::PUSH1, 3,   // args length
+                op::PUSH1, 4,   // args offset
+                op::PUSH1, 5,   // value
+                op::PUSH1, 6,   // address
+                op::PUSH1, 7,   // gas
+                op::CALL,
+            ],
+            spec_id: SpecId::ISTANBUL,
+            expected_return: RETURN_WHAT_INTERPRETER_SAYS,
+            expected_memory: MEMORY_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+            expected_next_action: ACTION_WHAT_INTERPRETER_SAYS,
+        }),
+        // STATICCALL in CANCUN: no value, different call kind.
+        staticcall_cancun(@raw {
+            bytecode: &[
+                op::PUSH1, 1,   // ret length
+                op::PUSH1, 2,   // ret offset
+                op::PUSH1, 3,   // args length
+                op::PUSH1, 4,   // args offset
+                op::PUSH1, 5,   // address
+                op::PUSH1, 6,   // gas
+                op::STATICCALL,
+            ],
+            spec_id: SpecId::CANCUN,
+            expected_return: RETURN_WHAT_INTERPRETER_SAYS,
+            expected_memory: MEMORY_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+            expected_next_action: ACTION_WHAT_INTERPRETER_SAYS,
+        }),
+        // DELEGATECALL in CANCUN.
+        delegatecall_cancun(@raw {
+            bytecode: &[
+                op::PUSH1, 1,   // ret length
+                op::PUSH1, 2,   // ret offset
+                op::PUSH1, 3,   // args length
+                op::PUSH1, 4,   // args offset
+                op::PUSH1, 5,   // address
+                op::PUSH1, 6,   // gas
+                op::DELEGATECALL,
+            ],
+            spec_id: SpecId::CANCUN,
+            expected_return: RETURN_WHAT_INTERPRETER_SAYS,
+            expected_memory: MEMORY_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+            expected_next_action: ACTION_WHAT_INTERPRETER_SAYS,
+        }),
+        // CALL with large gas and value to stress EIP-150 63/64ths rule + stipend.
+        call_high_gas_value(@raw {
+            bytecode: &[
+                op::PUSH1, 32,       // ret length
+                op::PUSH0,           // ret offset
+                op::PUSH1, 64,       // args length
+                op::PUSH0,           // args offset
+                op::PUSH1, 100,      // value = 100
+                op::PUSH1, 0x69,     // address
+                op::PUSH2, 0xFF, 0xFF, // gas = 65535
+                op::CALL,
+            ],
+            spec_id: SpecId::CANCUN,
+            expected_return: RETURN_WHAT_INTERPRETER_SAYS,
+            expected_memory: MEMORY_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+            expected_next_action: ACTION_WHAT_INTERPRETER_SAYS,
+        }),
+        // CALL must populate known_bytecode in CallInputs (via load_account_delegated).
+        // Without the fix, known_bytecode was None — the callee had to re-resolve the
+        // bytecode, breaking EIP-7702 delegation and EOF execution.
+        call_known_bytecode(@raw {
+            bytecode: &[
+                op::PUSH1, 0,    // ret length
+                op::PUSH1, 0,    // ret offset
+                op::PUSH1, 0,    // args length
+                op::PUSH1, 0,    // args offset
+                op::PUSH1, 0,    // value
+                op::PUSH1, 0x69, // address (OTHER_ADDR = 0x69..69, has code in TestHost)
+                op::PUSH1, 7,    // gas
+                op::CALL,
+            ],
+            spec_id: SpecId::CANCUN,
+            expected_return: RETURN_WHAT_INTERPRETER_SAYS,
+            expected_memory: MEMORY_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+            expected_next_action: ACTION_WHAT_INTERPRETER_SAYS,
+            assert_ecx: Some(|ecx| {
+                if let Some(InterpreterAction::NewFrame(FrameInput::Call(call_inputs))) =
+                    ecx.next_action.as_ref()
+                {
+                    assert!(
+                        call_inputs.known_bytecode.is_some(),
+                        "CALL must populate known_bytecode via load_account_delegated; \
+                         got None (old code path that skips delegation resolution)"
+                    );
+                }
+            }),
+        }),
+    }
+
     regressions {
         // Mismatched costs in < BERLIN.
         // GeneralStateTests/stSolidityTest/TestKeywords.json
