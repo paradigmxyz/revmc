@@ -985,6 +985,71 @@ tests! {
         }),
     }
 
+    // Tests for CODECOPY correctness (4aec3ced).
+    // CODECOPY must read bytecode from EvmContext at runtime, not from embedded compile-time
+    // pointers. These tests verify CODECOPY with various lengths and offsets.
+    codecopy_fix {
+        // Copy entire bytecode and verify all bytes match.
+        // Bytecode: PUSH1 <len> PUSH0 PUSH0 CODECOPY
+        // The bytecode is 5 bytes, so we copy 5 bytes.
+        codecopy_exact(@raw {
+            bytecode: &[op::PUSH1, 5, op::PUSH0, op::PUSH0, op::CODECOPY],
+            expected_memory: &hex!("60055f5f39000000000000000000000000000000000000000000000000000000"),
+            expected_gas: 3 + 2 + 2 + (verylowcopy_cost(32).unwrap() + memory_gas_cost(1)),
+        }),
+        // CODECOPY with non-zero source offset: skip 2 bytes, copy 3.
+        codecopy_offset(@raw {
+            bytecode: &[op::PUSH1, 3, op::PUSH1, 2, op::PUSH0, op::CODECOPY],
+            // Source offset=2, so we copy bytes [2..5] = [5f, 02, 5f]
+            // Wait, the bytecode is [PUSH1(0x60), 3, PUSH1(0x60), 2, PUSH0(0x5f), CODECOPY(0x39)]
+            // Bytes at offset 2: 0x60, 0x02, 0x5f, 0x39 — we copy 3 bytes → 0x60, 0x02, 0x5f
+            expected_memory: &hex!("60025f0000000000000000000000000000000000000000000000000000000000"),
+            expected_gas: 3 + 3 + 2 + (verylowcopy_cost(32).unwrap() + memory_gas_cost(1)),
+        }),
+        // CODECOPY beyond bytecode length: pads with zeros.
+        codecopy_beyond(@raw {
+            bytecode: &[op::PUSH1, 10, op::PUSH0, op::PUSH0, op::CODECOPY],
+            // Bytecode is 5 bytes: [0x60, 0x0a, 0x5f, 0x5f, 0x39]
+            // Copy 10 bytes from offset 0: first 5 are bytecode, last 5 are zero-padded.
+            expected_memory: &hex!("600a5f5f39000000000000000000000000000000000000000000000000000000"),
+            expected_gas: 3 + 2 + 2 + (verylowcopy_cost(32).unwrap() + memory_gas_cost(1)),
+        }),
+        // CODECOPY with longer bytecode to verify larger copies work.
+        // This 12-byte contract copies its full bytecode to memory.
+        codecopy_longer(@raw {
+            bytecode: &[
+                op::PUSH1, 42,  // dummy: push 42
+                op::POP,        // pop it
+                op::PUSH1, 99,  // another dummy
+                op::POP,        // pop it
+                op::PUSH1, 12,  // length = 12 (exact bytecode length)
+                op::PUSH0,      // source offset = 0
+                op::PUSH0,      // dest offset = 0
+                op::CODECOPY,   // copy
+            ],
+            expected_memory: MEMORY_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+        }),
+        // Red-green test: CODECOPY must read bytecode from EvmContext at runtime,
+        // not from compile-time embedded pointers.
+        //
+        // We use modify_ecx to swap bytecode_ptr to a fake buffer. With the fix,
+        // CODECOPY reads the fake data. Without the fix (old code embedded the
+        // pointer at compile time), it would still copy the original bytecode.
+        codecopy_runtime_ptr(@raw {
+            bytecode: &[op::PUSH1, 5, op::PUSH0, op::PUSH0, op::CODECOPY],
+            modify_ecx: Some(|ecx| {
+                static FAKE_CODE: [u8; 5] = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE];
+                ecx.bytecode_ptr = FAKE_CODE.as_ptr();
+                ecx.bytecode_len = FAKE_CODE.len();
+            }),
+            // JIT should copy FAKE_CODE (0xAA..0xEE), not the original bytecode.
+            expected_return: InstructionResult::Stop,
+            expected_memory: &hex!("AABBCCDDEE000000000000000000000000000000000000000000000000000000"),
+            expected_gas: 3 + 2 + 2 + (verylowcopy_cost(32).unwrap() + memory_gas_cost(1)),
+        }),
+    }
+
     regressions {
         // Mismatched costs in < BERLIN.
         // GeneralStateTests/stSolidityTest/TestKeywords.json
