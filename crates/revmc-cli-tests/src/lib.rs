@@ -143,6 +143,36 @@ impl Config {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().parent().unwrap();
         let build_base = root.join("target/tester");
         fs::create_dir_all(&build_base).unwrap();
-        Self { root, cmd, build_base, filecheck: None }
+        Self { root, cmd, build_base, filecheck: resolve_filecheck() }
     }
+}
+
+fn resolve_filecheck() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("FILECHECK").filter(|p| !p.is_empty()) {
+        return Some(PathBuf::from(path));
+    }
+
+    if let Some(prefix) = std::env::var_os("LLVM_SYS_211_PREFIX").filter(|p| !p.is_empty()) {
+        let candidate = Path::new(&prefix).join("bin/FileCheck");
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+
+    // Support other `llvm-sys` prefix env vars as a generic fallback.
+    for (key, value) in std::env::vars_os() {
+        let key = key.to_string_lossy();
+        if !key.starts_with("LLVM_SYS_") || !key.ends_with("_PREFIX") {
+            continue;
+        }
+        if value.is_empty() {
+            continue;
+        }
+        let candidate = PathBuf::from(&value).join("bin/FileCheck");
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+
+    None
 }
