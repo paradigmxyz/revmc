@@ -562,6 +562,79 @@ impl<'ctx> EvmLlvmBuilder<'_, 'ctx> {
         let kind_id = self.cx.get_kind_id("prof");
         inst.set_metadata(metadata, kind_id).unwrap();
     }
+
+    // Byte offset of a 64-bit lane within an EVM i256 word, accounting for endianness.
+    // EVM words are big-endian (most-significant byte first), but `EvmWord` stores them
+    // in native little-endian order on x86. Lane 0 = bits [63:0], lane 3 = bits [255:192].
+    #[inline]
+    fn i256_lane_byte_offset(lane: u64) -> u64 {
+        if cfg!(target_endian = "little") {
+            lane * 8
+        } else {
+            (3 - lane) * 8
+        }
+    }
+
+    // Load an i256 from `ptr` by issuing 4 individual i64 loads, each with `align`-byte
+    // alignment. This avoids emitting a raw i256 memory access, which LLVM may lower to
+    // AVX-512 or other wide instructions unavailable on the CI runner (causing SIGILL).
+    fn load_i256_as_i64_lanes(
+        &mut self,
+        ptr: PointerValue<'ctx>,
+        align: u32,
+        name: &str,
+    ) -> BasicValueEnum<'ctx> {
+        let mut acc = self.ty_i256.const_zero();
+        for lane in 0..4u64 {
+            let offset = self.ty_isize.const_int(Self::i256_lane_byte_offset(lane), false);
+            let lane_ptr = unsafe {
+                self.bcx.build_in_bounds_gep(self.ty_i8, ptr, &[offset], "")
+            }
+            .unwrap();
+            let lane_val = self
+                .bcx
+                .build_load(self.ty_i64, lane_ptr, if lane == 0 { name } else { "" })
+                .unwrap()
+                .into_int_value();
+            self.current_block().unwrap().get_last_instruction().unwrap().set_alignment(align).unwrap();
+            let lane_val = self.bcx.build_int_z_extend(lane_val, self.ty_i256, "").unwrap();
+            let shifted = if lane == 0 {
+                lane_val
+            } else {
+                let shift = self.ty_i256.const_int(lane * 64, false);
+                self.bcx.build_left_shift(lane_val, shift, "").unwrap()
+            };
+            acc = self.bcx.build_or(acc, shifted, "").unwrap();
+        }
+        acc.into()
+    }
+
+    // Store an i256 `value` to `ptr` by issuing 4 individual i64 stores, each with
+    // `align`-byte alignment. Symmetric with `load_i256_as_i64_lanes`.
+    fn store_i256_as_i64_lanes(
+        &mut self,
+        value: BasicValueEnum<'ctx>,
+        ptr: PointerValue<'ctx>,
+        align: u32,
+    ) {
+        let value = value.into_int_value();
+        for lane in 0..4u64 {
+            let shifted = if lane == 0 {
+                value
+            } else {
+                let shift = self.ty_i256.const_int(lane * 64, false);
+                self.bcx.build_right_shift(value, shift, false, "").unwrap()
+            };
+            let lane_val = self.bcx.build_int_truncate(shifted, self.ty_i64, "").unwrap();
+            let offset = self.ty_isize.const_int(Self::i256_lane_byte_offset(lane), false);
+            let lane_ptr = unsafe {
+                self.bcx.build_in_bounds_gep(self.ty_i8, ptr, &[offset], "")
+            }
+            .unwrap();
+            let inst = self.bcx.build_store(lane_ptr, lane_val).unwrap();
+            inst.set_alignment(align).unwrap();
+        }
+    }
 }
 
 impl<'ctx> BackendTypes for EvmLlvmBuilder<'_, 'ctx> {
@@ -700,32 +773,38 @@ impl Builder for EvmLlvmBuilder<'_, '_> {
     }
 
     fn load(&mut self, ty: Self::Type, ptr: Self::Value, name: &str) -> Self::Value {
-        let value = self.bcx.build_load(ty, ptr.into_pointer_value(), name).unwrap();
-        // EVM stack words are 32 bytes with 8-byte alignment (`EvmWord`), while LLVM i256 defaults
-        // to a higher preferred alignment on some targets. Keep the IR alignment conservative.
+        // Decompose i256 into 4 x i64 loads. A raw i256 memory access would let LLVM choose
+        // its own lowering (potentially AVX-512 on nightly x86-64), causing SIGILL on runners
+        // without AVX-512 support. Explicit i64 lanes avoid this entirely.
         if ty == self.ty_i256.into() {
-            let inst = self.current_block().unwrap().get_last_instruction().unwrap();
-            inst.set_alignment(8).unwrap();
-            let _ = inst.set_volatile(true);
+            return self.load_i256_as_i64_lanes(ptr.into_pointer_value(), 8, name);
         }
-        value
+        self.bcx.build_load(ty, ptr.into_pointer_value(), name).unwrap()
     }
 
     fn load_unaligned(&mut self, ty: Self::Type, ptr: Self::Value, name: &str) -> Self::Value {
-        let value = self.load(ty, ptr, name);
+        if ty == self.ty_i256.into() {
+            return self.load_i256_as_i64_lanes(ptr.into_pointer_value(), 1, name);
+        }
+        let value = self.bcx.build_load(ty, ptr.into_pointer_value(), name).unwrap();
         self.current_block().unwrap().get_last_instruction().unwrap().set_alignment(1).unwrap();
         value
     }
 
     fn store(&mut self, value: Self::Value, ptr: Self::Value) {
-        let inst = self.bcx.build_store(ptr.into_pointer_value(), value).unwrap();
+        // Decompose i256 into 4 x i64 stores for the same reason as `load`.
         if value.get_type() == self.ty_i256.into() {
-            inst.set_alignment(8).unwrap();
-            let _ = inst.set_volatile(true);
+            self.store_i256_as_i64_lanes(value, ptr.into_pointer_value(), 8);
+            return;
         }
+        self.bcx.build_store(ptr.into_pointer_value(), value).unwrap();
     }
 
     fn store_unaligned(&mut self, value: Self::Value, ptr: Self::Value) {
+        if value.get_type() == self.ty_i256.into() {
+            self.store_i256_as_i64_lanes(value, ptr.into_pointer_value(), 1);
+            return;
+        }
         let inst = self.bcx.build_store(ptr.into_pointer_value(), value).unwrap();
         inst.set_alignment(1).unwrap();
     }

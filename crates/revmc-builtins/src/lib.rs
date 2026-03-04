@@ -652,22 +652,23 @@ pub unsafe extern "C" fn __revmc_builtin_call(
 
     // Match interpreter call path: load delegated account and pass resolved bytecode/hash through
     // CallInputs::known_bytecode (covers EIP-7702 delegation and EOF execution).
-    let (dynamic_gas, bytecode, code_hash) = match revm_interpreter::instructions::contract::load_account_delegated(
-        ecx.host,
-        spec_id,
-        ecx.gas.remaining(),
-        to,
-        transfers_value,
-        call_kind == CallKind::Call,
-    ) {
-        Ok(out) => out,
-        Err(revm_context_interface::host::LoadError::ColdLoadSkipped) => {
-            return InstructionResult::OutOfGas;
-        }
-        Err(revm_context_interface::host::LoadError::DBError) => {
-            return InstructionResult::FatalExternalError;
-        }
-    };
+    let (dynamic_gas, bytecode, code_hash) =
+        match revm_interpreter::instructions::contract::load_account_delegated(
+            ecx.host,
+            spec_id,
+            ecx.gas.remaining(),
+            to,
+            transfers_value,
+            call_kind == CallKind::Call,
+        ) {
+            Ok(out) => out,
+            Err(revm_context_interface::host::LoadError::ColdLoadSkipped) => {
+                return InstructionResult::OutOfGas;
+            }
+            Err(revm_context_interface::host::LoadError::DBError) => {
+                return InstructionResult::FatalExternalError;
+            }
+        };
 
     gas!(ecx, dynamic_gas);
 
