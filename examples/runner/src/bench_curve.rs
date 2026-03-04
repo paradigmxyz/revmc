@@ -26,8 +26,8 @@ use revm::{
     database::{CacheDB, EmptyDB},
     handler::{EvmTr, FrameResult, Handler, ItemOrResult, MainBuilder},
     primitives::{
-        hardfork::SpecId, Address, Bytes, HashMap as RevmHashMap, StorageKey, StorageValue,
-        TxKind, B256, U256,
+        hardfork::SpecId, Address, Bytes, HashMap as RevmHashMap, StorageKey, StorageValue, TxKind,
+        B256, U256,
     },
     state::AccountInfo,
     ExecuteEvm, MainnetEvm,
@@ -68,15 +68,12 @@ impl Handler for JitHandler {
                 if let Some(&raw_fn) = self.functions.get(&bytecode_hash) {
                     let ctx = &mut evm.ctx;
                     let f = EvmCompilerFn::new(raw_fn);
-                    let action =
-                        unsafe { f.call_with_interpreter(&mut frame.interpreter, ctx) };
-                    frame
-                        .process_next_action::<_, BenchError>(ctx, action)
-                        .inspect(|i| {
-                            if i.is_result() {
-                                frame.set_finished(true);
-                            }
-                        })?
+                    let action = unsafe { f.call_with_interpreter(&mut frame.interpreter, ctx) };
+                    frame.process_next_action::<_, BenchError>(ctx, action).inspect(|i| {
+                        if i.is_result() {
+                            frame.set_finished(true);
+                        }
+                    })?
                 } else {
                     evm.frame_run()?
                 }
@@ -182,14 +179,17 @@ impl CurveBench {
             let bytecode_bytes = parse_hex_bytes(&raw.code);
             let bytecode = Bytecode::new_raw(Bytes::from(bytecode_bytes));
             let code_hash = bytecode.hash_slow();
-            let storage: RevmHashMap<StorageKey, StorageValue> = raw
-                .storage
-                .iter()
-                .map(|(k, v)| (parse_u256(k), parse_u256(v)))
-                .collect();
+            let storage: RevmHashMap<StorageKey, StorageValue> =
+                raw.storage.iter().map(|(k, v)| (parse_u256(k), parse_u256(v))).collect();
             db.insert_account_info(
                 address,
-                AccountInfo { balance, nonce, code_hash, code: Some(bytecode.clone()), account_id: None },
+                AccountInfo {
+                    balance,
+                    nonce,
+                    code_hash,
+                    code: Some(bytecode.clone()),
+                    account_id: None,
+                },
             );
             if !storage.is_empty() {
                 db.replace_account_storage(address, storage).unwrap();
@@ -207,9 +207,7 @@ impl CurveBench {
         block.gas_limit = parse_u64(env.current_gas_limit.as_deref().unwrap_or("0x1000000"));
         block.basefee = parse_u64(env.current_base_fee.as_deref().unwrap_or("0x1"));
         block.beneficiary = parse_address(
-            env.current_coinbase
-                .as_deref()
-                .unwrap_or("0x0000000000000000000000000000000000000000"),
+            env.current_coinbase.as_deref().unwrap_or("0x0000000000000000000000000000000000000000"),
         );
         if let Some(random) = &env.current_random {
             block.prevrandao = Some(B256::from_slice(&parse_fixed_bytes(random, 32)));
@@ -245,8 +243,7 @@ impl CurveBench {
         };
 
         // JIT compile
-        let context =
-            Box::leak(Box::new(revmc::llvm::inkwell::context::Context::create()));
+        let context = Box::leak(Box::new(revmc::llvm::inkwell::context::Context::create()));
         let backend = EvmLlvmBackend::new(context, false, OptimizationLevel::Aggressive)
             .expect("LLVM backend");
         let compiler: &'static mut EvmCompiler<EvmLlvmBackend<'static>> =
@@ -310,7 +307,10 @@ pub fn bench_curve_stableswap(c: &mut Criterion) {
 
     // Sanity check
     assert!(bench.run_plain().result.is_success(), "plain execution reverted");
-    assert!(bench.run_jit().result.is_success(), "JIT execution reverted — check revmc/revm version compatibility");
+    assert!(
+        bench.run_jit().result.is_success(),
+        "JIT execution reverted — check revmc/revm version compatibility"
+    );
 
     let mut group = c.benchmark_group("curve_stableswap");
     group.bench_function("plain_execution", |b| {
@@ -351,22 +351,36 @@ fn parse_address(value: &str) -> Address {
 
 fn parse_u256(value: &str) -> U256 {
     let trimmed = strip_0x(value.trim());
-    if trimmed.is_empty() { U256::ZERO } else { U256::from_str_radix(trimmed, 16).unwrap() }
+    if trimmed.is_empty() {
+        U256::ZERO
+    } else {
+        U256::from_str_radix(trimmed, 16).unwrap()
+    }
 }
 
 fn parse_u128(value: &str) -> u128 {
     let trimmed = strip_0x(value.trim());
-    if trimmed.is_empty() { 0 } else { u128::from_str_radix(trimmed, 16).unwrap() }
+    if trimmed.is_empty() {
+        0
+    } else {
+        u128::from_str_radix(trimmed, 16).unwrap()
+    }
 }
 
 fn parse_u64(value: &str) -> u64 {
     let trimmed = strip_0x(value.trim());
-    if trimmed.is_empty() { 0 } else { u64::from_str_radix(trimmed, 16).unwrap() }
+    if trimmed.is_empty() {
+        0
+    } else {
+        u64::from_str_radix(trimmed, 16).unwrap()
+    }
 }
 
 fn parse_hex_bytes(value: &str) -> Vec<u8> {
     let trimmed = strip_0x(value.trim());
-    if trimmed.is_empty() { return Vec::new(); }
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
     let even = if trimmed.len() % 2 == 0 { trimmed.to_owned() } else { format!("0{trimmed}") };
     hex::decode(even).unwrap()
 }
