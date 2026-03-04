@@ -16,7 +16,7 @@ use crate::{Backend, EvmCompiler};
 use revm_bytecode::opcode as op;
 use revm_interpreter::{
     interpreter::ExtBytecode, CallInput, FrameInput, Gas, InputsImpl, InstructionResult,
-    InterpreterAction, InterpreterResult, Interpreter, SharedMemory,
+    Interpreter, InterpreterAction, InterpreterResult, SharedMemory,
 };
 use revm_primitives::{Bytes, U256};
 
@@ -60,14 +60,8 @@ fn run_call_then_push<B: Backend>(compiler: &mut EvmCompiler<B>) {
     };
     let bytecode_obj = revm_bytecode::Bytecode::new_raw(Bytes::copy_from_slice(bytecode));
     let ext_bytecode = ExtBytecode::new(bytecode_obj);
-    let mut interpreter = Interpreter::new(
-        SharedMemory::new(),
-        ext_bytecode,
-        input,
-        false,
-        DEF_SPEC,
-        DEF_GAS_LIMIT,
-    );
+    let mut interpreter =
+        Interpreter::new(SharedMemory::new(), ext_bytecode, input, false, DEF_SPEC, DEF_GAS_LIMIT);
 
     let action = unsafe { f.call_with_interpreter(&mut interpreter, &mut host) };
 
@@ -149,14 +143,8 @@ fn run_call_then_return<B: Backend>(compiler: &mut EvmCompiler<B>) {
     };
     let bytecode_obj = revm_bytecode::Bytecode::new_raw(Bytes::copy_from_slice(bytecode));
     let ext_bytecode = ExtBytecode::new(bytecode_obj);
-    let mut interpreter = Interpreter::new(
-        SharedMemory::new(),
-        ext_bytecode,
-        input,
-        false,
-        DEF_SPEC,
-        DEF_GAS_LIMIT,
-    );
+    let mut interpreter =
+        Interpreter::new(SharedMemory::new(), ext_bytecode, input, false, DEF_SPEC, DEF_GAS_LIMIT);
 
     // First call: suspends at CALL
     let action = unsafe { f.call_with_interpreter(&mut interpreter, &mut host) };
@@ -181,11 +169,7 @@ fn run_call_then_return<B: Backend>(compiler: &mut EvmCompiler<B>) {
     match &action {
         InterpreterAction::Return(result) => {
             assert_eq!(result.result, InstructionResult::Return);
-            assert_eq!(
-                result.output.len(),
-                32,
-                "expected 32-byte return output"
-            );
+            assert_eq!(result.output.len(), 32, "expected 32-byte return output");
         }
         other => panic!("expected Return after resume, got {other:?}"),
     }

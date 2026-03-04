@@ -265,7 +265,6 @@ impl EvmCompilerFn {
         }
 
         let return_data_is_empty = ecx.return_data.is_empty();
-        // ecx is no longer used after this point; NLL releases the borrow.
 
         if return_data_is_empty {
             interpreter.return_data.0.clear();
