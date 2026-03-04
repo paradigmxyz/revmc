@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 //! Curve StableSwap benchmark: plain interpreter vs JIT.
 //!
 //! This is the key A/B test for the DIV/MOD ruint builtin optimization.
@@ -307,6 +308,7 @@ impl CurveBench {
 
 // ── Benchmark ────────────────────────────────────────────────────────────────
 
+/// Benchmark Curve StableSwap: plain interpreter vs JIT-compiled execution.
 pub fn bench_curve_stableswap(c: &mut Criterion) {
     let bench = CurveBench::load();
 
