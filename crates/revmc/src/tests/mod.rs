@@ -21,9 +21,9 @@ mod macros;
 
 mod meta;
 
+mod div_zero_opaque;
 mod fibonacci;
 mod resume;
-mod div_zero_opaque;
 
 mod runner;
 pub use runner::*;

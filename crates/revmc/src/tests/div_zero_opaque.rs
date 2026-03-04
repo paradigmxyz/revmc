@@ -12,7 +12,7 @@ use revm_bytecode::opcode as op;
 use revm_interpreter::InstructionResult;
 use revm_primitives::U256;
 
-/// Build bytecode: MSTORE(a, 0), MSTORE(b, 32), MLOAD(32), MLOAD(0), <op>
+/// Build bytecode: MSTORE(a, 0), MSTORE(b, 32), MLOAD(32), MLOAD(0), `<op>`
 ///
 /// The operands pass through MLOAD (an opaque builtin), preventing LLVM from
 /// constant-folding or exploiting division-by-zero UB at compile time.
@@ -77,5 +77,9 @@ fn run_opaque_zero_div_test<B: Backend>(
 // EVM spec: x DIV 0 = 0, x MOD 0 = 0, x SMOD 0 = 0, x SDIV 0 = 0
 matrix_tests!(div_zero = |jit| run_opaque_zero_div_test(jit, "div_zero", op::DIV, U256::from(32)));
 matrix_tests!(mod_zero = |jit| run_opaque_zero_div_test(jit, "mod_zero", op::MOD, U256::from(32)));
-matrix_tests!(smod_zero = |jit| run_opaque_zero_div_test(jit, "smod_zero", op::SMOD, U256::from(5)));
-matrix_tests!(sdiv_zero = |jit| run_opaque_zero_div_test(jit, "sdiv_zero", op::SDIV, U256::from(5)));
+matrix_tests!(
+    smod_zero = |jit| run_opaque_zero_div_test(jit, "smod_zero", op::SMOD, U256::from(5))
+);
+matrix_tests!(
+    sdiv_zero = |jit| run_opaque_zero_div_test(jit, "sdiv_zero", op::SDIV, U256::from(5))
+);
