@@ -5,7 +5,7 @@
 //! heavy uint256 division. Before the fix, JIT was 43% SLOWER than the
 //! interpreter on this workload due to LLVM's poor i256 udiv codegen.
 //!
-//! Run: `cargo bench -p revmc-examples-runner --bench bench_curve`
+//! Run: `cargo bench -p revmc-cli --bench bench_curve`
 
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -164,7 +164,7 @@ struct CurveBench {
 impl CurveBench {
     fn load() -> Self {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../data/curve-stableswap-2pool.json");
+            .join("../../../data/curve-stableswap-2pool.json");
         let json = fs::read_to_string(&path).expect("failed to read fixture");
         let file: FixtureFile = serde_json::from_str(&json).expect("failed to parse fixture");
         let case = file.cases.into_values().next().expect("no cases in fixture");
