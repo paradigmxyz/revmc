@@ -1,0 +1,621 @@
+// revmc-specific code: compilation, handler integration, and test orchestration.
+
+use crate::runner::{
+    check_evm_execution, execute_test_suite, skip_test, TestError, TestErrorKind, TestRunnerState,
+};
+use revm::{
+    context::{block::BlockEnv, cfg::CfgEnv, tx::TxEnv},
+    context_interface::{
+        result::{EVMError, ExecutionResult, HaltReason, InvalidTransaction},
+        ContextSetters,
+    },
+    database::{self, bal::EvmDatabaseError},
+    database_interface::{DatabaseCommit, EmptyDB},
+    handler::{EvmTr, FrameResult, Handler, ItemOrResult},
+    primitives::{hardfork::SpecId, keccak256, B256, U256},
+    statetest_types::{SpecName, TestSuite, TestUnit},
+    Context, MainBuilder, MainContext, MainnetEvm,
+};
+use revmc::{
+    llvm::inkwell::context::Context as LlvmContext, Backend, EvmCompiler, EvmCompilerFn,
+    EvmLlvmBackend, Linker, OptimizationLevel,
+};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+    },
+    time::{Duration, Instant},
+};
+
+// ── Compile mode ────────────────────────────────────────────────────────────
+
+/// How to compile and execute bytecodes in the test suite.
+#[derive(Clone, Copy, Debug, Default)]
+pub enum CompileMode {
+    /// Standard interpreter execution (no compilation).
+    #[default]
+    Interpreter,
+    /// JIT-compile all bytecodes before execution.
+    Jit,
+    /// AOT-compile all bytecodes to a shared library, then load and execute.
+    Aot,
+}
+
+// ── Compiled contracts ──────────────────────────────────────────────────────
+
+/// Compiled contracts cache mapping bytecode hash to compiled function.
+#[derive(Default)]
+pub struct CompiledContracts {
+    functions: HashMap<B256, EvmCompilerFn>,
+}
+
+impl CompiledContracts {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn get(&self, code_hash: &B256) -> Option<EvmCompilerFn> {
+        self.functions.get(code_hash).copied()
+    }
+
+    pub fn insert(&mut self, code_hash: B256, func: EvmCompilerFn) {
+        self.functions.insert(code_hash, func);
+    }
+}
+
+// ── Handler ─────────────────────────────────────────────────────────────────
+
+type StateTestEvm<'a> =
+    MainnetEvm<revm::handler::MainnetContext<&'a mut database::State<EmptyDB>>>;
+type StateTestError = EVMError<EvmDatabaseError<std::convert::Infallible>, InvalidTransaction>;
+
+/// Custom handler that dispatches to compiled functions when available.
+struct CompiledHandler<'a> {
+    compiled: &'a CompiledContracts,
+}
+
+impl Handler for CompiledHandler<'_> {
+    type Evm = StateTestEvm<'static>;
+    type Error = StateTestError;
+    type HaltReason = HaltReason;
+
+    fn run_exec_loop(
+        &mut self,
+        evm: &mut Self::Evm,
+        first_frame_input: revm::interpreter::interpreter_action::FrameInit,
+    ) -> Result<FrameResult, Self::Error> {
+        let res = evm.frame_init(first_frame_input)?;
+        if let ItemOrResult::Result(frame_result) = res {
+            return Ok(frame_result);
+        }
+        loop {
+            let call_or_result = {
+                let frame = evm.frame_stack.get();
+                let bytecode_hash = frame.interpreter.bytecode.get_or_calculate_hash();
+                if let Some(f) = self.compiled.get(&bytecode_hash) {
+                    let ctx = &mut evm.ctx;
+                    let action =
+                        unsafe { f.call_with_interpreter(&mut frame.interpreter, ctx) };
+                    frame.process_next_action::<_, StateTestError>(ctx, action).inspect(|i| {
+                        if i.is_result() {
+                            frame.set_finished(true);
+                        }
+                    })?
+                } else {
+                    evm.frame_run()?
+                }
+            };
+            let result = match call_or_result {
+                ItemOrResult::Item(init) => match evm.frame_init(init)? {
+                    ItemOrResult::Item(_) => continue,
+                    ItemOrResult::Result(result) => result,
+                },
+                ItemOrResult::Result(result) => result,
+            };
+            if let Some(result) = evm.frame_return_result(result)? {
+                return Ok(result);
+            }
+        }
+    }
+}
+
+// ── Compilation helpers ─────────────────────────────────────────────────────
+
+/// JIT-compile all non-empty contracts in the test unit's pre-state.
+fn jit_compile_contracts<'ctx>(
+    unit: &TestUnit,
+    spec_id: SpecId,
+    compiler: &mut EvmCompiler<EvmLlvmBackend<'ctx>>,
+) -> Result<CompiledContracts, TestErrorKind> {
+    let mut compiled = CompiledContracts::new();
+    let mut func_ids: Vec<(B256, <EvmLlvmBackend<'ctx> as Backend>::FuncId)> = Vec::new();
+
+    for (address, info) in &unit.pre {
+        if info.code.is_empty() {
+            continue;
+        }
+
+        let code_hash = keccak256(&info.code);
+        if func_ids.iter().any(|(hash, _)| hash == &code_hash) {
+            continue;
+        }
+
+        let name = format!("contract_{:x}", address);
+        let func_id = compiler.translate(&name, &info.code[..], spec_id).map_err(|e| {
+            TestErrorKind::CompilationError(format!("translate {:x}: {e}", address))
+        })?;
+
+        func_ids.push((code_hash, func_id));
+    }
+
+    for (code_hash, func_id) in func_ids {
+        let func = unsafe { compiler.jit_function(func_id) }
+            .map_err(|e| TestErrorKind::CompilationError(format!("jit {:x}: {e}", code_hash)))?;
+
+        compiled.insert(code_hash, func);
+    }
+
+    Ok(compiled)
+}
+
+/// AOT-compile all non-empty contracts in the test unit's pre-state to a shared library,
+/// then load the compiled functions.
+fn aot_compile_contracts(
+    unit: &TestUnit,
+    spec_id: SpecId,
+) -> Result<(CompiledContracts, tempfile::TempDir, libloading::Library), TestErrorKind> {
+    let cx = LlvmContext::create();
+    let backend = EvmLlvmBackend::new(&cx, true, OptimizationLevel::Default)
+        .map_err(|e| TestErrorKind::CompilationError(format!("backend: {e}")))?;
+    let mut compiler = EvmCompiler::new(backend);
+
+    let mut names: Vec<(B256, String)> = Vec::new();
+
+    for (address, info) in &unit.pre {
+        if info.code.is_empty() {
+            continue;
+        }
+
+        let code_hash = keccak256(&info.code);
+        if names.iter().any(|(hash, _)| hash == &code_hash) {
+            continue;
+        }
+
+        let name = format!("contract_{:x}", address);
+        compiler.translate(&name, &info.code[..], spec_id).map_err(|e| {
+            TestErrorKind::CompilationError(format!("translate {:x}: {e}", address))
+        })?;
+
+        names.push((code_hash, name));
+    }
+
+    let tmp_dir = tempfile::tempdir()
+        .map_err(|e| TestErrorKind::CompilationError(format!("tempdir: {e}")))?;
+    let obj_path = tmp_dir.path().join("a.o");
+    let so_path = tmp_dir.path().join("a.so");
+
+    compiler
+        .write_object_to_file(&obj_path)
+        .map_err(|e| TestErrorKind::CompilationError(format!("write object: {e}")))?;
+
+    let linker = Linker::new();
+    linker
+        .link(&so_path, [obj_path.to_str().unwrap()])
+        .map_err(|e| TestErrorKind::CompilationError(format!("link: {e}")))?;
+
+    let lib = unsafe { libloading::Library::new(&so_path) }
+        .map_err(|e| TestErrorKind::CompilationError(format!("load: {e}")))?;
+
+    let mut compiled = CompiledContracts::new();
+    for (code_hash, name) in &names {
+        let f: libloading::Symbol<'_, EvmCompilerFn> = unsafe { lib.get(name.as_bytes()) }
+            .map_err(|e| TestErrorKind::CompilationError(format!("symbol {name}: {e}")))?;
+        compiled.insert(*code_hash, *f);
+    }
+
+    Ok((compiled, tmp_dir, lib))
+}
+
+// ── Compiled test execution ─────────────────────────────────────────────────
+
+/// Execute a single test using compiled functions via the custom handler.
+fn execute_single_test_compiled(
+    compiled: &CompiledContracts,
+    test: &revm::statetest_types::Test,
+    unit: &TestUnit,
+    name: &str,
+    cfg: &CfgEnv,
+    block: &BlockEnv,
+    tx: &TxEnv,
+    cache_state: &database::CacheState,
+    elapsed: &Arc<Mutex<Duration>>,
+) -> Result<(), TestErrorKind> {
+    let mut cache = cache_state.clone();
+    cache.set_state_clear_flag(cfg.spec().is_enabled_in(SpecId::SPURIOUS_DRAGON));
+    let mut state =
+        database::State::builder().with_cached_prestate(cache).with_bundle_update().build();
+
+    let timer = Instant::now();
+    // SAFETY: The handler and evm do not outlive `state`. The `'static` in
+    // `StateTestEvm<'static>` is required by the `Handler` trait but we
+    // guarantee the borrow is valid for the duration of `handler.run`.
+    let exec_result = unsafe {
+        let db_ref = &mut *(&mut state as *mut database::State<EmptyDB>);
+        let evm_context = Context::mainnet()
+            .with_block(block.clone())
+            .with_tx(tx.clone())
+            .with_cfg(cfg.clone())
+            .with_db(db_ref);
+        let mut handler = CompiledHandler { compiled };
+        let mut evm = evm_context.build_mainnet();
+        let result = handler.run(&mut evm);
+        if result.is_ok() {
+            let s = evm.ctx.journaled_state.finalize();
+            DatabaseCommit::commit(&mut evm.ctx.journaled_state.database, s);
+        }
+        result
+    };
+    let db = &mut state;
+    *elapsed.lock().unwrap() += timer.elapsed();
+
+    check_evm_execution(test, unit.out.as_ref(), name, &exec_result, db, *cfg.spec(), false)
+}
+
+/// Iterate over all specs and tests in a suite, calling `run_test` for each.
+fn for_each_test_in_suite(
+    path: &Path,
+    mut run_test: impl FnMut(
+        &str,
+        &TestUnit,
+        &revm::statetest_types::Test,
+        &CfgEnv,
+        &BlockEnv,
+        &TxEnv,
+        &database::CacheState,
+        SpecId,
+    ) -> Result<(), TestErrorKind>,
+) -> Result<(), TestError> {
+    if skip_test(path) {
+        return Ok(());
+    }
+
+    let s = std::fs::read_to_string(path).unwrap();
+    let path_str = path.to_string_lossy().into_owned();
+    let suite: TestSuite = serde_json::from_str(&s).map_err(|e| TestError {
+        name: "Unknown".to_string(),
+        path: path_str.clone(),
+        kind: e.into(),
+    })?;
+
+    for (name, unit) in suite.0 {
+        let cache_state = unit.state();
+
+        let mut cfg = CfgEnv::default();
+        cfg.chain_id = unit.env.current_chain_id.unwrap_or(U256::ONE).try_into().unwrap_or(1);
+
+        for (spec_name, tests) in &unit.post {
+            if *spec_name == SpecName::Constantinople {
+                continue;
+            }
+
+            let spec_id = spec_name.to_spec_id();
+            cfg.set_spec_and_mainnet_gas_params(spec_id);
+
+            if cfg.spec().is_enabled_in(SpecId::OSAKA) {
+                cfg.set_max_blobs_per_tx(6);
+            } else if cfg.spec().is_enabled_in(SpecId::PRAGUE) {
+                cfg.set_max_blobs_per_tx(9);
+            } else {
+                cfg.set_max_blobs_per_tx(6);
+            }
+
+            let block = unit.block_env(&mut cfg);
+
+            for test in tests.iter() {
+                let tx = match test.tx_env(&unit) {
+                    Ok(tx) => tx,
+                    Err(_) if test.expect_exception.is_some() => continue,
+                    Err(_) => {
+                        return Err(TestError {
+                            name,
+                            path: path_str,
+                            kind: TestErrorKind::UnknownPrivateKey(unit.transaction.secret_key),
+                        });
+                    }
+                };
+
+                let result =
+                    run_test(&name, &unit, test, &cfg, &block, &tx, &cache_state, spec_id);
+
+                if let Err(e) = result {
+                    return Err(TestError { name, path: path_str, kind: e });
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+// ── Suite-level execution (JIT / AOT) ───────────────────────────────────────
+
+/// Execute a single test suite file, JIT-compiling all contracts before execution.
+pub fn execute_test_suite_jit(
+    path: &Path,
+    elapsed: &Arc<Mutex<Duration>>,
+) -> Result<(), TestError> {
+    if skip_test(path) {
+        return Ok(());
+    }
+
+    let s = std::fs::read_to_string(path).unwrap();
+    let path_str = path.to_string_lossy().into_owned();
+    let suite: TestSuite = serde_json::from_str(&s).map_err(|e| TestError {
+        name: "Unknown".to_string(),
+        path: path_str.clone(),
+        kind: e.into(),
+    })?;
+
+    for (name, unit) in suite.0 {
+        let cache_state = unit.state();
+
+        let mut cfg = CfgEnv::default();
+        cfg.chain_id = unit.env.current_chain_id.unwrap_or(U256::ONE).try_into().unwrap_or(1);
+
+        for (spec_name, tests) in &unit.post {
+            if *spec_name == SpecName::Constantinople {
+                continue;
+            }
+
+            let spec_id = spec_name.to_spec_id();
+            cfg.set_spec_and_mainnet_gas_params(spec_id);
+
+            if cfg.spec().is_enabled_in(SpecId::OSAKA) {
+                cfg.set_max_blobs_per_tx(6);
+            } else if cfg.spec().is_enabled_in(SpecId::PRAGUE) {
+                cfg.set_max_blobs_per_tx(9);
+            } else {
+                cfg.set_max_blobs_per_tx(6);
+            }
+
+            let block = unit.block_env(&mut cfg);
+
+            // JIT-compile all contracts for this spec.
+            let cx = LlvmContext::create();
+            let backend =
+                EvmLlvmBackend::new(&cx, false, OptimizationLevel::Default).map_err(|e| {
+                    TestError {
+                        name: name.clone(),
+                        path: path_str.clone(),
+                        kind: TestErrorKind::CompilationError(format!("backend: {e}")),
+                    }
+                })?;
+            let mut compiler = EvmCompiler::new(backend);
+            let compiled = jit_compile_contracts(&unit, spec_id, &mut compiler)
+                .map_err(|e| TestError { name: name.clone(), path: path_str.clone(), kind: e })?;
+
+            for test in tests.iter() {
+                let tx = match test.tx_env(&unit) {
+                    Ok(tx) => tx,
+                    Err(_) if test.expect_exception.is_some() => continue,
+                    Err(_) => {
+                        return Err(TestError {
+                            name,
+                            path: path_str,
+                            kind: TestErrorKind::UnknownPrivateKey(unit.transaction.secret_key),
+                        });
+                    }
+                };
+
+                let result = execute_single_test_compiled(
+                    &compiled,
+                    test,
+                    &unit,
+                    &name,
+                    &cfg,
+                    &block,
+                    &tx,
+                    &cache_state,
+                    elapsed,
+                );
+
+                if let Err(e) = result {
+                    return Err(TestError { name, path: path_str, kind: e });
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Execute a single test suite file, AOT-compiling all contracts before execution.
+pub fn execute_test_suite_aot(
+    path: &Path,
+    elapsed: &Arc<Mutex<Duration>>,
+) -> Result<(), TestError> {
+    if skip_test(path) {
+        return Ok(());
+    }
+
+    let s = std::fs::read_to_string(path).unwrap();
+    let path_str = path.to_string_lossy().into_owned();
+    let suite: TestSuite = serde_json::from_str(&s).map_err(|e| TestError {
+        name: "Unknown".to_string(),
+        path: path_str.clone(),
+        kind: e.into(),
+    })?;
+
+    for (name, unit) in suite.0 {
+        let cache_state = unit.state();
+
+        let mut cfg = CfgEnv::default();
+        cfg.chain_id = unit.env.current_chain_id.unwrap_or(U256::ONE).try_into().unwrap_or(1);
+
+        for (spec_name, tests) in &unit.post {
+            if *spec_name == SpecName::Constantinople {
+                continue;
+            }
+
+            let spec_id = spec_name.to_spec_id();
+            cfg.set_spec_and_mainnet_gas_params(spec_id);
+
+            if cfg.spec().is_enabled_in(SpecId::OSAKA) {
+                cfg.set_max_blobs_per_tx(6);
+            } else if cfg.spec().is_enabled_in(SpecId::PRAGUE) {
+                cfg.set_max_blobs_per_tx(9);
+            } else {
+                cfg.set_max_blobs_per_tx(6);
+            }
+
+            let block = unit.block_env(&mut cfg);
+
+            // AOT-compile all contracts for this spec.
+            let (compiled, _tmp_dir, _lib) = aot_compile_contracts(&unit, spec_id)
+                .map_err(|e| TestError { name: name.clone(), path: path_str.clone(), kind: e })?;
+
+            for test in tests.iter() {
+                let tx = match test.tx_env(&unit) {
+                    Ok(tx) => tx,
+                    Err(_) if test.expect_exception.is_some() => continue,
+                    Err(_) => {
+                        return Err(TestError {
+                            name,
+                            path: path_str,
+                            kind: TestErrorKind::UnknownPrivateKey(unit.transaction.secret_key),
+                        });
+                    }
+                };
+
+                let result = execute_single_test_compiled(
+                    &compiled,
+                    test,
+                    &unit,
+                    &name,
+                    &cfg,
+                    &block,
+                    &tx,
+                    &cache_state,
+                    elapsed,
+                );
+
+                if let Err(e) = result {
+                    return Err(TestError { name, path: path_str, kind: e });
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+// ── Top-level runner ────────────────────────────────────────────────────────
+
+fn run_test_worker(
+    state: TestRunnerState,
+    keep_going: bool,
+    mode: CompileMode,
+) -> Result<(), TestError> {
+    loop {
+        if !keep_going && state.n_errors.load(Ordering::SeqCst) > 0 {
+            return Ok(());
+        }
+
+        let Some(test_path) = state.next_test() else {
+            return Ok(());
+        };
+
+        let result = match mode {
+            CompileMode::Interpreter => {
+                execute_test_suite(&test_path, &state.elapsed, false, false)
+            }
+            CompileMode::Jit => execute_test_suite_jit(&test_path, &state.elapsed),
+            CompileMode::Aot => execute_test_suite_aot(&test_path, &state.elapsed),
+        };
+
+        state.console_bar.inc(1);
+
+        if let Err(err) = result {
+            state.n_errors.fetch_add(1, Ordering::SeqCst);
+            if !keep_going {
+                return Err(err);
+            }
+        }
+    }
+}
+
+/// Run all test files.
+pub fn run(
+    test_files: Vec<PathBuf>,
+    single_thread: bool,
+    keep_going: bool,
+    mode: CompileMode,
+) -> Result<(), TestError> {
+    let n_files = test_files.len();
+    let state = TestRunnerState::new(test_files);
+
+    // JIT/AOT modes use single thread since the LLVM context is not Send.
+    let single_thread = single_thread || !matches!(mode, CompileMode::Interpreter);
+    let num_threads = if single_thread {
+        1
+    } else {
+        match std::thread::available_parallelism() {
+            Ok(n) => n.get().min(n_files),
+            Err(_) => 1,
+        }
+    };
+
+    let mut handles = Vec::with_capacity(num_threads);
+    for i in 0..num_threads {
+        let state = state.clone();
+
+        let thread = std::thread::Builder::new()
+            .name(format!("runner-{i}"))
+            .spawn(move || run_test_worker(state, keep_going, mode))
+            .unwrap();
+
+        handles.push(thread);
+    }
+
+    let mut thread_errors = Vec::new();
+    for (i, handle) in handles.into_iter().enumerate() {
+        match handle.join() {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => thread_errors.push(e),
+            Err(_) => thread_errors.push(TestError {
+                name: format!("thread {i} panicked"),
+                path: String::new(),
+                kind: TestErrorKind::Panic,
+            }),
+        }
+    }
+
+    state.console_bar.finish();
+
+    println!(
+        "Finished execution. Total CPU time: {:.6}s",
+        state.elapsed.lock().unwrap().as_secs_f64()
+    );
+
+    let n_errors = state.n_errors.load(Ordering::SeqCst);
+    let n_thread_errors = thread_errors.len();
+
+    if n_errors == 0 && n_thread_errors == 0 {
+        println!("All tests passed!");
+        Ok(())
+    } else {
+        println!("Encountered {n_errors} errors out of {n_files} total tests");
+
+        if n_thread_errors == 0 {
+            std::process::exit(1);
+        }
+
+        if n_thread_errors > 1 {
+            println!("{n_thread_errors} threads returned an error, out of {num_threads} total:");
+            for error in &thread_errors {
+                println!("{error}");
+            }
+        }
+        Err(thread_errors.swap_remove(0))
+    }
+}

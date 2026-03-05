@@ -1,3 +1,4 @@
+pub mod compiled;
 pub mod merkle_trie;
 pub mod runner;
 pub mod utils;

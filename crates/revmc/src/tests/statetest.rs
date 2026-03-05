@@ -1,4 +1,4 @@
-use revmc_statetest::runner::CompileMode;
+use revmc_statetest::compiled::CompileMode;
 
 fn run_state_tests(mode: CompileMode) {
     let Some(mut path) = revmc_statetest::get_general_state_tests_path() else {
@@ -16,7 +16,7 @@ fn run_state_tests(mode: CompileMode) {
         return;
     }
 
-    revmc_statetest::runner::run(test_files, false, false, mode).unwrap();
+    revmc_statetest::compiled::run(test_files, false, false, mode).unwrap();
 }
 
 #[test]
