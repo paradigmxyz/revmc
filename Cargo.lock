@@ -3115,6 +3115,7 @@ dependencies = [
  "revmc-build",
  "revmc-cli-tests",
  "revmc-context",
+ "revmc-statetest",
  "serde",
  "serde_json",
  "tracing-subscriber 0.3.19",

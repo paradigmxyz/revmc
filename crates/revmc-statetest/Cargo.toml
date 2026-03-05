@@ -10,7 +10,6 @@ revmc = { workspace = true, features = ["llvm"] }
 revm = { workspace = true, features = ["std", "test-types", "tracer"] }
 
 alloy-rlp = { version = "0.3", features = ["arrayvec", "derive"] }
-clap = { version = "4", features = ["derive"] }
 dashmap = "6"
 eyre.workspace = true
 indicatif = "0.17"
@@ -28,7 +27,3 @@ walkdir = "2.5"
 
 [lib]
 path = "src/lib.rs"
-
-[[bin]]
-name = "statetest-diff"
-path = "src/bin/statetest_diff.rs"
