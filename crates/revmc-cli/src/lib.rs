@@ -89,7 +89,7 @@ fn parse_imm(s: &str, size: Option<u8>) -> Result<Vec<u8>> {
         match imm_bytes.len().cmp(&(size as usize)) {
             Ordering::Less => {
                 let extend = size as usize - imm_bytes.len();
-                imm_bytes.splice(0..0, std::iter::repeat(0).take(extend));
+                imm_bytes.splice(0..0, std::iter::repeat_n(0, extend));
             }
             Ordering::Equal => {}
             Ordering::Greater => {

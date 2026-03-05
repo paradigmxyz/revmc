@@ -647,14 +647,36 @@ pub unsafe extern "C" fn __revmc_builtin_call(
         usize::MAX // unrealistic value so we are sure it is not used
     };
 
-    // Load account and calculate gas cost.
-    let mut account_load = try_host!(ecx.host.load_account_delegated(to));
+    // Charge the CALL base access cost up-front. In the interpreter this is charged as static
+    // opcode gas before entering call helpers; revmc marks CALL as dynamic, so the builtin must
+    // do it.
+    gas!(ecx, ecx.host.gas_params().warm_storage_read_cost());
 
-    if call_kind != CallKind::Call {
-        account_load.is_empty = false;
+    if transfers_value {
+        gas!(ecx, ecx.host.gas_params().transfer_value_cost());
     }
 
-    gas!(ecx, gas::call_cost(spec_id, transfers_value, account_load));
+    // Match interpreter call path: load delegated account and pass resolved bytecode/hash
+    // through CallInputs::known_bytecode (covers EIP-7702 delegation and EOF execution).
+    let (dynamic_gas, bytecode, code_hash) =
+        match revm_interpreter::instructions::contract::load_account_delegated(
+            ecx.host,
+            spec_id,
+            ecx.gas.remaining(),
+            to,
+            transfers_value,
+            call_kind == CallKind::Call,
+        ) {
+            Ok(out) => out,
+            Err(revm_context_interface::host::LoadError::ColdLoadSkipped) => {
+                return InstructionResult::OutOfGas;
+            }
+            Err(revm_context_interface::host::LoadError::DBError) => {
+                return InstructionResult::FatalExternalError;
+            }
+        };
+
+    gas!(ecx, dynamic_gas);
 
     // EIP-150: Gas cost changes for IO-heavy operations
     let mut gas_limit = if spec_id.is_enabled_in(SpecId::TANGERINE) {
@@ -669,7 +691,7 @@ pub unsafe extern "C" fn __revmc_builtin_call(
 
     // Add call stipend if there is value to be transferred.
     if matches!(call_kind, CallKind::Call | CallKind::CallCode) && transfers_value {
-        gas_limit = gas_limit.saturating_add(gas::CALL_STIPEND);
+        gas_limit = gas_limit.saturating_add(ecx.host.gas_params().call_stipend());
     }
 
     *ecx.next_action = Some(InterpreterAction::NewFrame(revm_interpreter::FrameInput::Call(
@@ -678,7 +700,7 @@ pub unsafe extern "C" fn __revmc_builtin_call(
             return_memory_offset: out_offset..out_offset + out_len,
             gas_limit,
             bytecode_address: to,
-            known_bytecode: None,
+            known_bytecode: Some((code_hash, bytecode)),
             target_address: if matches!(call_kind, CallKind::DelegateCall | CallKind::CallCode) {
                 ecx.input.target_address
             } else {

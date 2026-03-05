@@ -987,6 +987,122 @@ tests! {
         }),
     }
 
+    // Tests for CALL gas accounting fix.
+    // JIT CALL gas must match interpreter across specs and value-transfer scenarios.
+    call_gas {
+        call_value_cancun(@raw {
+            bytecode: &[
+                op::PUSH1, 1,   // ret length
+                op::PUSH1, 2,   // ret offset
+                op::PUSH1, 3,   // args length
+                op::PUSH1, 4,   // args offset
+                op::PUSH1, 5,   // value (non-zero → triggers value transfer gas)
+                op::PUSH1, 6,   // address
+                op::PUSH1, 7,   // gas
+                op::CALL,
+            ],
+            spec_id: SpecId::CANCUN,
+            expected_return: RETURN_WHAT_INTERPRETER_SAYS,
+            expected_memory: MEMORY_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+            expected_next_action: ACTION_WHAT_INTERPRETER_SAYS,
+        }),
+        call_no_value_cancun(@raw {
+            bytecode: &[
+                op::PUSH1, 1,   // ret length
+                op::PUSH1, 2,   // ret offset
+                op::PUSH1, 3,   // args length
+                op::PUSH1, 4,   // args offset
+                op::PUSH0,      // value = 0 (no transfer)
+                op::PUSH1, 6,   // address
+                op::PUSH1, 7,   // gas
+                op::CALL,
+            ],
+            spec_id: SpecId::CANCUN,
+            expected_return: RETURN_WHAT_INTERPRETER_SAYS,
+            expected_memory: MEMORY_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+            expected_next_action: ACTION_WHAT_INTERPRETER_SAYS,
+        }),
+        staticcall_cancun(@raw {
+            bytecode: &[
+                op::PUSH1, 1,   // ret length
+                op::PUSH1, 2,   // ret offset
+                op::PUSH1, 3,   // args length
+                op::PUSH1, 4,   // args offset
+                op::PUSH1, 5,   // address
+                op::PUSH1, 6,   // gas
+                op::STATICCALL,
+            ],
+            spec_id: SpecId::CANCUN,
+            expected_return: RETURN_WHAT_INTERPRETER_SAYS,
+            expected_memory: MEMORY_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+            expected_next_action: ACTION_WHAT_INTERPRETER_SAYS,
+        }),
+        delegatecall_cancun(@raw {
+            bytecode: &[
+                op::PUSH1, 1,   // ret length
+                op::PUSH1, 2,   // ret offset
+                op::PUSH1, 3,   // args length
+                op::PUSH1, 4,   // args offset
+                op::PUSH1, 5,   // address
+                op::PUSH1, 6,   // gas
+                op::DELEGATECALL,
+            ],
+            spec_id: SpecId::CANCUN,
+            expected_return: RETURN_WHAT_INTERPRETER_SAYS,
+            expected_memory: MEMORY_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+            expected_next_action: ACTION_WHAT_INTERPRETER_SAYS,
+        }),
+        call_high_gas_value(@raw {
+            bytecode: &[
+                op::PUSH1, 32,       // ret length
+                op::PUSH0,           // ret offset
+                op::PUSH1, 64,       // args length
+                op::PUSH0,           // args offset
+                op::PUSH1, 100,      // value = 100
+                op::PUSH1, 0x69,     // address
+                op::PUSH2, 0xFF, 0xFF, // gas = 65535
+                op::CALL,
+            ],
+            spec_id: SpecId::CANCUN,
+            expected_return: RETURN_WHAT_INTERPRETER_SAYS,
+            expected_memory: MEMORY_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+            expected_next_action: ACTION_WHAT_INTERPRETER_SAYS,
+        }),
+        call_known_bytecode(@raw {
+            bytecode: &[
+                op::PUSH1, 0,    // ret length
+                op::PUSH1, 0,    // ret offset
+                op::PUSH1, 0,    // args length
+                op::PUSH1, 0,    // args offset
+                op::PUSH1, 0,    // value
+                op::PUSH1, 0x69, // address (OTHER_ADDR = 0x69..69, has code in TestHost)
+                op::PUSH1, 7,    // gas
+                op::CALL,
+            ],
+            spec_id: SpecId::CANCUN,
+            expected_return: RETURN_WHAT_INTERPRETER_SAYS,
+            expected_memory: MEMORY_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+            expected_next_action: ACTION_WHAT_INTERPRETER_SAYS,
+            assert_ecx: Some(|ecx| {
+                if let Some(InterpreterAction::NewFrame(FrameInput::Call(call_inputs))) =
+                    ecx.next_action.as_ref()
+                {
+                    assert!(
+                        call_inputs.known_bytecode.is_some(),
+                        "CALL must populate known_bytecode via load_account_delegated; \
+                         got None (old code path that skips delegation resolution)"
+                    );
+                }
+            }),
+        }),
+    }
+
     // Tests for i256 correctness under LLVM optimization (a09436d1).
     // These exercise full 256-bit (4 x i64 lane) arithmetic that LLVM may miscompile
     // if i256 load/store alignment or alias attributes are incorrect.
