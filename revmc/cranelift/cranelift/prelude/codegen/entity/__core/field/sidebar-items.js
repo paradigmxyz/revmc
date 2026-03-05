@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"macro":["field_of"],"struct":["FieldRepresentingType"],"trait":["Field"]};

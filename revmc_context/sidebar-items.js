@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["option_as_mut_ptr"],"macro":["extern_revmc"],"struct":["EvmCompilerFn","EvmContext","EvmStack","EvmWord","ResumeAt"],"trait":["HostExt"],"type":["RawEvmCompilerFn"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["collect_tests","make_tests","run_test","run_tests"],"struct":["Config"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["call_high_gas_value","call_known_bytecode","call_no_value_cancun","call_value_cancun","delegatecall_cancun","staticcall_cancun"]};

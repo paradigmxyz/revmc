@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MANGLE_PREFIX"],"fn":["emit"]};

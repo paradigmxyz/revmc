@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["calldatacopy","calldataload1","calldataload2","calldatasize"]};

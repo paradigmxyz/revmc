@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["for_fn","for_param","for_ptr","for_ptr_t","for_ref","for_ref_t","for_sized_ptr","for_sized_ref","size_align"]};

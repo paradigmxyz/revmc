@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["should_write_ir","write_clif_file","write_ir_file"],"struct":["CommentWriter"]};

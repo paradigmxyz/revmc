@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["basefee","blobbasefee","blobhash0","blobhash1","blobhash2","blockhash0","blockhash1","blockhash2","blockhash3","blockhash4","chainid","coinbase","difficulty","difficulty_prevrandao","gas_price","gaslimit","number","selfbalance","timestamp"]};
