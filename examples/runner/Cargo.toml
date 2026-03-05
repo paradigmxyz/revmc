@@ -21,4 +21,4 @@ cc = "1.0"
 revmc-builtins = { workspace = true, default-features = false }
 revmc-context = { workspace = true, default-features = false }
 
-revm = { workspace = true, default-features = false }
+revm = { workspace = true, default-features = false, features = ["std"] }

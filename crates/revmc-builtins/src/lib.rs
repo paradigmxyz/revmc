@@ -81,6 +81,18 @@ pub unsafe extern "C-unwind" fn __revmc_builtin_panic(data: *const u8, len: usiz
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn __revmc_builtin_udiv(rev![a, b]: &mut [EvmWord; 2]) {
+    let divisor = b.to_u256();
+    *b = if divisor.is_zero() { U256::ZERO } else { a.to_u256().wrapping_div(divisor) }.into();
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn __revmc_builtin_urem(rev![a, b]: &mut [EvmWord; 2]) {
+    let divisor = b.to_u256();
+    *b = if divisor.is_zero() { U256::ZERO } else { a.to_u256().wrapping_rem(divisor) }.into();
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn __revmc_builtin_addmod(rev![a, b, c]: &mut [EvmWord; 3]) {
     *c = a.to_u256().add_mod(b.to_u256(), c.to_u256()).into();
 }
