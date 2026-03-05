@@ -685,7 +685,10 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             op::ADD => binop!(iadd),
             op::MUL => binop!(imul),
             op::SUB => binop!(isub),
-            op::DIV => binop!(@if_not_zero udiv),
+            op::DIV => {
+                let sp = self.sp_after_inputs();
+                let _ = self.call_builtin(Builtin::UDiv, &[sp]);
+            }
             op::SDIV => {
                 let [a, b] = self.popn();
                 let b_is_zero = self.bcx.icmp_imm(IntCC::Equal, b, 0);
@@ -706,7 +709,10 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 );
                 self.push(r);
             }
-            op::MOD => binop!(@if_not_zero urem),
+            op::MOD => {
+                let sp = self.sp_after_inputs();
+                let _ = self.call_builtin(Builtin::URem, &[sp]);
+            }
             op::SMOD => binop!(@if_not_zero srem),
             op::ADDMOD => {
                 let sp = self.sp_after_inputs();

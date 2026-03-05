@@ -768,3 +768,41 @@ fn assert_actions(actual: &InterpreterAction, expected: &InterpreterAction) {
         (a, b) => assert_eq!(a, b, "next action mismatch"),
     }
 }
+
+/// Insert a call outcome into the interpreter state (for testing call_with_interpreter).
+///
+/// Mimics revm-handler's insert_call_outcome: pushes success indicator, copies return data
+/// to memory, and returns unspent gas.
+pub fn insert_call_outcome_test(
+    interpreter: &mut revm_interpreter::Interpreter,
+    outcome: InterpreterResult,
+    return_memory_offset: Option<std::ops::Range<usize>>,
+) {
+    use revm_interpreter::interpreter_types::ReturnData;
+
+    let ins_result = outcome.result;
+    let out_gas = outcome.gas;
+    let returned_len = outcome.output.len();
+
+    interpreter.return_data.set_buffer(outcome.output);
+
+    let success_indicator = if ins_result.is_ok() { U256::from(1) } else { U256::ZERO };
+    let _ = interpreter.stack.push(success_indicator);
+
+    if ins_result.is_ok_or_revert() {
+        interpreter.gas.erase_cost(out_gas.remaining());
+
+        if let Some(mem_range) = return_memory_offset {
+            let target_len = std::cmp::min(mem_range.len(), returned_len);
+            if target_len > 0 {
+                interpreter
+                    .memory
+                    .set(mem_range.start, &interpreter.return_data.buffer()[..target_len]);
+            }
+        }
+    }
+
+    if ins_result.is_ok() {
+        interpreter.gas.record_refund(out_gas.refunded());
+    }
+}
