@@ -268,7 +268,7 @@ impl CompileCache {
     }
 
     /// Compile a single bytecode (e.g. from CREATE/CREATE2 at runtime).
-    /// Respects the cache's mode (JIT or AOT).
+    /// Claims the cache slot first, then compiles via the batch path.
     fn compile_single(
         &self,
         code_hash: B256,
@@ -277,91 +277,32 @@ impl CompileCache {
     ) -> Result<EvmCompilerFn, TestErrorKind> {
         use dashmap::mapref::entry::Entry;
 
-        if let Entry::Occupied(e) = self.functions.entry((code_hash, spec_id)) {
-            let lock = e.get().clone();
-            drop(e);
-            let f = lock.wait();
-            self.n_hits.fetch_add(1, Ordering::Relaxed);
-            return Ok(*f);
+        match self.functions.entry((code_hash, spec_id)) {
+            Entry::Occupied(e) => {
+                let lock = e.get().clone();
+                drop(e);
+                let f = lock.wait();
+                self.n_hits.fetch_add(1, Ordering::Relaxed);
+                Ok(*f)
+            }
+            Entry::Vacant(e) => {
+                let lock = Arc::new(OnceLock::new());
+                e.insert(lock.clone());
+                self.n_misses.fetch_add(1, Ordering::Relaxed);
+
+                let name = format!("runtime_{:x}", code_hash);
+                let claimed = vec![(code_hash, code, name, lock)];
+                let mut compiled = CompiledContracts::new();
+
+                match self.mode {
+                    CompileMode::Jit => self.compile_jit_batch(&claimed, &mut compiled, spec_id)?,
+                    CompileMode::Aot => self.compile_aot_batch(&claimed, &mut compiled, spec_id)?,
+                    CompileMode::Interpreter => unreachable!(),
+                }
+
+                Ok(compiled.get(&code_hash).unwrap())
+            }
         }
-
-        self.n_misses.fetch_add(1, Ordering::Relaxed);
-
-        let name = format!("runtime_{:x}", code_hash);
-        let func = match self.mode {
-            CompileMode::Jit => self.jit_compile_single(code, spec_id, &name)?,
-            CompileMode::Aot => self.aot_compile_single(code, spec_id, &name)?,
-            CompileMode::Interpreter => unreachable!(),
-        };
-
-        self.functions
-            .entry((code_hash, spec_id))
-            .or_insert_with(|| Arc::new(OnceLock::new()))
-            .set(func)
-            .ok();
-
-        Ok(func)
-    }
-
-    fn jit_compile_single(
-        &self,
-        code: &[u8],
-        spec_id: SpecId,
-        name: &str,
-    ) -> Result<EvmCompilerFn, TestErrorKind> {
-        let cx: &'static LlvmContext = Box::leak(Box::new(LlvmContext::create()));
-        let backend = EvmLlvmBackend::new(cx, false, OptimizationLevel::Default)
-            .map_err(|e| TestErrorKind::CompilationError(format!("backend: {e}")))?;
-        let compiler: &'static mut EvmCompiler<EvmLlvmBackend<'static>> =
-            Box::leak(Box::new(EvmCompiler::new(backend)));
-
-        let func_id = compiler
-            .translate(name, code, spec_id)
-            .map_err(|e| TestErrorKind::CompilationError(format!("translate {name}: {e}")))?;
-        let func = unsafe { compiler.jit_function(func_id) }
-            .map_err(|e| TestErrorKind::CompilationError(format!("jit {name}: {e}")))?;
-        Ok(func)
-    }
-
-    fn aot_compile_single(
-        &self,
-        code: &[u8],
-        spec_id: SpecId,
-        name: &str,
-    ) -> Result<EvmCompilerFn, TestErrorKind> {
-        let cx = LlvmContext::create();
-        let backend = EvmLlvmBackend::new(&cx, true, OptimizationLevel::Default)
-            .map_err(|e| TestErrorKind::CompilationError(format!("backend: {e}")))?;
-        let mut compiler = EvmCompiler::new(backend);
-
-        compiler
-            .translate(name, code, spec_id)
-            .map_err(|e| TestErrorKind::CompilationError(format!("translate {name}: {e}")))?;
-
-        let tmp_dir = tempfile::tempdir()
-            .map_err(|e| TestErrorKind::CompilationError(format!("tempdir: {e}")))?;
-        let obj_path = tmp_dir.path().join("a.o");
-        let so_path = tmp_dir.path().join("a.so");
-
-        compiler
-            .write_object_to_file(&obj_path)
-            .map_err(|e| TestErrorKind::CompilationError(format!("write object: {e}")))?;
-
-        let linker = Linker::new();
-        linker
-            .link(&so_path, [obj_path.to_str().unwrap()])
-            .map_err(|e| TestErrorKind::CompilationError(format!("link: {e}")))?;
-
-        let lib = unsafe { libloading::Library::new(&so_path) }
-            .map_err(|e| TestErrorKind::CompilationError(format!("load: {e}")))?;
-
-        let func: libloading::Symbol<'_, EvmCompilerFn> = unsafe { lib.get(name.as_bytes()) }
-            .map_err(|e| TestErrorKind::CompilationError(format!("symbol {name}: {e}")))?;
-        let func = *func;
-
-        self.libs.lock().unwrap().push((tmp_dir, lib));
-
-        Ok(func)
     }
 
     fn compile_jit_batch(
