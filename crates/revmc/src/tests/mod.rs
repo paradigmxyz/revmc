@@ -987,6 +987,122 @@ tests! {
         }),
     }
 
+    // Tests for CALL gas accounting fix.
+    // JIT CALL gas must match interpreter across specs and value-transfer scenarios.
+    call_gas {
+        call_value_cancun(@raw {
+            bytecode: &[
+                op::PUSH1, 1,   // ret length
+                op::PUSH1, 2,   // ret offset
+                op::PUSH1, 3,   // args length
+                op::PUSH1, 4,   // args offset
+                op::PUSH1, 5,   // value (non-zero → triggers value transfer gas)
+                op::PUSH1, 6,   // address
+                op::PUSH1, 7,   // gas
+                op::CALL,
+            ],
+            spec_id: SpecId::CANCUN,
+            expected_return: RETURN_WHAT_INTERPRETER_SAYS,
+            expected_memory: MEMORY_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+            expected_next_action: ACTION_WHAT_INTERPRETER_SAYS,
+        }),
+        call_no_value_cancun(@raw {
+            bytecode: &[
+                op::PUSH1, 1,   // ret length
+                op::PUSH1, 2,   // ret offset
+                op::PUSH1, 3,   // args length
+                op::PUSH1, 4,   // args offset
+                op::PUSH0,      // value = 0 (no transfer)
+                op::PUSH1, 6,   // address
+                op::PUSH1, 7,   // gas
+                op::CALL,
+            ],
+            spec_id: SpecId::CANCUN,
+            expected_return: RETURN_WHAT_INTERPRETER_SAYS,
+            expected_memory: MEMORY_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+            expected_next_action: ACTION_WHAT_INTERPRETER_SAYS,
+        }),
+        staticcall_cancun(@raw {
+            bytecode: &[
+                op::PUSH1, 1,   // ret length
+                op::PUSH1, 2,   // ret offset
+                op::PUSH1, 3,   // args length
+                op::PUSH1, 4,   // args offset
+                op::PUSH1, 5,   // address
+                op::PUSH1, 6,   // gas
+                op::STATICCALL,
+            ],
+            spec_id: SpecId::CANCUN,
+            expected_return: RETURN_WHAT_INTERPRETER_SAYS,
+            expected_memory: MEMORY_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+            expected_next_action: ACTION_WHAT_INTERPRETER_SAYS,
+        }),
+        delegatecall_cancun(@raw {
+            bytecode: &[
+                op::PUSH1, 1,   // ret length
+                op::PUSH1, 2,   // ret offset
+                op::PUSH1, 3,   // args length
+                op::PUSH1, 4,   // args offset
+                op::PUSH1, 5,   // address
+                op::PUSH1, 6,   // gas
+                op::DELEGATECALL,
+            ],
+            spec_id: SpecId::CANCUN,
+            expected_return: RETURN_WHAT_INTERPRETER_SAYS,
+            expected_memory: MEMORY_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+            expected_next_action: ACTION_WHAT_INTERPRETER_SAYS,
+        }),
+        call_high_gas_value(@raw {
+            bytecode: &[
+                op::PUSH1, 32,       // ret length
+                op::PUSH0,           // ret offset
+                op::PUSH1, 64,       // args length
+                op::PUSH0,           // args offset
+                op::PUSH1, 100,      // value = 100
+                op::PUSH1, 0x69,     // address
+                op::PUSH2, 0xFF, 0xFF, // gas = 65535
+                op::CALL,
+            ],
+            spec_id: SpecId::CANCUN,
+            expected_return: RETURN_WHAT_INTERPRETER_SAYS,
+            expected_memory: MEMORY_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+            expected_next_action: ACTION_WHAT_INTERPRETER_SAYS,
+        }),
+        call_known_bytecode(@raw {
+            bytecode: &[
+                op::PUSH1, 0,    // ret length
+                op::PUSH1, 0,    // ret offset
+                op::PUSH1, 0,    // args length
+                op::PUSH1, 0,    // args offset
+                op::PUSH1, 0,    // value
+                op::PUSH1, 0x69, // address (OTHER_ADDR = 0x69..69, has code in TestHost)
+                op::PUSH1, 7,    // gas
+                op::CALL,
+            ],
+            spec_id: SpecId::CANCUN,
+            expected_return: RETURN_WHAT_INTERPRETER_SAYS,
+            expected_memory: MEMORY_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+            expected_next_action: ACTION_WHAT_INTERPRETER_SAYS,
+            assert_ecx: Some(|ecx| {
+                if let Some(InterpreterAction::NewFrame(FrameInput::Call(call_inputs))) =
+                    ecx.next_action.as_ref()
+                {
+                    assert!(
+                        call_inputs.known_bytecode.is_some(),
+                        "CALL must populate known_bytecode via load_account_delegated; \
+                         got None (old code path that skips delegation resolution)"
+                    );
+                }
+            }),
+        }),
+    }
+
     // Tests for i256 correctness under LLVM optimization (a09436d1).
     // These exercise full 256-bit (4 x i64 lane) arithmetic that LLVM may miscompile
     // if i256 load/store alignment or alias attributes are incorrect.
@@ -1028,6 +1144,54 @@ tests! {
             0x00000000_00000001_00000000_00000000_00000000_00000000_00000000_00000000_U256
             => 0x00000000_00000000_00000000_00000001_00000000_00000000_00000000_00000000_U256
         ),
+    }
+
+    // Tests for CODECOPY correctness.
+    // CODECOPY must read bytecode from EvmContext at runtime, not from embedded compile-time
+    // pointers, so that AOT-cached code works after deserialization.
+    codecopy_fix {
+        codecopy_exact(@raw {
+            bytecode: &[op::PUSH1, 5, op::PUSH0, op::PUSH0, op::CODECOPY],
+            expected_memory: &hex!("60055f5f39000000000000000000000000000000000000000000000000000000"),
+            expected_gas: 3 + 2 + 2 + (verylowcopy_cost(32).unwrap() + memory_gas_cost(1)),
+        }),
+        codecopy_offset(@raw {
+            bytecode: &[op::PUSH1, 3, op::PUSH1, 2, op::PUSH0, op::CODECOPY],
+            expected_memory: &hex!("60025f0000000000000000000000000000000000000000000000000000000000"),
+            expected_gas: 3 + 3 + 2 + (verylowcopy_cost(32).unwrap() + memory_gas_cost(1)),
+        }),
+        codecopy_beyond(@raw {
+            bytecode: &[op::PUSH1, 10, op::PUSH0, op::PUSH0, op::CODECOPY],
+            expected_memory: &hex!("600a5f5f39000000000000000000000000000000000000000000000000000000"),
+            expected_gas: 3 + 2 + 2 + (verylowcopy_cost(32).unwrap() + memory_gas_cost(1)),
+        }),
+        codecopy_longer(@raw {
+            bytecode: &[
+                op::PUSH1, 42,  // dummy: push 42
+                op::POP,        // pop it
+                op::PUSH1, 99,  // another dummy
+                op::POP,        // pop it
+                op::PUSH1, 12,  // length = 12 (exact bytecode length)
+                op::PUSH0,      // source offset = 0
+                op::PUSH0,      // dest offset = 0
+                op::CODECOPY,   // copy
+            ],
+            expected_memory: MEMORY_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+        }),
+        // Red-green test: CODECOPY must read bytecode from EvmContext at runtime.
+        // We swap bytecode ptr to fake data via modify_ecx. With the fix, CODECOPY reads the
+        // fake data; without it, it would still read the original bytecode.
+        codecopy_runtime_ptr(@raw {
+            bytecode: &[op::PUSH1, 5, op::PUSH0, op::PUSH0, op::CODECOPY],
+            modify_ecx: Some(|ecx| {
+                static FAKE_CODE: [u8; 5] = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE];
+                ecx.bytecode = &FAKE_CODE as *const [u8];
+            }),
+            expected_return: InstructionResult::Stop,
+            expected_memory: &hex!("AABBCCDDEE000000000000000000000000000000000000000000000000000000"),
+            expected_gas: 3 + 2 + 2 + (verylowcopy_cost(32).unwrap() + memory_gas_cost(1)),
+        }),
     }
 
     regressions {
