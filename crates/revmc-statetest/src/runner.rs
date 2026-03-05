@@ -44,15 +44,9 @@ pub enum TestErrorKind {
     #[error("unknown private key: {0:?}")]
     UnknownPrivateKey(B256),
     #[error("unexpected exception: got {got_exception:?}, expected {expected_exception:?}")]
-    UnexpectedException {
-        expected_exception: Option<String>,
-        got_exception: Option<String>,
-    },
+    UnexpectedException { expected_exception: Option<String>, got_exception: Option<String> },
     #[error("unexpected output: got {got_output:?}, expected {expected_output:?}")]
-    UnexpectedOutput {
-        expected_output: Option<Bytes>,
-        got_output: Option<Bytes>,
-    },
+    UnexpectedOutput { expected_output: Option<Bytes>, got_output: Option<Bytes> },
     #[error(transparent)]
     SerdeDeserialize(#[from] serde_json::Error),
     #[error("thread panicked")]

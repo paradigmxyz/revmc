@@ -69,10 +69,13 @@ impl CompiledContracts {
 type StateTestEvm<'a> = MainnetEvm<revm::handler::MainnetContext<&'a mut database::State<EmptyDB>>>;
 type StateTestError = EVMError<EvmDatabaseError<std::convert::Infallible>, InvalidTransaction>;
 
-/// Custom handler that dispatches to compiled functions for pre-state contracts
-/// and falls back to the interpreter for runtime-created contracts (CREATE/CREATE2).
+/// Custom handler that dispatches to compiled functions. All bytecodes —
+/// including runtime-created ones (CREATE/CREATE2) — are JIT-compiled before
+/// execution. Never falls back to the interpreter.
 struct CompiledHandler<'a> {
     compiled: &'a CompiledContracts,
+    cache: &'a CompileCache,
+    spec_id: SpecId,
 }
 
 impl Handler for CompiledHandler<'_> {
@@ -93,7 +96,16 @@ impl Handler for CompiledHandler<'_> {
             let call_or_result = {
                 let frame = evm.frame_stack.get();
                 let bytecode_hash = frame.interpreter.bytecode.get_or_calculate_hash();
-                if let Some(f) = self.compiled.get(&bytecode_hash) {
+                let f = if let Some(f) = self.compiled.get(&bytecode_hash) {
+                    f
+                } else {
+                    // Runtime-created contract (CREATE/CREATE2); JIT-compile it.
+                    let code = frame.interpreter.bytecode.original_byte_slice();
+                    self.cache
+                        .jit_compile_single(bytecode_hash, code, self.spec_id)
+                        .expect("JIT compilation failed for runtime bytecode")
+                };
+                {
                     let ctx = &mut evm.ctx;
                     let action = unsafe { f.call_with_interpreter(&mut frame.interpreter, ctx) };
                     frame.process_next_action::<_, StateTestError>(ctx, action).inspect(|i| {
@@ -101,9 +113,6 @@ impl Handler for CompiledHandler<'_> {
                             frame.set_finished(true);
                         }
                     })?
-                } else {
-                    // Runtime-created contract (CREATE/CREATE2); interpret.
-                    evm.frame_run()?
                 }
             };
             let result = match call_or_result {
@@ -329,6 +338,46 @@ impl CompileCache {
         Ok(compiled)
     }
 
+    /// JIT-compile a single bytecode (e.g. from CREATE/CREATE2) and insert into cache.
+    fn jit_compile_single(
+        &self,
+        code_hash: B256,
+        code: &[u8],
+        spec_id: SpecId,
+    ) -> Result<EvmCompilerFn, TestErrorKind> {
+        use dashmap::mapref::entry::Entry;
+
+        match self.functions.entry((code_hash, spec_id)) {
+            Entry::Occupied(e) => {
+                let lock = e.get().clone();
+                drop(e);
+                let f = lock.wait();
+                self.n_hits.fetch_add(1, Ordering::Relaxed);
+                Ok(*f)
+            }
+            Entry::Vacant(e) => {
+                let lock = Arc::new(OnceLock::new());
+                e.insert(lock.clone());
+                self.n_misses.fetch_add(1, Ordering::Relaxed);
+
+                let cx: &'static LlvmContext = Box::leak(Box::new(LlvmContext::create()));
+                let backend = EvmLlvmBackend::new(cx, false, OptimizationLevel::Default)
+                    .map_err(|e| TestErrorKind::CompilationError(format!("backend: {e}")))?;
+                let compiler: &'static mut EvmCompiler<EvmLlvmBackend<'static>> =
+                    Box::leak(Box::new(EvmCompiler::new(backend)));
+
+                let name = format!("runtime_{:x}", code_hash);
+                let func_id = compiler.translate(&name, code, spec_id).map_err(|e| {
+                    TestErrorKind::CompilationError(format!("translate {name}: {e}"))
+                })?;
+                let func = unsafe { compiler.jit_function(func_id) }
+                    .map_err(|e| TestErrorKind::CompilationError(format!("jit {name}: {e}")))?;
+                lock.set(func).ok();
+                Ok(func)
+            }
+        }
+    }
+
     fn print_stats(&self, label: &str) {
         let hits = self.n_hits.load(Ordering::Relaxed);
         let misses = self.n_misses.load(Ordering::Relaxed);
@@ -356,6 +405,8 @@ impl CompileCache {
 /// Execute a single test using compiled functions via the custom handler.
 fn execute_single_test_compiled(
     compiled: &CompiledContracts,
+    cache: &CompileCache,
+    spec_id: SpecId,
     test: &revm::statetest_types::Test,
     unit: &TestUnit,
     name: &str,
@@ -365,10 +416,10 @@ fn execute_single_test_compiled(
     cache_state: &database::CacheState,
     elapsed: &Arc<Mutex<Duration>>,
 ) -> Result<(), TestErrorKind> {
-    let mut cache = cache_state.clone();
-    cache.set_state_clear_flag(cfg.spec().is_enabled_in(SpecId::SPURIOUS_DRAGON));
+    let mut prestate = cache_state.clone();
+    prestate.set_state_clear_flag(cfg.spec().is_enabled_in(SpecId::SPURIOUS_DRAGON));
     let mut state =
-        database::State::builder().with_cached_prestate(cache).with_bundle_update().build();
+        database::State::builder().with_cached_prestate(prestate).with_bundle_update().build();
 
     let timer = Instant::now();
     // SAFETY: The handler and evm do not outlive `state`. The `'static` in
@@ -381,7 +432,7 @@ fn execute_single_test_compiled(
             .with_tx(tx.clone())
             .with_cfg(cfg.clone())
             .with_db(db_ref);
-        let mut handler = CompiledHandler { compiled };
+        let mut handler = CompiledHandler { compiled, cache, spec_id };
         let mut evm = evm_context.build_mainnet();
         let result = handler.run(&mut evm);
         if result.is_ok() {
@@ -461,6 +512,8 @@ fn execute_test_suite_jit(
 
                 let result = execute_single_test_compiled(
                     &compiled,
+                    cache,
+                    spec_id,
                     test,
                     &unit,
                     &name,
@@ -543,6 +596,8 @@ fn execute_test_suite_aot(
 
                 let result = execute_single_test_compiled(
                     &compiled,
+                    cache,
+                    spec_id,
                     test,
                     &unit,
                     &name,
