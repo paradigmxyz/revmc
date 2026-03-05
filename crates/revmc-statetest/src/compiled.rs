@@ -3,6 +3,7 @@
 use crate::runner::{
     check_evm_execution, execute_test_suite, skip_test, TestError, TestErrorKind, TestRunnerState,
 };
+use dashmap::DashMap;
 use revm::{
     context::{block::BlockEnv, cfg::CfgEnv, tx::TxEnv},
     context_interface::result::{EVMError, HaltReason, InvalidTransaction},
@@ -14,16 +15,15 @@ use revm::{
     Context, MainBuilder, MainContext, MainnetEvm,
 };
 use revmc::{
-    llvm::inkwell::context::Context as LlvmContext, Backend, EvmCompiler, EvmCompilerFn,
-    EvmLlvmBackend, Linker, OptimizationLevel,
+    llvm::inkwell::context::Context as LlvmContext, EvmCompiler, EvmCompilerFn, EvmLlvmBackend,
+    Linker, OptimizationLevel,
 };
-use dashmap::DashMap;
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
     },
     time::{Duration, Instant},
 };
@@ -66,11 +66,11 @@ impl CompiledContracts {
 
 // ── Handler ─────────────────────────────────────────────────────────────────
 
-type StateTestEvm<'a> =
-    MainnetEvm<revm::handler::MainnetContext<&'a mut database::State<EmptyDB>>>;
+type StateTestEvm<'a> = MainnetEvm<revm::handler::MainnetContext<&'a mut database::State<EmptyDB>>>;
 type StateTestError = EVMError<EvmDatabaseError<std::convert::Infallible>, InvalidTransaction>;
 
-/// Custom handler that dispatches to compiled functions when available.
+/// Custom handler that dispatches to compiled functions for pre-state contracts
+/// and falls back to the interpreter for runtime-created contracts (CREATE/CREATE2).
 struct CompiledHandler<'a> {
     compiled: &'a CompiledContracts,
 }
@@ -94,16 +94,15 @@ impl Handler for CompiledHandler<'_> {
                 let frame = evm.frame_stack.get();
                 let bytecode_hash = frame.interpreter.bytecode.get_or_calculate_hash();
                 if let Some(f) = self.compiled.get(&bytecode_hash) {
-                    tracing::debug!(%bytecode_hash, "executing compiled function");
                     let ctx = &mut evm.ctx;
-                    let action =
-                        unsafe { f.call_with_interpreter(&mut frame.interpreter, ctx) };
+                    let action = unsafe { f.call_with_interpreter(&mut frame.interpreter, ctx) };
                     frame.process_next_action::<_, StateTestError>(ctx, action).inspect(|i| {
                         if i.is_result() {
                             frame.set_finished(true);
                         }
                     })?
                 } else {
+                    // Runtime-created contract (CREATE/CREATE2); interpret.
                     evm.frame_run()?
                 }
             };
@@ -125,13 +124,14 @@ impl Handler for CompiledHandler<'_> {
 
 /// Thread-safe compilation cache shared across workers.
 ///
+/// Uses `DashMap` with `OnceLock` per entry to guarantee each `(code_hash, spec_id)`
+/// is compiled exactly once. The first thread to insert claims the slot; other threads
+/// seeing an uninitialized `OnceLock` block on `.wait()` until compilation finishes.
+///
 /// For JIT: LLVM contexts and compilers are leaked so function pointers remain valid.
 /// For AOT: shared libraries and temp dirs are kept alive in a `Mutex<Vec>`.
-///
-/// Cache key is `(code_hash, spec_id)` since the same bytecode compiled for different
-/// specs may produce different code.
 struct CompileCache {
-    functions: DashMap<(B256, SpecId), EvmCompilerFn>,
+    functions: DashMap<(B256, SpecId), Arc<OnceLock<EvmCompilerFn>>>,
     /// Keep AOT shared libraries alive. Unused for JIT mode.
     libs: Mutex<Vec<(tempfile::TempDir, libloading::Library)>>,
     n_hits: AtomicUsize,
@@ -148,15 +148,18 @@ impl CompileCache {
         }
     }
 
-    /// Collect compiled contracts for a test unit. Returns only cached entries;
-    /// uncached bytecodes are returned via `to_compile`.
-    fn collect_cached<'a>(
+    /// Partition a test unit's contracts into cached (already compiled) and
+    /// claimed (this thread must compile them). Uses `DashMap::entry()` to
+    /// atomically distinguish vacant (we compile) from occupied (we wait).
+    fn claim_missing<'a>(
         &self,
         unit: &'a TestUnit,
         spec_id: SpecId,
-    ) -> (CompiledContracts, Vec<(B256, &'a [u8], String)>) {
+    ) -> (CompiledContracts, Vec<(B256, &'a [u8], String, Arc<OnceLock<EvmCompilerFn>>)>) {
+        use dashmap::mapref::entry::Entry;
+
         let mut compiled = CompiledContracts::new();
-        let mut to_compile: Vec<(B256, &'a [u8], String)> = Vec::new();
+        let mut claimed = Vec::new();
 
         for (address, info) in &unit.pre {
             if info.code.is_empty() {
@@ -166,16 +169,57 @@ impl CompileCache {
             if compiled.get(&code_hash).is_some() {
                 continue;
             }
-            if let Some(f) = self.functions.get(&(code_hash, spec_id)) {
-                self.n_hits.fetch_add(1, Ordering::Relaxed);
-                compiled.insert(code_hash, *f);
-            } else if !to_compile.iter().any(|(h, _, _)| h == &code_hash) {
-                self.n_misses.fetch_add(1, Ordering::Relaxed);
-                to_compile.push((code_hash, &info.code[..], format!("contract_{:x}", address)));
+            if claimed.iter().any(|(h, _, _, _): &(B256, _, _, _)| h == &code_hash) {
+                continue;
+            }
+
+            match self.functions.entry((code_hash, spec_id)) {
+                Entry::Occupied(e) => {
+                    let lock = e.get().clone();
+                    drop(e);
+                    // Already compiled or being compiled by another thread.
+                    if let Some(f) = lock.get() {
+                        self.n_hits.fetch_add(1, Ordering::Relaxed);
+                        compiled.insert(code_hash, *f);
+                    }
+                    // Otherwise: another thread is compiling it, wait_for_all handles it.
+                }
+                Entry::Vacant(e) => {
+                    // We're first — claim it.
+                    let lock = Arc::new(OnceLock::new());
+                    e.insert(lock.clone());
+                    self.n_misses.fetch_add(1, Ordering::Relaxed);
+                    claimed.push((
+                        code_hash,
+                        &info.code[..],
+                        format!("contract_{:x}", address),
+                        lock,
+                    ));
+                }
             }
         }
 
-        (compiled, to_compile)
+        (compiled, claimed)
+    }
+
+    /// Wait for all contracts in a test unit to be compiled, returning the
+    /// fully populated `CompiledContracts`.
+    fn wait_for_all(&self, unit: &TestUnit, spec_id: SpecId) -> CompiledContracts {
+        let mut compiled = CompiledContracts::new();
+        for info in unit.pre.values() {
+            if info.code.is_empty() {
+                continue;
+            }
+            let code_hash = keccak256(&info.code);
+            if compiled.get(&code_hash).is_some() {
+                continue;
+            }
+            if let Some(entry) = self.functions.get(&(code_hash, spec_id)) {
+                let f = entry.value().wait();
+                compiled.insert(code_hash, *f);
+            }
+        }
+        compiled
     }
 
     /// JIT-compile missing contracts and insert into cache.
@@ -184,8 +228,8 @@ impl CompileCache {
         unit: &TestUnit,
         spec_id: SpecId,
     ) -> Result<CompiledContracts, TestErrorKind> {
-        let (mut compiled, to_compile) = self.collect_cached(unit, spec_id);
-        if to_compile.is_empty() {
+        let (mut compiled, claimed) = self.claim_missing(unit, spec_id);
+        if claimed.is_empty() {
             return Ok(compiled);
         }
 
@@ -196,20 +240,26 @@ impl CompileCache {
         let compiler: &'static mut EvmCompiler<EvmLlvmBackend<'static>> =
             Box::leak(Box::new(EvmCompiler::new(backend)));
 
-        let mut func_ids: Vec<(B256, <EvmLlvmBackend<'static> as Backend>::FuncId)> = Vec::new();
-        for (code_hash, code, name) in &to_compile {
-            let func_id = compiler.translate(name, *code, spec_id).map_err(|e| {
-                TestErrorKind::CompilationError(format!("translate {name}: {e}"))
-            })?;
+        let mut func_ids = Vec::new();
+        for (code_hash, code, name, _) in &claimed {
+            let func_id = compiler
+                .translate(name, *code, spec_id)
+                .map_err(|e| TestErrorKind::CompilationError(format!("translate {name}: {e}")))?;
             func_ids.push((*code_hash, func_id));
         }
 
-        for (code_hash, func_id) in func_ids {
+        for (i, (code_hash, func_id)) in func_ids.into_iter().enumerate() {
             let func = unsafe { compiler.jit_function(func_id) }.map_err(|e| {
                 TestErrorKind::CompilationError(format!("jit {:x}: {e}", code_hash))
             })?;
-            self.functions.insert((code_hash, spec_id), func);
+            claimed[i].3.set(func).ok();
             compiled.insert(code_hash, func);
+        }
+
+        // Wait for contracts claimed by other threads.
+        let rest = self.wait_for_all(unit, spec_id);
+        for (hash, f) in rest.functions {
+            compiled.functions.entry(hash).or_insert(f);
         }
 
         Ok(compiled)
@@ -221,8 +271,13 @@ impl CompileCache {
         unit: &TestUnit,
         spec_id: SpecId,
     ) -> Result<CompiledContracts, TestErrorKind> {
-        let (mut compiled, to_compile) = self.collect_cached(unit, spec_id);
-        if to_compile.is_empty() {
+        let (mut compiled, claimed) = self.claim_missing(unit, spec_id);
+        if claimed.is_empty() {
+            // Still need to wait for contracts another thread claimed.
+            let rest = self.wait_for_all(unit, spec_id);
+            for (hash, f) in rest.functions {
+                compiled.functions.entry(hash).or_insert(f);
+            }
             return Ok(compiled);
         }
 
@@ -232,10 +287,10 @@ impl CompileCache {
         let mut compiler = EvmCompiler::new(backend);
 
         let mut names: Vec<(B256, String)> = Vec::new();
-        for (code_hash, code, name) in &to_compile {
-            compiler.translate(name, *code, spec_id).map_err(|e| {
-                TestErrorKind::CompilationError(format!("translate {name}: {e}"))
-            })?;
+        for (code_hash, code, name, _) in &claimed {
+            compiler
+                .translate(name, *code, spec_id)
+                .map_err(|e| TestErrorKind::CompilationError(format!("translate {name}: {e}")))?;
             names.push((*code_hash, name.clone()));
         }
 
@@ -256,14 +311,21 @@ impl CompileCache {
         let lib = unsafe { libloading::Library::new(&so_path) }
             .map_err(|e| TestErrorKind::CompilationError(format!("load: {e}")))?;
 
-        for (code_hash, name) in &names {
+        for (i, (code_hash, name)) in names.iter().enumerate() {
             let f: libloading::Symbol<'_, EvmCompilerFn> = unsafe { lib.get(name.as_bytes()) }
                 .map_err(|e| TestErrorKind::CompilationError(format!("symbol {name}: {e}")))?;
-            self.functions.insert((*code_hash, spec_id), *f);
+            claimed[i].3.set(*f).ok();
             compiled.insert(*code_hash, *f);
         }
 
         self.libs.lock().unwrap().push((tmp_dir, lib));
+
+        // Wait for contracts claimed by other threads.
+        let rest = self.wait_for_all(unit, spec_id);
+        for (hash, f) in rest.functions {
+            compiled.functions.entry(hash).or_insert(f);
+        }
+
         Ok(compiled)
     }
 
@@ -378,9 +440,11 @@ fn execute_test_suite_jit(
 
             let block = unit.block_env(&mut cfg);
 
-            let compiled = cache
-                .jit_compile(&unit, spec_id)
-                .map_err(|e| TestError { name: name.clone(), path: path_str.clone(), kind: e })?;
+            let compiled = cache.jit_compile(&unit, spec_id).map_err(|e| TestError {
+                name: name.clone(),
+                path: path_str.clone(),
+                kind: e,
+            })?;
 
             for test in tests.iter() {
                 let tx = match test.tx_env(&unit) {
@@ -458,9 +522,11 @@ fn execute_test_suite_aot(
 
             let block = unit.block_env(&mut cfg);
 
-            let compiled = cache
-                .aot_compile(&unit, spec_id)
-                .map_err(|e| TestError { name: name.clone(), path: path_str.clone(), kind: e })?;
+            let compiled = cache.aot_compile(&unit, spec_id).map_err(|e| TestError {
+                name: name.clone(),
+                path: path_str.clone(),
+                kind: e,
+            })?;
 
             for test in tests.iter() {
                 let tx = match test.tx_env(&unit) {
@@ -517,12 +583,8 @@ fn run_test_worker(
             CompileMode::Interpreter => {
                 execute_test_suite(&test_path, &state.elapsed, false, false)
             }
-            CompileMode::Jit => {
-                execute_test_suite_jit(&test_path, &state.elapsed, cache.unwrap())
-            }
-            CompileMode::Aot => {
-                execute_test_suite_aot(&test_path, &state.elapsed, cache.unwrap())
-            }
+            CompileMode::Jit => execute_test_suite_jit(&test_path, &state.elapsed, cache.unwrap()),
+            CompileMode::Aot => execute_test_suite_aot(&test_path, &state.elapsed, cache.unwrap()),
         };
 
         state.console_bar.inc(1);
