@@ -1,0 +1,6 @@
+[test-groups.statetest]
+max-threads = 1
+
+[[profile.default.overrides]]
+filter = "test(statetest::)"
+test-group = "statetest"

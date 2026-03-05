@@ -69,13 +69,13 @@ Then run the state tests:
 
 ```bash
 # All three modes (interpreter baseline, JIT, AOT):
-cargo test -p revmc --lib statetest
+cargo nextest run -p revmc -E 'test(statetest::)'
 
 # A specific mode:
-cargo test -p revmc --lib statetest::jit
+cargo nextest run -p revmc -E 'test(statetest::jit)'
 
 # A specific test subdirectory:
-SUBDIR=stSelfBalance cargo test -p revmc --lib statetest::jit
+SUBDIR=stSelfBalance cargo nextest run -p revmc -E 'test(statetest::jit)'
 ```
 
 ## Credits
