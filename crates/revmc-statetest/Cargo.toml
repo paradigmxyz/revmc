@@ -19,6 +19,7 @@ plain_hasher = "0.2"
 serde_json = { version = "1.0", features = ["preserve_order"] }
 tempfile = "3"
 thiserror = "2"
+tracing-subscriber.workspace = true
 triehash = "0.8"
 walkdir = "2.5"
 
