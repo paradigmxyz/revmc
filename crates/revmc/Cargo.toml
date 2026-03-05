@@ -58,5 +58,6 @@ llvm-prefer-dynamic = ["llvm", "revmc-llvm?/prefer-dynamic"]
 cranelift = ["dep:revmc-cranelift"]
 
 asm-keccak = ["alloy-primitives/asm-keccak"]
+
 # Internal features.
 __fuzzing = ["dep:arbitrary", "dep:paste", "dep:similar-asserts"]
