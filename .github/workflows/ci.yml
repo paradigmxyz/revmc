@@ -114,7 +114,7 @@ jobs:
 
   state-tests:
     name: state-tests (${{ matrix.mode }})
-    runs-on: depot-ubuntu-latest-8
+    runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:
       fail-fast: false
