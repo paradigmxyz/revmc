@@ -45,14 +45,19 @@ pub struct EvmContext<'a> {
     /// `0` is the initial state.
     #[doc(hidden)]
     pub resume_at: usize,
+    /// Pointer to the contract bytecode slice (for CODECOPY in AOT-cached code).
+    ///
+    /// In JIT mode bytecode pointers baked into generated code are valid (same process), but in
+    /// AOT mode the compiled code is deserialized from disk and the embedded pointer is stale.
+    /// Builtins read this field at runtime instead.
+    pub bytecode: *const [u8],
 }
 
 // Static assertions to ensure the struct layout matches expectations.
 // These offsets are used by the JIT compiler to access fields.
 const _: () = {
     use core::mem::offset_of;
-    // EvmContext should be 80 bytes with #[repr(C)] (removed bytecode_ptr and bytecode_len)
-    assert!(core::mem::size_of::<EvmContext<'_>>() == 80);
+    assert!(core::mem::size_of::<EvmContext<'_>>() == 96);
     // Key fields accessed by JIT code
     assert!(offset_of!(EvmContext<'_>, memory) == 0);
     assert!(offset_of!(EvmContext<'_>, resume_at) == 72);
@@ -82,6 +87,8 @@ impl<'a> EvmContext<'a> {
         let (stack, stack_len) = EvmStack::from_interpreter_stack(&mut interpreter.stack);
         let bytecode_slice = interpreter.bytecode.bytecode_slice();
         let resume_at = ResumeAt::load(interpreter.bytecode.pc(), bytecode_slice);
+        // Capture as a raw fat pointer before the mutable borrow on `action` below.
+        let bytecode = bytecode_slice as *const [u8];
         let this = Self {
             memory: &mut interpreter.memory,
             input: &mut interpreter.input,
@@ -91,6 +98,7 @@ impl<'a> EvmContext<'a> {
             return_data: interpreter.return_data.buffer(),
             is_static: interpreter.runtime_flag.is_static,
             resume_at,
+            bytecode,
         };
         (this, stack, stack_len)
     }
