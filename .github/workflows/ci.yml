@@ -132,7 +132,7 @@ jobs:
           cache-on-failure: true
       - uses: taiki-e/install-action@nextest
       - name: Run state tests
-        run: cargo nextest run -p revmc --features llvm -E 'test(statetest::${{ matrix.mode }})' --run-ignored ignored-only
+        run: cargo nextest run -p revmc --features llvm -E 'test(statetest::${{ matrix.mode }})'
 
   fmt:
     runs-on: ubuntu-latest

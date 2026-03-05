@@ -20,19 +20,16 @@ fn run_state_tests(mode: CompileMode) {
 }
 
 #[test]
-#[ignore = "requires ethereum/tests checkout"]
 fn interpreter() {
     run_state_tests(CompileMode::Interpreter);
 }
 
 #[test]
-#[ignore = "requires ethereum/tests checkout"]
 fn jit() {
     run_state_tests(CompileMode::Jit);
 }
 
 #[test]
-#[ignore = "requires ethereum/tests checkout"]
 fn aot() {
     run_state_tests(CompileMode::Aot);
 }
