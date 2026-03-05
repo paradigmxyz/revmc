@@ -43,10 +43,21 @@ pub fn get_ethtests_path() -> PathBuf {
 /// Get the path to `GeneralStateTests`, extracting the tarball if necessary.
 ///
 /// The ethereum/tests repo ships the fixtures as `.tgz` archives.
-/// This extracts `fixtures_general_state_tests.tgz` into the repo root
-/// so that `GeneralStateTests/` is available as a directory.
+/// We extract into the parent of the submodule (`tests/`) rather than inside
+/// the submodule itself, so the root `.gitignore` can cover the extracted
+/// directory and the submodule stays clean.
 pub fn get_general_state_tests_path() -> Option<PathBuf> {
     let root = get_ethtests_path();
+
+    // Check next to the submodule first (extracted location).
+    if let Some(parent) = root.parent() {
+        let dir = parent.join("GeneralStateTests");
+        if dir.is_dir() {
+            return Some(dir);
+        }
+    }
+
+    // Also check inside the submodule (manual extraction or old layout).
     let dir = root.join("GeneralStateTests");
     if dir.is_dir() {
         return Some(dir);
@@ -57,17 +68,19 @@ pub fn get_general_state_tests_path() -> Option<PathBuf> {
         return None;
     }
 
-    // Extract into the repo root.
+    // Extract next to the submodule so the root .gitignore covers it.
+    let extract_dir = root.parent()?;
     let status = std::process::Command::new("tar")
         .arg("xzf")
         .arg(&tarball)
         .arg("-C")
-        .arg(&root)
+        .arg(extract_dir)
         .status()
         .ok()?;
     if !status.success() {
         return None;
     }
 
+    let dir = extract_dir.join("GeneralStateTests");
     dir.is_dir().then_some(dir)
 }

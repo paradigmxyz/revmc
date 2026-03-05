@@ -3,5 +3,5 @@ clif
 .vscode
 .idea
 /tmp
-/tests/ethereum-tests/GeneralStateTests
-/tests/ethereum-tests/BlockchainTests
+/tests/GeneralStateTests
+/tests/BlockchainTests
