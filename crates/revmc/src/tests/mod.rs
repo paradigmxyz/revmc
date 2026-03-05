@@ -1070,7 +1070,7 @@ tests! {
             bytecode: &[op::PUSH1, 5, op::PUSH0, op::PUSH0, op::CODECOPY],
             modify_ecx: Some(|ecx| {
                 static FAKE_CODE: [u8; 5] = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE];
-                ecx.bytecode = &FAKE_CODE as *const [u8];
+                ecx.bytecode = &FAKE_CODE;
             }),
             expected_return: InstructionResult::Stop,
             expected_memory: &hex!("AABBCCDDEE000000000000000000000000000000000000000000000000000000"),

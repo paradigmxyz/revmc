@@ -707,7 +707,8 @@ where
     interpreter.bytecode.action = None;
 
     let (stack, stack_len) = EvmStack::from_interpreter_stack(&mut interpreter.stack);
-    let bytecode = interpreter.bytecode.bytecode_slice() as *const [u8];
+    let bytecode_slice = interpreter.bytecode.bytecode_slice();
+    let bytecode = unsafe { &*(bytecode_slice as *const [u8]) };
     let mut ecx = EvmContext {
         memory: &mut interpreter.memory,
         input: &mut interpreter.input,
@@ -741,7 +742,8 @@ fn call_jit_with_resume_nested<H: revmc::HostExt>(
     interpreter.bytecode.action = None;
 
     let (stack, stack_len) = EvmStack::from_interpreter_stack(&mut interpreter.stack);
-    let bytecode = interpreter.bytecode.bytecode_slice() as *const [u8];
+    let bytecode_slice = interpreter.bytecode.bytecode_slice();
+    let bytecode = unsafe { &*(bytecode_slice as *const [u8]) };
     let mut ecx = EvmContext {
         memory: &mut interpreter.memory,
         input: &mut interpreter.input,

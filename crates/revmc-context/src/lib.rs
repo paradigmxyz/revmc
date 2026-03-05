@@ -45,12 +45,8 @@ pub struct EvmContext<'a> {
     /// `0` is the initial state.
     #[doc(hidden)]
     pub resume_at: usize,
-    /// Pointer to the contract bytecode slice (for CODECOPY in AOT-cached code).
-    ///
-    /// In JIT mode bytecode pointers baked into generated code are valid (same process), but in
-    /// AOT mode the compiled code is deserialized from disk and the embedded pointer is stale.
-    /// Builtins read this field at runtime instead.
-    pub bytecode: *const [u8],
+    /// The contract bytecode, for CODECOPY at runtime in AOT mode.
+    pub bytecode: &'a [u8],
 }
 
 // Static assertions to ensure the struct layout matches expectations.
@@ -87,8 +83,10 @@ impl<'a> EvmContext<'a> {
         let (stack, stack_len) = EvmStack::from_interpreter_stack(&mut interpreter.stack);
         let bytecode_slice = interpreter.bytecode.bytecode_slice();
         let resume_at = ResumeAt::load(interpreter.bytecode.pc(), bytecode_slice);
-        // Capture as a raw fat pointer before the mutable borrow on `action` below.
-        let bytecode = bytecode_slice as *const [u8];
+        // SAFETY: `bytecode_slice` points into `interpreter.bytecode.code` which is disjoint
+        // from `interpreter.bytecode.action`. We reborrow it through a raw pointer to avoid
+        // conflicting with the `&mut action` below; the data is valid for `'a`.
+        let bytecode = unsafe { &*(bytecode_slice as *const [u8]) };
         let this = Self {
             memory: &mut interpreter.memory,
             input: &mut interpreter.input,

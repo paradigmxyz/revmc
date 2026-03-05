@@ -233,8 +233,7 @@ pub unsafe extern "C" fn __revmc_builtin_codecopy(
     ecx: &mut EvmContext<'_>,
     sp: &mut [EvmWord; 3],
 ) -> InstructionResult {
-    let bytecode = unsafe { &*ecx.bytecode };
-    copy_operation(ecx, sp, bytecode)
+    copy_operation(ecx, sp, ecx.bytecode)
 }
 
 #[no_mangle]
