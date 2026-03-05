@@ -114,7 +114,7 @@ jobs:
 
   state-tests:
     name: state-tests (${{ matrix.mode }})
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-latest-8
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -132,7 +132,7 @@ jobs:
           cache-on-failure: true
       - uses: taiki-e/install-action@nextest
       - name: Run state tests
-        run: cargo nextest run -p revmc --features llvm -E 'test(statetest::${{ matrix.mode }})'
+        run: cargo nextest run -p revmc --features llvm --cargo-profile ethtests -E 'test(statetest::${{ matrix.mode }})'
 
   fmt:
     runs-on: ubuntu-latest

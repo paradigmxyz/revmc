@@ -75,5 +75,9 @@ inherits = "release"
 debug = 2
 strip = false
 
+[profile.ethtests]
+inherits = "dev"
+opt-level = 3
+
 [profile.bench]
 inherits = "profiling"
