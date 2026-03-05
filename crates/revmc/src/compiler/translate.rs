@@ -630,12 +630,18 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 self.push(r);
             }};
             (@if_not_zero $op:ident) => {{
-                // TODO: `select` might not have the same semantics in all backends.
+                // Use `lazy_select` (conditional branch) instead of `select` to avoid
+                // computing `$op(a, b)` when `b == 0`. Division/remainder by zero is UB
+                // in LLVM IR, and `select` evaluates both operands unconditionally, so
+                // LLVM may exploit the UB to remove the zero check entirely.
                 let [a, b] = self.popn();
                 let b_is_zero = self.bcx.icmp_imm(IntCC::Equal, b, 0);
-                let zero = self.bcx.iconst_256(U256::ZERO);
-                let op_result = self.bcx.$op(a, b);
-                let r = self.bcx.select(b_is_zero, zero, op_result);
+                let r = self.bcx.lazy_select(
+                    b_is_zero,
+                    self.word_type,
+                    |bcx| bcx.iconst_256(U256::ZERO),
+                    |bcx| bcx.$op(a, b),
+                );
                 self.push(r);
             }};
         }
