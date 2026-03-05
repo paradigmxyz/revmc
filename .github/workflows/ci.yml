@@ -119,7 +119,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Checkout ethereum/tests
-        run: git -c submodule."tests/ethereum-tests".update=checkout submodule update --init --depth 1 tests/ethereum-tests
+        run: git submodule update --init --checkout --depth 1 tests/ethereum-tests
       - name: Install LLVM
         run: sudo .github/scripts/install_llvm_ubuntu.sh ${{ env.LLVM_VERSION }}
       - uses: dtolnay/rust-toolchain@stable

@@ -54,6 +54,30 @@ fn main() {
 
 You can check out the [examples](/examples) directory for example usage.
 
+## Testing
+
+The [Ethereum state tests](https://github.com/ethereum/tests) are included as a git submodule.
+The submodule is configured with `update = none` so it won't be cloned automatically.
+
+To check it out:
+
+```bash
+git submodule update --init --checkout --depth 1 tests/ethereum-tests
+```
+
+Then run the state tests:
+
+```bash
+# All three modes (interpreter baseline, JIT, AOT):
+cargo test -p revmc --lib statetest -- --ignored
+
+# A specific mode:
+cargo test -p revmc --lib statetest::jit -- --ignored
+
+# A specific test subdirectory:
+SUBDIR=stSelfBalance cargo test -p revmc --lib statetest::jit -- --ignored
+```
+
 ## Credits
 
 The initial compiler implementation was inspired by [`paradigmxyz/jitevm`](https://github.com/paradigmxyz/jitevm).

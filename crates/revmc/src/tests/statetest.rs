@@ -2,7 +2,7 @@ use revmc_statetest::runner::CompileMode;
 
 fn run_state_tests(mode: CompileMode) {
     let Some(mut path) = revmc_statetest::get_general_state_tests_path() else {
-        eprintln!("Skipping: ethereum/tests not available (run `git submodule update --init --depth 1 tests/ethereum-tests`)");
+        eprintln!("Skipping: ethereum/tests not available (run `git submodule update --init --checkout --depth 1 tests/ethereum-tests`)");
         return;
     };
 
