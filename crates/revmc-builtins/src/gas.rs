@@ -1,9 +1,7 @@
 //! Gas calculation utilities.
 
-use revm_interpreter::{SStoreResult, StateLoad};
 use revm_primitives::{hardfork::SpecId, U256};
 
-pub use revm_context_interface::journaled_state::AccountLoad;
 pub use revm_interpreter::gas::*;
 
 /// `const` Option `?`.
@@ -40,16 +38,6 @@ pub const fn warm_cold_cost(is_cold: bool) -> u64 {
     }
 }
 
-/// Returns warm/cold cost with delegation support.
-#[inline]
-pub fn warm_cold_cost_with_delegation(state: StateLoad<bool>) -> u64 {
-    if state.is_cold {
-        COLD_ACCOUNT_ACCESS_COST
-    } else {
-        WARM_STORAGE_READ_COST
-    }
-}
-
 /// Calculate EXTCODECOPY gas cost.
 #[inline]
 pub fn extcodecopy_cost(spec_id: SpecId, len: u64, is_cold: bool) -> Option<u64> {
@@ -79,156 +67,6 @@ pub const fn sload_cost(spec_id: SpecId, is_cold: bool) -> u64 {
     } else {
         50
     }
-}
-
-/// Calculate SSTORE gas cost.
-#[inline]
-pub fn sstore_cost(
-    spec_id: SpecId,
-    result: &SStoreResult,
-    remaining_gas: u64,
-    is_cold: bool,
-) -> Option<u64> {
-    if spec_id.is_enabled_in(SpecId::BERLIN) {
-        let base = if is_cold { COLD_SLOAD_COST } else { 0 };
-        let cost = if result.original_value == result.new_value {
-            WARM_STORAGE_READ_COST
-        } else if result.original_value == result.present_value {
-            if result.original_value.is_zero() {
-                SSTORE_SET
-            } else {
-                WARM_SSTORE_RESET
-            }
-        } else {
-            WARM_STORAGE_READ_COST
-        };
-        Some(base.saturating_add(cost))
-    } else if spec_id.is_enabled_in(SpecId::ISTANBUL) {
-        let stipend = 2300;
-        if remaining_gas <= stipend {
-            return None;
-        }
-        let cost = if result.original_value == result.new_value {
-            ISTANBUL_SLOAD_GAS
-        } else if result.original_value == result.present_value {
-            if result.original_value.is_zero() {
-                SSTORE_SET
-            } else {
-                SSTORE_RESET
-            }
-        } else {
-            ISTANBUL_SLOAD_GAS
-        };
-        Some(cost)
-    } else {
-        let cost = if result.present_value.is_zero() && !result.new_value.is_zero() {
-            SSTORE_SET
-        } else {
-            SSTORE_RESET
-        };
-        Some(cost)
-    }
-}
-
-/// Calculate SSTORE refund.
-///
-/// Follows the logic from EIP-2200 / EIP-3529.
-#[inline]
-pub fn sstore_refund(spec_id: SpecId, result: &SStoreResult) -> i64 {
-    let is_istanbul = spec_id.is_enabled_in(SpecId::ISTANBUL);
-
-    if !is_istanbul {
-        // Pre-Istanbul: simple refund for clearing a slot.
-        return if !result.present_value.is_zero() && result.new_value.is_zero() {
-            REFUND_SSTORE_CLEARS
-        } else {
-            0
-        };
-    }
-
-    // EIP-3529: Reduction in refunds (London+).
-    let sstore_clears_refund = if spec_id.is_enabled_in(SpecId::LONDON) {
-        (WARM_SSTORE_RESET + ACCESS_LIST_STORAGE_KEY) as i64
-    } else {
-        REFUND_SSTORE_CLEARS
-    };
-
-    // No-op: current value equals new value.
-    if result.new_value == result.present_value {
-        return 0;
-    }
-
-    // Direct clear: original == present and new == 0.
-    if result.original_value == result.present_value && result.new_value.is_zero() {
-        return sstore_clears_refund;
-    }
-
-    let mut refund = 0i64;
-
-    // Original is nonzero: account for clearing/un-clearing transitions.
-    if !result.original_value.is_zero() {
-        if result.present_value.is_zero() {
-            // Reverting a clear (present was 0, now setting nonzero): remove clearing refund.
-            refund -= sstore_clears_refund;
-        } else if result.new_value.is_zero() {
-            // Clearing a dirty slot (present nonzero → 0): add clearing refund.
-            refund += sstore_clears_refund;
-        }
-    }
-
-    // Resetting to original value.
-    if result.original_value == result.new_value {
-        if result.original_value.is_zero() {
-            // Was 0 originally, returning to 0: refund the set cost minus load cost.
-            refund += if spec_id.is_enabled_in(SpecId::BERLIN) {
-                (SSTORE_SET - WARM_STORAGE_READ_COST) as i64
-            } else {
-                (SSTORE_SET - ISTANBUL_SLOAD_GAS) as i64
-            };
-        } else {
-            // Was nonzero originally, returning to original: refund the reset cost minus load cost.
-            refund += if spec_id.is_enabled_in(SpecId::BERLIN) {
-                (WARM_SSTORE_RESET - WARM_STORAGE_READ_COST) as i64
-            } else {
-                (SSTORE_RESET - ISTANBUL_SLOAD_GAS) as i64
-            };
-        }
-    }
-
-    refund
-}
-
-/// Calculate CALL gas cost.
-#[inline]
-pub fn call_cost(
-    spec_id: SpecId,
-    transfers_value: bool,
-    account_load: StateLoad<AccountLoad>,
-) -> u64 {
-    let mut gas = if spec_id.is_enabled_in(SpecId::BERLIN) {
-        warm_cold_cost(account_load.is_cold)
-            + if let Some(is_cold) = account_load.data.is_delegate_account_cold {
-                warm_cold_cost(is_cold)
-            } else {
-                0
-            }
-    } else if spec_id.is_enabled_in(SpecId::TANGERINE) {
-        700
-    } else {
-        40
-    };
-
-    if transfers_value {
-        gas += CALLVALUE;
-    }
-
-    if account_load.data.is_empty
-        && (transfers_value || !spec_id.is_enabled_in(SpecId::SPURIOUS_DRAGON))
-    {
-        gas += NEWACCOUNT;
-    }
-
-    gas
 }
 
 /// Calculate CREATE2 gas cost.
