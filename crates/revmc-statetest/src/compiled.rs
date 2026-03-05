@@ -344,8 +344,7 @@ impl CompileCache {
         let cx: &'static LlvmContext = unsafe { &*cx_ptr };
         let backend = EvmLlvmBackend::new(cx, false, OptimizationLevel::Default)
             .map_err(|e| TestErrorKind::CompilationError(format!("backend: {e}")))?;
-        let compiler_ptr =
-            Box::into_raw(Box::new(EvmCompiler::new(backend)));
+        let compiler_ptr = Box::into_raw(Box::new(EvmCompiler::new(backend)));
         // SAFETY: compiler_ptr is valid and owned.
         let compiler: &'static mut EvmCompiler<EvmLlvmBackend<'static>> =
             unsafe { &mut *compiler_ptr };
