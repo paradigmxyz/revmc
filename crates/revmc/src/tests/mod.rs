@@ -986,6 +986,49 @@ tests! {
         }),
     }
 
+    // Tests for i256 correctness under LLVM optimization (a09436d1).
+    // These exercise full 256-bit (4 x i64 lane) arithmetic that LLVM may miscompile
+    // if i256 load/store alignment or alias attributes are incorrect.
+    i256_lanes {
+        // ADD of two large 256-bit values that use all 4 i64 lanes.
+        add_full_width(op::ADD,
+            0xDEADBEEF_12345678_ABCDEF01_23456789_FEDCBA98_76543210_01234567_89ABCDEF_U256,
+            0x11111111_22222222_33333333_44444444_55555555_66666666_77777777_88888888_U256
+            => 0xDEADBEEF_12345678_ABCDEF01_23456789_FEDCBA98_76543210_01234567_89ABCDEF_U256
+             + 0x11111111_22222222_33333333_44444444_55555555_66666666_77777777_88888888_U256
+        ),
+        // MUL of two values producing a result spanning all lanes.
+        mul_full_width(op::MUL,
+            0x00000000_00000000_00000000_00000000_FFFFFFFF_FFFFFFFF_FFFFFFFF_FFFFFFFF_U256,
+            0x00000000_00000000_00000000_00000000_00000000_00000000_00000000_00000002_U256
+            => 0x00000000_00000000_00000000_00000001_FFFFFFFF_FFFFFFFF_FFFFFFFF_FFFFFFFE_U256
+        ),
+        // SUB across lane boundaries (borrow propagation through all 4 lanes).
+        sub_cross_lane(op::SUB,
+            0x00000000_00000000_00000000_00000001_00000000_00000000_00000000_00000000_U256,
+            0x00000000_00000000_00000000_00000000_00000000_00000000_00000000_00000001_U256
+            => 0x00000000_00000000_00000000_00000000_FFFFFFFF_FFFFFFFF_FFFFFFFF_FFFFFFFF_U256
+        ),
+        // Bitwise OR: each lane has different bit patterns.
+        or_all_lanes(op::OR,
+            0xFF000000_00000000_00FF0000_00000000_0000FF00_00000000_000000FF_00000000_U256,
+            0x00000000_FF000000_00000000_00FF0000_00000000_0000FF00_00000000_000000FF_U256
+            => 0xFF000000_FF000000_00FF0000_00FF0000_0000FF00_0000FF00_000000FF_000000FF_U256
+        ),
+        // SHL: shift left across lane boundaries (operand order: shift, value).
+        shl_cross_lane(op::SHL,
+            64_U256,
+            0x00000000_00000000_00000000_00000000_00000000_00000000_00000000_00000001_U256
+            => 0x00000000_00000000_00000000_00000000_00000000_00000001_00000000_00000000_U256
+        ),
+        // SHR: shift right across lane boundaries (operand order: shift, value).
+        shr_cross_lane(op::SHR,
+            64_U256,
+            0x00000000_00000001_00000000_00000000_00000000_00000000_00000000_00000000_U256
+            => 0x00000000_00000000_00000000_00000001_00000000_00000000_00000000_00000000_U256
+        ),
+    }
+
     regressions {
         // Mismatched costs in < BERLIN.
         // GeneralStateTests/stSolidityTest/TestKeywords.json
