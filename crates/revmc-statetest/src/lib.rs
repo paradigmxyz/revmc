@@ -32,8 +32,8 @@ pub fn get_ethtests_path() -> PathBuf {
         return PathBuf::from(path);
     }
     // Resolve relative to the workspace root via CARGO_MANIFEST_DIR.
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default();
-    Path::new(&manifest_dir)
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    Path::new(manifest_dir)
         .ancestors()
         .find(|p| p.join(DEFAULT_ETHTESTS_PATH).exists())
         .map(|p| p.join(DEFAULT_ETHTESTS_PATH))
