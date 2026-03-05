@@ -8,6 +8,7 @@ use revm::{
     statetest_types::{SpecName, Test, TestSuite, TestUnit},
     Context, ExecuteCommitEvm, MainBuilder, MainContext,
 };
+use indicatif::{ProgressBar, ProgressDrawTarget};
 use revmc::{
     llvm::inkwell::context::Context as LlvmContext, Backend, EvmCompiler, EvmCompilerFn,
     EvmLlvmBackend, Linker, OptimizationLevel,
@@ -726,16 +727,23 @@ pub fn execute_test_suite_aot(
     Ok(())
 }
 
+#[derive(Clone)]
 struct TestRunnerState {
     n_errors: Arc<AtomicUsize>,
+    console_bar: Arc<ProgressBar>,
     queue: Arc<Mutex<(usize, Vec<PathBuf>)>>,
     elapsed: Arc<Mutex<Duration>>,
 }
 
 impl TestRunnerState {
     fn new(test_files: Vec<PathBuf>) -> Self {
+        let n_files = test_files.len();
         Self {
             n_errors: Arc::new(AtomicUsize::new(0)),
+            console_bar: Arc::new(ProgressBar::with_draw_target(
+                Some(n_files as u64),
+                ProgressDrawTarget::stdout(),
+            )),
             queue: Arc::new(Mutex::new((0usize, test_files))),
             elapsed: Arc::new(Mutex::new(Duration::ZERO)),
         }
@@ -747,16 +755,6 @@ impl TestRunnerState {
         let test_path = queue.get(idx).cloned()?;
         *current_idx = idx + 1;
         Some(test_path)
-    }
-}
-
-impl Clone for TestRunnerState {
-    fn clone(&self) -> Self {
-        Self {
-            n_errors: Arc::clone(&self.n_errors),
-            queue: Arc::clone(&self.queue),
-            elapsed: Arc::clone(&self.elapsed),
-        }
     }
 }
 
@@ -781,6 +779,8 @@ fn run_test_worker(
             CompileMode::Jit => execute_test_suite_jit(&test_path, &state.elapsed),
             CompileMode::Aot => execute_test_suite_aot(&test_path, &state.elapsed),
         };
+
+        state.console_bar.inc(1);
 
         if let Err(err) = result {
             state.n_errors.fetch_add(1, Ordering::SeqCst);
@@ -837,6 +837,8 @@ pub fn run(
         }
     }
 
+    state.console_bar.finish();
+
     println!(
         "Finished execution. Total CPU time: {:.6}s",
         state.elapsed.lock().unwrap().as_secs_f64()
@@ -851,14 +853,15 @@ pub fn run(
     } else {
         println!("Encountered {n_errors} errors out of {n_files} total tests");
 
+        if n_thread_errors == 0 {
+            std::process::exit(1);
+        }
+
         if n_thread_errors > 1 {
             println!("{n_thread_errors} threads returned an error, out of {num_threads} total:");
             for error in &thread_errors {
                 println!("{error}");
             }
-        }
-        if n_thread_errors == 0 {
-            std::process::exit(1);
         }
         Err(thread_errors.swap_remove(0))
     }

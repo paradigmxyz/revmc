@@ -11,6 +11,7 @@ revm = { workspace = true, features = ["std", "test-types"] }
 
 alloy-rlp = { version = "0.3", features = ["arrayvec", "derive"] }
 eyre.workspace = true
+indicatif = "0.17"
 hash-db = "0.15"
 k256 = { version = "0.13", features = ["ecdsa"] }
 libloading = "0.8"
