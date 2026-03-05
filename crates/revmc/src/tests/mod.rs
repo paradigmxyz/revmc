@@ -24,6 +24,7 @@ mod meta;
 mod div_zero_opaque;
 mod fibonacci;
 mod resume;
+mod resume_at_call;
 
 mod runner;
 pub use runner::*;

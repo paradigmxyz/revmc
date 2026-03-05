@@ -255,6 +255,9 @@ impl EvmCompilerFn {
             EvmContext::from_interpreter_with_stack(interpreter, host);
         let result = self.call(Some(stack), Some(stack_len), &mut ecx);
 
+        // Save resume_at (Copy usize) before ecx's borrow ends.
+        let resume_at = ecx.resume_at;
+
         // Set the remaining gas to 0 if the result is `OutOfGas`,
         // as it might have overflown inside of the function.
         if result == InstructionResult::OutOfGas {
@@ -266,6 +269,10 @@ impl EvmCompilerFn {
         if return_data_is_empty {
             interpreter.return_data.0.clear();
         }
+
+        // Persist the resume_at value in the interpreter's bytecode PC so that
+        // subsequent calls can correctly resume after a CALL/CREATE suspension.
+        interpreter.bytecode.absolute_jump(resume_at);
 
         if let Some(action) = interpreter.bytecode.action.take() {
             action
