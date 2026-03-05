@@ -1,7 +1,5 @@
 use super::with_evm_context;
 use crate::{Backend, EvmCompiler, SpecId};
-use revm_interpreter::InstructionResult;
-
 matrix_tests!(translate_then_compile);
 
 // Also tests multiple functions in the same module.
@@ -16,8 +14,8 @@ fn translate_then_compile<B: Backend>(compiler: &mut EvmCompiler<B>) {
     let no_gas_fn = unsafe { compiler.jit_function(no_gas_id) }.unwrap();
     with_evm_context(bytecode, |ecx, stack, stack_len| {
         let r = unsafe { gas_fn.call(Some(stack), Some(stack_len), ecx) };
-        assert_eq!(r, InstructionResult::Stop);
+        assert_eq!(r, Ok(()));
         let r = unsafe { no_gas_fn.call(Some(stack), Some(stack_len), ecx) };
-        assert_eq!(r, InstructionResult::Stop);
+        assert_eq!(r, Ok(()));
     });
 }

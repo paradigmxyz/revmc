@@ -164,7 +164,7 @@ macro_rules! extern_revmc {
                     stack_len: *mut usize,
                     input: *const $crate::private::revm_interpreter::InputsImpl,
                     ecx: *mut $crate::EvmContext<'_>,
-                ) -> $crate::private::revm_interpreter::InstructionResult;
+                ) -> Result<(), $crate::private::revm_interpreter::InstructionResult>;
             )+
         }
     };
@@ -181,7 +181,7 @@ pub type RawEvmCompilerFn = unsafe extern "C" fn(
     stack_len: *mut usize,
     input: *const InputsImpl,
     ecx: *mut EvmContext<'_>,
-) -> InstructionResult;
+) -> Result<(), InstructionResult>;
 
 /// An EVM bytecode function.
 #[derive(Clone, Copy, Debug, Hash)]
@@ -258,9 +258,14 @@ impl EvmCompilerFn {
         // Save resume_at (Copy usize) before ecx's borrow ends.
         let resume_at = ecx.resume_at;
 
+        let ir = match result {
+            Ok(()) => InstructionResult::Stop,
+            Err(ir) => ir,
+        };
+
         // Set the remaining gas to 0 if the result is `OutOfGas`,
         // as it might have overflown inside of the function.
-        if result == InstructionResult::OutOfGas {
+        if ir == InstructionResult::OutOfGas {
             ecx.gas.spend_all();
         }
 
@@ -278,7 +283,7 @@ impl EvmCompilerFn {
             action
         } else {
             InterpreterAction::Return(InterpreterResult {
-                result,
+                result: ir,
                 output: Bytes::new(),
                 gas: interpreter.gas,
             })
@@ -306,7 +311,7 @@ impl EvmCompilerFn {
         stack: Option<&mut EvmStack>,
         stack_len: Option<&mut usize>,
         ecx: &mut EvmContext<'_>,
-    ) -> InstructionResult {
+    ) -> Result<(), InstructionResult> {
         (self.0)(ecx.gas, option_as_mut_ptr(stack), option_as_mut_ptr(stack_len), ecx.input, ecx)
     }
 
@@ -323,7 +328,7 @@ impl EvmCompilerFn {
         stack: Option<&mut EvmStack>,
         stack_len: Option<&mut usize>,
         ecx: &mut EvmContext<'_>,
-    ) -> InstructionResult {
+    ) -> Result<(), InstructionResult> {
         self.call(stack, stack_len, ecx)
     }
 }
@@ -774,8 +779,8 @@ mod tests {
         _stack_len: *mut usize,
         _input: *const InputsImpl,
         _ecx: *mut EvmContext<'_>,
-    ) -> InstructionResult {
-        InstructionResult::Stop
+    ) -> Result<(), InstructionResult> {
+        Ok(())
     }
 
     #[test]

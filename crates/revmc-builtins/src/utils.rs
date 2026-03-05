@@ -21,7 +21,7 @@ pub(crate) fn ensure_memory(
     ecx: &mut EvmContext<'_>,
     offset: usize,
     len: usize,
-) -> InstructionResult {
+) -> Result<(), InstructionResult> {
     ensure_memory_inner(ecx.memory, ecx.gas, offset, len)
 }
 
@@ -31,16 +31,16 @@ pub(crate) fn ensure_memory_inner(
     gas: &mut Gas,
     offset: usize,
     len: usize,
-) -> InstructionResult {
+) -> Result<(), InstructionResult> {
     let new_size = offset.saturating_add(len);
     if new_size > memory.len() {
         return resize_memory_inner(memory, gas, new_size);
     }
-    InstructionResult::Stop
+    Ok(())
 }
 
 #[inline]
-pub(crate) fn resize_memory(ecx: &mut EvmContext<'_>, new_size: usize) -> InstructionResult {
+pub(crate) fn resize_memory(ecx: &mut EvmContext<'_>, new_size: usize) -> Result<(), InstructionResult> {
     resize_memory_inner(ecx.memory, ecx.gas, new_size)
 }
 
@@ -48,7 +48,7 @@ fn resize_memory_inner(
     memory: &mut SharedMemory,
     gas: &mut Gas,
     new_size: usize,
-) -> InstructionResult {
+) -> Result<(), InstructionResult> {
     // Calculate words needed (memory is always word-aligned)
     let new_num_words = revm_interpreter::interpreter::num_words(new_size);
     let current_words = gas.memory().words_num;
@@ -62,7 +62,7 @@ fn resize_memory_inner(
         let cost = new_cost.saturating_sub(old_cost);
 
         if !gas.record_cost(cost) {
-            return InstructionResult::MemoryOOG;
+            return Err(InstructionResult::MemoryOOG);
         }
 
         // Update memory words tracking
@@ -71,14 +71,14 @@ fn resize_memory_inner(
         // Resize the actual memory (must be word-aligned, as per EVM spec)
         memory.resize(new_num_words * 32);
     }
-    InstructionResult::Stop
+    Ok(())
 }
 
 pub(crate) unsafe fn copy_operation(
     ecx: &mut EvmContext<'_>,
     rev![memory_offset, data_offset, len]: &mut [EvmWord; 3],
     data: &[u8],
-) -> InstructionResult {
+) -> Result<(), InstructionResult> {
     let len = try_into_usize!(len);
     if len != 0 {
         gas_opt!(ecx, gas::dyn_verylowcopy_cost(len as u64));
@@ -88,5 +88,5 @@ pub(crate) unsafe fn copy_operation(
         let data_offset = as_usize_saturated!(data_offset);
         ecx.memory.set_data(memory_offset, data_offset, len, data);
     }
-    InstructionResult::Stop
+    Ok(())
 }

@@ -643,6 +643,10 @@ fn run_compiled_test_case(test_case: &TestCase<'_>, f: EvmCompilerFn) {
         }
 
         let actual_return = unsafe { f.call(Some(stack), Some(stack_len), ecx) };
+        let actual_return = match actual_return {
+            Ok(()) => InstructionResult::Stop,
+            Err(ir) => ir,
+        };
 
         if matches!(
             actual_return,

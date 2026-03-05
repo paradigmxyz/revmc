@@ -9,7 +9,6 @@
 use super::{with_evm_context, DEF_SPEC};
 use crate::{Backend, EvmCompiler};
 use revm_bytecode::opcode as op;
-use revm_interpreter::InstructionResult;
 use revm_primitives::U256;
 
 /// Build bytecode: MSTORE(a, 0), MSTORE(b, 32), MLOAD(32), MLOAD(0), `<op>`
@@ -63,7 +62,7 @@ fn run_opaque_zero_div_test<B: Backend>(
 
     with_evm_context(&code, |ecx, stack, stack_len| {
         let r = unsafe { f.call(Some(stack), Some(stack_len), ecx) };
-        assert_eq!(r, InstructionResult::Stop, "{name}: unexpected return");
+        assert_eq!(r, Ok(()), "{name}: unexpected return");
         assert_eq!(*stack_len, 1, "{name}: expected 1 stack element");
         let actual = stack.as_slice()[0].to_u256();
         assert_eq!(

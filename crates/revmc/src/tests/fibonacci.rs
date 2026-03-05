@@ -2,7 +2,6 @@ use super::{with_evm_context, DEF_SPEC};
 use crate::{Backend, EvmCompiler};
 use paste::paste;
 use revm_bytecode::opcode as op;
-use revm_interpreter::InstructionResult;
 use revm_primitives::U256;
 
 macro_rules! fibonacci_tests {
@@ -29,7 +28,7 @@ fn run_fibonacci_test<B: Backend>(compiler: &mut EvmCompiler<B>, input: u16, dyn
             *stack_len = 1;
         }
         let r = unsafe { f.call(Some(stack), Some(stack_len), ecx) };
-        assert_eq!(r, InstructionResult::Stop);
+        assert_eq!(r, Ok(()));
         // Apparently the code does `fibonacci(input + 1)`.
         assert_eq!(*stack_len, 1);
         assert_eq!(stack.as_slice()[0].to_u256(), fibonacci_rust(input + 1));

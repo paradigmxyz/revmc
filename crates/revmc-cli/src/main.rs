@@ -237,6 +237,10 @@ fn main() -> Result<()> {
             *stack_len = stack_input.len();
 
             let r = unsafe { f.call_noinline(Some(stack), Some(stack_len), &mut ecx) };
+            let r = match r {
+                Ok(()) => revm_interpreter::InstructionResult::Stop,
+                Err(ir) => ir,
+            };
             // The JIT code may not set an action (e.g., for STOP), so we need to handle that.
             // If action is None, create a default action based on the return result.
             let action = ecx.next_action.take().unwrap_or_else(|| {

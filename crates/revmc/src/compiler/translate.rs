@@ -159,13 +159,13 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     ///     // ...
     ///     // There will always be at least one diverging instruction.
     ///     op.stop: {
-    ///         goto return(InstructionResult::Stop);
+    ///         goto return(Ok(()));
     ///     };
     ///
     ///     #[cfg(may_suspend)]
     ///     suspend(resume_at: u32): {
     ///         ecx.resume_at = resume_at;
-    ///         goto return(InstructionResult::Stop);  // Caller checks next_action
+    ///         goto return(Ok(()));  // Caller checks next_action
     ///     };
     ///
     ///     // All paths lead to here.
@@ -421,7 +421,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 fx.bcx.store(resume_value, resume_at);
 
                 // Signal that execution suspended - caller checks next_action for Call/Create
-                fx.build_return_imm(InstructionResult::Stop);
+                fx.build_return_ok();
             }
         } else {
             debug_assert!(fx.resume_blocks.is_empty());
@@ -680,7 +680,10 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         }
 
         match data.opcode {
-            op::STOP => goto_return!(build InstructionResult::Stop),
+            op::STOP => {
+                self.build_return_ok();
+                goto_return!(no_branch);
+            }
 
             op::ADD => binop!(iadd),
             op::MUL => binop!(imul),
@@ -1315,10 +1318,10 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     }
     */
 
-    /// Builds a check, failing if `ret` is not `InstructionResult::Continue`.
+    /// Builds a check, failing if the builtin returned `Err(InstructionResult)`.
     fn build_check_instruction_result(&mut self, ret: B::Value) {
-        // Continue was 0 in old revm, use Stop (1) as the "continue" marker
-        let failure = self.bcx.icmp_imm(IntCC::NotEqual, ret, InstructionResult::Stop as i64);
+        // Ok(()) is 0, any non-zero value is Err(InstructionResult)
+        let failure = self.bcx.icmp_imm(IntCC::NotEqual, ret, 0);
         let target = self.build_check_inner(true, failure, ret);
         self.bcx.switch_to_block(target);
     }
@@ -1383,6 +1386,15 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             self.bcx.br(block);
         } else {
             self.bcx.ret(&[ret]);
+        }
+    }
+
+    /// Builds a return with `Ok(())` (value 0), indicating successful completion.
+    fn build_return_ok(&mut self) {
+        let ret_value = self.bcx.iconst(self.i8_type, 0);
+        self.build_return(ret_value);
+        if self.config.comments {
+            self.add_comment("return Ok(())");
         }
     }
 
