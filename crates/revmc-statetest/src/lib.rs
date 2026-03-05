@@ -1,3 +1,5 @@
+#![allow(clippy::incompatible_msrv)]
+
 pub mod compiled;
 pub mod merkle_trie;
 pub mod runner;

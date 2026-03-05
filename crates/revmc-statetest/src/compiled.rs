@@ -136,6 +136,8 @@ fn no_cache() -> bool {
     *NO_CACHE.get_or_init(|| std::env::var_os("REVMC_NO_CACHE").is_some())
 }
 
+type ClaimedEntry<'a> = (B256, &'a [u8], String, Arc<OnceLock<EvmCompilerFn>>);
+
 /// Thread-safe compilation cache shared across workers.
 ///
 /// Uses `DashMap` with `OnceLock` per entry to guarantee each `(code_hash, spec_id)`
@@ -171,7 +173,7 @@ impl CompileCache {
         &self,
         unit: &'a TestUnit,
         spec_id: SpecId,
-    ) -> (CompiledContracts, Vec<(B256, &'a [u8], String, Arc<OnceLock<EvmCompilerFn>>)>) {
+    ) -> (CompiledContracts, Vec<ClaimedEntry<'a>>) {
         use dashmap::mapref::entry::Entry;
 
         let mut compiled = CompiledContracts::new();
@@ -328,7 +330,7 @@ impl CompileCache {
 
     fn compile_jit_batch(
         &self,
-        claimed: &[(B256, &[u8], String, Arc<OnceLock<EvmCompilerFn>>)],
+        claimed: &[ClaimedEntry<'_>],
         compiled: &mut CompiledContracts,
         spec_id: SpecId,
     ) -> Result<(), TestErrorKind> {
@@ -360,7 +362,7 @@ impl CompileCache {
 
     fn compile_aot_batch(
         &self,
-        claimed: &[(B256, &[u8], String, Arc<OnceLock<EvmCompilerFn>>)],
+        claimed: &[ClaimedEntry<'_>],
         compiled: &mut CompiledContracts,
         spec_id: SpecId,
     ) -> Result<(), TestErrorKind> {
@@ -435,22 +437,24 @@ impl CompileCache {
 
 // ── Compiled test execution ─────────────────────────────────────────────────
 
-/// Execute a single test using compiled functions via the custom handler.
-fn execute_single_test_compiled(
-    compiled: &CompiledContracts,
-    cache: &CompileCache,
+struct CompiledTestContext<'a> {
+    compiled: &'a CompiledContracts,
+    cache: &'a CompileCache,
     spec_id: SpecId,
-    test: &revm::statetest_types::Test,
-    unit: &TestUnit,
-    name: &str,
-    cfg: &CfgEnv,
-    block: &BlockEnv,
-    tx: &TxEnv,
-    cache_state: &database::CacheState,
-    elapsed: &Arc<Mutex<Duration>>,
-) -> Result<(), TestErrorKind> {
-    let mut prestate = cache_state.clone();
-    prestate.set_state_clear_flag(cfg.spec().is_enabled_in(SpecId::SPURIOUS_DRAGON));
+    test: &'a revm::statetest_types::Test,
+    unit: &'a TestUnit,
+    name: &'a str,
+    cfg: &'a CfgEnv,
+    block: &'a BlockEnv,
+    tx: &'a TxEnv,
+    cache_state: &'a database::CacheState,
+    elapsed: &'a Arc<Mutex<Duration>>,
+}
+
+/// Execute a single test using compiled functions via the custom handler.
+fn execute_single_test_compiled(ctx: CompiledTestContext<'_>) -> Result<(), TestErrorKind> {
+    let mut prestate = ctx.cache_state.clone();
+    prestate.set_state_clear_flag(ctx.cfg.spec().is_enabled_in(SpecId::SPURIOUS_DRAGON));
     let mut state =
         database::State::builder().with_cached_prestate(prestate).with_bundle_update().build();
 
@@ -461,11 +465,12 @@ fn execute_single_test_compiled(
     let exec_result = unsafe {
         let db_ref = &mut *(&mut state as *mut database::State<EmptyDB>);
         let evm_context = Context::mainnet()
-            .with_block(block.clone())
-            .with_tx(tx.clone())
-            .with_cfg(cfg.clone())
+            .with_block(ctx.block.clone())
+            .with_tx(ctx.tx.clone())
+            .with_cfg(ctx.cfg.clone())
             .with_db(db_ref);
-        let mut handler = CompiledHandler { compiled, cache, spec_id };
+        let mut handler =
+            CompiledHandler { compiled: ctx.compiled, cache: ctx.cache, spec_id: ctx.spec_id };
         let mut evm = evm_context.build_mainnet();
         let result = handler.run(&mut evm);
         if result.is_ok() {
@@ -475,9 +480,17 @@ fn execute_single_test_compiled(
         result
     };
     let db = &mut state;
-    *elapsed.lock().unwrap() += timer.elapsed();
+    *ctx.elapsed.lock().unwrap() += timer.elapsed();
 
-    check_evm_execution(test, unit.out.as_ref(), name, &exec_result, db, *cfg.spec(), false)
+    check_evm_execution(
+        ctx.test,
+        ctx.unit.out.as_ref(),
+        ctx.name,
+        &exec_result,
+        db,
+        *ctx.cfg.spec(),
+        false,
+    )
 }
 
 // ── Suite-level execution (compiled) ─────────────────────────────────────────
@@ -543,19 +556,19 @@ fn execute_test_suite_compiled(
                     }
                 };
 
-                let result = execute_single_test_compiled(
-                    &compiled,
+                let result = execute_single_test_compiled(CompiledTestContext {
+                    compiled: &compiled,
                     cache,
                     spec_id,
                     test,
-                    &unit,
-                    &name,
-                    &cfg,
-                    &block,
-                    &tx,
-                    &cache_state,
+                    unit: &unit,
+                    name: &name,
+                    cfg: &cfg,
+                    block: &block,
+                    tx: &tx,
+                    cache_state: &cache_state,
                     elapsed,
-                );
+                });
 
                 if let Err(e) = result {
                     return Err(TestError { name, path: path_str, kind: e });
