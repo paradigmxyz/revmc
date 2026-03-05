@@ -133,17 +133,43 @@ impl Handler for CompiledHandler<'_> {
 
 type ClaimedEntry<'a> = (B256, &'a [u8], String, Arc<OnceLock<EvmCompilerFn>>);
 
+/// Owns leaked LLVM contexts and compilers so they are dropped in the correct
+/// order (compilers before contexts) when the cache is destroyed, preventing
+/// SIGSEGV from LLVM's global C++ destructors.
+struct JitState {
+    /// (context_ptr, compiler_ptr) — compiler borrows context via `'static` lie.
+    entries: Vec<(*mut LlvmContext, *mut EvmCompiler<EvmLlvmBackend<'static>>)>,
+}
+
+// SAFETY: The raw pointers are heap-allocated and exclusively owned. Access is
+// serialized via Mutex in CompileCache.
+unsafe impl Send for JitState {}
+
+impl Drop for JitState {
+    fn drop(&mut self) {
+        for &mut (cx_ptr, compiler_ptr) in self.entries.iter_mut().rev() {
+            // Drop compiler first (it holds exec engine borrowing the context).
+            unsafe { drop(Box::from_raw(compiler_ptr)) };
+            // Then drop the context.
+            unsafe { drop(Box::from_raw(cx_ptr)) };
+        }
+    }
+}
+
 /// Thread-safe compilation cache shared across workers.
 ///
 /// Uses `DashMap` with `OnceLock` per entry to guarantee each `(code_hash, spec_id)`
 /// is compiled exactly once. The first thread to insert claims the slot; other threads
 /// seeing an uninitialized `OnceLock` block on `.wait()` until compilation finishes.
 ///
-/// For JIT: LLVM contexts and compilers are leaked so function pointers remain valid.
-/// For AOT: shared libraries and temp dirs are kept alive in a `Mutex<Vec>`.
+/// For JIT: LLVM contexts and compilers are owned by `jit_state` so JIT function
+/// pointers remain valid for the cache's lifetime and are cleaned up properly.
+/// For AOT: shared libraries and temp dirs are kept alive in `libs`.
 pub struct CompileCache {
     mode: CompileMode,
     functions: DashMap<(B256, SpecId), Arc<OnceLock<EvmCompilerFn>>>,
+    /// Owns JIT LLVM contexts and compilers. Unused for AOT/interpreter.
+    jit_state: Mutex<JitState>,
     /// Keep AOT shared libraries alive. Unused for JIT mode.
     libs: Mutex<Vec<(tempfile::TempDir, libloading::Library)>>,
     n_hits: AtomicUsize,
@@ -155,6 +181,7 @@ impl CompileCache {
         Self {
             mode,
             functions: DashMap::new(),
+            jit_state: Mutex::new(JitState { entries: Vec::new() }),
             libs: Mutex::new(Vec::new()),
             n_hits: AtomicUsize::new(0),
             n_misses: AtomicUsize::new(0),
@@ -311,12 +338,17 @@ impl CompileCache {
         compiled: &mut CompiledContracts,
         spec_id: SpecId,
     ) -> Result<(), TestErrorKind> {
-        // Leak the context so JIT function pointers remain valid.
-        let cx: &'static LlvmContext = Box::leak(Box::new(LlvmContext::create()));
+        let cx_ptr = Box::into_raw(Box::new(LlvmContext::create()));
+        // SAFETY: cx_ptr is valid and owned; the `'static` lifetime is a lie but
+        // the context is kept alive in `jit_state` for the cache's lifetime.
+        let cx: &'static LlvmContext = unsafe { &*cx_ptr };
         let backend = EvmLlvmBackend::new(cx, false, OptimizationLevel::Default)
             .map_err(|e| TestErrorKind::CompilationError(format!("backend: {e}")))?;
+        let compiler_ptr =
+            Box::into_raw(Box::new(EvmCompiler::new(backend)));
+        // SAFETY: compiler_ptr is valid and owned.
         let compiler: &'static mut EvmCompiler<EvmLlvmBackend<'static>> =
-            Box::leak(Box::new(EvmCompiler::new(backend)));
+            unsafe { &mut *compiler_ptr };
 
         let mut func_ids = Vec::new();
         for (code_hash, code, name, _) in claimed {
@@ -333,6 +365,9 @@ impl CompileCache {
             claimed[i].3.set(func).ok();
             compiled.insert(code_hash, func);
         }
+
+        // Store ownership so they're dropped properly (compiler before context).
+        self.jit_state.lock().unwrap().entries.push((cx_ptr, compiler_ptr));
 
         Ok(())
     }
