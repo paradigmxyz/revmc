@@ -43,15 +43,6 @@ macro_rules! gas {
     };
 }
 
-macro_rules! gas_opt {
-    ($ecx:expr, $gas:expr) => {
-        match $gas {
-            Some(gas) => gas!($ecx, gas),
-            None => return InstructionResult::OutOfGas,
-        }
-    };
-}
-
 macro_rules! ensure_non_staticcall {
     ($ecx:expr) => {
         if $ecx.is_static {
