@@ -82,7 +82,6 @@ impl OpcodeInfo {
 /// Returns the static info map for the given `SpecId`.
 #[allow(unused_parens)]
 pub fn op_info_map(spec_id: SpecId) -> &'static [OpcodeInfo; 256] {
-    // Use a static cache for each SpecId to avoid recomputing
     use std::sync::OnceLock;
     static MAPS: OnceLock<[[OpcodeInfo; 256]; 32]> = OnceLock::new();
     let maps = MAPS.get_or_init(|| {
@@ -333,6 +332,38 @@ const fn make_map(spec_id: SpecId) -> [OpcodeInfo; 256] {
         // 0xCD
         // 0xCE
         // 0xCF
+        // 0xD0
+        // 0xD1
+        // 0xD2
+        // 0xD3
+        // 0xD4
+        // 0xD5
+        // 0xD6
+        // 0xD7
+        // 0xD8
+        // 0xD9
+        // 0xDA
+        // 0xDB
+        // 0xDC
+        // 0xDD
+        // 0xDE
+        // 0xDF
+        // 0xE0
+        // 0xE1
+        // 0xE2
+        // 0xE3
+        // 0xE4
+        // 0xE5
+        // 0xE6
+        // 0xE7
+        // 0xE8
+        // 0xE9
+        // 0xEA
+        // 0xEB
+        // 0xEC
+        // 0xED
+        // 0xEE
+        // 0xEF
         CREATE          = DYNAMIC;
         CALL            = DYNAMIC;
         CALLCODE        = DYNAMIC;
@@ -340,7 +371,11 @@ const fn make_map(spec_id: SpecId) -> [OpcodeInfo; 256] {
         DELEGATECALL    = DYNAMIC,       if HOMESTEAD;
         CREATE2         = DYNAMIC,       if PETERSBURG;
         // 0xF6
+        // 0xF7
+        // 0xF8
+        // 0xF9
         STATICCALL      = DYNAMIC,       if BYZANTIUM;
+        // 0xFB
         // 0xFC
         REVERT          = DYNAMIC,       if BYZANTIUM;
         INVALID         = 0;
