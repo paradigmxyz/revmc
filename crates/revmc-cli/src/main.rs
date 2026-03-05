@@ -315,7 +315,11 @@ fn cmd_statetest_diff(cli: StatetestDiffArgs) -> Result<()> {
         primitives::{hardfork::SpecId as SI, U256},
         statetest_types::{SpecName, TestSuite},
     };
-    use revmc_statetest::{compiled::CompileCache, diagnostic, runner::skip_test};
+    use revmc_statetest::{
+        compiled::{CompileCache, CompileMode},
+        diagnostic,
+        runner::skip_test,
+    };
 
     if !cli.path.exists() {
         return Err(eyre!("Path not found: {}", cli.path.display()));
@@ -328,7 +332,7 @@ fn cmd_statetest_diff(cli: StatetestDiffArgs) -> Result<()> {
 
     eprintln!("Found {} test file(s)", test_files.len());
 
-    let cache = CompileCache::new();
+    let cache = CompileCache::new(CompileMode::Jit);
     let mut n_total = 0u64;
     let mut n_mismatches = 0u64;
     let mut n_compile_errors = 0u64;
@@ -395,7 +399,7 @@ fn cmd_statetest_diff(cli: StatetestDiffArgs) -> Result<()> {
 
                 let block = unit.block_env(&mut cfg);
 
-                let compiled = match cache.jit_compile(unit, spec_id) {
+                let compiled = match cache.compile(unit, spec_id) {
                     Ok(c) => c,
                     Err(e) => {
                         eprintln!("COMPILE ERROR [{name}] spec={spec_name:?}: {e}");
