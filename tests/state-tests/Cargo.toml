@@ -7,11 +7,18 @@ edition = "2021"
 [dependencies]
 revmc = { workspace = true, features = ["llvm"] }
 
-revm = { workspace = true, features = ["std"] }
-revm-statetest-types = "14.0"
+revm = { workspace = true, features = ["std", "test-types"] }
 
+alloy-rlp = { version = "0.3", features = ["arrayvec", "derive"] }
 eyre.workspace = true
-serde_json = "1.0"
+hash-db = "0.15"
+k256 = { version = "0.13", features = ["ecdsa"] }
+libloading = "0.8"
+plain_hasher = "0.2"
+serde_json = { version = "1.0", features = ["preserve_order"] }
+tempfile = "3"
+thiserror = "2"
+triehash = "0.8"
 walkdir = "2.5"
 
 [lib]
