@@ -1146,6 +1146,54 @@ tests! {
         ),
     }
 
+    // Tests for CODECOPY correctness.
+    // CODECOPY must read bytecode from EvmContext at runtime, not from embedded compile-time
+    // pointers, so that AOT-cached code works after deserialization.
+    codecopy_fix {
+        codecopy_exact(@raw {
+            bytecode: &[op::PUSH1, 5, op::PUSH0, op::PUSH0, op::CODECOPY],
+            expected_memory: &hex!("60055f5f39000000000000000000000000000000000000000000000000000000"),
+            expected_gas: 3 + 2 + 2 + (verylowcopy_cost(32).unwrap() + memory_gas_cost(1)),
+        }),
+        codecopy_offset(@raw {
+            bytecode: &[op::PUSH1, 3, op::PUSH1, 2, op::PUSH0, op::CODECOPY],
+            expected_memory: &hex!("60025f0000000000000000000000000000000000000000000000000000000000"),
+            expected_gas: 3 + 3 + 2 + (verylowcopy_cost(32).unwrap() + memory_gas_cost(1)),
+        }),
+        codecopy_beyond(@raw {
+            bytecode: &[op::PUSH1, 10, op::PUSH0, op::PUSH0, op::CODECOPY],
+            expected_memory: &hex!("600a5f5f39000000000000000000000000000000000000000000000000000000"),
+            expected_gas: 3 + 2 + 2 + (verylowcopy_cost(32).unwrap() + memory_gas_cost(1)),
+        }),
+        codecopy_longer(@raw {
+            bytecode: &[
+                op::PUSH1, 42,  // dummy: push 42
+                op::POP,        // pop it
+                op::PUSH1, 99,  // another dummy
+                op::POP,        // pop it
+                op::PUSH1, 12,  // length = 12 (exact bytecode length)
+                op::PUSH0,      // source offset = 0
+                op::PUSH0,      // dest offset = 0
+                op::CODECOPY,   // copy
+            ],
+            expected_memory: MEMORY_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+        }),
+        // Red-green test: CODECOPY must read bytecode from EvmContext at runtime.
+        // We swap bytecode ptr to fake data via modify_ecx. With the fix, CODECOPY reads the
+        // fake data; without it, it would still read the original bytecode.
+        codecopy_runtime_ptr(@raw {
+            bytecode: &[op::PUSH1, 5, op::PUSH0, op::PUSH0, op::CODECOPY],
+            modify_ecx: Some(|ecx| {
+                static FAKE_CODE: [u8; 5] = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE];
+                ecx.bytecode = &FAKE_CODE as *const [u8];
+            }),
+            expected_return: InstructionResult::Stop,
+            expected_memory: &hex!("AABBCCDDEE000000000000000000000000000000000000000000000000000000"),
+            expected_gas: 3 + 2 + 2 + (verylowcopy_cost(32).unwrap() + memory_gas_cost(1)),
+        }),
+    }
+
     regressions {
         // Mismatched costs in < BERLIN.
         // GeneralStateTests/stSolidityTest/TestKeywords.json

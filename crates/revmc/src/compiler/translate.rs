@@ -818,15 +818,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             }
             op::CODECOPY => {
                 let sp = self.sp_after_inputs();
-                let bytecode_ptr_int =
-                    self.bcx.uconst(self.isize_type, self.bytecode.code.as_ptr() as u64);
-                let bytecode_ptr = self.bcx.inttoptr(bytecode_ptr_int, self.ptr_type);
-                let bytecode_len =
-                    self.bcx.uconst(self.isize_type, self.bytecode.code.len() as u64);
-                self.call_fallible_builtin(
-                    Builtin::CodeCopy,
-                    &[self.ecx, sp, bytecode_ptr, bytecode_len],
-                );
+                self.call_fallible_builtin(Builtin::CodeCopy, &[self.ecx, sp]);
             }
 
             op::GASPRICE => {
