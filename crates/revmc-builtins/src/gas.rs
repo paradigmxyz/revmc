@@ -134,6 +134,15 @@ pub fn sstore_cost(
 #[inline]
 pub fn sstore_refund(spec_id: SpecId, result: &SStoreResult) -> i64 {
     if spec_id.is_enabled_in(SpecId::BERLIN) {
+        // EIP-3529: Reduction in refunds (London+).
+        // Replace `REFUND_SSTORE_CLEARS` (15000) with
+        // `WARM_SSTORE_RESET + ACCESS_LIST_STORAGE_KEY` (4800).
+        let sstore_clears_refund = if spec_id.is_enabled_in(SpecId::LONDON) {
+            (WARM_SSTORE_RESET + ACCESS_LIST_STORAGE_KEY) as i64
+        } else {
+            REFUND_SSTORE_CLEARS
+        };
+
         let mut refund = 0i64;
         if result.original_value != result.present_value
             && result.original_value == result.new_value
@@ -145,13 +154,13 @@ pub fn sstore_refund(spec_id: SpecId, result: &SStoreResult) -> i64 {
             }
         }
         if !result.present_value.is_zero() && result.new_value.is_zero() {
-            refund += REFUND_SSTORE_CLEARS;
+            refund += sstore_clears_refund;
         }
         if !result.original_value.is_zero()
             && result.present_value.is_zero()
             && result.new_value == result.original_value
         {
-            refund -= REFUND_SSTORE_CLEARS;
+            refund -= sstore_clears_refund;
         }
         refund
     } else if spec_id.is_enabled_in(SpecId::ISTANBUL) {
