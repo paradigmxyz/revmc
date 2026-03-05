@@ -58,10 +58,5 @@ llvm-prefer-dynamic = ["llvm", "revmc-llvm?/prefer-dynamic"]
 cranelift = ["dep:revmc-cranelift"]
 
 asm-keccak = ["alloy-primitives/asm-keccak"]
-
-# Optimism support was moved to op-revm in revm v34.
-# This feature is kept for compatibility but is a no-op.
-optimism = []
-
 # Internal features.
 __fuzzing = ["dep:arbitrary", "dep:paste", "dep:similar-asserts"]
