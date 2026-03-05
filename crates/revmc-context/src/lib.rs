@@ -46,7 +46,7 @@ pub struct EvmContext<'a> {
     #[doc(hidden)]
     pub resume_at: usize,
     /// The contract bytecode, for CODECOPY at runtime in AOT mode.
-    pub bytecode: &'a [u8],
+    pub bytecode: *const [u8],
 }
 
 // Static assertions to ensure the struct layout matches expectations.
@@ -83,10 +83,7 @@ impl<'a> EvmContext<'a> {
         let (stack, stack_len) = EvmStack::from_interpreter_stack(&mut interpreter.stack);
         let bytecode_slice = interpreter.bytecode.bytecode_slice();
         let resume_at = ResumeAt::load(interpreter.bytecode.pc(), bytecode_slice);
-        // SAFETY: `bytecode_slice` points into `interpreter.bytecode.code` which is disjoint
-        // from `interpreter.bytecode.action`. We reborrow it through a raw pointer to avoid
-        // conflicting with the `&mut action` below; the data is valid for `'a`.
-        let bytecode = unsafe { &*(bytecode_slice as *const [u8]) };
+        let bytecode = bytecode_slice as *const [u8];
         let this = Self {
             memory: &mut interpreter.memory,
             input: &mut interpreter.input,
