@@ -72,10 +72,10 @@ type StateTestError = EVMError<EvmDatabaseError<std::convert::Infallible>, Inval
 /// Custom handler that dispatches to compiled functions. All bytecodes —
 /// including runtime-created ones (CREATE/CREATE2) — are JIT-compiled before
 /// execution. Never falls back to the interpreter.
-struct CompiledHandler<'a> {
-    compiled: &'a CompiledContracts,
-    cache: &'a CompileCache,
-    spec_id: SpecId,
+pub struct CompiledHandler<'a> {
+    pub compiled: &'a CompiledContracts,
+    pub cache: &'a CompileCache,
+    pub spec_id: SpecId,
 }
 
 impl Handler for CompiledHandler<'_> {
@@ -139,7 +139,7 @@ impl Handler for CompiledHandler<'_> {
 ///
 /// For JIT: LLVM contexts and compilers are leaked so function pointers remain valid.
 /// For AOT: shared libraries and temp dirs are kept alive in a `Mutex<Vec>`.
-struct CompileCache {
+pub struct CompileCache {
     functions: DashMap<(B256, SpecId), Arc<OnceLock<EvmCompilerFn>>>,
     /// Keep AOT shared libraries alive. Unused for JIT mode.
     libs: Mutex<Vec<(tempfile::TempDir, libloading::Library)>>,
@@ -148,7 +148,7 @@ struct CompileCache {
 }
 
 impl CompileCache {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             functions: DashMap::new(),
             libs: Mutex::new(Vec::new()),
@@ -232,7 +232,7 @@ impl CompileCache {
     }
 
     /// JIT-compile missing contracts and insert into cache.
-    fn jit_compile(
+    pub fn jit_compile(
         &self,
         unit: &TestUnit,
         spec_id: SpecId,
@@ -378,7 +378,7 @@ impl CompileCache {
         }
     }
 
-    fn print_stats(&self, label: &str) {
+    pub fn print_stats(&self, label: &str) {
         let hits = self.n_hits.load(Ordering::Relaxed);
         let misses = self.n_misses.load(Ordering::Relaxed);
         let total = hits + misses;
@@ -403,7 +403,7 @@ impl CompileCache {
 // ── Compiled test execution ─────────────────────────────────────────────────
 
 /// Execute a single test using compiled functions via the custom handler.
-fn execute_single_test_compiled(
+pub fn execute_single_test_compiled(
     compiled: &CompiledContracts,
     cache: &CompileCache,
     spec_id: SpecId,
