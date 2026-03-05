@@ -91,7 +91,7 @@ impl<'a> Bytecode<'a> {
         };
 
         // Pad code to ensure there is at least one diverging instruction.
-        if bytecode.insts.last().map_or(true, |last| !last.is_diverging()) {
+        if bytecode.insts.last().is_none_or(|last| !last.is_diverging()) {
             bytecode.insts.push(InstData::new(op::STOP));
         }
 
