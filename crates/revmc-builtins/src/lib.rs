@@ -453,13 +453,47 @@ pub unsafe extern "C" fn __revmc_builtin_sstore(
     rev![index, value]: &mut [EvmWord; 2],
     spec_id: SpecId,
 ) -> InstructionResult {
+    use revm_context_interface::host::LoadError;
+
     ensure_non_staticcall!(ecx);
 
-    let state =
-        try_opt!(ecx.host.sstore(ecx.input.target_address, index.to_u256(), value.to_u256()));
+    let target = ecx.input.target_address;
+    let index = index.to_u256();
+    let value = value.to_u256();
+    let gas_params = ecx.host.gas_params();
 
-    gas_opt!(ecx, gas::sstore_cost(spec_id, &state.data, ecx.gas.remaining(), state.is_cold));
-    ecx.gas.record_refund(gas::sstore_refund(spec_id, &state.data));
+    // EIP-2200: if gasleft <= call_stipend, fail with OOG (reentrancy sentry).
+    let is_istanbul = spec_id.is_enabled_in(SpecId::ISTANBUL);
+    if is_istanbul && ecx.gas.remaining() <= gas_params.call_stipend() {
+        return InstructionResult::ReentrancySentryOOG;
+    }
+
+    // Deduct static gas first (before host call).
+    gas!(ecx, gas_params.sstore_static_gas());
+
+    // Perform the storage write, using skip_cold_load for Berlin+.
+    let state_load = if spec_id.is_enabled_in(SpecId::BERLIN) {
+        let additional_cold_cost = gas_params.cold_storage_additional_cost();
+        let skip_cold = ecx.gas.remaining() < additional_cold_cost;
+        match ecx.host.sstore_skip_cold_load(target, index, value, skip_cold) {
+            Ok(load) => load,
+            Err(LoadError::ColdLoadSkipped) => return InstructionResult::OutOfGas,
+            Err(LoadError::DBError) => return InstructionResult::FatalExternalError,
+        }
+    } else {
+        try_opt!(ecx.host.sstore(target, index, value))
+    };
+
+    // Deduct dynamic gas (depends on storage state).
+    gas!(
+        ecx,
+        ecx.host
+            .gas_params()
+            .sstore_dynamic_gas(is_istanbul, &state_load.data, state_load.is_cold,)
+    );
+
+    // Record refund.
+    ecx.gas.record_refund(ecx.host.gas_params().sstore_refund(is_istanbul, &state_load.data));
     InstructionResult::Stop
 }
 
@@ -647,14 +681,44 @@ pub unsafe extern "C" fn __revmc_builtin_call(
         usize::MAX // unrealistic value so we are sure it is not used
     };
 
-    // Load account and calculate gas cost.
-    let mut account_load = try_host!(ecx.host.load_account_delegated(to));
+    // Charge the CALL base access cost (warm_storage_read_cost for Berlin+, 700 for
+    // Tangerine+, 40 for pre-Tangerine). The interpreter charges this as static opcode gas;
+    // revmc marks CALL as fully dynamic, so the builtin must do it.
+    let base_access_cost = if spec_id.is_enabled_in(SpecId::BERLIN) {
+        ecx.host.gas_params().warm_storage_read_cost()
+    } else if spec_id.is_enabled_in(SpecId::TANGERINE) {
+        700
+    } else {
+        40
+    };
+    gas!(ecx, base_access_cost);
 
-    if call_kind != CallKind::Call {
-        account_load.is_empty = false;
+    // Charge transfer value cost.
+    if transfers_value {
+        gas!(ecx, ecx.host.gas_params().transfer_value_cost());
     }
 
-    gas!(ecx, gas::call_cost(spec_id, transfers_value, account_load));
+    // Load delegated account and calculate dynamic gas.
+    let is_call = call_kind == CallKind::Call;
+    let (dynamic_gas, bytecode, code_hash) =
+        match revm_interpreter::instructions::contract::load_account_delegated(
+            ecx.host,
+            spec_id,
+            ecx.gas.remaining(),
+            to,
+            transfers_value,
+            is_call,
+        ) {
+            Ok(out) => out,
+            Err(revm_context_interface::host::LoadError::ColdLoadSkipped) => {
+                return InstructionResult::OutOfGas;
+            }
+            Err(revm_context_interface::host::LoadError::DBError) => {
+                return InstructionResult::FatalExternalError;
+            }
+        };
+
+    gas!(ecx, dynamic_gas);
 
     // EIP-150: Gas cost changes for IO-heavy operations
     let mut gas_limit = if spec_id.is_enabled_in(SpecId::TANGERINE) {
@@ -669,7 +733,7 @@ pub unsafe extern "C" fn __revmc_builtin_call(
 
     // Add call stipend if there is value to be transferred.
     if matches!(call_kind, CallKind::Call | CallKind::CallCode) && transfers_value {
-        gas_limit = gas_limit.saturating_add(gas::CALL_STIPEND);
+        gas_limit = gas_limit.saturating_add(ecx.host.gas_params().call_stipend());
     }
 
     *ecx.next_action = Some(InterpreterAction::NewFrame(revm_interpreter::FrameInput::Call(
@@ -678,7 +742,7 @@ pub unsafe extern "C" fn __revmc_builtin_call(
             return_memory_offset: out_offset..out_offset + out_len,
             gas_limit,
             bytecode_address: to,
-            known_bytecode: None,
+            known_bytecode: Some((code_hash, bytecode)),
             target_address: if matches!(call_kind, CallKind::DelegateCall | CallKind::CallCode) {
                 ecx.input.target_address
             } else {
