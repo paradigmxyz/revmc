@@ -5,10 +5,7 @@ use crate::runner::{
 };
 use revm::{
     context::{block::BlockEnv, cfg::CfgEnv, tx::TxEnv},
-    context_interface::{
-        result::{EVMError, ExecutionResult, HaltReason, InvalidTransaction},
-        ContextSetters,
-    },
+    context_interface::result::{EVMError, HaltReason, InvalidTransaction},
     database::{self, bal::EvmDatabaseError},
     database_interface::{DatabaseCommit, EmptyDB},
     handler::{EvmTr, FrameResult, Handler, ItemOrResult},
@@ -24,7 +21,7 @@ use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::Ordering,
         Arc, Mutex,
     },
     time::{Duration, Instant},
@@ -262,81 +259,6 @@ fn execute_single_test_compiled(
     *elapsed.lock().unwrap() += timer.elapsed();
 
     check_evm_execution(test, unit.out.as_ref(), name, &exec_result, db, *cfg.spec(), false)
-}
-
-/// Iterate over all specs and tests in a suite, calling `run_test` for each.
-fn for_each_test_in_suite(
-    path: &Path,
-    mut run_test: impl FnMut(
-        &str,
-        &TestUnit,
-        &revm::statetest_types::Test,
-        &CfgEnv,
-        &BlockEnv,
-        &TxEnv,
-        &database::CacheState,
-        SpecId,
-    ) -> Result<(), TestErrorKind>,
-) -> Result<(), TestError> {
-    if skip_test(path) {
-        return Ok(());
-    }
-
-    let s = std::fs::read_to_string(path).unwrap();
-    let path_str = path.to_string_lossy().into_owned();
-    let suite: TestSuite = serde_json::from_str(&s).map_err(|e| TestError {
-        name: "Unknown".to_string(),
-        path: path_str.clone(),
-        kind: e.into(),
-    })?;
-
-    for (name, unit) in suite.0 {
-        let cache_state = unit.state();
-
-        let mut cfg = CfgEnv::default();
-        cfg.chain_id = unit.env.current_chain_id.unwrap_or(U256::ONE).try_into().unwrap_or(1);
-
-        for (spec_name, tests) in &unit.post {
-            if *spec_name == SpecName::Constantinople {
-                continue;
-            }
-
-            let spec_id = spec_name.to_spec_id();
-            cfg.set_spec_and_mainnet_gas_params(spec_id);
-
-            if cfg.spec().is_enabled_in(SpecId::OSAKA) {
-                cfg.set_max_blobs_per_tx(6);
-            } else if cfg.spec().is_enabled_in(SpecId::PRAGUE) {
-                cfg.set_max_blobs_per_tx(9);
-            } else {
-                cfg.set_max_blobs_per_tx(6);
-            }
-
-            let block = unit.block_env(&mut cfg);
-
-            for test in tests.iter() {
-                let tx = match test.tx_env(&unit) {
-                    Ok(tx) => tx,
-                    Err(_) if test.expect_exception.is_some() => continue,
-                    Err(_) => {
-                        return Err(TestError {
-                            name,
-                            path: path_str,
-                            kind: TestErrorKind::UnknownPrivateKey(unit.transaction.secret_key),
-                        });
-                    }
-                };
-
-                let result =
-                    run_test(&name, &unit, test, &cfg, &block, &tx, &cache_state, spec_id);
-
-                if let Err(e) = result {
-                    return Err(TestError { name, path: path_str, kind: e });
-                }
-            }
-        }
-    }
-    Ok(())
 }
 
 // ── Suite-level execution (JIT / AOT) ───────────────────────────────────────
