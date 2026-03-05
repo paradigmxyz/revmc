@@ -93,6 +93,7 @@ impl Handler for CompiledHandler<'_> {
                 let frame = evm.frame_stack.get();
                 let bytecode_hash = frame.interpreter.bytecode.get_or_calculate_hash();
                 if let Some(f) = self.compiled.get(&bytecode_hash) {
+                    tracing::debug!(%bytecode_hash, "executing compiled function");
                     let ctx = &mut evm.ctx;
                     let action =
                         unsafe { f.call_with_interpreter(&mut frame.interpreter, ctx) };
