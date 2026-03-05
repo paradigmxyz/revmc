@@ -384,7 +384,13 @@ impl<'ctx> Backend for EvmLlvmBackend<'ctx> {
 
 impl Drop for EvmLlvmBackend<'_> {
     fn drop(&mut self) {
-        self.clear_module();
+        // Only clear the module if there's no execution engine. When an EE is
+        // present, it owns the module and will clean it up via
+        // LLVMDisposeExecutionEngine. Deleting functions/globals first causes
+        // use-after-free in the EE's destructor (SIGSEGV/SIGBUS on exit).
+        if self.exec_engine.is_none() {
+            self.clear_module();
+        }
     }
 }
 
