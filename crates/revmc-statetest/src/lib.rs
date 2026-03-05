@@ -24,9 +24,50 @@ pub fn find_all_json_tests(path: &Path) -> Vec<PathBuf> {
 /// Default path to ethereum/tests repository.
 const DEFAULT_ETHTESTS_PATH: &str = "tests/ethereum-tests";
 
+const STATE_TESTS_TARBALL: &str = "fixtures_general_state_tests.tgz";
+
 /// Get the path to ethereum/tests.
 pub fn get_ethtests_path() -> PathBuf {
-    std::env::var("ETHTESTS")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(DEFAULT_ETHTESTS_PATH))
+    if let Ok(path) = std::env::var("ETHTESTS") {
+        return PathBuf::from(path);
+    }
+    // Resolve relative to the workspace root via CARGO_MANIFEST_DIR.
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default();
+    Path::new(&manifest_dir)
+        .ancestors()
+        .find(|p| p.join(DEFAULT_ETHTESTS_PATH).exists())
+        .map(|p| p.join(DEFAULT_ETHTESTS_PATH))
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_ETHTESTS_PATH))
+}
+
+/// Get the path to `GeneralStateTests`, extracting the tarball if necessary.
+///
+/// The ethereum/tests repo ships the fixtures as `.tgz` archives.
+/// This extracts `fixtures_general_state_tests.tgz` into the repo root
+/// so that `GeneralStateTests/` is available as a directory.
+pub fn get_general_state_tests_path() -> Option<PathBuf> {
+    let root = get_ethtests_path();
+    let dir = root.join("GeneralStateTests");
+    if dir.is_dir() {
+        return Some(dir);
+    }
+
+    let tarball = root.join(STATE_TESTS_TARBALL);
+    if !tarball.is_file() {
+        return None;
+    }
+
+    // Extract into the repo root.
+    let status = std::process::Command::new("tar")
+        .arg("xzf")
+        .arg(&tarball)
+        .arg("-C")
+        .arg(&root)
+        .status()
+        .ok()?;
+    if !status.success() {
+        return None;
+    }
+
+    dir.is_dir().then_some(dir)
 }

@@ -112,6 +112,28 @@ jobs:
           publish_dir: target/doc
           force_orphan: true
 
+  state-tests:
+    name: ethereum state tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Checkout ethereum/tests
+        run: git -c submodule."tests/ethereum-tests".update=checkout submodule update --init --depth 1 tests/ethereum-tests
+      - name: Install LLVM
+        run: sudo .github/scripts/install_llvm_ubuntu.sh ${{ env.LLVM_VERSION }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - uses: taiki-e/install-action@nextest
+      - name: state tests (interpreter)
+        run: cargo nextest run -p revmc --features llvm -E 'test(statetest::interpreter)' --run-ignored ignored-only
+      - name: state tests (jit)
+        run: cargo nextest run -p revmc --features llvm -E 'test(statetest::jit)' --run-ignored ignored-only
+      - name: state tests (aot)
+        run: cargo nextest run -p revmc --features llvm -E 'test(statetest::aot)' --run-ignored ignored-only
+
   fmt:
     runs-on: ubuntu-latest
     timeout-minutes: 30
