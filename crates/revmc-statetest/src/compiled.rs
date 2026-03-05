@@ -131,11 +131,6 @@ impl Handler for CompiledHandler<'_> {
 
 // ── Compilation cache ────────────────────────────────────────────────────────
 
-fn no_cache() -> bool {
-    static NO_CACHE: OnceLock<bool> = OnceLock::new();
-    *NO_CACHE.get_or_init(|| std::env::var_os("REVMC_NO_CACHE").is_some())
-}
-
 type ClaimedEntry<'a> = (B256, &'a [u8], String, Arc<OnceLock<EvmCompilerFn>>);
 
 /// Thread-safe compilation cache shared across workers.
@@ -191,13 +186,6 @@ impl CompileCache {
                 continue;
             }
 
-            if no_cache() {
-                let lock = Arc::new(OnceLock::new());
-                self.n_misses.fetch_add(1, Ordering::Relaxed);
-                claimed.push((code_hash, &info.code[..], format!("contract_{:x}", address), lock));
-                continue;
-            }
-
             match self.functions.entry((code_hash, spec_id)) {
                 Entry::Occupied(e) => {
                     let lock = e.get().clone();
@@ -231,9 +219,6 @@ impl CompileCache {
     /// fully populated `CompiledContracts`.
     fn wait_for_all(&self, unit: &TestUnit, spec_id: SpecId) -> CompiledContracts {
         let mut compiled = CompiledContracts::new();
-        if no_cache() {
-            return compiled;
-        }
         for info in unit.pre.values() {
             if info.code.is_empty() {
                 continue;
@@ -292,14 +277,12 @@ impl CompileCache {
     ) -> Result<EvmCompilerFn, TestErrorKind> {
         use dashmap::mapref::entry::Entry;
 
-        if !no_cache() {
-            if let Entry::Occupied(e) = self.functions.entry((code_hash, spec_id)) {
-                let lock = e.get().clone();
-                drop(e);
-                let f = lock.wait();
-                self.n_hits.fetch_add(1, Ordering::Relaxed);
-                return Ok(*f);
-            }
+        if let Entry::Occupied(e) = self.functions.entry((code_hash, spec_id)) {
+            let lock = e.get().clone();
+            drop(e);
+            let f = lock.wait();
+            self.n_hits.fetch_add(1, Ordering::Relaxed);
+            return Ok(*f);
         }
 
         self.n_misses.fetch_add(1, Ordering::Relaxed);
@@ -311,13 +294,11 @@ impl CompileCache {
             CompileMode::Interpreter => unreachable!(),
         };
 
-        if !no_cache() {
-            self.functions
-                .entry((code_hash, spec_id))
-                .or_insert_with(|| Arc::new(OnceLock::new()))
-                .set(func)
-                .ok();
-        }
+        self.functions
+            .entry((code_hash, spec_id))
+            .or_insert_with(|| Arc::new(OnceLock::new()))
+            .set(func)
+            .ok();
 
         Ok(func)
     }
