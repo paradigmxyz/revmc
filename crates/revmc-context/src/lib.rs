@@ -1,4 +1,5 @@
 #![doc = include_str!("../README.md")]
+#![allow(improper_ctypes_definitions)]
 #![cfg_attr(not(test), warn(unused_extern_crates))]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(not(feature = "std"), no_std)]

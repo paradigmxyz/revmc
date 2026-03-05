@@ -1,5 +1,5 @@
 #![doc = include_str!("../README.md")]
-#![allow(missing_docs, clippy::missing_safety_doc)]
+#![allow(missing_docs, clippy::missing_safety_doc, improper_ctypes_definitions)]
 #![cfg_attr(not(test), warn(unused_extern_crates))]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(not(feature = "std"), no_std)]

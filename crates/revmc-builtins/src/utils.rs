@@ -40,7 +40,10 @@ pub(crate) fn ensure_memory_inner(
 }
 
 #[inline]
-pub(crate) fn resize_memory(ecx: &mut EvmContext<'_>, new_size: usize) -> Result<(), InstructionResult> {
+pub(crate) fn resize_memory(
+    ecx: &mut EvmContext<'_>,
+    new_size: usize,
+) -> Result<(), InstructionResult> {
     resize_memory_inner(ecx.memory, ecx.gas, new_size)
 }
 

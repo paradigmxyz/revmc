@@ -719,6 +719,10 @@ where
     };
 
     let result = unsafe { jit_fn.call(Some(stack), Some(stack_len), &mut ecx) };
+    let result = match result {
+        Ok(()) => revm::interpreter::InstructionResult::Stop,
+        Err(ir) => ir,
+    };
 
     if result == revm::interpreter::InstructionResult::OutOfGas {
         ecx.gas.spend_all();
@@ -751,6 +755,10 @@ fn call_jit_with_resume_nested<H: revmc::HostExt>(
     };
 
     let result = unsafe { jit_fn.call(Some(stack), Some(stack_len), &mut ecx) };
+    let result = match result {
+        Ok(()) => revm::interpreter::InstructionResult::Stop,
+        Err(ir) => ir,
+    };
 
     if result == revm::interpreter::InstructionResult::OutOfGas {
         ecx.gas.spend_all();
