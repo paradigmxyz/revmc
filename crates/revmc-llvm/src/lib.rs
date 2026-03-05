@@ -798,7 +798,7 @@ impl Builder for EvmLlvmBuilder<'_, '_> {
             targets.iter().map(|(v, b)| (ty.const_int(*v, false), *b)).collect::<Vec<_>>();
         let inst = self.bcx.build_switch(index.into_int_value(), default, &targets).unwrap();
         if default_is_cold {
-            let weights = iter::once(1).chain(iter::repeat(DEFAULT_WEIGHT).take(targets.len()));
+            let weights = iter::once(1).chain(iter::repeat_n(DEFAULT_WEIGHT, targets.len()));
             self.set_branch_weights(inst, weights);
         }
     }
