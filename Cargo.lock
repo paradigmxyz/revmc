@@ -1729,6 +1729,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "hash-db"
+version = "0.15.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d23bd4e7b5eda0d0f3a307e8b381fdc8ba9000f26fbe912250c0a4cc3956364a"
+
+[[package]]
 name = "hashbrown"
 version = "0.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2015,6 +2021,7 @@ dependencies = [
  "elliptic-curve",
  "once_cell",
  "sha2",
+ "signature",
 ]
 
 [[package]]
@@ -2440,6 +2447,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "plain_hasher"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1e19e6491bdde87c2c43d70f4c194bc8a758f2eb732df00f61e43f7362e3b4cc"
+dependencies = [
+ "crunchy",
+]
+
+[[package]]
 name = "powerfmt"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2757,6 +2773,7 @@ dependencies = [
  "revm-precompile",
  "revm-primitives",
  "revm-state",
+ "revm-statetest-types",
 ]
 
 [[package]]
@@ -2970,6 +2987,7 @@ dependencies = [
  "revmc-context",
  "revmc-cranelift",
  "revmc-llvm",
+ "revmc-statetest",
  "rustc-hash",
  "similar-asserts",
  "tempfile",
@@ -3093,14 +3111,21 @@ dependencies = [
 ]
 
 [[package]]
-name = "revmc-state-tests"
+name = "revmc-statetest"
 version = "0.0.0"
 dependencies = [
+ "alloy-rlp",
  "eyre",
+ "hash-db",
+ "k256",
+ "libloading",
+ "plain_hasher",
  "revm",
- "revm-statetest-types",
  "revmc",
  "serde_json",
+ "tempfile",
+ "thiserror 2.0.11",
+ "triehash",
  "walkdir",
 ]
 
@@ -3836,6 +3861,16 @@ checksum = "69fff37da548239c3bf9e64a12193d261e8b22b660991c6fd2df057c168f435f"
 dependencies = [
  "cc",
  "windows-targets",
+]
+
+[[package]]
+name = "triehash"
+version = "0.8.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a1631b201eb031b563d2e85ca18ec8092508e262a3196ce9bd10a67ec87b9f5c"
+dependencies = [
+ "hash-db",
+ "rlp",
 ]
 
 [[package]]

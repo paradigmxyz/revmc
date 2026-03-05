@@ -28,6 +28,8 @@ mod resume;
 mod runner;
 pub use runner::*;
 
+mod statetest;
+
 const I256_MAX: U256 = U256::from_limbs([
     0xFFFFFFFFFFFFFFFF,
     0xFFFFFFFFFFFFFFFF,
