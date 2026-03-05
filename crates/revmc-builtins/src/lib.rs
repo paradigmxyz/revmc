@@ -224,11 +224,6 @@ pub unsafe extern "C" fn __revmc_builtin_calldatacopy(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn __revmc_builtin_codesize(bytecode_len: usize) -> usize {
-    bytecode_len
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn __revmc_builtin_codecopy(
     ecx: &mut EvmContext<'_>,
     sp: &mut [EvmWord; 3],
