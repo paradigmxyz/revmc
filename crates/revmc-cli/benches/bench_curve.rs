@@ -388,7 +388,8 @@ fn parse_hex_bytes(value: &str) -> Vec<u8> {
     if trimmed.is_empty() {
         return Vec::new();
     }
-    let even = if trimmed.len().is_multiple_of(2) { trimmed.to_owned() } else { format!("0{trimmed}") };
+    let even =
+        if trimmed.len().is_multiple_of(2) { trimmed.to_owned() } else { format!("0{trimmed}") };
     hex::decode(even).unwrap()
 }
 
