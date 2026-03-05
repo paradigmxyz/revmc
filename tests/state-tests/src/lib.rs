@@ -13,7 +13,7 @@ use revm::{
     interpreter::{
         instructions::instruction_table_gas_changes_spec,
         interpreter::{EthInterpreter, ExtBytecode},
-        interpreter_types::ReturnData,
+        interpreter_types::{LegacyBytecode, ReturnData},
         FrameInput, InputsImpl, Interpreter, InterpreterAction, InterpreterResult, SharedMemory,
     },
     primitives::{hardfork::SpecId, keccak256, Bytes, TxKind, B256, U256},
@@ -707,6 +707,7 @@ where
     interpreter.bytecode.action = None;
 
     let (stack, stack_len) = EvmStack::from_interpreter_stack(&mut interpreter.stack);
+    let bytecode = interpreter.bytecode.bytecode_slice() as *const [u8];
     let mut ecx = EvmContext {
         memory: &mut interpreter.memory,
         input: &mut interpreter.input,
@@ -716,6 +717,7 @@ where
         return_data: interpreter.return_data.buffer(),
         is_static: interpreter.runtime_flag.is_static,
         resume_at,
+        bytecode,
     };
 
     let result = unsafe { jit_fn.call(Some(stack), Some(stack_len), &mut ecx) };
@@ -739,6 +741,7 @@ fn call_jit_with_resume_nested<H: revmc::HostExt>(
     interpreter.bytecode.action = None;
 
     let (stack, stack_len) = EvmStack::from_interpreter_stack(&mut interpreter.stack);
+    let bytecode = interpreter.bytecode.bytecode_slice() as *const [u8];
     let mut ecx = EvmContext {
         memory: &mut interpreter.memory,
         input: &mut interpreter.input,
@@ -748,6 +751,7 @@ fn call_jit_with_resume_nested<H: revmc::HostExt>(
         return_data: interpreter.return_data.buffer(),
         is_static: interpreter.runtime_flag.is_static,
         resume_at,
+        bytecode,
     };
 
     let result = unsafe { jit_fn.call(Some(stack), Some(stack_len), &mut ecx) };
