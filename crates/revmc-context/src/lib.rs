@@ -1,4 +1,6 @@
 #![doc = include_str!("../README.md")]
+// `Result<(), InstructionResult>` is niche-optimized to a single `u8` (same as
+// `Option<InstructionResult>`), so it is FFI-safe despite the lint.
 #![allow(improper_ctypes_definitions)]
 #![cfg_attr(not(test), warn(unused_extern_crates))]
 #![cfg_attr(docsrs, feature(doc_cfg))]
@@ -759,6 +761,31 @@ pub mod private {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `Result<(), InstructionResult>` must be layout-equivalent to `Option<InstructionResult>`
+    /// and a bare `u8`: `Ok(()) == 0`, `Err(v) == v as u8`.
+    #[test]
+    fn result_instruction_result_abi() {
+        use core::mem;
+
+        type R = Result<(), InstructionResult>;
+
+        // Same size as a single u8.
+        assert_eq!(mem::size_of::<R>(), 1);
+        assert_eq!(mem::size_of::<R>(), mem::size_of::<InstructionResult>());
+
+        // Ok(()) is 0.
+        assert_eq!(unsafe { mem::transmute::<R, u8>(Ok(())) }, 0);
+
+        // Err(Stop) keeps the discriminant (1).
+        assert_eq!(unsafe { mem::transmute::<R, u8>(Err(InstructionResult::Stop)) }, 1);
+
+        // Err(OutOfGas) keeps the discriminant (0x20).
+        assert_eq!(
+            unsafe { mem::transmute::<R, u8>(Err(InstructionResult::OutOfGas)) },
+            InstructionResult::OutOfGas as u8,
+        );
+    }
 
     #[test]
     fn conversions() {

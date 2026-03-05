@@ -1,4 +1,6 @@
 #![doc = include_str!("../README.md")]
+// `Result<(), InstructionResult>` is niche-optimized to a single `u8` (same as
+// `Option<InstructionResult>`), so it is FFI-safe despite the lint.
 #![allow(missing_docs, clippy::missing_safety_doc, improper_ctypes_definitions)]
 #![cfg_attr(not(test), warn(unused_extern_crates))]
 #![cfg_attr(docsrs, feature(doc_cfg))]
