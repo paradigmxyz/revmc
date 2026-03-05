@@ -10,6 +10,7 @@ revmc = { workspace = true, features = ["llvm"] }
 revm = { workspace = true, features = ["std", "test-types"] }
 
 alloy-rlp = { version = "0.3", features = ["arrayvec", "derive"] }
+dashmap = "6"
 eyre.workspace = true
 indicatif = "0.17"
 hash-db = "0.15"

@@ -17,11 +17,12 @@ use revmc::{
     llvm::inkwell::context::Context as LlvmContext, Backend, EvmCompiler, EvmCompilerFn,
     EvmLlvmBackend, Linker, OptimizationLevel,
 };
+use dashmap::DashMap;
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     sync::{
-        atomic::Ordering,
+        atomic::{AtomicUsize, Ordering},
         Arc, Mutex,
     },
     time::{Duration, Instant},
@@ -120,101 +121,172 @@ impl Handler for CompiledHandler<'_> {
     }
 }
 
-// ── Compilation helpers ─────────────────────────────────────────────────────
+// ── Compilation cache ────────────────────────────────────────────────────────
 
-/// JIT-compile all non-empty contracts in the test unit's pre-state.
-fn jit_compile_contracts<'ctx>(
-    unit: &TestUnit,
-    spec_id: SpecId,
-    compiler: &mut EvmCompiler<EvmLlvmBackend<'ctx>>,
-) -> Result<CompiledContracts, TestErrorKind> {
-    let mut compiled = CompiledContracts::new();
-    let mut func_ids: Vec<(B256, <EvmLlvmBackend<'ctx> as Backend>::FuncId)> = Vec::new();
-
-    for (address, info) in &unit.pre {
-        if info.code.is_empty() {
-            continue;
-        }
-
-        let code_hash = keccak256(&info.code);
-        if func_ids.iter().any(|(hash, _)| hash == &code_hash) {
-            continue;
-        }
-
-        let name = format!("contract_{:x}", address);
-        let func_id = compiler.translate(&name, &info.code[..], spec_id).map_err(|e| {
-            TestErrorKind::CompilationError(format!("translate {:x}: {e}", address))
-        })?;
-
-        func_ids.push((code_hash, func_id));
-    }
-
-    for (code_hash, func_id) in func_ids {
-        let func = unsafe { compiler.jit_function(func_id) }
-            .map_err(|e| TestErrorKind::CompilationError(format!("jit {:x}: {e}", code_hash)))?;
-
-        compiled.insert(code_hash, func);
-    }
-
-    Ok(compiled)
+/// Thread-safe compilation cache shared across workers.
+///
+/// For JIT: LLVM contexts and compilers are leaked so function pointers remain valid.
+/// For AOT: shared libraries and temp dirs are kept alive in a `Mutex<Vec>`.
+///
+/// Cache key is `(code_hash, spec_id)` since the same bytecode compiled for different
+/// specs may produce different code.
+struct CompileCache {
+    functions: DashMap<(B256, SpecId), EvmCompilerFn>,
+    /// Keep AOT shared libraries alive. Unused for JIT mode.
+    libs: Mutex<Vec<(tempfile::TempDir, libloading::Library)>>,
+    n_hits: AtomicUsize,
+    n_misses: AtomicUsize,
 }
 
-/// AOT-compile all non-empty contracts in the test unit's pre-state to a shared library,
-/// then load the compiled functions.
-fn aot_compile_contracts(
-    unit: &TestUnit,
-    spec_id: SpecId,
-) -> Result<(CompiledContracts, tempfile::TempDir, libloading::Library), TestErrorKind> {
-    let cx = LlvmContext::create();
-    let backend = EvmLlvmBackend::new(&cx, true, OptimizationLevel::Default)
-        .map_err(|e| TestErrorKind::CompilationError(format!("backend: {e}")))?;
-    let mut compiler = EvmCompiler::new(backend);
-
-    let mut names: Vec<(B256, String)> = Vec::new();
-
-    for (address, info) in &unit.pre {
-        if info.code.is_empty() {
-            continue;
+impl CompileCache {
+    fn new() -> Self {
+        Self {
+            functions: DashMap::new(),
+            libs: Mutex::new(Vec::new()),
+            n_hits: AtomicUsize::new(0),
+            n_misses: AtomicUsize::new(0),
         }
-
-        let code_hash = keccak256(&info.code);
-        if names.iter().any(|(hash, _)| hash == &code_hash) {
-            continue;
-        }
-
-        let name = format!("contract_{:x}", address);
-        compiler.translate(&name, &info.code[..], spec_id).map_err(|e| {
-            TestErrorKind::CompilationError(format!("translate {:x}: {e}", address))
-        })?;
-
-        names.push((code_hash, name));
     }
 
-    let tmp_dir = tempfile::tempdir()
-        .map_err(|e| TestErrorKind::CompilationError(format!("tempdir: {e}")))?;
-    let obj_path = tmp_dir.path().join("a.o");
-    let so_path = tmp_dir.path().join("a.so");
+    /// Collect compiled contracts for a test unit. Returns only cached entries;
+    /// uncached bytecodes are returned via `to_compile`.
+    fn collect_cached<'a>(
+        &self,
+        unit: &'a TestUnit,
+        spec_id: SpecId,
+    ) -> (CompiledContracts, Vec<(B256, &'a [u8], String)>) {
+        let mut compiled = CompiledContracts::new();
+        let mut to_compile: Vec<(B256, &'a [u8], String)> = Vec::new();
 
-    compiler
-        .write_object_to_file(&obj_path)
-        .map_err(|e| TestErrorKind::CompilationError(format!("write object: {e}")))?;
+        for (address, info) in &unit.pre {
+            if info.code.is_empty() {
+                continue;
+            }
+            let code_hash = keccak256(&info.code);
+            if compiled.get(&code_hash).is_some() {
+                continue;
+            }
+            if let Some(f) = self.functions.get(&(code_hash, spec_id)) {
+                self.n_hits.fetch_add(1, Ordering::Relaxed);
+                compiled.insert(code_hash, *f);
+            } else if !to_compile.iter().any(|(h, _, _)| h == &code_hash) {
+                self.n_misses.fetch_add(1, Ordering::Relaxed);
+                to_compile.push((code_hash, &info.code[..], format!("contract_{:x}", address)));
+            }
+        }
 
-    let linker = Linker::new();
-    linker
-        .link(&so_path, [obj_path.to_str().unwrap()])
-        .map_err(|e| TestErrorKind::CompilationError(format!("link: {e}")))?;
-
-    let lib = unsafe { libloading::Library::new(&so_path) }
-        .map_err(|e| TestErrorKind::CompilationError(format!("load: {e}")))?;
-
-    let mut compiled = CompiledContracts::new();
-    for (code_hash, name) in &names {
-        let f: libloading::Symbol<'_, EvmCompilerFn> = unsafe { lib.get(name.as_bytes()) }
-            .map_err(|e| TestErrorKind::CompilationError(format!("symbol {name}: {e}")))?;
-        compiled.insert(*code_hash, *f);
+        (compiled, to_compile)
     }
 
-    Ok((compiled, tmp_dir, lib))
+    /// JIT-compile missing contracts and insert into cache.
+    fn jit_compile(
+        &self,
+        unit: &TestUnit,
+        spec_id: SpecId,
+    ) -> Result<CompiledContracts, TestErrorKind> {
+        let (mut compiled, to_compile) = self.collect_cached(unit, spec_id);
+        if to_compile.is_empty() {
+            return Ok(compiled);
+        }
+
+        // Leak the context so JIT function pointers remain valid.
+        let cx: &'static LlvmContext = Box::leak(Box::new(LlvmContext::create()));
+        let backend = EvmLlvmBackend::new(cx, false, OptimizationLevel::Default)
+            .map_err(|e| TestErrorKind::CompilationError(format!("backend: {e}")))?;
+        let compiler: &'static mut EvmCompiler<EvmLlvmBackend<'static>> =
+            Box::leak(Box::new(EvmCompiler::new(backend)));
+
+        let mut func_ids: Vec<(B256, <EvmLlvmBackend<'static> as Backend>::FuncId)> = Vec::new();
+        for (code_hash, code, name) in &to_compile {
+            let func_id = compiler.translate(name, *code, spec_id).map_err(|e| {
+                TestErrorKind::CompilationError(format!("translate {name}: {e}"))
+            })?;
+            func_ids.push((*code_hash, func_id));
+        }
+
+        for (code_hash, func_id) in func_ids {
+            let func = unsafe { compiler.jit_function(func_id) }.map_err(|e| {
+                TestErrorKind::CompilationError(format!("jit {:x}: {e}", code_hash))
+            })?;
+            self.functions.insert((code_hash, spec_id), func);
+            compiled.insert(code_hash, func);
+        }
+
+        Ok(compiled)
+    }
+
+    /// AOT-compile missing contracts, link into a shared library, and insert into cache.
+    fn aot_compile(
+        &self,
+        unit: &TestUnit,
+        spec_id: SpecId,
+    ) -> Result<CompiledContracts, TestErrorKind> {
+        let (mut compiled, to_compile) = self.collect_cached(unit, spec_id);
+        if to_compile.is_empty() {
+            return Ok(compiled);
+        }
+
+        let cx = LlvmContext::create();
+        let backend = EvmLlvmBackend::new(&cx, true, OptimizationLevel::Default)
+            .map_err(|e| TestErrorKind::CompilationError(format!("backend: {e}")))?;
+        let mut compiler = EvmCompiler::new(backend);
+
+        let mut names: Vec<(B256, String)> = Vec::new();
+        for (code_hash, code, name) in &to_compile {
+            compiler.translate(name, *code, spec_id).map_err(|e| {
+                TestErrorKind::CompilationError(format!("translate {name}: {e}"))
+            })?;
+            names.push((*code_hash, name.clone()));
+        }
+
+        let tmp_dir = tempfile::tempdir()
+            .map_err(|e| TestErrorKind::CompilationError(format!("tempdir: {e}")))?;
+        let obj_path = tmp_dir.path().join("a.o");
+        let so_path = tmp_dir.path().join("a.so");
+
+        compiler
+            .write_object_to_file(&obj_path)
+            .map_err(|e| TestErrorKind::CompilationError(format!("write object: {e}")))?;
+
+        let linker = Linker::new();
+        linker
+            .link(&so_path, [obj_path.to_str().unwrap()])
+            .map_err(|e| TestErrorKind::CompilationError(format!("link: {e}")))?;
+
+        let lib = unsafe { libloading::Library::new(&so_path) }
+            .map_err(|e| TestErrorKind::CompilationError(format!("load: {e}")))?;
+
+        for (code_hash, name) in &names {
+            let f: libloading::Symbol<'_, EvmCompilerFn> = unsafe { lib.get(name.as_bytes()) }
+                .map_err(|e| TestErrorKind::CompilationError(format!("symbol {name}: {e}")))?;
+            self.functions.insert((*code_hash, spec_id), *f);
+            compiled.insert(*code_hash, *f);
+        }
+
+        self.libs.lock().unwrap().push((tmp_dir, lib));
+        Ok(compiled)
+    }
+
+    fn print_stats(&self, label: &str) {
+        let hits = self.n_hits.load(Ordering::Relaxed);
+        let misses = self.n_misses.load(Ordering::Relaxed);
+        let total = hits + misses;
+        if total > 0 {
+            let rate = hits as f64 / total as f64 * 100.0;
+            let n_libs = self.libs.lock().unwrap().len();
+            if n_libs > 0 {
+                println!(
+                    "{label} cache: {total} lookups, {hits} hits, {misses} misses ({rate:.1}% hit rate), {} unique, {n_libs} shared libs",
+                    self.functions.len()
+                );
+            } else {
+                println!(
+                    "{label} cache: {total} lookups, {hits} hits, {misses} misses ({rate:.1}% hit rate), {} unique",
+                    self.functions.len()
+                );
+            }
+        }
+    }
 }
 
 // ── Compiled test execution ─────────────────────────────────────────────────
@@ -265,9 +337,10 @@ fn execute_single_test_compiled(
 // ── Suite-level execution (JIT / AOT) ───────────────────────────────────────
 
 /// Execute a single test suite file, JIT-compiling all contracts before execution.
-pub fn execute_test_suite_jit(
+fn execute_test_suite_jit(
     path: &Path,
     elapsed: &Arc<Mutex<Duration>>,
+    cache: &CompileCache,
 ) -> Result<(), TestError> {
     if skip_test(path) {
         return Ok(());
@@ -305,18 +378,8 @@ pub fn execute_test_suite_jit(
 
             let block = unit.block_env(&mut cfg);
 
-            // JIT-compile all contracts for this spec.
-            let cx = LlvmContext::create();
-            let backend =
-                EvmLlvmBackend::new(&cx, false, OptimizationLevel::Default).map_err(|e| {
-                    TestError {
-                        name: name.clone(),
-                        path: path_str.clone(),
-                        kind: TestErrorKind::CompilationError(format!("backend: {e}")),
-                    }
-                })?;
-            let mut compiler = EvmCompiler::new(backend);
-            let compiled = jit_compile_contracts(&unit, spec_id, &mut compiler)
+            let compiled = cache
+                .jit_compile(&unit, spec_id)
                 .map_err(|e| TestError { name: name.clone(), path: path_str.clone(), kind: e })?;
 
             for test in tests.iter() {
@@ -354,9 +417,10 @@ pub fn execute_test_suite_jit(
 }
 
 /// Execute a single test suite file, AOT-compiling all contracts before execution.
-pub fn execute_test_suite_aot(
+fn execute_test_suite_aot(
     path: &Path,
     elapsed: &Arc<Mutex<Duration>>,
+    cache: &CompileCache,
 ) -> Result<(), TestError> {
     if skip_test(path) {
         return Ok(());
@@ -394,8 +458,8 @@ pub fn execute_test_suite_aot(
 
             let block = unit.block_env(&mut cfg);
 
-            // AOT-compile all contracts for this spec.
-            let (compiled, _tmp_dir, _lib) = aot_compile_contracts(&unit, spec_id)
+            let compiled = cache
+                .aot_compile(&unit, spec_id)
                 .map_err(|e| TestError { name: name.clone(), path: path_str.clone(), kind: e })?;
 
             for test in tests.iter() {
@@ -438,6 +502,7 @@ fn run_test_worker(
     state: TestRunnerState,
     keep_going: bool,
     mode: CompileMode,
+    cache: Option<&CompileCache>,
 ) -> Result<(), TestError> {
     loop {
         if !keep_going && state.n_errors.load(Ordering::SeqCst) > 0 {
@@ -452,8 +517,12 @@ fn run_test_worker(
             CompileMode::Interpreter => {
                 execute_test_suite(&test_path, &state.elapsed, false, false)
             }
-            CompileMode::Jit => execute_test_suite_jit(&test_path, &state.elapsed),
-            CompileMode::Aot => execute_test_suite_aot(&test_path, &state.elapsed),
+            CompileMode::Jit => {
+                execute_test_suite_jit(&test_path, &state.elapsed, cache.unwrap())
+            }
+            CompileMode::Aot => {
+                execute_test_suite_aot(&test_path, &state.elapsed, cache.unwrap())
+            }
         };
 
         state.console_bar.inc(1);
@@ -479,8 +548,11 @@ pub fn run(
     let n_files = test_files.len();
     let state = TestRunnerState::new(test_files);
 
-    // JIT/AOT modes use single thread since the LLVM context is not Send.
-    let single_thread = single_thread || !matches!(mode, CompileMode::Interpreter);
+    let cache = match mode {
+        CompileMode::Interpreter => None,
+        CompileMode::Jit | CompileMode::Aot => Some(Arc::new(CompileCache::new())),
+    };
+
     let num_threads = if single_thread {
         1
     } else {
@@ -493,10 +565,11 @@ pub fn run(
     let mut handles = Vec::with_capacity(num_threads);
     for i in 0..num_threads {
         let state = state.clone();
+        let cache = cache.clone();
 
         let thread = std::thread::Builder::new()
             .name(format!("runner-{i}"))
-            .spawn(move || run_test_worker(state, keep_going, mode))
+            .spawn(move || run_test_worker(state, keep_going, mode, cache.as_deref()))
             .unwrap();
 
         handles.push(thread);
@@ -521,6 +594,15 @@ pub fn run(
         "Finished execution. Total CPU time: {:.6}s",
         state.elapsed.lock().unwrap().as_secs_f64()
     );
+
+    if let Some(cache) = &cache {
+        let label = match mode {
+            CompileMode::Jit => "JIT",
+            CompileMode::Aot => "AOT",
+            _ => unreachable!(),
+        };
+        cache.print_stats(label);
+    }
 
     let n_errors = state.n_errors.load(Ordering::SeqCst);
     let n_thread_errors = thread_errors.len();
