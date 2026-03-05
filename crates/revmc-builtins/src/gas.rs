@@ -131,64 +131,71 @@ pub fn sstore_cost(
 }
 
 /// Calculate SSTORE refund.
+///
+/// Follows the logic from EIP-2200 / EIP-3529.
 #[inline]
 pub fn sstore_refund(spec_id: SpecId, result: &SStoreResult) -> i64 {
-    if spec_id.is_enabled_in(SpecId::BERLIN) {
-        // EIP-3529: Reduction in refunds (London+).
-        // Replace `REFUND_SSTORE_CLEARS` (15000) with
-        // `WARM_SSTORE_RESET + ACCESS_LIST_STORAGE_KEY` (4800).
-        let sstore_clears_refund = if spec_id.is_enabled_in(SpecId::LONDON) {
-            (WARM_SSTORE_RESET + ACCESS_LIST_STORAGE_KEY) as i64
-        } else {
-            REFUND_SSTORE_CLEARS
-        };
+    let is_istanbul = spec_id.is_enabled_in(SpecId::ISTANBUL);
 
-        let mut refund = 0i64;
-        if result.original_value != result.present_value
-            && result.original_value == result.new_value
-        {
-            if result.original_value.is_zero() {
-                refund += (SSTORE_SET - WARM_STORAGE_READ_COST) as i64;
-            } else {
-                refund += (WARM_SSTORE_RESET - WARM_STORAGE_READ_COST) as i64;
-            }
-        }
-        if !result.present_value.is_zero() && result.new_value.is_zero() {
+    if !is_istanbul {
+        // Pre-Istanbul: simple refund for clearing a slot.
+        return if !result.present_value.is_zero() && result.new_value.is_zero() {
+            REFUND_SSTORE_CLEARS
+        } else {
+            0
+        };
+    }
+
+    // EIP-3529: Reduction in refunds (London+).
+    let sstore_clears_refund = if spec_id.is_enabled_in(SpecId::LONDON) {
+        (WARM_SSTORE_RESET + ACCESS_LIST_STORAGE_KEY) as i64
+    } else {
+        REFUND_SSTORE_CLEARS
+    };
+
+    // No-op: current value equals new value.
+    if result.new_value == result.present_value {
+        return 0;
+    }
+
+    // Direct clear: original == present and new == 0.
+    if result.original_value == result.present_value && result.new_value.is_zero() {
+        return sstore_clears_refund;
+    }
+
+    let mut refund = 0i64;
+
+    // Original is nonzero: account for clearing/un-clearing transitions.
+    if !result.original_value.is_zero() {
+        if result.present_value.is_zero() {
+            // Reverting a clear (present was 0, now setting nonzero): remove clearing refund.
+            refund -= sstore_clears_refund;
+        } else if result.new_value.is_zero() {
+            // Clearing a dirty slot (present nonzero → 0): add clearing refund.
             refund += sstore_clears_refund;
         }
-        if !result.original_value.is_zero()
-            && result.present_value.is_zero()
-            && result.new_value == result.original_value
-        {
-            refund -= sstore_clears_refund;
-        }
-        refund
-    } else if spec_id.is_enabled_in(SpecId::ISTANBUL) {
-        let mut refund = 0i64;
-        if result.original_value != result.present_value
-            && result.original_value == result.new_value
-        {
-            if result.original_value.is_zero() {
-                refund += (SSTORE_SET - ISTANBUL_SLOAD_GAS) as i64;
-            } else {
-                refund += (SSTORE_RESET - ISTANBUL_SLOAD_GAS) as i64;
-            }
-        }
-        if !result.present_value.is_zero() && result.new_value.is_zero() {
-            refund += REFUND_SSTORE_CLEARS;
-        }
-        if !result.original_value.is_zero()
-            && result.present_value.is_zero()
-            && result.new_value == result.original_value
-        {
-            refund -= REFUND_SSTORE_CLEARS;
-        }
-        refund
-    } else if !result.present_value.is_zero() && result.new_value.is_zero() {
-        REFUND_SSTORE_CLEARS
-    } else {
-        0
     }
+
+    // Resetting to original value.
+    if result.original_value == result.new_value {
+        if result.original_value.is_zero() {
+            // Was 0 originally, returning to 0: refund the set cost minus load cost.
+            refund += if spec_id.is_enabled_in(SpecId::BERLIN) {
+                (SSTORE_SET - WARM_STORAGE_READ_COST) as i64
+            } else {
+                (SSTORE_SET - ISTANBUL_SLOAD_GAS) as i64
+            };
+        } else {
+            // Was nonzero originally, returning to original: refund the reset cost minus load cost.
+            refund += if spec_id.is_enabled_in(SpecId::BERLIN) {
+                (WARM_SSTORE_RESET - WARM_STORAGE_READ_COST) as i64
+            } else {
+                (SSTORE_RESET - ISTANBUL_SLOAD_GAS) as i64
+            };
+        }
+    }
+
+    refund
 }
 
 /// Calculate CALL gas cost.

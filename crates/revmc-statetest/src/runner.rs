@@ -61,7 +61,7 @@ pub enum TestErrorKind {
 
 /// Check if a test should be skipped based on its filename.
 /// Some tests are known to be problematic or take too long.
-pub(crate) fn skip_test(path: &Path) -> bool {
+pub fn skip_test(path: &Path) -> bool {
     let path_str = path.to_str().unwrap_or_default();
 
     // Skip tests that have storage for newly created account.
