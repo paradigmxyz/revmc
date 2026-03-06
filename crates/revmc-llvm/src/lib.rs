@@ -1198,6 +1198,12 @@ fn init_() -> Result<()> {
     };
     Target::initialize_all(&config);
 
+    // Ensure MCJIT is linked in. Without this, LTO may strip the MCJIT
+    // registration code, causing `create_jit_execution_engine` to fail with
+    // "JIT has not been linked in" followed by a SIGSEGV in destructors.
+    // See: https://github.com/TheDan64/inkwell/issues/320
+    inkwell::execution_engine::ExecutionEngine::link_in_mc_jit();
+
     Ok(())
 }
 

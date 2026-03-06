@@ -133,9 +133,11 @@ impl Handler for CompiledHandler<'_> {
 
 type ClaimedEntry<'a> = (B256, &'a [u8], String, Arc<OnceLock<EvmCompilerFn>>);
 
-/// Owns leaked LLVM contexts and compilers so they are dropped in the correct
-/// order (compilers before contexts) when the cache is destroyed, preventing
-/// SIGSEGV from LLVM's global C++ destructors.
+/// Owns LLVM contexts and compilers. These are intentionally leaked (never
+/// dropped) because LLVM's MCJIT cleanup has thread-safety issues and interacts
+/// badly with Rust LTO, causing SIGSEGV in `LLVMContext::removeModule`.
+/// The statetest process exits after the suite anyway, so the OS reclaims all
+/// memory.
 struct JitState {
     /// (context_ptr, compiler_ptr) — compiler borrows context via `'static` lie.
     entries: Vec<(*mut LlvmContext, *mut EvmCompiler<EvmLlvmBackend<'static>>)>,
@@ -144,17 +146,6 @@ struct JitState {
 // SAFETY: The raw pointers are heap-allocated and exclusively owned. Access is
 // serialized via Mutex in CompileCache.
 unsafe impl Send for JitState {}
-
-impl Drop for JitState {
-    fn drop(&mut self) {
-        for &mut (cx_ptr, compiler_ptr) in self.entries.iter_mut().rev() {
-            // Drop compiler first (it holds exec engine borrowing the context).
-            unsafe { drop(Box::from_raw(compiler_ptr)) };
-            // Then drop the context.
-            unsafe { drop(Box::from_raw(cx_ptr)) };
-        }
-    }
-}
 
 /// Thread-safe compilation cache shared across workers.
 ///
@@ -338,6 +329,10 @@ impl CompileCache {
         compiled: &mut CompiledContracts,
         spec_id: SpecId,
     ) -> Result<(), TestErrorKind> {
+        // LLVM MCJIT is not fully thread-safe for concurrent context/EE
+        // creation. Serialize JIT compilation to avoid races.
+        let mut _guard = self.jit_state.lock().unwrap();
+
         let cx_ptr = Box::into_raw(Box::new(LlvmContext::create()));
         // SAFETY: cx_ptr is valid and owned; the `'static` lifetime is a lie but
         // the context is kept alive in `jit_state` for the cache's lifetime.
@@ -365,8 +360,8 @@ impl CompileCache {
             compiled.insert(code_hash, func);
         }
 
-        // Store ownership so they're dropped properly (compiler before context).
-        self.jit_state.lock().unwrap().entries.push((cx_ptr, compiler_ptr));
+        // Store ownership so the context+compiler live as long as the cache.
+        _guard.entries.push((cx_ptr, compiler_ptr));
 
         Ok(())
     }
