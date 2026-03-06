@@ -810,11 +810,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 self.call_fallible_builtin(Builtin::CallDataCopy, &[self.ecx, sp]);
             }
             op::CODESIZE => {
-                let bytecode_len =
-                    self.bcx.uconst(self.isize_type, self.bytecode.code.len() as u64);
-                let size = self.call_builtin(Builtin::CodeSize, &[bytecode_len]).unwrap();
-                let size = self.bcx.zext(self.word_type, size);
-                self.push(size);
+                let len = self.bcx.iconst(self.word_type, self.bytecode.code.len() as i64);
+                self.push(len);
             }
             op::CODECOPY => {
                 let sp = self.sp_after_inputs();

@@ -76,55 +76,6 @@ pub fn def_env() -> DefEnv {
     }
 }
 
-/// Get the base gas cost for an opcode.
-/// This replaces the previous DEF_OPINFOS lookup.
-pub fn get_opcode_gas(op: u8) -> u64 {
-    use revm_bytecode::opcode::*;
-    match op {
-        STOP => 0,
-        ADD | SUB | NOT | LT | GT | SLT | SGT | EQ | ISZERO | AND | OR | XOR | BYTE | SHL | SHR
-        | SAR | POP => 3,
-        MUL | DIV | SDIV | MOD | SMOD | SIGNEXTEND => 5,
-        ADDMOD | MULMOD => 8,
-        EXP => 10,
-        KECCAK256 => 30,
-        ADDRESS | ORIGIN | CALLER | CALLVALUE | CALLDATASIZE | CODESIZE | GASPRICE | COINBASE
-        | TIMESTAMP | NUMBER | DIFFICULTY | GASLIMIT | CHAINID | SELFBALANCE | BASEFEE
-        | BLOBBASEFEE | RETURNDATASIZE | MSIZE | GAS | PC => 2,
-        BALANCE | EXTCODESIZE | EXTCODEHASH => 100,
-        CALLDATALOAD => 3,
-        CALLDATACOPY | CODECOPY | RETURNDATACOPY => 3,
-        EXTCODECOPY => 100,
-        BLOCKHASH => 20,
-        MLOAD | MSTORE | MSTORE8 => 3,
-        SLOAD => 100,
-        SSTORE => 100,
-        JUMP => 8,
-        JUMPI => 10,
-        JUMPDEST => 1,
-        PUSH0 => 2,
-        PUSH1..=PUSH32 => 3,
-        DUP1..=DUP16 => 3,
-        SWAP1..=SWAP16 => 3,
-        LOG0 => 375,
-        LOG1 => 375 + 375,
-        LOG2 => 375 + 375 * 2,
-        LOG3 => 375 + 375 * 3,
-        LOG4 => 375 + 375 * 4,
-        CREATE => 32000,
-        CALL | CALLCODE => 100,
-        RETURN | REVERT => 0,
-        INVALID => 0,
-        SELFDESTRUCT => 5000,
-        CREATE2 => 32000,
-        STATICCALL | DELEGATECALL => 100,
-        TLOAD | TSTORE => 100,
-        MCOPY => 3,
-        BLOBHASH => 3,
-        _ => 0,
-    }
-}
-
 /// Memory gas calculation with proper parameters.
 /// This is a helper that wraps the new 3-argument memory_gas function.
 pub fn memory_gas_cost(num_words: usize) -> u64 {
@@ -211,7 +162,8 @@ impl<'a> TestCase<'a> {
 
 // Default values.
 pub const DEF_SPEC: SpecId = SpecId::CANCUN;
-// DEF_OPINFOS removed - op_info_map is no longer const fn
+pub static DEF_OPINFOS: std::sync::LazyLock<&'static [OpcodeInfo; 256]> =
+    std::sync::LazyLock::new(|| op_info_map(DEF_SPEC));
 
 pub const DEF_GAS_LIMIT: u64 = 100_000;
 pub const DEF_GAS_LIMIT_U256: U256 = U256::from_le_slice(&DEF_GAS_LIMIT.to_le_bytes());

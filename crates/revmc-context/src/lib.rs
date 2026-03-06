@@ -45,10 +45,8 @@ pub struct EvmContext<'a> {
     /// `0` is the initial state.
     #[doc(hidden)]
     pub resume_at: usize,
-    /// Pointer to the contract bytecode (for CODECOPY at runtime).
-    pub bytecode_ptr: *const u8,
-    /// Length of the contract bytecode.
-    pub bytecode_len: usize,
+    /// The contract bytecode, for CODECOPY at runtime.
+    pub bytecode: *const [u8],
 }
 
 // Static assertions to ensure the struct layout matches expectations.
@@ -59,8 +57,6 @@ const _: () = {
     // Key fields accessed by JIT code
     assert!(offset_of!(EvmContext<'_>, memory) == 0);
     assert!(offset_of!(EvmContext<'_>, resume_at) == 72);
-    assert!(offset_of!(EvmContext<'_>, bytecode_ptr) == 80);
-    assert!(offset_of!(EvmContext<'_>, bytecode_len) == 88);
 };
 
 impl fmt::Debug for EvmContext<'_> {
@@ -87,20 +83,18 @@ impl<'a> EvmContext<'a> {
         let (stack, stack_len) = EvmStack::from_interpreter_stack(&mut interpreter.stack);
         let bytecode_slice = interpreter.bytecode.bytecode_slice();
         let resume_at = ResumeAt::load(interpreter.bytecode.pc(), bytecode_slice);
-        let bytecode_ptr = bytecode_slice.as_ptr();
-        let bytecode_len = bytecode_slice.len();
+        let bytecode = bytecode_slice as *const [u8];
         let this = Self {
-            memory: &mut interpreter.memory,
-            input: &mut interpreter.input,
-            gas: &mut interpreter.gas,
-            host,
-            next_action: &mut interpreter.bytecode.action,
-            return_data: interpreter.return_data.buffer(),
-            is_static: interpreter.runtime_flag.is_static,
-            resume_at,
-            bytecode_ptr,
-            bytecode_len,
-        };
+        memory: &mut interpreter.memory,
+        input: &mut interpreter.input,
+        gas: &mut interpreter.gas,
+        host,
+        next_action: &mut interpreter.bytecode.action,
+        return_data: interpreter.return_data.buffer(),
+        is_static: interpreter.runtime_flag.is_static,
+        resume_at,
+        bytecode,
+    };
         (this, stack, stack_len)
     }
 }
@@ -108,9 +102,6 @@ impl<'a> EvmContext<'a> {
 /// Extension trait for [`Host`].
 #[cfg(not(feature = "host-ext-any"))]
 pub trait HostExt: Host {}
-
-#[cfg(not(feature = "host-ext-any"))]
-impl<T: Host> HostExt for T {}
 
 /// Extension trait for [`Host`].
 #[cfg(feature = "host-ext-any")]
@@ -120,6 +111,9 @@ pub trait HostExt: Host + Any {
     #[doc(hidden)]
     fn as_any_mut(&mut self) -> &mut dyn Any;
 }
+
+#[cfg(not(feature = "host-ext-any"))]
+impl<T: Host> HostExt for T {}
 
 #[cfg(feature = "host-ext-any")]
 impl<T: Host + Any> HostExt for T {
