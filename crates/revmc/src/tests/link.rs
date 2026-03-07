@@ -3,7 +3,12 @@
 #[test]
 fn builtin_symbols_exported() {
     let exe = std::env::current_exe().unwrap();
-    let output = std::process::Command::new("nm").arg("-gU").arg(&exe).output().unwrap();
+    // macOS nm uses `-gU` for global+defined; GNU nm uses `-g --defined-only`.
+    let output = if cfg!(target_os = "macos") {
+        std::process::Command::new("nm").arg("-gU").arg(&exe).output().unwrap()
+    } else {
+        std::process::Command::new("nm").arg("-g").arg("--defined-only").arg(&exe).output().unwrap()
+    };
     assert!(output.status.success(), "nm failed: {}", String::from_utf8_lossy(&output.stderr));
     let stdout = String::from_utf8(output.stdout).unwrap();
     let exported: Vec<&str> = stdout.lines().filter(|l| l.contains("__revmc_builtin_")).collect();
