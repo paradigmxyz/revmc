@@ -11,10 +11,38 @@ use context_interface;
 use revm_bytecode::opcode as op;
 use revm_interpreter as interpreter;
 use revm_interpreter::{
-    gas, CreateInputs, FrameInput, Gas, InstructionResult, InterpreterAction, InterpreterResult,
+    CreateInputs, FrameInput, Gas, InstructionResult, InterpreterAction, InterpreterResult,
 };
 use revm_primitives::{hex, keccak256, Address, Bytes, LogData, B256, KECCAK_EMPTY};
-use revmc_builtins::gas::{keccak256_cost, log_cost, verylowcopy_cost};
+use revmc_builtins::gas;
+
+/// `KECCAK256` opcode gas cost (base + dynamic).
+const fn keccak256_cost(len: u64) -> Option<u64> {
+    let words = len.div_ceil(32);
+    match words.checked_mul(gas::KECCAK256WORD) {
+        Some(dyn_cost) => Some(gas::KECCAK256.saturating_add(dyn_cost)),
+        None => None,
+    }
+}
+
+/// `LOG` opcode gas cost (base + topics + dynamic).
+const fn log_cost(n_topics: u8, len: u64) -> Option<u64> {
+    match gas::LOGDATA.checked_mul(len) {
+        Some(dyn_cost) => {
+            Some((gas::LOG + gas::LOGTOPIC * n_topics as u64).saturating_add(dyn_cost))
+        }
+        None => None,
+    }
+}
+
+/// `CALLDATACOPY`, `CODECOPY`, `RETURNDATACOPY` opcode gas cost (base + dynamic).
+const fn verylowcopy_cost(len: u64) -> Option<u64> {
+    let words = len.div_ceil(32);
+    match words.checked_mul(gas::COPY) {
+        Some(dyn_cost) => Some(gas::VERYLOW.saturating_add(dyn_cost)),
+        None => None,
+    }
+}
 
 #[macro_use]
 mod macros;

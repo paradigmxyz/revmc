@@ -66,20 +66,6 @@ macro_rules! berlin_load_account {
     }};
 }
 
-/// Mirrors revm's SSTORE cold-load-skip pattern.
-macro_rules! berlin_sstore {
-    ($ecx:expr, $address:expr, $key:expr, $value:expr) => {{
-        use revm_context_interface::host::LoadError;
-        let additional_cold_cost = $ecx.host.gas_params().cold_storage_additional_cost();
-        let skip_cold = $ecx.gas.remaining() < additional_cold_cost;
-        match $ecx.host.sstore_skip_cold_load($address, $key, $value, skip_cold) {
-            Ok(load) => load,
-            Err(LoadError::ColdLoadSkipped) => return InstructionResult::OutOfGas,
-            Err(LoadError::DBError) => return InstructionResult::FatalExternalError,
-        }
-    }};
-}
-
 macro_rules! ensure_non_staticcall {
     ($ecx:expr) => {
         if $ecx.is_static {

@@ -452,15 +452,14 @@ pub unsafe extern "C" fn __revmc_builtin_sload(
     let address = ecx.input.target_address;
     let key = index.to_u256();
     if spec_id.is_enabled_in(SpecId::BERLIN) {
+        gas!(ecx, ecx.host.gas_params().warm_storage_read_cost());
         let additional_cold_cost = ecx.host.gas_params().cold_storage_additional_cost();
         let skip_cold = ecx.gas.remaining() < additional_cold_cost;
-        let res = ecx.host.sload_skip_cold_load(address, key, skip_cold);
-        match res {
+        match ecx.host.sload_skip_cold_load(address, key, skip_cold) {
             Ok(storage) => {
                 if storage.is_cold {
                     gas!(ecx, additional_cold_cost);
                 }
-
                 *index = storage.data.into();
             }
             Err(LoadError::ColdLoadSkipped) => return InstructionResult::OutOfGas,
@@ -470,6 +469,7 @@ pub unsafe extern "C" fn __revmc_builtin_sload(
         let Some(storage) = ecx.host.sload(address, key) else {
             return InstructionResult::FatalExternalError;
         };
+        gas!(ecx, gas::sload_cost(spec_id, storage.is_cold));
         *index = storage.data.into();
     }
 
@@ -495,7 +495,17 @@ pub unsafe extern "C" fn __revmc_builtin_sstore(
     gas!(ecx, ecx.host.gas_params().sstore_static_gas());
 
     let state_load = if spec_id.is_enabled_in(SpecId::BERLIN) {
-        berlin_sstore!(ecx, target, index.to_u256(), value.to_u256())
+        let additional_cold_cost = ecx.host.gas_params().cold_storage_additional_cost();
+        let skip_cold = ecx.gas.remaining() < additional_cold_cost;
+        match ecx.host.sstore_skip_cold_load(target, index.to_u256(), value.to_u256(), skip_cold) {
+            Ok(load) => load,
+            Err(revm_context_interface::host::LoadError::ColdLoadSkipped) => {
+                return InstructionResult::OutOfGas;
+            }
+            Err(revm_context_interface::host::LoadError::DBError) => {
+                return InstructionResult::FatalExternalError;
+            }
+        }
     } else {
         let Some(load) = ecx.host.sstore(target, index.to_u256(), value.to_u256()) else {
             return InstructionResult::FatalExternalError;
