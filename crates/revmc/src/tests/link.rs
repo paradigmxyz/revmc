@@ -3,11 +3,8 @@
 #[test]
 fn builtin_symbols_exported() {
     let exe = std::env::current_exe().unwrap();
-    let args: &[&str] = if cfg!(target_os = "macos") {
-        &["-gU"]
-    } else {
-        &["-D", "--defined-only"]
-    };
+    let args: &[&str] =
+        if cfg!(target_os = "macos") { &["-gU"] } else { &["-D", "--defined-only"] };
     let output = std::process::Command::new("nm").args(args).arg(&exe).output().unwrap();
     assert!(output.status.success(), "nm failed: {}", String::from_utf8_lossy(&output.stderr));
     let stdout = String::from_utf8(output.stdout).unwrap();

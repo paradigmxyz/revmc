@@ -15,8 +15,7 @@ use revm::{
     Context, MainBuilder, MainContext, MainnetEvm,
 };
 use revmc::{
-    llvm::with_llvm_context, with_compiler, EvmCompiler, EvmCompilerFn, EvmLlvmBackend, Linker,
-    OptimizationLevel,
+    llvm, with_compiler, EvmCompiler, EvmCompilerFn, EvmLlvmBackend, Linker, OptimizationLevel,
 };
 use std::{
     collections::HashMap,
@@ -304,29 +303,31 @@ impl CompileCache {
         compiled: &mut CompiledContracts,
         spec_id: SpecId,
     ) -> Result<(), TestErrorKind> {
-        with_llvm_context(|context| {
-            let backend =
-                EvmLlvmBackend::new(context, false, OptimizationLevel::Aggressive).unwrap();
-            let compiler = Box::leak(Box::new(EvmCompiler::new(backend)));
+        // Leak the LLVM context so it outlives the worker thread. Using
+        // `with_llvm_context` (thread-local) would destroy the context on
+        // thread exit, invalidating the JIT code memory that the leaked
+        // compiler's execution engine references.
+        let context: &'static llvm::Context = Box::leak(Box::new(llvm::Context::create()));
+        let backend = EvmLlvmBackend::new(context, false, OptimizationLevel::Aggressive).unwrap();
+        let compiler = Box::leak(Box::new(EvmCompiler::new(backend)));
 
-            let mut func_ids = Vec::new();
-            for (code_hash, code, name, _) in claimed {
-                let func_id = compiler.translate(name, *code, spec_id).map_err(|e| {
-                    TestErrorKind::CompilationError(format!("translate {name}: {e}"))
-                })?;
-                func_ids.push((*code_hash, func_id));
-            }
+        let mut func_ids = Vec::new();
+        for (code_hash, code, name, _) in claimed {
+            let func_id = compiler
+                .translate(name, *code, spec_id)
+                .map_err(|e| TestErrorKind::CompilationError(format!("translate {name}: {e}")))?;
+            func_ids.push((*code_hash, func_id));
+        }
 
-            for (i, (code_hash, func_id)) in func_ids.into_iter().enumerate() {
-                let func = unsafe { compiler.jit_function(func_id) }.map_err(|e| {
-                    TestErrorKind::CompilationError(format!("jit {:x}: {e}", code_hash))
-                })?;
-                claimed[i].3.set(func).ok();
-                compiled.insert(code_hash, func);
-            }
+        for (i, (code_hash, func_id)) in func_ids.into_iter().enumerate() {
+            let func = unsafe { compiler.jit_function(func_id) }.map_err(|e| {
+                TestErrorKind::CompilationError(format!("jit {:x}: {e}", code_hash))
+            })?;
+            claimed[i].3.set(func).ok();
+            compiled.insert(code_hash, func);
+        }
 
-            Ok(())
-        })
+        Ok(())
     }
 
     fn compile_aot_batch(
