@@ -15,8 +15,8 @@ use revm::{
     Context, MainBuilder, MainContext, MainnetEvm,
 };
 use revmc::{
-    llvm::inkwell::context::Context as LlvmContext, EvmCompiler, EvmCompilerFn, EvmLlvmBackend,
-    Linker, OptimizationLevel,
+    llvm::with_llvm_context, with_compiler, EvmCompiler, EvmCompilerFn, EvmLlvmBackend, Linker,
+    OptimizationLevel,
 };
 use std::{
     collections::HashMap,
@@ -133,34 +133,10 @@ impl Handler for CompiledHandler<'_> {
 
 type ClaimedEntry<'a> = (B256, &'a [u8], String, Arc<OnceLock<EvmCompilerFn>>);
 
-/// Owns LLVM contexts and compilers. These are intentionally leaked (never
-/// dropped) because LLVM's MCJIT cleanup has thread-safety issues and interacts
-/// badly with Rust LTO, causing SIGSEGV in `LLVMContext::removeModule`.
-/// The statetest process exits after the suite anyway, so the OS reclaims all
-/// memory.
-struct JitState {
-    /// (context_ptr, compiler_ptr) — compiler borrows context via `'static` lie.
-    entries: Vec<(*mut LlvmContext, *mut EvmCompiler<EvmLlvmBackend<'static>>)>,
-}
-
-// SAFETY: The raw pointers are heap-allocated and exclusively owned. Access is
-// serialized via Mutex in CompileCache.
-unsafe impl Send for JitState {}
-
 /// Thread-safe compilation cache shared across workers.
-///
-/// Uses `DashMap` with `OnceLock` per entry to guarantee each `(code_hash, spec_id)`
-/// is compiled exactly once. The first thread to insert claims the slot; other threads
-/// seeing an uninitialized `OnceLock` block on `.wait()` until compilation finishes.
-///
-/// For JIT: LLVM contexts and compilers are owned by `jit_state` so JIT function
-/// pointers remain valid for the cache's lifetime and are cleaned up properly.
-/// For AOT: shared libraries and temp dirs are kept alive in `libs`.
 pub struct CompileCache {
     mode: CompileMode,
     functions: DashMap<(B256, SpecId), Arc<OnceLock<EvmCompilerFn>>>,
-    /// Owns JIT LLVM contexts and compilers. Unused for AOT/interpreter.
-    jit_state: Mutex<JitState>,
     /// Keep AOT shared libraries alive. Unused for JIT mode.
     libs: Mutex<Vec<(tempfile::TempDir, libloading::Library)>>,
     n_hits: AtomicUsize,
@@ -172,7 +148,6 @@ impl CompileCache {
         Self {
             mode,
             functions: DashMap::new(),
-            jit_state: Mutex::new(JitState { entries: Vec::new() }),
             libs: Mutex::new(Vec::new()),
             n_hits: AtomicUsize::new(0),
             n_misses: AtomicUsize::new(0),
@@ -329,41 +304,29 @@ impl CompileCache {
         compiled: &mut CompiledContracts,
         spec_id: SpecId,
     ) -> Result<(), TestErrorKind> {
-        // LLVM MCJIT is not fully thread-safe for concurrent context/EE
-        // creation. Serialize JIT compilation to avoid races.
-        let mut _guard = self.jit_state.lock().unwrap();
+        with_llvm_context(|context| {
+            let backend =
+                EvmLlvmBackend::new(context, false, OptimizationLevel::Aggressive).unwrap();
+            let compiler = Box::leak(Box::new(EvmCompiler::new(backend)));
 
-        let cx_ptr = Box::into_raw(Box::new(LlvmContext::create()));
-        // SAFETY: cx_ptr is valid and owned; the `'static` lifetime is a lie but
-        // the context is kept alive in `jit_state` for the cache's lifetime.
-        let cx: &'static LlvmContext = unsafe { &*cx_ptr };
-        let backend = EvmLlvmBackend::new(cx, false, OptimizationLevel::Default)
-            .map_err(|e| TestErrorKind::CompilationError(format!("backend: {e}")))?;
-        let compiler_ptr = Box::into_raw(Box::new(EvmCompiler::new(backend)));
-        // SAFETY: compiler_ptr is valid and owned.
-        let compiler: &'static mut EvmCompiler<EvmLlvmBackend<'static>> =
-            unsafe { &mut *compiler_ptr };
+            let mut func_ids = Vec::new();
+            for (code_hash, code, name, _) in claimed {
+                let func_id = compiler.translate(name, *code, spec_id).map_err(|e| {
+                    TestErrorKind::CompilationError(format!("translate {name}: {e}"))
+                })?;
+                func_ids.push((*code_hash, func_id));
+            }
 
-        let mut func_ids = Vec::new();
-        for (code_hash, code, name, _) in claimed {
-            let func_id = compiler
-                .translate(name, *code, spec_id)
-                .map_err(|e| TestErrorKind::CompilationError(format!("translate {name}: {e}")))?;
-            func_ids.push((*code_hash, func_id));
-        }
+            for (i, (code_hash, func_id)) in func_ids.into_iter().enumerate() {
+                let func = unsafe { compiler.jit_function(func_id) }.map_err(|e| {
+                    TestErrorKind::CompilationError(format!("jit {:x}: {e}", code_hash))
+                })?;
+                claimed[i].3.set(func).ok();
+                compiled.insert(code_hash, func);
+            }
 
-        for (i, (code_hash, func_id)) in func_ids.into_iter().enumerate() {
-            let func = unsafe { compiler.jit_function(func_id) }.map_err(|e| {
-                TestErrorKind::CompilationError(format!("jit {:x}: {e}", code_hash))
-            })?;
-            claimed[i].3.set(func).ok();
-            compiled.insert(code_hash, func);
-        }
-
-        // Store ownership so the context+compiler live as long as the cache.
-        _guard.entries.push((cx_ptr, compiler_ptr));
-
-        Ok(())
+            Ok(())
+        })
     }
 
     fn compile_aot_batch(
@@ -372,46 +335,43 @@ impl CompileCache {
         compiled: &mut CompiledContracts,
         spec_id: SpecId,
     ) -> Result<(), TestErrorKind> {
-        let cx = LlvmContext::create();
-        let backend = EvmLlvmBackend::new(&cx, true, OptimizationLevel::Default)
-            .map_err(|e| TestErrorKind::CompilationError(format!("backend: {e}")))?;
-        let mut compiler = EvmCompiler::new(backend);
+        with_compiler(OptimizationLevel::Aggressive, true, |compiler| {
+            let mut names: Vec<(B256, String)> = Vec::new();
+            for (code_hash, code, name, _) in claimed {
+                compiler.translate(name, *code, spec_id).map_err(|e| {
+                    TestErrorKind::CompilationError(format!("translate {name}: {e}"))
+                })?;
+                names.push((*code_hash, name.clone()));
+            }
 
-        let mut names: Vec<(B256, String)> = Vec::new();
-        for (code_hash, code, name, _) in claimed {
+            let tmp_dir = tempfile::tempdir()
+                .map_err(|e| TestErrorKind::CompilationError(format!("tempdir: {e}")))?;
+            let obj_path = tmp_dir.path().join("a.o");
+            let so_path = tmp_dir.path().join("a.so");
+
             compiler
-                .translate(name, *code, spec_id)
-                .map_err(|e| TestErrorKind::CompilationError(format!("translate {name}: {e}")))?;
-            names.push((*code_hash, name.clone()));
-        }
+                .write_object_to_file(&obj_path)
+                .map_err(|e| TestErrorKind::CompilationError(format!("write object: {e}")))?;
 
-        let tmp_dir = tempfile::tempdir()
-            .map_err(|e| TestErrorKind::CompilationError(format!("tempdir: {e}")))?;
-        let obj_path = tmp_dir.path().join("a.o");
-        let so_path = tmp_dir.path().join("a.so");
+            let linker = Linker::new();
+            linker
+                .link(&so_path, [obj_path.to_str().unwrap()])
+                .map_err(|e| TestErrorKind::CompilationError(format!("link: {e}")))?;
 
-        compiler
-            .write_object_to_file(&obj_path)
-            .map_err(|e| TestErrorKind::CompilationError(format!("write object: {e}")))?;
+            let lib = unsafe { libloading::Library::new(&so_path) }
+                .map_err(|e| TestErrorKind::CompilationError(format!("load: {e}")))?;
 
-        let linker = Linker::new();
-        linker
-            .link(&so_path, [obj_path.to_str().unwrap()])
-            .map_err(|e| TestErrorKind::CompilationError(format!("link: {e}")))?;
+            for (i, (code_hash, name)) in names.iter().enumerate() {
+                let f: libloading::Symbol<'_, EvmCompilerFn> = unsafe { lib.get(name.as_bytes()) }
+                    .map_err(|e| TestErrorKind::CompilationError(format!("symbol {name}: {e}")))?;
+                claimed[i].3.set(*f).ok();
+                compiled.insert(*code_hash, *f);
+            }
 
-        let lib = unsafe { libloading::Library::new(&so_path) }
-            .map_err(|e| TestErrorKind::CompilationError(format!("load: {e}")))?;
+            self.libs.lock().unwrap().push((tmp_dir, lib));
 
-        for (i, (code_hash, name)) in names.iter().enumerate() {
-            let f: libloading::Symbol<'_, EvmCompilerFn> = unsafe { lib.get(name.as_bytes()) }
-                .map_err(|e| TestErrorKind::CompilationError(format!("symbol {name}: {e}")))?;
-            claimed[i].3.set(*f).ok();
-            compiled.insert(*code_hash, *f);
-        }
-
-        self.libs.lock().unwrap().push((tmp_dir, lib));
-
-        Ok(())
+            Ok(())
+        })
     }
 
     pub fn print_stats(&self) {

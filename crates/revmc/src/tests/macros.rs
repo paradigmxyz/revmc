@@ -13,12 +13,12 @@ macro_rules! matrix_tests {
 
             #[test]
             fn unopt() {
-                crate::tests::with_llvm_backend_jit(crate::OptimizationLevel::None, run_llvm);
+                crate::tests::with_jit_compiler(crate::OptimizationLevel::None, run_llvm);
             }
 
             #[test]
             fn opt() {
-                crate::tests::with_llvm_backend_jit(crate::OptimizationLevel::Aggressive, run_llvm);
+                crate::tests::with_jit_compiler(crate::OptimizationLevel::Aggressive, run_llvm);
             }
         }
     };

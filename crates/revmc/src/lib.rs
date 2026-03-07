@@ -61,6 +61,35 @@ const I256_MIN: U256 = U256::from_limbs([
     0x8000000000000000,
 ]);
 
+#[doc(hidden)]
+#[cfg(feature = "llvm")]
+pub fn with_llvm_backend<R>(
+    opt_level: OptimizationLevel,
+    aot: bool,
+    f: impl FnOnce(EvmLlvmBackend<'_>) -> R,
+) -> R {
+    llvm::with_llvm_context(|cx| f(EvmLlvmBackend::new(cx, aot, opt_level).unwrap()))
+}
+
+#[doc(hidden)]
+#[cfg(feature = "llvm")]
+pub fn with_compiler<R>(
+    opt_level: OptimizationLevel,
+    aot: bool,
+    f: impl FnOnce(&mut EvmCompiler<EvmLlvmBackend<'_>>) -> R,
+) -> R {
+    with_llvm_backend(opt_level, aot, |backend| f(&mut EvmCompiler::new(backend)))
+}
+
+#[doc(hidden)]
+#[cfg(feature = "llvm")]
+pub fn with_jit_compiler<R>(
+    opt_level: OptimizationLevel,
+    f: fn(&mut EvmCompiler<EvmLlvmBackend<'_>>) -> R,
+) -> R {
+    with_compiler(opt_level, false, f)
+}
+
 /// Enable for `cargo asm -p revmc --lib`.
 #[cfg(any())]
 pub fn generate_all_assembly() -> EvmCompiler<EvmLlvmBackend<'static>> {
