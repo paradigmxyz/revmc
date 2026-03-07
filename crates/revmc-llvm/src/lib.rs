@@ -200,10 +200,10 @@ impl<'ctx> EvmLlvmBackend<'ctx> {
     // Delete IR to lower memory consumption.
     // For some reason this does not happen when `Drop`ping either the `Module` or the engine.
     fn clear_module(&mut self) {
-        for function in self.module.get_functions() {
+        for function in self.module.get_functions().collect::<Vec<_>>() {
             unsafe { function.delete() };
         }
-        for global in self.module.get_globals() {
+        for global in self.module.get_globals().collect::<Vec<_>>() {
             unsafe { global.delete() };
         }
         self.functions.clear();
@@ -384,13 +384,7 @@ impl<'ctx> Backend for EvmLlvmBackend<'ctx> {
 
 impl Drop for EvmLlvmBackend<'_> {
     fn drop(&mut self) {
-        // Only clear the module if there's no execution engine. When an EE is
-        // present, it owns the module and will clean it up via
-        // LLVMDisposeExecutionEngine. Deleting functions/globals first causes
-        // use-after-free in the EE's destructor (SIGSEGV/SIGBUS on exit).
-        if self.exec_engine.is_none() {
-            self.clear_module();
-        }
+        self.clear_module();
     }
 }
 
