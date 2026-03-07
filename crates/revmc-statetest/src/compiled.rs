@@ -15,7 +15,7 @@ use revm::{
     Context, MainBuilder, MainContext, MainnetEvm,
 };
 use revmc::{
-    llvm, with_compiler, EvmCompiler, EvmCompilerFn, EvmLlvmBackend, Linker, OptimizationLevel,
+    llvm, EvmCompiler, EvmCompilerFn, EvmLlvmBackend, Linker, OptimizationLevel,
 };
 use std::{
     collections::HashMap,
@@ -336,7 +336,9 @@ impl CompileCache {
         compiled: &mut CompiledContracts,
         spec_id: SpecId,
     ) -> Result<(), TestErrorKind> {
-        with_compiler(OptimizationLevel::Aggressive, true, |compiler| {
+        with_llvm_context(|cx| {
+            let backend = EvmLlvmBackend::new(cx, true, OptimizationLevel::Aggressive).unwrap();
+            let compiler = &mut EvmCompiler::new(backend);
             let mut names: Vec<(B256, String)> = Vec::new();
             for (code_hash, code, name, _) in claimed {
                 compiler.translate(name, *code, spec_id).map_err(|e| {
