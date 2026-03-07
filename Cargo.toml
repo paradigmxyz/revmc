@@ -43,14 +43,14 @@ revmc-context = { version = "0.1.0", path = "crates/revmc-context", default-feat
 revmc-cranelift = { version = "0.1.0", path = "crates/revmc-cranelift", default-features = false }
 revmc-llvm = { version = "0.1.0", path = "crates/revmc-llvm", default-features = false }
 
-alloy-primitives = { version = "0.8", default-features = false }
-revm = { version = "34.0", default-features = false }
-revm-primitives = { version = "22.0", default-features = false }
-revm-interpreter = { version = "32.0", default-features = false }
-revm-bytecode = { version = "8.0", default-features = false, features = ["parse"] }
-revm-context-interface = { version = "14.0", default-features = false }
-revm-state = { version = "9.0", default-features = false }
-ruint = { version = "1.12", default-features = false }
+alloy-primitives = { version = "1.5", default-features = false }
+revm = { version = "36.0", default-features = false }
+revm-primitives = { version = "22.1", default-features = false }
+revm-interpreter = { version = "34.0", default-features = false }
+revm-bytecode = { version = "9.0", default-features = false, features = ["parse"] }
+revm-context-interface = { version = "16.0", default-features = false }
+revm-state = { version = "10.0", default-features = false }
+ruint = { version = "1.17", default-features = false }
 
 color-eyre = "0.6"
 eyre = "0.6"
