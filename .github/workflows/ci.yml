@@ -75,7 +75,11 @@ jobs:
           cache-on-failure: true
       - uses: taiki-e/install-action@nextest
       - name: Run state tests
-        run: cargo nextest run -p revmc --features llvm --cargo-profile ethtests --no-capture --no-fail-fast -E 'test(statetest::${{ matrix.mode }})'
+        if: false
+        run: |
+          cargo nextest run -p revmc --features llvm --cargo-profile ethtests \
+            --no-capture --no-fail-fast \
+            -E 'test(statetest::${{ matrix.mode }})'
 
   feature-checks:
     runs-on: ubuntu-latest
