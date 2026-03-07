@@ -17,7 +17,6 @@ use std::{
 };
 
 #[derive(Parser)]
-#[command(name = "revmc-cli")]
 struct Cli {
     #[command(subcommand)]
     command: Command,

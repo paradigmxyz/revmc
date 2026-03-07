@@ -59,7 +59,7 @@ cranelift = ["revmc/cranelift"]
 tracy = ["dep:tracing-tracy"]
 
 [[bin]]
-name = "revmc-cli"
+name = "revmc"
 path = "src/main.rs"
 required-features = ["llvm"]
 doc = false
