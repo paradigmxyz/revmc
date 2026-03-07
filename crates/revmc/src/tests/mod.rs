@@ -11,10 +11,38 @@ use context_interface;
 use revm_bytecode::opcode as op;
 use revm_interpreter as interpreter;
 use revm_interpreter::{
-    gas, CreateInputs, FrameInput, Gas, InstructionResult, InterpreterAction, InterpreterResult,
+    CreateInputs, FrameInput, Gas, InstructionResult, InterpreterAction, InterpreterResult,
 };
 use revm_primitives::{hex, keccak256, Address, Bytes, LogData, B256, KECCAK_EMPTY};
-use revmc_builtins::gas::{keccak256_cost, log_cost, verylowcopy_cost};
+use revmc_builtins::gas;
+
+/// `KECCAK256` opcode gas cost (base + dynamic).
+const fn keccak256_cost(len: u64) -> Option<u64> {
+    let words = len.div_ceil(32);
+    match words.checked_mul(gas::KECCAK256WORD) {
+        Some(dyn_cost) => Some(gas::KECCAK256.saturating_add(dyn_cost)),
+        None => None,
+    }
+}
+
+/// `LOG` opcode gas cost (base + topics + dynamic).
+const fn log_cost(n_topics: u8, len: u64) -> Option<u64> {
+    match gas::LOGDATA.checked_mul(len) {
+        Some(dyn_cost) => {
+            Some((gas::LOG + gas::LOGTOPIC * n_topics as u64).saturating_add(dyn_cost))
+        }
+        None => None,
+    }
+}
+
+/// `CALLDATACOPY`, `CODECOPY`, `RETURNDATACOPY` opcode gas cost (base + dynamic).
+const fn verylowcopy_cost(len: u64) -> Option<u64> {
+    let words = len.div_ceil(32);
+    match words.checked_mul(gas::COPY) {
+        Some(dyn_cost) => Some(gas::VERYLOW.saturating_add(dyn_cost)),
+        None => None,
+    }
+}
 
 #[macro_use]
 mod macros;
@@ -144,6 +172,47 @@ tests! {
             expected_gas: GAS_WHAT_INTERPRETER_SAYS,
         }),
 
+        // EXP gas: pre-SPURIOUS_DRAGON exp_byte_gas=10, post=50.
+        // power=0 → dynamic=0 for all specs.
+        exp_zero_frontier(@raw {
+            bytecode: &bytecode_binop(op::EXP, 2_U256, 0_U256),
+            spec_id: SpecId::FRONTIER,
+            expected_stack: &[1_U256],
+            expected_gas: 6 + 10,
+        }),
+        // power=1 → 1 byte, dynamic=10*1=10 pre-spurious, total=20.
+        exp_one_frontier(@raw {
+            bytecode: &bytecode_binop(op::EXP, 2_U256, 1_U256),
+            spec_id: SpecId::FRONTIER,
+            expected_stack: &[2_U256],
+            expected_gas: 6 + 10 + 10,
+        }),
+        // power=256 → log2floor=8, bytes=2, dynamic=10*2=20 pre-spurious, total=30.
+        exp_multi_byte_frontier(@raw {
+            bytecode: &bytecode_binop(op::EXP, 2_U256, 256_U256),
+            spec_id: SpecId::FRONTIER,
+            expected_stack: &[0_U256],
+            expected_gas: 6 + 10 + 20,
+        }),
+        // Same with ISTANBUL (post-spurious, exp_byte_gas=50).
+        exp_zero_istanbul(@raw {
+            bytecode: &bytecode_binop(op::EXP, 2_U256, 0_U256),
+            spec_id: SpecId::ISTANBUL,
+            expected_stack: &[1_U256],
+            expected_gas: 6 + 10,
+        }),
+        exp_one_istanbul(@raw {
+            bytecode: &bytecode_binop(op::EXP, 2_U256, 1_U256),
+            spec_id: SpecId::ISTANBUL,
+            expected_stack: &[2_U256],
+            expected_gas: 6 + 10 + 50,
+        }),
+        exp_multi_byte_istanbul(@raw {
+            bytecode: &bytecode_binop(op::EXP, 2_U256, 256_U256),
+            spec_id: SpecId::ISTANBUL,
+            expected_stack: &[0_U256],
+            expected_gas: 6 + 10 + 100,
+        }),
     }
 
     stack {
@@ -334,6 +403,10 @@ tests! {
         exp5(op::EXP, 2_U256, 3_U256 => 8_U256; op_gas(60)),
         exp6(op::EXP, 2_U256, 4_U256 => 16_U256; op_gas(60)),
         exp_overflow(op::EXP, 2_U256, 256_U256 => 0_U256; op_gas(110)),
+        // Large exponent spanning multiple bytes.
+        exp_large(op::EXP, 2_U256, 0xFFFF_U256 => 2_U256.pow(0xFFFF_U256); op_gas(110)),
+        // Max exponent (32 bytes), dynamic = 50 * 32 = 1600, total = 10 + 1600 = 1610.
+        exp_max_exponent(op::EXP, 2_U256, U256::MAX => 0_U256; op_gas(1610)),
 
         signextend1(op::SIGNEXTEND, 0_U256, 0_U256 => 0_U256),
         signextend2(op::SIGNEXTEND, 1_U256, 0_U256 => 0_U256),

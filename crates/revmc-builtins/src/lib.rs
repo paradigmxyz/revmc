@@ -13,6 +13,7 @@ extern crate tracing;
 use alloc::{boxed::Box, vec::Vec};
 use revm_interpreter::{
     as_u64_saturated, as_usize_saturated,
+    host::LoadError,
     interpreter_types::{InputsTr, MemoryTr},
     CallInput, CallInputs, CallScheme, CallValue, CreateInputs, CreateScheme, InstructionResult,
     InterpreterAction, InterpreterResult,
@@ -106,10 +107,9 @@ pub unsafe extern "C" fn __revmc_builtin_mulmod(rev![a, b, c]: &mut [EvmWord; 3]
 pub unsafe extern "C" fn __revmc_builtin_exp(
     ecx: &mut EvmContext<'_>,
     rev![base, exponent_ptr]: &mut [EvmWord; 2],
-    spec_id: SpecId,
 ) -> InstructionResult {
     let exponent = exponent_ptr.to_u256();
-    gas_opt!(ecx, gas::dyn_exp_cost(spec_id, exponent));
+    gas!(ecx, ecx.host.gas_params().exp_cost(exponent));
     *exponent_ptr = base.to_u256().pow(exponent).into();
     InstructionResult::Stop
 }
@@ -123,7 +123,7 @@ pub unsafe extern "C" fn __revmc_builtin_keccak256(
     *len_ptr = EvmWord::from_be_bytes(if len == 0 {
         KECCAK_EMPTY.0
     } else {
-        gas_opt!(ecx, gas::dyn_keccak256_cost(len as u64));
+        gas!(ecx, ecx.host.gas_params().keccak256_cost(len));
         let offset = try_into_usize!(offset);
         ensure_memory!(ecx, offset, len);
         let data = ecx.memory.slice(offset..offset + len);
@@ -138,19 +138,18 @@ pub unsafe extern "C" fn __revmc_builtin_balance(
     address: &mut EvmWord,
     spec_id: SpecId,
 ) -> InstructionResult {
-    let state = try_host!(ecx.host.balance(address.to_address()));
-    *address = state.data.into();
-    let gas = if spec_id.is_enabled_in(SpecId::BERLIN) {
-        gas::warm_cold_cost(state.is_cold)
-    } else if spec_id.is_enabled_in(SpecId::ISTANBUL) {
-        // EIP-1884: Repricing for trie-size-dependent opcodes
-        700
-    } else if spec_id.is_enabled_in(SpecId::TANGERINE) {
-        400
+    let addr = address.to_address();
+    if spec_id.is_enabled_in(SpecId::BERLIN) {
+        // Warm base cost; cold additional charged by the macro if cold.
+        gas!(ecx, ecx.host.gas_params().warm_storage_read_cost());
+        let account = berlin_load_account!(ecx, addr, false);
+        *address = account.balance.into();
     } else {
-        20
-    };
-    gas!(ecx, gas);
+        let Ok(account) = ecx.host.load_account_info_skip_cold_load(addr, false, false) else {
+            return InstructionResult::FatalExternalError;
+        };
+        *address = account.balance.into();
+    }
     InstructionResult::Stop
 }
 
@@ -206,7 +205,7 @@ pub unsafe extern "C" fn __revmc_builtin_calldatacopy(
 ) -> InstructionResult {
     let len = try_into_usize!(len);
     if len != 0 {
-        gas_opt!(ecx, gas::dyn_verylowcopy_cost(len as u64));
+        gas!(ecx, ecx.host.gas_params().copy_cost(len));
         let memory_offset = try_into_usize!(memory_offset);
         ensure_memory!(ecx, memory_offset, len);
         let data_offset = as_usize_saturated!(data_offset.to_u256());
@@ -243,16 +242,17 @@ pub unsafe extern "C" fn __revmc_builtin_extcodesize(
     address: &mut EvmWord,
     spec_id: SpecId,
 ) -> InstructionResult {
-    let state_load = try_opt!(ecx.host.load_account_code(address.to_address()));
-    *address = U256::from(state_load.data.len()).into();
-    let gas = if spec_id.is_enabled_in(SpecId::BERLIN) {
-        gas::warm_cold_cost(state_load.is_cold)
-    } else if spec_id.is_enabled_in(SpecId::TANGERINE) {
-        700
+    let addr = address.to_address();
+    if spec_id.is_enabled_in(SpecId::BERLIN) {
+        gas!(ecx, ecx.host.gas_params().warm_storage_read_cost());
+        let account = berlin_load_account!(ecx, addr, true);
+        *address = U256::from(account.code.as_ref().unwrap().len()).into();
     } else {
-        20
-    };
-    gas!(ecx, gas);
+        let Ok(account) = ecx.host.load_account_info_skip_cold_load(addr, true, false) else {
+            return InstructionResult::FatalExternalError;
+        };
+        *address = U256::from(account.code.as_ref().unwrap().len()).into();
+    }
     InstructionResult::Stop
 }
 
@@ -262,17 +262,29 @@ pub unsafe extern "C" fn __revmc_builtin_extcodecopy(
     rev![address, memory_offset, code_offset, len]: &mut [EvmWord; 4],
     spec_id: SpecId,
 ) -> InstructionResult {
-    let state_load = try_opt!(ecx.host.load_account_code(address.to_address()));
-
+    let addr = address.to_address();
     let len = try_into_usize!(len);
-    gas_opt!(ecx, gas::extcodecopy_cost(spec_id, len as u64, state_load.is_cold));
+    gas!(ecx, ecx.host.gas_params().extcodecopy(len));
+
+    let mut memory_offset_usize = 0;
     if len != 0 {
-        let memory_offset = try_into_usize!(memory_offset);
-        let code_offset = code_offset.to_u256();
-        let code_offset = as_usize_saturated!(code_offset).min(state_load.data.len());
-        ensure_memory!(ecx, memory_offset, len);
-        ecx.memory.set_data(memory_offset, code_offset, len, &state_load.data);
+        memory_offset_usize = try_into_usize!(memory_offset);
+        ensure_memory!(ecx, memory_offset_usize, len);
     }
+
+    let code = if spec_id.is_enabled_in(SpecId::BERLIN) {
+        gas!(ecx, ecx.host.gas_params().warm_storage_read_cost());
+        let account = berlin_load_account!(ecx, addr, true);
+        account.code.as_ref().unwrap().original_bytes()
+    } else {
+        let Some(code) = ecx.host.load_account_code(addr) else {
+            return InstructionResult::FatalExternalError;
+        };
+        code.data
+    };
+
+    let code_offset_usize = core::cmp::min(as_usize_saturated!(code_offset.to_u256()), code.len());
+    ecx.memory.set_data(memory_offset_usize, code_offset_usize, len, &code);
     InstructionResult::Stop
 }
 
@@ -282,13 +294,15 @@ pub unsafe extern "C" fn __revmc_builtin_returndatacopy(
     rev![memory_offset, offset, len]: &mut [EvmWord; 3],
 ) -> InstructionResult {
     let len = try_into_usize!(len);
-    gas_opt!(ecx, gas::dyn_verylowcopy_cost(len as u64));
-    let data_offset = offset.to_u256();
-    let data_offset = as_usize_saturated!(data_offset);
-    let (data_end, overflow) = data_offset.overflowing_add(len);
-    if overflow || data_end > ecx.return_data.len() {
+    let data_offset = as_usize_saturated!(offset.to_u256());
+
+    // Bounds check BEFORE charging gas, matching revm.
+    let data_end = data_offset.saturating_add(len);
+    if data_end > ecx.return_data.len() {
         return InstructionResult::OutOfOffset;
     }
+
+    gas!(ecx, ecx.host.gas_params().copy_cost(len));
     if len != 0 {
         let memory_offset = try_into_usize!(memory_offset);
         ensure_memory!(ecx, memory_offset, len);
@@ -303,16 +317,18 @@ pub unsafe extern "C" fn __revmc_builtin_extcodehash(
     address: &mut EvmWord,
     spec_id: SpecId,
 ) -> InstructionResult {
-    let state_load = try_opt!(ecx.host.load_account_code_hash(address.to_address()));
-    *address = EvmWord::from_be_bytes(state_load.data.0);
-    let gas = if spec_id.is_enabled_in(SpecId::BERLIN) {
-        gas::warm_cold_cost(state_load.is_cold)
-    } else if spec_id.is_enabled_in(SpecId::ISTANBUL) {
-        700
+    let addr = address.to_address();
+    let account = if spec_id.is_enabled_in(SpecId::BERLIN) {
+        gas!(ecx, ecx.host.gas_params().warm_storage_read_cost());
+        berlin_load_account!(ecx, addr, false)
     } else {
-        400
+        let Ok(account) = ecx.host.load_account_info_skip_cold_load(addr, false, false) else {
+            return InstructionResult::FatalExternalError;
+        };
+        account
     };
-    gas!(ecx, gas);
+    let code_hash = if account.is_empty { revm_primitives::B256::ZERO } else { account.code_hash };
+    *address = EvmWord::from_be_bytes(code_hash.0);
     InstructionResult::Stop
 }
 
@@ -434,9 +450,29 @@ pub unsafe extern "C" fn __revmc_builtin_sload(
     spec_id: SpecId,
 ) -> InstructionResult {
     let address = ecx.input.target_address;
-    let state = try_opt!(ecx.host.sload(address, index.to_u256()));
-    gas!(ecx, gas::sload_cost(spec_id, state.is_cold));
-    *index = state.data.into();
+    let key = index.to_u256();
+    if spec_id.is_enabled_in(SpecId::BERLIN) {
+        gas!(ecx, ecx.host.gas_params().warm_storage_read_cost());
+        let additional_cold_cost = ecx.host.gas_params().cold_storage_additional_cost();
+        let skip_cold = ecx.gas.remaining() < additional_cold_cost;
+        match ecx.host.sload_skip_cold_load(address, key, skip_cold) {
+            Ok(storage) => {
+                if storage.is_cold {
+                    gas!(ecx, additional_cold_cost);
+                }
+                *index = storage.data.into();
+            }
+            Err(LoadError::ColdLoadSkipped) => return InstructionResult::OutOfGas,
+            Err(LoadError::DBError) => return InstructionResult::FatalExternalError,
+        }
+    } else {
+        let Some(storage) = ecx.host.sload(address, key) else {
+            return InstructionResult::FatalExternalError;
+        };
+        gas!(ecx, gas::sload_cost(spec_id, storage.is_cold));
+        *index = storage.data.into();
+    }
+
     InstructionResult::Stop
 }
 
@@ -448,11 +484,38 @@ pub unsafe extern "C" fn __revmc_builtin_sstore(
 ) -> InstructionResult {
     ensure_non_staticcall!(ecx);
 
-    let state =
-        try_opt!(ecx.host.sstore(ecx.input.target_address, index.to_u256(), value.to_u256()));
+    let target = ecx.input.target_address;
+    let is_istanbul = spec_id.is_enabled_in(SpecId::ISTANBUL);
 
-    gas_opt!(ecx, gas::sstore_cost(spec_id, &state.data, ecx.gas.remaining(), state.is_cold));
-    ecx.gas.record_refund(gas::sstore_refund(spec_id, &state.data));
+    // EIP-2200: If gasleft is less than or equal to gas stipend, fail with OOG.
+    if is_istanbul && ecx.gas.remaining() <= ecx.host.gas_params().call_stipend() {
+        return InstructionResult::ReentrancySentryOOG;
+    }
+
+    gas!(ecx, ecx.host.gas_params().sstore_static_gas());
+
+    let state_load = if spec_id.is_enabled_in(SpecId::BERLIN) {
+        let additional_cold_cost = ecx.host.gas_params().cold_storage_additional_cost();
+        let skip_cold = ecx.gas.remaining() < additional_cold_cost;
+        match ecx.host.sstore_skip_cold_load(target, index.to_u256(), value.to_u256(), skip_cold) {
+            Ok(load) => load,
+            Err(revm_context_interface::host::LoadError::ColdLoadSkipped) => {
+                return InstructionResult::OutOfGas;
+            }
+            Err(revm_context_interface::host::LoadError::DBError) => {
+                return InstructionResult::FatalExternalError;
+            }
+        }
+    } else {
+        let Some(load) = ecx.host.sstore(target, index.to_u256(), value.to_u256()) else {
+            return InstructionResult::FatalExternalError;
+        };
+        load
+    };
+
+    let gp = ecx.host.gas_params();
+    gas!(ecx, gp.sstore_dynamic_gas(is_istanbul, &state_load.data, state_load.is_cold));
+    ecx.gas.record_refund(gp.sstore_refund(is_istanbul, &state_load.data));
     InstructionResult::Stop
 }
 
@@ -482,7 +545,7 @@ pub unsafe extern "C" fn __revmc_builtin_mcopy(
     rev![dst, src, len]: &mut [EvmWord; 3],
 ) -> InstructionResult {
     let len = try_into_usize!(len);
-    gas_opt!(ecx, gas::dyn_verylowcopy_cost(len as u64));
+    gas!(ecx, ecx.host.gas_params().mcopy_cost(len));
     if len != 0 {
         let dst = try_into_usize!(dst);
         let src = try_into_usize!(src);
@@ -551,7 +614,7 @@ pub unsafe extern "C" fn __revmc_builtin_create(
             if len > max_initcode_size {
                 return InstructionResult::CreateInitCodeSizeLimit;
             }
-            gas!(ecx, gas::initcode_cost(len as u64));
+            gas!(ecx, ecx.host.gas_params().initcode_cost(len));
         }
 
         let code_offset = try_into_usize!(code_offset);
@@ -562,7 +625,8 @@ pub unsafe extern "C" fn __revmc_builtin_create(
     };
 
     let is_create2 = create_kind == CreateKind::Create2;
-    gas_opt!(ecx, if is_create2 { gas::create2_cost(len as u64) } else { Some(gas::CREATE) });
+    let gp = ecx.host.gas_params();
+    gas!(ecx, if is_create2 { gp.create2_cost(len) } else { gp.create_cost() });
 
     let scheme = if is_create2 {
         pop!(sp; salt);
@@ -573,7 +637,7 @@ pub unsafe extern "C" fn __revmc_builtin_create(
 
     let mut gas_limit = ecx.gas.remaining();
     if spec_id.is_enabled_in(SpecId::TANGERINE) {
-        gas_limit -= gas_limit / 64;
+        gas_limit = ecx.host.gas_params().call_stipend_reduction(gas_limit);
     }
     gas!(ecx, gas_limit);
 
@@ -674,8 +738,7 @@ pub unsafe extern "C" fn __revmc_builtin_call(
     // EIP-150: Gas cost changes for IO-heavy operations
     let mut gas_limit = if spec_id.is_enabled_in(SpecId::TANGERINE) {
         let gas = ecx.gas.remaining();
-        // take l64 part of gas_limit
-        (gas - gas / 64).min(local_gas_limit)
+        ecx.host.gas_params().call_stipend_reduction(gas).min(local_gas_limit)
     } else {
         local_gas_limit
     };
@@ -744,26 +807,38 @@ pub unsafe extern "C" fn __revmc_builtin_selfdestruct(
 ) -> InstructionResult {
     ensure_non_staticcall!(ecx);
 
-    // EIP-150: SELFDESTRUCT base cost is 5000 starting from TANGERINE
+    // EIP-150: SELFDESTRUCT static gas is 5000 in Tangerine+.
+    // revm charges this via the instruction table; revmc marks SELFDESTRUCT as DYNAMIC.
     if spec_id.is_enabled_in(SpecId::TANGERINE) {
         gas!(ecx, 5000);
     }
 
-    let res = match ecx.host.selfdestruct(ecx.input.target_address, target.to_address(), false) {
+    let cold_load_gas = ecx.host.gas_params().selfdestruct_cold_cost();
+    let skip_cold_load = ecx.gas.remaining() < cold_load_gas;
+    let res = match ecx.host.selfdestruct(
+        ecx.input.target_address,
+        target.to_address(),
+        skip_cold_load,
+    ) {
         Ok(r) => r,
-        Err(_) => return InstructionResult::FatalExternalError,
+        Err(revm_context_interface::host::LoadError::ColdLoadSkipped) => {
+            return InstructionResult::OutOfGas;
+        }
+        Err(revm_context_interface::host::LoadError::DBError) => {
+            return InstructionResult::FatalExternalError;
+        }
     };
 
     // EIP-161: State trie clearing (invariant-preserving alternative)
     let should_charge_topup = if spec_id.is_enabled_in(SpecId::SPURIOUS_DRAGON) {
-        res.data.had_value && !res.data.target_exists
+        res.had_value && !res.target_exists
     } else {
-        !res.data.target_exists
+        !res.target_exists
     };
 
     gas!(ecx, ecx.host.gas_params().selfdestruct_cost(should_charge_topup, res.is_cold));
 
-    if !res.data.previously_destroyed {
+    if !res.previously_destroyed {
         ecx.gas.record_refund(ecx.host.gas_params().selfdestruct_refund());
     }
 

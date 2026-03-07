@@ -23,7 +23,7 @@ fn run_fibonacci_test<B: Backend>(compiler: &mut EvmCompiler<B>, input: u16, dyn
     compiler.inspect_stack_length(true);
     let f = unsafe { compiler.jit("fib", &code, DEF_SPEC) }.unwrap();
 
-    with_evm_context(&code, |ecx, stack, stack_len| {
+    with_evm_context(&code, DEF_SPEC, |ecx, stack, stack_len| {
         if dynamic {
             stack.as_mut_slice()[0] = U256::from(input).into();
             *stack_len = 1;

@@ -409,6 +409,7 @@ impl Host for TestHost {
 
 pub fn with_evm_context<F: FnOnce(&mut EvmContext<'_>, &mut EvmStack, &mut usize) -> R, R>(
     bytecode: &[u8],
+    spec_id: SpecId,
     f: F,
 ) -> R {
     let input = InputsImpl {
@@ -423,9 +424,9 @@ pub fn with_evm_context<F: FnOnce(&mut EvmContext<'_>, &mut EvmStack, &mut usize
     let ext_bytecode = ExtBytecode::new(bytecode_obj);
 
     let mut interpreter =
-        Interpreter::new(SharedMemory::new(), ext_bytecode, input, false, DEF_SPEC, DEF_GAS_LIMIT);
+        Interpreter::new(SharedMemory::new(), ext_bytecode, input, false, spec_id, DEF_GAS_LIMIT);
 
-    let mut host = TestHost::new();
+    let mut host = TestHost::with_spec(spec_id);
 
     let (mut ecx, stack, stack_len) =
         EvmContext::from_interpreter_with_stack(&mut interpreter, &mut host);
@@ -478,7 +479,7 @@ fn run_compiled_test_case(test_case: &TestCase<'_>, f: EvmCompilerFn) {
         assert_ecx,
     } = *test_case;
 
-    with_evm_context(bytecode, |ecx, stack, stack_len| {
+    with_evm_context(bytecode, spec_id, |ecx, stack, stack_len| {
         if let Some(modify_ecx) = modify_ecx {
             modify_ecx(ecx);
         }
