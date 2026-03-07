@@ -75,7 +75,6 @@ jobs:
           cache-on-failure: true
       - uses: taiki-e/install-action@nextest
       - name: Run state tests
-        if: false
         run: |
           cargo nextest run -p revmc --features llvm --cargo-profile ethtests \
             --no-capture --no-fail-fast \
