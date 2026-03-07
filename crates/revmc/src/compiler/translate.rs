@@ -724,8 +724,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             }
             op::EXP => {
                 let sp = self.sp_after_inputs();
-                let spec_id = self.const_spec_id();
-                self.call_fallible_builtin(Builtin::Exp, &[self.ecx, sp, spec_id]);
+                self.call_fallible_builtin(Builtin::Exp, &[self.ecx, sp]);
             }
             op::SIGNEXTEND => {
                 let [ext, x] = self.popn();

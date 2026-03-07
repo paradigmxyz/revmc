@@ -1,4 +1,3 @@
-use crate::gas;
 use revm_interpreter::{as_usize_saturated, Gas, InstructionResult, SharedMemory};
 use revmc_context::{EvmContext, EvmWord};
 
@@ -81,7 +80,7 @@ pub(crate) unsafe fn copy_operation(
 ) -> InstructionResult {
     let len = try_into_usize!(len);
     if len != 0 {
-        gas_opt!(ecx, gas::dyn_verylowcopy_cost(len as u64));
+        gas!(ecx, ecx.host.gas_params().copy_cost(len));
         let memory_offset = try_into_usize!(memory_offset);
         ensure_memory!(ecx, memory_offset, len);
         let data_offset = data_offset.to_u256();
