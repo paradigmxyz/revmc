@@ -94,6 +94,16 @@ pub unsafe extern "C" fn __revmc_builtin_urem(rev![a, b]: &mut [EvmWord; 2]) {
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn __revmc_builtin_sdiv(rev![a, b]: &mut [EvmWord; 2]) {
+    *b = revm_interpreter::instructions::i256::i256_div(a.to_u256(), b.to_u256()).into();
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn __revmc_builtin_srem(rev![a, b]: &mut [EvmWord; 2]) {
+    *b = revm_interpreter::instructions::i256::i256_mod(a.to_u256(), b.to_u256()).into();
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn __revmc_builtin_addmod(rev![a, b, c]: &mut [EvmWord; 3]) {
     *c = a.to_u256().add_mod(b.to_u256(), c.to_u256()).into();
 }
