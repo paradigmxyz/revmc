@@ -3,7 +3,12 @@
 #[test]
 fn builtin_symbols_exported() {
     let exe = std::env::current_exe().unwrap();
-    let output = std::process::Command::new("nm").arg("-gU").arg(&exe).output().unwrap();
+    let args: &[&str] = if cfg!(target_os = "macos") {
+        &["-gU"]
+    } else {
+        &["-D", "--defined-only"]
+    };
+    let output = std::process::Command::new("nm").args(args).arg(&exe).output().unwrap();
     assert!(output.status.success(), "nm failed: {}", String::from_utf8_lossy(&output.stderr));
     let stdout = String::from_utf8(output.stdout).unwrap();
     let exported: Vec<&str> = stdout.lines().filter(|l| l.contains("__revmc_builtin_")).collect();
@@ -12,7 +17,6 @@ fn builtin_symbols_exported() {
         "no __revmc_builtin_* symbols exported from test binary; \
          AOT shared libraries will fail to resolve builtins at runtime"
     );
-    // Spot-check a few critical builtins.
     for name in ["__revmc_builtin_mstore", "__revmc_builtin_call", "__revmc_builtin_create"] {
         assert!(
             exported.iter().any(|l| l.contains(name)),
