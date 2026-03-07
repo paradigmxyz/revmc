@@ -3060,7 +3060,6 @@ dependencies = [
  "revm-primitives",
  "revm-state",
  "revmc-backend",
- "revmc-build",
  "revmc-builtins",
  "revmc-context",
  "revmc-cranelift",
