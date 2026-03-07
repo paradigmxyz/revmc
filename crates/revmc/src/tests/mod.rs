@@ -60,6 +60,9 @@ pub use runner::*;
 #[cfg(test)]
 mod statetest;
 
+#[cfg(test)]
+mod link;
+
 const I256_MAX: U256 = U256::from_limbs([
     0xFFFFFFFFFFFFFFFF,
     0xFFFFFFFFFFFFFFFF,
