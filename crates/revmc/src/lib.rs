@@ -54,14 +54,6 @@ pub use revm_primitives as primitives;
 #[doc(no_inline)]
 pub use revm_primitives::hardfork::SpecId;
 
-#[cfg(test)]
-const I256_MIN: U256 = U256::from_limbs([
-    0x0000000000000000,
-    0x0000000000000000,
-    0x0000000000000000,
-    0x8000000000000000,
-]);
-
 /// Enable for `cargo asm -p revmc --lib`.
 #[cfg(any())]
 pub fn generate_all_assembly() -> EvmCompiler<EvmLlvmBackend<'static>> {
