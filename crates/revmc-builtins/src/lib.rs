@@ -482,8 +482,6 @@ pub unsafe extern "C" fn __revmc_builtin_sstore(
     rev![index, value]: &mut [EvmWord; 2],
     spec_id: SpecId,
 ) -> InstructionResult {
-    use revm_context_interface::host::LoadError;
-
     ensure_non_staticcall!(ecx);
 
     let target = ecx.input.target_address;
@@ -740,10 +738,10 @@ pub unsafe extern "C" fn __revmc_builtin_call(
             is_call,
         ) {
             Ok(out) => out,
-            Err(revm_context_interface::host::LoadError::ColdLoadSkipped) => {
+            Err(LoadError::ColdLoadSkipped) => {
                 return InstructionResult::OutOfGas;
             }
-            Err(revm_context_interface::host::LoadError::DBError) => {
+            Err(LoadError::DBError) => {
                 return InstructionResult::FatalExternalError;
             }
         };
@@ -836,10 +834,10 @@ pub unsafe extern "C" fn __revmc_builtin_selfdestruct(
         skip_cold_load,
     ) {
         Ok(r) => r,
-        Err(revm_context_interface::host::LoadError::ColdLoadSkipped) => {
+        Err(LoadError::ColdLoadSkipped) => {
             return InstructionResult::OutOfGas;
         }
-        Err(revm_context_interface::host::LoadError::DBError) => {
+        Err(LoadError::DBError) => {
             return InstructionResult::FatalExternalError;
         }
     };
