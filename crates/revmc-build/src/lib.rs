@@ -8,7 +8,10 @@ const MANGLE_PREFIX: &str = "__revmc_builtin_";
 /// Emits the linker flag to export all the necessary symbols.
 pub fn emit() {
     let target_vendor = std::env::var("CARGO_CFG_TARGET_VENDOR").unwrap();
-    let flag =
-        if target_vendor == "apple" { "-exported_symbol" } else { "--export-dynamic-symbol" };
-    println!("cargo:rustc-link-arg=-Wl,{flag},{MANGLE_PREFIX}*");
+    if target_vendor == "apple" {
+        // Mach-O C symbols have a leading `_`, so `__revmc_builtin_*` becomes `___revmc_builtin_*`.
+        println!("cargo:rustc-link-arg=-Wl,-exported_symbol,_{MANGLE_PREFIX}*");
+    } else {
+        println!("cargo:rustc-link-arg=-Wl,--export-dynamic-symbol,{MANGLE_PREFIX}*");
+    }
 }
