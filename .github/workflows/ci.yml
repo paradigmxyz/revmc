@@ -55,6 +55,32 @@ jobs:
       - name: test
         run: cargo nextest run --workspace --cargo-profile ${{ matrix.profile }} --features ${{ env.ALL_BACKENDS }}
 
+  state-tests:
+    name: state-tests (${{ matrix.mode }})
+    runs-on: depot-ubuntu-latest-8
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [interpreter, jit, aot]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Checkout ethereum/tests
+        run: git submodule update --init --checkout --depth 1 tests/ethereum-tests
+      - name: Install LLVM
+        run: sudo .github/scripts/install_llvm_ubuntu.sh ${{ env.LLVM_VERSION }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - uses: taiki-e/install-action@nextest
+      - name: Run state tests
+        if: false
+        run: |
+          cargo nextest run -p revmc --features llvm --cargo-profile ethtests \
+            --no-capture --no-fail-fast \
+            -E 'test(statetest::${{ matrix.mode }})'
+
   feature-checks:
     runs-on: ubuntu-latest
     timeout-minutes: 30
