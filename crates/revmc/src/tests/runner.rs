@@ -409,13 +409,6 @@ impl Host for TestHost {
 
 pub fn with_evm_context<F: FnOnce(&mut EvmContext<'_>, &mut EvmStack, &mut usize) -> R, R>(
     bytecode: &[u8],
-    f: F,
-) -> R {
-    with_evm_context_spec(bytecode, DEF_SPEC, f)
-}
-
-pub fn with_evm_context_spec<F: FnOnce(&mut EvmContext<'_>, &mut EvmStack, &mut usize) -> R, R>(
-    bytecode: &[u8],
     spec_id: SpecId,
     f: F,
 ) -> R {
@@ -486,7 +479,7 @@ fn run_compiled_test_case(test_case: &TestCase<'_>, f: EvmCompilerFn) {
         assert_ecx,
     } = *test_case;
 
-    with_evm_context_spec(bytecode, spec_id, |ecx, stack, stack_len| {
+    with_evm_context(bytecode, spec_id, |ecx, stack, stack_len| {
         if let Some(modify_ecx) = modify_ecx {
             modify_ecx(ecx);
         }

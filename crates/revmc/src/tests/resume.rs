@@ -15,7 +15,7 @@ const TEST: &[u8] = &[
     // 1
     op::PUSH1, 0x69,
     TEST_SUSPEND,
-    
+
     // 2
     op::ADD,
     TEST_SUSPEND,
@@ -27,7 +27,7 @@ const TEST: &[u8] = &[
 fn run<B: Backend>(compiler: &mut EvmCompiler<B>, code: &[u8], spec_id: SpecId) {
     let f = unsafe { compiler.jit("resume", code, spec_id) }.unwrap();
 
-    with_evm_context(code, |ecx, stack, stack_len| {
+    with_evm_context(code, spec_id, |ecx, stack, stack_len| {
         assert_eq!(ecx.resume_at, 0);
 
         // Suspension returns `InstructionResult::Stop` with `resume_at` set to the next
