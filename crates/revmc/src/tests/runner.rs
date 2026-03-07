@@ -407,6 +407,13 @@ impl Host for TestHost {
     }
 }
 
+pub fn with_evm_context<F: FnOnce(&mut EvmContext<'_>, &mut EvmStack, &mut usize) -> R, R>(
+    bytecode: &[u8],
+    f: F,
+) -> R {
+    with_evm_context_spec(bytecode, DEF_SPEC, f)
+}
+
 pub fn with_evm_context_spec<F: FnOnce(&mut EvmContext<'_>, &mut EvmStack, &mut usize) -> R, R>(
     bytecode: &[u8],
     spec_id: SpecId,
@@ -431,13 +438,6 @@ pub fn with_evm_context_spec<F: FnOnce(&mut EvmContext<'_>, &mut EvmStack, &mut 
     let (mut ecx, stack, stack_len) =
         EvmContext::from_interpreter_with_stack(&mut interpreter, &mut host);
     f(&mut ecx, stack, stack_len)
-}
-
-pub fn with_evm_context<F: FnOnce(&mut EvmContext<'_>, &mut EvmStack, &mut usize) -> R, R>(
-    bytecode: &[u8],
-    f: F,
-) -> R {
-    with_evm_context_spec(bytecode, DEF_SPEC, f)
 }
 
 #[cfg(feature = "llvm")]
