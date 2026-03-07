@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/*", "examples/*", "fuzz", "tests/state-tests"]
+members = ["crates/*", "examples/*", "fuzz"]
 default-members = ["crates/revmc-cli"]
 resolver = "2"
 
@@ -74,6 +74,10 @@ codegen-units = 1
 inherits = "release"
 debug = 2
 strip = false
+
+[profile.ethtests]
+inherits = "dev"
+opt-level = 3
 
 [profile.bench]
 inherits = "profiling"
