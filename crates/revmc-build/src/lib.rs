@@ -11,6 +11,8 @@ pub fn emit() {
     if target_vendor == "apple" {
         // Mach-O C symbols have a leading `_`, so `__revmc_builtin_*` becomes `___revmc_builtin_*`.
         println!("cargo:rustc-link-arg=-Wl,-exported_symbol,_{MANGLE_PREFIX}*");
+        // Preserve global symbols in executables during LTO dead-stripping.
+        println!("cargo:rustc-link-arg=-Wl,-export_dynamic");
     } else {
         println!("cargo:rustc-link-arg=-Wl,--export-dynamic-symbol,{MANGLE_PREFIX}*");
     }
