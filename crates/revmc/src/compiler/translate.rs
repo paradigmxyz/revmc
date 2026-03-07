@@ -1,9 +1,7 @@
 //! EVM to IR translation.
 
 use super::default_attrs;
-use crate::{
-    Backend, Builder, Bytecode, EvmContext, Inst, InstData, InstFlags, IntCC, Result, I256_MIN,
-};
+use crate::{Backend, Builder, Bytecode, EvmContext, Inst, InstData, InstFlags, IntCC, Result};
 use revm_bytecode::opcode as op;
 use revm_interpreter::{InputsImpl, InstructionResult};
 use revm_primitives::U256;
@@ -629,21 +627,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 let r = self.bcx.select(overflow, default, r);
                 self.push(r);
             }};
-            (@if_not_zero $op:ident) => {{
-                // Use `lazy_select` (conditional branch) instead of `select` to avoid
-                // computing `$op(a, b)` when `b == 0`. Division/remainder by zero is UB
-                // in LLVM IR, and `select` evaluates both operands unconditionally, so
-                // LLVM may exploit the UB to remove the zero check entirely.
-                let [a, b] = self.popn();
-                let b_is_zero = self.bcx.icmp_imm(IntCC::Equal, b, 0);
-                let r = self.bcx.lazy_select(
-                    b_is_zero,
-                    self.word_type,
-                    |bcx| bcx.iconst_256(U256::ZERO),
-                    |bcx| bcx.$op(a, b),
-                );
-                self.push(r);
-            }};
         }
 
         macro_rules! field {
@@ -690,30 +673,17 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 let _ = self.call_builtin(Builtin::UDiv, &[sp]);
             }
             op::SDIV => {
-                let [a, b] = self.popn();
-                let b_is_zero = self.bcx.icmp_imm(IntCC::Equal, b, 0);
-                let r = self.bcx.lazy_select(
-                    b_is_zero,
-                    self.word_type,
-                    |bcx| bcx.iconst_256(U256::ZERO),
-                    |bcx| {
-                        let min = bcx.iconst_256(I256_MIN);
-                        let is_weird_sdiv_edge_case = {
-                            let a_is_min = bcx.icmp(IntCC::Equal, a, min);
-                            let b_is_neg1 = bcx.icmp_imm(IntCC::Equal, b, -1);
-                            bcx.bitand(a_is_min, b_is_neg1)
-                        };
-                        let sdiv_result = bcx.sdiv(a, b);
-                        bcx.select(is_weird_sdiv_edge_case, min, sdiv_result)
-                    },
-                );
-                self.push(r);
+                let sp = self.sp_after_inputs();
+                let _ = self.call_builtin(Builtin::SDiv, &[sp]);
             }
             op::MOD => {
                 let sp = self.sp_after_inputs();
                 let _ = self.call_builtin(Builtin::URem, &[sp]);
             }
-            op::SMOD => binop!(@if_not_zero srem),
+            op::SMOD => {
+                let sp = self.sp_after_inputs();
+                let _ = self.call_builtin(Builtin::SRem, &[sp]);
+            }
             op::ADDMOD => {
                 let sp = self.sp_after_inputs();
                 let _ = self.call_builtin(Builtin::AddMod, &[sp]);
