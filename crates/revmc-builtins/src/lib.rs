@@ -485,42 +485,30 @@ pub unsafe extern "C" fn __revmc_builtin_sstore(
     ensure_non_staticcall!(ecx);
 
     let target = ecx.input.target_address;
-    let index = index.to_u256();
-    let value = value.to_u256();
-    let gas_params = ecx.host.gas_params();
-
-    // EIP-2200: if gasleft <= call_stipend, fail with OOG (reentrancy sentry).
     let is_istanbul = spec_id.is_enabled_in(SpecId::ISTANBUL);
-    if is_istanbul && ecx.gas.remaining() <= gas_params.call_stipend() {
+
+    // EIP-2200: If gasleft is less than or equal to gas stipend, fail with OOG.
+    if is_istanbul && ecx.gas.remaining() <= ecx.host.gas_params().call_stipend() {
         return InstructionResult::ReentrancySentryOOG;
     }
 
-    // Deduct static gas first (before host call).
-    gas!(ecx, gas_params.sstore_static_gas());
+    gas!(ecx, ecx.host.gas_params().sstore_static_gas());
 
-    // Perform the storage write, using skip_cold_load for Berlin+.
     let state_load = if spec_id.is_enabled_in(SpecId::BERLIN) {
-        let additional_cold_cost = gas_params.cold_storage_additional_cost();
+        let additional_cold_cost = ecx.host.gas_params().cold_storage_additional_cost();
         let skip_cold = ecx.gas.remaining() < additional_cold_cost;
-        match ecx.host.sstore_skip_cold_load(target, index, value, skip_cold) {
+        match ecx.host.sstore_skip_cold_load(target, index.to_u256(), value.to_u256(), skip_cold) {
             Ok(load) => load,
             Err(LoadError::ColdLoadSkipped) => return InstructionResult::OutOfGas,
             Err(LoadError::DBError) => return InstructionResult::FatalExternalError,
         }
     } else {
-        try_host!(ecx.host.sstore(target, index, value))
+        try_host!(ecx.host.sstore(target, index.to_u256(), value.to_u256()))
     };
 
-    // Deduct dynamic gas (depends on storage state).
-    gas!(
-        ecx,
-        ecx.host
-            .gas_params()
-            .sstore_dynamic_gas(is_istanbul, &state_load.data, state_load.is_cold,)
-    );
-
-    // Record refund.
-    ecx.gas.record_refund(ecx.host.gas_params().sstore_refund(is_istanbul, &state_load.data));
+    let gp = ecx.host.gas_params();
+    gas!(ecx, gp.sstore_dynamic_gas(is_istanbul, &state_load.data, state_load.is_cold));
+    ecx.gas.record_refund(gp.sstore_refund(is_istanbul, &state_load.data));
     InstructionResult::Stop
 }
 
@@ -709,25 +697,17 @@ pub unsafe extern "C" fn __revmc_builtin_call(
         usize::MAX // unrealistic value so we are sure it is not used
     };
 
-    // Charge the CALL base access cost (warm_storage_read_cost for Berlin+, 700 for
-    // Tangerine+, 40 for pre-Tangerine). The interpreter charges this as static opcode gas;
-    // revmc marks CALL as fully dynamic, so the builtin must do it.
-    let base_access_cost = if spec_id.is_enabled_in(SpecId::BERLIN) {
-        ecx.host.gas_params().warm_storage_read_cost()
-    } else if spec_id.is_enabled_in(SpecId::TANGERINE) {
-        700
-    } else {
-        40
-    };
-    gas!(ecx, base_access_cost);
+    // Charge the CALL base access cost up-front. In the interpreter this is charged as static
+    // opcode gas before entering call helpers; revmc marks CALL as dynamic, so the builtin must
+    // do it.
+    gas!(ecx, ecx.host.gas_params().warm_storage_read_cost());
 
-    // Charge transfer value cost.
     if transfers_value {
         gas!(ecx, ecx.host.gas_params().transfer_value_cost());
     }
 
-    // Load delegated account and calculate dynamic gas.
-    let is_call = call_kind == CallKind::Call;
+    // Match interpreter call path: load delegated account and pass resolved bytecode/hash
+    // through CallInputs::known_bytecode (covers EIP-7702 delegation and EOF execution).
     let (dynamic_gas, bytecode, code_hash) =
         match revm_interpreter::instructions::contract::load_account_delegated(
             ecx.host,
@@ -735,15 +715,11 @@ pub unsafe extern "C" fn __revmc_builtin_call(
             ecx.gas.remaining(),
             to,
             transfers_value,
-            is_call,
+            call_kind == CallKind::Call,
         ) {
             Ok(out) => out,
-            Err(LoadError::ColdLoadSkipped) => {
-                return InstructionResult::OutOfGas;
-            }
-            Err(LoadError::DBError) => {
-                return InstructionResult::FatalExternalError;
-            }
+            Err(LoadError::ColdLoadSkipped) => return InstructionResult::OutOfGas,
+            Err(LoadError::DBError) => return InstructionResult::FatalExternalError,
         };
 
     gas!(ecx, dynamic_gas);
@@ -834,12 +810,8 @@ pub unsafe extern "C" fn __revmc_builtin_selfdestruct(
         skip_cold_load,
     ) {
         Ok(r) => r,
-        Err(LoadError::ColdLoadSkipped) => {
-            return InstructionResult::OutOfGas;
-        }
-        Err(LoadError::DBError) => {
-            return InstructionResult::FatalExternalError;
-        }
+        Err(LoadError::ColdLoadSkipped) => return InstructionResult::OutOfGas,
+        Err(LoadError::DBError) => return InstructionResult::FatalExternalError,
     };
 
     // EIP-161: State trie clearing (invariant-preserving alternative)
