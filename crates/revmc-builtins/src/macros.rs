@@ -8,15 +8,6 @@ macro_rules! tri {
     };
 }
 
-macro_rules! try_opt {
-    ($e:expr) => {
-        match $e {
-            Some(x) => x,
-            None => return InstructionResult::InvalidOperandOOG,
-        }
-    };
-}
-
 macro_rules! try_host {
     ($e:expr) => {
         match $e {
@@ -50,6 +41,29 @@ macro_rules! gas_opt {
             None => return InstructionResult::OutOfGas,
         }
     };
+}
+
+/// Mirrors revm's `berlin_load_account!` macro.
+/// Loads account info with the cold-load-skip optimization: if remaining gas
+/// is less than the cold cost, skip the DB load and return OOG immediately.
+/// Charges both `warm_storage_read_cost` (which revm's instruction table charges
+/// as static gas) and `cold_account_additional_cost` if cold.
+macro_rules! berlin_load_account {
+    ($ecx:expr, $address:expr, $load_code:expr) => {{
+        use revm_context_interface::host::LoadError;
+        let cold_load_gas = $ecx.host.gas_params().cold_account_additional_cost();
+        let skip_cold_load = $ecx.gas.remaining() < cold_load_gas;
+        match $ecx.host.load_account_info_skip_cold_load($address, $load_code, skip_cold_load) {
+            Ok(account) => {
+                if account.is_cold {
+                    gas!($ecx, cold_load_gas);
+                }
+                account
+            }
+            Err(LoadError::ColdLoadSkipped) => return InstructionResult::OutOfGas,
+            Err(LoadError::DBError) => return InstructionResult::FatalExternalError,
+        }
+    }};
 }
 
 macro_rules! ensure_non_staticcall {

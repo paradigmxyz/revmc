@@ -219,7 +219,7 @@ builtins! {
     URem           = __revmc_builtin_urem(@[sp] ptr) None,
     AddMod         = __revmc_builtin_addmod(@[sp] ptr) None,
     MulMod         = __revmc_builtin_mulmod(@[sp] ptr) None,
-    Exp            = __revmc_builtin_exp(@[ecx] ptr, @[sp] ptr, u8) Some(u8),
+    Exp            = __revmc_builtin_exp(@[ecx] ptr, @[sp] ptr) Some(u8),
     Keccak256      = __revmc_builtin_keccak256(@[ecx] ptr, @[sp] ptr) Some(u8),
     Balance        = __revmc_builtin_balance(@[ecx] ptr, @[sp] ptr, u8) Some(u8),
     Origin         = __revmc_builtin_origin(@[ecx] ptr, @[sp] ptr) None,

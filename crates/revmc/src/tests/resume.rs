@@ -15,7 +15,7 @@ const TEST: &[u8] = &[
     // 1
     op::PUSH1, 0x69,
     TEST_SUSPEND,
-    
+
     // 2
     op::ADD,
     TEST_SUSPEND,
