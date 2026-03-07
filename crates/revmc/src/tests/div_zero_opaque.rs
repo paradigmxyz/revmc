@@ -61,7 +61,7 @@ fn run_opaque_zero_div_test<B: Backend>(
     compiler.inspect_stack_length(true);
     let f = unsafe { compiler.jit(name, &code, DEF_SPEC) }.unwrap();
 
-    with_evm_context(&code, |ecx, stack, stack_len| {
+    with_evm_context(&code, DEF_SPEC, |ecx, stack, stack_len| {
         let r = unsafe { f.call(Some(stack), Some(stack_len), ecx) };
         assert_eq!(r, InstructionResult::Stop, "{name}: unexpected return");
         assert_eq!(*stack_len, 1, "{name}: expected 1 stack element");
