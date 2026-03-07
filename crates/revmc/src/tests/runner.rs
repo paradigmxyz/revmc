@@ -433,19 +433,6 @@ pub fn with_evm_context<F: FnOnce(&mut EvmContext<'_>, &mut EvmStack, &mut usize
     f(&mut ecx, stack, stack_len)
 }
 
-#[cfg(feature = "llvm")]
-fn with_llvm_backend(opt_level: OptimizationLevel, f: impl FnOnce(EvmLlvmBackend<'_>)) {
-    llvm::with_llvm_context(|cx| f(EvmLlvmBackend::new(cx, false, opt_level).unwrap()))
-}
-
-#[cfg(feature = "llvm")]
-pub fn with_llvm_backend_jit(
-    opt_level: OptimizationLevel,
-    f: fn(&mut EvmCompiler<EvmLlvmBackend<'_>>),
-) {
-    with_llvm_backend(opt_level, |backend| f(&mut EvmCompiler::new(backend)));
-}
-
 pub fn set_test_dump<B: Backend>(compiler: &mut EvmCompiler<B>, module_path: &str) {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().parent().unwrap();
     let mut dump_path = root.to_path_buf();

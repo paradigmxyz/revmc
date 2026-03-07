@@ -22,14 +22,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: ["ubuntu-latest", "macos-14"]
+        runner: ["ubuntu-latest", "macos-latest"]
         arch: ["x64", "arm64"]
         toolchain: ["stable", "nightly"]
         profile: ["dev", "release"]
         exclude:
           - runner: "ubuntu-latest"
             arch: "arm64"
-          - runner: "macos-14"
+          - runner: "macos-latest"
             arch: "x64"
     steps:
       - uses: actions/checkout@v4
@@ -41,7 +41,7 @@ jobs:
         run: |
           v=${{ env.LLVM_VERSION }}
           brew install "llvm@${v}"
-          echo "LLVM_SYS_${v}0_PREFIX=$(brew --prefix llvm@${v})" >> $GITHUB_ENV
+          echo "LLVM_SYS_${v}1_PREFIX=$(brew --prefix llvm@${v})" >> $GITHUB_ENV
           echo "/opt/homebrew/opt/llvm@${v}/bin" >> $GITHUB_PATH
       - name: llvm-config
         run: llvm-config --version --bindir --libdir
@@ -56,26 +56,34 @@ jobs:
         run: cargo nextest run --workspace --cargo-profile ${{ matrix.profile }} --features ${{ env.ALL_BACKENDS }}
 
   state-tests:
-    name: state-tests (${{ matrix.mode }})
-    runs-on: depot-ubuntu-latest-8
+    name: state-tests ${{ matrix.runner }} (${{ matrix.mode }})
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
+        runner: ["depot-ubuntu-latest-8", "depot-macos-latest"]
         mode: [interpreter, jit, aot]
     steps:
       - uses: actions/checkout@v4
       - name: Checkout ethereum/tests
         run: git submodule update --init --checkout --depth 1 tests/ethereum-tests
-      - name: Install LLVM
+      - name: Install LLVM (apt)
+        if: ${{ !contains(matrix.runner, 'macos') }}
         run: sudo .github/scripts/install_llvm_ubuntu.sh ${{ env.LLVM_VERSION }}
+      - name: Install LLVM (brew)
+        if: ${{ contains(matrix.runner, 'macos') }}
+        run: |
+          v=${{ env.LLVM_VERSION }}
+          brew install "llvm@${v}"
+          echo "LLVM_SYS_${v}1_PREFIX=$(brew --prefix llvm@${v})" >> $GITHUB_ENV
+          echo "/opt/homebrew/opt/llvm@${v}/bin" >> $GITHUB_PATH
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
       - uses: taiki-e/install-action@nextest
       - name: Run state tests
-        if: false
         run: |
           cargo nextest run -p revmc --features llvm --cargo-profile ethtests \
             --no-capture --no-fail-fast \

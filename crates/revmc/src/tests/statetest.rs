@@ -16,7 +16,8 @@ fn run_state_tests(mode: CompileMode) {
         return;
     }
 
-    revmc_statetest::compiled::run(test_files, false, false, mode).unwrap();
+    let single_thread = std::env::var("SINGLE_THREAD").is_ok();
+    revmc_statetest::compiled::run(test_files, single_thread, false, mode).unwrap();
 }
 
 #[test]

@@ -7,7 +7,7 @@ edition = "2021"
 [dependencies]
 revmc = { workspace = true, features = ["llvm"] }
 
-revm = { workspace = true, features = ["std", "test-types"] }
+revm = { workspace = true, features = ["std", "test-types", "tracer"] }
 
 alloy-rlp = { version = "0.3", features = ["arrayvec", "derive"] }
 dashmap = "6"

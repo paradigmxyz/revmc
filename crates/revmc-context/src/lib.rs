@@ -45,7 +45,7 @@ pub struct EvmContext<'a> {
     /// `0` is the initial state.
     #[doc(hidden)]
     pub resume_at: usize,
-    /// The contract bytecode, for CODECOPY at runtime in AOT mode.
+    /// The contract bytecode, for CODECOPY at runtime.
     pub bytecode: *const [u8],
 }
 
@@ -103,9 +103,6 @@ impl<'a> EvmContext<'a> {
 #[cfg(not(feature = "host-ext-any"))]
 pub trait HostExt: Host {}
 
-#[cfg(not(feature = "host-ext-any"))]
-impl<T: Host> HostExt for T {}
-
 /// Extension trait for [`Host`].
 #[cfg(feature = "host-ext-any")]
 pub trait HostExt: Host + Any {
@@ -114,6 +111,9 @@ pub trait HostExt: Host + Any {
     #[doc(hidden)]
     fn as_any_mut(&mut self) -> &mut dyn Any;
 }
+
+#[cfg(not(feature = "host-ext-any"))]
+impl<T: Host> HostExt for T {}
 
 #[cfg(feature = "host-ext-any")]
 impl<T: Host + Any> HostExt for T {

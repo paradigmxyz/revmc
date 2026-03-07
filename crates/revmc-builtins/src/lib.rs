@@ -155,9 +155,7 @@ pub unsafe extern "C" fn __revmc_builtin_balance(
         let account = berlin_load_account!(ecx, addr, false);
         *address = account.balance.into();
     } else {
-        let Ok(account) = ecx.host.load_account_info_skip_cold_load(addr, false, false) else {
-            return InstructionResult::FatalExternalError;
-        };
+        let account = try_host!(ecx.host.load_account_info_skip_cold_load(addr, false, false).ok());
         *address = account.balance.into();
     }
     InstructionResult::Stop
@@ -258,9 +256,7 @@ pub unsafe extern "C" fn __revmc_builtin_extcodesize(
         let account = berlin_load_account!(ecx, addr, true);
         *address = U256::from(account.code.as_ref().unwrap().len()).into();
     } else {
-        let Ok(account) = ecx.host.load_account_info_skip_cold_load(addr, true, false) else {
-            return InstructionResult::FatalExternalError;
-        };
+        let account = try_host!(ecx.host.load_account_info_skip_cold_load(addr, true, false).ok());
         *address = U256::from(account.code.as_ref().unwrap().len()).into();
     }
     InstructionResult::Stop
@@ -287,9 +283,7 @@ pub unsafe extern "C" fn __revmc_builtin_extcodecopy(
         let account = berlin_load_account!(ecx, addr, true);
         account.code.as_ref().unwrap().original_bytes()
     } else {
-        let Some(code) = ecx.host.load_account_code(addr) else {
-            return InstructionResult::FatalExternalError;
-        };
+        let code = try_host!(ecx.host.load_account_code(addr));
         code.data
     };
 
@@ -332,10 +326,7 @@ pub unsafe extern "C" fn __revmc_builtin_extcodehash(
         gas!(ecx, ecx.host.gas_params().warm_storage_read_cost());
         berlin_load_account!(ecx, addr, false)
     } else {
-        let Ok(account) = ecx.host.load_account_info_skip_cold_load(addr, false, false) else {
-            return InstructionResult::FatalExternalError;
-        };
-        account
+        try_host!(ecx.host.load_account_info_skip_cold_load(addr, false, false).ok())
     };
     let code_hash = if account.is_empty { revm_primitives::B256::ZERO } else { account.code_hash };
     *address = EvmWord::from_be_bytes(code_hash.0);
@@ -476,9 +467,7 @@ pub unsafe extern "C" fn __revmc_builtin_sload(
             Err(LoadError::DBError) => return InstructionResult::FatalExternalError,
         }
     } else {
-        let Some(storage) = ecx.host.sload(address, key) else {
-            return InstructionResult::FatalExternalError;
-        };
+        let storage = try_host!(ecx.host.sload(address, key));
         gas!(ecx, gas::sload_cost(spec_id, storage.is_cold));
         *index = storage.data.into();
     }
@@ -509,18 +498,11 @@ pub unsafe extern "C" fn __revmc_builtin_sstore(
         let skip_cold = ecx.gas.remaining() < additional_cold_cost;
         match ecx.host.sstore_skip_cold_load(target, index.to_u256(), value.to_u256(), skip_cold) {
             Ok(load) => load,
-            Err(revm_context_interface::host::LoadError::ColdLoadSkipped) => {
-                return InstructionResult::OutOfGas;
-            }
-            Err(revm_context_interface::host::LoadError::DBError) => {
-                return InstructionResult::FatalExternalError;
-            }
+            Err(LoadError::ColdLoadSkipped) => return InstructionResult::OutOfGas,
+            Err(LoadError::DBError) => return InstructionResult::FatalExternalError,
         }
     } else {
-        let Some(load) = ecx.host.sstore(target, index.to_u256(), value.to_u256()) else {
-            return InstructionResult::FatalExternalError;
-        };
-        load
+        try_host!(ecx.host.sstore(target, index.to_u256(), value.to_u256()))
     };
 
     let gp = ecx.host.gas_params();
@@ -735,12 +717,8 @@ pub unsafe extern "C" fn __revmc_builtin_call(
             call_kind == CallKind::Call,
         ) {
             Ok(out) => out,
-            Err(revm_context_interface::host::LoadError::ColdLoadSkipped) => {
-                return InstructionResult::OutOfGas;
-            }
-            Err(revm_context_interface::host::LoadError::DBError) => {
-                return InstructionResult::FatalExternalError;
-            }
+            Err(LoadError::ColdLoadSkipped) => return InstructionResult::OutOfGas,
+            Err(LoadError::DBError) => return InstructionResult::FatalExternalError,
         };
 
     gas!(ecx, dynamic_gas);
@@ -831,12 +809,8 @@ pub unsafe extern "C" fn __revmc_builtin_selfdestruct(
         skip_cold_load,
     ) {
         Ok(r) => r,
-        Err(revm_context_interface::host::LoadError::ColdLoadSkipped) => {
-            return InstructionResult::OutOfGas;
-        }
-        Err(revm_context_interface::host::LoadError::DBError) => {
-            return InstructionResult::FatalExternalError;
-        }
+        Err(LoadError::ColdLoadSkipped) => return InstructionResult::OutOfGas,
+        Err(LoadError::DBError) => return InstructionResult::FatalExternalError,
     };
 
     // EIP-161: State trie clearing (invariant-preserving alternative)

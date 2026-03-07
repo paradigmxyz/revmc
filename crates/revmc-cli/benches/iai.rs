@@ -5,7 +5,7 @@ use iai_callgrind::{
     BinaryBenchmarkGroup, Command, EventKind, FlamegraphConfig, RegressionConfig,
 };
 
-const CMD: &str = env!("CARGO_BIN_EXE_revmc-cli");
+const CMD: &str = env!("CARGO_BIN_EXE_revmc");
 
 binary_benchmark_group!(
     name = revmc;
@@ -14,7 +14,8 @@ binary_benchmark_group!(
 
 fn setup_group(group: &mut BinaryBenchmarkGroup) {
     let make_bench = |name: &str, small: bool, is_ct: bool| {
-        let mut args = Vec::with_capacity(3);
+        let mut args = Vec::with_capacity(4);
+        args.push("run");
         args.push(name);
         // let out_dir = std::env::temp_dir().join("revmc-cli-iai");
         // let so = out_dir.join(name).join("a.so");
