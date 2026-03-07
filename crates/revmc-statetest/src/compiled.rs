@@ -15,7 +15,8 @@ use revm::{
     Context, MainBuilder, MainContext, MainnetEvm,
 };
 use revmc::{
-    llvm, EvmCompiler, EvmCompilerFn, EvmLlvmBackend, Linker, OptimizationLevel,
+    llvm::{self, with_llvm_context},
+    EvmCompiler, EvmCompilerFn, EvmLlvmBackend, Linker, OptimizationLevel,
 };
 use std::{
     collections::HashMap,
