@@ -46,8 +46,8 @@ macro_rules! gas_opt {
 /// Mirrors revm's `berlin_load_account!` macro.
 /// Loads account info with the cold-load-skip optimization: if remaining gas
 /// is less than the cold cost, skip the DB load and return OOG immediately.
-/// Only charges `cold_account_additional_cost` if cold; the caller is responsible
-/// for any static/warm gas.
+/// Charges both `warm_storage_read_cost` (which revm's instruction table charges
+/// as static gas) and `cold_account_additional_cost` if cold.
 macro_rules! berlin_load_account {
     ($ecx:expr, $address:expr, $load_code:expr) => {{
         use revm_context_interface::host::LoadError;

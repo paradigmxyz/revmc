@@ -138,9 +138,9 @@ pub unsafe extern "C" fn __revmc_builtin_balance(
     spec_id: SpecId,
 ) -> InstructionResult {
     let addr = address.to_address();
-    // Berlin+: use cold-load-skip optimization (mirrors revm's berlin_load_account! macro).
-    // Pre-Berlin: no warm/cold model, use load_account_info_skip_cold_load with skip=false.
     if spec_id.is_enabled_in(SpecId::BERLIN) {
+        // Warm base cost; cold additional charged by the macro if cold.
+        gas!(ecx, ecx.host.gas_params().warm_storage_read_cost());
         let account = berlin_load_account!(ecx, addr, false);
         *address = account.balance.into();
     } else {
@@ -243,6 +243,7 @@ pub unsafe extern "C" fn __revmc_builtin_extcodesize(
 ) -> InstructionResult {
     let addr = address.to_address();
     if spec_id.is_enabled_in(SpecId::BERLIN) {
+        gas!(ecx, ecx.host.gas_params().warm_storage_read_cost());
         let account = berlin_load_account!(ecx, addr, true);
         *address = U256::from(account.code.as_ref().unwrap().len()).into();
     } else {
@@ -271,6 +272,7 @@ pub unsafe extern "C" fn __revmc_builtin_extcodecopy(
     }
 
     let code = if spec_id.is_enabled_in(SpecId::BERLIN) {
+        gas!(ecx, ecx.host.gas_params().warm_storage_read_cost());
         let account = berlin_load_account!(ecx, addr, true);
         account.code.as_ref().unwrap().original_bytes()
     } else {
@@ -291,13 +293,15 @@ pub unsafe extern "C" fn __revmc_builtin_returndatacopy(
     rev![memory_offset, offset, len]: &mut [EvmWord; 3],
 ) -> InstructionResult {
     let len = try_into_usize!(len);
-    gas!(ecx, ecx.host.gas_params().copy_cost(len));
-    let data_offset = offset.to_u256();
-    let data_offset = as_usize_saturated!(data_offset);
-    let (data_end, overflow) = data_offset.overflowing_add(len);
-    if overflow || data_end > ecx.return_data.len() {
+    let data_offset = as_usize_saturated!(offset.to_u256());
+
+    // Bounds check BEFORE charging gas, matching revm.
+    let data_end = data_offset.saturating_add(len);
+    if data_end > ecx.return_data.len() {
         return InstructionResult::OutOfOffset;
     }
+
+    gas!(ecx, ecx.host.gas_params().copy_cost(len));
     if len != 0 {
         let memory_offset = try_into_usize!(memory_offset);
         ensure_memory!(ecx, memory_offset, len);
@@ -314,6 +318,7 @@ pub unsafe extern "C" fn __revmc_builtin_extcodehash(
 ) -> InstructionResult {
     let addr = address.to_address();
     let account = if spec_id.is_enabled_in(SpecId::BERLIN) {
+        gas!(ecx, ecx.host.gas_params().warm_storage_read_cost());
         berlin_load_account!(ecx, addr, false)
     } else {
         let Ok(account) = ecx.host.load_account_info_skip_cold_load(addr, false, false) else {
@@ -450,6 +455,7 @@ pub unsafe extern "C" fn __revmc_builtin_sload(
     let address = ecx.input.target_address;
     let key = index.to_u256();
     if spec_id.is_enabled_in(SpecId::BERLIN) {
+        gas!(ecx, ecx.host.gas_params().warm_storage_read_cost());
         let storage = berlin_sload!(ecx, address, key);
         *index = storage.data.into();
     } else {
@@ -785,6 +791,12 @@ pub unsafe extern "C" fn __revmc_builtin_selfdestruct(
 ) -> InstructionResult {
     ensure_non_staticcall!(ecx);
 
+    // EIP-150: SELFDESTRUCT static gas is 5000 in Tangerine+.
+    // revm charges this via the instruction table; revmc marks SELFDESTRUCT as DYNAMIC.
+    if spec_id.is_enabled_in(SpecId::TANGERINE) {
+        gas!(ecx, 5000);
+    }
+
     let cold_load_gas = ecx.host.gas_params().selfdestruct_cold_cost();
     let skip_cold_load = ecx.gas.remaining() < cold_load_gas;
     let res = match ecx.host.selfdestruct(ecx.input.target_address, target.to_address(), skip_cold_load) {
@@ -799,14 +811,14 @@ pub unsafe extern "C" fn __revmc_builtin_selfdestruct(
 
     // EIP-161: State trie clearing (invariant-preserving alternative)
     let should_charge_topup = if spec_id.is_enabled_in(SpecId::SPURIOUS_DRAGON) {
-        res.data.had_value && !res.data.target_exists
+        res.had_value && !res.target_exists
     } else {
-        !res.data.target_exists
+        !res.target_exists
     };
 
     gas!(ecx, ecx.host.gas_params().selfdestruct_cost(should_charge_topup, res.is_cold));
 
-    if !res.data.previously_destroyed {
+    if !res.previously_destroyed {
         ecx.gas.record_refund(ecx.host.gas_params().selfdestruct_refund());
     }
 
