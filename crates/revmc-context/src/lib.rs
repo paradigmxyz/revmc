@@ -85,16 +85,16 @@ impl<'a> EvmContext<'a> {
         let resume_at = ResumeAt::load(interpreter.bytecode.pc(), bytecode_slice);
         let bytecode = bytecode_slice as *const [u8];
         let this = Self {
-        memory: &mut interpreter.memory,
-        input: &mut interpreter.input,
-        gas: &mut interpreter.gas,
-        host,
-        next_action: &mut interpreter.bytecode.action,
-        return_data: interpreter.return_data.buffer(),
-        is_static: interpreter.runtime_flag.is_static,
-        resume_at,
-        bytecode,
-    };
+            memory: &mut interpreter.memory,
+            input: &mut interpreter.input,
+            gas: &mut interpreter.gas,
+            host,
+            next_action: &mut interpreter.bytecode.action,
+            return_data: interpreter.return_data.buffer(),
+            is_static: interpreter.runtime_flag.is_static,
+            resume_at,
+            bytecode,
+        };
         (this, stack, stack_len)
     }
 }
