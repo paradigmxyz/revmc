@@ -1,7 +1,9 @@
 //! EVM to IR translation.
 
 use super::default_attrs;
-use crate::{Backend, Builder, Bytecode, EvmContext, Inst, InstData, InstFlags, IntCC, Result};
+use crate::{
+    Backend, Builder, Bytecode, EvmContext, Inst, InstData, InstFlags, IntCC, Result, I256_MIN,
+};
 use revm_bytecode::opcode as op;
 use revm_interpreter::{InputsImpl, InstructionResult};
 use revm_primitives::U256;
@@ -673,16 +675,89 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 let _ = self.call_builtin(Builtin::UDiv, &[sp]);
             }
             op::SDIV => {
-                let sp = self.sp_after_inputs();
-                let _ = self.call_builtin(Builtin::SDiv, &[sp]);
+                // Signed division implemented via unsigned division + sign
+                // handling to avoid LLVM's `sdiv i256` which can produce
+                // SIGILL at O0 on x86_64.
+                let [a, b] = self.popn();
+                let b_is_zero = self.bcx.icmp_imm(IntCC::Equal, b, 0);
+                let r = self.bcx.lazy_select(
+                    b_is_zero,
+                    self.word_type,
+                    |bcx| bcx.iconst_256(U256::ZERO),
+                    |bcx| {
+                        let zero = bcx.iconst_256(U256::ZERO);
+                        let min = bcx.iconst_256(I256_MIN);
+
+                        // Negate if negative (two's complement).
+                        let a_neg = bcx.icmp_imm(IntCC::SignedLessThan, a, 0);
+                        let neg_a = bcx.isub(zero, a);
+                        let abs_a = bcx.select(a_neg, neg_a, a);
+
+                        let b_neg = bcx.icmp_imm(IntCC::SignedLessThan, b, 0);
+                        let neg_b = bcx.isub(zero, b);
+                        let abs_b = bcx.select(b_neg, neg_b, b);
+
+                        // I256_MIN / 1 edge case: two_compl(I256_MIN) overflows
+                        // back to I256_MIN, so abs_a stays I256_MIN. Detect and
+                        // return I256_MIN directly.
+                        let a_is_min = bcx.icmp(IntCC::Equal, a, min);
+                        let abs_b_is_one = bcx.icmp_imm(IntCC::Equal, abs_b, 1);
+                        let is_min_edge = bcx.bitand(a_is_min, abs_b_is_one);
+
+                        let d = bcx.udiv(abs_a, abs_b);
+
+                        // Clear sign bit of result.
+                        let sign_mask = bcx.bitnot(min);
+                        let d = bcx.bitand(d, sign_mask);
+
+                        // Negate if signs differ.
+                        let signs_differ = bcx.bitxor(a_neg, b_neg);
+                        let neg_d = bcx.isub(zero, d);
+                        let d = bcx.select(signs_differ, neg_d, d);
+
+                        bcx.select(is_min_edge, min, d)
+                    },
+                );
+                self.push(r);
             }
             op::MOD => {
                 let sp = self.sp_after_inputs();
                 let _ = self.call_builtin(Builtin::URem, &[sp]);
             }
             op::SMOD => {
-                let sp = self.sp_after_inputs();
-                let _ = self.call_builtin(Builtin::SRem, &[sp]);
+                // Signed modulo implemented via unsigned remainder + sign
+                // handling to avoid LLVM's `srem i256` which can produce
+                // SIGILL at O0 on x86_64.
+                let [a, b] = self.popn();
+                let b_is_zero = self.bcx.icmp_imm(IntCC::Equal, b, 0);
+                let r = self.bcx.lazy_select(
+                    b_is_zero,
+                    self.word_type,
+                    |bcx| bcx.iconst_256(U256::ZERO),
+                    |bcx| {
+                        let zero = bcx.iconst_256(U256::ZERO);
+                        let min = bcx.iconst_256(I256_MIN);
+
+                        let a_neg = bcx.icmp_imm(IntCC::SignedLessThan, a, 0);
+                        let neg_a = bcx.isub(zero, a);
+                        let abs_a = bcx.select(a_neg, neg_a, a);
+
+                        let b_neg = bcx.icmp_imm(IntCC::SignedLessThan, b, 0);
+                        let neg_b = bcx.isub(zero, b);
+                        let abs_b = bcx.select(b_neg, neg_b, b);
+
+                        let r = bcx.urem(abs_a, abs_b);
+
+                        // Clear sign bit.
+                        let sign_mask = bcx.bitnot(min);
+                        let r = bcx.bitand(r, sign_mask);
+
+                        // Result sign matches dividend (a).
+                        let neg_r = bcx.isub(zero, r);
+                        bcx.select(a_neg, neg_r, r)
+                    },
+                );
+                self.push(r);
             }
             op::ADDMOD => {
                 let sp = self.sp_after_inputs();

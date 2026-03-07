@@ -155,7 +155,6 @@ macro_rules! builtins {
                 const RESIZEMEMORY: u8 = 0;
                 const UDIV: u8 = DIV;
                 const UREM: u8 = MOD;
-                const SREM: u8 = SMOD;
 
                 match self {
                     $(Self::$ident => [<$ident:upper>]),*
@@ -218,8 +217,6 @@ builtins! {
 
     UDiv           = __revmc_builtin_udiv(@[sp] ptr) None,
     URem           = __revmc_builtin_urem(@[sp] ptr) None,
-    SDiv           = __revmc_builtin_sdiv(@[sp] ptr) None,
-    SRem           = __revmc_builtin_srem(@[sp] ptr) None,
     AddMod         = __revmc_builtin_addmod(@[sp] ptr) None,
     MulMod         = __revmc_builtin_mulmod(@[sp] ptr) None,
     Exp            = __revmc_builtin_exp(@[ecx] ptr, @[sp] ptr) Some(u8),
