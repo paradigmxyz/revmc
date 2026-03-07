@@ -13,6 +13,7 @@ extern crate tracing;
 use alloc::{boxed::Box, vec::Vec};
 use revm_interpreter::{
     as_u64_saturated, as_usize_saturated,
+    host::LoadError,
     interpreter_types::{InputsTr, MemoryTr},
     CallInput, CallInputs, CallScheme, CallValue, CreateInputs, CreateScheme, InstructionResult,
     InterpreterAction, InterpreterResult,
@@ -451,18 +452,27 @@ pub unsafe extern "C" fn __revmc_builtin_sload(
     let address = ecx.input.target_address;
     let key = index.to_u256();
     if spec_id.is_enabled_in(SpecId::BERLIN) {
-        gas!(ecx, ecx.host.gas_params().warm_storage_read_cost());
-        let storage = berlin_sload!(ecx, address, key);
-        *index = storage.data.into();
+        let additional_cold_cost = ecx.host.gas_params().cold_storage_additional_cost();
+        let skip_cold = ecx.gas.remaining() < additional_cold_cost;
+        let res = ecx.host.sload_skip_cold_load(address, key, skip_cold);
+        match res {
+            Ok(storage) => {
+                if storage.is_cold {
+                    gas!(ecx, additional_cold_cost);
+                }
+
+                *index = storage.data.into();
+            }
+            Err(LoadError::ColdLoadSkipped) => return InstructionResult::OutOfGas,
+            Err(LoadError::DBError) => return InstructionResult::FatalExternalError,
+        }
     } else {
-        // Pre-Berlin: no cold-load-skip optimization, charge static gas manually
-        // since revmc marks SLOAD as DYNAMIC with zero static gas.
         let Some(storage) = ecx.host.sload(address, key) else {
             return InstructionResult::FatalExternalError;
         };
-        gas!(ecx, gas::sload_cost(spec_id, storage.is_cold));
         *index = storage.data.into();
     }
+
     InstructionResult::Stop
 }
 
