@@ -326,11 +326,7 @@ pub unsafe extern "C" fn __revmc_builtin_extcodehash(
         };
         account
     };
-    let code_hash = if account.is_empty {
-        revm_primitives::B256::ZERO
-    } else {
-        account.code_hash
-    };
+    let code_hash = if account.is_empty { revm_primitives::B256::ZERO } else { account.code_hash };
     *address = EvmWord::from_be_bytes(code_hash.0);
     InstructionResult::Stop
 }
@@ -799,7 +795,11 @@ pub unsafe extern "C" fn __revmc_builtin_selfdestruct(
 
     let cold_load_gas = ecx.host.gas_params().selfdestruct_cold_cost();
     let skip_cold_load = ecx.gas.remaining() < cold_load_gas;
-    let res = match ecx.host.selfdestruct(ecx.input.target_address, target.to_address(), skip_cold_load) {
+    let res = match ecx.host.selfdestruct(
+        ecx.input.target_address,
+        target.to_address(),
+        skip_cold_load,
+    ) {
         Ok(r) => r,
         Err(revm_context_interface::host::LoadError::ColdLoadSkipped) => {
             return InstructionResult::OutOfGas;
