@@ -27,8 +27,7 @@ use revm::{
     database::{CacheDB, EmptyDB},
     handler::{EvmTr, FrameResult, Handler, ItemOrResult, MainBuilder},
     primitives::{
-        hardfork::SpecId, Address, Bytes, StorageKeyMap, StorageValue, TxKind,
-        B256, U256,
+        hardfork::SpecId, Address, Bytes, StorageKeyMap, StorageValue, TxKind, B256, U256,
     },
     state::AccountInfo,
     ExecuteEvm, MainnetEvm,
