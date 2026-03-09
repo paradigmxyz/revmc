@@ -3,7 +3,7 @@ use revm::{
     context::TxEnv,
     database::{CacheDB, EmptyDB},
     handler::ExecuteEvm,
-    primitives::{address, hex, TxKind, U256},
+    primitives::{TxKind, U256, address, hex},
     state::AccountInfo,
 };
 use revmc_examples_runner::build_evm;

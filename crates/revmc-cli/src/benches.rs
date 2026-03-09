@@ -1,5 +1,5 @@
 use revm_bytecode::opcode as op;
-use revmc::{primitives::hex, U256};
+use revmc::{U256, primitives::hex};
 use std::hint::black_box;
 
 macro_rules! include_code_str {

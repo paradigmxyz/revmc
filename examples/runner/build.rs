@@ -1,4 +1,4 @@
-use revmc::{primitives::hex, EvmCompiler, EvmLlvmBackend, OptimizationLevel, Result, SpecId};
+use revmc::{EvmCompiler, EvmLlvmBackend, OptimizationLevel, Result, SpecId, primitives::hex};
 use std::path::PathBuf;
 
 include!("./src/common.rs");

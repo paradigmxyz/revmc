@@ -9,11 +9,11 @@ extern crate alloc;
 use revmc_builtins as _;
 
 use revm::{
+    MainnetEvm,
     context::{BlockEnv, CfgEnv, Context, Journal, TxEnv},
     database_interface::Database,
     handler::MainBuilder,
-    primitives::{hardfork::SpecId, hex, B256},
-    MainnetEvm,
+    primitives::{B256, hardfork::SpecId, hex},
 };
 use revmc_context::EvmCompilerFn;
 

@@ -27,7 +27,7 @@ use inkwell::{
     targets::TargetMachine,
 };
 use std::{
-    ffi::{c_char, c_void, CStr, CString},
+    ffi::{CStr, CString, c_char, c_void},
     fmt,
     marker::PhantomData,
     mem::{self, MaybeUninit},
@@ -35,7 +35,7 @@ use std::{
     ptr::{self, NonNull},
 };
 
-extern "C" {
+unsafe extern "C" {
     fn LLVMOrcCreateNewThreadSafeContextFromLLVMContext(
         Ctx: LLVMContextRef,
     ) -> LLVMOrcThreadSafeContextRef;
@@ -972,16 +972,16 @@ pub struct DefinitionGenerator {
 impl DefinitionGenerator {
     /// Creates a generator that resolves symbols from the current process.
     pub fn for_current_process(global_prefix: c_char) -> Result<Self, LLVMString> {
-        let mut gen = MaybeUninit::uninit();
+        let mut generator = MaybeUninit::uninit();
         cvt(unsafe {
             LLVMOrcCreateDynamicLibrarySearchGeneratorForProcess(
-                gen.as_mut_ptr(),
+                generator.as_mut_ptr(),
                 global_prefix,
                 None,
                 ptr::null_mut(),
             )
         })?;
-        Ok(unsafe { Self::from_inner(gen.assume_init()) })
+        Ok(unsafe { Self::from_inner(generator.assume_init()) })
     }
 
     /// Creates a new custom DefinitionGenerator.
@@ -1474,11 +1474,7 @@ impl IRTransformLayerRef {
 
 /// Converts an `LLVMErrorRef` to a `Result`.
 pub(crate) fn cvt(ptr: LLVMErrorRef) -> Result<(), LLVMString> {
-    if ptr.is_null() {
-        Ok(())
-    } else {
-        Err(unsafe { llvm_string(LLVMGetErrorMessage(ptr)) })
-    }
+    if ptr.is_null() { Ok(()) } else { Err(unsafe { llvm_string(LLVMGetErrorMessage(ptr)) }) }
 }
 
 fn cvt_cb_res(res: Result<Result<(), String>, Box<dyn std::any::Any + Send>>) -> LLVMErrorRef {
