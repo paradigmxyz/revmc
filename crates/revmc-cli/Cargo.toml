@@ -38,7 +38,6 @@ tracing-tracy = { workspace = true, optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.5", default-features = false }
-iai-callgrind = "0.14"
 revmc-cli-tests = { path = "../revmc-cli-tests/" }
 revmc-context = { workspace = true, default-features = false }
 revm = { workspace = true, default-features = false, features = ["std"] }
@@ -67,13 +66,6 @@ doc = false
 [[bench]]
 name = "bench"
 path = "benches/bench.rs"
-required-features = ["llvm"]
-harness = false
-doc = false
-
-[[bench]]
-name = "iai"
-path = "benches/iai.rs"
 required-features = ["llvm"]
 harness = false
 doc = false

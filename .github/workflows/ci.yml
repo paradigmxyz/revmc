@@ -164,6 +164,21 @@ jobs:
         id: deployment
         uses: actions/deploy-pages@v4
 
+  bench:
+    runs-on: depot-ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install LLVM
+        run: sudo .github/scripts/install_llvm_ubuntu.sh ${{ env.LLVM_VERSION }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: mozilla-actions/sccache-action@v0.0.9
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - name: bench
+        run: cargo bench --workspace --features llvm
+
   fmt:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -185,6 +200,7 @@ jobs:
       - clippy
       - docs
       - deploy-docs
+      - bench
       - fmt
     timeout-minutes: 30
     steps:
