@@ -19,8 +19,9 @@ libloading = "0.8"
 serde_json = { version = "1.0", features = ["preserve_order"] }
 tempfile = "3"
 thiserror = "2"
-tracing.workspace = true
+thread_local = "1"
 tracing-subscriber.workspace = true
+tracing.workspace = true
 walkdir = "2.5"
 
 [lib]

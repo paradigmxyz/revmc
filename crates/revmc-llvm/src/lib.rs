@@ -74,6 +74,8 @@ pub struct EvmLlvmBackend {
     functions: FxHashMap<u32, (String, FunctionValue<'static>)>,
 }
 
+unsafe impl Send for EvmLlvmBackend {}
+
 impl EvmLlvmBackend {
     /// Creates a new LLVM backend for the host machine.
     ///
@@ -188,12 +190,8 @@ impl EvmLlvmBackend {
     // Delete IR to lower memory consumption.
     // For some reason this does not happen when `Drop`ping either the `Module` or the engine.
     fn clear_module(&mut self) {
-        for function in self.module.get_functions().collect::<Vec<_>>() {
-            unsafe { function.delete() };
-        }
-        for global in self.module.get_globals().collect::<Vec<_>>() {
-            unsafe { global.delete() };
-        }
+        for_each_2(self.module.get_functions(), |f| unsafe { f.delete() });
+        for_each_2(self.module.get_globals(), |g| unsafe { g.delete() });
         self.functions.clear();
     }
 }
@@ -349,29 +347,36 @@ impl Backend for EvmLlvmBackend {
     }
 
     fn clear_ir(&mut self) -> Result<()> {
-        self.clear_module();
+        for func in self.module.get_functions() {
+            for_each_2(func.get_basic_block_iter(), |b| unsafe { _ = b.delete() });
+        }
+
+        self.module = create_module(self.cx, &self.machine)?;
+        if let Some(exec_engine) = &self.exec_engine {
+            exec_engine.add_module(&self.module).map_err(|_| Error::msg("failed to add module"))?;
+        }
+
         Ok(())
     }
 
     unsafe fn free_function(&mut self, id: Self::FuncId) -> Result<()> {
-        let name = self.id_to_name(id);
-        let function = self.exec_engine().get_function_value(name)?;
-        self.exec_engine().free_fn_machine_code(function);
-        self.functions.clear();
+        let (_, function) = self.functions.remove(&id).unwrap();
+        if let Some(exec_engine) = &self.exec_engine {
+            exec_engine.free_fn_machine_code(function);
+        }
+        unsafe { function.delete() };
         Ok(())
     }
 
     unsafe fn free_all_functions(&mut self) -> Result<()> {
-        self.clear_module();
         if let Some(exec_engine) = &self.exec_engine {
+            for (_, (_, function)) in &self.functions {
+                exec_engine.free_fn_machine_code(*function);
+                unsafe { function.delete() };
+            }
             exec_engine.remove_module(&self.module).map_err(|e| Error::msg(e.to_string()))?;
         }
-        self.module = create_module(self.cx, &self.machine)?;
-        if self.exec_engine.is_some() {
-            self.exec_engine =
-                Some(self.module.create_jit_execution_engine(self.opt_level).map_err(error_msg)?);
-        }
-        Ok(())
+        self.clear_ir()
     }
 }
 
@@ -1352,4 +1357,13 @@ fn error_msg(msg: inkwell::support::LLVMString) -> revmc_backend::Error {
 
 fn fmt_ty(ty: BasicTypeEnum<'_>) -> impl std::fmt::Display {
     ty.print_to_string().to_str().unwrap().trim_matches('"').to_string()
+}
+
+fn for_each_2<T>(iter: impl IntoIterator<Item = T>, mut f: impl FnMut(T)) {
+    let mut iter = iter.into_iter();
+    let mut next = iter.next();
+    while let Some(x) = next {
+        next = iter.next();
+        f(x);
+    }
 }

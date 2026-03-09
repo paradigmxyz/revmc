@@ -3140,6 +3140,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
+ "thread_local",
  "tracing",
  "tracing-subscriber 0.3.22",
  "walkdir",
