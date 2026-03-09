@@ -265,6 +265,13 @@ impl Backend for EvmCraneliftBackend {
         self.module.get_finalized_function(id).map(|ptr| ptr as usize)
     }
 
+    fn clear_ir(&mut self) -> Result<()> {
+        self.module.get().clear_context(&mut self.ctx);
+        self.comments.clear();
+        self.functions.clear();
+        Ok(())
+    }
+
     unsafe fn free_function(&mut self, id: Self::FuncId) -> Result<()> {
         // This doesn't exist yet.
         let _ = id;

@@ -220,6 +220,13 @@ pub trait Backend: BackendTypes + TypeMethods {
     fn optimize_module(&mut self) -> Result<()>;
     fn write_object<W: std::io::Write>(&mut self, w: W) -> Result<()>;
     fn jit_function(&mut self, id: Self::FuncId) -> Result<usize>;
+
+    /// Clears the IR module, freeing memory used by IR representations.
+    ///
+    /// This does **not** free JIT-compiled machine code, so previously obtained function pointers
+    /// remain valid. The module is left in a state where new functions can be translated.
+    fn clear_ir(&mut self) -> Result<()>;
+
     unsafe fn free_function(&mut self, id: Self::FuncId) -> Result<()>;
     unsafe fn free_all_functions(&mut self) -> Result<()>;
 }
