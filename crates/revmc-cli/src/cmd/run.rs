@@ -280,7 +280,7 @@ fn bench<T>(n_iters: u64, name: &str, mut f: impl FnMut() -> T) {
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 #[clap(rename_all = "lowercase")]
-#[allow(non_camel_case_types)]
+#[allow(non_camel_case_types, clippy::upper_case_acronyms)]
 enum SpecIdValueEnum {
     FRONTIER,
     FRONTIER_THAWING,
