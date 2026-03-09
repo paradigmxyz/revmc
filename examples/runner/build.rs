@@ -20,7 +20,7 @@ fn main() -> Result<()> {
     let object = out_dir.join(name).with_extension("o");
     compiler.write_object_to_file(&object)?;
 
-    cc::Build::new().object(&object).static_flag(true).compile(name);
+    cc::Build::new().object(&object).compile(name);
 
     Ok(())
 }
