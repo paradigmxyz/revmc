@@ -17,28 +17,29 @@ concurrency:
 
 jobs:
   test:
-    name: test +${{ matrix.runner }}-${{ matrix.arch }}-${{ matrix.toolchain }} ${{ matrix.profile }}
+    name: test ${{ matrix.os }}-${{ matrix.arch }}-${{ matrix.toolchain }} ${{ matrix.profile }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        runner: ["depot-ubuntu-latest", "depot-macos-latest"]
-        arch: ["x64", "arm64"]
+        os: ["ubuntu", "macos"]
         toolchain: ["stable", "nightly"]
         profile: ["dev", "release"]
-        exclude:
-          - runner: "depot-ubuntu-latest"
-            arch: "arm64"
-          - runner: "depot-macos-latest"
-            arch: "x64"
+        include:
+          - os: ubuntu
+            runner: depot-ubuntu-latest
+            arch: x64
+          - os: macos
+            runner: depot-macos-latest
+            arch: arm64
     steps:
       - uses: actions/checkout@v4
       - name: Install LLVM (apt)
-        if: ${{ !contains(matrix.runner, 'macos') }}
+        if: ${{ matrix.os == 'ubuntu' }}
         run: sudo .github/scripts/install_llvm_ubuntu.sh ${{ env.LLVM_VERSION }}
       - name: Install LLVM (brew)
-        if: ${{ contains(matrix.runner, 'macos') }}
+        if: ${{ matrix.os == 'macos' }}
         run: |
           v=${{ env.LLVM_VERSION }}
           brew install "llvm@${v}"
@@ -58,23 +59,26 @@ jobs:
         run: cargo nextest run --workspace --cargo-profile ${{ matrix.profile }} --features ${{ env.ALL_BACKENDS }}
 
   state-tests:
-    name: state-tests ${{ matrix.runner }} (${{ matrix.mode }})
+    name: state-tests (${{ matrix.os }}, ${{ matrix.mode }})
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        runner: ["depot-ubuntu-latest-8"] # TODO: depot-macos-latest
+        os: ["ubuntu"] # TODO: macos
         mode: [interpreter, jit, aot]
+        include:
+          - os: ubuntu
+            runner: depot-ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Checkout ethereum/tests
         run: git submodule update --init --checkout --depth 1 tests/ethereum-tests
       - name: Install LLVM (apt)
-        if: ${{ !contains(matrix.runner, 'macos') }}
+        if: ${{ matrix.os == 'ubuntu' }}
         run: sudo .github/scripts/install_llvm_ubuntu.sh ${{ env.LLVM_VERSION }}
       - name: Install LLVM (brew)
-        if: ${{ contains(matrix.runner, 'macos') }}
+        if: ${{ matrix.os == 'macos' }}
         run: |
           v=${{ env.LLVM_VERSION }}
           brew install "llvm@${v}"
