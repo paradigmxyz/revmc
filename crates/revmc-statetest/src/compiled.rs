@@ -423,8 +423,7 @@ pub struct CompiledTestContext<'a> {
 
 /// Execute a single test using compiled functions via the custom handler.
 pub fn execute_single_test_compiled(ctx: CompiledTestContext<'_>) -> Result<(), TestErrorKind> {
-    let mut prestate = ctx.cache_state.clone();
-    prestate.set_state_clear_flag(ctx.cfg.spec().is_enabled_in(SpecId::SPURIOUS_DRAGON));
+    let prestate = ctx.cache_state.clone();
     let mut state =
         database::State::builder().with_cached_prestate(prestate).with_bundle_update().build();
 

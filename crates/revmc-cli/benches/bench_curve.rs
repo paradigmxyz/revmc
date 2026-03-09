@@ -27,8 +27,7 @@ use revm::{
     database::{CacheDB, EmptyDB},
     handler::{EvmTr, FrameResult, Handler, ItemOrResult, MainBuilder},
     primitives::{
-        hardfork::SpecId, Address, Bytes, HashMap as RevmHashMap, StorageKey, StorageValue, TxKind,
-        B256, U256,
+        hardfork::SpecId, Address, Bytes, StorageKeyMap, StorageValue, TxKind, B256, U256,
     },
     state::AccountInfo,
     ExecuteEvm, MainnetEvm,
@@ -181,7 +180,7 @@ impl CurveBench {
             let bytecode_bytes = parse_hex_bytes(&raw.code);
             let bytecode = Bytecode::new_raw(Bytes::from(bytecode_bytes));
             let code_hash = bytecode.hash_slow();
-            let storage: RevmHashMap<StorageKey, StorageValue> =
+            let storage: StorageKeyMap<StorageValue> =
                 raw.storage.iter().map(|(k, v)| (parse_u256(k), parse_u256(v))).collect();
             db.insert_account_info(
                 address,

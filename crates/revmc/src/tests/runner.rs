@@ -290,6 +290,10 @@ impl Host for TestHost {
         Address::repeat_byte(0xcb)
     }
 
+    fn slot_num(&self) -> U256 {
+        U256::ZERO
+    }
+
     fn chain_id(&self) -> U256 {
         U256::from(69)
     }
