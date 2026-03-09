@@ -2,7 +2,9 @@ use clap::{Parser, ValueEnum};
 use color_eyre::{eyre::eyre, Result};
 use revm_bytecode::Bytecode;
 use revm_interpreter::{
-    host::DummyHost, instruction_table, interpreter::EthInterpreter, interpreter::ExtBytecode,
+    host::DummyHost,
+    instruction_table,
+    interpreter::{EthInterpreter, ExtBytecode},
     InputsImpl, SharedMemory,
 };
 use revmc::{
@@ -101,7 +103,10 @@ impl RunArgs {
                 let path = Path::new(&self.bench_name);
                 ensure!(path.is_file(), "argument must be a file");
                 ensure!(self.code.is_none(), "--code is not allowed with a file argument");
-                ensure!(self.code_path.is_none(), "--code-path is not allowed with a file argument");
+                ensure!(
+                    self.code_path.is_none(),
+                    "--code-path is not allowed with a file argument"
+                );
                 Bench {
                     name: path.file_stem().unwrap().to_str().unwrap().to_string().leak(),
                     bytecode: read_code(None, Some(path))?,
@@ -134,8 +139,7 @@ impl RunArgs {
 
         let spec_id = self.spec_id.into();
 
-        let bytecode_raw =
-            Bytecode::new_raw(revmc::primitives::Bytes::copy_from_slice(&bytecode));
+        let bytecode_raw = Bytecode::new_raw(revmc::primitives::Bytes::copy_from_slice(&bytecode));
         let bytecode_slice = bytecode_raw.original_byte_slice();
 
         let mut host = DummyHost::new(spec_id);

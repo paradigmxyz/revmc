@@ -177,9 +177,7 @@ impl StatetestDiffArgs {
                         }
 
                         if !self.keep_going {
-                            println!(
-                                "\nStopping at first mismatch. Use --keep-going to continue."
-                            );
+                            println!("\nStopping at first mismatch. Use --keep-going to continue.");
                             std::process::exit(1);
                         }
                     }
