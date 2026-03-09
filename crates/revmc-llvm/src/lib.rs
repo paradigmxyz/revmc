@@ -360,6 +360,11 @@ impl<'ctx> Backend for EvmLlvmBackend<'ctx> {
         Ok(addr)
     }
 
+    fn clear_ir(&mut self) -> Result<()> {
+        self.clear_module();
+        Ok(())
+    }
+
     unsafe fn free_function(&mut self, id: Self::FuncId) -> Result<()> {
         let name = self.id_to_name(id);
         let function = self.exec_engine().get_function_value(name)?;
