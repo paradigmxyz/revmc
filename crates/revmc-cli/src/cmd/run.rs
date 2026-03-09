@@ -82,9 +82,8 @@ pub(crate) struct RunArgs {
 impl RunArgs {
     pub(crate) fn run(self) -> Result<()> {
         // Build the compiler.
-        let context = revmc::llvm::inkwell::context::Context::create();
         let target = revmc::Target::new(self.target, self.target_cpu, self.target_features);
-        let backend = EvmLlvmBackend::new_for_target(&context, self.aot, self.opt_level, &target)?;
+        let backend = EvmLlvmBackend::new_for_target(self.aot, self.opt_level, &target)?;
         let mut compiler = EvmCompiler::new(backend);
         compiler.set_dump_to(self.out_dir);
         compiler.gas_metering(!self.no_gas);

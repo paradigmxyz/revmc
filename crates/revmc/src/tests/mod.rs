@@ -63,12 +63,10 @@ mod statetest;
 #[cfg(feature = "llvm")]
 pub fn with_jit_compiler<R>(
     opt_level: OptimizationLevel,
-    f: fn(&mut EvmCompiler<crate::llvm::EvmLlvmBackend<'_>>) -> R,
+    f: fn(&mut EvmCompiler<crate::llvm::EvmLlvmBackend>) -> R,
 ) -> R {
-    crate::llvm::with_llvm_context(|cx| {
-        let backend = crate::llvm::EvmLlvmBackend::new(cx, false, opt_level).unwrap();
-        f(&mut EvmCompiler::new(backend))
-    })
+    let backend = crate::llvm::EvmLlvmBackend::new(false, opt_level).unwrap();
+    f(&mut EvmCompiler::new(backend))
 }
 
 const I256_MIN: U256 = U256::from_limbs([
