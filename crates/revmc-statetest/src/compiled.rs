@@ -139,7 +139,9 @@ pub struct CompileCache {
     functions: DashMap<(B256, SpecId), Arc<OnceLock<EvmCompilerFn>>>,
     /// Keep AOT shared libraries alive. Unused for JIT mode.
     libs: Mutex<Vec<(tempfile::TempDir, libloading::Library)>>,
-    // TODO: idk segfault on drop
+    /// `ManuallyDrop` because `ThreadLocal::drop` drops values on the calling thread, but each
+    /// `EvmLlvmBackend` holds a reference to a thread-local LLVM context that only lives on the
+    /// thread that created it. Dropping on a different thread would use-after-free.
     compiler: ManuallyDrop<ThreadLocal<RefCell<EvmCompiler<EvmLlvmBackend>>>>,
     n_hits: AtomicUsize,
     n_misses: AtomicUsize,
@@ -170,7 +172,7 @@ impl CompileCache {
         let mut compiled = CompiledContracts::new();
         let mut claimed = Vec::new();
 
-        for (address, info) in &unit.pre {
+        for info in unit.pre.values() {
             if info.code.is_empty() {
                 continue;
             }
@@ -201,7 +203,7 @@ impl CompileCache {
                     claimed.push((
                         code_hash,
                         &info.code[..],
-                        format!("contract_{:x}", address),
+                        format!("contract_{code_hash:x}"),
                         lock,
                     ));
                 }
@@ -286,7 +288,7 @@ impl CompileCache {
                 e.insert(lock.clone());
                 self.n_misses.fetch_add(1, Ordering::Relaxed);
 
-                let name = format!("runtime_{:x}", code_hash);
+                let name = format!("runtime_{code_hash:x}");
                 let claimed = vec![(code_hash, code, name, lock)];
                 let mut compiled = CompiledContracts::new();
 
