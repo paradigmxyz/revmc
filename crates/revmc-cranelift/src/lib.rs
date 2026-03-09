@@ -12,8 +12,8 @@ use cranelift_module::{DataDescription, FuncId, FuncOrDataId, Linkage, Module, M
 use cranelift_object::{ObjectBuilder, ObjectModule};
 use pretty_clif::CommentWriter;
 use revmc_backend::{
-    eyre::eyre, Backend, BackendTypes, Builder, OptimizationLevel, Result, TailCallKind,
-    TypeMethods, U256,
+    Backend, BackendTypes, Builder, OptimizationLevel, Result, TailCallKind, TypeMethods, U256,
+    eyre::eyre,
 };
 use std::{
     collections::HashMap,
@@ -887,11 +887,7 @@ enum ModuleWrapper {
 
 impl ModuleWrapper {
     fn new(aot: bool, opt_level: OptimizationLevel, symbols: &Symbols) -> Result<Self> {
-        if aot {
-            Self::new_aot(opt_level)
-        } else {
-            Self::new_jit(opt_level, symbols.clone())
-        }
+        if aot { Self::new_aot(opt_level) } else { Self::new_jit(opt_level, symbols.clone()) }
     }
 
     fn new_jit(opt_level: OptimizationLevel, symbols: Symbols) -> Result<Self> {

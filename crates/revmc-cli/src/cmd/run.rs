@@ -1,17 +1,17 @@
 use clap::{Parser, ValueEnum};
-use color_eyre::{eyre::eyre, Result};
+use color_eyre::{Result, eyre::eyre};
 use revm_bytecode::Bytecode;
 use revm_interpreter::{
+    InputsImpl, SharedMemory,
     host::DummyHost,
     instruction_table,
     interpreter::{EthInterpreter, ExtBytecode},
-    InputsImpl, SharedMemory,
 };
 use revmc::{
-    eyre::ensure, primitives::hardfork::SpecId, EvmCompiler, EvmContext, EvmLlvmBackend,
-    OptimizationLevel,
+    EvmCompiler, EvmContext, EvmLlvmBackend, OptimizationLevel, eyre::ensure,
+    primitives::hardfork::SpecId,
 };
-use revmc_cli::{get_benches, read_code, Bench};
+use revmc_cli::{Bench, get_benches, read_code};
 use std::{
     hint::black_box,
     path::{Path, PathBuf},

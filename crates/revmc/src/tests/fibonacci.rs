@@ -1,4 +1,4 @@
-use super::{with_evm_context, DEF_SPEC};
+use super::{DEF_SPEC, with_evm_context};
 use crate::{Backend, EvmCompiler};
 use paste::paste;
 use revm_bytecode::opcode as op;

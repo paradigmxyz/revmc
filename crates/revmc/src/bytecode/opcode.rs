@@ -1,4 +1,4 @@
-use crate::{op_info_map, OpcodeInfo};
+use crate::{OpcodeInfo, op_info_map};
 use revm_bytecode::opcode::OPCODE_INFO;
 use revm_primitives::hardfork::SpecId;
 use std::{fmt, slice};
@@ -155,11 +155,7 @@ impl fmt::Display for Opcode<'_> {
 /// Returns the length of the immediate data for the given opcode, or `0` if none.
 #[inline]
 pub const fn min_imm_len(op: u8) -> u8 {
-    if let Some(info) = &OPCODE_INFO[op as usize] {
-        info.immediate_size()
-    } else {
-        0
-    }
+    if let Some(info) = &OPCODE_INFO[op as usize] { info.immediate_size() } else { 0 }
 }
 
 /// Returns the number of input and output stack elements of the given opcode.

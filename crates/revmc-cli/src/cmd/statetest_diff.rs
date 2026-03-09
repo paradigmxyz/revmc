@@ -1,8 +1,8 @@
 use clap::Parser;
-use color_eyre::{eyre::eyre, Result};
+use color_eyre::{Result, eyre::eyre};
 use revm::{
     context::cfg::CfgEnv,
-    primitives::{hardfork::SpecId as SI, U256},
+    primitives::{U256, hardfork::SpecId as SI},
     statetest_types::{SpecName, TestSuite},
 };
 use revmc_statetest::{
@@ -78,10 +78,10 @@ impl StatetestDiffArgs {
             n_files += 1;
 
             for (name, unit) in &suite.0 {
-                if let Some(filter) = &self.name {
-                    if !name.contains(filter.as_str()) {
-                        continue;
-                    }
+                if let Some(filter) = &self.name
+                    && !name.contains(filter.as_str())
+                {
+                    continue;
                 }
 
                 let cache_state = unit.state();

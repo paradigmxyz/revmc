@@ -6,7 +6,7 @@ resolver = "2"
 [workspace.package]
 version = "0.1.0"
 authors = ["DaniPopes <57450786+DaniPopes@users.noreply.github.com>"]
-edition = "2021"
+edition = "2024"
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 categories = ["compilers", "cryptography::cryptocurrencies"]
@@ -30,6 +30,7 @@ unreachable-pub = "warn"
 unused-must-use = "warn"
 redundant-lifetimes = "warn"
 unnameable-types = "warn"
+unsafe-op-in-unsafe-fn = "allow"
 
 [workspace.lints.rustdoc]
 all = "warn"

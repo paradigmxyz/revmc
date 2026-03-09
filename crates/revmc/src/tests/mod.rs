@@ -13,7 +13,7 @@ use revm_interpreter as interpreter;
 use revm_interpreter::{
     CreateInputs, FrameInput, Gas, InstructionResult, InterpreterAction, InterpreterResult,
 };
-use revm_primitives::{hex, keccak256, Address, Bytes, LogData, B256, KECCAK_EMPTY};
+use revm_primitives::{Address, B256, Bytes, KECCAK_EMPTY, LogData, hex, keccak256};
 use revmc_builtins::gas;
 
 /// `KECCAK256` opcode gas cost (base + dynamic).
