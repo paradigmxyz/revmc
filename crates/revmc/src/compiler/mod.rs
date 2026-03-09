@@ -293,6 +293,16 @@ impl<B: Backend> EvmCompiler<B> {
         self.backend.free_function(id)
     }
 
+    /// Clears the IR module, freeing memory used by IR representations.
+    ///
+    /// This does **not** free JIT-compiled machine code, so previously obtained function pointers
+    /// remain valid. The module is left in a state where new functions can be translated.
+    pub fn clear_ir(&mut self) -> Result<()> {
+        self.builtins.clear();
+        self.finalized = false;
+        self.backend.clear_ir()
+    }
+
     /// Frees all functions and resets the state of the internal module, allowing for new functions
     /// to be compiled.
     ///
