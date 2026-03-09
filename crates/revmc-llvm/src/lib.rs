@@ -293,6 +293,8 @@ impl Backend for EvmLlvmBackend {
     ) -> Result<(Self::Builder<'_>, Self::FuncId)> {
         let (id, function) = if let Some((&id, &(_, function))) =
             self.functions.iter().find(|(_k, (fname, _f))| fname == name)
+            && let Some(function2) = self.module.get_function(name)
+            && function == function2
         {
             self.bcx.position_at_end(function.get_first_basic_block().unwrap());
             (id, function)
@@ -370,7 +372,7 @@ impl Backend for EvmLlvmBackend {
 
     unsafe fn free_all_functions(&mut self) -> Result<()> {
         if let Some(exec_engine) = &self.exec_engine {
-            for (_, (_, function)) in &self.functions {
+            for (_, function) in self.functions.values() {
                 exec_engine.free_fn_machine_code(*function);
                 unsafe { function.delete() };
             }

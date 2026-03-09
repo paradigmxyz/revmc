@@ -18,6 +18,7 @@ use revmc::{EvmCompiler, EvmCompilerFn, EvmLlvmBackend, Linker, OptimizationLeve
 use std::{
     cell::RefCell,
     collections::HashMap,
+    mem::ManuallyDrop,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -138,7 +139,8 @@ pub struct CompileCache {
     functions: DashMap<(B256, SpecId), Arc<OnceLock<EvmCompilerFn>>>,
     /// Keep AOT shared libraries alive. Unused for JIT mode.
     libs: Mutex<Vec<(tempfile::TempDir, libloading::Library)>>,
-    compiler: ThreadLocal<RefCell<EvmCompiler<EvmLlvmBackend>>>,
+    // TODO: idk segfault on drop
+    compiler: ManuallyDrop<ThreadLocal<RefCell<EvmCompiler<EvmLlvmBackend>>>>,
     n_hits: AtomicUsize,
     n_misses: AtomicUsize,
 }
@@ -147,11 +149,11 @@ impl CompileCache {
     pub fn new(mode: CompileMode) -> Self {
         Self {
             mode,
-            functions: DashMap::new(),
-            libs: Mutex::new(Vec::new()),
-            compiler: ThreadLocal::new(),
-            n_hits: AtomicUsize::new(0),
-            n_misses: AtomicUsize::new(0),
+            functions: Default::default(),
+            libs: Default::default(),
+            compiler: Default::default(),
+            n_hits: Default::default(),
+            n_misses: Default::default(),
         }
     }
 
@@ -335,7 +337,6 @@ impl CompileCache {
         spec_id: SpecId,
     ) -> Result<(), TestErrorKind> {
         let mut compiler = self.compiler.get_or(|| make_compiler(true)).borrow_mut();
-        let _ = compiler.clear_ir();
 
         let mut names: Vec<(B256, String)> = Vec::new();
         for (code_hash, code, name, _) in claimed {
@@ -370,6 +371,8 @@ impl CompileCache {
         }
 
         self.libs.lock().unwrap().push((tmp_dir, lib));
+
+        let _ = compiler.clear_ir();
 
         Ok(())
     }
