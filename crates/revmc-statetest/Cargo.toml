@@ -10,19 +10,17 @@ revmc = { workspace = true, features = ["llvm"] }
 revm = { workspace = true, features = ["std", "test-types", "tracer"] }
 
 alloy-rlp = { version = "0.3", features = ["arrayvec", "derive"] }
+alloy-trie = { version = "0.9", features = ["ethereum"] }
 dashmap = "6"
 eyre.workspace = true
 indicatif = "0.17"
-hash-db = "0.15"
 k256 = { version = "0.13", features = ["ecdsa"] }
 libloading = "0.8"
-plain_hasher = "0.2"
 serde_json = { version = "1.0", features = ["preserve_order"] }
 tempfile = "3"
 thiserror = "2"
 tracing.workspace = true
 tracing-subscriber.workspace = true
-triehash = "0.8"
 walkdir = "2.5"
 
 [lib]
