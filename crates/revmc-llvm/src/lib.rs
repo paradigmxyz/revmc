@@ -200,10 +200,10 @@ impl<'ctx> EvmLlvmBackend<'ctx> {
     // Delete IR to lower memory consumption.
     // For some reason this does not happen when `Drop`ping either the `Module` or the engine.
     fn clear_module(&mut self) {
-        for function in self.module.get_functions() {
+        for function in self.module.get_functions().collect::<Vec<_>>() {
             unsafe { function.delete() };
         }
-        for global in self.module.get_globals() {
+        for global in self.module.get_globals().collect::<Vec<_>>() {
             unsafe { global.delete() };
         }
         self.functions.clear();
@@ -1191,6 +1191,12 @@ fn init_() -> Result<()> {
         machine_code: true,
     };
     Target::initialize_all(&config);
+
+    // Ensure MCJIT is linked in. Without this, LTO may strip the MCJIT
+    // registration code, causing `create_jit_execution_engine` to fail with
+    // "JIT has not been linked in" followed by a SIGSEGV in destructors.
+    // See: https://github.com/TheDan64/inkwell/issues/320
+    inkwell::execution_engine::ExecutionEngine::link_in_mc_jit();
 
     Ok(())
 }

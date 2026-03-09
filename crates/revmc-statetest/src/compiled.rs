@@ -15,8 +15,8 @@ use revm::{
     Context, MainBuilder, MainContext, MainnetEvm,
 };
 use revmc::{
-    llvm::inkwell::context::Context as LlvmContext, EvmCompiler, EvmCompilerFn, EvmLlvmBackend,
-    Linker, OptimizationLevel,
+    llvm::{self, with_llvm_context},
+    EvmCompiler, EvmCompilerFn, EvmLlvmBackend, Linker, OptimizationLevel,
 };
 use std::{
     collections::HashMap,
@@ -72,10 +72,10 @@ type StateTestError = EVMError<EvmDatabaseError<std::convert::Infallible>, Inval
 /// Custom handler that dispatches to compiled functions. All bytecodes —
 /// including runtime-created ones (CREATE/CREATE2) — are JIT-compiled before
 /// execution. Never falls back to the interpreter.
-struct CompiledHandler<'a> {
-    compiled: &'a CompiledContracts,
-    cache: &'a CompileCache,
-    spec_id: SpecId,
+pub struct CompiledHandler<'a> {
+    pub compiled: &'a CompiledContracts,
+    pub cache: &'a CompileCache,
+    pub spec_id: SpecId,
 }
 
 impl Handler for CompiledHandler<'_> {
@@ -134,14 +134,7 @@ impl Handler for CompiledHandler<'_> {
 type ClaimedEntry<'a> = (B256, &'a [u8], String, Arc<OnceLock<EvmCompilerFn>>);
 
 /// Thread-safe compilation cache shared across workers.
-///
-/// Uses `DashMap` with `OnceLock` per entry to guarantee each `(code_hash, spec_id)`
-/// is compiled exactly once. The first thread to insert claims the slot; other threads
-/// seeing an uninitialized `OnceLock` block on `.wait()` until compilation finishes.
-///
-/// For JIT: LLVM contexts and compilers are leaked so function pointers remain valid.
-/// For AOT: shared libraries and temp dirs are kept alive in a `Mutex<Vec>`.
-struct CompileCache {
+pub struct CompileCache {
     mode: CompileMode,
     functions: DashMap<(B256, SpecId), Arc<OnceLock<EvmCompilerFn>>>,
     /// Keep AOT shared libraries alive. Unused for JIT mode.
@@ -151,7 +144,7 @@ struct CompileCache {
 }
 
 impl CompileCache {
-    fn new(mode: CompileMode) -> Self {
+    pub fn new(mode: CompileMode) -> Self {
         Self {
             mode,
             functions: DashMap::new(),
@@ -237,7 +230,7 @@ impl CompileCache {
 
     /// Compile all contracts in a test unit, returning the compiled functions.
     /// Uses the cache's mode (JIT or AOT) to determine compilation strategy.
-    fn compile(
+    pub fn compile(
         &self,
         unit: &TestUnit,
         spec_id: SpecId,
@@ -311,12 +304,13 @@ impl CompileCache {
         compiled: &mut CompiledContracts,
         spec_id: SpecId,
     ) -> Result<(), TestErrorKind> {
-        // Leak the context so JIT function pointers remain valid.
-        let cx: &'static LlvmContext = Box::leak(Box::new(LlvmContext::create()));
-        let backend = EvmLlvmBackend::new(cx, false, OptimizationLevel::Default)
-            .map_err(|e| TestErrorKind::CompilationError(format!("backend: {e}")))?;
-        let compiler: &'static mut EvmCompiler<EvmLlvmBackend<'static>> =
-            Box::leak(Box::new(EvmCompiler::new(backend)));
+        // Leak the LLVM context so it outlives the worker thread. Using
+        // `with_llvm_context` (thread-local) would destroy the context on
+        // thread exit, invalidating the JIT code memory that the leaked
+        // compiler's execution engine references.
+        let context: &'static llvm::Context = Box::leak(Box::new(llvm::Context::create()));
+        let backend = EvmLlvmBackend::new(context, false, OptimizationLevel::Aggressive).unwrap();
+        let compiler = Box::leak(Box::new(EvmCompiler::new(backend)));
 
         let mut func_ids = Vec::new();
         for (code_hash, code, name, _) in claimed {
@@ -343,49 +337,48 @@ impl CompileCache {
         compiled: &mut CompiledContracts,
         spec_id: SpecId,
     ) -> Result<(), TestErrorKind> {
-        let cx = LlvmContext::create();
-        let backend = EvmLlvmBackend::new(&cx, true, OptimizationLevel::Default)
-            .map_err(|e| TestErrorKind::CompilationError(format!("backend: {e}")))?;
-        let mut compiler = EvmCompiler::new(backend);
+        with_llvm_context(|cx| {
+            let backend = EvmLlvmBackend::new(cx, true, OptimizationLevel::Aggressive).unwrap();
+            let compiler = &mut EvmCompiler::new(backend);
+            let mut names: Vec<(B256, String)> = Vec::new();
+            for (code_hash, code, name, _) in claimed {
+                compiler.translate(name, *code, spec_id).map_err(|e| {
+                    TestErrorKind::CompilationError(format!("translate {name}: {e}"))
+                })?;
+                names.push((*code_hash, name.clone()));
+            }
 
-        let mut names: Vec<(B256, String)> = Vec::new();
-        for (code_hash, code, name, _) in claimed {
+            let tmp_dir = tempfile::tempdir()
+                .map_err(|e| TestErrorKind::CompilationError(format!("tempdir: {e}")))?;
+            let obj_path = tmp_dir.path().join("a.o");
+            let so_path = tmp_dir.path().join("a.so");
+
             compiler
-                .translate(name, *code, spec_id)
-                .map_err(|e| TestErrorKind::CompilationError(format!("translate {name}: {e}")))?;
-            names.push((*code_hash, name.clone()));
-        }
+                .write_object_to_file(&obj_path)
+                .map_err(|e| TestErrorKind::CompilationError(format!("write object: {e}")))?;
 
-        let tmp_dir = tempfile::tempdir()
-            .map_err(|e| TestErrorKind::CompilationError(format!("tempdir: {e}")))?;
-        let obj_path = tmp_dir.path().join("a.o");
-        let so_path = tmp_dir.path().join("a.so");
+            let linker = Linker::new();
+            linker
+                .link(&so_path, [obj_path.to_str().unwrap()])
+                .map_err(|e| TestErrorKind::CompilationError(format!("link: {e}")))?;
 
-        compiler
-            .write_object_to_file(&obj_path)
-            .map_err(|e| TestErrorKind::CompilationError(format!("write object: {e}")))?;
+            let lib = unsafe { libloading::Library::new(&so_path) }
+                .map_err(|e| TestErrorKind::CompilationError(format!("load: {e}")))?;
 
-        let linker = Linker::new();
-        linker
-            .link(&so_path, [obj_path.to_str().unwrap()])
-            .map_err(|e| TestErrorKind::CompilationError(format!("link: {e}")))?;
+            for (i, (code_hash, name)) in names.iter().enumerate() {
+                let f: libloading::Symbol<'_, EvmCompilerFn> = unsafe { lib.get(name.as_bytes()) }
+                    .map_err(|e| TestErrorKind::CompilationError(format!("symbol {name}: {e}")))?;
+                claimed[i].3.set(*f).ok();
+                compiled.insert(*code_hash, *f);
+            }
 
-        let lib = unsafe { libloading::Library::new(&so_path) }
-            .map_err(|e| TestErrorKind::CompilationError(format!("load: {e}")))?;
+            self.libs.lock().unwrap().push((tmp_dir, lib));
 
-        for (i, (code_hash, name)) in names.iter().enumerate() {
-            let f: libloading::Symbol<'_, EvmCompilerFn> = unsafe { lib.get(name.as_bytes()) }
-                .map_err(|e| TestErrorKind::CompilationError(format!("symbol {name}: {e}")))?;
-            claimed[i].3.set(*f).ok();
-            compiled.insert(*code_hash, *f);
-        }
-
-        self.libs.lock().unwrap().push((tmp_dir, lib));
-
-        Ok(())
+            Ok(())
+        })
     }
 
-    fn print_stats(&self) {
+    pub fn print_stats(&self) {
         let hits = self.n_hits.load(Ordering::Relaxed);
         let misses = self.n_misses.load(Ordering::Relaxed);
         let total = hits + misses;
@@ -414,22 +407,22 @@ impl CompileCache {
 
 // ── Compiled test execution ─────────────────────────────────────────────────
 
-struct CompiledTestContext<'a> {
-    compiled: &'a CompiledContracts,
-    cache: &'a CompileCache,
-    spec_id: SpecId,
-    test: &'a revm::statetest_types::Test,
-    unit: &'a TestUnit,
-    name: &'a str,
-    cfg: &'a CfgEnv,
-    block: &'a BlockEnv,
-    tx: &'a TxEnv,
-    cache_state: &'a database::CacheState,
-    elapsed: &'a Arc<Mutex<Duration>>,
+pub struct CompiledTestContext<'a> {
+    pub compiled: &'a CompiledContracts,
+    pub cache: &'a CompileCache,
+    pub spec_id: SpecId,
+    pub test: &'a revm::statetest_types::Test,
+    pub unit: &'a TestUnit,
+    pub name: &'a str,
+    pub cfg: &'a CfgEnv,
+    pub block: &'a BlockEnv,
+    pub tx: &'a TxEnv,
+    pub cache_state: &'a database::CacheState,
+    pub elapsed: &'a Arc<Mutex<Duration>>,
 }
 
 /// Execute a single test using compiled functions via the custom handler.
-fn execute_single_test_compiled(ctx: CompiledTestContext<'_>) -> Result<(), TestErrorKind> {
+pub fn execute_single_test_compiled(ctx: CompiledTestContext<'_>) -> Result<(), TestErrorKind> {
     let prestate = ctx.cache_state.clone();
     let mut state =
         database::State::builder().with_cached_prestate(prestate).with_bundle_update().build();

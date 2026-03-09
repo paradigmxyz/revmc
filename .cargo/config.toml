@@ -1,0 +1,2 @@
+[alias]
+cl = "clippy --workspace --all-targets --features llvm,cranelift"
