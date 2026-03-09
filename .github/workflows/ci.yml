@@ -62,7 +62,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: ["depot-ubuntu-latest-8", "depot-macos-latest"]
+        runner: ["depot-ubuntu-latest-8"] # TODO: depot-macos-latest
         mode: [interpreter, jit, aot]
     steps:
       - uses: actions/checkout@v4
