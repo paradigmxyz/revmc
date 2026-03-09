@@ -7,6 +7,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  RUSTC_WRAPPER: sccache
   LLVM_VERSION: "21" # Must be just the major version
   ALL_BACKENDS: "llvm,cranelift"
 
@@ -22,14 +23,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: ["ubuntu-latest", "macos-14"]
+        runner: ["depot-ubuntu-latest", "depot-macos-latest"]
         arch: ["x64", "arm64"]
         toolchain: ["stable", "nightly"]
         profile: ["dev", "release"]
         exclude:
-          - runner: "ubuntu-latest"
+          - runner: "depot-ubuntu-latest"
             arch: "arm64"
-          - runner: "macos-14"
+          - runner: "depot-macos-latest"
             arch: "x64"
     steps:
       - uses: actions/checkout@v4
@@ -48,6 +49,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.toolchain }}
+      - uses: mozilla-actions/sccache-action@v0.0.9
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
@@ -70,6 +72,7 @@ jobs:
       - name: Install LLVM
         run: sudo .github/scripts/install_llvm_ubuntu.sh ${{ env.LLVM_VERSION }}
       - uses: dtolnay/rust-toolchain@stable
+      - uses: mozilla-actions/sccache-action@v0.0.9
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
@@ -82,13 +85,14 @@ jobs:
             -E 'test(statetest::${{ matrix.mode }})'
 
   feature-checks:
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - name: Install LLVM
         run: sudo .github/scripts/install_llvm_ubuntu.sh ${{ env.LLVM_VERSION }}
       - uses: dtolnay/rust-toolchain@stable
+      - uses: mozilla-actions/sccache-action@v0.0.9
       - uses: taiki-e/install-action@cargo-hack
       - uses: Swatinem/rust-cache@v2
         with:
@@ -99,13 +103,14 @@ jobs:
             --skip llvm-prefer-static --skip prefer-static
 
   clippy:
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - name: Install LLVM
         run: sudo .github/scripts/install_llvm_ubuntu.sh ${{ env.LLVM_VERSION }}
       - uses: dtolnay/rust-toolchain@clippy
+      - uses: mozilla-actions/sccache-action@v0.0.9
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
@@ -114,13 +119,14 @@ jobs:
           RUSTFLAGS: -Dwarnings
 
   docs:
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - name: Install LLVM
         run: sudo .github/scripts/install_llvm_ubuntu.sh ${{ env.LLVM_VERSION }}
       - uses: dtolnay/rust-toolchain@nightly
+      - uses: mozilla-actions/sccache-action@v0.0.9
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
@@ -159,3 +165,23 @@ jobs:
         with:
           components: rustfmt
       - run: cargo fmt --all --check
+
+  success:
+    name: success
+    runs-on: ubuntu-latest
+    if: always()
+    needs:
+      - test
+      - state-tests
+      - feature-checks
+      - clippy
+      - docs
+      - deploy-docs
+      - fmt
+    timeout-minutes: 30
+    steps:
+      - name: Decide whether the needed jobs succeeded or failed
+        uses: re-actors/alls-green@release/v1
+        with:
+          allowed-skips: deploy-docs
+          jobs: ${{ toJSON(needs) }}
