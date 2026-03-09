@@ -56,10 +56,9 @@ pub use revm_primitives::hardfork::SpecId;
 
 /// Enable for `cargo asm -p revmc --lib`.
 #[cfg(any())]
-pub fn generate_all_assembly() -> EvmCompiler<EvmLlvmBackend<'static>> {
-    let cx = Box::leak(Box::new(llvm::inkwell::context::Context::create()));
+pub fn generate_all_assembly() -> EvmCompiler<EvmLlvmBackend> {
     let mut compiler =
-        EvmCompiler::new(EvmLlvmBackend::new(cx, OptimizationLevel::Aggressive).unwrap());
+        EvmCompiler::new(EvmLlvmBackend::new(false, OptimizationLevel::Aggressive).unwrap());
     let _ = compiler.jit(None, &[], primitives::SpecId::ARROW_GLACIER).unwrap();
     unsafe { compiler.clear().unwrap() };
     compiler

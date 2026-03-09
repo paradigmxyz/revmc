@@ -14,10 +14,7 @@ use revm::{
     statetest_types::{SpecName, TestSuite, TestUnit},
     Context, MainBuilder, MainContext, MainnetEvm,
 };
-use revmc::{
-    llvm::{self, with_llvm_context},
-    EvmCompiler, EvmCompilerFn, EvmLlvmBackend, Linker, OptimizationLevel,
-};
+use revmc::{EvmCompiler, EvmCompilerFn, EvmLlvmBackend, Linker, OptimizationLevel};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -304,12 +301,7 @@ impl CompileCache {
         compiled: &mut CompiledContracts,
         spec_id: SpecId,
     ) -> Result<(), TestErrorKind> {
-        // Leak the LLVM context so it outlives the worker thread. Using
-        // `with_llvm_context` (thread-local) would destroy the context on
-        // thread exit, invalidating the JIT code memory that the leaked
-        // compiler's execution engine references.
-        let context: &'static llvm::Context = Box::leak(Box::new(llvm::Context::create()));
-        let backend = EvmLlvmBackend::new(context, false, OptimizationLevel::Aggressive).unwrap();
+        let backend = EvmLlvmBackend::new(false, OptimizationLevel::Aggressive).unwrap();
         let compiler = Box::leak(Box::new(EvmCompiler::new(backend)));
 
         let mut func_ids = Vec::new();
@@ -337,8 +329,8 @@ impl CompileCache {
         compiled: &mut CompiledContracts,
         spec_id: SpecId,
     ) -> Result<(), TestErrorKind> {
-        with_llvm_context(|cx| {
-            let backend = EvmLlvmBackend::new(cx, true, OptimizationLevel::Aggressive).unwrap();
+        {
+            let backend = EvmLlvmBackend::new(true, OptimizationLevel::Aggressive).unwrap();
             let compiler = &mut EvmCompiler::new(backend);
             let mut names: Vec<(B256, String)> = Vec::new();
             for (code_hash, code, name, _) in claimed {
@@ -375,7 +367,7 @@ impl CompileCache {
             self.libs.lock().unwrap().push((tmp_dir, lib));
 
             Ok(())
-        })
+        }
     }
 
     pub fn print_stats(&self) {

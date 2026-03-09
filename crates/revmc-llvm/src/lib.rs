@@ -46,64 +46,52 @@ pub(crate) use utils::*;
 
 const DEFAULT_WEIGHT: u32 = 20000;
 
-/// Executes the given closure with a thread-local LLVM context.
-#[inline]
-pub fn with_llvm_context<R>(f: impl FnOnce(&Context) -> R) -> R {
-    thread_local! {
-        static TLS_LLVM_CONTEXT: Context = Context::create();
-    }
-    TLS_LLVM_CONTEXT.with(f)
-}
-
 /// The LLVM-based EVM bytecode compiler backend.
 #[derive(Debug)]
 #[must_use]
-pub struct EvmLlvmBackend<'ctx> {
-    cx: &'ctx Context,
-    _dh: dh::DiagnosticHandlerGuard<'ctx>,
-    bcx: inkwell::builder::Builder<'ctx>,
-    module: Module<'ctx>,
-    exec_engine: Option<ExecutionEngine<'ctx>>,
+pub struct EvmLlvmBackend {
+    cx: &'static Context,
+    _dh: dh::DiagnosticHandlerGuard,
+    bcx: inkwell::builder::Builder<'static>,
+    module: Module<'static>,
+    exec_engine: Option<ExecutionEngine<'static>>,
     machine: TargetMachine,
 
-    ty_void: VoidType<'ctx>,
-    ty_ptr: PointerType<'ctx>,
-    ty_i1: IntType<'ctx>,
-    ty_i8: IntType<'ctx>,
-    ty_i32: IntType<'ctx>,
-    ty_i64: IntType<'ctx>,
-    ty_i256: IntType<'ctx>,
-    ty_isize: IntType<'ctx>,
+    ty_void: VoidType<'static>,
+    ty_ptr: PointerType<'static>,
+    ty_i1: IntType<'static>,
+    ty_i8: IntType<'static>,
+    ty_i32: IntType<'static>,
+    ty_i64: IntType<'static>,
+    ty_i256: IntType<'static>,
+    ty_isize: IntType<'static>,
 
     aot: bool,
     debug_assertions: bool,
     opt_level: OptimizationLevel,
     /// Separate from `functions` to have always increasing IDs.
     function_counter: u32,
-    functions: FxHashMap<u32, (String, FunctionValue<'ctx>)>,
+    functions: FxHashMap<u32, (String, FunctionValue<'static>)>,
 }
 
-impl<'ctx> EvmLlvmBackend<'ctx> {
+impl EvmLlvmBackend {
     /// Creates a new LLVM backend for the host machine.
     ///
     /// Use [`new_for_target`](Self::new_for_target) to create a backend for a specific target.
-    pub fn new(
-        cx: &'ctx Context,
-        aot: bool,
-        opt_level: revmc_backend::OptimizationLevel,
-    ) -> Result<Self> {
-        Self::new_for_target(cx, aot, opt_level, &revmc_backend::Target::Native)
+    pub fn new(aot: bool, opt_level: revmc_backend::OptimizationLevel) -> Result<Self> {
+        Self::new_for_target(aot, opt_level, &revmc_backend::Target::Native)
     }
 
     /// Creates a new LLVM backend for the given target.
     #[instrument(name = "new_llvm_backend", level = "debug", skip_all)]
     pub fn new_for_target(
-        cx: &'ctx Context,
         aot: bool,
         opt_level: revmc_backend::OptimizationLevel,
         target: &revmc_backend::Target,
     ) -> Result<Self> {
         init()?;
+
+        let cx = get_context();
 
         let opt_level = convert_opt_level(opt_level);
 
@@ -172,20 +160,20 @@ impl<'ctx> EvmLlvmBackend<'ctx> {
 
     /// Returns the LLVM context.
     #[inline]
-    pub fn cx(&self) -> &'ctx Context {
+    pub fn cx(&self) -> &Context {
         self.cx
     }
 
-    fn exec_engine(&self) -> &ExecutionEngine<'ctx> {
+    fn exec_engine(&self) -> &ExecutionEngine<'static> {
         assert!(!self.aot, "requested JIT execution engine on AOT");
         self.exec_engine.as_ref().expect("missing JIT execution engine")
     }
 
     fn fn_type(
         &self,
-        ret: Option<BasicTypeEnum<'ctx>>,
-        params: &[BasicTypeEnum<'ctx>],
-    ) -> FunctionType<'ctx> {
+        ret: Option<BasicTypeEnum<'static>>,
+        params: &[BasicTypeEnum<'static>],
+    ) -> FunctionType<'static> {
         let params = params.iter().copied().map(Into::into).collect::<Vec<_>>();
         match ret {
             Some(ret) => ret.fn_type(&params, false),
@@ -210,15 +198,15 @@ impl<'ctx> EvmLlvmBackend<'ctx> {
     }
 }
 
-impl<'ctx> BackendTypes for EvmLlvmBackend<'ctx> {
-    type Type = BasicTypeEnum<'ctx>;
-    type Value = BasicValueEnum<'ctx>;
-    type StackSlot = PointerValue<'ctx>;
-    type BasicBlock = BasicBlock<'ctx>;
-    type Function = FunctionValue<'ctx>;
+impl BackendTypes for EvmLlvmBackend {
+    type Type = BasicTypeEnum<'static>;
+    type Value = BasicValueEnum<'static>;
+    type StackSlot = PointerValue<'static>;
+    type BasicBlock = BasicBlock<'static>;
+    type Function = FunctionValue<'static>;
 }
 
-impl TypeMethods for EvmLlvmBackend<'_> {
+impl TypeMethods for EvmLlvmBackend {
     fn type_ptr(&self) -> Self::Type {
         self.ty_ptr.into()
     }
@@ -250,9 +238,9 @@ impl TypeMethods for EvmLlvmBackend<'_> {
     }
 }
 
-impl<'ctx> Backend for EvmLlvmBackend<'ctx> {
+impl Backend for EvmLlvmBackend {
     type Builder<'a>
-        = EvmLlvmBuilder<'a, 'ctx>
+        = EvmLlvmBuilder<'a>
     where
         Self: 'a;
     type FuncId = u32;
@@ -387,7 +375,7 @@ impl<'ctx> Backend for EvmLlvmBackend<'ctx> {
     }
 }
 
-impl Drop for EvmLlvmBackend<'_> {
+impl Drop for EvmLlvmBackend {
     fn drop(&mut self) {
         self.clear_module();
     }
@@ -446,13 +434,13 @@ impl TargetInfo {
 /// The LLVM-based EVM bytecode compiler function builder.
 #[derive(Debug)]
 #[must_use]
-pub struct EvmLlvmBuilder<'a, 'ctx> {
-    backend: &'a mut EvmLlvmBackend<'ctx>,
-    function: FunctionValue<'ctx>,
+pub struct EvmLlvmBuilder<'a> {
+    backend: &'a mut EvmLlvmBackend,
+    function: FunctionValue<'static>,
 }
 
-impl<'ctx> std::ops::Deref for EvmLlvmBuilder<'_, 'ctx> {
-    type Target = EvmLlvmBackend<'ctx>;
+impl std::ops::Deref for EvmLlvmBuilder<'_> {
+    type Target = EvmLlvmBackend;
 
     #[inline]
     fn deref(&self) -> &Self::Target {
@@ -460,29 +448,29 @@ impl<'ctx> std::ops::Deref for EvmLlvmBuilder<'_, 'ctx> {
     }
 }
 
-impl std::ops::DerefMut for EvmLlvmBuilder<'_, '_> {
+impl std::ops::DerefMut for EvmLlvmBuilder<'_> {
     #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.backend
     }
 }
 
-impl<'ctx> EvmLlvmBuilder<'_, 'ctx> {
+impl EvmLlvmBuilder<'_> {
     #[allow(dead_code)]
     fn extract_value(
         &mut self,
-        value: BasicValueEnum<'ctx>,
+        value: BasicValueEnum<'static>,
         index: u32,
         name: &str,
-    ) -> BasicValueEnum<'ctx> {
+    ) -> BasicValueEnum<'static> {
         self.bcx.build_extract_value(value.into_struct_value(), index, name).unwrap()
     }
 
     fn memcpy_inner(
         &mut self,
-        dst: BasicValueEnum<'ctx>,
-        src: BasicValueEnum<'ctx>,
-        len: BasicValueEnum<'ctx>,
+        dst: BasicValueEnum<'static>,
+        src: BasicValueEnum<'static>,
+        len: BasicValueEnum<'static>,
         inline: bool,
     ) {
         let dst = dst.into_pointer_value();
@@ -509,9 +497,9 @@ impl<'ctx> EvmLlvmBuilder<'_, 'ctx> {
     fn call_overflow_function(
         &mut self,
         name: &str,
-        lhs: BasicValueEnum<'ctx>,
-        rhs: BasicValueEnum<'ctx>,
-    ) -> (BasicValueEnum<'ctx>, BasicValueEnum<'ctx>) {
+        lhs: BasicValueEnum<'static>,
+        rhs: BasicValueEnum<'static>,
+    ) -> (BasicValueEnum<'static>, BasicValueEnum<'static>) {
         let f = self.get_overflow_function(name, lhs.get_type());
         let result = self.call(f, &[lhs, rhs]).unwrap();
         (self.extract_value(result, 0, "result"), self.extract_value(result, 1, "overflow"))
@@ -521,8 +509,8 @@ impl<'ctx> EvmLlvmBuilder<'_, 'ctx> {
     fn get_overflow_function(
         &mut self,
         name: &str,
-        ty: BasicTypeEnum<'ctx>,
-    ) -> FunctionValue<'ctx> {
+        ty: BasicTypeEnum<'static>,
+    ) -> FunctionValue<'static> {
         let name = format!("llvm.{name}.with.overflow.{}", fmt_ty(ty));
         self.get_or_add_function(&name, |this| {
             this.fn_type(
@@ -532,7 +520,11 @@ impl<'ctx> EvmLlvmBuilder<'_, 'ctx> {
         })
     }
 
-    fn get_sat_function(&mut self, name: &str, ty: BasicTypeEnum<'ctx>) -> FunctionValue<'ctx> {
+    fn get_sat_function(
+        &mut self,
+        name: &str,
+        ty: BasicTypeEnum<'static>,
+    ) -> FunctionValue<'static> {
         let name = format!("llvm.{name}.sat.{}", fmt_ty(ty));
         self.get_or_add_function(&name, |this| this.fn_type(Some(ty), &[ty, ty]))
     }
@@ -540,8 +532,8 @@ impl<'ctx> EvmLlvmBuilder<'_, 'ctx> {
     fn get_or_add_function(
         &mut self,
         name: &str,
-        mk_ty: impl FnOnce(&mut Self) -> FunctionType<'ctx>,
-    ) -> FunctionValue<'ctx> {
+        mk_ty: impl FnOnce(&mut Self) -> FunctionType<'static>,
+    ) -> FunctionValue<'static> {
         match self.module.get_function(name) {
             Some(function) => function,
             None => {
@@ -553,12 +545,13 @@ impl<'ctx> EvmLlvmBuilder<'_, 'ctx> {
 
     fn set_branch_weights(
         &self,
-        inst: InstructionValue<'ctx>,
+        inst: InstructionValue<'static>,
         weights: impl IntoIterator<Item = u32>,
     ) {
         let weights = weights.into_iter();
-        let mut values =
-            Vec::<BasicMetadataValueEnum<'ctx>>::with_capacity(1 + weights.size_hint().1.unwrap());
+        let mut values = Vec::<BasicMetadataValueEnum<'static>>::with_capacity(
+            1 + weights.size_hint().1.unwrap(),
+        );
         values.push(self.cx.metadata_string("branch_weights").into());
         for weight in weights {
             values.push(self.ty_i32.const_int(weight as u64, false).into());
@@ -569,15 +562,15 @@ impl<'ctx> EvmLlvmBuilder<'_, 'ctx> {
     }
 }
 
-impl<'ctx> BackendTypes for EvmLlvmBuilder<'_, 'ctx> {
-    type Type = <EvmLlvmBackend<'ctx> as BackendTypes>::Type;
-    type Value = <EvmLlvmBackend<'ctx> as BackendTypes>::Value;
-    type StackSlot = <EvmLlvmBackend<'ctx> as BackendTypes>::StackSlot;
-    type BasicBlock = <EvmLlvmBackend<'ctx> as BackendTypes>::BasicBlock;
-    type Function = <EvmLlvmBackend<'ctx> as BackendTypes>::Function;
+impl BackendTypes for EvmLlvmBuilder<'_> {
+    type Type = <EvmLlvmBackend as BackendTypes>::Type;
+    type Value = <EvmLlvmBackend as BackendTypes>::Value;
+    type StackSlot = <EvmLlvmBackend as BackendTypes>::StackSlot;
+    type BasicBlock = <EvmLlvmBackend as BackendTypes>::BasicBlock;
+    type Function = <EvmLlvmBackend as BackendTypes>::Function;
 }
 
-impl TypeMethods for EvmLlvmBuilder<'_, '_> {
+impl TypeMethods for EvmLlvmBuilder<'_> {
     fn type_ptr(&self) -> Self::Type {
         self.backend.type_ptr()
     }
@@ -599,7 +592,7 @@ impl TypeMethods for EvmLlvmBuilder<'_, '_> {
     }
 }
 
-impl Builder for EvmLlvmBuilder<'_, '_> {
+impl Builder for EvmLlvmBuilder<'_> {
     fn create_block(&mut self, name: &str) -> Self::BasicBlock {
         self.cx.append_basic_block(self.function, name)
     }
@@ -1206,6 +1199,14 @@ fn init_() -> Result<()> {
     Ok(())
 }
 
+fn get_context() -> &'static Context {
+    thread_local! {
+        static TLS_LLVM_CONTEXT: Context = Context::create();
+    }
+    // SAFETY: It can't be shared across threads anyway.
+    TLS_LLVM_CONTEXT.with(|cx| unsafe { core::mem::transmute(cx) })
+}
+
 fn create_module<'ctx>(cx: &'ctx Context, machine: &TargetMachine) -> Result<Module<'ctx>> {
     let module_name = "evm";
     let module = cx.create_module(module_name);
@@ -1258,7 +1259,7 @@ fn convert_opt_level_rev(level: OptimizationLevel) -> revmc_backend::Optimizatio
     }
 }
 
-fn convert_attribute(bcx: &EvmLlvmBuilder<'_, '_>, attr: revmc_backend::Attribute) -> Attribute {
+fn convert_attribute(bcx: &EvmLlvmBuilder<'_>, attr: revmc_backend::Attribute) -> Attribute {
     use revmc_backend::Attribute as OurAttr;
 
     enum AttrValue<'a> {

@@ -6,7 +6,7 @@ macro_rules! matrix_tests {
             #[allow(unused_imports)]
             use similar_asserts::assert_eq;
 
-            fn run_llvm(compiler: &mut EvmCompiler<crate::llvm::EvmLlvmBackend<'_>>) {
+            fn run_llvm(compiler: &mut EvmCompiler<crate::llvm::EvmLlvmBackend>) {
                 crate::tests::set_test_dump(compiler, module_path!());
                 $run(compiler);
             }

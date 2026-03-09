@@ -157,8 +157,7 @@ struct CurveBench {
     tx: TxEnv,
     functions: Arc<HashMap<B256, RawEvmCompilerFn>>,
     // Prevent drop of compiler/context while JIT functions are alive.
-    _compiler: &'static mut EvmCompiler<EvmLlvmBackend<'static>>,
-    _context: &'static revmc::llvm::inkwell::context::Context,
+    _compiler: &'static mut EvmCompiler<EvmLlvmBackend>,
 }
 
 impl CurveBench {
@@ -248,10 +247,9 @@ impl CurveBench {
         };
 
         // JIT compile
-        let context = Box::leak(Box::new(revmc::llvm::inkwell::context::Context::create()));
-        let backend = EvmLlvmBackend::new(context, false, OptimizationLevel::Aggressive)
-            .expect("LLVM backend");
-        let compiler: &'static mut EvmCompiler<EvmLlvmBackend<'static>> =
+        let backend =
+            EvmLlvmBackend::new(false, OptimizationLevel::Aggressive).expect("LLVM backend");
+        let compiler: &'static mut EvmCompiler<EvmLlvmBackend> =
             Box::leak(Box::new(EvmCompiler::new(backend)));
         let mut seen = HashSet::new();
         let mut pending = Vec::new();
@@ -278,7 +276,6 @@ impl CurveBench {
             tx,
             functions: Arc::new(functions),
             _compiler: compiler,
-            _context: context,
         }
     }
 

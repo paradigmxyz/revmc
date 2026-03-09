@@ -13,8 +13,7 @@ fuzz_target!(|test_case: TestCase<'_>| {
         return;
     }
 
-    let context = revmc::llvm::inkwell::context::Context::create();
-    let backend = EvmLlvmBackend::new(&context, false, OptimizationLevel::None).unwrap();
+    let backend = EvmLlvmBackend::new(false, OptimizationLevel::None).unwrap();
     let mut compiler = EvmCompiler::new(backend);
     if let Ok(dump_location) = std::env::var("COMPILER_DUMP") {
         compiler.set_dump_to(Some(PathBuf::from(dump_location)));
