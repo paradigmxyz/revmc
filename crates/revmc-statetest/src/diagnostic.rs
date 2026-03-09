@@ -87,8 +87,7 @@ pub fn run_interpreter(
     tx: &TxEnv,
     cache_state: &database::CacheState,
 ) -> ExecutionSnapshot {
-    let mut prestate = cache_state.clone();
-    prestate.set_state_clear_flag(cfg.spec().is_enabled_in(SpecId::SPURIOUS_DRAGON));
+    let prestate = cache_state.clone();
     let mut state =
         database::State::builder().with_cached_prestate(prestate).with_bundle_update().build();
 
@@ -114,8 +113,7 @@ pub fn run_jit(
     tx: &TxEnv,
     cache_state: &database::CacheState,
 ) -> ExecutionSnapshot {
-    let mut prestate = cache_state.clone();
-    prestate.set_state_clear_flag(cfg.spec().is_enabled_in(SpecId::SPURIOUS_DRAGON));
+    let prestate = cache_state.clone();
     let mut state =
         database::State::builder().with_cached_prestate(prestate).with_bundle_update().build();
 
@@ -150,8 +148,7 @@ pub fn trace_interpreter(
     tx: &TxEnv,
     cache_state: &database::CacheState,
 ) {
-    let mut prestate = cache_state.clone();
-    prestate.set_state_clear_flag(cfg.spec().is_enabled_in(SpecId::SPURIOUS_DRAGON));
+    let prestate = cache_state.clone();
     let mut state =
         database::State::builder().with_cached_prestate(prestate).with_bundle_update().build();
 
