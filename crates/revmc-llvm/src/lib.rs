@@ -6,6 +6,7 @@
 extern crate tracing;
 
 use inkwell::{
+    AddressSpace, IntPredicate, OptimizationLevel,
     attributes::{Attribute, AttributeLoc},
     basic_block::BasicBlock,
     execution_engine::ExecutionEngine,
@@ -23,10 +24,9 @@ use inkwell::{
         BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, InstructionValue,
         PointerValue,
     },
-    AddressSpace, IntPredicate, OptimizationLevel,
 };
 use revmc_backend::{
-    eyre, Backend, BackendTypes, Builder, Error, IntCC, Result, TailCallKind, TypeMethods, U256,
+    Backend, BackendTypes, Builder, Error, IntCC, Result, TailCallKind, TypeMethods, U256, eyre,
 };
 use rustc_hash::FxHashMap;
 use std::{

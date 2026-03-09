@@ -7,12 +7,12 @@
 
 use cranelift::codegen::{
     entity::SecondaryMap,
-    ir::{entities::AnyEntity, Block, Fact, Function, Inst, Value},
+    ir::{Block, Fact, Function, Inst, Value, entities::AnyEntity},
     isa::TargetIsa,
     write::{FuncWriter, PlainWriter},
 };
 use std::{
-    collections::{hash_map::Entry, HashMap},
+    collections::{HashMap, hash_map::Entry},
     fmt,
     io::Write,
     path::Path,

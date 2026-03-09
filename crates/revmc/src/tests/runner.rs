@@ -7,10 +7,10 @@ use context_interface::{
 };
 use revm_bytecode::opcode as op;
 use revm_interpreter::{
-    instructions::instruction_table_gas_changes_spec, interpreter::ExtBytecode, CallInput, Host,
-    InputsImpl, Interpreter, SharedMemory,
+    CallInput, Host, InputsImpl, Interpreter, SharedMemory,
+    instructions::instruction_table_gas_changes_spec, interpreter::ExtBytecode,
 };
-use revm_primitives::{HashMap, B256};
+use revm_primitives::{B256, HashMap};
 use similar_asserts::assert_eq;
 use std::{fmt, path::Path, sync::OnceLock};
 

@@ -1,4 +1,4 @@
-use revm_interpreter::{as_usize_saturated, Gas, InstructionResult, SharedMemory};
+use revm_interpreter::{Gas, InstructionResult, SharedMemory, as_usize_saturated};
 use revmc_context::{EvmContext, EvmWord};
 
 /// Splits the stack pointer into `N` elements by casting it to an array.

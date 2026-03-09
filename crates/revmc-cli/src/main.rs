@@ -21,7 +21,9 @@ enum Command {
 
 fn main() -> Result<()> {
     if std::env::var_os("RUST_BACKTRACE").is_none() {
-        std::env::set_var("RUST_BACKTRACE", "1");
+        // SAFETY: This is called at the very beginning of main, before any other threads are
+        // spawned.
+        unsafe { std::env::set_var("RUST_BACKTRACE", "1") };
     }
     let _ = color_eyre::install();
     let _ = init_tracing_subscriber();

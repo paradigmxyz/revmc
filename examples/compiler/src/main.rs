@@ -5,13 +5,13 @@
 use clap::Parser;
 use eyre::Context;
 use revmc::{
+    EvmCompiler, EvmLlvmBackend, OptimizationLevel, SpecId,
     context_interface::host::DummyHost,
     interpreter::{
-        interpreter::{ExtBytecode, InputsImpl, SharedMemory},
         Interpreter,
+        interpreter::{ExtBytecode, InputsImpl, SharedMemory},
     },
     revm_bytecode::Bytecode,
-    EvmCompiler, EvmLlvmBackend, OptimizationLevel, SpecId,
 };
 use std::path::PathBuf;
 

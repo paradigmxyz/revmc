@@ -1,6 +1,6 @@
 use inkwell::{
     context::{AsContextRef, Context},
-    llvm_sys::{core::*, prelude::*, LLVMDiagnosticHandler, LLVMDiagnosticSeverity::*},
+    llvm_sys::{LLVMDiagnosticHandler, LLVMDiagnosticSeverity::*, core::*, prelude::*},
 };
 use std::{ffi::c_void, fmt, ptr};
 

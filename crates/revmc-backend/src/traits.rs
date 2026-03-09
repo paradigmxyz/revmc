@@ -183,12 +183,12 @@ pub trait BackendTypes: Sized {
 #[allow(clippy::missing_safety_doc)]
 pub trait Backend: BackendTypes + TypeMethods {
     type Builder<'a>: Builder<
-        Type = Self::Type,
-        Value = Self::Value,
-        StackSlot = Self::StackSlot,
-        BasicBlock = Self::BasicBlock,
-        Function = Self::Function,
-    >
+            Type = Self::Type,
+            Value = Self::Value,
+            StackSlot = Self::StackSlot,
+            BasicBlock = Self::BasicBlock,
+            Function = Self::Function,
+        >
     where
         Self: 'a;
     type FuncId: Copy + Eq + std::hash::Hash + fmt::Debug;

@@ -1,17 +1,17 @@
 #![allow(missing_docs)]
 
 use criterion::{
-    criterion_group, criterion_main, measurement::WallTime, BenchmarkGroup, Criterion,
+    BenchmarkGroup, Criterion, criterion_group, criterion_main, measurement::WallTime,
 };
 use revm_bytecode::Bytecode;
 use revm_interpreter::{
+    InputsImpl, SharedMemory,
     host::DummyHost,
     instruction_table,
     interpreter::{EthInterpreter, ExtBytecode},
-    InputsImpl, SharedMemory,
 };
 use revmc::{
-    primitives::hardfork::SpecId, EvmCompiler, EvmCompilerFn, EvmContext, EvmLlvmBackend, EvmStack,
+    EvmCompiler, EvmCompilerFn, EvmContext, EvmLlvmBackend, EvmStack, primitives::hardfork::SpecId,
 };
 use revmc_cli::Bench;
 use std::time::Duration;

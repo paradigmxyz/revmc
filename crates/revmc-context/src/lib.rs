@@ -8,11 +8,11 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::{fmt, mem::MaybeUninit, ptr};
 use revm_interpreter::{
-    interpreter_types::{Jumps, ReturnData},
     Gas, Host, InputsImpl, InstructionResult, Interpreter, InterpreterAction, InterpreterResult,
     SharedMemory,
+    interpreter_types::{Jumps, ReturnData},
 };
-use revm_primitives::{ruint, Address, Bytes, U256};
+use revm_primitives::{Address, Bytes, U256, ruint};
 
 #[cfg(feature = "host-ext-any")]
 use core::any::Any;
@@ -145,7 +145,7 @@ impl dyn HostExt {
 /// # Examples
 ///
 /// ```no_run
-/// use revmc_context::{extern_revmc, EvmCompilerFn};
+/// use revmc_context::{EvmCompilerFn, extern_revmc};
 ///
 /// extern_revmc! {
 ///    /// A simple function that returns `Continue`.
@@ -158,7 +158,7 @@ impl dyn HostExt {
 macro_rules! extern_revmc {
     ($( $(#[$attr:meta])* $vis:vis fn $name:ident; )+) => {
         #[allow(improper_ctypes)]
-        extern "C" {
+        unsafe extern "C" {
             $(
                 $(#[$attr])*
                 $vis fn $name(
@@ -729,11 +729,7 @@ struct ResumeAt;
 
 impl ResumeAt {
     fn load(pc: usize, code: &[u8]) -> usize {
-        if pc < code.len() {
-            0
-        } else {
-            pc
-        }
+        if pc < code.len() { 0 } else { pc }
     }
 }
 
@@ -770,7 +766,7 @@ mod tests {
         fn test_fn;
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     extern "C" fn __test_fn(
         _gas: *mut Gas,
         _stack: *mut EvmStack,

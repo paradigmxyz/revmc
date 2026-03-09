@@ -3,8 +3,8 @@
 use revm_bytecode::opcode::OpCode;
 use revm_primitives::hex;
 use revmc::{
-    eyre::{bail, eyre, Result, WrapErr},
     U256,
+    eyre::{Result, WrapErr, bail, eyre},
 };
 use std::{cmp::Ordering, path::Path, str::FromStr};
 
@@ -70,10 +70,10 @@ fn parse_evm_dsl(s: &str) -> Result<Vec<u8>> {
                 let imm = words.next().ok_or_else(|| eyre!("missing immediate for opcode {op}"))?;
                 let imm_bytes = parse_imm(imm, Some(imm_len))?;
                 code.extend_from_slice(&imm_bytes);
-            } else if let Some(next) = words.peek() {
-                if U256::from_str(next).is_ok() {
-                    bail!("unexpected immediate for opcode {op}");
-                }
+            } else if let Some(next) = words.peek()
+                && U256::from_str(next).is_ok()
+            {
+                bail!("unexpected immediate for opcode {op}");
             }
         }
     }
