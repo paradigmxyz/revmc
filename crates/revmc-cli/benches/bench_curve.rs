@@ -8,15 +8,7 @@
 //!
 //! Run: `cargo bench -p revmc-cli --bench bench_curve`
 
-use std::{
-    collections::{BTreeMap, HashMap, HashSet},
-    fs,
-    path::PathBuf,
-    sync::Arc,
-    time::{Duration, Instant},
-};
-
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
 use revm::{
     ExecuteEvm, MainnetEvm,
     bytecode::Bytecode,
@@ -35,6 +27,14 @@ use revm::{
 use revmc::{EvmCompiler, EvmLlvmBackend, OptimizationLevel};
 use revmc_context::{EvmCompilerFn, RawEvmCompilerFn};
 use serde::Deserialize;
+use std::{
+    collections::{BTreeMap, HashMap, HashSet},
+    fs,
+    hint::black_box,
+    path::PathBuf,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
