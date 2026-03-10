@@ -6,60 +6,56 @@ Proposed.
 
 ## Summary
 
-Add a new `revmc::runtime` module with a simple coordinator-owned model.
+Add a new `revmc::runtime` module with a coordinator-owned design and a single O(1) lookup path.
 
-There are two consumers:
+Startup behavior:
 
-1. EVM execution lookup: use compiled code if present, prefer AOT artifact load when available, otherwise follow normal interpreter + JIT warmup path.
-1. Explicit AOT preparation: user provides contracts to ensure AOT artifacts exist (compile and persist if missing).
+1. Call `ArtifactStore::load_all()`.
+1. Load all returned `(ArtifactKey, StoredArtifact)` entries into in-memory compiled map.
+1. Start serving lookups.
 
-Core constraints:
+Runtime behavior:
 
-1. Hot path must be non-blocking.
-1. State transitions must be coordinator-only.
-1. Runtime JIT output is process-local and never persisted.
-1. AOT artifacts are persisted through `ArtifactStore`.
+1. `lookup()` checks only in-memory compiled map (`AOT` or `JIT`).
+1. `lookup()` never touches storage and never waits.
+1. `lookup()` sends fire-and-forget tracking event to coordinator.
+1. Coordinator tracks hotness and may enqueue background JIT compile.
 
-The runtime remains a strict 2-tier system:
-
-1. Tier 0: interpreter.
-1. Tier 1: compiled (`Aot` or `Jit`).
-
-No OSR, no deopt, no speculative guards, no mid-frame switching.
+JIT outputs are process-local and never persisted.
 
 ## Scope
 
 ### In Scope
 
-1. Fast lookup API for execution.
-1. Unified in-memory compiled map containing both loaded AOT and JIT programs.
-1. On-miss AOT load attempt (when storage configured), with fallback to normal path.
+1. Startup AOT preload from `ArtifactStore::load_all()` into runtime compiled map.
+1. O(1) lookup path using only in-memory map.
+1. Fire-and-forget lookup tracking to coordinator.
 1. Warm-threshold runtime JIT compilation.
-1. Explicit AOT prepare API (compile + store when absent).
-1. Coordinator-owned scheduling, dedupe, retries, and invalidation.
+1. Explicit AOT preparation API for known contract lists (compile+store if missing).
+1. Coordinator-owned state transitions, scheduling, invalidation, and eviction.
 
 ### Out Of Scope
 
-1. Speculative multi-tier optimization.
-1. Distributed artifact caches.
-1. Guaranteed cross-machine artifact portability.
-1. Hot-path waiting for compilation or load completion.
+1. Storage access on lookup miss.
+1. Hot-path waiting for compile/load completion.
+1. Multi-tier speculative optimization and deopt.
+1. Distributed artifact caches and portability guarantees.
 
 ## Goals
 
 ### Functional
 
-1. Reusable service for reth and other revm/revmc embedders.
+1. Reusable runtime for reth and other revm/revmc embedders.
 1. Correct execution under `SpecId`-sensitive semantics.
-1. Correct suspend/resume behavior for `CALL*` and `CREATE*` through existing interpreter fallback machinery.
-1. Support `CREATE/CREATE2` runtime code as normal JIT candidates.
+1. Correct fallback and suspend/resume compatibility with existing interpreter path.
+1. Support runtime-created code (`CREATE`/`CREATE2`) as normal JIT candidates.
 
 ### Operational
 
-1. No waits on frame execution path.
-1. Bounded queue and resident memory.
-1. Predictable clear/reconfigure/shutdown behavior.
-1. Rollout-friendly observability.
+1. Non-blocking execution hot path.
+1. Bounded background work and resident memory.
+1. Deterministic coordinator-only control flow.
+1. Strong observability for rollout/tuning.
 
 ## Proposed Public API
 
@@ -87,8 +83,6 @@ pub mod runtime {
         Disabled,
         NotReady,
         QueueSaturated,
-        AotMissing,
-        AotLoadFailed,
         JitFailed,
         UnsupportedBackend,
         Invalidated,
@@ -115,7 +109,7 @@ pub mod runtime {
     impl JitCoordinatorHandle {
         pub fn lookup(&self, req: LookupRequest<'_>) -> LookupDecision;
 
-        // Explicit APIs. These are enqueue-only and do not return wait tickets.
+        // Explicit enqueue APIs (non-waiting).
         pub fn compile_jit(&self, req: LookupRequest<'_>) -> Result<(), RuntimeError>;
         pub fn prepare_aot(&self, req: AotRequest<'_>) -> Result<(), RuntimeError>;
         pub fn prepare_aot_batch(&self, reqs: Vec<AotRequest<'_>>) -> Result<(), RuntimeError>;
@@ -133,11 +127,11 @@ pub mod runtime {
 
 ### API Behavior
 
-1. `lookup()` is hot-path only and never blocks.
-1. `lookup()` reads the in-memory compiled map and returns immediately.
-1. On miss, `lookup()` sends a best-effort event to coordinator and returns interpreter fallback.
-1. `compile_jit()`, `prepare_aot()`, and `prepare_aot_batch()` enqueue work and return immediately.
-1. `code_hash` is treated as trusted input.
+1. `lookup()` never blocks.
+1. `lookup()` only reads in-memory compiled map.
+1. Every `lookup()` emits best-effort tracking event to coordinator (hit or miss).
+1. `compile_jit()` and `prepare_aot*()` are enqueue-only and return immediately.
+1. `code_hash` is trusted input.
 
 ## Module Layout
 
@@ -163,38 +157,48 @@ runtime/
 1. `api.rs`: public types and handle methods.
 1. `config.rs`: defaults and tuning.
 1. `coordinator.rs`: single-threaded state machine, queues, generation control.
-1. `cache.rs`: concurrent map for published programs.
-1. `entry.rs`: hot-path entry (`ready`, `last_used_at`) only.
-1. `worker.rs`: compile/load tasks on custom rayon pool.
-1. `artifact.rs`: artifact identity and loaded backing lifetime.
-1. `storage.rs`: `ArtifactStore` trait and implementations.
+1. `cache.rs`: concurrent in-memory compiled map.
+1. `entry.rs`: hot-path data (`ready`, `last_used_at`) only.
+1. `worker.rs`: background JIT and AOT-prepare compile tasks.
+1. `artifact.rs`: artifact identity and loaded lifetime owners.
+1. `storage.rs`: `ArtifactStore` and backends.
 1. `stats.rs`: counters/gauges/snapshots.
-1. `error.rs`: typed runtime errors.
+1. `error.rs`: runtime error types.
 
 ## Core Architecture
 
+### Startup Bootstrap
+
+Before serving lookups:
+
+1. Build coordinator.
+1. Call `ArtifactStore::load_all()`.
+1. Validate and publish each returned artifact into compiled map as `ProgramKind::Aot`.
+1. Start coordinator event loop and return handle.
+
+Startup may block; hot path must not.
+
 ### Hot Path
 
-Hot path does only:
+For each `lookup(req)`:
 
-1. Check runtime enabled flag.
-1. Build `RuntimeCacheKey = (code_hash, spec_id)`.
+1. Check enabled flag.
+1. Compute key `(code_hash, spec_id)`.
 1. Probe compiled map.
-1. If ready, return compiled.
-1. If missing, submit `LookupMiss` command (best effort).
-1. Return interpreter fallback.
+1. Return `Compiled` on hit or `Interpret` on miss.
+1. Emit non-blocking `LookupObserved` command to coordinator.
 
 Hot-path invariants:
 
 1. No waiting.
-1. No filesystem or storage access.
-1. No linker interaction.
+1. No storage or filesystem calls.
+1. No linker calls.
 1. No worker pool calls.
-1. No blocking global lock.
+1. No blocking global mutex.
 
 ### Coordinator-Only State
 
-All mutable state transitions are coordinator-owned.
+All mutable state is written only by coordinator thread.
 
 ```rust
 struct EntryState {
@@ -202,14 +206,19 @@ struct EntryState {
     hotness: u32,
     generation: u64,
     next_retry_at: u64,
-    aot_known: bool,
+    source: Source,
+}
+
+enum Source {
+    Aot,
+    Jit,
+    Unknown,
 }
 
 enum Phase {
     Cold,
-    AotLoadQueued,
     JitQueued,
-    AotCompileQueued,
+    AotPrepareQueued,
     Working,
     Ready,
     Failed,
@@ -219,43 +228,35 @@ enum Phase {
 State transitions:
 
 ```text
-Absent -> Cold
+Startup-loaded AOT -> Ready(source=Aot)
+Absent -> Cold(source=Unknown)
 
-Cold + lookup miss -> maybe AotLoadQueued (if storage enabled and retry window allows)
-AotLoadQueued -> Working(load) -> Ready | Cold(AotMissing) | Failed
+Cold + observed lookups + hotness<threshold -> Cold
+Cold + observed lookups + hotness>=threshold -> JitQueued -> Working(jit) -> Ready(source=Jit) | Failed
 
-Cold + lookup miss increments hotness
-Cold + hotness >= threshold -> JitQueued -> Working(jit) -> Ready | Failed
-
-Cold + prepare_aot -> AotCompileQueued -> Working(aot_compile) -> Cold(aot_known=true) | Failed
+Cold + prepare_aot -> AotPrepareQueued -> Working(aot_compile) -> Cold(source=Aot) | Failed
 
 Failed + retry ttl elapsed -> Cold
 Ready + eviction -> Cold
 Any + clear/reconfigure -> Cold(next generation)
 ```
 
-Interpretation rule:
+Only `Ready` returns compiled.
 
-1. Only `Ready` returns compiled.
-1. Every other phase returns interpreter.
+### Unified In-Memory Compiled Map
 
-### Unified Fast Lookup Map
+Single map keyed by `(code_hash, spec_id)` containing both AOT and JIT compiled programs.
 
-Maintain a single in-memory compiled map keyed by `(code_hash, spec_id)` containing both:
-
-1. Loaded AOT programs.
-1. JIT-compiled programs.
-
-This map is the only data read on hot lookup.
+At startup, map contains only AOT entries. JIT entries are added later by coordinator.
 
 ### Worker Pool
 
-Use dedicated bounded rayon pool for compile/load work.
+Dedicated bounded rayon pool:
 
 1. Custom thread count.
-1. Custom names (`revmc-compile-{i}`).
-1. No use of global rayon pool.
-1. Work admission bounded by coordinator queue.
+1. Thread names `revmc-compile-{i}`.
+1. No global rayon pool usage.
+1. Admission bounded by coordinator queue.
 
 Default: `min(max(1, available_parallelism / 2), 4)`.
 
@@ -304,15 +305,14 @@ pub enum StorageConfig {
 |---|---:|---|
 | `enabled` | `false` | Safe rollout default |
 | `warm_threshold` | `8` | Promote repeated contracts to JIT |
-| `max_pending_jobs` | `2048` | Bound memory and background pressure |
+| `max_pending_jobs` | `2048` | Bound memory/background pressure |
 | `reserved_direct_slots` | `64` | Keep explicit requests responsive |
 | `batch_max_items` | `8` | Keep batches small |
 | `batch_max_total_bytecode_bytes` | `256 KiB` | Avoid giant batches |
-| `batch_max_wait` | `2 ms` | Micro-batching without noticeable delay |
+| `batch_max_wait` | `2 ms` | Micro-batching without visible delay |
 | `jit_opt_level` | `Default` | Compile-latency/runtime balance |
 | `aot_opt_level` | `Aggressive` | Better persisted artifact quality |
 | `negative_jit_ttl` | `300 s` | Avoid failing-JIT retry storms |
-| `negative_aot_load_ttl` | `60 s` | Avoid repeated missing-artifact probes |
 | `enqueue_cooldown` | `1 s` | Avoid queue hammering |
 | `resident_code_cache_bytes` | `128 MiB` | Predictable memory bound |
 | `worker_count` | `min(max(1, cpus/2), 4)` | Leave CPU headroom |
@@ -342,14 +342,15 @@ pub struct ArtifactKey {
 }
 ```
 
-Persisted artifacts are validated by full key, not hash alone.
+Persisted artifacts must match full key.
 
 ## Artifact Store
 
-`ArtifactStore` remains full read/write lifecycle API:
+`ArtifactStore` API remains:
 
 ```rust
 pub trait ArtifactStore: Send + Sync + 'static {
+    fn load_all(&self) -> Result<Vec<(ArtifactKey, StoredArtifact)>, StorageError>;
     fn load(&self, key: &ArtifactKey) -> Result<Option<StoredArtifact>, StorageError>;
     fn store(&self, key: &ArtifactKey, artifact: &StoredArtifact) -> Result<(), StorageError>;
     fn delete(&self, key: &ArtifactKey) -> Result<(), StorageError>;
@@ -394,15 +395,15 @@ enum ProgramBacking {
 
 Rules:
 
+1. Startup AOT and loaded libraries stay valid via shared backing owners.
 1. JIT output is process-local and never persisted.
-1. AOT load keeps library handle and temp backing alive behind `Arc`.
-1. Eviction drops runtime strong refs; memory frees after active users release `Arc`.
+1. Eviction drops runtime strong refs only; memory frees after active `Arc` holders release.
 
 ## Coordinator Commands
 
 ```rust
 enum Command {
-    LookupMiss(LookupRequestOwned),
+    LookupObserved(LookupObservedEvent),
     CompileJit(LookupRequestOwned),
     PrepareAot(Vec<AotRequestOwned>),
     SetEnabled(bool, ReplySender<()>),
@@ -418,145 +419,140 @@ enum Command {
 Priority order:
 
 1. Explicit `PrepareAot` and `CompileJit` requests.
-1. AOT load attempts from lookup misses.
-1. JIT compile requests from warm lookup misses.
+1. `LookupObserved` processing for hotness/JIT admission.
 
 ## Pipeline Behavior
 
-### Lookup-Miss Handling
+### Lookup Tracking
 
-For each miss:
+Every lookup emits `LookupObserved { key, was_hit }`.
 
-1. Attempt AOT load path first (if storage configured and not in AOT negative TTL).
-1. If no usable AOT artifact, continue normal path.
-1. Increment hotness and queue JIT once threshold is reached.
-1. Return interpreter immediately from hot path.
+Coordinator behavior:
 
-### AOT Prepare Flow
+1. Update counters/hotness.
+1. If key already `Ready`, do nothing further.
+1. If key is cold and hotness reaches threshold, enqueue JIT compile.
+
+### AOT Prepare
 
 For each requested contract:
 
-1. Compute `ArtifactKey`.
+1. Build `ArtifactKey`.
 1. Probe storage.
-1. If present and valid, mark `aot_known = true`.
-1. If absent, compile AOT and persist through `ArtifactStore::store`.
-1. Do not require immediate resident load; lookup can load on demand.
+1. If missing, compile AOT and persist via `store()`.
+1. Optionally load into resident map immediately (policy knob), otherwise available after next restart/bootstrap.
 
-### JIT Flow
+### JIT Compile
 
-1. Queue compile when hotness threshold reached.
+1. Enqueue when hotness threshold crossed.
 1. Compile on worker pool.
-1. Publish to unified compiled map.
-1. Mark entry `Ready`.
+1. Publish into in-memory map as `ProgramKind::Jit`.
 
 ## Clear, Reconfigure, Shutdown
 
 1. `clear_resident()`: clear in-memory compiled map and bump generation.
-1. `clear_persisted()`: call `ArtifactStore::clear()` and clear AOT-known markers.
+1. `clear_persisted()`: call `ArtifactStore::clear()` and clear any in-memory AOT catalog metadata.
 1. `clear_all()`: both operations above.
-1. `reconfigure()`: apply config updates, rebuild worker pool if needed, bump generation for destructive changes.
-1. `shutdown()`: stop accepting new work, stop coordinator loop, and discard stale/in-flight results by generation.
+1. `reconfigure()`: apply updates, rebuild worker pool if needed, bump generation for destructive changes.
+1. `shutdown()`: stop accepting events and ignore stale/in-flight worker results.
 
 No compile wait API is exposed.
 
 ## Correctness Invariants
 
-1. Interpreter is always the fallback on miss/error paths.
-1. Cache key always includes `SpecId`.
-1. `code_hash` is treated as trusted input.
-1. Coordinator is the only mutator of entry state.
-1. Stale worker results from older generations are discarded.
+1. Interpreter is always fallback on non-ready/error path.
+1. Key includes `SpecId`.
+1. `code_hash` is trusted input.
+1. Coordinator is sole state mutator.
+1. Stale generation results are discarded.
 1. Function pointer lifetime is tied to backing owner.
 
 ## Eviction And Invalidation
 
-Eviction is coordinator-managed LRU-ish by `last_used_at` and `approx_size_bytes` against `resident_code_cache_bytes`.
+Coordinator-managed LRU-ish eviction by `last_used_at` and `approx_size_bytes` against `resident_code_cache_bytes`.
 
 When over budget:
 
 1. Evict least-recently-used `Ready` entries.
-1. Drop runtime strong references only.
-1. Allow memory to free naturally when outstanding `Arc` holders finish.
+1. Drop runtime strong refs.
+1. Let memory free naturally as outstanding `Arc` refs drop.
 
 ## Observability
 
 Expose metrics for:
 
-1. Lookup outcomes (`compiled`, `aot_missing`, `interpreted_not_ready`, `interpreted_failed`).
-1. Queue depth, enqueue rate, dedupe count, drop count.
-1. AOT load attempts/success/failure/latency.
-1. AOT prepare compile/store attempts/success/failure/latency.
+1. Lookup outcomes (`compiled`, `interpreted_not_ready`, `interpreted_failed`).
+1. Lookup-observed enqueue success/drop counts.
+1. Hotness promotions to JIT queue.
 1. JIT compile attempts/success/failure/latency.
+1. AOT prepare probe/compile/store success/failure/latency.
+1. Startup `load_all` count/failure/latency.
 1. Resident bytes and evictions.
 
-Tracing spans around lookup-miss decisions, aot-load jobs, aot-prepare jobs, jit jobs, publish, clear/reconfigure/shutdown.
+Add tracing spans around startup preload, lookup-observed handling, JIT jobs, AOT prepare jobs, and lifecycle operations.
 
 ## Testing Strategy
 
-### 1. Unit
+### Unit
 
-1. Coordinator-only transitions.
-1. Dedupe and queue priority.
-1. Negative TTL behavior for AOT missing and JIT failures.
+1. Coordinator-only state transitions.
+1. Hotness tracking from `LookupObserved`.
+1. JIT admission threshold behavior.
 1. Generation invalidation.
 
-### 2. Concurrency
+### Concurrency
 
-1. Many threads same `(code_hash, spec_id)` lookup misses.
-1. Ensure single queued work per generation/key.
-1. Verify hot path remains non-blocking under saturation.
+1. Many threads calling `lookup()` on same key.
+1. Ensure lookup remains non-blocking under saturated coordinator channel.
+1. Ensure single JIT work admission per key/generation.
 
-### 3. Correctness vs Interpreter
+### Correctness
 
-1. State tests and block replays compare result/gas/halts.
-1. Include suspend/resume across `CALL*` and `CREATE*`.
-1. Include multiple `SpecId` coverage.
+1. Compare against interpreter on state tests/block replays.
+1. Cover `CALL*` and `CREATE*` suspend/resume behavior.
+1. Cover multiple `SpecId`s.
 
-### 4. Runtime-Created Code
+### Runtime-Created Code
 
-1. `CREATE/CREATE2` constructor/runtime distinction.
+1. `CREATE/CREATE2` runtime bytecode warmup and JIT admission.
 1. Repeated factory deployments.
-1. JIT warmup behavior for newly created runtime bytecode.
 
-### 5. Failure
+### Failure
 
-1. AOT load miss/corruption.
-1. AOT compile/store errors.
+1. Startup preload partial failures.
+1. AOT prepare compile/store errors.
 1. JIT compile errors.
-1. Queue saturation.
+1. Queue saturation/drop behavior.
 1. Clear/reconfigure/shutdown during active work.
 
-### 6. Performance
+### Performance
 
 1. Cold-heavy replay.
 1. Hot-heavy replay.
 1. Mixed replay.
-1. Track fallback rate, queue saturation, compile/load latencies, resident memory.
+1. Measure lookup cost, queue pressure, JIT latency, and resident memory.
 
 ## Rollout Plan
 
 ### Phase 0
 
-1. Coordinator lifecycle.
-1. Hot-path lookup + miss event.
-1. Unified compiled map.
+1. Startup AOT preload + in-memory map.
+1. O(1) lookup + fire-and-forget observed event.
 
 ### Phase 1
 
-1. AOT load-on-miss path.
-1. JIT warm-threshold compile path.
+1. Coordinator hotness tracking.
+1. Threshold-based JIT background compile.
 
 ### Phase 2
 
-1. Explicit `prepare_aot` and batch flow.
-1. AOT compile + persist integration.
+1. Explicit `prepare_aot` APIs.
+1. Compile+persist flow through `ArtifactStore`.
 
 ### Phase 3
 
-1. Eviction and operational hardening.
-1. Reconfigure/clear/shutdown polish.
-1. Rollout tuning from metrics.
+1. Eviction, lifecycle hardening, and rollout tuning.
 
 ## Final Recommendation
 
-Implement the smallest coordinator-only design that keeps lookup fast and deterministic: always try resident compiled first, opportunistically use AOT from storage, and otherwise rely on interpreter with background JIT warmup, while supporting explicit AOT preparation for known contracts.
+Keep lookup minimal: probe resident map and return immediately. Move all policy into coordinator by consuming fire-and-forget lookup events, preload AOT at startup via `load_all`, and add JIT only as background promotion for observed hot keys.
