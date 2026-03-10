@@ -38,8 +38,10 @@ matrix_tests!(
 
         compiler.clear_ir().unwrap();
 
-        // Second function: PUSH1 1, PUSH1 2, ADD, STOP.
-        let bytecode2: &[u8] = &[op::PUSH1, 1, op::PUSH1, 2, op::ADD];
+        // Second function: PUSH1 42, PUSH1 0, MSTORE, PUSH1 1, PUSH1 2, ADD, STOP.
+        // Uses MSTORE to exercise a builtin being re-declared in the new module.
+        let bytecode2: &[u8] =
+            &[op::PUSH1, 42, op::PUSH1, 0, op::MSTORE, op::PUSH1, 1, op::PUSH1, 2, op::ADD];
         let f2 = unsafe { compiler.jit("clear_ir_2", bytecode2, spec_id) }.unwrap();
 
         // First function still works after clear_ir + second compilation.

@@ -1307,7 +1307,7 @@ fn convert_attribute(bcx: &EvmLlvmBuilder<'_>, attr: revmc_backend::Attribute) -
         OurAttr::Speculatable => ("speculatable", AttrValue::Enum(0)),
 
         OurAttr::NoAlias => ("noalias", AttrValue::Enum(0)),
-        OurAttr::NoCapture => ("captures", AttrValue::Enum(0)),
+        OurAttr::NoCapture => ("captures", AttrValue::Enum(0)), // captures(none) - no capture
         OurAttr::NoUndef => ("noundef", AttrValue::Enum(0)),
         OurAttr::Align(n) => ("align", AttrValue::Enum(n)),
         OurAttr::NonNull => ("nonnull", AttrValue::Enum(0)),
