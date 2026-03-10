@@ -6,7 +6,7 @@
 //! exploit the UB and remove the zero check entirely. The fix uses `lazy_select`
 //! (conditional branch) so the division is never executed when b==0.
 
-use super::{with_evm_context, DEF_SPEC};
+use super::{DEF_SPEC, with_evm_context};
 use crate::{Backend, EvmCompiler};
 use revm_bytecode::opcode as op;
 use revm_interpreter::InstructionResult;

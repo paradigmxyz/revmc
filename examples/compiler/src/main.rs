@@ -5,13 +5,13 @@
 use clap::Parser;
 use eyre::Context;
 use revmc::{
+    EvmCompiler, EvmLlvmBackend, OptimizationLevel, SpecId,
     context_interface::host::DummyHost,
     interpreter::{
-        interpreter::{ExtBytecode, InputsImpl, SharedMemory},
         Interpreter,
+        interpreter::{ExtBytecode, InputsImpl, SharedMemory},
     },
     revm_bytecode::Bytecode,
-    EvmCompiler, EvmLlvmBackend, OptimizationLevel, SpecId,
 };
 use std::path::PathBuf;
 
@@ -36,8 +36,7 @@ fn main() -> eyre::Result<()> {
         .wrap_err("Failed to decode hex-encoded code")?;
 
     // Compile the code.
-    let context = revmc::llvm::inkwell::context::Context::create();
-    let backend = EvmLlvmBackend::new(&context, false, OptimizationLevel::Aggressive)?;
+    let backend = EvmLlvmBackend::new(false, OptimizationLevel::Aggressive)?;
     let mut compiler = EvmCompiler::new(backend);
     let f = unsafe { compiler.jit("test", &bytecode[..], SpecId::CANCUN) }
         .wrap_err("Failed to JIT-compile code")?;

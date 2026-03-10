@@ -16,21 +16,21 @@ use std::{
     time::{Duration, Instant},
 };
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use revm::{
+    ExecuteEvm, MainnetEvm,
     bytecode::Bytecode,
     context::{BlockEnv, CfgEnv, TxEnv},
     context_interface::{
-        result::{EVMError, HaltReason, InvalidTransaction, ResultAndState},
         ContextSetters,
+        result::{EVMError, HaltReason, InvalidTransaction, ResultAndState},
     },
     database::{CacheDB, EmptyDB},
     handler::{EvmTr, FrameResult, Handler, ItemOrResult, MainBuilder},
     primitives::{
-        hardfork::SpecId, Address, Bytes, StorageKeyMap, StorageValue, TxKind, B256, U256,
+        Address, B256, Bytes, StorageKeyMap, StorageValue, TxKind, U256, hardfork::SpecId,
     },
     state::AccountInfo,
-    ExecuteEvm, MainnetEvm,
 };
 use revmc::{EvmCompiler, EvmLlvmBackend, OptimizationLevel};
 use revmc_context::{EvmCompilerFn, RawEvmCompilerFn};
@@ -157,8 +157,7 @@ struct CurveBench {
     tx: TxEnv,
     functions: Arc<HashMap<B256, RawEvmCompilerFn>>,
     // Prevent drop of compiler/context while JIT functions are alive.
-    _compiler: &'static mut EvmCompiler<EvmLlvmBackend<'static>>,
-    _context: &'static revmc::llvm::inkwell::context::Context,
+    _compiler: &'static mut EvmCompiler<EvmLlvmBackend>,
 }
 
 impl CurveBench {
@@ -248,10 +247,9 @@ impl CurveBench {
         };
 
         // JIT compile
-        let context = Box::leak(Box::new(revmc::llvm::inkwell::context::Context::create()));
-        let backend = EvmLlvmBackend::new(context, false, OptimizationLevel::Aggressive)
-            .expect("LLVM backend");
-        let compiler: &'static mut EvmCompiler<EvmLlvmBackend<'static>> =
+        let backend =
+            EvmLlvmBackend::new(false, OptimizationLevel::Aggressive).expect("LLVM backend");
+        let compiler: &'static mut EvmCompiler<EvmLlvmBackend> =
             Box::leak(Box::new(EvmCompiler::new(backend)));
         let mut seen = HashSet::new();
         let mut pending = Vec::new();
@@ -278,7 +276,6 @@ impl CurveBench {
             tx,
             functions: Arc::new(functions),
             _compiler: compiler,
-            _context: context,
         }
     }
 
@@ -357,29 +354,17 @@ fn parse_address(value: &str) -> Address {
 
 fn parse_u256(value: &str) -> U256 {
     let trimmed = strip_0x(value.trim());
-    if trimmed.is_empty() {
-        U256::ZERO
-    } else {
-        U256::from_str_radix(trimmed, 16).unwrap()
-    }
+    if trimmed.is_empty() { U256::ZERO } else { U256::from_str_radix(trimmed, 16).unwrap() }
 }
 
 fn parse_u128(value: &str) -> u128 {
     let trimmed = strip_0x(value.trim());
-    if trimmed.is_empty() {
-        0
-    } else {
-        u128::from_str_radix(trimmed, 16).unwrap()
-    }
+    if trimmed.is_empty() { 0 } else { u128::from_str_radix(trimmed, 16).unwrap() }
 }
 
 fn parse_u64(value: &str) -> u64 {
     let trimmed = strip_0x(value.trim());
-    if trimmed.is_empty() {
-        0
-    } else {
-        u64::from_str_radix(trimmed, 16).unwrap()
-    }
+    if trimmed.is_empty() { 0 } else { u64::from_str_radix(trimmed, 16).unwrap() }
 }
 
 fn parse_hex_bytes(value: &str) -> Vec<u8> {

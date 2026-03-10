@@ -1,4 +1,4 @@
-use revmc::{primitives::hex, EvmCompiler, EvmLlvmBackend, OptimizationLevel, Result, SpecId};
+use revmc::{EvmCompiler, EvmLlvmBackend, OptimizationLevel, Result, SpecId, primitives::hex};
 use std::path::PathBuf;
 
 include!("./src/common.rs");
@@ -13,14 +13,13 @@ fn main() -> Result<()> {
     let bytecode = FIBONACCI_CODE;
 
     let out_dir = PathBuf::from(std::env::var("OUT_DIR")?);
-    let context = revmc::llvm::inkwell::context::Context::create();
-    let backend = EvmLlvmBackend::new(&context, true, OptimizationLevel::Aggressive)?;
+    let backend = EvmLlvmBackend::new(true, OptimizationLevel::Aggressive)?;
     let mut compiler = EvmCompiler::new(backend);
     compiler.translate(name, bytecode, SpecId::CANCUN)?;
     let object = out_dir.join(name).with_extension("o");
     compiler.write_object_to_file(&object)?;
 
-    cc::Build::new().object(&object).static_flag(true).compile(name);
+    cc::Build::new().object(&object).compile(name);
 
     Ok(())
 }

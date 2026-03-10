@@ -9,14 +9,14 @@
 // beginning on every re-entry.
 
 use super::{
-    insert_call_outcome_test, TestHost, DEF_ADDR, DEF_CALLER, DEF_CD, DEF_GAS_LIMIT, DEF_SPEC,
-    DEF_VALUE,
+    DEF_ADDR, DEF_CALLER, DEF_CD, DEF_GAS_LIMIT, DEF_SPEC, DEF_VALUE, TestHost,
+    insert_call_outcome_test,
 };
 use crate::{Backend, EvmCompiler};
 use revm_bytecode::opcode as op;
 use revm_interpreter::{
-    interpreter::ExtBytecode, CallInput, FrameInput, Gas, InputsImpl, InstructionResult,
-    Interpreter, InterpreterAction, InterpreterResult, SharedMemory,
+    CallInput, FrameInput, Gas, InputsImpl, InstructionResult, Interpreter, InterpreterAction,
+    InterpreterResult, SharedMemory, interpreter::ExtBytecode,
 };
 use revm_primitives::{Bytes, U256};
 

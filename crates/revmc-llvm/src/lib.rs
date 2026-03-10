@@ -6,6 +6,7 @@
 extern crate tracing;
 
 use inkwell::{
+    AddressSpace, IntPredicate, OptimizationLevel,
     attributes::{Attribute, AttributeLoc},
     basic_block::BasicBlock,
     execution_engine::ExecutionEngine,
@@ -23,12 +24,11 @@ use inkwell::{
         BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, InstructionValue,
         PointerValue,
     },
-    AddressSpace, IntPredicate, OptimizationLevel,
 };
 use revmc_backend::{
-    eyre, Backend, BackendTypes, Builder, Error, IntCC, Result, TailCallKind, TypeMethods, U256,
+    Backend, BackendTypes, Builder, Error, IntCC, Result, TailCallKind, TypeMethods, U256, eyre,
 };
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::{
     borrow::Cow,
     iter,
@@ -46,64 +46,57 @@ pub(crate) use utils::*;
 
 const DEFAULT_WEIGHT: u32 = 20000;
 
-/// Executes the given closure with a thread-local LLVM context.
-#[inline]
-pub fn with_llvm_context<R>(f: impl FnOnce(&Context) -> R) -> R {
-    thread_local! {
-        static TLS_LLVM_CONTEXT: Context = Context::create();
-    }
-    TLS_LLVM_CONTEXT.with(f)
-}
-
 /// The LLVM-based EVM bytecode compiler backend.
 #[derive(Debug)]
 #[must_use]
-pub struct EvmLlvmBackend<'ctx> {
-    cx: &'ctx Context,
-    _dh: dh::DiagnosticHandlerGuard<'ctx>,
-    bcx: inkwell::builder::Builder<'ctx>,
-    module: Module<'ctx>,
-    exec_engine: Option<ExecutionEngine<'ctx>>,
+pub struct EvmLlvmBackend {
+    cx: &'static Context,
+    _dh: dh::DiagnosticHandlerGuard,
+    bcx: inkwell::builder::Builder<'static>,
+    module: Module<'static>,
+    exec_engine: Option<ExecutionEngine<'static>>,
     machine: TargetMachine,
 
-    ty_void: VoidType<'ctx>,
-    ty_ptr: PointerType<'ctx>,
-    ty_i1: IntType<'ctx>,
-    ty_i8: IntType<'ctx>,
-    ty_i32: IntType<'ctx>,
-    ty_i64: IntType<'ctx>,
-    ty_i256: IntType<'ctx>,
-    ty_isize: IntType<'ctx>,
+    ty_void: VoidType<'static>,
+    ty_ptr: PointerType<'static>,
+    ty_i1: IntType<'static>,
+    ty_i8: IntType<'static>,
+    ty_i32: IntType<'static>,
+    ty_i64: IntType<'static>,
+    ty_i256: IntType<'static>,
+    ty_isize: IntType<'static>,
 
     aot: bool,
     debug_assertions: bool,
     opt_level: OptimizationLevel,
     /// Separate from `functions` to have always increasing IDs.
     function_counter: u32,
-    functions: FxHashMap<u32, (String, FunctionValue<'ctx>)>,
+    functions: FxHashMap<u32, (String, FunctionValue<'static>)>,
+    /// Symbol names that have been registered via `add_global_mapping` in the MCJIT engine.
+    /// Used to avoid re-registering builtins when a new module is created after `clear_ir`.
+    mapped_symbols: FxHashSet<String>,
 }
 
-impl<'ctx> EvmLlvmBackend<'ctx> {
+unsafe impl Send for EvmLlvmBackend {}
+
+impl EvmLlvmBackend {
     /// Creates a new LLVM backend for the host machine.
     ///
     /// Use [`new_for_target`](Self::new_for_target) to create a backend for a specific target.
-    pub fn new(
-        cx: &'ctx Context,
-        aot: bool,
-        opt_level: revmc_backend::OptimizationLevel,
-    ) -> Result<Self> {
-        Self::new_for_target(cx, aot, opt_level, &revmc_backend::Target::Native)
+    pub fn new(aot: bool, opt_level: revmc_backend::OptimizationLevel) -> Result<Self> {
+        Self::new_for_target(aot, opt_level, &revmc_backend::Target::Native)
     }
 
     /// Creates a new LLVM backend for the given target.
     #[instrument(name = "new_llvm_backend", level = "debug", skip_all)]
     pub fn new_for_target(
-        cx: &'ctx Context,
         aot: bool,
         opt_level: revmc_backend::OptimizationLevel,
         target: &revmc_backend::Target,
     ) -> Result<Self> {
         init()?;
+
+        let cx = get_context();
 
         let opt_level = convert_opt_level(opt_level);
 
@@ -167,25 +160,26 @@ impl<'ctx> EvmLlvmBackend<'ctx> {
             opt_level,
             function_counter: 0,
             functions: FxHashMap::default(),
+            mapped_symbols: FxHashSet::default(),
         })
     }
 
     /// Returns the LLVM context.
     #[inline]
-    pub fn cx(&self) -> &'ctx Context {
+    pub fn cx(&self) -> &Context {
         self.cx
     }
 
-    fn exec_engine(&self) -> &ExecutionEngine<'ctx> {
+    fn exec_engine(&self) -> &ExecutionEngine<'static> {
         assert!(!self.aot, "requested JIT execution engine on AOT");
         self.exec_engine.as_ref().expect("missing JIT execution engine")
     }
 
     fn fn_type(
         &self,
-        ret: Option<BasicTypeEnum<'ctx>>,
-        params: &[BasicTypeEnum<'ctx>],
-    ) -> FunctionType<'ctx> {
+        ret: Option<BasicTypeEnum<'static>>,
+        params: &[BasicTypeEnum<'static>],
+    ) -> FunctionType<'static> {
         let params = params.iter().copied().map(Into::into).collect::<Vec<_>>();
         match ret {
             Some(ret) => ret.fn_type(&params, false),
@@ -199,26 +193,25 @@ impl<'ctx> EvmLlvmBackend<'ctx> {
 
     // Delete IR to lower memory consumption.
     // For some reason this does not happen when `Drop`ping either the `Module` or the engine.
-    fn clear_module(&mut self) {
-        for function in self.module.get_functions().collect::<Vec<_>>() {
-            unsafe { function.delete() };
-        }
-        for global in self.module.get_globals().collect::<Vec<_>>() {
-            unsafe { global.delete() };
+    fn clear_module(&mut self) -> Result<()> {
+        if let Some(exec_engine) = &self.exec_engine {
+            exec_engine.remove_module(&self.module).map_err(|e| Error::msg(e.to_string()))?;
         }
         self.functions.clear();
+        self.mapped_symbols.clear();
+        self.clear_ir()
     }
 }
 
-impl<'ctx> BackendTypes for EvmLlvmBackend<'ctx> {
-    type Type = BasicTypeEnum<'ctx>;
-    type Value = BasicValueEnum<'ctx>;
-    type StackSlot = PointerValue<'ctx>;
-    type BasicBlock = BasicBlock<'ctx>;
-    type Function = FunctionValue<'ctx>;
+impl BackendTypes for EvmLlvmBackend {
+    type Type = BasicTypeEnum<'static>;
+    type Value = BasicValueEnum<'static>;
+    type StackSlot = PointerValue<'static>;
+    type BasicBlock = BasicBlock<'static>;
+    type Function = FunctionValue<'static>;
 }
 
-impl TypeMethods for EvmLlvmBackend<'_> {
+impl TypeMethods for EvmLlvmBackend {
     fn type_ptr(&self) -> Self::Type {
         self.ty_ptr.into()
     }
@@ -250,9 +243,9 @@ impl TypeMethods for EvmLlvmBackend<'_> {
     }
 }
 
-impl<'ctx> Backend for EvmLlvmBackend<'ctx> {
+impl Backend for EvmLlvmBackend {
     type Builder<'a>
-        = EvmLlvmBuilder<'a, 'ctx>
+        = EvmLlvmBuilder<'a>
     where
         Self: 'a;
     type FuncId = u32;
@@ -307,6 +300,8 @@ impl<'ctx> Backend for EvmLlvmBackend<'ctx> {
     ) -> Result<(Self::Builder<'_>, Self::FuncId)> {
         let (id, function) = if let Some((&id, &(_, function))) =
             self.functions.iter().find(|(_k, (fname, _f))| fname == name)
+            && let Some(function2) = self.module.get_function(name)
+            && function == function2
         {
             self.bcx.position_at_end(function.get_first_basic_block().unwrap());
             (id, function)
@@ -361,35 +356,44 @@ impl<'ctx> Backend for EvmLlvmBackend<'ctx> {
     }
 
     fn clear_ir(&mut self) -> Result<()> {
-        self.clear_module();
+        /*
+        for func in self.module.get_functions() {
+            if !func.as_global_value().is_declaration() {
+                func_delete_body(func);
+            }
+        }
+        */
+
+        self.module = create_module(self.cx, &self.machine)?;
+        if let Some(exec_engine) = &self.exec_engine {
+            exec_engine.add_module(&self.module).map_err(|_| Error::msg("failed to add module"))?;
+        }
+
         Ok(())
     }
 
     unsafe fn free_function(&mut self, id: Self::FuncId) -> Result<()> {
-        let name = self.id_to_name(id);
-        let function = self.exec_engine().get_function_value(name)?;
-        self.exec_engine().free_fn_machine_code(function);
-        self.functions.clear();
+        let (_, function) = self.functions.remove(&id).unwrap();
+        if let Some(exec_engine) = &self.exec_engine {
+            exec_engine.free_fn_machine_code(function);
+        }
+        unsafe { function.delete() };
         Ok(())
     }
 
     unsafe fn free_all_functions(&mut self) -> Result<()> {
-        self.clear_module();
         if let Some(exec_engine) = &self.exec_engine {
-            exec_engine.remove_module(&self.module).map_err(|e| Error::msg(e.to_string()))?;
+            for (_, function) in self.functions.values() {
+                exec_engine.free_fn_machine_code(*function);
+            }
         }
-        self.module = create_module(self.cx, &self.machine)?;
-        if self.exec_engine.is_some() {
-            self.exec_engine =
-                Some(self.module.create_jit_execution_engine(self.opt_level).map_err(error_msg)?);
-        }
-        Ok(())
+        self.clear_module()
     }
 }
 
-impl Drop for EvmLlvmBackend<'_> {
+impl Drop for EvmLlvmBackend {
     fn drop(&mut self) {
-        self.clear_module();
+        let _ = self.clear_module();
     }
 }
 
@@ -446,13 +450,13 @@ impl TargetInfo {
 /// The LLVM-based EVM bytecode compiler function builder.
 #[derive(Debug)]
 #[must_use]
-pub struct EvmLlvmBuilder<'a, 'ctx> {
-    backend: &'a mut EvmLlvmBackend<'ctx>,
-    function: FunctionValue<'ctx>,
+pub struct EvmLlvmBuilder<'a> {
+    backend: &'a mut EvmLlvmBackend,
+    function: FunctionValue<'static>,
 }
 
-impl<'ctx> std::ops::Deref for EvmLlvmBuilder<'_, 'ctx> {
-    type Target = EvmLlvmBackend<'ctx>;
+impl std::ops::Deref for EvmLlvmBuilder<'_> {
+    type Target = EvmLlvmBackend;
 
     #[inline]
     fn deref(&self) -> &Self::Target {
@@ -460,29 +464,29 @@ impl<'ctx> std::ops::Deref for EvmLlvmBuilder<'_, 'ctx> {
     }
 }
 
-impl std::ops::DerefMut for EvmLlvmBuilder<'_, '_> {
+impl std::ops::DerefMut for EvmLlvmBuilder<'_> {
     #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.backend
     }
 }
 
-impl<'ctx> EvmLlvmBuilder<'_, 'ctx> {
+impl EvmLlvmBuilder<'_> {
     #[allow(dead_code)]
     fn extract_value(
         &mut self,
-        value: BasicValueEnum<'ctx>,
+        value: BasicValueEnum<'static>,
         index: u32,
         name: &str,
-    ) -> BasicValueEnum<'ctx> {
+    ) -> BasicValueEnum<'static> {
         self.bcx.build_extract_value(value.into_struct_value(), index, name).unwrap()
     }
 
     fn memcpy_inner(
         &mut self,
-        dst: BasicValueEnum<'ctx>,
-        src: BasicValueEnum<'ctx>,
-        len: BasicValueEnum<'ctx>,
+        dst: BasicValueEnum<'static>,
+        src: BasicValueEnum<'static>,
+        len: BasicValueEnum<'static>,
         inline: bool,
     ) {
         let dst = dst.into_pointer_value();
@@ -509,9 +513,9 @@ impl<'ctx> EvmLlvmBuilder<'_, 'ctx> {
     fn call_overflow_function(
         &mut self,
         name: &str,
-        lhs: BasicValueEnum<'ctx>,
-        rhs: BasicValueEnum<'ctx>,
-    ) -> (BasicValueEnum<'ctx>, BasicValueEnum<'ctx>) {
+        lhs: BasicValueEnum<'static>,
+        rhs: BasicValueEnum<'static>,
+    ) -> (BasicValueEnum<'static>, BasicValueEnum<'static>) {
         let f = self.get_overflow_function(name, lhs.get_type());
         let result = self.call(f, &[lhs, rhs]).unwrap();
         (self.extract_value(result, 0, "result"), self.extract_value(result, 1, "overflow"))
@@ -521,8 +525,8 @@ impl<'ctx> EvmLlvmBuilder<'_, 'ctx> {
     fn get_overflow_function(
         &mut self,
         name: &str,
-        ty: BasicTypeEnum<'ctx>,
-    ) -> FunctionValue<'ctx> {
+        ty: BasicTypeEnum<'static>,
+    ) -> FunctionValue<'static> {
         let name = format!("llvm.{name}.with.overflow.{}", fmt_ty(ty));
         self.get_or_add_function(&name, |this| {
             this.fn_type(
@@ -532,7 +536,11 @@ impl<'ctx> EvmLlvmBuilder<'_, 'ctx> {
         })
     }
 
-    fn get_sat_function(&mut self, name: &str, ty: BasicTypeEnum<'ctx>) -> FunctionValue<'ctx> {
+    fn get_sat_function(
+        &mut self,
+        name: &str,
+        ty: BasicTypeEnum<'static>,
+    ) -> FunctionValue<'static> {
         let name = format!("llvm.{name}.sat.{}", fmt_ty(ty));
         self.get_or_add_function(&name, |this| this.fn_type(Some(ty), &[ty, ty]))
     }
@@ -540,8 +548,8 @@ impl<'ctx> EvmLlvmBuilder<'_, 'ctx> {
     fn get_or_add_function(
         &mut self,
         name: &str,
-        mk_ty: impl FnOnce(&mut Self) -> FunctionType<'ctx>,
-    ) -> FunctionValue<'ctx> {
+        mk_ty: impl FnOnce(&mut Self) -> FunctionType<'static>,
+    ) -> FunctionValue<'static> {
         match self.module.get_function(name) {
             Some(function) => function,
             None => {
@@ -553,12 +561,13 @@ impl<'ctx> EvmLlvmBuilder<'_, 'ctx> {
 
     fn set_branch_weights(
         &self,
-        inst: InstructionValue<'ctx>,
+        inst: InstructionValue<'static>,
         weights: impl IntoIterator<Item = u32>,
     ) {
         let weights = weights.into_iter();
-        let mut values =
-            Vec::<BasicMetadataValueEnum<'ctx>>::with_capacity(1 + weights.size_hint().1.unwrap());
+        let mut values = Vec::<BasicMetadataValueEnum<'static>>::with_capacity(
+            1 + weights.size_hint().1.unwrap(),
+        );
         values.push(self.cx.metadata_string("branch_weights").into());
         for weight in weights {
             values.push(self.ty_i32.const_int(weight as u64, false).into());
@@ -569,15 +578,15 @@ impl<'ctx> EvmLlvmBuilder<'_, 'ctx> {
     }
 }
 
-impl<'ctx> BackendTypes for EvmLlvmBuilder<'_, 'ctx> {
-    type Type = <EvmLlvmBackend<'ctx> as BackendTypes>::Type;
-    type Value = <EvmLlvmBackend<'ctx> as BackendTypes>::Value;
-    type StackSlot = <EvmLlvmBackend<'ctx> as BackendTypes>::StackSlot;
-    type BasicBlock = <EvmLlvmBackend<'ctx> as BackendTypes>::BasicBlock;
-    type Function = <EvmLlvmBackend<'ctx> as BackendTypes>::Function;
+impl BackendTypes for EvmLlvmBuilder<'_> {
+    type Type = <EvmLlvmBackend as BackendTypes>::Type;
+    type Value = <EvmLlvmBackend as BackendTypes>::Value;
+    type StackSlot = <EvmLlvmBackend as BackendTypes>::StackSlot;
+    type BasicBlock = <EvmLlvmBackend as BackendTypes>::BasicBlock;
+    type Function = <EvmLlvmBackend as BackendTypes>::Function;
 }
 
-impl TypeMethods for EvmLlvmBuilder<'_, '_> {
+impl TypeMethods for EvmLlvmBuilder<'_> {
     fn type_ptr(&self) -> Self::Type {
         self.backend.type_ptr()
     }
@@ -599,7 +608,7 @@ impl TypeMethods for EvmLlvmBuilder<'_, '_> {
     }
 }
 
-impl Builder for EvmLlvmBuilder<'_, '_> {
+impl Builder for EvmLlvmBuilder<'_> {
     fn create_block(&mut self, name: &str) -> Self::BasicBlock {
         self.cx.append_basic_block(self.function, name)
     }
@@ -627,7 +636,7 @@ impl Builder for EvmLlvmBuilder<'_, '_> {
         });
         let true_ = self.bool_const(true);
         let callsite = self.bcx.build_call(function, &[true_.into()], "cold").unwrap();
-        let cold = self.cx.create_enum_attribute(Attribute::get_named_enum_kind_id("cold"), 1);
+        let cold = self.cx.create_enum_attribute(Attribute::get_named_enum_kind_id("cold"), 0);
         callsite.add_attribute(AttributeLoc::Function, cold);
     }
 
@@ -1137,8 +1146,12 @@ impl Builder for EvmLlvmBuilder<'_, '_> {
     ) -> Self::Function {
         let func_ty = self.fn_type(ret, params);
         let function = self.module.add_function(name, func_ty, Some(convert_linkage(linkage)));
-        if let (Some(address), Some(exec_engine)) = (address, &self.exec_engine) {
+        if let Some(address) = address
+            && let Some(exec_engine) = &self.exec_engine
+            && !self.mapped_symbols.contains(name)
+        {
             exec_engine.add_global_mapping(&function, address);
+            self.mapped_symbols.insert(name.to_string());
         }
         function
     }
@@ -1206,6 +1219,14 @@ fn init_() -> Result<()> {
     Ok(())
 }
 
+fn get_context() -> &'static Context {
+    thread_local! {
+        static TLS_LLVM_CONTEXT: Context = Context::create();
+    }
+    // SAFETY: It can't be shared across threads anyway.
+    TLS_LLVM_CONTEXT.with(|cx| unsafe { core::mem::transmute(cx) })
+}
+
 fn create_module<'ctx>(cx: &'ctx Context, machine: &TargetMachine) -> Result<Module<'ctx>> {
     let module_name = "evm";
     let module = cx.create_module(module_name);
@@ -1258,7 +1279,7 @@ fn convert_opt_level_rev(level: OptimizationLevel) -> revmc_backend::Optimizatio
     }
 }
 
-fn convert_attribute(bcx: &EvmLlvmBuilder<'_, '_>, attr: revmc_backend::Attribute) -> Attribute {
+fn convert_attribute(bcx: &EvmLlvmBuilder<'_>, attr: revmc_backend::Attribute) -> Attribute {
     use revmc_backend::Attribute as OurAttr;
 
     enum AttrValue<'a> {
@@ -1269,12 +1290,12 @@ fn convert_attribute(bcx: &EvmLlvmBuilder<'_, '_>, attr: revmc_backend::Attribut
 
     let cpu;
     let (key, value) = match attr {
-        OurAttr::WillReturn => ("willreturn", AttrValue::Enum(1)),
-        OurAttr::NoReturn => ("noreturn", AttrValue::Enum(1)),
-        OurAttr::NoFree => ("nofree", AttrValue::Enum(1)),
-        OurAttr::NoRecurse => ("norecurse", AttrValue::Enum(1)),
-        OurAttr::NoSync => ("nosync", AttrValue::Enum(1)),
-        OurAttr::NoUnwind => ("nounwind", AttrValue::Enum(1)),
+        OurAttr::WillReturn => ("willreturn", AttrValue::Enum(0)),
+        OurAttr::NoReturn => ("noreturn", AttrValue::Enum(0)),
+        OurAttr::NoFree => ("nofree", AttrValue::Enum(0)),
+        OurAttr::NoRecurse => ("norecurse", AttrValue::Enum(0)),
+        OurAttr::NoSync => ("nosync", AttrValue::Enum(0)),
+        OurAttr::NoUnwind => ("nounwind", AttrValue::Enum(0)),
         OurAttr::AllFramePointers => ("frame-pointer", AttrValue::String("all")),
         OurAttr::NativeTargetCpu => (
             "target-cpu",
@@ -1283,26 +1304,26 @@ fn convert_attribute(bcx: &EvmLlvmBuilder<'_, '_>, attr: revmc_backend::Attribut
                 cpu.to_str().unwrap()
             }),
         ),
-        OurAttr::Cold => ("cold", AttrValue::Enum(1)),
-        OurAttr::Hot => ("hot", AttrValue::Enum(1)),
-        OurAttr::HintInline => ("inlinehint", AttrValue::Enum(1)),
-        OurAttr::AlwaysInline => ("alwaysinline", AttrValue::Enum(1)),
-        OurAttr::NoInline => ("noinline", AttrValue::Enum(1)),
-        OurAttr::Speculatable => ("speculatable", AttrValue::Enum(1)),
+        OurAttr::Cold => ("cold", AttrValue::Enum(0)),
+        OurAttr::Hot => ("hot", AttrValue::Enum(0)),
+        OurAttr::HintInline => ("inlinehint", AttrValue::Enum(0)),
+        OurAttr::AlwaysInline => ("alwaysinline", AttrValue::Enum(0)),
+        OurAttr::NoInline => ("noinline", AttrValue::Enum(0)),
+        OurAttr::Speculatable => ("speculatable", AttrValue::Enum(0)),
 
-        OurAttr::NoAlias => ("noalias", AttrValue::Enum(1)),
+        OurAttr::NoAlias => ("noalias", AttrValue::Enum(0)),
         OurAttr::NoCapture => ("captures", AttrValue::Enum(0)), // captures(none) - no capture
-        OurAttr::NoUndef => ("noundef", AttrValue::Enum(1)),
+        OurAttr::NoUndef => ("noundef", AttrValue::Enum(0)),
         OurAttr::Align(n) => ("align", AttrValue::Enum(n)),
-        OurAttr::NonNull => ("nonnull", AttrValue::Enum(1)),
+        OurAttr::NonNull => ("nonnull", AttrValue::Enum(0)),
         OurAttr::Dereferenceable(n) => ("dereferenceable", AttrValue::Enum(n)),
         OurAttr::SRet(n) => {
             ("sret", AttrValue::Type(bcx.type_array(bcx.ty_i8.into(), n as _).as_any_type_enum()))
         }
-        OurAttr::ReadNone => ("readnone", AttrValue::Enum(1)),
-        OurAttr::ReadOnly => ("readonly", AttrValue::Enum(1)),
-        OurAttr::WriteOnly => ("writeonly", AttrValue::Enum(1)),
-        OurAttr::Writable => ("writable", AttrValue::Enum(1)),
+        OurAttr::ReadNone => ("readnone", AttrValue::Enum(0)),
+        OurAttr::ReadOnly => ("readonly", AttrValue::Enum(0)),
+        OurAttr::WriteOnly => ("writeonly", AttrValue::Enum(0)),
+        OurAttr::Writable => ("writable", AttrValue::Enum(0)),
 
         attr => unimplemented!("llvm attribute conversion: {attr:?}"),
     };
@@ -1352,3 +1373,33 @@ fn error_msg(msg: inkwell::support::LLVMString) -> revmc_backend::Error {
 fn fmt_ty(ty: BasicTypeEnum<'_>) -> impl std::fmt::Display {
     ty.print_to_string().to_str().unwrap().trim_matches('"').to_string()
 }
+
+// TODO: `LLVMSetOperand` is not the same as `Use::set(nullptr)`.
+/*
+/// Mimics `llvm::Function::deleteBody`.
+fn func_delete_body(func: FunctionValue<'_>) {
+    for block in func.get_basic_block_iter() {
+        for inst in block.get_instructions() {
+            for i in 0..inst.get_num_operands() {
+                unsafe { LLVMSetOperand(inst.as_value_ref(), i, core::ptr::null_mut()) }
+            }
+        }
+    }
+
+    for_each_2(func.get_basic_block_iter(), |b| unsafe {
+        for_each_2(b.get_instructions(), |inst| {
+            inst.erase_from_basic_block();
+        });
+        let _ = b.delete();
+    });
+}
+
+fn for_each_2<T>(iter: impl IntoIterator<Item = T>, mut f: impl FnMut(T)) {
+    let mut iter = iter.into_iter();
+    let mut next = iter.next();
+    while let Some(x) = next {
+        next = iter.next();
+        f(x);
+    }
+}
+*/

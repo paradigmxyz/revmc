@@ -7,6 +7,8 @@ const MANGLE_PREFIX: &str = "__revmc_builtin_";
 #[derive(Debug)]
 pub struct Builtins<B: Backend>([Option<B::Function>; Builtin::COUNT]);
 
+unsafe impl<B: Backend> Send for Builtins<B> {}
+
 impl<B: Backend> Default for Builtins<B> {
     fn default() -> Self {
         Self::new()

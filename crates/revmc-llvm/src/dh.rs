@@ -1,24 +1,24 @@
 use inkwell::{
     context::{AsContextRef, Context},
-    llvm_sys::{core::*, prelude::*, LLVMDiagnosticHandler, LLVMDiagnosticSeverity::*},
+    llvm_sys::{LLVMDiagnosticHandler, LLVMDiagnosticSeverity::*, core::*, prelude::*},
 };
 use std::{ffi::c_void, fmt, ptr};
 
 /// LLVM diagnostic handler guard.
-pub(crate) struct DiagnosticHandlerGuard<'ctx> {
-    cx: &'ctx Context,
+pub(crate) struct DiagnosticHandlerGuard {
+    cx: &'static Context,
     prev_dh: LLVMDiagnosticHandler,
     prev_dhc: *mut c_void,
 }
 
-impl fmt::Debug for DiagnosticHandlerGuard<'_> {
+impl fmt::Debug for DiagnosticHandlerGuard {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("DiagnosticHandlerGuard").finish_non_exhaustive()
     }
 }
 
-impl<'ctx> DiagnosticHandlerGuard<'ctx> {
-    pub(crate) fn new(cx: &'ctx Context) -> Self {
+impl DiagnosticHandlerGuard {
+    pub(crate) fn new(cx: &'static Context) -> Self {
         unsafe {
             let c = cx.as_ctx_ref();
             let prev_dh = LLVMContextGetDiagnosticHandler(c);
@@ -43,7 +43,7 @@ impl<'ctx> DiagnosticHandlerGuard<'ctx> {
     }
 }
 
-impl Drop for DiagnosticHandlerGuard<'_> {
+impl Drop for DiagnosticHandlerGuard {
     fn drop(&mut self) {
         unsafe {
             LLVMContextSetDiagnosticHandler(self.cx.as_ctx_ref(), self.prev_dh, self.prev_dhc);

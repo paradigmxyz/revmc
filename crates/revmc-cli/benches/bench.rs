@@ -1,18 +1,17 @@
 #![allow(missing_docs)]
 
 use criterion::{
-    criterion_group, criterion_main, measurement::WallTime, BenchmarkGroup, Criterion,
+    BenchmarkGroup, Criterion, criterion_group, criterion_main, measurement::WallTime,
 };
 use revm_bytecode::Bytecode;
 use revm_interpreter::{
+    InputsImpl, SharedMemory,
     host::DummyHost,
     instruction_table,
     interpreter::{EthInterpreter, ExtBytecode},
-    InputsImpl, SharedMemory,
 };
 use revmc::{
-    llvm, primitives::hardfork::SpecId, EvmCompiler, EvmCompilerFn, EvmContext, EvmLlvmBackend,
-    EvmStack,
+    EvmCompiler, EvmCompilerFn, EvmContext, EvmLlvmBackend, EvmStack, primitives::hardfork::SpecId,
 };
 use revmc_cli::Bench;
 use std::time::Duration;
@@ -41,9 +40,8 @@ fn run_bench(c: &mut Criterion, bench: &Bench) {
     let table = instruction_table::<EthInterpreter, DummyHost>();
 
     // Set up the compiler.
-    let context = llvm::inkwell::context::Context::create();
     let opt_level = revmc::OptimizationLevel::Aggressive;
-    let backend = EvmLlvmBackend::new(&context, false, opt_level).unwrap();
+    let backend = EvmLlvmBackend::new(false, opt_level).unwrap();
     let mut compiler = EvmCompiler::new(backend);
     compiler.inspect_stack_length(!stack_input.is_empty());
     compiler.gas_metering(true);

@@ -1,17 +1,17 @@
 use clap::{Parser, ValueEnum};
-use color_eyre::{eyre::eyre, Result};
+use color_eyre::{Result, eyre::eyre};
 use revm_bytecode::Bytecode;
 use revm_interpreter::{
+    InputsImpl, SharedMemory,
     host::DummyHost,
     instruction_table,
     interpreter::{EthInterpreter, ExtBytecode},
-    InputsImpl, SharedMemory,
 };
 use revmc::{
-    eyre::ensure, primitives::hardfork::SpecId, EvmCompiler, EvmContext, EvmLlvmBackend,
-    OptimizationLevel,
+    EvmCompiler, EvmContext, EvmLlvmBackend, OptimizationLevel, eyre::ensure,
+    primitives::hardfork::SpecId,
 };
-use revmc_cli::{get_benches, read_code, Bench};
+use revmc_cli::{Bench, get_benches, read_code};
 use std::{
     hint::black_box,
     path::{Path, PathBuf},
@@ -82,9 +82,8 @@ pub(crate) struct RunArgs {
 impl RunArgs {
     pub(crate) fn run(self) -> Result<()> {
         // Build the compiler.
-        let context = revmc::llvm::inkwell::context::Context::create();
         let target = revmc::Target::new(self.target, self.target_cpu, self.target_features);
-        let backend = EvmLlvmBackend::new_for_target(&context, self.aot, self.opt_level, &target)?;
+        let backend = EvmLlvmBackend::new_for_target(self.aot, self.opt_level, &target)?;
         let mut compiler = EvmCompiler::new(backend);
         compiler.set_dump_to(self.out_dir);
         compiler.gas_metering(!self.no_gas);

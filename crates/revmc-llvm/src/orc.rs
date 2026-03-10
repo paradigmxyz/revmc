@@ -15,6 +15,7 @@
 
 use crate::llvm_string;
 use inkwell::{
+    context::{Context, ContextRef},
     llvm_sys::{
         core::{LLVMContextCreate, LLVMModuleCreateWithNameInContext},
         error::*,
@@ -26,13 +27,19 @@ use inkwell::{
     targets::TargetMachine,
 };
 use std::{
-    ffi::{c_char, c_void, CStr, CString},
+    ffi::{CStr, CString, c_char, c_void},
     fmt,
     marker::PhantomData,
     mem::{self, MaybeUninit},
     panic::AssertUnwindSafe,
     ptr::{self, NonNull},
 };
+
+unsafe extern "C" {
+    fn LLVMOrcCreateNewThreadSafeContextFromLLVMContext(
+        Ctx: LLVMContextRef,
+    ) -> LLVMOrcThreadSafeContextRef;
+}
 
 /// A thread-safe LLVM context.
 ///
@@ -49,6 +56,12 @@ impl ThreadSafeContext {
         unsafe { Self::from_inner(LLVMOrcCreateNewThreadSafeContext()) }
     }
 
+    /// Creates a thread-safe context from an existing LLVM context.
+    pub fn from_context(ctx: Context) -> Self {
+        let ctx = mem::ManuallyDrop::new(ctx);
+        unsafe { Self::from_inner(LLVMOrcCreateNewThreadSafeContextFromLLVMContext(ctx.raw())) }
+    }
+
     /// Wraps a raw pointer.
     pub unsafe fn from_inner(ctx: LLVMOrcThreadSafeContextRef) -> Self {
         Self { ctx }
@@ -57,6 +70,11 @@ impl ThreadSafeContext {
     /// Unwraps the raw pointer.
     pub fn as_inner(&self) -> LLVMOrcThreadSafeContextRef {
         self.ctx
+    }
+
+    /// Returns the underlying LLVM context.
+    pub fn get_context(&self) -> ContextRef<'_> {
+        unsafe { ContextRef::new(LLVMOrcThreadSafeContextGetContext(self.ctx)) }
     }
 
     /// Create a ThreadSafeModule wrapper around the given LLVM module.
@@ -82,12 +100,6 @@ impl Drop for ThreadSafeContext {
 // > references (e.g. from ThreadSafeModules) will keep the data alive as long as it is needed.
 pub struct ThreadSafeModule {
     ptr: LLVMOrcThreadSafeModuleRef,
-}
-
-extern "C" {
-    fn LLVMOrcCreateNewThreadSafeContextFromLLVMContext(
-        Ctx: LLVMContextRef,
-    ) -> LLVMOrcThreadSafeContextRef;
 }
 
 impl ThreadSafeModule {
@@ -958,6 +970,20 @@ pub struct DefinitionGenerator {
 }
 
 impl DefinitionGenerator {
+    /// Creates a generator that resolves symbols from the current process.
+    pub fn for_current_process(global_prefix: c_char) -> Result<Self, LLVMString> {
+        let mut generator = MaybeUninit::uninit();
+        cvt(unsafe {
+            LLVMOrcCreateDynamicLibrarySearchGeneratorForProcess(
+                generator.as_mut_ptr(),
+                global_prefix,
+                None,
+                ptr::null_mut(),
+            )
+        })?;
+        Ok(unsafe { Self::from_inner(generator.assume_init()) })
+    }
+
     /// Creates a new custom DefinitionGenerator.
     pub fn new_custom(generator: Box<dyn CustomDefinitionGenerator>) -> Self {
         extern "C" fn try_to_generate(
@@ -1447,12 +1473,8 @@ impl IRTransformLayerRef {
 }
 
 /// Converts an `LLVMErrorRef` to a `Result`.
-fn cvt(ptr: LLVMErrorRef) -> Result<(), LLVMString> {
-    if ptr.is_null() {
-        Ok(())
-    } else {
-        Err(unsafe { llvm_string(LLVMGetErrorMessage(ptr)) })
-    }
+pub(crate) fn cvt(ptr: LLVMErrorRef) -> Result<(), LLVMString> {
+    if ptr.is_null() { Ok(()) } else { Err(unsafe { llvm_string(LLVMGetErrorMessage(ptr)) }) }
 }
 
 fn cvt_cb_res(res: Result<Result<(), String>, Box<dyn std::any::Any + Send>>) -> LLVMErrorRef {
