@@ -4,7 +4,7 @@
 
 use codegen::ir::Function;
 use cranelift::{
-    codegen::ir::{FuncRef, StackSlot},
+    codegen::ir::{FuncRef, StackSlot, instructions::BlockArg},
     prelude::*,
 };
 use cranelift_jit::{JITBuilder, JITModule};
@@ -553,7 +553,7 @@ impl<'a> Builder for EvmCraneliftBuilder<'a> {
         for &(value, block) in incoming {
             self.bcx.switch_to_block(block);
             let last_inst = self.bcx.func.layout.last_inst(block).unwrap();
-            let src = self.bcx.ins().jump(current, &[value]);
+            let src = self.bcx.ins().jump(current, &[BlockArg::Value(value)]);
             self.bcx.func.transplant_inst(last_inst, src);
         }
         self.bcx.switch_to_block(current);
@@ -590,12 +590,12 @@ impl<'a> Builder for EvmCraneliftBuilder<'a> {
         self.seal_block(then_block);
         self.switch_to_block(then_block);
         let then_value = then_value(self);
-        self.bcx.ins().jump(done_block, &[then_value]);
+        self.bcx.ins().jump(done_block, &[BlockArg::Value(then_value)]);
 
         self.seal_block(else_block);
         self.switch_to_block(else_block);
         let else_value = else_value(self);
-        self.bcx.ins().jump(done_block, &[else_value]);
+        self.bcx.ins().jump(done_block, &[BlockArg::Value(else_value)]);
 
         self.seal_block(done_block);
         self.switch_to_block(done_block);
@@ -880,6 +880,7 @@ impl Symbols {
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 enum ModuleWrapper {
     Jit(JITModule),
     Aot(ObjectModule),
