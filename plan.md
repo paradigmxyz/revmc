@@ -6,64 +6,60 @@ Proposed.
 
 ## Summary
 
-Add a new `revmc::runtime` module that provides a production-grade runtime JIT coordinator service for reth and other users.
+Add a new `revmc::runtime` module with a simple coordinator-owned model.
 
-The service should:
+There are two consumers:
 
-1. Decide compiled vs interpreter execution at runtime.
-1. Keep the execution hot path lock-light and non-blocking.
-1. Perform background JIT compilation off-path.
-1. Support direct compile requests for explicit prewarming or blocking compilation.
-1. Support AOT persistence and reload through an abstract storage backend.
-1. Centralize policy and lifecycle changes in one coordinator thread.
-1. Run compilation work on a custom bounded rayon worker pool.
+1. EVM execution lookup: use compiled code if present, prefer AOT artifact load when available, otherwise follow normal interpreter + JIT warmup path.
+1. Explicit AOT preparation: user provides contracts to ensure AOT artifacts exist (compile and persist if missing).
 
-The first production version should intentionally use a simple 2-tier model:
+Core constraints:
+
+1. Hot path must be non-blocking.
+1. State transitions must be coordinator-only.
+1. Runtime JIT output is process-local and never persisted.
+1. AOT artifacts are persisted through `ArtifactStore`.
+
+The runtime remains a strict 2-tier system:
 
 1. Tier 0: interpreter.
-1. Tier 1: compiled code (JIT-loaded in memory, or AOT-loaded from storage).
+1. Tier 1: compiled (`Aot` or `Jit`).
 
-No speculative optimization, no mid-frame tier switching, and no deoptimization machinery.
+No OSR, no deopt, no speculative guards, no mid-frame switching.
+
+## Scope
+
+### In Scope
+
+1. Fast lookup API for execution.
+1. Unified in-memory compiled map containing both loaded AOT and JIT programs.
+1. On-miss AOT load attempt (when storage configured), with fallback to normal path.
+1. Warm-threshold runtime JIT compilation.
+1. Explicit AOT prepare API (compile + store when absent).
+1. Coordinator-owned scheduling, dedupe, retries, and invalidation.
+
+### Out Of Scope
+
+1. Speculative multi-tier optimization.
+1. Distributed artifact caches.
+1. Guaranteed cross-machine artifact portability.
+1. Hot-path waiting for compilation or load completion.
 
 ## Goals
 
-### Functional goals
+### Functional
 
-1. Provide a reusable runtime service usable by reth execution, benchmarks, statetest-like runners, and other revm/revmc embedders.
-1. Decide on each bytecode entry whether to run compiled code immediately or run the interpreter and queue background compilation.
-1. Support explicit/direct compile requests for direct JIT compile, direct AOT compile and persist, and direct AOT load if artifact already exists.
-1. Support runtime-created code from `CREATE` and `CREATE2`.
-1. Support runtime enable/disable, clear/reset, tuning updates, worker count changes, backend changes, and storage backend changes.
-1. Preserve correctness under `SpecId`-sensitive semantics, dynamic gas behavior, warm/cold state, suspend/resume for `CALL*` and `CREATE*`, and interpreter fallback on all miss/error paths.
+1. Reusable service for reth and other revm/revmc embedders.
+1. Correct execution under `SpecId`-sensitive semantics.
+1. Correct suspend/resume behavior for `CALL*` and `CREATE*` through existing interpreter fallback machinery.
+1. Support `CREATE/CREATE2` runtime code as normal JIT candidates.
 
-### Operational goals
+### Operational
 
-1. No blocking waits on the normal execution hot path.
-1. Bounded background work and bounded memory growth.
-1. Strong observability for rollout and tuning.
-1. Safe invalidation/clear semantics.
-
-## Non-Goals
-
-The initial module will not attempt to provide OSR, multi-stage optimizing recompilation beyond interpreter to compiled, speculative guards and deopt, cross-contract inlining, whole-block or whole-transaction compilation, network/distributed artifact caches, guaranteed cross-machine artifact portability, automatic compilation of every seen contract, or hot-path waiting for compile completion.
-
-## Why This Shape Fits Ethereum Execution
-
-Ethereum node execution is different from browser JS or JVM workloads:
-
-1. Many contracts are cold and executed only once.
-1. Correctness is more important than peak per-contract throughput.
-1. Semantics are fork-sensitive (`SpecId`).
-1. Runtime state affects gas and behavior.
-1. Code can appear dynamically via `CREATE/CREATE2`.
-1. Execution is mostly synchronous and latency-sensitive.
-
-That makes a simple design the right default:
-
-1. Keep interpreter as the always-correct baseline.
-1. Compile only after repeated use or an explicit request.
-1. Publish compiled code asynchronously.
-1. Never stall transaction/frame execution waiting for background compilation.
+1. No waits on frame execution path.
+1. Bounded queue and resident memory.
+1. Predictable clear/reconfigure/shutdown behavior.
+1. Rollout-friendly observability.
 
 ## Proposed Public API
 
@@ -91,72 +87,61 @@ pub mod runtime {
         Disabled,
         NotReady,
         QueueSaturated,
-        CompileFailed,
-        LoadFailed,
+        AotMissing,
+        AotLoadFailed,
+        JitFailed,
         UnsupportedBackend,
         Invalidated,
     }
 
-    pub struct CompileRequest<'a> {
+    pub struct AotRequest<'a> {
         pub code_hash: B256,
         pub code: Cow<'a, [u8]>,
         pub spec_id: SpecId,
-        pub flavor: CompileFlavor,
-        pub priority: CompilePriority,
-    }
-
-    pub enum CompileFlavor {
-        Jit,
-        AotPersist,
-        AotLoadOrCompilePersist,
-    }
-
-    pub enum CompilePriority {
-        Direct,
-        Warm,
-        ColdLoad,
-    }
-
-    pub struct CompileTicket;
-    impl CompileTicket {
-        pub fn wait(self) -> Result<Arc<CompiledProgram>, RuntimeError>;
-        pub fn wait_timeout(self, timeout: Duration) -> Result<Option<Arc<CompiledProgram>>, RuntimeError>;
     }
 
     pub struct CompiledProgram {
         pub key: RuntimeCacheKey,
         pub kind: ProgramKind,
         pub func: EvmCompilerFn,
+        pub approx_size_bytes: usize,
     }
 
     pub enum ProgramKind {
+        Aot,
         Jit,
-        AotLoaded,
     }
 
     impl JitCoordinatorHandle {
         pub fn lookup(&self, req: LookupRequest<'_>) -> LookupDecision;
-        pub fn compile_now(&self, req: CompileRequest<'_>) -> Result<CompileTicket, RuntimeError>;
+
+        // Explicit APIs. These are enqueue-only and do not return wait tickets.
+        pub fn compile_jit(&self, req: LookupRequest<'_>) -> Result<(), RuntimeError>;
+        pub fn prepare_aot(&self, req: AotRequest<'_>) -> Result<(), RuntimeError>;
+        pub fn prepare_aot_batch(&self, reqs: Vec<AotRequest<'_>>) -> Result<(), RuntimeError>;
 
         pub fn set_enabled(&self, enabled: bool) -> Result<(), RuntimeError>;
         pub fn reconfigure(&self, update: RuntimeConfigUpdate) -> Result<(), RuntimeError>;
-        pub fn clear(&self, scope: ClearScope) -> Result<(), RuntimeError>;
+        pub fn clear_resident(&self) -> Result<(), RuntimeError>;
+        pub fn clear_persisted(&self) -> Result<(), RuntimeError>;
+        pub fn clear_all(&self) -> Result<(), RuntimeError>;
         pub fn stats(&self) -> RuntimeStatsSnapshot;
         pub fn shutdown(self) -> Result<(), RuntimeError>;
     }
 }
 ```
 
-### API behavior
+### API Behavior
 
-1. `lookup()` is the hot-path API.
-1. `lookup()` must never block, avoid coarse locks, return compiled code immediately if ready, otherwise queue work opportunistically and return `Interpret(...)`.
-1. `compile_now()` is the explicit/blocking or prewarm path.
-1. `clear()` and `reconfigure()` are control-plane operations and may synchronize with the coordinator thread.
+1. `lookup()` is hot-path only and never blocks.
+1. `lookup()` reads the in-memory compiled map and returns immediately.
+1. On miss, `lookup()` sends a best-effort event to coordinator and returns interpreter fallback.
+1. `compile_jit()`, `prepare_aot()`, and `prepare_aot_batch()` enqueue work and return immediately.
+1. `code_hash` is treated as trusted input.
 
 ## Module Layout
 
-Create a new module under `crates/revmc/src/runtime/`:
+Create module under `crates/revmc/src/runtime/`:
 
 ```text
 runtime/
@@ -175,95 +160,108 @@ runtime/
 
 ### Responsibilities
 
-1. `api.rs`: public handle/types and request/result enums.
-1. `config.rs`: runtime config, tuning, defaults.
-1. `coordinator.rs`: single-threaded control loop, commands, invalidation, scheduling, worker-pool rebuild.
-1. `cache.rs`: runtime entry map and lock-light hot-path lookup helpers.
-1. `entry.rs`: entry state machine, atomics, metadata.
-1. `worker.rs`: compile task execution, custom rayon pool, batch construction.
-1. `artifact.rs`: compiled backing, artifact keys/manifests, library loading handles.
-1. `storage.rs`: abstract storage trait, filesystem backend, no-op backend.
-1. `stats.rs`: counters, gauges, snapshots.
+1. `api.rs`: public types and handle methods.
+1. `config.rs`: defaults and tuning.
+1. `coordinator.rs`: single-threaded state machine, queues, generation control.
+1. `cache.rs`: concurrent map for published programs.
+1. `entry.rs`: hot-path entry (`ready`, `last_used_at`) only.
+1. `worker.rs`: compile/load tasks on custom rayon pool.
+1. `artifact.rs`: artifact identity and loaded backing lifetime.
+1. `storage.rs`: `ArtifactStore` trait and implementations.
+1. `stats.rs`: counters/gauges/snapshots.
 1. `error.rs`: typed runtime errors.
-
-Keep the core module generic. Any reth-specific adapter should stay downstream or in a thin optional adapter layer.
 
 ## Core Architecture
 
-### 1. Hot path: lock-light lookup
+### Hot Path
 
-The hot path should do only:
+Hot path does only:
 
-1. Check global enabled/config state.
-1. Compute `RuntimeCacheKey = (code_hash, spec_id)`.
-1. Fetch/create entry from a concurrent map.
-1. Atomically check if compiled program is ready.
-1. If ready, return it.
-1. Otherwise update hotness/first-seen metadata and try to enqueue background work.
-1. Return interpreter.
+1. Check runtime enabled flag.
+1. Build `RuntimeCacheKey = (code_hash, spec_id)`.
+1. Probe compiled map.
+1. If ready, return compiled.
+1. If missing, submit `LookupMiss` command (best effort).
+1. Return interpreter fallback.
 
-#### Hot-path invariants
+Hot-path invariants:
 
 1. No waiting.
-1. No worker-pool interaction directly.
-1. No filesystem access.
-1. No linker invocation.
-1. No storage backend calls.
-1. No blocking lock on a shared global mutex.
+1. No filesystem or storage access.
+1. No linker interaction.
+1. No worker pool calls.
+1. No blocking global lock.
 
-A `DashMap<RuntimeCacheKey, Arc<Entry>>` is acceptable in v1. Inside each `Entry`, compiled publication should use atomic-publish semantics (`ArcSwapOption` or equivalent).
+### Coordinator-Only State
 
-### 2. Single coordinator thread
+All mutable state transitions are coordinator-owned.
 
-A dedicated coordinator thread owns control-plane logic:
+```rust
+struct EntryState {
+    phase: Phase,
+    hotness: u32,
+    generation: u64,
+    next_retry_at: u64,
+    aot_known: bool,
+}
 
-1. Queue admission.
-1. Prioritization.
-1. Deduplication.
-1. Background scheduling.
-1. Artifact load/store bookkeeping.
-1. Cache eviction.
-1. Runtime reconfiguration.
-1. Generation-based invalidation.
-1. Worker-pool rebuild.
-1. Clear/shutdown sequencing.
+enum Phase {
+    Cold,
+    AotLoadQueued,
+    JitQueued,
+    AotCompileQueued,
+    Working,
+    Ready,
+    Failed,
+}
+```
 
-#### Why single coordinator
+State transitions:
 
-1. Simpler reasoning.
-1. Deterministic control flow.
-1. Easier invalidation and lifecycle management.
-1. Avoid subtle multi-writer races between queueing, clearing, and reconfiguration.
+```text
+Absent -> Cold
 
-### 3. Compile workers: custom rayon thread pool
+Cold + lookup miss -> maybe AotLoadQueued (if storage enabled and retry window allows)
+AotLoadQueued -> Working(load) -> Ready | Cold(AotMissing) | Failed
 
-Compilation happens on a dedicated rayon pool, not execution threads.
+Cold + lookup miss increments hotness
+Cold + hotness >= threshold -> JitQueued -> Working(jit) -> Ready | Failed
 
-#### Requirements
+Cold + prepare_aot -> AotCompileQueued -> Working(aot_compile) -> Cold(aot_known=true) | Failed
+
+Failed + retry ttl elapsed -> Cold
+Ready + eviction -> Cold
+Any + clear/reconfigure -> Cold(next generation)
+```
+
+Interpretation rule:
+
+1. Only `Ready` returns compiled.
+1. Every other phase returns interpreter.
+
+### Unified Fast Lookup Map
+
+Maintain a single in-memory compiled map keyed by `(code_hash, spec_id)` containing both:
+
+1. Loaded AOT programs.
+1. JIT-compiled programs.
+
+This map is the only data read on hot lookup.
+
+### Worker Pool
+
+Use dedicated bounded rayon pool for compile/load work.
 
 1. Custom thread count.
-1. Custom thread names (`revmc-compile-{i}`).
-1. Bounded work admission.
+1. Custom names (`revmc-compile-{i}`).
 1. No use of global rayon pool.
+1. Work admission bounded by coordinator queue.
 
-#### Default worker count
+Default: `min(max(1, available_parallelism / 2), 4)`.
 
-`min(max(1, available_parallelism / 2), 4)`
+## Runtime Configuration
 
-Examples:
-
-1. 2 cores: 1 worker.
-1. 4 cores: 2 workers.
-1. 8 cores: 4 workers.
-1. 32 cores: 4 workers.
-
-#### Rationale
-
-Compilation is CPU-heavy and should not starve block/tx execution, networking, DB activity, or trie/state work.
-
-## Runtime Configuration And Defaults
-
-### Top-level config
+### Top-Level
 
 ```rust
 pub struct RuntimeConfig {
@@ -274,7 +272,7 @@ pub struct RuntimeConfig {
 }
 ```
 
-### Backend selection
+### Backend
 
 ```rust
 pub enum BackendSelection {
@@ -284,15 +282,13 @@ pub enum BackendSelection {
 }
 ```
 
-Default: `Auto`.
-
 Behavior:
 
 1. Prefer LLVM when available.
 1. Return `UnsupportedBackend` if requested backend is not built in.
-1. Keep Cranelift feature-gated/experimental until ready for production revmc requirements.
+1. Keep Cranelift feature-gated/experimental.
 
-### Storage selection
+### Storage
 
 ```rust
 pub enum StorageConfig {
@@ -302,32 +298,28 @@ pub enum StorageConfig {
 }
 ```
 
-Default: `None`.
-
-### Tuning defaults
+### Tuning Defaults
 
 | Knob | Default | Why |
 |---|---:|---|
-| `enabled` | `false` | Safe rollout default for node operators |
-| `warm_threshold` | `8` | Filters one-off contracts but promotes hot code quickly |
-| `load_persisted_on_first_seen` | `true` | Cheap path to reclaim prewarmed artifacts |
-| `max_pending_jobs` | `2048` | Bounded memory/backpressure under bursts |
-| `reserved_direct_slots` | `64` | Keep direct compile requests responsive |
-| `batch_max_items` | `8` | Good amortization without large per-batch latency |
-| `batch_max_total_bytecode_bytes` | `256 KiB` | Avoid giant batches dominating workers |
-| `batch_max_wait` | `2 ms` | Micro-batching without visible delay |
-| `jit_opt_level` | `Default` | Better compile-latency/runtime tradeoff for background JIT |
+| `enabled` | `false` | Safe rollout default |
+| `warm_threshold` | `8` | Promote repeated contracts to JIT |
+| `max_pending_jobs` | `2048` | Bound memory and background pressure |
+| `reserved_direct_slots` | `64` | Keep explicit requests responsive |
+| `batch_max_items` | `8` | Keep batches small |
+| `batch_max_total_bytecode_bytes` | `256 KiB` | Avoid giant batches |
+| `batch_max_wait` | `2 ms` | Micro-batching without noticeable delay |
+| `jit_opt_level` | `Default` | Compile-latency/runtime balance |
 | `aot_opt_level` | `Aggressive` | Better persisted artifact quality |
-| `negative_compile_ttl` | `300 s` | Avoid repeated compile storms on persistent failures |
-| `negative_load_ttl` | `60 s` | Avoid repeated storage miss/load storms |
-| `enqueue_cooldown` | `1 s` | Avoid queue hammering on hot misses/full queues |
-| `resident_code_cache_bytes` | `128 MiB` | Predictable memory bound for node workloads |
-| `persisted_artifact_budget_bytes` | `512 MiB` | Sensible default disk budget |
-| `worker_count` | `min(max(1, cpus/2), 4)` | Leave CPU headroom for node work |
+| `negative_jit_ttl` | `300 s` | Avoid failing-JIT retry storms |
+| `negative_aot_load_ttl` | `60 s` | Avoid repeated missing-artifact probes |
+| `enqueue_cooldown` | `1 s` | Avoid queue hammering |
+| `resident_code_cache_bytes` | `128 MiB` | Predictable memory bound |
+| `worker_count` | `min(max(1, cpus/2), 4)` | Leave CPU headroom |
 
 ## Data Model
 
-### Runtime cache key
+### Runtime Key
 
 ```rust
 pub struct RuntimeCacheKey {
@@ -336,7 +328,7 @@ pub struct RuntimeCacheKey {
 }
 ```
 
-### Persisted artifact key
+### Artifact Key
 
 ```rust
 pub struct ArtifactKey {
@@ -350,64 +342,40 @@ pub struct ArtifactKey {
 }
 ```
 
-Persisted machine code must be invalidated by backend/target/version/ABI fingerprint, not just hash.
+Persisted artifacts are validated by full key, not hash alone.
 
-## Entry Model
+## Artifact Store
 
-Each runtime entry should contain:
+`ArtifactStore` remains full read/write lifecycle API:
 
 ```rust
-struct Entry {
-    ready: ArcSwapOption<CompiledProgram>,
-    state: AtomicU8,
-    hotness: AtomicU32,
-    generation: AtomicU64,
-    last_used_at: AtomicU64,
-    next_retry_at: AtomicU64,
-    fail_count: AtomicU32,
-    load_attempted: AtomicBool,
+pub trait ArtifactStore: Send + Sync + 'static {
+    fn load(&self, key: &ArtifactKey) -> Result<Option<StoredArtifact>, StorageError>;
+    fn store(&self, key: &ArtifactKey, artifact: &StoredArtifact) -> Result<(), StorageError>;
+    fn delete(&self, key: &ArtifactKey) -> Result<(), StorageError>;
+    fn clear(&self) -> Result<(), StorageError>;
 }
 ```
 
-### Entry states
-
 ```rust
-enum EntryState {
-    Cold,
-    LoadQueued,
-    Queued,
-    Compiling,
-    Ready,
-    Failed,
+pub struct StoredArtifact {
+    pub manifest: ArtifactManifest,
+    pub dylib_bytes: Bytes,
+}
+
+pub struct ArtifactManifest {
+    pub artifact_key: ArtifactKey,
+    pub symbol_name: String,
+    pub bytecode_len: usize,
+    pub artifact_len: usize,
+    pub created_at_unix_secs: u64,
+    pub sha256: [u8; 32],
 }
 ```
 
-### State transitions
+## Compiled Program Lifetime
 
-```text
-Absent -> Cold
-
-Cold --first seen + load enabled--> LoadQueued
-LoadQueued -> Compiling(load)
-Compiling(load) -> Ready
-Compiling(load) -> Cold
-Compiling(load) -> Failed
-
-Cold --hotness >= threshold--> Queued
-Queued -> Compiling(compile)
-Compiling(compile) -> Ready
-Compiling(compile) -> Failed
-
-Failed --retry ttl elapsed--> Cold
-Ready --evicted--> Cold
-Any --clear/reconfigure--> Cold(next generation)
-```
-
-Only `Ready` changes execution choice. All other states mean interpret now.
-
-## Compiled Program Lifetime Model
-
-A raw `EvmCompilerFn` is not sufficient on its own. Backing allocation must outlive active calls.
+`EvmCompilerFn` must not outlive backing allocation.
 
 ```rust
 pub struct CompiledProgram {
@@ -424,281 +392,171 @@ enum ProgramBacking {
 }
 ```
 
-### JIT lifetime rule
+Rules:
 
-1. Compile a batch in a dedicated compiler/module owner.
-1. Publish `CompiledProgram` per symbol.
-1. Keep module owner alive behind `Arc`.
-1. Eviction removes cache strong ref.
-1. Memory reclaimed only when no active execution still holds `Arc<CompiledProgram>`.
-
-### AOT lifetime rule
-
-1. Load shared library.
-1. Resolve symbol.
-1. Keep loaded library and temp file backing alive in an `Arc`.
-1. Use same eviction semantics.
+1. JIT output is process-local and never persisted.
+1. AOT load keeps library handle and temp backing alive behind `Arc`.
+1. Eviction drops runtime strong refs; memory frees after active users release `Arc`.
 
 ## Coordinator Commands
 
 ```rust
 enum Command {
-    EnqueueWarm(RuntimeCacheKey, Bytes, SpecId),
-    EnqueueLoad(RuntimeCacheKey),
-    DirectCompile(CompileRequestOwned, ReplySender),
+    LookupMiss(LookupRequestOwned),
+    CompileJit(LookupRequestOwned),
+    PrepareAot(Vec<AotRequestOwned>),
     SetEnabled(bool, ReplySender<()>),
     Reconfigure(RuntimeConfigUpdate, ReplySender<()>),
-    Clear(ClearScope, ReplySender<()>),
+    ClearResident(ReplySender<()>),
+    ClearPersisted(ReplySender<()>),
+    ClearAll(ReplySender<()>),
     WorkerFinished(WorkerResult),
     Shutdown(ReplySender<()>),
 }
 ```
 
-### Priority order
+Priority order:
 
-1. Direct compile requests.
-1. Persisted artifact loads.
-1. Warm-threshold background compile requests.
+1. Explicit `PrepareAot` and `CompileJit` requests.
+1. AOT load attempts from lookup misses.
+1. JIT compile requests from warm lookup misses.
 
-## Queueing And Backpressure
+## Pipeline Behavior
 
-Use a bounded coordinator-owned priority queue with dedupe by key + generation + flavor.
+### Lookup-Miss Handling
 
-Rules:
+For each miss:
 
-1. If request arrives for already `Queued`, `Compiling`, or `Ready`, ignore.
-1. If queue full, drop low-priority background work, set `next_retry_at = now + enqueue_cooldown`, continue interpreter fallback.
-1. Direct compile requests consume reserved capacity and are not silently dropped.
+1. Attempt AOT load path first (if storage configured and not in AOT negative TTL).
+1. If no usable AOT artifact, continue normal path.
+1. Increment hotness and queue JIT once threshold is reached.
+1. Return interpreter immediately from hot path.
 
-## Compilation Pipeline
+### AOT Prepare Flow
 
-### Background JIT compile path
+For each requested contract:
 
-1. Hot path sees miss and warm threshold reached.
-1. Coordinator admits warm compile request.
-1. Coordinator forms micro-batch.
-1. Worker compiles batch to JIT.
-1. Worker publishes `CompiledProgram`s.
-1. Coordinator stores results and updates resident usage.
+1. Compute `ArtifactKey`.
+1. Probe storage.
+1. If present and valid, mark `aot_known = true`.
+1. If absent, compile AOT and persist through `ArtifactStore::store`.
+1. Do not require immediate resident load; lookup can load on demand.
 
-### Batch grouping
+### JIT Flow
 
-Group by backend, compile flavor, target, and optimization level. `SpecId` remains per item.
+1. Queue compile when hotness threshold reached.
+1. Compile on worker pool.
+1. Publish to unified compiled map.
+1. Mark entry `Ready`.
 
-## Direct Compile Path
+## Clear, Reconfigure, Shutdown
 
-`compile_now()` supports:
+1. `clear_resident()`: clear in-memory compiled map and bump generation.
+1. `clear_persisted()`: call `ArtifactStore::clear()` and clear AOT-known markers.
+1. `clear_all()`: both operations above.
+1. `reconfigure()`: apply config updates, rebuild worker pool if needed, bump generation for destructive changes.
+1. `shutdown()`: stop accepting new work, stop coordinator loop, and discard stale/in-flight results by generation.
 
-1. `Jit`: high-priority compile, publish, return ticket.
-1. `AotPersist`: compile AOT, persist artifact, optionally load+publish, return ticket.
-1. `AotLoadOrCompilePersist`: try load first, otherwise AOT compile/persist/load/publish.
-
-## AOT Persistence Design
-
-### Storage trait
-
-```rust
-pub trait ArtifactStore: Send + Sync + 'static {
-    fn load(&self, key: &ArtifactKey) -> Result<Option<StoredArtifact>, StorageError>;
-    fn store(&self, key: &ArtifactKey, artifact: &StoredArtifact) -> Result<(), StorageError>;
-    fn delete(&self, key: &ArtifactKey) -> Result<(), StorageError>;
-    fn clear(&self) -> Result<(), StorageError>;
-}
-```
-
-### Stored artifact
-
-```rust
-pub struct StoredArtifact {
-    pub manifest: ArtifactManifest,
-    pub dylib_bytes: Bytes,
-}
-```
-
-### Manifest
-
-```rust
-pub struct ArtifactManifest {
-    pub artifact_key: ArtifactKey,
-    pub symbol_name: String,
-    pub bytecode_len: usize,
-    pub artifact_len: usize,
-    pub created_at_unix_secs: u64,
-    pub sha256: [u8; 32],
-}
-```
-
-Store final dylib bytes in v1 for simple reload path.
-
-## Execution Lifecycle Hooks
-
-### Generic embedder hooks
-
-1. `on_enter_bytecode`: lookup, hotness increment, queueing, compiled hit return.
-1. `on_created_runtime_code`: register runtime code from `CREATE/CREATE2`, optional low-priority load/compile queueing.
-1. `on_admin_event`: enable/disable, clear, reconfigure, stats, shutdown.
-
-### reth integration behavior
-
-1. Call `lookup()` on frame entry.
-1. If `Compiled`, run `EvmCompilerFn::call_with_interpreter(...)`.
-1. Otherwise run interpreter.
-1. If compiled execution suspends via existing `CALL*`/`CREATE*` semantics, continue existing suspend/resume machinery.
-1. If `CREATE/CREATE2` produces runtime code, notify coordinator with new bytecode.
-
-No frame should wait for background compilation.
+No compile wait API is exposed.
 
 ## Correctness Invariants
 
-1. Interpreter is always safe fallback for disabled runtime, not-ready entries, queue full, compile/load errors, unsupported backend, stale generation, and clear in progress.
-1. Cache key includes `SpecId`.
-1. No speculative state assumptions about warm/cold, gas progression, storage/account state, or non-suspending flow.
-1. Runtime-created code is first-class and uses same keying/policy.
-1. Clear/reconfigure uses generations; stale worker results are discarded.
-1. Backing object lifetime is explicit; no function pointer outlives module/library owner.
+1. Interpreter is always the fallback on miss/error paths.
+1. Cache key always includes `SpecId`.
+1. `code_hash` is treated as trusted input.
+1. Coordinator is the only mutator of entry state.
+1. Stale worker results from older generations are discarded.
+1. Function pointer lifetime is tied to backing owner.
 
-## Cache Eviction And Invalidation
+## Eviction And Invalidation
 
-### Initial eviction policy
-
-Coordinator-managed LRU-ish policy by `last_used_at` and `approx_size_bytes` against resident budget.
+Eviction is coordinator-managed LRU-ish by `last_used_at` and `approx_size_bytes` against `resident_code_cache_bytes`.
 
 When over budget:
 
-1. Remove least-recently-used `Ready` entries.
-1. Drop only cache strong reference.
-1. Allow memory to free naturally when active users release remaining `Arc`s.
-
-### Invalidations
-
-Support:
-
-1. Clear resident only.
-1. Clear persisted only.
-1. Clear all.
-1. Reconfigure backend implies generation bump plus resident clear.
-1. Reconfigure worker count rebuilds worker pool.
-1. Disable stops new queue admission but existing resident programs remain callable until evicted/cleared.
+1. Evict least-recently-used `Ready` entries.
+1. Drop runtime strong references only.
+1. Allow memory to free naturally when outstanding `Arc` holders finish.
 
 ## Observability
 
-Expose metrics for lookup outcomes, queue depth/enqueue/drop, compile totals/duration/batch sizing, storage ops, resident bytes/evictions/generation, and direct compile latency/outcomes.
+Expose metrics for:
 
-Add tracing spans around lookup enqueue decisions, batch formation, compile jobs, AOT link/store/load, and clear/reconfigure/shutdown.
+1. Lookup outcomes (`compiled`, `aot_missing`, `interpreted_not_ready`, `interpreted_failed`).
+1. Queue depth, enqueue rate, dedupe count, drop count.
+1. AOT load attempts/success/failure/latency.
+1. AOT prepare compile/store attempts/success/failure/latency.
+1. JIT compile attempts/success/failure/latency.
+1. Resident bytes and evictions.
+
+Tracing spans around lookup-miss decisions, aot-load jobs, aot-prepare jobs, jit jobs, publish, clear/reconfigure/shutdown.
 
 ## Testing Strategy
 
-### 1. Unit tests
+### 1. Unit
 
-Cover entry transitions, generation invalidation, queue dedupe, backpressure, negative TTLs, resident budget eviction, and direct compile wait semantics.
+1. Coordinator-only transitions.
+1. Dedupe and queue priority.
+1. Negative TTL behavior for AOT missing and JIT failures.
+1. Generation invalidation.
 
-### 2. Concurrency tests
+### 2. Concurrency
 
-Use claim/wait ideas from statetest `CompileCache`: many threads same `(code_hash, spec_id)`, only one compile admitted, others interpret on hot path or wait only via direct compile.
+1. Many threads same `(code_hash, spec_id)` lookup misses.
+1. Ensure single queued work per generation/key.
+1. Verify hot path remains non-blocking under saturation.
 
-### 3. Correctness tests vs interpreter
+### 3. Correctness vs Interpreter
 
-State tests/block replays asserting same result, gas behavior, halts, suspend/resume across `CALL*` and `CREATE*`, and behavior across multiple `SpecId`s.
+1. State tests and block replays compare result/gas/halts.
+1. Include suspend/resume across `CALL*` and `CREATE*`.
+1. Include multiple `SpecId` coverage.
 
-### 4. Runtime-created code tests
+### 4. Runtime-Created Code
 
-Exercise `CREATE`, `CREATE2`, repeated factory deployments of identical runtime code, constructor vs runtime code distinction, first-seen vs re-seen behavior.
+1. `CREATE/CREATE2` constructor/runtime distinction.
+1. Repeated factory deployments.
+1. JIT warmup behavior for newly created runtime bytecode.
 
-### 5. Failure injection
+### 5. Failure
 
-Compile errors, backend creation errors, link errors, storage failures, queue saturation, clear during compile, shutdown during compile. All must preserve correctness by interpreter fallback.
+1. AOT load miss/corruption.
+1. AOT compile/store errors.
+1. JIT compile errors.
+1. Queue saturation.
+1. Clear/reconfigure/shutdown during active work.
 
-### 6. Persistence tests
+### 6. Performance
 
-Artifact round-trip, fingerprint mismatch rejection, reload after restart, budget cleanup, symbol resolution correctness.
-
-### 7. Performance tests
-
-Cold-heavy, hot-heavy, mixed replay, sync-like bursts. Track fallback rate, queue saturation, compile latency, warmup hit-rate, resident memory.
+1. Cold-heavy replay.
+1. Hot-heavy replay.
+1. Mixed replay.
+1. Track fallback rate, queue saturation, compile/load latencies, resident memory.
 
 ## Rollout Plan
 
-### Phase 0: core API + direct compile only
+### Phase 0
 
-Implement `compile_now()` and direct JIT compile. No automatic background queueing. Feature-gated and off by default.
+1. Coordinator lifecycle.
+1. Hot-path lookup + miss event.
+1. Unified compiled map.
 
-### Phase 1: passive runtime tracking
+### Phase 1
 
-Implement `lookup()` and track hotness/stats, but still interpret always.
+1. AOT load-on-miss path.
+1. JIT warm-threshold compile path.
 
-### Phase 2: background JIT
+### Phase 2
 
-Enable enqueue-on-threshold and compiled publication. No persistence required yet.
+1. Explicit `prepare_aot` and batch flow.
+1. AOT compile + persist integration.
 
-### Phase 3: AOT persistence
+### Phase 3
 
-Add storage trait, filesystem backend, AOT load/store flow, and direct `AotLoadOrCompilePersist`.
-
-### Phase 4: operational hardening
-
-Add eviction, reconfigure/clear/shutdown polish, block replay tuning. Keep default disabled until field data validates settings.
-
-## Explicit Runtime Knobs
-
-Provide runtime controls for:
-
-1. Enable/disable JIT.
-1. Clear resident state.
-1. Clear persisted state.
-1. Clear all state.
-1. Update warm threshold.
-1. Update queue/backpressure parameters.
-1. Update worker count.
-1. Rebuild worker pool.
-1. Switch backend.
-1. Switch storage backend.
-1. Update optimization levels.
-1. Update resident code cache limit.
-1. Fetch stats snapshot.
-
-Control-plane changes should flow through coordinator thread. Destructive changes should bump generation.
-
-## Borrowed JIT Ideas To revmc Choices
-
-| Borrowed idea | Source inspiration | revmc design choice |
-|---|---|---|
-| Warmup before compile | V8, HotSpot, SpiderMonkey, YJIT | `warm_threshold = 8` before background JIT |
-| Keep miss path cheap | YJIT, JSC | hot path returns interpreter immediately, no waits |
-| Bounded compile workers | RPCS3, browser engines, JVMs | dedicated rayon pool with conservative defaults |
-| Bounded compile queue | HotSpot, V8, RPCS3 | `max_pending_jobs = 2048`, reserved direct slots |
-| Small compile batches | statetest `CompileCache`, JVM practice | `batch_max_items = 8`, `batch_max_wait = 2ms` |
-| Code cache limits | V8, JSC, HotSpot | resident cap + LRU-ish eviction |
-| Negative caching/backoff | production JIT patterns | compile/load negative TTLs |
-| Runtime knobs | V8, HotSpot, RPCS3 | enable/disable/clear/tune workers/backend/storage |
-| Persistent code cache | JSC/V8-style code cache ideas | AOT artifacts via `ArtifactStore` |
-| Invalidations via generations | browser/JVM runtime control | generation bump on clear/reconfigure |
-| Thread-affine compiler concerns | revmc/LLVM, RPCS3 | compile only on dedicated workers |
-| Avoid speculative deopt complexity | PyPy/HotSpot lessons + EVM determinism | no speculative guards/OSR in v1 |
-
-## Why Some JIT Ideas Are Deferred
-
-OSR, speculative guards/deopt, and deep multi-tiering are deliberately deferred. Interpreter to compiled covers most initial value while keeping complexity and correctness risk low.
-
-## When To Consider Advanced Path
-
-Revisit design if queue saturation is sustained, hot contracts remain interpreter-bound too long, startup repeatedly misses persisted artifacts, cache churn is high, or compile latency dominates hot code.
-
-Potential upgrades:
-
-1. Adaptive thresholds by code size.
-1. Startup artifact prefetch.
-1. Separate low-opt quick-JIT and high-opt AOT policies.
-1. Operator prewarm CLI from block traces or snapshots.
-
-## Implementation Notes Tied To Current revmc
-
-1. `EvmCompiler` is single-threaded per instance; do not share one compiler across threads.
-1. Reuse statetest cache pattern: dedupe by `(code_hash, spec_id)` with claim/wait semantics.
-1. Keep compile batches intentionally small.
-1. Use existing JIT/AOT paths and `Linker` for final AOT dylib creation.
-1. Treat runtime-created bytecode as first-class cache candidates.
-1. Keep interpreter fallback as the universal correctness escape hatch.
+1. Eviction and operational hardening.
+1. Reconfigure/clear/shutdown polish.
+1. Rollout tuning from metrics.
 
 ## Final Recommendation
 
-Ship the smallest production-safe version first: single coordinator thread, bounded rayon pool, lock-light lookup, direct compile API, background JIT on warm threshold, optional AOT persistence, and interpreter fallback in every error/miss path.
+Implement the smallest coordinator-only design that keeps lookup fast and deterministic: always try resident compiled first, opportunistically use AOT from storage, and otherwise rely on interpreter with background JIT warmup, while supporting explicit AOT preparation for known contracts.
