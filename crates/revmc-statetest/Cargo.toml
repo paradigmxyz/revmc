@@ -13,9 +13,9 @@ alloy-rlp = { version = "0.3", features = ["arrayvec", "derive"] }
 alloy-trie = { version = "0.9", features = ["ethereum"] }
 dashmap = "6"
 eyre.workspace = true
-indicatif = "0.17"
+indicatif = "0.18"
 k256 = { version = "0.13", features = ["ecdsa"] }
-libloading = "0.8"
+libloading = "0.9"
 serde_json = { version = "1.0", features = ["preserve_order"] }
 tempfile = "3"
 thiserror = "2"

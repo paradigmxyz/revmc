@@ -31,13 +31,13 @@ revm-bytecode.workspace = true
 
 clap = { version = "4", features = ["derive"] }
 color-eyre.workspace = true
-libloading = "0.8"
+libloading = "0.9"
 serde_json = "1.0"
 tracing-subscriber = { workspace = true, features = ["fmt", "env-filter"] }
 tracing-tracy = { workspace = true, optional = true }
 
 [dev-dependencies]
-criterion = { version = "0.5", default-features = false }
+criterion = { version = "0.8", default-features = false }
 revmc-cli-tests = { path = "../revmc-cli-tests/" }
 revmc-context = { workspace = true, default-features = false }
 revm = { workspace = true, default-features = false, features = ["std"] }
