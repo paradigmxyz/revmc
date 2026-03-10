@@ -28,7 +28,7 @@ use inkwell::{
 use revmc_backend::{
     Backend, BackendTypes, Builder, Error, IntCC, Result, TailCallKind, TypeMethods, U256, eyre,
 };
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::{
     borrow::Cow,
     iter,
@@ -72,7 +72,12 @@ pub struct EvmLlvmBackend {
     /// Separate from `functions` to have always increasing IDs.
     function_counter: u32,
     functions: FxHashMap<u32, (String, FunctionValue<'static>)>,
+    /// Symbol names that have been registered via `add_global_mapping` in the MCJIT engine.
+    /// Used to avoid re-registering builtins when a new module is created after `clear_ir`.
+    mapped_symbols: FxHashSet<String>,
 }
+
+unsafe impl Send for EvmLlvmBackend {}
 
 impl EvmLlvmBackend {
     /// Creates a new LLVM backend for the host machine.
@@ -155,6 +160,7 @@ impl EvmLlvmBackend {
             opt_level,
             function_counter: 0,
             functions: FxHashMap::default(),
+            mapped_symbols: FxHashSet::default(),
         })
     }
 
@@ -187,14 +193,13 @@ impl EvmLlvmBackend {
 
     // Delete IR to lower memory consumption.
     // For some reason this does not happen when `Drop`ping either the `Module` or the engine.
-    fn clear_module(&mut self) {
-        for function in self.module.get_functions().collect::<Vec<_>>() {
-            unsafe { function.delete() };
-        }
-        for global in self.module.get_globals().collect::<Vec<_>>() {
-            unsafe { global.delete() };
+    fn clear_module(&mut self) -> Result<()> {
+        if let Some(exec_engine) = &self.exec_engine {
+            exec_engine.remove_module(&self.module).map_err(|e| Error::msg(e.to_string()))?;
         }
         self.functions.clear();
+        self.mapped_symbols.clear();
+        self.clear_ir()
     }
 }
 
@@ -295,6 +300,8 @@ impl Backend for EvmLlvmBackend {
     ) -> Result<(Self::Builder<'_>, Self::FuncId)> {
         let (id, function) = if let Some((&id, &(_, function))) =
             self.functions.iter().find(|(_k, (fname, _f))| fname == name)
+            && let Some(function2) = self.module.get_function(name)
+            && function == function2
         {
             self.bcx.position_at_end(function.get_first_basic_block().unwrap());
             (id, function)
@@ -349,35 +356,44 @@ impl Backend for EvmLlvmBackend {
     }
 
     fn clear_ir(&mut self) -> Result<()> {
-        self.clear_module();
+        /*
+        for func in self.module.get_functions() {
+            if !func.as_global_value().is_declaration() {
+                func_delete_body(func);
+            }
+        }
+        */
+
+        self.module = create_module(self.cx, &self.machine)?;
+        if let Some(exec_engine) = &self.exec_engine {
+            exec_engine.add_module(&self.module).map_err(|_| Error::msg("failed to add module"))?;
+        }
+
         Ok(())
     }
 
     unsafe fn free_function(&mut self, id: Self::FuncId) -> Result<()> {
-        let name = self.id_to_name(id);
-        let function = self.exec_engine().get_function_value(name)?;
-        self.exec_engine().free_fn_machine_code(function);
-        self.functions.clear();
+        let (_, function) = self.functions.remove(&id).unwrap();
+        if let Some(exec_engine) = &self.exec_engine {
+            exec_engine.free_fn_machine_code(function);
+        }
+        unsafe { function.delete() };
         Ok(())
     }
 
     unsafe fn free_all_functions(&mut self) -> Result<()> {
-        self.clear_module();
         if let Some(exec_engine) = &self.exec_engine {
-            exec_engine.remove_module(&self.module).map_err(|e| Error::msg(e.to_string()))?;
+            for (_, function) in self.functions.values() {
+                exec_engine.free_fn_machine_code(*function);
+            }
         }
-        self.module = create_module(self.cx, &self.machine)?;
-        if self.exec_engine.is_some() {
-            self.exec_engine =
-                Some(self.module.create_jit_execution_engine(self.opt_level).map_err(error_msg)?);
-        }
-        Ok(())
+        self.clear_module()
     }
 }
 
 impl Drop for EvmLlvmBackend {
     fn drop(&mut self) {
-        self.clear_module();
+        let _ = self.clear_module();
     }
 }
 
@@ -620,7 +636,7 @@ impl Builder for EvmLlvmBuilder<'_> {
         });
         let true_ = self.bool_const(true);
         let callsite = self.bcx.build_call(function, &[true_.into()], "cold").unwrap();
-        let cold = self.cx.create_enum_attribute(Attribute::get_named_enum_kind_id("cold"), 1);
+        let cold = self.cx.create_enum_attribute(Attribute::get_named_enum_kind_id("cold"), 0);
         callsite.add_attribute(AttributeLoc::Function, cold);
     }
 
@@ -1130,8 +1146,12 @@ impl Builder for EvmLlvmBuilder<'_> {
     ) -> Self::Function {
         let func_ty = self.fn_type(ret, params);
         let function = self.module.add_function(name, func_ty, Some(convert_linkage(linkage)));
-        if let (Some(address), Some(exec_engine)) = (address, &self.exec_engine) {
+        if let Some(address) = address
+            && let Some(exec_engine) = &self.exec_engine
+            && !self.mapped_symbols.contains(name)
+        {
             exec_engine.add_global_mapping(&function, address);
+            self.mapped_symbols.insert(name.to_string());
         }
         function
     }
@@ -1270,12 +1290,12 @@ fn convert_attribute(bcx: &EvmLlvmBuilder<'_>, attr: revmc_backend::Attribute) -
 
     let cpu;
     let (key, value) = match attr {
-        OurAttr::WillReturn => ("willreturn", AttrValue::Enum(1)),
-        OurAttr::NoReturn => ("noreturn", AttrValue::Enum(1)),
-        OurAttr::NoFree => ("nofree", AttrValue::Enum(1)),
-        OurAttr::NoRecurse => ("norecurse", AttrValue::Enum(1)),
-        OurAttr::NoSync => ("nosync", AttrValue::Enum(1)),
-        OurAttr::NoUnwind => ("nounwind", AttrValue::Enum(1)),
+        OurAttr::WillReturn => ("willreturn", AttrValue::Enum(0)),
+        OurAttr::NoReturn => ("noreturn", AttrValue::Enum(0)),
+        OurAttr::NoFree => ("nofree", AttrValue::Enum(0)),
+        OurAttr::NoRecurse => ("norecurse", AttrValue::Enum(0)),
+        OurAttr::NoSync => ("nosync", AttrValue::Enum(0)),
+        OurAttr::NoUnwind => ("nounwind", AttrValue::Enum(0)),
         OurAttr::AllFramePointers => ("frame-pointer", AttrValue::String("all")),
         OurAttr::NativeTargetCpu => (
             "target-cpu",
@@ -1284,26 +1304,26 @@ fn convert_attribute(bcx: &EvmLlvmBuilder<'_>, attr: revmc_backend::Attribute) -
                 cpu.to_str().unwrap()
             }),
         ),
-        OurAttr::Cold => ("cold", AttrValue::Enum(1)),
-        OurAttr::Hot => ("hot", AttrValue::Enum(1)),
-        OurAttr::HintInline => ("inlinehint", AttrValue::Enum(1)),
-        OurAttr::AlwaysInline => ("alwaysinline", AttrValue::Enum(1)),
-        OurAttr::NoInline => ("noinline", AttrValue::Enum(1)),
-        OurAttr::Speculatable => ("speculatable", AttrValue::Enum(1)),
+        OurAttr::Cold => ("cold", AttrValue::Enum(0)),
+        OurAttr::Hot => ("hot", AttrValue::Enum(0)),
+        OurAttr::HintInline => ("inlinehint", AttrValue::Enum(0)),
+        OurAttr::AlwaysInline => ("alwaysinline", AttrValue::Enum(0)),
+        OurAttr::NoInline => ("noinline", AttrValue::Enum(0)),
+        OurAttr::Speculatable => ("speculatable", AttrValue::Enum(0)),
 
-        OurAttr::NoAlias => ("noalias", AttrValue::Enum(1)),
+        OurAttr::NoAlias => ("noalias", AttrValue::Enum(0)),
         OurAttr::NoCapture => ("captures", AttrValue::Enum(0)), // captures(none) - no capture
-        OurAttr::NoUndef => ("noundef", AttrValue::Enum(1)),
+        OurAttr::NoUndef => ("noundef", AttrValue::Enum(0)),
         OurAttr::Align(n) => ("align", AttrValue::Enum(n)),
-        OurAttr::NonNull => ("nonnull", AttrValue::Enum(1)),
+        OurAttr::NonNull => ("nonnull", AttrValue::Enum(0)),
         OurAttr::Dereferenceable(n) => ("dereferenceable", AttrValue::Enum(n)),
         OurAttr::SRet(n) => {
             ("sret", AttrValue::Type(bcx.type_array(bcx.ty_i8.into(), n as _).as_any_type_enum()))
         }
-        OurAttr::ReadNone => ("readnone", AttrValue::Enum(1)),
-        OurAttr::ReadOnly => ("readonly", AttrValue::Enum(1)),
-        OurAttr::WriteOnly => ("writeonly", AttrValue::Enum(1)),
-        OurAttr::Writable => ("writable", AttrValue::Enum(1)),
+        OurAttr::ReadNone => ("readnone", AttrValue::Enum(0)),
+        OurAttr::ReadOnly => ("readonly", AttrValue::Enum(0)),
+        OurAttr::WriteOnly => ("writeonly", AttrValue::Enum(0)),
+        OurAttr::Writable => ("writable", AttrValue::Enum(0)),
 
         attr => unimplemented!("llvm attribute conversion: {attr:?}"),
     };
@@ -1353,3 +1373,33 @@ fn error_msg(msg: inkwell::support::LLVMString) -> revmc_backend::Error {
 fn fmt_ty(ty: BasicTypeEnum<'_>) -> impl std::fmt::Display {
     ty.print_to_string().to_str().unwrap().trim_matches('"').to_string()
 }
+
+// TODO: `LLVMSetOperand` is not the same as `Use::set(nullptr)`.
+/*
+/// Mimics `llvm::Function::deleteBody`.
+fn func_delete_body(func: FunctionValue<'_>) {
+    for block in func.get_basic_block_iter() {
+        for inst in block.get_instructions() {
+            for i in 0..inst.get_num_operands() {
+                unsafe { LLVMSetOperand(inst.as_value_ref(), i, core::ptr::null_mut()) }
+            }
+        }
+    }
+
+    for_each_2(func.get_basic_block_iter(), |b| unsafe {
+        for_each_2(b.get_instructions(), |inst| {
+            inst.erase_from_basic_block();
+        });
+        let _ = b.delete();
+    });
+}
+
+fn for_each_2<T>(iter: impl IntoIterator<Item = T>, mut f: impl FnMut(T)) {
+    let mut iter = iter.into_iter();
+    let mut next = iter.next();
+    while let Some(x) = next {
+        next = iter.next();
+        f(x);
+    }
+}
+*/

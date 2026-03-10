@@ -16,7 +16,9 @@ use revm::{
 };
 use revmc::{EvmCompiler, EvmCompilerFn, EvmLlvmBackend, Linker, OptimizationLevel};
 use std::{
+    cell::RefCell,
     collections::HashMap,
+    mem::ManuallyDrop,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -24,6 +26,7 @@ use std::{
     },
     time::{Duration, Instant},
 };
+use thread_local::ThreadLocal;
 
 // ── Compile mode ────────────────────────────────────────────────────────────
 
@@ -136,6 +139,10 @@ pub struct CompileCache {
     functions: DashMap<(B256, SpecId), Arc<OnceLock<EvmCompilerFn>>>,
     /// Keep AOT shared libraries alive. Unused for JIT mode.
     libs: Mutex<Vec<(tempfile::TempDir, libloading::Library)>>,
+    /// `ManuallyDrop` because `ThreadLocal::drop` drops values on the calling thread, but each
+    /// `EvmLlvmBackend` holds a reference to a thread-local LLVM context that only lives on the
+    /// thread that created it. Dropping on a different thread would use-after-free.
+    compiler: ManuallyDrop<ThreadLocal<RefCell<EvmCompiler<EvmLlvmBackend>>>>,
     n_hits: AtomicUsize,
     n_misses: AtomicUsize,
 }
@@ -144,10 +151,11 @@ impl CompileCache {
     pub fn new(mode: CompileMode) -> Self {
         Self {
             mode,
-            functions: DashMap::new(),
-            libs: Mutex::new(Vec::new()),
-            n_hits: AtomicUsize::new(0),
-            n_misses: AtomicUsize::new(0),
+            functions: Default::default(),
+            libs: Default::default(),
+            compiler: Default::default(),
+            n_hits: Default::default(),
+            n_misses: Default::default(),
         }
     }
 
@@ -164,7 +172,7 @@ impl CompileCache {
         let mut compiled = CompiledContracts::new();
         let mut claimed = Vec::new();
 
-        for (address, info) in &unit.pre {
+        for info in unit.pre.values() {
             if info.code.is_empty() {
                 continue;
             }
@@ -195,7 +203,7 @@ impl CompileCache {
                     claimed.push((
                         code_hash,
                         &info.code[..],
-                        format!("contract_{:x}", address),
+                        format!("contract_{code_hash:x}"),
                         lock,
                     ));
                 }
@@ -280,7 +288,7 @@ impl CompileCache {
                 e.insert(lock.clone());
                 self.n_misses.fetch_add(1, Ordering::Relaxed);
 
-                let name = format!("runtime_{:x}", code_hash);
+                let name = format!("runtime_{code_hash:x}");
                 let claimed = vec![(code_hash, code, name, lock)];
                 let mut compiled = CompiledContracts::new();
 
@@ -301,8 +309,7 @@ impl CompileCache {
         compiled: &mut CompiledContracts,
         spec_id: SpecId,
     ) -> Result<(), TestErrorKind> {
-        let backend = EvmLlvmBackend::new(false, OptimizationLevel::Aggressive).unwrap();
-        let compiler = Box::leak(Box::new(EvmCompiler::new(backend)));
+        let mut compiler = self.compiler.get_or(|| make_compiler(false)).borrow_mut();
 
         let mut func_ids = Vec::new();
         for (code_hash, code, name, _) in claimed {
@@ -320,6 +327,8 @@ impl CompileCache {
             compiled.insert(code_hash, func);
         }
 
+        let _ = compiler.clear_ir();
+
         Ok(())
     }
 
@@ -329,45 +338,45 @@ impl CompileCache {
         compiled: &mut CompiledContracts,
         spec_id: SpecId,
     ) -> Result<(), TestErrorKind> {
-        {
-            let backend = EvmLlvmBackend::new(true, OptimizationLevel::Aggressive).unwrap();
-            let compiler = &mut EvmCompiler::new(backend);
-            let mut names: Vec<(B256, String)> = Vec::new();
-            for (code_hash, code, name, _) in claimed {
-                compiler.translate(name, *code, spec_id).map_err(|e| {
-                    TestErrorKind::CompilationError(format!("translate {name}: {e}"))
-                })?;
-                names.push((*code_hash, name.clone()));
-            }
+        let mut compiler = self.compiler.get_or(|| make_compiler(true)).borrow_mut();
 
-            let tmp_dir = tempfile::tempdir()
-                .map_err(|e| TestErrorKind::CompilationError(format!("tempdir: {e}")))?;
-            let obj_path = tmp_dir.path().join("a.o");
-            let so_path = tmp_dir.path().join("a.so");
-
+        let mut names: Vec<(B256, String)> = Vec::new();
+        for (code_hash, code, name, _) in claimed {
             compiler
-                .write_object_to_file(&obj_path)
-                .map_err(|e| TestErrorKind::CompilationError(format!("write object: {e}")))?;
-
-            let linker = Linker::new();
-            linker
-                .link(&so_path, [obj_path.to_str().unwrap()])
-                .map_err(|e| TestErrorKind::CompilationError(format!("link: {e}")))?;
-
-            let lib = unsafe { libloading::Library::new(&so_path) }
-                .map_err(|e| TestErrorKind::CompilationError(format!("load: {e}")))?;
-
-            for (i, (code_hash, name)) in names.iter().enumerate() {
-                let f: libloading::Symbol<'_, EvmCompilerFn> = unsafe { lib.get(name.as_bytes()) }
-                    .map_err(|e| TestErrorKind::CompilationError(format!("symbol {name}: {e}")))?;
-                claimed[i].3.set(*f).ok();
-                compiled.insert(*code_hash, *f);
-            }
-
-            self.libs.lock().unwrap().push((tmp_dir, lib));
-
-            Ok(())
+                .translate(name, *code, spec_id)
+                .map_err(|e| TestErrorKind::CompilationError(format!("translate {name}: {e}")))?;
+            names.push((*code_hash, name.clone()));
         }
+
+        let tmp_dir = tempfile::tempdir()
+            .map_err(|e| TestErrorKind::CompilationError(format!("tempdir: {e}")))?;
+        let obj_path = tmp_dir.path().join("a.o");
+        let so_path = tmp_dir.path().join("a.so");
+
+        compiler
+            .write_object_to_file(&obj_path)
+            .map_err(|e| TestErrorKind::CompilationError(format!("write object: {e}")))?;
+
+        let linker = Linker::new();
+        linker
+            .link(&so_path, [obj_path.to_str().unwrap()])
+            .map_err(|e| TestErrorKind::CompilationError(format!("link: {e}")))?;
+
+        let lib = unsafe { libloading::Library::new(&so_path) }
+            .map_err(|e| TestErrorKind::CompilationError(format!("load: {e}")))?;
+
+        for (i, (code_hash, name)) in names.iter().enumerate() {
+            let f: libloading::Symbol<'_, EvmCompilerFn> = unsafe { lib.get(name.as_bytes()) }
+                .map_err(|e| TestErrorKind::CompilationError(format!("symbol {name}: {e}")))?;
+            claimed[i].3.set(*f).ok();
+            compiled.insert(*code_hash, *f);
+        }
+
+        self.libs.lock().unwrap().push((tmp_dir, lib));
+
+        let _ = compiler.clear_ir();
+
+        Ok(())
     }
 
     pub fn print_stats(&self) {
@@ -395,6 +404,10 @@ impl CompileCache {
             }
         }
     }
+}
+
+fn make_compiler(aot: bool) -> RefCell<EvmCompiler<EvmLlvmBackend>> {
+    RefCell::new(EvmCompiler::new(EvmLlvmBackend::new(aot, OptimizationLevel::Aggressive).unwrap()))
 }
 
 // ── Compiled test execution ─────────────────────────────────────────────────
