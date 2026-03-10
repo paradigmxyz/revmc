@@ -28,7 +28,7 @@ use inkwell::{
 use revmc_backend::{
     Backend, BackendTypes, Builder, Error, IntCC, Result, TailCallKind, TypeMethods, U256, eyre,
 };
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::{
     borrow::Cow,
     iter,
@@ -72,6 +72,9 @@ pub struct EvmLlvmBackend {
     /// Separate from `functions` to have always increasing IDs.
     function_counter: u32,
     functions: FxHashMap<u32, (String, FunctionValue<'static>)>,
+    /// Symbol names that have been registered via `add_global_mapping` in the MCJIT engine.
+    /// Used to avoid re-registering builtins when a new module is created after `clear_ir`.
+    mapped_symbols: FxHashSet<String>,
 }
 
 unsafe impl Send for EvmLlvmBackend {}
@@ -157,6 +160,7 @@ impl EvmLlvmBackend {
             opt_level,
             function_counter: 0,
             functions: FxHashMap::default(),
+            mapped_symbols: FxHashSet::default(),
         })
     }
 
@@ -194,6 +198,7 @@ impl EvmLlvmBackend {
             exec_engine.remove_module(&self.module).map_err(|e| Error::msg(e.to_string()))?;
         }
         self.functions.clear();
+        self.mapped_symbols.clear();
         self.clear_ir()
     }
 }
@@ -1137,8 +1142,11 @@ impl Builder for EvmLlvmBuilder<'_> {
     ) -> Self::Function {
         let func_ty = self.fn_type(ret, params);
         let function = self.module.add_function(name, func_ty, Some(convert_linkage(linkage)));
-        if let (Some(address), Some(exec_engine)) = (address, &self.exec_engine) {
-            exec_engine.add_global_mapping(&function, address);
+        if let (Some(address), Some(exec_engine)) = (address, self.exec_engine.as_ref()) {
+            if !self.mapped_symbols.contains(name) {
+                exec_engine.add_global_mapping(&function, address);
+                self.mapped_symbols.insert(name.to_string());
+            }
         }
         function
     }
