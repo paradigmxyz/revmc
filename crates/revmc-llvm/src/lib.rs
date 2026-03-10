@@ -1146,11 +1146,12 @@ impl Builder for EvmLlvmBuilder<'_> {
     ) -> Self::Function {
         let func_ty = self.fn_type(ret, params);
         let function = self.module.add_function(name, func_ty, Some(convert_linkage(linkage)));
-        if let (Some(address), Some(exec_engine)) = (address, self.exec_engine.as_ref()) {
-            if !self.mapped_symbols.contains(name) {
-                exec_engine.add_global_mapping(&function, address);
-                self.mapped_symbols.insert(name.to_string());
-            }
+        if let Some(address) = address
+            && let Some(exec_engine) = &self.exec_engine
+            && !self.mapped_symbols.contains(name)
+        {
+            exec_engine.add_global_mapping(&function, address);
+            self.mapped_symbols.insert(name.to_string());
         }
         function
     }
