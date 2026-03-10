@@ -189,10 +189,12 @@ impl EvmLlvmBackend {
 
     // Delete IR to lower memory consumption.
     // For some reason this does not happen when `Drop`ping either the `Module` or the engine.
-    fn clear_module(&mut self) {
-        for_each_2(self.module.get_functions(), |f| unsafe { f.delete() });
-        for_each_2(self.module.get_globals(), |g| unsafe { g.delete() });
+    fn clear_module(&mut self) -> Result<()> {
+        if let Some(exec_engine) = &self.exec_engine {
+            exec_engine.remove_module(&self.module).map_err(|e| Error::msg(e.to_string()))?;
+        }
         self.functions.clear();
+        self.clear_ir()
     }
 }
 
@@ -349,9 +351,9 @@ impl Backend for EvmLlvmBackend {
     }
 
     fn clear_ir(&mut self) -> Result<()> {
-        for func in self.module.get_functions() {
-            for_each_2(func.get_basic_block_iter(), |b| unsafe { _ = b.delete() });
-        }
+        // for func in self.module.get_functions() {
+        //     for_each_2(func.get_basic_block_iter(), |b| unsafe { _ = b.delete() });
+        // }
 
         self.module = create_module(self.cx, &self.machine)?;
         if let Some(exec_engine) = &self.exec_engine {
@@ -374,17 +376,15 @@ impl Backend for EvmLlvmBackend {
         if let Some(exec_engine) = &self.exec_engine {
             for (_, function) in self.functions.values() {
                 exec_engine.free_fn_machine_code(*function);
-                unsafe { function.delete() };
             }
-            exec_engine.remove_module(&self.module).map_err(|e| Error::msg(e.to_string()))?;
         }
-        self.clear_ir()
+        self.clear_module()
     }
 }
 
 impl Drop for EvmLlvmBackend {
     fn drop(&mut self) {
-        self.clear_module();
+        let _ = self.clear_module();
     }
 }
 
@@ -627,7 +627,7 @@ impl Builder for EvmLlvmBuilder<'_> {
         });
         let true_ = self.bool_const(true);
         let callsite = self.bcx.build_call(function, &[true_.into()], "cold").unwrap();
-        let cold = self.cx.create_enum_attribute(Attribute::get_named_enum_kind_id("cold"), 1);
+        let cold = self.cx.create_enum_attribute(Attribute::get_named_enum_kind_id("cold"), 0);
         callsite.add_attribute(AttributeLoc::Function, cold);
     }
 
@@ -1277,12 +1277,12 @@ fn convert_attribute(bcx: &EvmLlvmBuilder<'_>, attr: revmc_backend::Attribute) -
 
     let cpu;
     let (key, value) = match attr {
-        OurAttr::WillReturn => ("willreturn", AttrValue::Enum(1)),
-        OurAttr::NoReturn => ("noreturn", AttrValue::Enum(1)),
-        OurAttr::NoFree => ("nofree", AttrValue::Enum(1)),
-        OurAttr::NoRecurse => ("norecurse", AttrValue::Enum(1)),
-        OurAttr::NoSync => ("nosync", AttrValue::Enum(1)),
-        OurAttr::NoUnwind => ("nounwind", AttrValue::Enum(1)),
+        OurAttr::WillReturn => ("willreturn", AttrValue::Enum(0)),
+        OurAttr::NoReturn => ("noreturn", AttrValue::Enum(0)),
+        OurAttr::NoFree => ("nofree", AttrValue::Enum(0)),
+        OurAttr::NoRecurse => ("norecurse", AttrValue::Enum(0)),
+        OurAttr::NoSync => ("nosync", AttrValue::Enum(0)),
+        OurAttr::NoUnwind => ("nounwind", AttrValue::Enum(0)),
         OurAttr::AllFramePointers => ("frame-pointer", AttrValue::String("all")),
         OurAttr::NativeTargetCpu => (
             "target-cpu",
@@ -1291,26 +1291,26 @@ fn convert_attribute(bcx: &EvmLlvmBuilder<'_>, attr: revmc_backend::Attribute) -
                 cpu.to_str().unwrap()
             }),
         ),
-        OurAttr::Cold => ("cold", AttrValue::Enum(1)),
-        OurAttr::Hot => ("hot", AttrValue::Enum(1)),
-        OurAttr::HintInline => ("inlinehint", AttrValue::Enum(1)),
-        OurAttr::AlwaysInline => ("alwaysinline", AttrValue::Enum(1)),
-        OurAttr::NoInline => ("noinline", AttrValue::Enum(1)),
-        OurAttr::Speculatable => ("speculatable", AttrValue::Enum(1)),
+        OurAttr::Cold => ("cold", AttrValue::Enum(0)),
+        OurAttr::Hot => ("hot", AttrValue::Enum(0)),
+        OurAttr::HintInline => ("inlinehint", AttrValue::Enum(0)),
+        OurAttr::AlwaysInline => ("alwaysinline", AttrValue::Enum(0)),
+        OurAttr::NoInline => ("noinline", AttrValue::Enum(0)),
+        OurAttr::Speculatable => ("speculatable", AttrValue::Enum(0)),
 
-        OurAttr::NoAlias => ("noalias", AttrValue::Enum(1)),
-        OurAttr::NoCapture => ("captures", AttrValue::Enum(0)), // captures(none) - no capture
-        OurAttr::NoUndef => ("noundef", AttrValue::Enum(1)),
+        OurAttr::NoAlias => ("noalias", AttrValue::Enum(0)),
+        OurAttr::NoCapture => ("captures", AttrValue::Enum(0)),
+        OurAttr::NoUndef => ("noundef", AttrValue::Enum(0)),
         OurAttr::Align(n) => ("align", AttrValue::Enum(n)),
-        OurAttr::NonNull => ("nonnull", AttrValue::Enum(1)),
+        OurAttr::NonNull => ("nonnull", AttrValue::Enum(0)),
         OurAttr::Dereferenceable(n) => ("dereferenceable", AttrValue::Enum(n)),
         OurAttr::SRet(n) => {
             ("sret", AttrValue::Type(bcx.type_array(bcx.ty_i8.into(), n as _).as_any_type_enum()))
         }
-        OurAttr::ReadNone => ("readnone", AttrValue::Enum(1)),
-        OurAttr::ReadOnly => ("readonly", AttrValue::Enum(1)),
-        OurAttr::WriteOnly => ("writeonly", AttrValue::Enum(1)),
-        OurAttr::Writable => ("writable", AttrValue::Enum(1)),
+        OurAttr::ReadNone => ("readnone", AttrValue::Enum(0)),
+        OurAttr::ReadOnly => ("readonly", AttrValue::Enum(0)),
+        OurAttr::WriteOnly => ("writeonly", AttrValue::Enum(0)),
+        OurAttr::Writable => ("writable", AttrValue::Enum(0)),
 
         attr => unimplemented!("llvm attribute conversion: {attr:?}"),
     };
