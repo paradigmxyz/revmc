@@ -98,31 +98,36 @@ pub fn op_info_map(spec_id: SpecId) -> &'static [OpcodeInfo; 256] {
     &maps[spec_id as usize]
 }
 
-/// Opcodes that have a dynamic gas component in addition to (or instead of) the static cost.
-///
-/// - `[1]`: Not dynamic in all `SpecId`s, but gas is calculated dynamically in a builtin.
-/// - `[2]`: Dynamic with a base cost. Only the dynamic part is paid in builtins.
-const DYNAMIC_OPCODES: &[u8] = &[
-    op::EXP,          // [2]
-    op::KECCAK256,    // [2]
-    op::BALANCE,      // [1]
-    op::CALLDATACOPY, // [2]
-    op::CODECOPY,     // [2]
-    op::EXTCODESIZE,  // [1]
+/// Opcodes with a dynamic gas component that also have a base (static) cost deducted upfront.
+/// Only the dynamic part is paid in builtins.
+const DYNAMIC_WITH_BASE_GAS: &[u8] = &[
+    op::EXP,
+    op::KECCAK256,
+    op::CALLDATACOPY,
+    op::CODECOPY,
+    op::RETURNDATACOPY,
+    op::MLOAD,
+    op::MSTORE,
+    op::MSTORE8,
+    op::MCOPY,
+    op::LOG0,
+    op::LOG1,
+    op::LOG2,
+    op::LOG3,
+    op::LOG4,
+];
+
+/// Opcodes whose gas cost is entirely dynamic — computed fully in builtins at runtime.
+/// The upstream instruction table may assign a non-zero static gas to some of these (e.g.
+/// SELFDESTRUCT=5000 post-Tangerine), but revmc handles their full gas in builtins,
+/// so their base gas is always 0.
+const FULLY_DYNAMIC: &[u8] = &[
+    op::BALANCE,
+    op::EXTCODESIZE,
     op::EXTCODECOPY,
-    op::RETURNDATACOPY, // [2]
-    op::EXTCODEHASH,    // [1]
-    op::MLOAD,          // [2]
-    op::MSTORE,         // [2]
-    op::MSTORE8,        // [2]
-    op::SLOAD,          // [1]
+    op::EXTCODEHASH,
+    op::SLOAD,
     op::SSTORE,
-    op::MCOPY, // [2]
-    op::LOG0,  // [2]
-    op::LOG1,  // [2]
-    op::LOG2,  // [2]
-    op::LOG3,  // [2]
-    op::LOG4,  // [2]
     op::CREATE,
     op::CALL,
     op::CALLCODE,
@@ -179,16 +184,21 @@ fn make_map(spec_id: SpecId) -> [OpcodeInfo; 256] {
             continue;
         }
 
-        let static_gas = table[op as usize].static_gas();
+        let is_fully_dynamic = FULLY_DYNAMIC.contains(&op);
+        let is_dynamic_with_base = DYNAMIC_WITH_BASE_GAS.contains(&op);
 
-        // LOG opcodes: upstream only uses the base LOG cost as static gas and handles per-topic
-        // cost dynamically. revmc deducts the full static portion (base + n * LOGTOPIC) upfront,
-        // so add the per-topic cost here.
-        let gas = if (op::LOG0..=op::LOG4).contains(&op) {
+        // Fully dynamic opcodes have their entire gas cost handled in builtins.
+        let gas = if is_fully_dynamic {
+            0u16
+        } else if (op::LOG0..=op::LOG4).contains(&op) {
+            // LOG opcodes: upstream only uses the base LOG cost as static gas and handles
+            // per-topic cost dynamically. revmc deducts the full static portion
+            // (base + n * LOGTOPIC) upfront, so add the per-topic cost here.
             let n_topics = (op - op::LOG0) as u64;
-            let full = static_gas + n_topics * revm_interpreter::instructions::gas::LOGTOPIC;
-            full as u16
+            let static_gas = table[op as usize].static_gas();
+            (static_gas + n_topics * revm_interpreter::instructions::gas::LOGTOPIC) as u16
         } else {
+            let static_gas = table[op as usize].static_gas();
             assert!(
                 static_gas <= OpcodeInfo::MASK as u64,
                 "static gas for opcode 0x{op:02X} exceeds OpcodeInfo capacity: {static_gas}"
@@ -198,7 +208,7 @@ fn make_map(spec_id: SpecId) -> [OpcodeInfo; 256] {
 
         let mut info = OpcodeInfo::new(gas);
 
-        if DYNAMIC_OPCODES.contains(&op) {
+        if is_fully_dynamic || is_dynamic_with_base {
             info.set_dynamic();
         }
 
@@ -289,12 +299,9 @@ mod tests {
         assert_eq!(cancun[op::KECCAK256 as usize].base_gas(), 30);
         assert!(cancun[op::KECCAK256 as usize].is_dynamic());
 
-        // Storage: dynamic, warm storage read cost in Berlin+.
+        // Storage: fully dynamic, base gas is 0.
         assert!(cancun[op::SLOAD as usize].is_dynamic());
-        assert_eq!(
-            cancun[op::SLOAD as usize].base_gas(),
-            revm_interpreter::instructions::gas::WARM_STORAGE_READ_COST as u16
-        );
+        assert_eq!(cancun[op::SLOAD as usize].base_gas(), 0);
 
         // Transient storage (Cancun).
         assert_eq!(cancun[op::TLOAD as usize].base_gas(), 100);
@@ -308,8 +315,10 @@ mod tests {
         assert!(pre_shanghai[op::PUSH0 as usize].is_disabled());
         assert!(!cancun[op::PUSH0 as usize].is_disabled());
 
-        // Spec changes: SLOAD gas differs across specs.
+        // Fully dynamic opcodes: base gas is always 0 regardless of spec.
         let frontier = op_info_map(SpecId::FRONTIER);
-        assert_eq!(frontier[op::SLOAD as usize].base_gas(), 50); // base cost
+        assert_eq!(frontier[op::SLOAD as usize].base_gas(), 0);
+        assert!(frontier[op::SELFDESTRUCT as usize].is_dynamic());
+        assert_eq!(frontier[op::SELFDESTRUCT as usize].base_gas(), 0);
     }
 }
