@@ -183,13 +183,13 @@ impl<'a> Bytecode<'a> {
         writeln!(w, "  graph [bgcolor=\"#1a1a2e\" rankdir=TB];")?;
         writeln!(
             w,
-            "  node [shape=Mrecord fontname=\"Courier New\" fontsize=10 \
+            "  node [shape=Mrecord fontname=\"Courier\" fontsize=10 \
              style=filled fillcolor=\"#16213e\" fontcolor=\"#e0e0e0\" \
              color=\"#0f3460\" penwidth=1.5];"
         )?;
         writeln!(
             w,
-            "  edge [fontname=\"Courier New\" fontsize=9 color=\"#555577\" \
+            "  edge [fontname=\"Courier\" fontsize=9 color=\"#555577\" \
              fontcolor=\"#8888aa\"];"
         )?;
 
