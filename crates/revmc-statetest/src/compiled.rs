@@ -31,7 +31,7 @@ use thread_local::ThreadLocal;
 // ── Compile mode ────────────────────────────────────────────────────────────
 
 /// How to compile and execute bytecodes in the test suite.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CompileMode {
     /// Standard interpreter execution (no compilation).
     #[default]
@@ -40,6 +40,9 @@ pub enum CompileMode {
     Jit,
     /// AOT-compile all bytecodes to a shared library, then load and execute.
     Aot,
+    /// Use the runtime coordinator: AOT-compile, load through `JitCoordinator`, and look up
+    /// compiled functions via `JitCoordinatorHandle::lookup()`.
+    Runtime,
 }
 
 // ── Compiled contracts ──────────────────────────────────────────────────────
@@ -252,7 +255,9 @@ impl CompileCache {
 
         match self.mode {
             CompileMode::Jit => self.compile_jit_batch(&claimed, &mut compiled, spec_id)?,
-            CompileMode::Aot => self.compile_aot_batch(&claimed, &mut compiled, spec_id)?,
+            CompileMode::Aot | CompileMode::Runtime => {
+                self.compile_aot_batch(&claimed, &mut compiled, spec_id)?
+            }
             CompileMode::Interpreter => unreachable!(),
         }
 
@@ -294,7 +299,9 @@ impl CompileCache {
 
                 match self.mode {
                     CompileMode::Jit => self.compile_jit_batch(&claimed, &mut compiled, spec_id)?,
-                    CompileMode::Aot => self.compile_aot_batch(&claimed, &mut compiled, spec_id)?,
+                    CompileMode::Aot | CompileMode::Runtime => {
+                        self.compile_aot_batch(&claimed, &mut compiled, spec_id)?
+                    }
                     CompileMode::Interpreter => unreachable!(),
                 }
 
@@ -387,6 +394,7 @@ impl CompileCache {
             let label = match self.mode {
                 CompileMode::Jit => "JIT",
                 CompileMode::Aot => "AOT",
+                CompileMode::Runtime => "Runtime",
                 CompileMode::Interpreter => unreachable!(),
             };
             let rate = hits as f64 / total as f64 * 100.0;
@@ -553,6 +561,216 @@ fn execute_test_suite_compiled(
     Ok(())
 }
 
+// ── Runtime coordinator mode ─────────────────────────────────────────────────
+
+use revmc::runtime::{
+    JitCoordinator, JitCoordinatorHandle, LookupDecision, LookupRequest, RuntimeConfig,
+};
+
+/// Custom handler that looks up compiled functions via the runtime coordinator.
+/// Falls back to the interpreter for contracts not in the resident map.
+struct RuntimeHandler {
+    handle: JitCoordinatorHandle,
+    /// Fallback: compile cache for runtime-created code (CREATE/CREATE2).
+    cache: Arc<CompileCache>,
+    spec_id: SpecId,
+}
+
+impl Handler for RuntimeHandler {
+    type Evm = StateTestEvm<'static>;
+    type Error = StateTestError;
+    type HaltReason = HaltReason;
+
+    fn run_exec_loop(
+        &mut self,
+        evm: &mut Self::Evm,
+        first_frame_input: revm::interpreter::interpreter_action::FrameInit,
+    ) -> Result<FrameResult, Self::Error> {
+        let res = evm.frame_init(first_frame_input)?;
+        if let ItemOrResult::Result(frame_result) = res {
+            return Ok(frame_result);
+        }
+        loop {
+            let call_or_result = {
+                let frame = evm.frame_stack.get();
+                let bytecode_hash = frame.interpreter.bytecode.get_or_calculate_hash();
+                let code = frame.interpreter.bytecode.original_byte_slice();
+
+                let req = LookupRequest { code_hash: bytecode_hash, code, spec_id: self.spec_id };
+                let decision = self.handle.lookup(req);
+
+                let f = match decision {
+                    LookupDecision::Compiled(program) => program.func,
+                    LookupDecision::Interpret(_reason) => {
+                        // Fall back: compile via cache (handles CREATE/CREATE2).
+                        self.cache
+                            .compile_single(bytecode_hash, code, self.spec_id)
+                            .expect("compilation failed for runtime bytecode")
+                    }
+                };
+
+                {
+                    let ctx = &mut evm.ctx;
+                    let action = unsafe { f.call_with_interpreter(&mut frame.interpreter, ctx) };
+                    frame.process_next_action::<_, StateTestError>(ctx, action).inspect(|i| {
+                        if i.is_result() {
+                            frame.set_finished(true);
+                        }
+                    })?
+                }
+            };
+            let result = match call_or_result {
+                ItemOrResult::Item(init) => match evm.frame_init(init)? {
+                    ItemOrResult::Item(_) => continue,
+                    ItemOrResult::Result(result) => result,
+                },
+                ItemOrResult::Result(result) => result,
+            };
+            if let Some(result) = evm.frame_return_result(result)? {
+                return Ok(result);
+            }
+        }
+    }
+}
+
+/// Execute a single test using the runtime coordinator handler.
+fn execute_single_test_runtime(
+    handle: &JitCoordinatorHandle,
+    cache: &Arc<CompileCache>,
+    ctx: CompiledTestContext<'_>,
+) -> Result<(), TestErrorKind> {
+    let prestate = ctx.cache_state.clone();
+    let mut state =
+        database::State::builder().with_cached_prestate(prestate).with_bundle_update().build();
+
+    let timer = Instant::now();
+    let exec_result = unsafe {
+        let db_ref = &mut *(&mut state as *mut database::State<EmptyDB>);
+        let evm_context = Context::mainnet()
+            .with_block(ctx.block.clone())
+            .with_tx(ctx.tx.clone())
+            .with_cfg(ctx.cfg.clone())
+            .with_db(db_ref);
+        let mut handler = RuntimeHandler {
+            handle: handle.clone(),
+            cache: Arc::clone(cache),
+            spec_id: ctx.spec_id,
+        };
+        let mut evm = evm_context.build_mainnet();
+        let result = handler.run(&mut evm);
+        if result.is_ok() {
+            let s = evm.ctx.journaled_state.finalize();
+            DatabaseCommit::commit(&mut evm.ctx.journaled_state.database, s);
+        }
+        result
+    };
+    let db = &mut state;
+    *ctx.elapsed.lock().unwrap() += timer.elapsed();
+
+    check_evm_execution(
+        ctx.test,
+        ctx.unit.out.as_ref(),
+        ctx.name,
+        &exec_result,
+        db,
+        *ctx.cfg.spec(),
+        false,
+    )
+}
+
+/// Execute a test suite file using the runtime coordinator.
+///
+/// For each test unit, we AOT-compile all contracts via `CompileCache`, then look them up
+/// through the `JitCoordinatorHandle`. This exercises the full preload → lookup path.
+fn execute_test_suite_runtime(
+    path: &Path,
+    elapsed: &Arc<Mutex<Duration>>,
+    cache: &CompileCache,
+    handle: &JitCoordinatorHandle,
+    cache_arc: &Arc<CompileCache>,
+) -> Result<(), TestError> {
+    if skip_test(path) {
+        return Ok(());
+    }
+
+    let s = std::fs::read_to_string(path).unwrap();
+    let path_str = path.to_string_lossy().into_owned();
+    let suite: TestSuite = serde_json::from_str(&s).map_err(|e| TestError {
+        name: "Unknown".to_string(),
+        path: path_str.clone(),
+        kind: e.into(),
+    })?;
+
+    for (name, unit) in suite.0 {
+        let cache_state = unit.state();
+        let mut cfg = CfgEnv::default();
+        cfg.chain_id = unit.env.current_chain_id.unwrap_or(U256::ONE).try_into().unwrap_or(1);
+
+        for (spec_name, tests) in &unit.post {
+            if *spec_name == SpecName::Constantinople {
+                continue;
+            }
+
+            let spec_id = spec_name.to_spec_id();
+            cfg.set_spec_and_mainnet_gas_params(spec_id);
+
+            if cfg.spec().is_enabled_in(SpecId::OSAKA) {
+                cfg.set_max_blobs_per_tx(6);
+            } else if cfg.spec().is_enabled_in(SpecId::PRAGUE) {
+                cfg.set_max_blobs_per_tx(9);
+            } else {
+                cfg.set_max_blobs_per_tx(6);
+            }
+
+            let block = unit.block_env(&mut cfg);
+
+            // AOT-compile all contracts in this unit (populates the CompileCache).
+            let compiled = cache.compile(&unit, spec_id).map_err(|e| TestError {
+                name: name.clone(),
+                path: path_str.clone(),
+                kind: e,
+            })?;
+
+            for test in tests.iter() {
+                let tx = match test.tx_env(&unit) {
+                    Ok(tx) => tx,
+                    Err(_) if test.expect_exception.is_some() => continue,
+                    Err(_) => {
+                        return Err(TestError {
+                            name,
+                            path: path_str,
+                            kind: TestErrorKind::UnknownPrivateKey(unit.transaction.secret_key),
+                        });
+                    }
+                };
+
+                let result = execute_single_test_runtime(
+                    handle,
+                    cache_arc,
+                    CompiledTestContext {
+                        compiled: &compiled,
+                        cache,
+                        spec_id,
+                        test,
+                        unit: &unit,
+                        name: &name,
+                        cfg: &cfg,
+                        block: &block,
+                        tx: &tx,
+                        cache_state: &cache_state,
+                        elapsed,
+                    },
+                );
+
+                if let Err(e) = result {
+                    return Err(TestError { name, path: path_str, kind: e });
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 // ── Top-level runner ────────────────────────────────────────────────────────
 
 fn run_test_worker(
@@ -560,6 +778,8 @@ fn run_test_worker(
     keep_going: bool,
     mode: CompileMode,
     cache: Option<&CompileCache>,
+    runtime_handle: Option<&JitCoordinatorHandle>,
+    cache_arc: Option<&Arc<CompileCache>>,
 ) -> Result<(), TestError> {
     loop {
         if !keep_going && state.n_errors.load(Ordering::SeqCst) > 0 {
@@ -577,6 +797,13 @@ fn run_test_worker(
             CompileMode::Jit | CompileMode::Aot => {
                 execute_test_suite_compiled(&test_path, &state.elapsed, cache.unwrap())
             }
+            CompileMode::Runtime => execute_test_suite_runtime(
+                &test_path,
+                &state.elapsed,
+                cache.unwrap(),
+                runtime_handle.unwrap(),
+                cache_arc.unwrap(),
+            ),
         };
 
         state.console_bar.inc(1);
@@ -604,8 +831,25 @@ pub fn run(
 
     let cache = match mode {
         CompileMode::Interpreter => None,
-        CompileMode::Jit | CompileMode::Aot => Some(Arc::new(CompileCache::new(mode))),
+        CompileMode::Jit | CompileMode::Aot | CompileMode::Runtime => {
+            Some(Arc::new(CompileCache::new(mode)))
+        }
     };
+
+    // For runtime mode, start the coordinator with an empty store.
+    // All lookups will miss → fall back to CompileCache → compile on demand.
+    // This exercises the full lookup → miss → fallback → event tracking path.
+    let coordinator = if mode == CompileMode::Runtime {
+        let config = RuntimeConfig { enabled: true, ..Default::default() };
+        Some(JitCoordinator::start(config).map_err(|e| TestError {
+            name: "coordinator".to_string(),
+            path: String::new(),
+            kind: TestErrorKind::CompilationError(format!("coordinator start: {e}")),
+        })?)
+    } else {
+        None
+    };
+    let runtime_handle = coordinator.as_ref().map(|c| c.handle());
 
     let num_threads = if single_thread {
         1
@@ -620,10 +864,20 @@ pub fn run(
     for i in 0..num_threads {
         let state = state.clone();
         let cache = cache.clone();
+        let runtime_handle = runtime_handle.clone();
 
         let thread = std::thread::Builder::new()
             .name(format!("runner-{i}"))
-            .spawn(move || run_test_worker(state, keep_going, mode, cache.as_deref()))
+            .spawn(move || {
+                run_test_worker(
+                    state,
+                    keep_going,
+                    mode,
+                    cache.as_deref(),
+                    runtime_handle.as_ref(),
+                    cache.as_ref(),
+                )
+            })
             .unwrap();
 
         handles.push(thread);
@@ -651,6 +905,21 @@ pub fn run(
 
     if let Some(cache) = &cache {
         cache.print_stats();
+    }
+
+    // Print runtime coordinator stats.
+    if let Some(handle) = &runtime_handle {
+        let stats = handle.stats();
+        println!(
+            "Runtime coordinator: {} hits, {} misses, {} disabled, {} events sent, {} events dropped, {} resident",
+            stats.lookup_hits, stats.lookup_misses, stats.lookup_disabled,
+            stats.events_sent, stats.events_dropped, stats.resident_entries,
+        );
+    }
+
+    // Shutdown coordinator.
+    if let Some(coord) = coordinator {
+        let _ = coord.shutdown();
     }
 
     let n_errors = state.n_errors.load(Ordering::SeqCst);

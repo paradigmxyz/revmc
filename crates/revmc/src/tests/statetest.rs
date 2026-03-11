@@ -36,3 +36,8 @@ fn jit() {
 fn aot() {
     run_state_tests(CompileMode::Aot);
 }
+
+#[test]
+fn runtime() {
+    run_state_tests(CompileMode::Runtime);
+}
