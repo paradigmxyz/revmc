@@ -140,16 +140,19 @@ impl JitCoordinator {
         for (artifact_key, stored) in artifacts {
             match Self::load_artifact(&artifact_key, &stored) {
                 Ok(program) => {
-                    let key = artifact_key.runtime.clone();
-                    if map.contains_key(&key) {
-                        warn!(
-                            code_hash = %key.code_hash,
-                            spec_id = ?key.spec_id,
-                            "duplicate artifact key, keeping first",
-                        );
-                        continue;
+                    match map.entry(artifact_key.runtime.clone()) {
+                        std::collections::hash_map::Entry::Occupied(_) => {
+                            warn!(
+                                code_hash = %artifact_key.runtime.code_hash,
+                                spec_id = ?artifact_key.runtime.spec_id,
+                                "duplicate artifact key, keeping first",
+                            );
+                            continue;
+                        }
+                        std::collections::hash_map::Entry::Vacant(e) => {
+                            e.insert(Arc::new(program));
+                        }
                     }
-                    map.insert(key, Arc::new(program));
                     loaded += 1;
                 }
                 Err(e) => {
