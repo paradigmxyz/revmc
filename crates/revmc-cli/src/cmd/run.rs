@@ -153,37 +153,13 @@ impl RunArgs {
 
         if self.parse_only || self.dot {
             let bytecode = compiler.parse(bytecode_slice.into(), spec_id)?;
-            if self.dot {
-                let mut dot = String::new();
-                bytecode.write_dot(&mut dot).map_err(|e| eyre!("{e}"))?;
-
-                let dir = std::env::temp_dir().join("revmc-dot");
-                std::fs::create_dir_all(&dir)?;
-                let dot_path = dir.join(format!("{name}.dot"));
-                let svg_path = dir.join(format!("{name}.svg"));
-                std::fs::write(&dot_path, &dot)?;
-
-                let status = std::process::Command::new("dot")
-                    .args(["-Tsvg", "-o"])
-                    .arg(&svg_path)
-                    .arg(&dot_path)
-                    .status();
-                match status {
-                    Ok(s) if s.success() => {
-                        eprintln!("SVG written to {}", svg_path.display());
-                        let _ = open::that(&svg_path);
-                    }
-                    Ok(s) => return Err(eyre!("`dot` exited with {s}")),
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                        eprintln!("graphviz `dot` not found, printing raw DOT:");
-                        println!("{dot}");
-                    }
-                    Err(e) => return Err(e.into()),
-                }
-            } else {
+            if self.parse_only {
                 println!("{bytecode}");
+                return Ok(());
             }
-            return Ok(());
+            if self.dot {
+                emit_dot(&bytecode, name)?;
+            }
         }
 
         let f_id = compiler.translate(name, bytecode_slice, spec_id)?;
@@ -295,6 +271,36 @@ impl RunArgs {
 
         Ok(())
     }
+}
+
+fn emit_dot(bytecode: &revmc::Bytecode<'_>, name: &str) -> Result<()> {
+    let mut dot = String::new();
+    bytecode.write_dot(&mut dot).map_err(|e| eyre!("{e}"))?;
+
+    let dir = std::env::temp_dir().join("revmc-dot");
+    std::fs::create_dir_all(&dir)?;
+    let dot_path = dir.join(format!("{name}.dot"));
+    let svg_path = dir.join(format!("{name}.svg"));
+    std::fs::write(&dot_path, &dot)?;
+
+    let status = std::process::Command::new("dot")
+        .args(["-Tsvg", "-o"])
+        .arg(&svg_path)
+        .arg(&dot_path)
+        .status();
+    match status {
+        Ok(s) if s.success() => {
+            eprintln!("SVG written to {}", svg_path.display());
+            let _ = open::that(&svg_path);
+        }
+        Ok(s) => return Err(eyre!("`dot` exited with {s}")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!("graphviz `dot` not found, printing raw DOT:");
+            println!("{dot}");
+        }
+        Err(e) => return Err(e.into()),
+    }
+    Ok(())
 }
 
 fn bench<T>(n_iters: u64, name: &str, mut f: impl FnMut() -> T) {
