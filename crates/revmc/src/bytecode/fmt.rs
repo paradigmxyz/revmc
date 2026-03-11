@@ -183,7 +183,9 @@ impl<'a> Bytecode<'a> {
         writeln!(w, "  graph [bgcolor=\"#1a1a2e\" rankdir=TB];")?;
         writeln!(
             w,
-            "  node [shape=plain fontname=\"Fira Code,monospace\" fontsize=10];"
+            "  node [shape=Mrecord fontname=\"Fira Code,monospace\" fontsize=10 \
+             style=filled fillcolor=\"#16213e\" fontcolor=\"#e0e0e0\" \
+             color=\"#0f3460\" penwidth=1.5 margin=\"0.2\"];"
         )?;
         writeln!(
             w,
@@ -209,37 +211,29 @@ impl<'a> Bytecode<'a> {
 
             write!(
                 w,
-                "  bb{block_idx} [label=<\
-                 <TABLE BORDER=\"1\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"4\" \
-                 BGCOLOR=\"{fill}\" COLOR=\"{border}\">\
-                 <TR><TD><B><FONT COLOR=\"#e0e0e0\">bb{block_idx}</FONT></B></TD></TR>",
+                "  bb{block_idx} [fillcolor=\"{fill}\" color=\"{border}\" \
+                 label=\"{{bb{block_idx}",
             )?;
 
             if !first.section.is_empty() {
                 write!(
                     w,
-                    "<TR><TD><FONT COLOR=\"#8888aa\" POINT-SIZE=\"9\">\
-                     gas={} in={} growth={}\
-                     </FONT></TD></TR>",
+                    " | gas={} in={} growth={}",
                     first.section.gas_cost, first.section.inputs, first.section.max_growth,
                 )?;
             }
 
-            write!(w, "<HR/><TR><TD ALIGN=\"LEFT\"><FONT COLOR=\"#e0e0e0\">")?;
+            write!(w, " |")?;
             for inst in first_inst..=last_inst {
                 let data = self.inst(inst);
                 if data.is_dead_code() {
                     continue;
                 }
                 let opcode = data.to_op_in(self);
-                let op_str = opcode
-                    .to_string()
-                    .replace('&', "&amp;")
-                    .replace('<', "&lt;")
-                    .replace('>', "&gt;");
-                write!(w, "{op_str}<BR ALIGN=\"LEFT\"/>")?;
+                let op_str = opcode.to_string().replace('>', "\\>").replace('<', "\\<");
+                write!(w, "{op_str}\\l")?;
             }
-            writeln!(w, "</FONT></TD></TR></TABLE>>];")?;
+            writeln!(w, "}}\"];")?;
         }
 
         // Emit edges.
