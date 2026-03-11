@@ -571,25 +571,17 @@ mod tests {
 
     #[test]
     fn display_format() {
-        // pc=0: PUSH1 0x01 (condition)
-        // pc=2: PUSH1 0x07 (jump target, skip_logic)
-        // pc=4: JUMPI -> JUMPDEST at pc=7 (static jump)
-        // pc=5: STOP (fallthrough)
-        // pc=6: ADD (dead code, between STOP and JUMPDEST)
-        // pc=7: JUMPDEST (reachable)
-        // pc=8: PUSH1 0x02
-        // pc=10: STOP
         let code: &[u8] = &[
             op::PUSH1,
-            0x01, // push condition
+            0x01,
             op::PUSH1,
-            0x07,      // push jump target
-            op::JUMPI, // conditional jump
-            op::STOP,  // fallthrough
-            op::ADD,   // dead code
+            0x07,
+            op::JUMPI,
+            op::STOP,
+            op::ADD,
             op::JUMPDEST,
             op::PUSH1,
-            0x02, // jumped-to block
+            0x02,
             op::STOP,
         ];
         let mut bytecode = Bytecode::new(code, SpecId::OSAKA);
@@ -622,15 +614,15 @@ bb2:         ; gas=4, stack_in=0, max_growth=1
     fn dot_format() {
         let code: &[u8] = &[
             op::PUSH1,
-            0x01, // push condition
+            0x01,
             op::PUSH1,
-            0x07,      // push jump target
-            op::JUMPI, // conditional jump
-            op::STOP,  // fallthrough
-            op::ADD,   // dead code
+            0x07,
+            op::JUMPI,
+            op::STOP,
+            op::ADD,
             op::JUMPDEST,
             op::PUSH1,
-            0x02, // jumped-to block
+            0x02,
             op::STOP,
         ];
         let mut bytecode = Bytecode::new(code, SpecId::OSAKA);
