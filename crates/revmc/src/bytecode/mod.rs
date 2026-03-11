@@ -364,6 +364,112 @@ impl<'a> Bytecode<'a> {
         }
         s
     }
+
+    /// Writes the bytecode as a DOT graph to the given writer.
+    #[doc(hidden)]
+    pub fn write_dot<W: fmt::Write>(&self, w: &mut W) -> fmt::Result {
+        // Collect blocks: (block_idx, first_inst, last_inst).
+        let mut blocks: Vec<(usize, usize, usize)> = Vec::new();
+        let mut inst_to_block: FxHashMap<usize, usize> = FxHashMap::default();
+        {
+            let mut block_idx = 0usize;
+            let mut need_header = true;
+            for (inst, data) in self.iter_all_insts() {
+                if data.is_dead_code() {
+                    continue;
+                }
+                if !data.section.is_empty() || need_header {
+                    inst_to_block.insert(inst, block_idx);
+                    blocks.push((block_idx, inst, inst));
+                    block_idx += 1;
+                    need_header = false;
+                }
+                // Update last inst of current block.
+                if let Some(b) = blocks.last_mut() {
+                    b.2 = inst;
+                }
+                if data.is_branching() {
+                    need_header = true;
+                }
+            }
+        }
+
+        writeln!(w, "digraph bytecode {{")?;
+        writeln!(w, "  node [shape=record fontname=\"monospace\" fontsize=10];")?;
+        writeln!(w, "  edge [fontname=\"monospace\" fontsize=9];")?;
+
+        // Emit nodes.
+        for &(block_idx, first_inst, last_inst) in &blocks {
+            write!(w, "  bb{block_idx} [label=\"{{bb{block_idx}")?;
+
+            let first = self.inst(first_inst);
+            if !first.section.is_empty() {
+                write!(
+                    w,
+                    " | gas={} in={} growth={}",
+                    first.section.gas_cost, first.section.inputs, first.section.max_growth,
+                )?;
+            }
+
+            write!(w, " |")?;
+            for inst in first_inst..=last_inst {
+                let data = self.inst(inst);
+                if data.is_dead_code() {
+                    continue;
+                }
+                let opcode = data.to_op_in(self);
+                // Escape DOT special chars.
+                let op_str = opcode.to_string().replace('>', "\\>").replace('<', "\\<");
+                write!(w, " {op_str}\\l")?;
+            }
+            writeln!(w, "}}\"];")?;
+        }
+
+        // Emit edges.
+        for (i, &(block_idx, _, last_inst)) in blocks.iter().enumerate() {
+            let last = self.inst(last_inst);
+
+            // Jump edge.
+            if last.is_legacy_static_jump() && !last.flags.contains(InstFlags::INVALID_JUMP) {
+                let target = last.data as usize;
+                if let Some(&target_block) = inst_to_block.get(&target) {
+                    let label = if last.opcode == op::JUMPI { "true" } else { "" };
+                    writeln!(w, "  bb{block_idx} -> bb{target_block} [label=\"{label}\"];")?;
+                }
+            } else if last.is_legacy_jump() && !last.is_legacy_static_jump() {
+                // Dynamic jump.
+                writeln!(w, "  bb{block_idx} -> dynamic [label=\"dynamic\"];")?;
+            }
+
+            // Fallthrough edge (JUMPI has a false branch, non-diverging non-JUMP falls through).
+            let has_fallthrough = if last.opcode == op::JUMPI {
+                true
+            } else {
+                !last.is_diverging() && last.opcode != op::JUMP
+            };
+            if has_fallthrough
+                && let Some(&(next_block, _, _)) = blocks.get(i + 1)
+            {
+                let label = if last.opcode == op::JUMPI { "false" } else { "" };
+                writeln!(w, "  bb{block_idx} -> bb{next_block} [label=\"{label}\"];")?;
+            }
+        }
+
+        // Dynamic jump target node if needed.
+        if self.has_dynamic_jumps {
+            writeln!(w, "  dynamic [shape=ellipse label=\"dynamic\\njump\"];")?;
+        }
+
+        writeln!(w, "}}")
+    }
+
+    /// Returns the bytecode as a DOT graph string.
+    #[allow(dead_code)]
+    pub(crate) fn to_dot(&self) -> String {
+        let mut s = String::new();
+        self.write_dot(&mut s).unwrap();
+        s
+    }
 }
 
 impl fmt::Display for Bytecode<'_> {
@@ -770,6 +876,38 @@ bb2:         ; gas=4, stack_in=0, max_growth=1
   STOP       ; pc=10
 
 "#]]
+        );
+    }
+
+    #[test]
+    fn dot_format() {
+        let code: &[u8] = &[
+            op::PUSH1,
+            0x01, // push condition
+            op::PUSH1,
+            0x07,      // push jump target
+            op::JUMPI, // conditional jump
+            op::STOP,  // fallthrough
+            op::ADD,   // dead code
+            op::JUMPDEST,
+            op::PUSH1,
+            0x02, // jumped-to block
+            op::STOP,
+        ];
+        let mut bytecode = Bytecode::new(code, SpecId::OSAKA);
+        bytecode.analyze().unwrap();
+
+        similar_asserts::assert_eq!(
+            bytecode.to_dot(),
+            "digraph bytecode {\n  \
+             node [shape=record fontname=\"monospace\" fontsize=10];\n  \
+             edge [fontname=\"monospace\" fontsize=9];\n  \
+             bb0 [label=\"{bb0 | gas=16 in=0 growth=2 | PUSH1 0x01\\l PUSH1 0x07\\l JUMPI\\l}\"];\n  \
+             bb1 [label=\"{bb1 | STOP\\l}\"];\n  \
+             bb2 [label=\"{bb2 | gas=4 in=0 growth=1 | JUMPDEST\\l PUSH1 0x02\\l STOP\\l}\"];\n  \
+             bb0 -> bb2 [label=\"true\"];\n  \
+             bb0 -> bb1 [label=\"false\"];\n\
+             }\n"
         );
     }
 }
