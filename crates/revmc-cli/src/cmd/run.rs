@@ -287,7 +287,7 @@ impl RunArgs {
 
 fn open_dot(dot_path: &Path) -> Result<()> {
     let dot_source = std::fs::read_to_string(dot_path)?;
-    let compressed = lz_str::compress_to_encoded_uri_component(&dot_source);
+    let compressed = lz_str::compress_to_encoded_uri_component(&dot_source).replace('+', "%2B");
     let url = format!("https://dreampuf.github.io/GraphvizOnline/?engine=dot&compressed={compressed}");
     let _ = open::that(&url);
     Ok(())
