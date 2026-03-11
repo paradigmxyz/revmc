@@ -93,7 +93,14 @@ impl RunArgs {
         let target = revmc::Target::new(self.target, self.target_cpu, self.target_features);
         let backend = EvmLlvmBackend::new_for_target(self.aot, self.opt_level, &target)?;
         let mut compiler = EvmCompiler::new(backend);
-        compiler.set_dump_to(self.out_dir);
+        let out_dir = if self.out_dir.is_some() {
+            self.out_dir
+        } else if self.dot || self.display || self.parse_only {
+            Some(std::env::temp_dir().join("revmc-cli"))
+        } else {
+            None
+        };
+        compiler.set_dump_to(out_dir);
         compiler.gas_metering(!self.no_gas);
         unsafe { compiler.stack_bound_checks(!self.no_len_checks) };
         compiler.frame_pointers(true);
@@ -160,7 +167,8 @@ impl RunArgs {
             println!("{name}()\n{bytecode}");
         }
         if self.dot {
-            emit_dot(&bytecode, name)?;
+            let dump_dir = compiler.dump_dir().expect("dump_dir should be set when --dot is used");
+            render_dot_svg(&dump_dir.join("bytecode.dot"))?;
         }
         if self.parse_only {
             return Ok(());
@@ -277,20 +285,12 @@ impl RunArgs {
     }
 }
 
-fn emit_dot(bytecode: &revmc::Bytecode<'_>, name: &str) -> Result<()> {
-    let mut dot = String::new();
-    bytecode.write_dot(&mut dot).map_err(|e| eyre!("{e}"))?;
-
-    let dir = std::env::temp_dir().join("revmc-dot");
-    std::fs::create_dir_all(&dir)?;
-    let dot_path = dir.join(format!("{name}.dot"));
-    let svg_path = dir.join(format!("{name}.svg"));
-    std::fs::write(&dot_path, &dot)?;
-
+fn render_dot_svg(dot_path: &Path) -> Result<()> {
+    let svg_path = dot_path.with_extension("svg");
     let status = std::process::Command::new("dot")
         .args(["-Tsvg", "-o"])
         .arg(&svg_path)
-        .arg(&dot_path)
+        .arg(dot_path)
         .status();
     match status {
         Ok(s) if s.success() => {
@@ -299,8 +299,7 @@ fn emit_dot(bytecode: &revmc::Bytecode<'_>, name: &str) -> Result<()> {
         }
         Ok(s) => return Err(eyre!("`dot` exited with {s}")),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            eprintln!("graphviz `dot` not found, printing raw DOT:");
-            println!("{dot}");
+            eprintln!("graphviz `dot` not found; DOT file at {}", dot_path.display());
         }
         Err(e) => return Err(e.into()),
     }
