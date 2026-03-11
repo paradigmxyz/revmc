@@ -1,14 +1,49 @@
-use super::{Bytecode, InstData, InstFlags};
+use super::{Bytecode, InstData, InstFlags, bitvec_as_bytes};
 use revm_bytecode::opcode as op;
 use revm_primitives::hex;
 use rustc_hash::FxHashMap;
 use std::fmt;
 
-use super::bitvec_as_bytes;
+/// Basic block info collected from bytecode analysis.
+struct BlockInfo {
+    /// `(block_idx, first_inst, last_inst)` for each block.
+    blocks: Vec<(usize, usize, usize)>,
+    /// Maps instruction index to block index.
+    inst_to_block: FxHashMap<usize, usize>,
+}
+
+impl Bytecode<'_> {
+    fn collect_blocks(&self) -> BlockInfo {
+        let mut blocks = Vec::new();
+        let mut inst_to_block = FxHashMap::default();
+        let mut block_idx = 0usize;
+        let mut need_header = true;
+        for (inst, data) in self.iter_all_insts() {
+            if data.is_dead_code() {
+                continue;
+            }
+            if !data.section.is_empty() || need_header {
+                inst_to_block.insert(inst, block_idx);
+                blocks.push((block_idx, inst, inst));
+                block_idx += 1;
+                need_header = false;
+            }
+            if let Some(b) = blocks.last_mut() {
+                b.2 = inst;
+            }
+            if data.is_branching() {
+                need_header = true;
+            }
+        }
+        BlockInfo { blocks, inst_to_block }
+    }
+}
 
 impl fmt::Display for Bytecode<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         use std::fmt::Write;
+
+        let info = self.collect_blocks();
 
         // First pass: collect lines with their text and comments.
         let mut lines: Vec<(String, String)> = Vec::new();
@@ -22,100 +57,77 @@ impl fmt::Display for Bytecode<'_> {
         ));
         lines.push((String::new(), String::new()));
 
-        // Pre-pass: build inst -> block index map.
-        let mut inst_to_block = FxHashMap::default();
-        {
-            let mut block_idx = 0usize;
-            let mut need_header = true;
-            for (inst, data) in self.iter_all_insts() {
-                if data.is_dead_code() {
-                    continue;
-                }
-                if !data.section.is_empty() || need_header {
-                    inst_to_block.insert(inst, block_idx);
-                    block_idx += 1;
-                    need_header = false;
-                }
-                if data.is_branching() {
-                    need_header = true;
-                }
-            }
-        }
-
-        let mut block_idx = 0usize;
-        let mut need_header = true;
-        for (inst, data) in self.iter_all_insts() {
-            if data.is_dead_code() {
-                continue;
+        for &(block_idx, first_inst, last_inst) in &info.blocks {
+            // Blank line between blocks.
+            if first_inst > 0 {
+                lines.push((String::new(), String::new()));
             }
 
             // Block header.
-            if !data.section.is_empty() || need_header {
-                if inst > 0 {
-                    lines.push((String::new(), String::new()));
-                }
-                let mut header = format!("bb{block_idx}:");
-                let mut comment = String::new();
-                if !data.section.is_empty() {
-                    write!(
-                        comment,
-                        "gas={}, stack_in={}, max_growth={}",
-                        data.section.gas_cost, data.section.inputs, data.section.max_growth,
-                    )
-                    .unwrap();
-                }
-                // Pad header to align with indented instructions.
-                while header.len() < 2 {
-                    header.push(' ');
-                }
-                lines.push((header, comment));
-                block_idx += 1;
-                need_header = false;
+            let first = self.inst(first_inst);
+            let mut header = format!("bb{block_idx}:");
+            let mut comment = String::new();
+            if !first.section.is_empty() {
+                write!(
+                    comment,
+                    "gas={}, stack_in={}, max_growth={}",
+                    first.section.gas_cost, first.section.inputs, first.section.max_growth,
+                )
+                .unwrap();
             }
+            // Pad header to align with indented instructions.
+            while header.len() < 2 {
+                header.push(' ');
+            }
+            lines.push((header, comment));
 
-            // Instruction text.
-            let mut text = String::from("  ");
-            let opcode = data.to_op_in(self);
-            write!(text, "{opcode}").unwrap();
-            if data.flags.contains(InstFlags::INVALID_JUMP) {
-                text.push_str(" -> INVALID");
-            } else if data.is_legacy_static_jump() {
-                let target = data.data as usize;
-                match inst_to_block.get(&target) {
-                    Some(b) => write!(text, " bb{b}").unwrap(),
-                    None => write!(text, " inst {target}").unwrap(),
+            // Instructions.
+            for inst in first_inst..=last_inst {
+                let data = self.inst(inst);
+                if data.is_dead_code() {
+                    continue;
                 }
-            }
 
-            // Comment with pc and flags/behavior.
-            let mut comment = format!("pc={}", data.pc);
-            let flags = data.flags;
-            if flags.contains(InstFlags::SKIP_LOGIC) {
-                comment.push_str(", skip");
-            }
-            if flags.contains(InstFlags::DEAD_CODE) {
-                comment.push_str(", dead");
-            }
-            if flags.contains(InstFlags::DISABLED) {
-                comment.push_str(", disabled");
-            }
-            if flags.contains(InstFlags::UNKNOWN) {
-                comment.push_str(", unknown");
-            }
-            if flags.contains(InstFlags::INVALID_JUMP) {
-                comment.push_str(", invalid_jump");
-            }
-            if data.may_suspend() {
-                comment.push_str(", suspends");
-            }
-            if data.is_reachable_jumpdest(self.has_dynamic_jumps) {
-                comment.push_str(", reachable");
-            }
+                // Instruction text.
+                let mut text = String::from("  ");
+                let opcode = data.to_op_in(self);
+                write!(text, "{opcode}").unwrap();
+                if data.flags.contains(InstFlags::INVALID_JUMP) {
+                    text.push_str(" -> INVALID");
+                } else if data.is_legacy_static_jump() {
+                    let target = data.data as usize;
+                    match info.inst_to_block.get(&target) {
+                        Some(b) => write!(text, " bb{b}").unwrap(),
+                        None => write!(text, " inst {target}").unwrap(),
+                    }
+                }
 
-            lines.push((text, comment));
+                // Comment with pc and flags/behavior.
+                let mut comment = format!("pc={}", data.pc);
+                let flags = data.flags;
+                if flags.contains(InstFlags::SKIP_LOGIC) {
+                    comment.push_str(", skip");
+                }
+                if flags.contains(InstFlags::DEAD_CODE) {
+                    comment.push_str(", dead");
+                }
+                if flags.contains(InstFlags::DISABLED) {
+                    comment.push_str(", disabled");
+                }
+                if flags.contains(InstFlags::UNKNOWN) {
+                    comment.push_str(", unknown");
+                }
+                if flags.contains(InstFlags::INVALID_JUMP) {
+                    comment.push_str(", invalid_jump");
+                }
+                if data.may_suspend() {
+                    comment.push_str(", suspends");
+                }
+                if data.is_reachable_jumpdest(self.has_dynamic_jumps) {
+                    comment.push_str(", reachable");
+                }
 
-            if data.is_branching() {
-                need_header = true;
+                lines.push((text, comment));
             }
         }
 
@@ -165,31 +177,7 @@ impl<'a> Bytecode<'a> {
     /// Writes the bytecode as a DOT graph to the given writer.
     #[doc(hidden)]
     pub fn write_dot<W: fmt::Write>(&self, w: &mut W) -> fmt::Result {
-        // Collect blocks: (block_idx, first_inst, last_inst).
-        let mut blocks: Vec<(usize, usize, usize)> = Vec::new();
-        let mut inst_to_block: FxHashMap<usize, usize> = FxHashMap::default();
-        {
-            let mut block_idx = 0usize;
-            let mut need_header = true;
-            for (inst, data) in self.iter_all_insts() {
-                if data.is_dead_code() {
-                    continue;
-                }
-                if !data.section.is_empty() || need_header {
-                    inst_to_block.insert(inst, block_idx);
-                    blocks.push((block_idx, inst, inst));
-                    block_idx += 1;
-                    need_header = false;
-                }
-                // Update last inst of current block.
-                if let Some(b) = blocks.last_mut() {
-                    b.2 = inst;
-                }
-                if data.is_branching() {
-                    need_header = true;
-                }
-            }
-        }
+        let info = self.collect_blocks();
 
         writeln!(w, "digraph bytecode {{")?;
         writeln!(w, "  graph [bgcolor=\"#1a1a2e\" rankdir=TB];")?;
@@ -206,7 +194,7 @@ impl<'a> Bytecode<'a> {
         )?;
 
         // Emit nodes.
-        for &(block_idx, first_inst, last_inst) in &blocks {
+        for &(block_idx, first_inst, last_inst) in &info.blocks {
             let last = self.inst(last_inst);
             let first = self.inst(first_inst);
 
@@ -249,13 +237,13 @@ impl<'a> Bytecode<'a> {
         }
 
         // Emit edges.
-        for (i, &(block_idx, _, last_inst)) in blocks.iter().enumerate() {
+        for (i, &(block_idx, _, last_inst)) in info.blocks.iter().enumerate() {
             let last = self.inst(last_inst);
 
             // Jump edge.
             if last.is_legacy_static_jump() && !last.flags.contains(InstFlags::INVALID_JUMP) {
                 let target = last.data as usize;
-                if let Some(&target_block) = inst_to_block.get(&target) {
+                if let Some(&target_block) = info.inst_to_block.get(&target) {
                     let (label, color) = if last.opcode == op::JUMPI {
                         ("true", "#5cdb95")
                     } else {
@@ -281,7 +269,7 @@ impl<'a> Bytecode<'a> {
             } else {
                 !last.is_diverging() && last.opcode != op::JUMP
             };
-            if has_fallthrough && let Some(&(next_block, _, _)) = blocks.get(i + 1) {
+            if has_fallthrough && let Some(&(next_block, _, _)) = info.blocks.get(i + 1) {
                 let (label, color) =
                     if last.opcode == op::JUMPI { ("false", "#e94560") } else { ("", "#555577") };
                 writeln!(
@@ -300,7 +288,7 @@ impl<'a> Bytecode<'a> {
                  color=\"#e94560\" fontcolor=\"#e0e0e0\" \
                  label=\"dynamic\\njump table\"];"
             )?;
-            for &(block_idx, first_inst, _) in &blocks {
+            for &(block_idx, first_inst, _) in &info.blocks {
                 let first = self.inst(first_inst);
                 if first.is_reachable_jumpdest(self.has_dynamic_jumps) {
                     writeln!(
@@ -316,8 +304,8 @@ impl<'a> Bytecode<'a> {
     }
 
     /// Returns the bytecode as a DOT graph string.
-    #[allow(dead_code)]
-    pub(crate) fn to_dot(&self) -> String {
+    #[cfg(test)]
+    fn to_dot(&self) -> String {
         let mut s = String::new();
         self.write_dot(&mut s).unwrap();
         s
