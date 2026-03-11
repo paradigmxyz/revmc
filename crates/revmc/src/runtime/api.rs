@@ -1,6 +1,9 @@
 //! Public types and handle methods.
 
-use crate::{EvmCompilerFn, runtime::storage::RuntimeCacheKey};
+use crate::{
+    EvmCompilerFn,
+    runtime::{storage::RuntimeCacheKey, worker::WorkerBacking},
+};
 use alloy_primitives::B256;
 use revm_primitives::hardfork::SpecId;
 use std::sync::Arc;
@@ -83,6 +86,22 @@ impl CompiledProgram {
             _backing: ProgramBacking::LoadedLibrary(library),
         }
     }
+
+    /// Creates a new compiled program backed by a JIT worker's compiler.
+    pub(crate) fn new_jit(
+        key: RuntimeCacheKey,
+        func: EvmCompilerFn,
+        approx_size_bytes: usize,
+        backing: Arc<WorkerBacking>,
+    ) -> Self {
+        Self {
+            key,
+            kind: ProgramKind::Jit,
+            func,
+            approx_size_bytes,
+            _backing: ProgramBacking::JitModule(backing),
+        }
+    }
 }
 
 /// Whether this program was compiled AOT or JIT.
@@ -97,8 +116,10 @@ pub enum ProgramKind {
 /// Backing storage that keeps compiled code alive.
 #[expect(dead_code, reason = "variant fields are held alive for Drop")]
 enum ProgramBacking {
-    /// A dynamically loaded shared library.
+    /// A dynamically loaded shared library (AOT).
     LoadedLibrary(Arc<LoadedLibrary>),
+    /// A JIT worker's backing compiler (keeps JIT code alive).
+    JitModule(Arc<WorkerBacking>),
 }
 
 /// Owns a loaded shared library.

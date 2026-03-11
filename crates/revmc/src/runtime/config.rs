@@ -48,14 +48,48 @@ pub struct RuntimeTuning {
 
     /// Timeout for joining the coordinator thread during shutdown.
     ///
-    /// If the thread does not exit within this duration, shutdown returns an error.
-    ///
     /// Defaults to `5s`.
     pub shutdown_timeout: Duration,
+
+    /// Number of observed misses before a key is promoted to JIT compilation.
+    ///
+    /// Defaults to `8`.
+    pub jit_hot_threshold: u32,
+
+    /// Maximum number of JIT compilation jobs in flight.
+    ///
+    /// Defaults to `2048`.
+    pub max_pending_jit_jobs: usize,
+
+    /// Number of JIT compilation worker threads.
+    ///
+    /// Defaults to `min(max(1, cpus/2), 4)`.
+    pub jit_worker_count: usize,
+
+    /// Capacity of the per-worker job queue.
+    ///
+    /// Defaults to `64`.
+    pub jit_worker_queue_capacity: usize,
+
+    /// Optimization level for JIT compilation.
+    ///
+    /// Defaults to [`OptimizationLevel::Default`](crate::OptimizationLevel::Default).
+    pub jit_opt_level: crate::OptimizationLevel,
 }
 
 impl Default for RuntimeTuning {
     fn default() -> Self {
-        Self { lookup_event_channel_capacity: 4096, shutdown_timeout: Duration::from_secs(5) }
+        let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+        let worker_count = cpus.div_ceil(2).clamp(1, 4);
+
+        Self {
+            lookup_event_channel_capacity: 4096,
+            shutdown_timeout: Duration::from_secs(5),
+            jit_hot_threshold: 8,
+            max_pending_jit_jobs: 2048,
+            jit_worker_count: worker_count,
+            jit_worker_queue_capacity: 64,
+            jit_opt_level: crate::OptimizationLevel::Default,
+        }
     }
 }

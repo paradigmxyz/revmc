@@ -1,10 +1,9 @@
 //! Runtime JIT coordinator: O(1) compiled-function lookup with background compilation.
 //!
-//! # Phase 0
-//!
 //! - Startup AOT preload from [`ArtifactStore::load_all`] into an immutable in-memory map.
 //! - O(1) [`JitCoordinatorHandle::lookup`] that only reads the resident map.
 //! - Fire-and-forget lookup-observed events to the coordinator thread.
+//! - Background JIT compilation for hot keys (threshold-based promotion).
 
 mod api;
 mod config;
@@ -12,6 +11,7 @@ mod coordinator;
 mod error;
 mod stats;
 mod storage;
+mod worker;
 
 #[cfg(test)]
 mod tests;
@@ -25,10 +25,11 @@ pub use storage::{
 };
 
 use api::LoadedLibrary;
-use coordinator::{Command, LookupObservedEvent};
+use coordinator::{Command, LookupObservedEvent, ResidentMap};
 use stats::RuntimeStats;
 
 use crate::EvmCompilerFn;
+use arc_swap::ArcSwap;
 use rustc_hash::FxHashMap;
 use std::{
     sync::{
@@ -56,23 +57,26 @@ impl JitCoordinator {
     /// Starts the coordinator: loads AOT artifacts, builds the resident map, and spawns the
     /// coordinator thread.
     pub fn start(config: RuntimeConfig) -> Result<Self, RuntimeError> {
-        let resident = Self::preload_aot(config.store.as_deref())?;
-        let resident = Arc::new(resident);
+        let initial_resident = Self::preload_aot(config.store.as_deref())?;
+        let resident_shared = Arc::new(ArcSwap::from_pointee(initial_resident.clone()));
         let stats = Arc::new(RuntimeStats::default());
         let enabled = Arc::new(AtomicBool::new(config.enabled));
 
         let (tx, rx) = mpsc::sync_channel::<Command>(config.tuning.lookup_event_channel_capacity);
         let (done_tx, done_rx) = mpsc::sync_channel::<()>(1);
 
+        let tuning = config.tuning;
+        let resident_for_coord = Arc::clone(&resident_shared);
+
         let thread = std::thread::Builder::new()
             .name(config.thread_name)
             .spawn(move || {
-                coordinator::run(rx);
+                coordinator::run(rx, resident_for_coord, initial_resident, tuning);
                 let _ = done_tx.send(());
             })
             .map_err(|e| RuntimeError::ArtifactLoad(format!("failed to spawn coordinator: {e}")))?;
 
-        let handle = JitCoordinatorHandle { resident, enabled, tx, stats };
+        let handle = JitCoordinatorHandle { resident: resident_shared, enabled, tx, stats };
 
         Ok(Self {
             handle,
@@ -116,9 +120,7 @@ impl JitCoordinator {
     }
 
     /// Preloads AOT artifacts from the store into the resident map.
-    fn preload_aot(
-        store: Option<&dyn ArtifactStore>,
-    ) -> Result<FxHashMap<RuntimeCacheKey, Arc<CompiledProgram>>, RuntimeError> {
+    fn preload_aot(store: Option<&dyn ArtifactStore>) -> Result<ResidentMap, RuntimeError> {
         let store = match store {
             Some(s) => s,
             None => {
@@ -212,8 +214,8 @@ impl Drop for JitCoordinator {
 #[derive(Clone)]
 #[allow(missing_debug_implementations)]
 pub struct JitCoordinatorHandle {
-    /// Immutable resident compiled map.
-    resident: Arc<FxHashMap<RuntimeCacheKey, Arc<CompiledProgram>>>,
+    /// Published resident compiled map (read via `ArcSwap::load`).
+    resident: Arc<ArcSwap<ResidentMap>>,
     /// Global enable flag.
     enabled: Arc<AtomicBool>,
     /// Channel for sending commands to the coordinator thread.
@@ -234,7 +236,8 @@ impl JitCoordinatorHandle {
 
         let key = RuntimeCacheKey { code_hash: req.code_hash, spec_id: req.spec_id };
 
-        let decision = if let Some(program) = self.resident.get(&key) {
+        let resident = self.resident.load();
+        let decision = if let Some(program) = resident.get(&key) {
             self.stats.lookup_hits.fetch_add(1, Ordering::Relaxed);
             LookupDecision::Compiled(Arc::clone(program))
         } else {
@@ -244,15 +247,16 @@ impl JitCoordinatorHandle {
 
         // Fire-and-forget: silently drop if channel is full.
         let was_hit = matches!(decision, LookupDecision::Compiled(_));
-        let event = Command::LookupObserved(LookupObservedEvent { key, was_hit });
+        let event = Command::LookupObserved(LookupObservedEvent {
+            key,
+            was_hit,
+            bytecode: if was_hit { None } else { Some(Arc::<[u8]>::from(req.code)) },
+        });
         match self.tx.try_send(event) {
             Ok(()) => {
                 self.stats.events_sent.fetch_add(1, Ordering::Relaxed);
             }
-            Err(mpsc::TrySendError::Full(_)) => {
-                self.stats.events_dropped.fetch_add(1, Ordering::Relaxed);
-            }
-            Err(mpsc::TrySendError::Disconnected(_)) => {
+            Err(mpsc::TrySendError::Full(_) | mpsc::TrySendError::Disconnected(_)) => {
                 self.stats.events_dropped.fetch_add(1, Ordering::Relaxed);
             }
         }
@@ -267,6 +271,6 @@ impl JitCoordinatorHandle {
 
     /// Returns a point-in-time snapshot of runtime statistics.
     pub fn stats(&self) -> RuntimeStatsSnapshot {
-        self.stats.snapshot(self.resident.len() as u64)
+        self.stats.snapshot(self.resident.load().len() as u64)
     }
 }
