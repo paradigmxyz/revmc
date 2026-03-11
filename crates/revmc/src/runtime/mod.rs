@@ -13,6 +13,9 @@ mod error;
 mod stats;
 mod storage;
 
+#[cfg(test)]
+mod tests;
+
 pub use api::{CompiledProgram, InterpretReason, LookupDecision, LookupRequest, ProgramKind};
 pub use config::{RuntimeConfig, RuntimeTuning};
 pub use error::{RuntimeError, StorageError};
