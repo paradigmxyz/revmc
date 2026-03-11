@@ -147,6 +147,9 @@ impl RunArgs {
                 }
             };
         compiler.set_module_name(name);
+        if let Some(dump_dir) = compiler.dump_dir() {
+            eprintln!("Dump directory: {}", dump_dir.display());
+        }
 
         let calldata: revmc::primitives::Bytes = if let Some(calldata) = self.calldata {
             revmc::primitives::hex::decode(calldata)?.into()
