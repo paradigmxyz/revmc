@@ -1,4 +1,7 @@
 use revm_bytecode::opcode as op;
+use revm_interpreter::{
+    host::DummyHost, instructions::instruction_table_gas_changes_spec, interpreter::EthInterpreter,
+};
 use revm_primitives::hardfork::SpecId;
 
 /// Opcode information.
@@ -80,7 +83,6 @@ impl OpcodeInfo {
 }
 
 /// Returns the static info map for the given `SpecId`.
-#[allow(unused_parens)]
 pub fn op_info_map(spec_id: SpecId) -> &'static [OpcodeInfo; 256] {
     use std::sync::OnceLock;
     static MAPS: OnceLock<[[OpcodeInfo; 256]; 32]> = OnceLock::new();
@@ -96,302 +98,131 @@ pub fn op_info_map(spec_id: SpecId) -> &'static [OpcodeInfo; 256] {
     &maps[spec_id as usize]
 }
 
-#[allow(unused_mut)]
-const fn make_map(spec_id: SpecId) -> [OpcodeInfo; 256] {
-    const DYNAMIC: u16 = OpcodeInfo::DYNAMIC;
+/// Opcodes with a dynamic gas component that also have a base (static) cost deducted upfront.
+/// Only the dynamic part is paid in builtins.
+const DYNAMIC_WITH_BASE_GAS: &[u8] = &[
+    op::EXP,
+    op::KECCAK256,
+    op::CALLDATACOPY,
+    op::CODECOPY,
+    op::RETURNDATACOPY,
+    op::MLOAD,
+    op::MSTORE,
+    op::MSTORE8,
+    op::MCOPY,
+    op::LOG0,
+    op::LOG1,
+    op::LOG2,
+    op::LOG3,
+    op::LOG4,
+];
+
+/// Opcodes whose gas cost is entirely dynamic — computed fully in builtins at runtime.
+/// The upstream instruction table may assign a non-zero static gas to some of these (e.g.
+/// SELFDESTRUCT=5000 post-Tangerine), but revmc handles their full gas in builtins,
+/// so their base gas is always 0.
+const FULLY_DYNAMIC: &[u8] = &[
+    op::BALANCE,
+    op::EXTCODESIZE,
+    op::EXTCODECOPY,
+    op::EXTCODEHASH,
+    op::SLOAD,
+    op::SSTORE,
+    op::CREATE,
+    op::CALL,
+    op::CALLCODE,
+    op::RETURN,
+    op::DELEGATECALL,
+    op::CREATE2,
+    op::STATICCALL,
+    op::REVERT,
+    op::SELFDESTRUCT,
+];
+
+/// Opcodes that are gated behind a specific `SpecId`, paired with the spec they were introduced in.
+const SPEC_GATED_OPCODES: &[(u8, SpecId)] = &[
+    (op::SHL, SpecId::CONSTANTINOPLE),
+    (op::SHR, SpecId::CONSTANTINOPLE),
+    (op::SAR, SpecId::CONSTANTINOPLE),
+    (op::CLZ, SpecId::OSAKA),
+    (op::RETURNDATASIZE, SpecId::BYZANTIUM),
+    (op::RETURNDATACOPY, SpecId::BYZANTIUM),
+    (op::EXTCODEHASH, SpecId::CONSTANTINOPLE),
+    (op::CHAINID, SpecId::ISTANBUL),
+    (op::SELFBALANCE, SpecId::ISTANBUL),
+    (op::BASEFEE, SpecId::LONDON),
+    (op::BLOBHASH, SpecId::CANCUN),
+    (op::BLOBBASEFEE, SpecId::CANCUN),
+    (op::TLOAD, SpecId::CANCUN),
+    (op::TSTORE, SpecId::CANCUN),
+    (op::MCOPY, SpecId::CANCUN),
+    (op::PUSH0, SpecId::SHANGHAI),
+    (op::DELEGATECALL, SpecId::HOMESTEAD),
+    (op::CREATE2, SpecId::PETERSBURG),
+    (op::STATICCALL, SpecId::BYZANTIUM),
+    (op::REVERT, SpecId::BYZANTIUM),
+];
+
+/// Opcodes present in the upstream instruction table but not supported by revmc (e.g. EOF-only).
+const UNSUPPORTED_OPCODES: &[u8] = &[op::DUPN, op::SWAPN, op::EXCHANGE, op::SLOTNUM];
+
+fn make_map(spec_id: SpecId) -> [OpcodeInfo; 256] {
+    let table = instruction_table_gas_changes_spec::<EthInterpreter, DummyHost>(spec_id);
 
     let mut map = [OpcodeInfo(OpcodeInfo::UNKNOWN); 256];
-    macro_rules! set {
-        ($($op:ident = $gas:expr $(, if $spec_id:ident)? ;)*) => {
-            $(
-                let mut g = $gas;
-                $(
-                    if (spec_id as u8) < SpecId::$spec_id as u8 {
-                        g |= OpcodeInfo::DISABLED;
-                    }
-                )?
-                map[op::$op as usize] = OpcodeInfo::new(g);
-            )*
+
+    for i in 0..256u16 {
+        let op = i as u8;
+
+        // Skip opcodes not defined in revm's opcode table.
+        if revm_bytecode::opcode::OpCode::new(op).is_none() {
+            continue;
+        }
+
+        // Skip opcodes not supported by revmc (e.g. EOF-only).
+        if UNSUPPORTED_OPCODES.contains(&op) {
+            continue;
+        }
+
+        let is_fully_dynamic = FULLY_DYNAMIC.contains(&op);
+        let is_dynamic_with_base = DYNAMIC_WITH_BASE_GAS.contains(&op);
+
+        // Fully dynamic opcodes have their entire gas cost handled in builtins.
+        let gas = if is_fully_dynamic {
+            0u16
+        } else if (op::LOG0..=op::LOG4).contains(&op) {
+            // LOG opcodes: upstream only uses the base LOG cost as static gas and handles
+            // per-topic cost dynamically. revmc deducts the full static portion
+            // (base + n * LOGTOPIC) upfront, so add the per-topic cost here.
+            let n_topics = (op - op::LOG0) as u64;
+            let static_gas = table[op as usize].static_gas();
+            (static_gas + n_topics * revm_interpreter::instructions::gas::LOGTOPIC) as u16
+        } else {
+            let static_gas = table[op as usize].static_gas();
+            assert!(
+                static_gas <= OpcodeInfo::MASK as u64,
+                "static gas for opcode 0x{op:02X} exceeds OpcodeInfo capacity: {static_gas}"
+            );
+            static_gas as u16
         };
+
+        let mut info = OpcodeInfo::new(gas);
+
+        if is_fully_dynamic || is_dynamic_with_base {
+            info.set_dynamic();
+        }
+
+        map[op as usize] = info;
     }
-    // [1]: Not dynamic in all `SpecId`s, but gas is calculated dynamically in a builtin.
-    //      TODO: Could be converted into [2] with a base cost.
-    // [2]: Dynamic with a base cost. Only the dynamic part is paid in builtins.
-    set! {
-        STOP = 0;
 
-        ADD        = 3;
-        MUL        = 5;
-        SUB        = 3;
-        DIV        = 5;
-        SDIV       = 5;
-        MOD        = 5;
-        SMOD       = 5;
-        ADDMOD     = 8;
-        MULMOD     = 8;
-        EXP        = 10 | DYNAMIC; // [2]
-        SIGNEXTEND = 5;
-        // 0x0C
-        // 0x0D
-        // 0x0E
-        // 0x0F
-        LT     = 3;
-        GT     = 3;
-        SLT    = 3;
-        SGT    = 3;
-        EQ     = 3;
-        ISZERO = 3;
-        AND    = 3;
-        OR     = 3;
-        XOR    = 3;
-        NOT    = 3;
-        BYTE   = 3;
-        SHL    = 3, if CONSTANTINOPLE;
-        SHR    = 3, if CONSTANTINOPLE;
-        SAR    = 3, if CONSTANTINOPLE;
-        CLZ    = 5, if OSAKA;
-        // 0x1F
-        KECCAK256 = 30 | DYNAMIC; // [2]
-        // 0x21
-        // 0x22
-        // 0x23
-        // 0x24
-        // 0x25
-        // 0x26
-        // 0x27
-        // 0x28
-        // 0x29
-        // 0x2A
-        // 0x2B
-        // 0x2C
-        // 0x2D
-        // 0x2E
-        // 0x2F
-        ADDRESS      = 2;
-        BALANCE      = DYNAMIC; // [1]
-        ORIGIN       = 2;
-        CALLER       = 2;
-        CALLVALUE    = 2;
-        CALLDATALOAD = 3;
-        CALLDATASIZE = 2;
-        CALLDATACOPY = 3 | DYNAMIC; // [2]
-        CODESIZE     = 2;
-        CODECOPY     = 3 | DYNAMIC; // [2]
-
-        GASPRICE       = 2;
-        EXTCODESIZE    = DYNAMIC; // [1]
-        EXTCODECOPY    = DYNAMIC;
-        RETURNDATASIZE = 2,              if BYZANTIUM;
-        RETURNDATACOPY = 3 | DYNAMIC,    if BYZANTIUM; // [2]
-        EXTCODEHASH    = DYNAMIC,        if CONSTANTINOPLE; // [1]
-        BLOCKHASH      = 20;
-        COINBASE       = 2;
-        TIMESTAMP      = 2;
-        NUMBER         = 2;
-        DIFFICULTY     = 2;
-        GASLIMIT       = 2;
-        CHAINID        = 2,              if ISTANBUL;
-        SELFBALANCE    = 5,              if ISTANBUL;
-        BASEFEE        = 2,              if LONDON;
-        BLOBHASH       = 3,              if CANCUN;
-        BLOBBASEFEE    = 2,              if CANCUN;
-        // 0x4B
-        // 0x4C
-        // 0x4D
-        // 0x4E
-        // 0x4F
-        POP      = 2;
-        MLOAD    = 3 | DYNAMIC; // [2]
-        MSTORE   = 3 | DYNAMIC; // [2]
-        MSTORE8  = 3 | DYNAMIC; // [2]
-        SLOAD    = DYNAMIC; // [1]
-        SSTORE   = DYNAMIC;
-        JUMP     = 8;
-        JUMPI    = 10;
-        PC       = 2;
-        MSIZE    = 2;
-        GAS      = 2;
-        JUMPDEST = 1;
-        TLOAD    = 100,                  if CANCUN;
-        TSTORE   = 100,                  if CANCUN;
-        MCOPY    = 3 | DYNAMIC,          if CANCUN; // [2]
-
-        PUSH0  = 2,                      if SHANGHAI;
-        PUSH1  = 3;
-        PUSH2  = 3;
-        PUSH3  = 3;
-        PUSH4  = 3;
-        PUSH5  = 3;
-        PUSH6  = 3;
-        PUSH7  = 3;
-        PUSH8  = 3;
-        PUSH9  = 3;
-        PUSH10 = 3;
-        PUSH11 = 3;
-        PUSH12 = 3;
-        PUSH13 = 3;
-        PUSH14 = 3;
-        PUSH15 = 3;
-        PUSH16 = 3;
-        PUSH17 = 3;
-        PUSH18 = 3;
-        PUSH19 = 3;
-        PUSH20 = 3;
-        PUSH21 = 3;
-        PUSH22 = 3;
-        PUSH23 = 3;
-        PUSH24 = 3;
-        PUSH25 = 3;
-        PUSH26 = 3;
-        PUSH27 = 3;
-        PUSH28 = 3;
-        PUSH29 = 3;
-        PUSH30 = 3;
-        PUSH31 = 3;
-        PUSH32 = 3;
-
-        DUP1  = 3;
-        DUP2  = 3;
-        DUP3  = 3;
-        DUP4  = 3;
-        DUP5  = 3;
-        DUP6  = 3;
-        DUP7  = 3;
-        DUP8  = 3;
-        DUP9  = 3;
-        DUP10 = 3;
-        DUP11 = 3;
-        DUP12 = 3;
-        DUP13 = 3;
-        DUP14 = 3;
-        DUP15 = 3;
-        DUP16 = 3;
-
-        SWAP1  = 3;
-        SWAP2  = 3;
-        SWAP3  = 3;
-        SWAP4  = 3;
-        SWAP5  = 3;
-        SWAP6  = 3;
-        SWAP7  = 3;
-        SWAP8  = 3;
-        SWAP9  = 3;
-        SWAP10 = 3;
-        SWAP11 = 3;
-        SWAP12 = 3;
-        SWAP13 = 3;
-        SWAP14 = 3;
-        SWAP15 = 3;
-        SWAP16 = 3;
-
-        LOG0 = log_cost(0) | DYNAMIC; // [2]
-        LOG1 = log_cost(1) | DYNAMIC; // [2]
-        LOG2 = log_cost(2) | DYNAMIC; // [2]
-        LOG3 = log_cost(3) | DYNAMIC; // [2]
-        LOG4 = log_cost(4) | DYNAMIC; // [2]
-        // 0xA5
-        // 0xA6
-        // 0xA7
-        // 0xA8
-        // 0xA9
-        // 0xAA
-        // 0xAB
-        // 0xAC
-        // 0xAD
-        // 0xAE
-        // 0xAF
-        // 0xB0
-        // 0xB1
-        // 0xB2
-        // 0xB3
-        // 0xB4
-        // 0xB5
-        // 0xB6
-        // 0xB7
-        // 0xB8
-        // 0xB9
-        // 0xBA
-        // 0xBB
-        // 0xBC
-        // 0xBD
-        // 0xBE
-        // 0xBF
-        // 0xC0
-        // 0xC1
-        // 0xC2
-        // 0xC3
-        // 0xC4
-        // 0xC5
-        // 0xC6
-        // 0xC7
-        // 0xC8
-        // 0xC9
-        // 0xCA
-        // 0xCB
-        // 0xCC
-        // 0xCD
-        // 0xCE
-        // 0xCF
-        // 0xD0
-        // 0xD1
-        // 0xD2
-        // 0xD3
-        // 0xD4
-        // 0xD5
-        // 0xD6
-        // 0xD7
-        // 0xD8
-        // 0xD9
-        // 0xDA
-        // 0xDB
-        // 0xDC
-        // 0xDD
-        // 0xDE
-        // 0xDF
-        // 0xE0
-        // 0xE1
-        // 0xE2
-        // 0xE3
-        // 0xE4
-        // 0xE5
-        // 0xE6
-        // 0xE7
-        // 0xE8
-        // 0xE9
-        // 0xEA
-        // 0xEB
-        // 0xEC
-        // 0xED
-        // 0xEE
-        // 0xEF
-        CREATE          = DYNAMIC;
-        CALL            = DYNAMIC;
-        CALLCODE        = DYNAMIC;
-        RETURN          = DYNAMIC;
-        DELEGATECALL    = DYNAMIC,       if HOMESTEAD;
-        CREATE2         = DYNAMIC,       if PETERSBURG;
-        // 0xF6
-        // 0xF7
-        // 0xF8
-        // 0xF9
-        STATICCALL      = DYNAMIC,       if BYZANTIUM;
-        // 0xFB
-        // 0xFC
-        REVERT          = DYNAMIC,       if BYZANTIUM;
-        INVALID         = 0;
-        SELFDESTRUCT    = DYNAMIC;
+    // Apply spec-gating: mark opcodes as disabled if the current spec is before their introduction.
+    for &(op, required_spec) in SPEC_GATED_OPCODES {
+        if (spec_id as u8) < (required_spec as u8) {
+            map[op as usize].set_disabled();
+        }
     }
+
     map
-}
-
-const fn log_cost(n: u8) -> u16 {
-    // LOG base cost + n topics * LOGTOPIC cost
-    // From revm-context-interface: LOG = 375, LOGTOPIC = 375
-    const LOG_BASE: u64 = 375;
-    const LOGTOPIC: u64 = 375;
-    let cost = LOG_BASE + (n as u64 * LOGTOPIC);
-    assert!(cost <= u16::MAX as u64);
-    cost as u16
 }
 
 #[cfg(test)]
@@ -433,5 +264,61 @@ mod tests {
         assert!(clz_cancun.is_disabled(), "CLZ should be disabled on CANCUN");
         assert!(!clz_osaka.is_unknown(), "CLZ should not be unknown on OSAKA");
         assert!(!clz_osaka.is_disabled(), "CLZ should not be disabled on OSAKA");
+    }
+
+    #[test]
+    fn test_gas_values() {
+        let cancun = op_info_map(SpecId::CANCUN);
+
+        // Basic arithmetic.
+        assert_eq!(cancun[op::ADD as usize].base_gas(), 3);
+        assert_eq!(cancun[op::MUL as usize].base_gas(), 5);
+        assert_eq!(cancun[op::ADDMOD as usize].base_gas(), 8);
+
+        // EXP: base 10, dynamic.
+        assert_eq!(cancun[op::EXP as usize].base_gas(), 10);
+        assert!(cancun[op::EXP as usize].is_dynamic());
+
+        // PUSH/DUP/SWAP gas.
+        assert_eq!(cancun[op::PUSH1 as usize].base_gas(), 3);
+        assert_eq!(cancun[op::DUP1 as usize].base_gas(), 3);
+        assert_eq!(cancun[op::SWAP1 as usize].base_gas(), 3);
+        assert_eq!(cancun[op::PUSH0 as usize].base_gas(), 2);
+
+        // LOG: base + n * LOGTOPIC.
+        assert_eq!(cancun[op::LOG0 as usize].base_gas(), 375);
+        assert_eq!(cancun[op::LOG1 as usize].base_gas(), 750);
+        assert_eq!(cancun[op::LOG2 as usize].base_gas(), 1125);
+        assert_eq!(cancun[op::LOG3 as usize].base_gas(), 1500);
+        assert_eq!(cancun[op::LOG4 as usize].base_gas(), 1875);
+        assert!(cancun[op::LOG0 as usize].is_dynamic());
+
+        // Memory ops: dynamic with base cost 3.
+        assert_eq!(cancun[op::MLOAD as usize].base_gas(), 3);
+        assert!(cancun[op::MLOAD as usize].is_dynamic());
+        assert_eq!(cancun[op::KECCAK256 as usize].base_gas(), 30);
+        assert!(cancun[op::KECCAK256 as usize].is_dynamic());
+
+        // Storage: fully dynamic, base gas is 0.
+        assert!(cancun[op::SLOAD as usize].is_dynamic());
+        assert_eq!(cancun[op::SLOAD as usize].base_gas(), 0);
+
+        // Transient storage (Cancun).
+        assert_eq!(cancun[op::TLOAD as usize].base_gas(), 100);
+        assert!(!cancun[op::TLOAD as usize].is_disabled());
+
+        // Unknown opcode.
+        assert!(cancun[0x0C].is_unknown());
+
+        // Spec-gated: PUSH0 disabled before Shanghai.
+        let pre_shanghai = op_info_map(SpecId::MERGE);
+        assert!(pre_shanghai[op::PUSH0 as usize].is_disabled());
+        assert!(!cancun[op::PUSH0 as usize].is_disabled());
+
+        // Fully dynamic opcodes: base gas is always 0 regardless of spec.
+        let frontier = op_info_map(SpecId::FRONTIER);
+        assert_eq!(frontier[op::SLOAD as usize].base_gas(), 0);
+        assert!(frontier[op::SELFDESTRUCT as usize].is_dynamic());
+        assert_eq!(frontier[op::SELFDESTRUCT as usize].base_gas(), 0);
     }
 }
