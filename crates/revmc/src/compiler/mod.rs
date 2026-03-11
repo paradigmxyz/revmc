@@ -477,6 +477,15 @@ impl<B: Backend> EvmCompiler<B> {
             writer.flush()?;
         }
 
+        {
+            let file = fs::File::create(dump_dir.join("bytecode.dot"))?;
+            let mut writer = io::BufWriter::new(file);
+            let mut dot = String::new();
+            bytecode.write_dot(&mut dot).map_err(|e| revmc_backend::eyre::eyre!("{e}"))?;
+            writer.write_all(dot.as_bytes())?;
+            writer.flush()?;
+        }
+
         Ok(())
     }
 
