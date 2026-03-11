@@ -2,6 +2,7 @@ use super::{Bytecode, InstData, InstFlags, bitvec_as_bytes};
 use revm_bytecode::opcode as op;
 use revm_primitives::hex;
 use rustc_hash::FxHashMap;
+use std::borrow::Cow;
 use std::fmt;
 
 /// Basic block info collected from bytecode analysis.
@@ -230,7 +231,9 @@ impl<'a> Bytecode<'a> {
                     continue;
                 }
                 let opcode = data.to_op_in(self);
-                let op_str = opcode.to_string().replace('>', "\\>").replace('<', "\\<");
+                let op_str = abbreviate_hex(&opcode.to_string())
+                    .replace('>', "\\>")
+                    .replace('<', "\\<");
                 write!(w, "{op_str}\\l")?;
             }
             writeln!(w, "}}\"];")?;
@@ -310,6 +313,30 @@ impl<'a> Bytecode<'a> {
         self.write_dot(&mut s).unwrap();
         s
     }
+}
+
+/// Abbreviates hex strings with repeated leading byte pairs.
+/// E.g. `"PUSH32 0xffffffffff...ffe0"` → `"PUSH32 0xff..ffe0"`.
+fn abbreviate_hex(s: &str) -> Cow<'_, str> {
+    let Some(hex_start) = s.find("0x") else {
+        return Cow::Borrowed(s);
+    };
+    let hex = &s[hex_start + 2..];
+    // Need at least 2 byte pairs (4 hex chars) of repetition to abbreviate.
+    if hex.len() < 8 {
+        return Cow::Borrowed(s);
+    }
+    let prefix = &hex[..2];
+    let run_len = hex
+        .as_bytes()
+        .chunks(2)
+        .take_while(|chunk| chunk.len() == 2 && *chunk == prefix.as_bytes())
+        .count();
+    if run_len < 4 {
+        return Cow::Borrowed(s);
+    }
+    let suffix = &hex[run_len * 2..];
+    Cow::Owned(format!("{}0x{prefix}..{suffix}", &s[..hex_start]))
 }
 
 #[cfg(test)]
