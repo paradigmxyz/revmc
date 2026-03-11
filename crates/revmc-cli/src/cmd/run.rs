@@ -148,7 +148,8 @@ impl RunArgs {
         }
 
         if self.parse_only {
-            let _ = compiler.parse(bytecode_slice.into(), spec_id)?;
+            let bytecode = compiler.parse(bytecode_slice.into(), spec_id)?;
+            println!("{bytecode}");
             return Ok(());
         }
 

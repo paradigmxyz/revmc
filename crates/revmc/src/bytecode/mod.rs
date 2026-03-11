@@ -100,6 +100,7 @@ impl<'a> Bytecode<'a> {
 
     /// Returns an iterator over the opcodes.
     #[inline]
+    #[allow(dead_code)]
     pub(crate) fn opcodes(&self) -> OpcodesIter<'a> {
         OpcodesIter::new(self.code, self.spec_id)
     }
@@ -367,14 +368,130 @@ impl<'a> Bytecode<'a> {
 
 impl fmt::Display for Bytecode<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let header = format!("{:^6} | {:^6} | {:^80} | {}", "ic", "pc", "opcode", "instruction");
-        writeln!(f, "{header}")?;
-        writeln!(f, "{}", "-".repeat(header.len()))?;
-        for (inst, (pc, opcode)) in self.opcodes().with_pc().enumerate() {
-            let data = self.inst(inst);
-            let opcode = opcode.to_string();
-            writeln!(f, "{inst:>6} | {pc:>6} | {opcode:<80} | {data:?}")?;
+        use std::fmt::Write;
+
+        // First pass: collect lines with their text and comments.
+        let mut lines: Vec<(String, String)> = Vec::new();
+
+        lines.push((
+            String::new(),
+            format!(
+                "spec_id={}, has_dynamic_jumps={}, may_suspend={}",
+                self.spec_id, self.has_dynamic_jumps, self.may_suspend,
+            ),
+        ));
+        lines.push((String::new(), String::new()));
+
+        // Pre-pass: build inst -> block index map.
+        let mut inst_to_block = FxHashMap::default();
+        {
+            let mut block_idx = 0usize;
+            let mut need_header = true;
+            for (inst, data) in self.iter_all_insts() {
+                if data.is_dead_code() {
+                    continue;
+                }
+                if !data.section.is_empty() || need_header {
+                    inst_to_block.insert(inst, block_idx);
+                    block_idx += 1;
+                    need_header = false;
+                }
+                if data.is_branching() {
+                    need_header = true;
+                }
+            }
         }
+
+        let mut block_idx = 0usize;
+        let mut need_header = true;
+        for (inst, data) in self.iter_all_insts() {
+            if data.is_dead_code() {
+                continue;
+            }
+
+            // Block header.
+            if !data.section.is_empty() || need_header {
+                if inst > 0 {
+                    lines.push((String::new(), String::new()));
+                }
+                let mut header = format!("bb{block_idx}:");
+                let mut comment = String::new();
+                if !data.section.is_empty() {
+                    write!(
+                        comment,
+                        "gas={}, stack_in={}, max_growth={}",
+                        data.section.gas_cost, data.section.inputs, data.section.max_growth,
+                    )
+                    .unwrap();
+                }
+                // Pad header to align with indented instructions.
+                while header.len() < 2 {
+                    header.push(' ');
+                }
+                lines.push((header, comment));
+                block_idx += 1;
+                need_header = false;
+            }
+
+            // Instruction text.
+            let mut text = String::from("  ");
+            let opcode = data.to_op_in(self);
+            write!(text, "{opcode}").unwrap();
+            if data.flags.contains(InstFlags::INVALID_JUMP) {
+                text.push_str(" -> INVALID");
+            } else if data.is_legacy_static_jump() {
+                let target = data.data as usize;
+                match inst_to_block.get(&target) {
+                    Some(b) => write!(text, " bb{b}").unwrap(),
+                    None => write!(text, " inst {target}").unwrap(),
+                }
+            }
+
+            // Comment with pc and flags/behavior.
+            let mut comment = format!("pc={}", data.pc);
+            let flags = data.flags;
+            if flags.contains(InstFlags::SKIP_LOGIC) {
+                comment.push_str(", skip");
+            }
+            if flags.contains(InstFlags::DEAD_CODE) {
+                comment.push_str(", dead");
+            }
+            if flags.contains(InstFlags::DISABLED) {
+                comment.push_str(", disabled");
+            }
+            if flags.contains(InstFlags::UNKNOWN) {
+                comment.push_str(", unknown");
+            }
+            if flags.contains(InstFlags::INVALID_JUMP) {
+                comment.push_str(", invalid_jump");
+            }
+            if data.may_suspend() {
+                comment.push_str(", suspends");
+            }
+            if data.is_reachable_jumpdest(self.has_dynamic_jumps) {
+                comment.push_str(", reachable");
+            }
+
+            lines.push((text, comment));
+
+            if data.is_branching() {
+                need_header = true;
+            }
+        }
+
+        // Second pass: find max text width and write with aligned comments.
+        let max_text_width = lines.iter().map(|(t, _)| t.len()).max().unwrap_or(0);
+        let comment_col = max_text_width.clamp(4, 20);
+        for (text, comment) in &lines {
+            if text.is_empty() && comment.is_empty() {
+                writeln!(f)?;
+            } else if comment.is_empty() {
+                writeln!(f, "{text}")?;
+            } else {
+                writeln!(f, "{text:<comment_col$} ; {comment}")?;
+            }
+        }
+
         Ok(())
     }
 }
@@ -605,5 +722,54 @@ mod tests {
     #[test]
     fn test_suspend_is_free() {
         assert_eq!(OPCODE_INFO[TEST_SUSPEND as usize], None);
+    }
+
+    #[test]
+    fn display_format() {
+        // pc=0: PUSH1 0x01 (condition)
+        // pc=2: PUSH1 0x07 (jump target, skip_logic)
+        // pc=4: JUMPI -> JUMPDEST at pc=7 (static jump)
+        // pc=5: STOP (fallthrough)
+        // pc=6: ADD (dead code, between STOP and JUMPDEST)
+        // pc=7: JUMPDEST (reachable)
+        // pc=8: PUSH1 0x02
+        // pc=10: STOP
+        let code: &[u8] = &[
+            op::PUSH1,
+            0x01, // push condition
+            op::PUSH1,
+            0x07,      // push jump target
+            op::JUMPI, // conditional jump
+            op::STOP,  // fallthrough
+            op::ADD,   // dead code
+            op::JUMPDEST,
+            op::PUSH1,
+            0x02, // jumped-to block
+            op::STOP,
+        ];
+        let mut bytecode = Bytecode::new(code, SpecId::OSAKA);
+        bytecode.analyze().unwrap();
+
+        let actual = format!("{bytecode}");
+        snapbox::assert_data_eq!(
+            actual,
+            snapbox::str![[r#"
+             ; spec_id=Osaka, has_dynamic_jumps=false, may_suspend=false
+
+bb0:         ; gas=16, stack_in=0, max_growth=2
+  PUSH1 0x01 ; pc=0
+  PUSH1 0x07 ; pc=2, skip
+  JUMPI bb2  ; pc=4
+
+bb1:
+  STOP       ; pc=5
+
+bb2:         ; gas=4, stack_in=0, max_growth=1
+  JUMPDEST   ; pc=7, reachable
+  PUSH1 0x02 ; pc=8
+  STOP       ; pc=10
+
+"#]]
+        );
     }
 }
