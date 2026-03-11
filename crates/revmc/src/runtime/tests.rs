@@ -9,11 +9,11 @@ use std::sync::Arc;
 struct EmptyStore;
 
 impl ArtifactStore for EmptyStore {
-    fn load_all(&self) -> Result<Vec<(ArtifactKey, StoredArtifact)>, StorageError> {
+    fn load_all(&self) -> eyre::Result<Vec<(ArtifactKey, StoredArtifact)>> {
         Ok(vec![])
     }
 
-    fn load(&self, _key: &ArtifactKey) -> Result<Option<StoredArtifact>, StorageError> {
+    fn load(&self, _key: &ArtifactKey) -> eyre::Result<Option<StoredArtifact>> {
         Ok(None)
     }
 
@@ -22,15 +22,15 @@ impl ArtifactStore for EmptyStore {
         _key: &ArtifactKey,
         _manifest: &ArtifactManifest,
         _dylib_bytes: &[u8],
-    ) -> Result<(), StorageError> {
+    ) -> eyre::Result<()> {
         Ok(())
     }
 
-    fn delete(&self, _key: &ArtifactKey) -> Result<(), StorageError> {
+    fn delete(&self, _key: &ArtifactKey) -> eyre::Result<()> {
         Ok(())
     }
 
-    fn clear(&self) -> Result<(), StorageError> {
+    fn clear(&self) -> eyre::Result<()> {
         Ok(())
     }
 }
@@ -167,11 +167,11 @@ fn handle_clone() {
 struct FailingStore;
 
 impl ArtifactStore for FailingStore {
-    fn load_all(&self) -> Result<Vec<(ArtifactKey, StoredArtifact)>, StorageError> {
-        Err(StorageError::new(std::io::Error::other("boom")))
+    fn load_all(&self) -> eyre::Result<Vec<(ArtifactKey, StoredArtifact)>> {
+        Err(std::io::Error::other("boom").into())
     }
 
-    fn load(&self, _key: &ArtifactKey) -> Result<Option<StoredArtifact>, StorageError> {
+    fn load(&self, _key: &ArtifactKey) -> eyre::Result<Option<StoredArtifact>> {
         Ok(None)
     }
 
@@ -180,15 +180,15 @@ impl ArtifactStore for FailingStore {
         _key: &ArtifactKey,
         _manifest: &ArtifactManifest,
         _dylib_bytes: &[u8],
-    ) -> Result<(), StorageError> {
+    ) -> eyre::Result<()> {
         Ok(())
     }
 
-    fn delete(&self, _key: &ArtifactKey) -> Result<(), StorageError> {
+    fn delete(&self, _key: &ArtifactKey) -> eyre::Result<()> {
         Ok(())
     }
 
-    fn clear(&self) -> Result<(), StorageError> {
+    fn clear(&self) -> eyre::Result<()> {
         Ok(())
     }
 }

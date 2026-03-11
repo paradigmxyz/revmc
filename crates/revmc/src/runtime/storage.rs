@@ -1,6 +1,6 @@
 //! Artifact storage trait and data model.
 
-use crate::runtime::error::StorageError;
+use crate::eyre;
 use alloy_primitives::B256;
 use revm_primitives::hardfork::SpecId;
 use revmc_backend::{OptimizationLevel, Target};
@@ -80,10 +80,10 @@ pub enum BackendSelection {
 /// returns paths to them. The coordinator loads shared libraries directly from these paths.
 pub trait ArtifactStore: Send + Sync + 'static {
     /// Loads all available artifacts from storage.
-    fn load_all(&self) -> Result<Vec<(ArtifactKey, StoredArtifact)>, StorageError>;
+    fn load_all(&self) -> eyre::Result<Vec<(ArtifactKey, StoredArtifact)>>;
 
     /// Loads a single artifact by key.
-    fn load(&self, key: &ArtifactKey) -> Result<Option<StoredArtifact>, StorageError>;
+    fn load(&self, key: &ArtifactKey) -> eyre::Result<Option<StoredArtifact>>;
 
     /// Stores an artifact. The `dylib_bytes` are the raw shared-library bytes to persist.
     /// The store writes them to disk and the returned path (via subsequent `load`) points there.
@@ -92,11 +92,11 @@ pub trait ArtifactStore: Send + Sync + 'static {
         key: &ArtifactKey,
         manifest: &ArtifactManifest,
         dylib_bytes: &[u8],
-    ) -> Result<(), StorageError>;
+    ) -> eyre::Result<()>;
 
     /// Deletes an artifact by key.
-    fn delete(&self, key: &ArtifactKey) -> Result<(), StorageError>;
+    fn delete(&self, key: &ArtifactKey) -> eyre::Result<()>;
 
     /// Clears all stored artifacts.
-    fn clear(&self) -> Result<(), StorageError>;
+    fn clear(&self) -> eyre::Result<()>;
 }

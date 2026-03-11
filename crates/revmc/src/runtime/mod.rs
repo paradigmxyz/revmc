@@ -8,7 +8,6 @@
 mod api;
 mod config;
 mod coordinator;
-mod error;
 mod stats;
 mod storage;
 mod worker;
@@ -18,7 +17,6 @@ mod tests;
 
 pub use api::{CompiledProgram, InterpretReason, LookupDecision, LookupRequest, ProgramKind};
 pub use config::{RuntimeConfig, RuntimeTuning};
-pub use error::{RuntimeError, StorageError};
 pub use stats::RuntimeStatsSnapshot;
 pub use storage::{
     ArtifactKey, ArtifactManifest, ArtifactStore, BackendSelection, RuntimeCacheKey, StoredArtifact,
@@ -29,6 +27,7 @@ use coordinator::{Command, LookupObservedEvent, ResidentMap};
 use stats::RuntimeStats;
 
 use crate::EvmCompilerFn;
+use crate::eyre::{self, WrapErr};
 use std::{
     sync::{
         Arc,
@@ -54,7 +53,7 @@ pub struct JitCoordinator {
 impl JitCoordinator {
     /// Starts the coordinator: loads AOT artifacts, builds the resident map, and spawns the
     /// coordinator thread.
-    pub fn start(config: RuntimeConfig) -> Result<Self, RuntimeError> {
+    pub fn start(config: RuntimeConfig) -> eyre::Result<Self> {
         let resident = Self::preload_aot(config.store.as_deref())?;
         let resident = Arc::new(resident);
         let stats = Arc::new(RuntimeStats::default());
@@ -72,7 +71,7 @@ impl JitCoordinator {
                 coordinator::run(rx, resident_for_coord, tuning);
                 let _ = done_tx.send(());
             })
-            .map_err(|e| RuntimeError::ArtifactLoad(format!("failed to spawn coordinator: {e}")))?;
+            .wrap_err("failed to spawn coordinator")?;
 
         let handle = JitCoordinatorHandle { resident, enabled, tx, stats };
 
@@ -90,11 +89,11 @@ impl JitCoordinator {
     }
 
     /// Shuts down the coordinator thread and waits for it to finish.
-    pub fn shutdown(mut self) -> Result<(), RuntimeError> {
+    pub fn shutdown(mut self) -> eyre::Result<()> {
         self.shutdown_inner()
     }
 
-    fn shutdown_inner(&mut self) -> Result<(), RuntimeError> {
+    fn shutdown_inner(&mut self) -> eyre::Result<()> {
         if let Some(thread) = self.thread.take() {
             // Ignoring send error — coordinator may already be gone.
             let _ = self.handle.tx.send(Command::Shutdown);
@@ -107,18 +106,20 @@ impl JitCoordinator {
                         timeout = ?self.shutdown_timeout,
                         "coordinator thread did not exit within timeout",
                     );
-                    return Err(RuntimeError::Shutdown);
+                    eyre::bail!("coordinator thread did not exit within timeout");
                 }
             }
 
             // Thread signaled done, join should return immediately.
-            thread.join().map_err(|_| RuntimeError::Shutdown)?;
+            thread
+                .join()
+                .map_err(|_| eyre::eyre!("coordinator thread panicked"))?;
         }
         Ok(())
     }
 
     /// Preloads AOT artifacts from the store into the resident map.
-    fn preload_aot(store: Option<&dyn ArtifactStore>) -> Result<ResidentMap, RuntimeError> {
+    fn preload_aot(store: Option<&dyn ArtifactStore>) -> eyre::Result<ResidentMap> {
         let store = match store {
             Some(s) => s,
             None => {
@@ -171,19 +172,14 @@ impl JitCoordinator {
     fn load_artifact(
         key: &ArtifactKey,
         stored: &StoredArtifact,
-    ) -> Result<CompiledProgram, RuntimeError> {
-        let library = unsafe { libloading::Library::new(&stored.dylib_path) }.map_err(|e| {
-            RuntimeError::ArtifactLoad(format!("dlopen {:?}: {e}", stored.dylib_path))
-        })?;
+    ) -> eyre::Result<CompiledProgram> {
+        let library = unsafe { libloading::Library::new(&stored.dylib_path) }
+            .wrap_err_with(|| format!("dlopen {:?}", stored.dylib_path))?;
 
         let func: EvmCompilerFn = unsafe {
-            let sym: libloading::Symbol<'_, EvmCompilerFn> =
-                library.get(stored.manifest.symbol_name.as_bytes()).map_err(|e| {
-                    RuntimeError::ArtifactLoad(format!(
-                        "symbol '{}': {e}",
-                        stored.manifest.symbol_name,
-                    ))
-                })?;
+            let sym: libloading::Symbol<'_, EvmCompilerFn> = library
+                .get(stored.manifest.symbol_name.as_bytes())
+                .wrap_err_with(|| format!("symbol '{}'", stored.manifest.symbol_name))?;
             *sym
         };
 
