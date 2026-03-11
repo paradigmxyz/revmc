@@ -153,12 +153,12 @@ impl RunArgs {
 
         if self.parse_only || self.dot {
             let bytecode = compiler.parse(bytecode_slice.into(), spec_id)?;
+            if self.dot {
+                emit_dot(&bytecode, name)?;
+            }
             if self.parse_only {
                 println!("{bytecode}");
                 return Ok(());
-            }
-            if self.dot {
-                emit_dot(&bytecode, name)?;
             }
         }
 
