@@ -30,10 +30,13 @@ use stats::RuntimeStats;
 
 use crate::EvmCompilerFn;
 use rustc_hash::FxHashMap;
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-    mpsc,
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
+    time::Duration,
 };
 
 /// The JIT coordinator. Owns the coordinator thread and resident map.
@@ -44,6 +47,9 @@ use std::sync::{
 pub struct JitCoordinator {
     handle: JitCoordinatorHandle,
     thread: Option<std::thread::JoinHandle<()>>,
+    /// Receives a signal when the coordinator thread exits.
+    thread_done_rx: mpsc::Receiver<()>,
+    shutdown_timeout: Duration,
 }
 
 impl JitCoordinator {
@@ -56,15 +62,24 @@ impl JitCoordinator {
         let enabled = Arc::new(AtomicBool::new(config.enabled));
 
         let (tx, rx) = mpsc::sync_channel::<Command>(config.tuning.lookup_event_channel_capacity);
+        let (done_tx, done_rx) = mpsc::sync_channel::<()>(1);
 
         let thread = std::thread::Builder::new()
             .name(config.thread_name)
-            .spawn(move || coordinator::run(rx))
+            .spawn(move || {
+                coordinator::run(rx);
+                let _ = done_tx.send(());
+            })
             .map_err(|e| RuntimeError::ArtifactLoad(format!("failed to spawn coordinator: {e}")))?;
 
         let handle = JitCoordinatorHandle { resident, enabled, tx, stats };
 
-        Ok(Self { handle, thread: Some(thread) })
+        Ok(Self {
+            handle,
+            thread: Some(thread),
+            thread_done_rx: done_rx,
+            shutdown_timeout: config.tuning.shutdown_timeout,
+        })
     }
 
     /// Returns a clonable handle for performing lookups.
@@ -81,6 +96,20 @@ impl JitCoordinator {
         if let Some(thread) = self.thread.take() {
             // Ignoring send error — coordinator may already be gone.
             let _ = self.handle.tx.send(Command::Shutdown);
+
+            // Wait for the thread to signal completion, with a timeout.
+            match self.thread_done_rx.recv_timeout(self.shutdown_timeout) {
+                Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => {}
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    warn!(
+                        timeout = ?self.shutdown_timeout,
+                        "coordinator thread did not exit within timeout",
+                    );
+                    return Err(RuntimeError::Shutdown);
+                }
+            }
+
+            // Thread signaled done, join should return immediately.
             thread.join().map_err(|_| RuntimeError::Shutdown)?;
         }
         Ok(())
@@ -98,7 +127,7 @@ impl JitCoordinator {
             }
         };
 
-        let span = tracing::info_span!("aot_preload");
+        let span = info_span!("aot_preload");
         let _enter = span.enter();
 
         let artifacts = store.load_all()?;

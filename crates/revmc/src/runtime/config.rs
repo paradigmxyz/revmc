@@ -1,7 +1,7 @@
 //! Runtime configuration.
 
 use crate::runtime::storage::ArtifactStore;
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 /// Runtime configuration.
 #[allow(missing_debug_implementations)]
@@ -45,10 +45,17 @@ pub struct RuntimeTuning {
     ///
     /// Defaults to `4096`.
     pub lookup_event_channel_capacity: usize,
+
+    /// Timeout for joining the coordinator thread during shutdown.
+    ///
+    /// If the thread does not exit within this duration, shutdown returns an error.
+    ///
+    /// Defaults to `5s`.
+    pub shutdown_timeout: Duration,
 }
 
 impl Default for RuntimeTuning {
     fn default() -> Self {
-        Self { lookup_event_channel_capacity: 4096 }
+        Self { lookup_event_channel_capacity: 4096, shutdown_timeout: Duration::from_secs(5) }
     }
 }
