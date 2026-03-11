@@ -2182,6 +2182,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "normalize-line-endings"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "61807f77802ff30975e01f4f071c8ba10c022052f98b3294119f3e615d13e5be"
+
+[[package]]
 name = "nu-ansi-term"
 version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3026,6 +3032,7 @@ dependencies = [
  "revmc-statetest",
  "rustc-hash",
  "similar-asserts",
+ "snapbox",
  "tempfile",
  "tracing",
 ]
@@ -3568,6 +3575,28 @@ name = "smallvec"
 version = "1.15.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
+
+[[package]]
+name = "snapbox"
+version = "0.6.24"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c1abc378119f77310836665f8523018532cf7e3faeb3b10b01da5a7321bf8e1"
+dependencies = [
+ "anstream",
+ "anstyle",
+ "normalize-line-endings",
+ "similar",
+ "snapbox-macros",
+]
+
+[[package]]
+name = "snapbox-macros"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3b750c344002d7cc69afb9da00ebd9b5c0f8ac2eb7d115d9d45d5b5f47718d74"
+dependencies = [
+ "anstream",
+]
 
 [[package]]
 name = "spki"
