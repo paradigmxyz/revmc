@@ -138,11 +138,76 @@ impl JitCoordinator {
         Ok(map)
     }
 
-    /// Loads a single artifact: writes dylib to a temp dir, loads it, and resolves the symbol.
+    /// Loads a single artifact, resolves the symbol, and returns a `CompiledProgram`.
+    ///
+    /// On Linux, uses `memfd_create` to load entirely from memory (no filesystem I/O).
+    /// On other platforms, writes to a temp directory and loads via `libloading`.
     fn load_artifact(
         key: &ArtifactKey,
         stored: &StoredArtifact,
     ) -> Result<CompiledProgram, RuntimeError> {
+        let owner = Self::load_library(&stored.dylib_bytes)?;
+
+        let func: EvmCompilerFn = unsafe {
+            let sym: libloading::Symbol<'_, EvmCompilerFn> =
+                owner.library().get(stored.manifest.symbol_name.as_bytes()).map_err(|e| {
+                    RuntimeError::ArtifactLoad(format!(
+                        "symbol '{}': {e}",
+                        stored.manifest.symbol_name,
+                    ))
+                })?;
+            *sym
+        };
+
+        let owner = Arc::new(owner);
+        Ok(CompiledProgram::new_aot(key.runtime.clone(), func, stored.manifest.artifact_len, owner))
+    }
+
+    /// Loads a shared library from raw bytes.
+    ///
+    /// On Linux, uses `memfd_create` + `dlopen("/proc/self/fd/{fd}")` — entirely in memory.
+    /// On other platforms, writes to a temp directory.
+    fn load_library(dylib_bytes: &[u8]) -> Result<LoadedLibraryOwner, RuntimeError> {
+        #[cfg(target_os = "linux")]
+        {
+            Self::load_library_memfd(dylib_bytes)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Self::load_library_tempfile(dylib_bytes)
+        }
+    }
+
+    /// Linux: load via `memfd_create` + `dlopen("/proc/self/fd/{fd}")` — no filesystem I/O.
+    #[cfg(target_os = "linux")]
+    fn load_library_memfd(dylib_bytes: &[u8]) -> Result<LoadedLibraryOwner, RuntimeError> {
+        use rustix::fd::IntoRawFd;
+        use std::{
+            io::Write,
+            os::unix::io::{AsRawFd, FromRawFd},
+        };
+
+        // Create an anonymous in-memory file.
+        let memfd = rustix::fs::memfd_create(c"revmc-artifact", rustix::fs::MemfdFlags::CLOEXEC)
+            .map_err(|e| RuntimeError::ArtifactLoad(format!("memfd_create: {e}")))?;
+
+        // Convert rustix OwnedFd → std File for writing.
+        let mut file = unsafe { std::fs::File::from_raw_fd(memfd.into_raw_fd()) };
+        file.write_all(dylib_bytes)
+            .map_err(|e| RuntimeError::ArtifactLoad(format!("write memfd: {e}")))?;
+
+        // dlopen via /proc/self/fd/{fd}.
+        let fd: std::os::unix::io::OwnedFd = file.into();
+        let path = format!("/proc/self/fd/{}", fd.as_raw_fd());
+        let library = unsafe { libloading::Library::new(&path) }
+            .map_err(|e| RuntimeError::ArtifactLoad(format!("dlopen memfd: {e}")))?;
+
+        Ok(LoadedLibraryOwner::new_memfd(library, fd))
+    }
+
+    /// Non-Linux fallback: write to temp directory and load.
+    #[cfg(not(target_os = "linux"))]
+    fn load_library_tempfile(dylib_bytes: &[u8]) -> Result<LoadedLibraryOwner, RuntimeError> {
         let tmp_dir =
             tempfile::tempdir().map_err(|e| RuntimeError::ArtifactLoad(format!("tempdir: {e}")))?;
 
@@ -155,26 +220,13 @@ impl JitCoordinator {
         };
         let lib_path = tmp_dir.path().join(format!("artifact.{lib_ext}"));
 
-        std::fs::write(&lib_path, &stored.dylib_bytes)
+        std::fs::write(&lib_path, dylib_bytes)
             .map_err(|e| RuntimeError::ArtifactLoad(format!("write dylib: {e}")))?;
 
         let library = unsafe { libloading::Library::new(&lib_path) }
             .map_err(|e| RuntimeError::ArtifactLoad(format!("load library: {e}")))?;
 
-        let func: EvmCompilerFn = unsafe {
-            let sym: libloading::Symbol<'_, EvmCompilerFn> =
-                library.get(stored.manifest.symbol_name.as_bytes()).map_err(|e| {
-                    RuntimeError::ArtifactLoad(format!(
-                        "symbol '{}': {e}",
-                        stored.manifest.symbol_name,
-                    ))
-                })?;
-            *sym
-        };
-
-        let owner = Arc::new(LoadedLibraryOwner::new(library, tmp_dir));
-
-        Ok(CompiledProgram::new_aot(key.runtime.clone(), func, stored.manifest.artifact_len, owner))
+        Ok(LoadedLibraryOwner::new_tempdir(library, tmp_dir))
     }
 }
 
