@@ -447,17 +447,21 @@ impl<'a> Bytecode<'a> {
             } else {
                 !last.is_diverging() && last.opcode != op::JUMP
             };
-            if has_fallthrough
-                && let Some(&(next_block, _, _)) = blocks.get(i + 1)
-            {
+            if has_fallthrough && let Some(&(next_block, _, _)) = blocks.get(i + 1) {
                 let label = if last.opcode == op::JUMPI { "false" } else { "" };
                 writeln!(w, "  bb{block_idx} -> bb{next_block} [label=\"{label}\"];")?;
             }
         }
 
-        // Dynamic jump target node if needed.
+        // Dynamic jump table: synthetic node with edges to every JUMPDEST block.
         if self.has_dynamic_jumps {
-            writeln!(w, "  dynamic [shape=ellipse label=\"dynamic\\njump\"];")?;
+            writeln!(w, "  dynamic [shape=diamond label=\"dynamic\\njump table\"];")?;
+            for &(block_idx, first_inst, _) in &blocks {
+                let first = self.inst(first_inst);
+                if first.is_reachable_jumpdest(self.has_dynamic_jumps) {
+                    writeln!(w, "  dynamic -> bb{block_idx};")?;
+                }
+            }
         }
 
         writeln!(w, "}}")
