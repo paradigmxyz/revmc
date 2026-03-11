@@ -11,6 +11,11 @@ pub struct RuntimeConfig {
     /// Defaults to `false` (safe rollout default).
     pub enabled: bool,
 
+    /// Name for the coordinator thread.
+    ///
+    /// Defaults to `"revmc-coordinator"`.
+    pub thread_name: String,
+
     /// Artifact store for loading precompiled AOT artifacts.
     ///
     /// `None` means no AOT preload—only JIT will populate the map (in later phases).
@@ -21,9 +26,13 @@ pub struct RuntimeConfig {
 }
 
 impl Default for RuntimeConfig {
-    #[allow(clippy::derivable_impls)]
     fn default() -> Self {
-        Self { enabled: false, store: None, tuning: RuntimeTuning::default() }
+        Self {
+            enabled: false,
+            thread_name: "revmc-coordinator".into(),
+            store: None,
+            tuning: RuntimeTuning::default(),
+        }
     }
 }
 

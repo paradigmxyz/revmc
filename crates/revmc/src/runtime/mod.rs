@@ -58,7 +58,7 @@ impl JitCoordinator {
         let (tx, rx) = mpsc::sync_channel::<Command>(config.tuning.lookup_event_channel_capacity);
 
         let thread = std::thread::Builder::new()
-            .name("revmc-coordinator".into())
+            .name(config.thread_name)
             .spawn(move || coordinator::run(rx))
             .map_err(|e| RuntimeError::ArtifactLoad(format!("failed to spawn coordinator: {e}")))?;
 
