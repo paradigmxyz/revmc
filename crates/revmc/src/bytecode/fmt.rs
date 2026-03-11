@@ -407,4 +407,35 @@ bb2:         ; gas=4, stack_in=0, max_growth=1
         assert!(dot.contains("\"false\""), "missing false label");
         assert!(!dot.contains("dynamic"), "unexpected dynamic jump table");
     }
+
+    #[test]
+    fn abbreviate_hex_repeated() {
+        // 32 repeated ff bytes + suffix.
+        assert_eq!(
+            abbreviate_hex("PUSH32 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffe0"),
+            "PUSH32 0xff..e0",
+        );
+        // 32 repeated 00 bytes + suffix.
+        assert_eq!(
+            abbreviate_hex("PUSH32 0x0000000000000000000000000000000000000000000000000000000000000001"),
+            "PUSH32 0x00..01",
+        );
+        // All repeated, no suffix.
+        assert_eq!(
+            abbreviate_hex("PUSH32 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"),
+            "PUSH32 0xff..",
+        );
+    }
+
+    #[test]
+    fn abbreviate_hex_short() {
+        // Too few repeated pairs (< 4).
+        assert_eq!(abbreviate_hex("PUSH3 0xffffff"), "PUSH3 0xffffff");
+        // No repetition.
+        assert_eq!(abbreviate_hex("PUSH4 0x30627b7c"), "PUSH4 0x30627b7c");
+        // Short value.
+        assert_eq!(abbreviate_hex("PUSH1 0x40"), "PUSH1 0x40");
+        // No hex at all.
+        assert_eq!(abbreviate_hex("STOP"), "STOP");
+    }
 }
