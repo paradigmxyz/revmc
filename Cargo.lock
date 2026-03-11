@@ -2168,6 +2168,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "lz-str"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "39f3d72d77227090eed75ea331285a53726e78374a1f357ff5757702c23c70cc"
+
+[[package]]
 name = "mach2"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3108,6 +3114,7 @@ dependencies = [
  "criterion",
  "hex",
  "libloading",
+ "lz-str",
  "open",
  "revm",
  "revm-bytecode",
@@ -3122,6 +3129,7 @@ dependencies = [
  "serde_json",
  "tracing-subscriber 0.3.22",
  "tracing-tracy",
+ "urlencoding",
 ]
 
 [[package]]
@@ -4040,6 +4048,12 @@ name = "unit-prefix"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "81e544489bf3d8ef66c953931f56617f423cd4b5494be343d9b9d3dda037b9a3"
+
+[[package]]
+name = "urlencoding"
+version = "2.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "daf8dba3b7eb870caf1ddeed7bc9d2a049f3cfdfae7cb521b087cc33ae4c49da"
 
 [[package]]
 name = "utf8parse"

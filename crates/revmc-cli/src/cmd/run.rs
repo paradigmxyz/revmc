@@ -45,9 +45,13 @@ pub(crate) struct RunArgs {
     #[arg(long)]
     display: bool,
 
-    /// Parse the bytecode and render the CFG as a DOT graph, then open as SVG in the browser.
+    /// Parse the bytecode and render the CFG as a DOT graph, then open in the browser.
     #[arg(long)]
     dot: bool,
+
+    /// Don't open URLs in the browser.
+    #[arg(long)]
+    no_open: bool,
 
     /// Compile and link to a shared library.
     #[arg(long)]
@@ -93,7 +97,14 @@ impl RunArgs {
         let target = revmc::Target::new(self.target, self.target_cpu, self.target_features);
         let backend = EvmLlvmBackend::new_for_target(self.aot, self.opt_level, &target)?;
         let mut compiler = EvmCompiler::new(backend);
-        compiler.set_dump_to(self.out_dir);
+        let out_dir = if self.out_dir.is_some() {
+            self.out_dir
+        } else if self.dot || self.display || self.parse_only {
+            Some(std::env::temp_dir().join("revmc-cli"))
+        } else {
+            None
+        };
+        compiler.set_dump_to(out_dir);
         compiler.gas_metering(!self.no_gas);
         unsafe { compiler.stack_bound_checks(!self.no_len_checks) };
         compiler.frame_pointers(true);
@@ -136,6 +147,9 @@ impl RunArgs {
                 }
             };
         compiler.set_module_name(name);
+        if let Some(dump_dir) = compiler.dump_dir() {
+            eprintln!("Dump directory: {}", dump_dir.display());
+        }
 
         let calldata: revmc::primitives::Bytes = if let Some(calldata) = self.calldata {
             revmc::primitives::hex::decode(calldata)?.into()
@@ -160,7 +174,8 @@ impl RunArgs {
             println!("{name}()\n{bytecode}");
         }
         if self.dot {
-            emit_dot(&bytecode, name)?;
+            let dump_dir = compiler.dump_dir().expect("dump_dir should be set when --dot is used");
+            open_dot(&dump_dir.join("bytecode.dot"), !self.no_open)?;
         }
         if self.parse_only {
             return Ok(());
@@ -277,32 +292,15 @@ impl RunArgs {
     }
 }
 
-fn emit_dot(bytecode: &revmc::Bytecode<'_>, name: &str) -> Result<()> {
-    let mut dot = String::new();
-    bytecode.write_dot(&mut dot).map_err(|e| eyre!("{e}"))?;
-
-    let dir = std::env::temp_dir().join("revmc-dot");
-    std::fs::create_dir_all(&dir)?;
-    let dot_path = dir.join(format!("{name}.dot"));
-    let svg_path = dir.join(format!("{name}.svg"));
-    std::fs::write(&dot_path, &dot)?;
-
-    let status = std::process::Command::new("dot")
-        .args(["-Tsvg", "-o"])
-        .arg(&svg_path)
-        .arg(&dot_path)
-        .status();
-    match status {
-        Ok(s) if s.success() => {
-            eprintln!("SVG written to {}", svg_path.display());
-            let _ = open::that(&svg_path);
-        }
-        Ok(s) => return Err(eyre!("`dot` exited with {s}")),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            eprintln!("graphviz `dot` not found, printing raw DOT:");
-            println!("{dot}");
-        }
-        Err(e) => return Err(e.into()),
+fn open_dot(dot_path: &Path, open: bool) -> Result<()> {
+    let dot_source = std::fs::read_to_string(dot_path)?;
+    let compressed = lz_str::compress_to_encoded_uri_component(&dot_source);
+    let compressed = urlencoding::encode(&compressed);
+    let url =
+        format!("https://dreampuf.github.io/GraphvizOnline/?engine=dot&compressed={compressed}");
+    eprintln!("DOT graph: {url}");
+    if open {
+        let _ = open::that(&url);
     }
     Ok(())
 }

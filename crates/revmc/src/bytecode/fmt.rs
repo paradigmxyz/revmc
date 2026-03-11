@@ -2,7 +2,7 @@ use super::{Bytecode, InstData, InstFlags, bitvec_as_bytes};
 use revm_bytecode::opcode as op;
 use revm_primitives::hex;
 use rustc_hash::FxHashMap;
-use std::fmt;
+use std::{borrow::Cow, fmt};
 
 /// Basic block info collected from bytecode analysis.
 struct BlockInfo {
@@ -183,13 +183,13 @@ impl<'a> Bytecode<'a> {
         writeln!(w, "  graph [bgcolor=\"#1a1a2e\" rankdir=TB];")?;
         writeln!(
             w,
-            "  node [shape=Mrecord fontname=\"Fira Code,monospace\" fontsize=10 \
+            "  node [shape=Mrecord fontname=\"Courier\" fontsize=10 \
              style=filled fillcolor=\"#16213e\" fontcolor=\"#e0e0e0\" \
              color=\"#0f3460\" penwidth=1.5];"
         )?;
         writeln!(
             w,
-            "  edge [fontname=\"Fira Code,monospace\" fontsize=9 color=\"#555577\" \
+            "  edge [fontname=\"Courier\" fontsize=9 color=\"#555577\" \
              fontcolor=\"#8888aa\"];"
         )?;
 
@@ -230,7 +230,8 @@ impl<'a> Bytecode<'a> {
                     continue;
                 }
                 let opcode = data.to_op_in(self);
-                let op_str = opcode.to_string().replace('>', "\\>").replace('<', "\\<");
+                let op_str =
+                    abbreviate_hex(&opcode.to_string()).replace('>', "\\>").replace('<', "\\<");
                 write!(w, "{op_str}\\l")?;
             }
             writeln!(w, "}}\"];")?;
@@ -312,6 +313,30 @@ impl<'a> Bytecode<'a> {
     }
 }
 
+/// Abbreviates hex strings with repeated leading byte pairs.
+/// E.g. `"PUSH32 0xffffffffff...ffe0"` → `"PUSH32 0xff..ffe0"`.
+fn abbreviate_hex(s: &str) -> Cow<'_, str> {
+    let Some(hex_start) = s.find("0x") else {
+        return Cow::Borrowed(s);
+    };
+    let hex = &s[hex_start + 2..];
+    // Need at least 2 byte pairs (4 hex chars) of repetition to abbreviate.
+    if hex.len() < 8 {
+        return Cow::Borrowed(s);
+    }
+    let prefix = &hex[..2];
+    let run_len = hex
+        .as_bytes()
+        .chunks(2)
+        .take_while(|chunk| chunk.len() == 2 && *chunk == prefix.as_bytes())
+        .count();
+    if run_len < 4 {
+        return Cow::Borrowed(s);
+    }
+    let suffix = &hex[run_len * 2..];
+    Cow::Owned(format!("{}0x{prefix}..{suffix}", &s[..hex_start]))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -379,5 +404,54 @@ bb2:         ; gas=4, stack_in=0, max_growth=1
         assert!(dot.contains("\"true\""), "missing true label");
         assert!(dot.contains("\"false\""), "missing false label");
         assert!(!dot.contains("dynamic"), "unexpected dynamic jump table");
+    }
+
+    #[test]
+    fn abbreviate_hex_repeated() {
+        // 32 repeated ff bytes + suffix.
+        assert_eq!(
+            abbreviate_hex(
+                "PUSH32 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffe0"
+            ),
+            "PUSH32 0xff..e0",
+        );
+        assert_eq!(
+            abbreviate_hex(
+                "PUSH32 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffeeee"
+            ),
+            "PUSH32 0xff..eeee",
+        );
+        assert_eq!(
+            abbreviate_hex(
+                "PUSH32 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffeeeeee"
+            ),
+            "PUSH32 0xff..eeeeee",
+        );
+        // 32 repeated 00 bytes + suffix.
+        assert_eq!(
+            abbreviate_hex(
+                "PUSH32 0x0000000000000000000000000000000000000000000000000000000000000001"
+            ),
+            "PUSH32 0x00..01",
+        );
+        // All repeated, no suffix.
+        assert_eq!(
+            abbreviate_hex(
+                "PUSH32 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+            ),
+            "PUSH32 0xff..",
+        );
+    }
+
+    #[test]
+    fn abbreviate_hex_short() {
+        // Too few repeated pairs (< 4).
+        assert_eq!(abbreviate_hex("PUSH3 0xffffff"), "PUSH3 0xffffff");
+        // No repetition.
+        assert_eq!(abbreviate_hex("PUSH4 0x30627b7c"), "PUSH4 0x30627b7c");
+        // Short value.
+        assert_eq!(abbreviate_hex("PUSH1 0x40"), "PUSH1 0x40");
+        // No hex at all.
+        assert_eq!(abbreviate_hex("STOP"), "STOP");
     }
 }

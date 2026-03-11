@@ -489,7 +489,9 @@ impl<B: Backend> EvmCompiler<B> {
         Ok(())
     }
 
-    fn dump_dir(&self) -> Option<PathBuf> {
+    /// Returns the dump directory, if set.
+    #[doc(hidden)]
+    pub fn dump_dir(&self) -> Option<PathBuf> {
         let mut dump_dir = self.out_dir.clone()?;
         if let Some(name) = &self.name {
             dump_dir.push(name.replace(char::is_whitespace, "_"));
