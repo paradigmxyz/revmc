@@ -335,7 +335,8 @@ impl<B: Backend> EvmCompiler<B> {
     }
 
     #[instrument(name = "translate", level = "debug", skip_all)]
-    fn translate_inner(&mut self, name: &str, bytecode: &Bytecode<'_>) -> Result<B::FuncId> {
+    #[doc(hidden)] // Not public API.
+    pub fn translate_inner(&mut self, name: &str, bytecode: &Bytecode<'_>) -> Result<B::FuncId> {
         ensure!(self.backend.function_name_is_unique(name), "function name `{name}` is not unique");
         let linkage = Linkage::Public;
         let (bcx, id) = Self::make_builder(&mut self.backend, &self.config, name, linkage)?;
@@ -473,6 +474,15 @@ impl<B: Backend> EvmCompiler<B> {
             let file = fs::File::create(dump_dir.join("bytecode.dbg.txt"))?;
             let mut writer = io::BufWriter::new(file);
             writeln!(writer, "{bytecode:#?}")?;
+            writer.flush()?;
+        }
+
+        {
+            let file = fs::File::create(dump_dir.join("bytecode.dot"))?;
+            let mut writer = io::BufWriter::new(file);
+            let mut dot = String::new();
+            bytecode.write_dot(&mut dot).map_err(|e| revmc_backend::eyre::eyre!("{e}"))?;
+            writer.write_all(dot.as_bytes())?;
             writer.flush()?;
         }
 
