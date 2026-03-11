@@ -45,9 +45,13 @@ pub(crate) struct RunArgs {
     #[arg(long)]
     display: bool,
 
-    /// Parse the bytecode and render the CFG as a DOT graph, then open as SVG in the browser.
+    /// Parse the bytecode and render the CFG as a DOT graph, then open in the browser.
     #[arg(long)]
     dot: bool,
+
+    /// Don't open URLs in the browser.
+    #[arg(long)]
+    no_open: bool,
 
     /// Compile and link to a shared library.
     #[arg(long)]
@@ -168,7 +172,7 @@ impl RunArgs {
         }
         if self.dot {
             let dump_dir = compiler.dump_dir().expect("dump_dir should be set when --dot is used");
-            open_dot(&dump_dir.join("bytecode.dot"))?;
+            open_dot(&dump_dir.join("bytecode.dot"), !self.no_open)?;
         }
         if self.parse_only {
             return Ok(());
@@ -285,13 +289,16 @@ impl RunArgs {
     }
 }
 
-fn open_dot(dot_path: &Path) -> Result<()> {
+fn open_dot(dot_path: &Path, open: bool) -> Result<()> {
     let dot_source = std::fs::read_to_string(dot_path)?;
     let compressed = lz_str::compress_to_encoded_uri_component(&dot_source);
     let compressed = urlencoding::encode(&compressed);
     let url =
         format!("https://dreampuf.github.io/GraphvizOnline/?engine=dot&compressed={compressed}");
-    let _ = open::that(&url);
+    eprintln!("{url}");
+    if open {
+        let _ = open::that(&url);
+    }
     Ok(())
 }
 
