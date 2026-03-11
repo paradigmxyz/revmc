@@ -335,7 +335,8 @@ impl<B: Backend> EvmCompiler<B> {
     }
 
     #[instrument(name = "translate", level = "debug", skip_all)]
-    fn translate_inner(&mut self, name: &str, bytecode: &Bytecode<'_>) -> Result<B::FuncId> {
+    #[doc(hidden)] // Not public API.
+    pub fn translate_inner(&mut self, name: &str, bytecode: &Bytecode<'_>) -> Result<B::FuncId> {
         ensure!(self.backend.function_name_is_unique(name), "function name `{name}` is not unique");
         let linkage = Linkage::Public;
         let (bcx, id) = Self::make_builder(&mut self.backend, &self.config, name, linkage)?;

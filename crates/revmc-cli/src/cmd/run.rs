@@ -41,6 +41,10 @@ pub(crate) struct RunArgs {
     #[arg(long)]
     parse_only: bool,
 
+    /// Print the parsed bytecode IR.
+    #[arg(long)]
+    display: bool,
+
     /// Parse the bytecode and render the CFG as a DOT graph, then open as SVG in the browser.
     #[arg(long)]
     dot: bool,
@@ -151,18 +155,18 @@ impl RunArgs {
             compiler.inspect_stack_length(true);
         }
 
-        if self.parse_only || self.dot {
-            let bytecode = compiler.parse(bytecode_slice.into(), spec_id)?;
-            if self.dot {
-                emit_dot(&bytecode, name)?;
-            }
-            if self.parse_only {
-                println!("{bytecode}");
-                return Ok(());
-            }
+        let bytecode = compiler.parse(bytecode_slice.into(), spec_id)?;
+        if self.display || self.parse_only {
+            println!("{bytecode}");
+        }
+        if self.dot {
+            emit_dot(&bytecode, name)?;
+        }
+        if self.parse_only {
+            return Ok(());
         }
 
-        let f_id = compiler.translate(name, bytecode_slice, spec_id)?;
+        let f_id = compiler.translate_inner(name, &bytecode)?;
 
         let mut load = self.load;
         if self.aot {
