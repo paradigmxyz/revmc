@@ -157,7 +157,7 @@ impl RunArgs {
 
         let bytecode = compiler.parse(bytecode_slice.into(), spec_id)?;
         if self.display || self.parse_only {
-            println!("{bytecode}");
+            println!("{name}()\n{bytecode}");
         }
         if self.dot {
             emit_dot(&bytecode, name)?;
