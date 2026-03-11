@@ -29,8 +29,6 @@ use coordinator::{Command, LookupObservedEvent, ResidentMap};
 use stats::RuntimeStats;
 
 use crate::EvmCompilerFn;
-use arc_swap::ArcSwap;
-use rustc_hash::FxHashMap;
 use std::{
     sync::{
         Arc,
@@ -57,8 +55,8 @@ impl JitCoordinator {
     /// Starts the coordinator: loads AOT artifacts, builds the resident map, and spawns the
     /// coordinator thread.
     pub fn start(config: RuntimeConfig) -> Result<Self, RuntimeError> {
-        let initial_resident = Self::preload_aot(config.store.as_deref())?;
-        let resident_shared = Arc::new(ArcSwap::from_pointee(initial_resident.clone()));
+        let resident = Self::preload_aot(config.store.as_deref())?;
+        let resident = Arc::new(resident);
         let stats = Arc::new(RuntimeStats::default());
         let enabled = Arc::new(AtomicBool::new(config.enabled));
 
@@ -66,17 +64,17 @@ impl JitCoordinator {
         let (done_tx, done_rx) = mpsc::sync_channel::<()>(1);
 
         let tuning = config.tuning;
-        let resident_for_coord = Arc::clone(&resident_shared);
+        let resident_for_coord = Arc::clone(&resident);
 
         let thread = std::thread::Builder::new()
             .name(config.thread_name)
             .spawn(move || {
-                coordinator::run(rx, resident_for_coord, initial_resident, tuning);
+                coordinator::run(rx, resident_for_coord, tuning);
                 let _ = done_tx.send(());
             })
             .map_err(|e| RuntimeError::ArtifactLoad(format!("failed to spawn coordinator: {e}")))?;
 
-        let handle = JitCoordinatorHandle { resident: resident_shared, enabled, tx, stats };
+        let handle = JitCoordinatorHandle { resident, enabled, tx, stats };
 
         Ok(Self {
             handle,
@@ -125,7 +123,7 @@ impl JitCoordinator {
             Some(s) => s,
             None => {
                 debug!("no artifact store configured, skipping AOT preload");
-                return Ok(FxHashMap::default());
+                return Ok(ResidentMap::default());
             }
         };
 
@@ -135,26 +133,23 @@ impl JitCoordinator {
         let artifacts = store.load_all()?;
         info!(count = artifacts.len(), "loading AOT artifacts");
 
-        let mut map = FxHashMap::with_capacity_and_hasher(artifacts.len(), Default::default());
+        let map = ResidentMap::with_capacity(artifacts.len());
         let mut loaded = 0u64;
         let mut failed = 0u64;
 
         for (artifact_key, stored) in artifacts {
             match Self::load_artifact(&artifact_key, &stored) {
                 Ok(program) => {
-                    match map.entry(artifact_key.runtime.clone()) {
-                        std::collections::hash_map::Entry::Occupied(_) => {
-                            warn!(
-                                code_hash = %artifact_key.runtime.code_hash,
-                                spec_id = ?artifact_key.runtime.spec_id,
-                                "duplicate artifact key, keeping first",
-                            );
-                            continue;
-                        }
-                        std::collections::hash_map::Entry::Vacant(e) => {
-                            e.insert(Arc::new(program));
-                        }
+                    let key = artifact_key.runtime.clone();
+                    if map.contains_key(&key) {
+                        warn!(
+                            code_hash = %key.code_hash,
+                            spec_id = ?key.spec_id,
+                            "duplicate artifact key, keeping first",
+                        );
+                        continue;
                     }
+                    map.insert(key, Arc::new(program));
                     loaded += 1;
                 }
                 Err(e) => {
@@ -214,8 +209,8 @@ impl Drop for JitCoordinator {
 #[derive(Clone)]
 #[allow(missing_debug_implementations)]
 pub struct JitCoordinatorHandle {
-    /// Published resident compiled map (read via `ArcSwap::load`).
-    resident: Arc<ArcSwap<ResidentMap>>,
+    /// Shared resident compiled map.
+    resident: Arc<ResidentMap>,
     /// Global enable flag.
     enabled: Arc<AtomicBool>,
     /// Channel for sending commands to the coordinator thread.
@@ -236,10 +231,9 @@ impl JitCoordinatorHandle {
 
         let key = RuntimeCacheKey { code_hash: req.code_hash, spec_id: req.spec_id };
 
-        let resident = self.resident.load();
-        let decision = if let Some(program) = resident.get(&key) {
+        let decision = if let Some(program) = self.resident.get(&key) {
             self.stats.lookup_hits.fetch_add(1, Ordering::Relaxed);
-            LookupDecision::Compiled(Arc::clone(program))
+            LookupDecision::Compiled(Arc::clone(&program))
         } else {
             self.stats.lookup_misses.fetch_add(1, Ordering::Relaxed);
             LookupDecision::Interpret(InterpretReason::NotReady)
@@ -271,6 +265,6 @@ impl JitCoordinatorHandle {
 
     /// Returns a point-in-time snapshot of runtime statistics.
     pub fn stats(&self) -> RuntimeStatsSnapshot {
-        self.stats.snapshot(self.resident.load().len() as u64)
+        self.stats.snapshot(self.resident.len() as u64)
     }
 }

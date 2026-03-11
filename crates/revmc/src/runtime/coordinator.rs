@@ -1,8 +1,8 @@
 //! Coordinator thread: single-threaded event loop for runtime state management.
 //!
 //! The coordinator is the sole writer of mutable state. It processes lookup-observed
-//! events, tracks hotness, admits JIT compilation jobs, and publishes results into
-//! the resident map via `ArcSwap`.
+//! events, tracks hotness, admits JIT compilation jobs, and inserts results into
+//! the shared resident `DashMap`.
 
 use crate::runtime::{
     api::CompiledProgram,
@@ -10,12 +10,12 @@ use crate::runtime::{
     storage::RuntimeCacheKey,
     worker::{JitJob, WorkerPool, WorkerResult},
 };
-use arc_swap::ArcSwap;
+use dashmap::DashMap;
 use rustc_hash::FxHashMap;
 use std::sync::{Arc, mpsc};
 
 /// The resident map type: code_hash+spec_id → compiled program.
-pub(crate) type ResidentMap = FxHashMap<RuntimeCacheKey, Arc<CompiledProgram>>;
+pub(crate) type ResidentMap = DashMap<RuntimeCacheKey, Arc<CompiledProgram>>;
 
 /// Commands sent to the coordinator thread.
 pub(crate) enum Command {
@@ -58,11 +58,9 @@ enum EntryPhase {
 
 /// All coordinator-owned mutable state.
 struct CoordinatorState {
-    /// The mutable canonical resident map (coordinator is sole writer).
-    resident_mut: ResidentMap,
-    /// The shared published snapshot (read by handles).
-    resident_shared: Arc<ArcSwap<ResidentMap>>,
-    /// Per-key tracking state.
+    /// The shared resident map (handles read, coordinator writes).
+    resident: Arc<ResidentMap>,
+    /// Per-key tracking state (coordinator-only).
     entries: FxHashMap<RuntimeCacheKey, EntryState>,
     /// Worker pool for JIT compilation.
     workers: WorkerPool,
@@ -85,8 +83,8 @@ impl CoordinatorState {
             return;
         }
 
-        // Already in the resident map (may have been published since the event was emitted).
-        if self.resident_mut.contains_key(&event.key) {
+        // Already in the resident map (may have been inserted since the event was emitted).
+        if self.resident.contains_key(&event.key) {
             return;
         }
 
@@ -144,9 +142,8 @@ impl CoordinatorState {
                     backing,
                 ));
 
-                self.resident_mut.insert(result.key.clone(), program);
+                self.resident.insert(result.key.clone(), program);
                 self.entries.remove(&result.key);
-                self.publish_resident();
                 self.jit_successes += 1;
 
                 debug!(
@@ -176,19 +173,10 @@ impl CoordinatorState {
             self.handle_worker_result(result);
         }
     }
-
-    fn publish_resident(&self) {
-        self.resident_shared.store(Arc::new(self.resident_mut.clone()));
-    }
 }
 
 /// Runs the coordinator event loop. Called on the coordinator thread.
-pub(crate) fn run(
-    rx: mpsc::Receiver<Command>,
-    resident_shared: Arc<ArcSwap<ResidentMap>>,
-    initial_resident: ResidentMap,
-    tuning: RuntimeTuning,
-) {
+pub(crate) fn run(rx: mpsc::Receiver<Command>, resident: Arc<ResidentMap>, tuning: RuntimeTuning) {
     debug!("coordinator thread started");
 
     let (result_tx, result_rx) = mpsc::channel::<WorkerResult>();
@@ -201,8 +189,7 @@ pub(crate) fn run(
     );
 
     let mut state = CoordinatorState {
-        resident_mut: initial_resident,
-        resident_shared,
+        resident,
         entries: FxHashMap::default(),
         workers,
         result_rx,
@@ -240,7 +227,7 @@ pub(crate) fn run(
         jit_promotions = state.jit_promotions,
         jit_successes = state.jit_successes,
         jit_failures = state.jit_failures,
-        resident_entries = state.resident_mut.len(),
+        resident_entries = state.resident.len(),
         "coordinator stats at shutdown",
     );
 

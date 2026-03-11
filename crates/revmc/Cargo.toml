@@ -34,8 +34,8 @@ revm-interpreter.workspace = true
 revm-primitives.workspace = true
 revm-state.workspace = true
 
-arc-swap = "1"
 bitflags = "2.5"
+dashmap = "6"
 bitvec = "1.0"
 either = "1.13"
 libloading = "0.9"
