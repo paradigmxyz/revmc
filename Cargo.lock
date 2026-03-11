@@ -3011,6 +3011,7 @@ dependencies = [
  "bitflags 2.11.0",
  "bitvec",
  "either",
+ "libloading",
  "paste",
  "revm-bytecode",
  "revm-context-interface",

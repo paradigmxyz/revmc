@@ -18,6 +18,8 @@ pub use compiler::{EvmCompiler, EvmCompilerInput};
 mod linker;
 pub use linker::Linker;
 
+pub mod runtime;
+
 /// Internal tests and testing utilities. Not public API.
 #[cfg(any(test, feature = "__fuzzing"))]
 pub mod tests;
