@@ -295,7 +295,7 @@ fn open_dot(dot_path: &Path, open: bool) -> Result<()> {
     let compressed = urlencoding::encode(&compressed);
     let url =
         format!("https://dreampuf.github.io/GraphvizOnline/?engine=dot&compressed={compressed}");
-    eprintln!("{url}");
+    eprintln!("DOT graph: {url}");
     if open {
         let _ = open::that(&url);
     }
