@@ -2,8 +2,7 @@ use super::{Bytecode, InstData, InstFlags, bitvec_as_bytes};
 use revm_bytecode::opcode as op;
 use revm_primitives::hex;
 use rustc_hash::FxHashMap;
-use std::borrow::Cow;
-use std::fmt;
+use std::{borrow::Cow, fmt};
 
 /// Basic block info collected from bytecode analysis.
 struct BlockInfo {
@@ -231,9 +230,8 @@ impl<'a> Bytecode<'a> {
                     continue;
                 }
                 let opcode = data.to_op_in(self);
-                let op_str = abbreviate_hex(&opcode.to_string())
-                    .replace('>', "\\>")
-                    .replace('<', "\\<");
+                let op_str =
+                    abbreviate_hex(&opcode.to_string()).replace('>', "\\>").replace('<', "\\<");
                 write!(w, "{op_str}\\l")?;
             }
             writeln!(w, "}}\"];")?;
@@ -412,17 +410,35 @@ bb2:         ; gas=4, stack_in=0, max_growth=1
     fn abbreviate_hex_repeated() {
         // 32 repeated ff bytes + suffix.
         assert_eq!(
-            abbreviate_hex("PUSH32 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffe0"),
+            abbreviate_hex(
+                "PUSH32 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffe0"
+            ),
             "PUSH32 0xff..e0",
+        );
+        assert_eq!(
+            abbreviate_hex(
+                "PUSH32 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffeeee"
+            ),
+            "PUSH32 0xff..eeee",
+        );
+        assert_eq!(
+            abbreviate_hex(
+                "PUSH32 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffeeeeee"
+            ),
+            "PUSH32 0xff..eeeeee",
         );
         // 32 repeated 00 bytes + suffix.
         assert_eq!(
-            abbreviate_hex("PUSH32 0x0000000000000000000000000000000000000000000000000000000000000001"),
+            abbreviate_hex(
+                "PUSH32 0x0000000000000000000000000000000000000000000000000000000000000001"
+            ),
             "PUSH32 0x00..01",
         );
         // All repeated, no suffix.
         assert_eq!(
-            abbreviate_hex("PUSH32 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"),
+            abbreviate_hex(
+                "PUSH32 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+            ),
             "PUSH32 0xff..",
         );
     }
