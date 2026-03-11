@@ -168,7 +168,7 @@ impl RunArgs {
         }
         if self.dot {
             let dump_dir = compiler.dump_dir().expect("dump_dir should be set when --dot is used");
-            render_dot_svg(&dump_dir.join("bytecode.dot"))?;
+            open_dot(&dump_dir.join("bytecode.dot"))?;
         }
         if self.parse_only {
             return Ok(());
@@ -285,24 +285,11 @@ impl RunArgs {
     }
 }
 
-fn render_dot_svg(dot_path: &Path) -> Result<()> {
-    let svg_path = dot_path.with_extension("svg");
-    let status = std::process::Command::new("dot")
-        .args(["-Tsvg", "-o"])
-        .arg(&svg_path)
-        .arg(dot_path)
-        .status();
-    match status {
-        Ok(s) if s.success() => {
-            eprintln!("SVG written to {}", svg_path.display());
-            let _ = open::that(&svg_path);
-        }
-        Ok(s) => return Err(eyre!("`dot` exited with {s}")),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            eprintln!("graphviz `dot` not found; DOT file at {}", dot_path.display());
-        }
-        Err(e) => return Err(e.into()),
-    }
+fn open_dot(dot_path: &Path) -> Result<()> {
+    let dot_source = std::fs::read_to_string(dot_path)?;
+    let compressed = lz_str::compress_to_encoded_uri_component(&dot_source);
+    let url = format!("https://dreampuf.github.io/GraphvizOnline/?engine=dot&compressed={compressed}");
+    let _ = open::that(&url);
     Ok(())
 }
 
