@@ -3026,7 +3026,6 @@ dependencies = [
  "revmc-llvm",
  "revmc-statetest",
  "rustc-hash",
- "rustix",
  "similar-asserts",
  "tempfile",
  "tracing",

@@ -73,14 +73,14 @@ impl CompiledProgram {
         key: RuntimeCacheKey,
         func: EvmCompilerFn,
         approx_size_bytes: usize,
-        owner: Arc<LoadedLibraryOwner>,
+        library: Arc<LoadedLibrary>,
     ) -> Self {
         Self {
             key,
             kind: ProgramKind::Aot,
             func,
             approx_size_bytes,
-            _backing: ProgramBacking::LoadedLibrary(owner),
+            _backing: ProgramBacking::LoadedLibrary(library),
         }
     }
 }
@@ -98,50 +98,20 @@ pub enum ProgramKind {
 #[expect(dead_code, reason = "variant fields are held alive for Drop")]
 enum ProgramBacking {
     /// A dynamically loaded shared library.
-    LoadedLibrary(Arc<LoadedLibraryOwner>),
+    LoadedLibrary(Arc<LoadedLibrary>),
 }
 
-/// Owns a loaded shared library and its backing storage.
+/// Owns a loaded shared library.
 ///
-/// On Linux, the backing is a memfd (anonymous in-memory file) — no filesystem I/O.
-/// On other platforms, the backing is a temporary directory on disk.
-///
-/// Dropping this unloads the library and cleans up any backing resources.
-pub(crate) struct LoadedLibraryOwner {
-    /// The loaded library. Must be dropped before the backing storage.
-    library: libloading::Library,
-    /// Keeps the backing memory alive (memfd or temp directory).
-    _backing: LibraryBacking,
+/// Dropping this unloads the library.
+pub(crate) struct LoadedLibrary {
+    /// The loaded library.
+    _library: libloading::Library,
 }
 
-/// Backing storage for a loaded shared library.
-#[expect(dead_code, reason = "variant fields are held alive for Drop")]
-enum LibraryBacking {
-    /// Linux: anonymous in-memory file via `memfd_create`. The `OwnedFd` keeps the memfd alive;
-    /// closing it invalidates the `/proc/self/fd/{fd}` path but the already-mapped pages remain
-    /// valid until the library is unloaded.
-    #[cfg(target_os = "linux")]
-    Memfd(std::os::unix::io::OwnedFd),
-    /// Fallback: temp directory on disk.
-    #[cfg(not(target_os = "linux"))]
-    TempDir(tempfile::TempDir),
-}
-
-impl LoadedLibraryOwner {
-    /// Creates a new owner backed by a temp directory (non-Linux fallback).
-    #[cfg(not(target_os = "linux"))]
-    pub(crate) fn new_tempdir(library: libloading::Library, tmp_dir: tempfile::TempDir) -> Self {
-        Self { library, _backing: LibraryBacking::TempDir(tmp_dir) }
-    }
-
-    /// Creates a new owner backed by a memfd (Linux).
-    #[cfg(target_os = "linux")]
-    pub(crate) fn new_memfd(library: libloading::Library, fd: std::os::unix::io::OwnedFd) -> Self {
-        Self { library, _backing: LibraryBacking::Memfd(fd) }
-    }
-
-    /// Returns a reference to the loaded library.
-    pub(crate) fn library(&self) -> &libloading::Library {
-        &self.library
+impl LoadedLibrary {
+    /// Creates a new loaded library wrapper.
+    pub(crate) fn new(library: libloading::Library) -> Self {
+        Self { _library: library }
     }
 }

@@ -4,6 +4,7 @@ use crate::runtime::error::StorageError;
 use alloy_primitives::B256;
 use revm_primitives::hardfork::SpecId;
 use revmc_backend::{OptimizationLevel, Target};
+use std::path::PathBuf;
 
 /// Runtime cache key: the minimal identity for a compiled program at runtime.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -35,13 +36,13 @@ pub struct ArtifactKey {
     pub abi_version: u32,
 }
 
-/// A stored artifact consisting of a manifest and the compiled dylib bytes.
+/// A stored artifact consisting of a manifest and a path to the compiled dylib.
 #[derive(Clone, Debug)]
 pub struct StoredArtifact {
     /// Metadata about the artifact.
     pub manifest: ArtifactManifest,
-    /// The raw shared-library bytes.
-    pub dylib_bytes: Vec<u8>,
+    /// Path to the shared library on disk. The store owns and manages these files.
+    pub dylib_path: PathBuf,
 }
 
 /// Metadata for a stored artifact.
@@ -74,6 +75,9 @@ pub enum BackendSelection {
 }
 
 /// Trait for loading and storing compiled artifacts.
+///
+/// Implementations manage artifact files on the filesystem. The store owns the dylib files and
+/// returns paths to them. The coordinator loads shared libraries directly from these paths.
 pub trait ArtifactStore: Send + Sync + 'static {
     /// Loads all available artifacts from storage.
     fn load_all(&self) -> Result<Vec<(ArtifactKey, StoredArtifact)>, StorageError>;
@@ -81,8 +85,14 @@ pub trait ArtifactStore: Send + Sync + 'static {
     /// Loads a single artifact by key.
     fn load(&self, key: &ArtifactKey) -> Result<Option<StoredArtifact>, StorageError>;
 
-    /// Stores an artifact.
-    fn store(&self, key: &ArtifactKey, artifact: &StoredArtifact) -> Result<(), StorageError>;
+    /// Stores an artifact. The `dylib_bytes` are the raw shared-library bytes to persist.
+    /// The store writes them to disk and the returned path (via subsequent `load`) points there.
+    fn store(
+        &self,
+        key: &ArtifactKey,
+        manifest: &ArtifactManifest,
+        dylib_bytes: &[u8],
+    ) -> Result<(), StorageError>;
 
     /// Deletes an artifact by key.
     fn delete(&self, key: &ArtifactKey) -> Result<(), StorageError>;

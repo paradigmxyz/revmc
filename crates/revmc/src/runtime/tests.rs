@@ -17,7 +17,12 @@ impl ArtifactStore for EmptyStore {
         Ok(None)
     }
 
-    fn store(&self, _key: &ArtifactKey, _artifact: &StoredArtifact) -> Result<(), StorageError> {
+    fn store(
+        &self,
+        _key: &ArtifactKey,
+        _manifest: &ArtifactManifest,
+        _dylib_bytes: &[u8],
+    ) -> Result<(), StorageError> {
         Ok(())
     }
 
@@ -40,11 +45,8 @@ fn start_no_store() {
 
 #[test]
 fn start_empty_store() {
-    let config = RuntimeConfig {
-        enabled: true,
-        store: Some(Arc::new(EmptyStore)),
-        ..Default::default()
-    };
+    let config =
+        RuntimeConfig { enabled: true, store: Some(Arc::new(EmptyStore)), ..Default::default() };
     let coord = JitCoordinator::start(config).unwrap();
     let handle = coord.handle();
     assert_eq!(handle.stats().resident_entries, 0);
@@ -57,11 +59,7 @@ fn lookup_disabled() {
     let coord = JitCoordinator::start(config).unwrap();
     let handle = coord.handle();
 
-    let req = LookupRequest {
-        code_hash: B256::ZERO,
-        code: &[],
-        spec_id: SpecId::CANCUN,
-    };
+    let req = LookupRequest { code_hash: B256::ZERO, code: &[], spec_id: SpecId::CANCUN };
     let decision = handle.lookup(req);
     assert!(matches!(decision, LookupDecision::Interpret(InterpretReason::Disabled)));
 
@@ -79,11 +77,7 @@ fn lookup_miss_when_enabled() {
     let coord = JitCoordinator::start(config).unwrap();
     let handle = coord.handle();
 
-    let req = LookupRequest {
-        code_hash: B256::ZERO,
-        code: &[0x00],
-        spec_id: SpecId::CANCUN,
-    };
+    let req = LookupRequest { code_hash: B256::ZERO, code: &[0x00], spec_id: SpecId::CANCUN };
     let decision = handle.lookup(req);
     assert!(matches!(decision, LookupDecision::Interpret(InterpretReason::NotReady)));
 
@@ -100,18 +94,20 @@ fn set_enabled_toggle() {
     let coord = JitCoordinator::start(config).unwrap();
     let handle = coord.handle();
 
-    let req = LookupRequest {
-        code_hash: B256::ZERO,
-        code: &[],
-        spec_id: SpecId::CANCUN,
-    };
+    let req = LookupRequest { code_hash: B256::ZERO, code: &[], spec_id: SpecId::CANCUN };
 
     // Initially disabled.
-    assert!(matches!(handle.lookup(req.clone()), LookupDecision::Interpret(InterpretReason::Disabled)));
+    assert!(matches!(
+        handle.lookup(req.clone()),
+        LookupDecision::Interpret(InterpretReason::Disabled)
+    ));
 
     // Enable.
     handle.set_enabled(true);
-    assert!(matches!(handle.lookup(req.clone()), LookupDecision::Interpret(InterpretReason::NotReady)));
+    assert!(matches!(
+        handle.lookup(req.clone()),
+        LookupDecision::Interpret(InterpretReason::NotReady)
+    ));
 
     // Disable again.
     handle.set_enabled(false);
@@ -127,11 +123,7 @@ fn events_sent_on_lookup() {
     let handle = coord.handle();
 
     for _ in 0..10 {
-        let req = LookupRequest {
-            code_hash: B256::ZERO,
-            code: &[],
-            spec_id: SpecId::CANCUN,
-        };
+        let req = LookupRequest { code_hash: B256::ZERO, code: &[], spec_id: SpecId::CANCUN };
         let _ = handle.lookup(req);
     }
 
@@ -149,11 +141,7 @@ fn drop_shuts_down_coordinator() {
     drop(coord);
 
     // Lookups still work (no panic), events will be dropped since coordinator is gone.
-    let req = LookupRequest {
-        code_hash: B256::ZERO,
-        code: &[],
-        spec_id: SpecId::CANCUN,
-    };
+    let req = LookupRequest { code_hash: B256::ZERO, code: &[], spec_id: SpecId::CANCUN };
     let _ = handle.lookup(req);
 }
 
@@ -164,11 +152,7 @@ fn handle_clone() {
     let h1 = coord.handle();
     let h2 = h1.clone();
 
-    let req = LookupRequest {
-        code_hash: B256::ZERO,
-        code: &[],
-        spec_id: SpecId::CANCUN,
-    };
+    let req = LookupRequest { code_hash: B256::ZERO, code: &[], spec_id: SpecId::CANCUN };
     let _ = h1.lookup(req.clone());
     let _ = h2.lookup(req);
 
@@ -184,17 +168,19 @@ struct FailingStore;
 
 impl ArtifactStore for FailingStore {
     fn load_all(&self) -> Result<Vec<(ArtifactKey, StoredArtifact)>, StorageError> {
-        Err(StorageError::new(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "boom",
-        )))
+        Err(StorageError::new(std::io::Error::other("boom")))
     }
 
     fn load(&self, _key: &ArtifactKey) -> Result<Option<StoredArtifact>, StorageError> {
         Ok(None)
     }
 
-    fn store(&self, _key: &ArtifactKey, _artifact: &StoredArtifact) -> Result<(), StorageError> {
+    fn store(
+        &self,
+        _key: &ArtifactKey,
+        _manifest: &ArtifactManifest,
+        _dylib_bytes: &[u8],
+    ) -> Result<(), StorageError> {
         Ok(())
     }
 
@@ -209,11 +195,8 @@ impl ArtifactStore for FailingStore {
 
 #[test]
 fn startup_store_failure() {
-    let config = RuntimeConfig {
-        enabled: true,
-        store: Some(Arc::new(FailingStore)),
-        ..Default::default()
-    };
+    let config =
+        RuntimeConfig { enabled: true, store: Some(Arc::new(FailingStore)), ..Default::default() };
     let result = JitCoordinator::start(config);
     assert!(result.is_err());
 }
