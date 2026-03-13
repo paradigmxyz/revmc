@@ -159,16 +159,22 @@ impl Bytecode<'_> {
                     // Mark JUMPDEST as reachable.
                     self.insts[target_inst].data = 1;
                     newly_resolved += 1;
-                    trace!(jump_inst, target_inst, "block_analysis: resolved jump");
+                    trace!(jump_inst, target_inst, "resolved jump");
                 }
                 JumpTarget::Invalid => {
                     self.insts[jump_inst].flags |= InstFlags::STATIC_JUMP
                         | InstFlags::INVALID_JUMP
                         | InstFlags::BLOCK_RESOLVED_JUMP;
                     newly_resolved += 1;
-                    trace!(jump_inst, "block_analysis: resolved invalid jump");
+                    trace!(jump_inst, "resolved invalid jump");
                 }
-                _ => {}
+                JumpTarget::Bottom => {
+                    // Unreachable jump — mark as invalid so it doesn't keep
+                    // `has_dynamic_jumps` set and force a dynamic jump table.
+                    self.insts[jump_inst].flags |= InstFlags::STATIC_JUMP | InstFlags::INVALID_JUMP;
+                    trace!(jump_inst, "unreachable jump");
+                }
+                JumpTarget::Top => {}
             }
         }
 
@@ -281,11 +287,10 @@ impl Bytecode<'_> {
     /// Returns a list of (jump_inst, resolved_target) pairs and the count of resolvable jumps.
     fn run_abstract_interp(&self, cfg: &Cfg) -> (Vec<(usize, JumpTarget)>, usize) {
         let num_blocks = cfg.blocks.len();
-        let mut block_states: Vec<BlockState> = vec![BlockState::Bottom; num_blocks];
-        let mut jump_targets: Vec<(usize, JumpTarget)> = Vec::new();
 
-        // Collect unresolved jumps and their indices in jump_targets.
+        // Collect unresolved jumps and their indices.
         let mut jump_inst_to_idx = rustc_hash::FxHashMap::default();
+        let mut jump_targets: Vec<(usize, JumpTarget)> = Vec::new();
         for (i, inst) in self.insts.iter().enumerate() {
             if inst.is_legacy_jump() && !inst.flags.contains(InstFlags::STATIC_JUMP) {
                 let idx = jump_targets.len();
@@ -298,29 +303,76 @@ impl Bytecode<'_> {
             return (jump_targets, 0);
         }
 
-        // Identify JUMPDEST blocks that may receive edges from the dynamic jump
-        // table. Instead of tainting them (which would poison all downstream
-        // resolution), we widen their incoming state to all-Top once their stack
-        // height is known. This preserves height information and still allows
-        // values pushed *within* the block to be tracked precisely.
-        let mut is_dynamic_target = vec![false; num_blocks];
-        if self.has_dynamic_jumps {
-            for (bid, block) in cfg.blocks.iter().enumerate() {
-                if self.insts[block.start].is_jumpdest() {
-                    is_dynamic_target[bid] = true;
+        // Phase 1: Run optimistically without widening to discover targets.
+        let mut block_states: Vec<BlockState> = vec![BlockState::Bottom; num_blocks];
+        block_states[0] = BlockState::Known(Vec::new());
+        self.run_fixpoint(
+            cfg,
+            &mut block_states,
+            &mut jump_targets,
+            &jump_inst_to_idx,
+            &vec![false; num_blocks],
+        );
+
+        // Invalidate resolutions that flowed through conflicted blocks.
+        // A conflict means multiple predecessors had incompatible stack heights,
+        // so any resolution that depends on flow through that block is unsound
+        // (the optimistic pass may have seen only one predecessor's values).
+        let mut tainted = vec![false; num_blocks];
+        for (bid, state) in block_states.iter().enumerate() {
+            if matches!(state, BlockState::Conflict) {
+                tainted[bid] = true;
+            }
+        }
+        // Propagate taint to successors.
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for bid in 0..num_blocks {
+                if !tainted[bid] {
+                    continue;
+                }
+                for &succ in &cfg.blocks[bid].succs {
+                    if !tainted[succ] {
+                        tainted[succ] = true;
+                        changed = true;
+                    }
+                }
+            }
+        }
+        // Invalidate any resolution in a tainted block.
+        for (inst, target) in jump_targets.iter_mut() {
+            if matches!(target, JumpTarget::Const(_) | JumpTarget::Invalid) {
+                let bid = cfg.inst_to_block[*inst];
+                if bid < num_blocks && tainted[bid] {
+                    *target = JumpTarget::Top;
                 }
             }
         }
 
-        // Entry block starts with empty stack.
-        block_states[0] = BlockState::Known(Vec::new());
+        let count = jump_targets
+            .iter()
+            .filter(|(_, t)| matches!(t, JumpTarget::Const(_) | JumpTarget::Invalid))
+            .count();
 
+        (jump_targets, count)
+    }
+
+    /// Run a single fixpoint pass of abstract interpretation.
+    fn run_fixpoint(
+        &self,
+        cfg: &Cfg,
+        block_states: &mut [BlockState],
+        jump_targets: &mut [(usize, JumpTarget)],
+        jump_inst_to_idx: &rustc_hash::FxHashMap<usize, usize>,
+        widen: &[bool],
+    ) {
+        let num_blocks = cfg.blocks.len();
         let mut worklist = VecDeque::new();
         worklist.push_back(0usize);
         let mut in_worklist = vec![false; num_blocks];
         in_worklist[0] = true;
 
-        // Iteration limit to avoid pathological cases.
         let max_iterations = num_blocks * 8;
         let mut iterations = 0;
 
@@ -335,47 +387,33 @@ impl Bytecode<'_> {
             let input = match &block_states[bid] {
                 BlockState::Known(s) => s.clone(),
                 BlockState::Bottom => continue,
-                // Stack height conflict: can't analyze this block.
                 BlockState::Conflict => continue,
             };
 
             let block = &cfg.blocks[bid];
 
-            // For JUMPDEST blocks reachable from the dynamic jump table, widen
-            // the input to all-Top. The dynamic jump table can arrive with any
-            // values on the stack, but EVM guarantees the stack height is
-            // consistent across all predecessors (or the program is invalid).
-            // By widening values to Top (instead of tainting), we preserve the
-            // ability to resolve jumps whose targets depend on values pushed
-            // *within* this block (e.g. Solidity function dispatch patterns).
-            let input = if is_dynamic_target[bid] {
-                input.iter().map(|_| AbsValue::Top).collect()
-            } else {
-                input
-            };
+            // For JUMPDEST blocks that need widening (potential dynamic jump
+            // table targets), widen incoming values to Top. This preserves
+            // stack height but makes all inherited values unknown.
+            let input =
+                if widen[bid] { input.iter().map(|_| AbsValue::Top).collect() } else { input };
 
-            // Interpret instructions in this block.
             let output = self.interpret_block(block.start, block.end, &input);
             let output = match output {
                 Some(s) => s,
                 None => continue,
             };
 
-            // Check the terminator for jump resolution.
             let term = &self.insts[block.end];
             let mut extra_succs: Vec<BlockId> = Vec::new();
 
             if term.is_legacy_jump() && !term.flags.contains(InstFlags::STATIC_JUMP) {
-                // Get the stack state *before* the jump instruction.
                 let pre_jump_stack = if block.start == block.end {
-                    // Single-instruction block (just the jump). Pre-jump state is the input.
                     input.clone()
                 } else {
                     self.interpret_block(block.start, block.end - 1, &input).unwrap_or_default()
                 };
 
-                // EVM spec: μ_s[0] (TOS) is the target for both JUMP and JUMPI.
-                // For JUMPI, μ_s[1] (second from top) is the condition.
                 let target_val = pre_jump_stack.last().cloned();
 
                 let resolved = match target_val {
@@ -387,13 +425,9 @@ impl Bytecode<'_> {
                         _ => JumpTarget::Invalid,
                     },
                     Some(AbsValue::Top) => JumpTarget::Top,
-                    None => {
-                        // Stack underflow — can't resolve.
-                        JumpTarget::Top
-                    }
+                    None => JumpTarget::Top,
                 };
 
-                // If we resolved to a constant target, add a speculative edge.
                 if let JumpTarget::Const(target_inst) = &resolved {
                     let target_block = cfg.inst_to_block[*target_inst];
                     if target_block != usize::MAX && target_block < num_blocks {
@@ -401,8 +435,6 @@ impl Bytecode<'_> {
                     }
                 }
 
-                // Also check JUMPI condition for refinement.
-                // For JUMPI: target = μ_s[0] (TOS), condition = μ_s[1] (second from top).
                 if term.opcode == op::JUMPI {
                     let cond_val = pre_jump_stack
                         .len()
@@ -410,25 +442,18 @@ impl Bytecode<'_> {
                         .and_then(|i| pre_jump_stack.get(i).cloned());
                     match cond_val {
                         Some(AbsValue::Const(v)) if v.is_zero() => {
-                            // Condition is always false — only fallthrough, no jump taken.
                             extra_succs.clear();
                         }
-                        Some(AbsValue::Const(_)) => {
-                            // Condition is always true — only jump taken.
-                            // Don't propagate to fallthrough successor.
-                            // (handled below by not propagating to fallthrough)
-                        }
+                        Some(AbsValue::Const(_)) => {}
                         _ => {}
                     }
                 }
 
-                // Join into the jump target lattice.
                 if let Some(&idx) = jump_inst_to_idx.get(&block.end) {
                     jump_targets[idx].1.join(&resolved);
                 }
             }
 
-            // Propagate to static successors.
             for &succ in &block.succs {
                 if block_states[succ].join(&output) && !in_worklist[succ] {
                     worklist.push_back(succ);
@@ -436,7 +461,6 @@ impl Bytecode<'_> {
                 }
             }
 
-            // Propagate to speculatively discovered successors.
             for succ in extra_succs {
                 if block_states[succ].join(&output) && !in_worklist[succ] {
                     worklist.push_back(succ);
@@ -444,13 +468,6 @@ impl Bytecode<'_> {
                 }
             }
         }
-
-        let count = jump_targets
-            .iter()
-            .filter(|(_, t)| matches!(t, JumpTarget::Const(_) | JumpTarget::Invalid))
-            .count();
-
-        (jump_targets, count)
     }
 
     /// Interpret a sequence of instructions on the abstract stack.
@@ -643,5 +660,92 @@ impl Bytecode<'_> {
             }
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::bytecode::Bytecode;
+    use revm_primitives::hardfork::SpecId;
+
+    fn analyze_bytecode(hex: &str) -> Bytecode<'static> {
+        let code = revm_primitives::hex::decode(hex.trim()).unwrap();
+        let code = Box::leak(code.into_boxed_slice());
+        let mut bytecode = Bytecode::new(code, SpecId::CANCUN);
+        bytecode.analyze().unwrap();
+        bytecode
+    }
+
+    #[test]
+    fn revert_sub_call_storage_oog() {
+        let bytecode = analyze_bytecode(
+            "60606040526000357c01000000000000000000000000000000000000000000000000000000009004\
+             63ffffffff168063b28175c4146046578063c0406226146052575b6000565b34600057605060765\
+             65b005b34600057605c6081565b604051808215151515815260200191505060405180910390f35b\
+             600c6000819055505b565b600060896076565b600d600181905550600e600281905550600190505\
+             b905600a165627a7a723058202a8a75d7d795b5bcb9042fb18b283daa90b999a11ddec892f54873\
+             22",
+        );
+        eprintln!("{bytecode}");
+    }
+
+    #[test]
+    fn revert_remote_sub_call_storage_oog_caller() {
+        let bytecode = analyze_bytecode(
+            "608060405234801561001057600080fd5b50600436106100415760003560e01c806354d1405f14\
+             610046578063b28175c414610050578063c04062261461005a575b600080fd5b61004e610064565b\
+             005b610058610110565b005b610062610116565b005b6000604051610072906101b6565b60405180\
+             9103906000f08015801561008e573d6000803e3d6000fd5b5090508073ffffffffffffffffffff\
+             ffffffffffffffffffff166373027f6d306040518263ffffffff1660e01b81526004016100ca91\
+             90610204565b600060405180830381600087803b1580156100e457600080fd5b505af11580156100\
+             f8573d6000803e3d6000fd5b50505050600360025560038055622fffff6000205050565b60028055\
+             565b6000604051610124906101b6565b604051809103906000f080158015610140573d6000803e3d\
+             6000fd5b5090508073ffffffffffffffffffffffffffffffffffffffff166373027f6d3060405182\
+             63ffffffff1660e01b815260040161017c9190610204565b600060405180830381600087803b1580\
+             1561019657600080fd5b505af11580156101aa573d6000803e3d6000fd5b50505050600360025550\
+             565b6102b48061022083390190565b600073ffffffffffffffffffffffffffffffffffffff\
+             ff82169050919050565b60006101ee826101c3565b9050919050565b6101fe816101e3565b825250\
+             50565b600060208201905061021960008301846101f5565b9291505056fe",
+        );
+        eprintln!("{bytecode}");
+    }
+
+    #[test]
+    fn revert_remote_sub_call_storage_oog() {
+        let bytecode = analyze_bytecode(
+            "608060405234801561001057600080fd5b506004361061002b5760003560e01c806373027f6d14\
+             610030575b600080fd5b61004a600480360381019061004591906101a9565b61004c565b005b60\
+             00808273ffffffffffffffffffffffffffffffffffffffff1660405160240160405160208183030\
+             38152906040527fb28175c4000000000000000000000000000000000000000000000000000000007\
+             bffffffffffffffffffffffffffffffffffffffffffffffffffffffff19166020820180517bffff\
+             ffffffffffffffffffffffffffffffffffffffffffffffffff838183161783525050505060405161\
+             00f69190610247565b6000604051808303816000865af19150503d8060008114610133576040519150\
+             601f19603f3d011682016040523d82523d6000602084013e610138565b606091505b50915091508160\
+             0155505050565b600080fd5b600073ffffffffffffffffffffffffffffffffffffffff82169050919\
+             050565b60006101768261014b565b9050919050565b6101868161016b565b811461019157600080fd5\
+             b50565b6000813590506101a38161017d565b92915050565b6000602082840312156101bf576101be\
+             610146565b5b60006101cd84828501610194565b91505092915050565b600081519050919050565b6\
+             00081905092915050565b60005b8381101561020a5780820151818401526020810190506101ef565b6\
+             0008484015250505050565b6000610221826101d6565b61022b81856101e1565b935061023b8185602\
+             086016101ec565b80840191505092915050565b60006102538284610216565b91508190509291505056\
+             fea2646970667358221220b4673c55c7b0268d7d118059e6509196d2185bb7fe040a7d3900f902c854\
+             2ea464736f6c63430008180033",
+        );
+        // This contract has a single function with one call site. The analysis
+        // should NOT incorrectly resolve any jumps (all dynamic jumps should
+        // remain dynamic or be correctly resolved).
+        eprintln!("{bytecode}");
+    }
+
+    #[test]
+    fn hash_10k() {
+        let code =
+            revm_primitives::hex::decode(include_str!("../../../../data/hash_10k.rt.hex").trim())
+                .unwrap();
+        let code = Box::leak(code.into_boxed_slice());
+        let mut bytecode = Bytecode::new(code, SpecId::CANCUN);
+        bytecode.analyze().unwrap();
+        eprintln!("{bytecode}");
+        assert!(!bytecode.has_dynamic_jumps, "expected all jumps to be resolved");
     }
 }
