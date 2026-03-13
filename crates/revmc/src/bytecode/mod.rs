@@ -6,6 +6,7 @@ use revm_primitives::hardfork::SpecId;
 use revmc_backend::Result;
 use rustc_hash::FxHashMap;
 
+mod block_analysis;
 mod fmt;
 mod sections;
 use sections::{Section, SectionAnalysis};
@@ -165,7 +166,8 @@ impl<'a> Bytecode<'a> {
     #[instrument(level = "debug", skip_all)]
     pub(crate) fn analyze(&mut self) -> Result<()> {
         self.static_jump_analysis();
-        // NOTE: `mark_dead_code` must run after `static_jump_analysis` as it can mark
+        self.block_analysis();
+        // NOTE: `mark_dead_code` must run after jump analysis as it can mark
         // unreachable `JUMPDEST`s as dead code.
         self.mark_dead_code();
 
@@ -421,7 +423,11 @@ impl InstData {
     #[inline]
     pub(crate) fn stack_io(&self) -> (u8, u8) {
         let (mut inp, out) = stack_io(self.opcode);
+        // For adjacent PUSH+JUMP, the PUSH is marked SKIP_LOGIC so the target is never on the
+        // stack. Reduce inputs accordingly. Block-resolved jumps still have the target on the
+        // stack, so their input count is unchanged.
         if self.is_legacy_static_jump()
+            && !self.flags.contains(InstFlags::BLOCK_RESOLVED_JUMP)
             && !(self.opcode == op::JUMPI && self.flags.contains(InstFlags::INVALID_JUMP))
         {
             inp -= 1;
@@ -541,6 +547,10 @@ bitflags::bitflags! {
         /// The instruction is unknown.
         /// Always returns [`InstructionResult::NotFound`] at runtime.
         const UNKNOWN = 1 << 4;
+
+        /// The jump target was resolved by block analysis (not adjacent PUSH+JUMP).
+        /// The target value is still on the stack and must be popped at runtime.
+        const BLOCK_RESOLVED_JUMP = 1 << 5;
 
         /// Skip generating instruction logic, but keep the gas calculation.
         const SKIP_LOGIC = 1 << 6;
