@@ -6,6 +6,7 @@ use revm_primitives::hardfork::SpecId;
 use revmc_backend::Result;
 use rustc_hash::FxHashMap;
 
+mod const_prop;
 mod fmt;
 mod sections;
 use sections::{Section, SectionAnalysis};
@@ -164,8 +165,8 @@ impl<'a> Bytecode<'a> {
     /// Runs a list of analysis passes on the instructions.
     #[instrument(level = "debug", skip_all)]
     pub(crate) fn analyze(&mut self) -> Result<()> {
-        self.static_jump_analysis();
-        // NOTE: `mark_dead_code` must run after `static_jump_analysis` as it can mark
+        const_prop::run(self);
+        // NOTE: `mark_dead_code` must run after jump analysis as it can mark
         // unreachable `JUMPDEST`s as dead code.
         self.mark_dead_code();
 
@@ -178,11 +179,11 @@ impl<'a> Bytecode<'a> {
 
     /// Mark `PUSH<N>` followed by `JUMP[I]` as `STATIC_JUMP` and resolve the target.
     #[instrument(name = "sj", level = "debug", skip_all)]
-    fn static_jump_analysis(&mut self) {
+    pub(crate) fn static_jump_analysis(&mut self) {
         for jump_inst in 0..self.insts.len() {
             let jump = &self.insts[jump_inst];
             let Some(push_inst) = jump_inst.checked_sub(1) else {
-                if jump.is_legacy_jump() {
+                if jump.is_jump() {
                     trace!(jump_inst, target=?None::<()>, "found jump");
                     self.has_dynamic_jumps = true;
                 }
@@ -190,8 +191,8 @@ impl<'a> Bytecode<'a> {
             };
 
             let push = &self.insts[push_inst];
-            if !(push.is_push() && jump.is_legacy_jump()) {
-                if jump.is_legacy_jump() {
+            if !(push.is_push() && jump.is_jump()) {
+                if jump.is_jump() {
                     trace!(jump_inst, target=?None::<()>, "found jump");
                     self.has_dynamic_jumps = true;
                 }
@@ -421,7 +422,7 @@ impl InstData {
     #[inline]
     pub(crate) fn stack_io(&self) -> (u8, u8) {
         let (mut inp, out) = stack_io(self.opcode);
-        if self.is_legacy_static_jump()
+        if self.is_static_jump()
             && !(self.opcode == op::JUMPI && self.flags.contains(InstFlags::INVALID_JUMP))
         {
             inp -= 1;
@@ -448,17 +449,30 @@ impl InstData {
         matches!(self.opcode, op::PUSH0..=op::PUSH32)
     }
 
-    /// Returns `true` if this instruction is a legacy jump instruction (`JUMP`/`JUMPI`).
+    /// Returns `true` if this instruction is a jump instruction (`JUMP`/`JUMPI`).
     #[inline]
-    pub(crate) fn is_legacy_jump(&self) -> bool {
+    pub(crate) fn is_jump(&self) -> bool {
         matches!(self.opcode, op::JUMP | op::JUMPI)
     }
 
-    /// Returns `true` if this instruction is a legacy jump instruction (`JUMP`/`JUMPI`), and the
+    /// Returns `true` if this instruction is a jump instruction (`JUMP`/`JUMPI`), and the
     /// target known statically.
     #[inline]
-    pub(crate) fn is_legacy_static_jump(&self) -> bool {
-        self.is_legacy_jump() && self.flags.contains(InstFlags::STATIC_JUMP)
+    pub(crate) fn is_static_jump(&self) -> bool {
+        self.is_jump() && self.flags.contains(InstFlags::STATIC_JUMP)
+    }
+
+    /// Returns `true` if this instruction is a legacy jump with a target known via constant
+    /// propagation (operand still on stack).
+    #[inline]
+    pub(crate) fn is_const_jump(&self) -> bool {
+        self.is_jump() && self.flags.contains(InstFlags::CONST_JUMP)
+    }
+
+    /// Returns `true` if the jump target is known by any means.
+    #[inline]
+    pub(crate) fn is_known_jump(&self) -> bool {
+        self.is_static_jump() || self.is_const_jump()
     }
 
     /// Returns `true` if this instruction is a `JUMPDEST`.
@@ -490,7 +504,7 @@ impl InstData {
     /// Returns `true` if we know that this instruction will branch or stop execution.
     #[inline]
     pub(crate) fn is_branching(&self) -> bool {
-        self.is_legacy_jump() || self.is_diverging()
+        self.is_jump() || self.is_diverging()
     }
 
     /// Returns `true` if we know that this instruction will stop execution.
@@ -529,11 +543,15 @@ bitflags::bitflags! {
     /// [`InstrData`] flags.
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
     pub(crate) struct InstFlags: u8 {
-        /// The `JUMP`/`JUMPI` target is known at compile time.
+        /// The `JUMP`/`JUMPI` target is known at compile time and the target operand is elided
+        /// from the stack (the preceding PUSH is marked `SKIP_LOGIC`).
         const STATIC_JUMP = 1 << 0;
         /// The jump target is known to be invalid.
         /// Always returns [`InstructionResult::InvalidJump`] at runtime.
         const INVALID_JUMP = 1 << 1;
+        /// The `JUMP`/`JUMPI` target is known at compile time via constant propagation.
+        /// Unlike `STATIC_JUMP`, the target operand is still on the stack and must be popped.
+        const CONST_JUMP = 1 << 2;
 
         /// The instruction is disabled in this EVM version.
         /// Always returns [`InstructionResult::NotActivated`] at runtime.

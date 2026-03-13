@@ -903,6 +903,16 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                             "jumping to non-JUMPDEST; target_inst={target_inst}",
                         );
                         self.inst_entries[target_inst]
+                    } else if data.flags.contains(InstFlags::CONST_JUMP) {
+                        // Target known via const-prop, but operand is still on the stack.
+                        let _target_val = self.pop();
+                        let target_inst = data.data as usize;
+                        debug_assert_eq!(
+                            *self.bytecode.inst(target_inst),
+                            op::JUMPDEST,
+                            "jumping to non-JUMPDEST; target_inst={target_inst}",
+                        );
+                        self.inst_entries[target_inst]
                     } else {
                         // Dynamic jump.
                         debug_assert!(self.bytecode.has_dynamic_jumps());

@@ -94,7 +94,7 @@ impl fmt::Display for Bytecode<'_> {
                 write!(text, "{opcode}").unwrap();
                 if data.flags.contains(InstFlags::INVALID_JUMP) {
                     text.push_str(" -> INVALID");
-                } else if data.is_legacy_static_jump() {
+                } else if data.is_static_jump() {
                     let target = data.data as usize;
                     match info.inst_to_block.get(&target) {
                         Some(b) => write!(text, " bb{b}").unwrap(),
@@ -199,9 +199,9 @@ impl<'a> Bytecode<'a> {
             let first = self.inst(first_inst);
 
             // Color based on block terminator.
-            let (fill, border) = if last.is_diverging() && !last.is_legacy_jump() {
+            let (fill, border) = if last.is_diverging() && !last.is_jump() {
                 ("#2d1b2e", "#e94560") // exit blocks: dark red
-            } else if last.is_legacy_jump() {
+            } else if last.is_jump() {
                 ("#1a2340", "#53a8b6") // branching blocks: teal
             } else if first.is_reachable_jumpdest(self.has_dynamic_jumps) {
                 ("#1a2e1a", "#5cdb95") // jump targets: green
@@ -242,7 +242,7 @@ impl<'a> Bytecode<'a> {
             let last = self.inst(last_inst);
 
             // Jump edge.
-            if last.is_legacy_static_jump() && !last.flags.contains(InstFlags::INVALID_JUMP) {
+            if last.is_static_jump() && !last.flags.contains(InstFlags::INVALID_JUMP) {
                 let target = last.data as usize;
                 if let Some(&target_block) = info.inst_to_block.get(&target) {
                     let (label, color) = if last.opcode == op::JUMPI {
@@ -256,7 +256,7 @@ impl<'a> Bytecode<'a> {
                          [label=\"{label}\" color=\"{color}\" fontcolor=\"{color}\"];"
                     )?;
                 }
-            } else if last.is_legacy_jump() && !last.is_legacy_static_jump() {
+            } else if last.is_jump() && !last.is_static_jump() {
                 writeln!(
                     w,
                     "  bb{block_idx} -> dynamic \
