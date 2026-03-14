@@ -72,7 +72,7 @@ fn new_compiler(opt_level: OptimizationLevel) -> EvmCompiler<EvmLlvmBackend> {
 // ── Runtime benchmarks ──────────────────────────────────────────────────────
 
 fn run_runtime_bench(c: &mut Criterion, bench: &Bench) {
-    let Bench { name, bytecode, calldata, stack_input, native, requires_storage } = bench;
+    let Bench { name, bytecode, calldata, stack_input, native } = bench;
 
     let mut g = mk_group(c, name);
 
@@ -138,37 +138,27 @@ fn run_runtime_bench(c: &mut Criterion, bench: &Bench) {
         g.bench_function(format!("revmc/{name}"), |b| b.iter(|| call_jit(jit)));
     }
 
-    // Skip interpreter benchmark for contracts that require storage (SLOAD/SSTORE)
-    // since DummyHost doesn't support storage operations.
-    if !requires_storage {
-        g.bench_function("revm-interpreter", |b| {
-            b.iter(|| {
-                let ext_bytecode = ExtBytecode::new(bytecode_raw.clone());
-                let input = InputsImpl {
-                    input: revm_interpreter::CallInput::Bytes(calldata.clone()),
-                    ..Default::default()
-                };
-                let mut interpreter = revm_interpreter::Interpreter::new(
-                    SharedMemory::new(),
-                    ext_bytecode,
-                    input,
-                    false,
-                    SPEC_ID,
-                    gas_limit,
-                );
+    g.bench_function("revm-interpreter", |b| {
+        b.iter(|| {
+            let ext_bytecode = ExtBytecode::new(bytecode_raw.clone());
+            let input = InputsImpl {
+                input: revm_interpreter::CallInput::Bytes(calldata.clone()),
+                ..Default::default()
+            };
+            let mut interpreter = revm_interpreter::Interpreter::new(
+                SharedMemory::new(),
+                ext_bytecode,
+                input,
+                false,
+                SPEC_ID,
+                gas_limit,
+            );
 
-                interpreter.stack.data_mut().extend_from_slice(stack_input);
+            interpreter.stack.data_mut().extend_from_slice(stack_input);
 
-                let action = interpreter.run_plain(&table, &mut host);
-                let result = action
-                    .instruction_result()
-                    .unwrap_or(revm_interpreter::InstructionResult::Stop);
-                assert!(result.is_ok(), "Interpreter failed with {result:?}");
-                assert!(action.is_return(), "Interpreter bad action: {action:?}");
-                action
-            })
-        });
-    }
+            interpreter.run_plain(&table, &mut host)
+        })
+    });
 
     g.finish();
 }

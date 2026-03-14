@@ -110,7 +110,7 @@ impl RunArgs {
         compiler.frame_pointers(true);
         compiler.debug_assertions(self.debug_assertions);
 
-        let Bench { name, bytecode, calldata, stack_input, native: _, requires_storage: _ } =
+        let Bench { name, bytecode, calldata, stack_input, native: _ } =
             if self.bench_name == "custom" {
                 Bench {
                     name: "custom",
