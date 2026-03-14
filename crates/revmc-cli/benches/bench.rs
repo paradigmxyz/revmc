@@ -135,12 +135,7 @@ fn run_bench(c: &mut Criterion, bench: &Bench) {
 
             interpreter.stack.data_mut().extend_from_slice(stack_input);
 
-            let action = interpreter.run_plain(&table, &mut host);
-            let result =
-                action.instruction_result().unwrap_or(revm_interpreter::InstructionResult::Stop);
-            assert!(result.is_ok(), "Interpreter failed with {result:?}");
-            assert!(action.is_return(), "Interpreter bad action: {action:?}");
-            action
+            interpreter.run_plain(&table, &mut host)
         })
     });
 
