@@ -1,8 +1,6 @@
 #![allow(missing_docs)]
 
-use criterion::{
-    BatchSize, BenchmarkGroup, Criterion, criterion_group, criterion_main, measurement::WallTime,
-};
+use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use revm_bytecode::Bytecode;
 use revm_interpreter::{
     InputsImpl, SharedMemory,
@@ -22,23 +20,25 @@ const SPEC_ID: SpecId = SpecId::OSAKA;
 
 fn bench(c: &mut Criterion) {
     for bench in &revmc_cli::get_benches() {
-        run_compile_bench(c, bench);
-        run_runtime_bench(c, bench);
+        run_bench(c, bench);
     }
 }
 
-// ── Compile-time benchmarks ─────────────────────────────────────────────────
+fn run_bench(c: &mut Criterion, bench: &Bench) {
+    let Bench { name, bytecode, calldata, stack_input, native } = bench;
 
-fn run_compile_bench(c: &mut Criterion, bench: &Bench) {
-    let name = bench.name;
-    let bytecode = &bench.bytecode;
-
-    let mut g = c.benchmark_group(format!("compile/{name}"));
+    let mut g = c.benchmark_group(*name);
     g.sample_size(10);
     g.warm_up_time(Duration::from_secs(1));
     g.measurement_time(Duration::from_secs(5));
 
-    g.bench_function("translate", |b| {
+    let gas_limit = 1_000_000_000;
+    let calldata: revmc::primitives::Bytes = calldata.clone().into();
+    let bytecode_raw = Bytecode::new_raw(revmc::primitives::Bytes::copy_from_slice(bytecode));
+
+    // ── Compile-time ────────────────────────────────────────────────────
+
+    g.bench_function("compile/translate", |b| {
         b.iter_batched(
             || new_compiler(OptimizationLevel::None),
             |mut compiler| {
@@ -48,7 +48,7 @@ fn run_compile_bench(c: &mut Criterion, bench: &Bench) {
         )
     });
 
-    g.bench_function("jit", |b| {
+    g.bench_function("compile/jit", |b| {
         b.iter_batched(
             || {
                 let mut compiler = new_compiler(OptimizationLevel::Aggressive);
@@ -62,32 +62,11 @@ fn run_compile_bench(c: &mut Criterion, bench: &Bench) {
         )
     });
 
-    g.finish();
-}
-
-fn new_compiler(opt_level: OptimizationLevel) -> EvmCompiler<EvmLlvmBackend> {
-    let backend = EvmLlvmBackend::new(false, opt_level).unwrap();
-    EvmCompiler::new(backend)
-}
-
-// ── Runtime benchmarks ──────────────────────────────────────────────────────
-
-fn run_runtime_bench(c: &mut Criterion, bench: &Bench) {
-    let Bench { name, bytecode, calldata, stack_input, native } = bench;
-
-    let mut g = mk_group(c, name);
-
-    let gas_limit = 1_000_000_000;
-
-    let calldata: revmc::primitives::Bytes = calldata.clone().into();
-
-    let bytecode_raw = Bytecode::new_raw(revmc::primitives::Bytes::copy_from_slice(bytecode));
+    // ── Runtime ─────────────────────────────────────────────────────────
 
     let mut host = BenchHost::new(SPEC_ID);
-
     let table = instruction_table::<EthInterpreter, BenchHost>();
 
-    // Set up the compiler.
     let opt_level = revmc::OptimizationLevel::Aggressive;
     let backend = EvmLlvmBackend::new(false, opt_level).unwrap();
     let mut compiler = EvmCompiler::new(backend);
@@ -126,8 +105,6 @@ fn run_runtime_bench(c: &mut Criterion, bench: &Bench) {
     let jit_matrix = [
         ("default", (true, true)),
         ("no_gas", (false, true)),
-        // ("no_stack", (true, false)),
-        // ("no_gas_no_stack", (false, false)),
     ];
     let jit_ids = jit_matrix.map(|(name, (gas, stack))| {
         compiler.gas_metering(gas);
@@ -170,12 +147,9 @@ fn run_runtime_bench(c: &mut Criterion, bench: &Bench) {
     g.finish();
 }
 
-fn mk_group<'a>(c: &'a mut Criterion, name: &str) -> BenchmarkGroup<'a, WallTime> {
-    let mut g = c.benchmark_group(name);
-    g.sample_size(20);
-    g.warm_up_time(Duration::from_secs(2));
-    g.measurement_time(Duration::from_secs(5));
-    g
+fn new_compiler(opt_level: OptimizationLevel) -> EvmCompiler<EvmLlvmBackend> {
+    let backend = EvmLlvmBackend::new(false, opt_level).unwrap();
+    EvmCompiler::new(backend)
 }
 
 // ── Minimal Host with storage support ───────────────────────────────────────
