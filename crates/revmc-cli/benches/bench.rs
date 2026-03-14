@@ -20,6 +20,10 @@ const SPEC_ID: SpecId = SpecId::OSAKA;
 
 fn bench(c: &mut Criterion) {
     for bench in &revmc_cli::get_benches() {
+        // Skip snailtracer because it's too slow for CI benchmarks.
+        if bench.name == "snailtracer" {
+            continue;
+        }
         run_bench(c, bench);
     }
 }
@@ -32,7 +36,7 @@ fn run_bench(c: &mut Criterion, bench: &Bench) {
     g.warm_up_time(Duration::from_secs(1));
     g.measurement_time(Duration::from_secs(5));
 
-    let gas_limit = 1_000_000_000;
+    let gas_limit = u64::MAX / 2;
     let calldata: revmc::primitives::Bytes = calldata.clone().into();
     let bytecode_raw = Bytecode::new_raw(revmc::primitives::Bytes::copy_from_slice(bytecode));
 
