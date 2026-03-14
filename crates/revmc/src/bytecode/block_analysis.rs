@@ -44,6 +44,16 @@ enum BlockState {
 }
 
 impl BlockState {
+    /// Force this state to Conflict. Returns `true` if the state changed.
+    fn conflict(&mut self) -> bool {
+        if matches!(self, Self::Conflict) {
+            false
+        } else {
+            *self = Self::Conflict;
+            true
+        }
+    }
+
     /// Join another incoming state into this one. Returns `true` if the state changed.
     fn join(&mut self, incoming: &[AbsValue]) -> bool {
         match self {
@@ -98,19 +108,6 @@ enum JumpTarget {
     Top,
 }
 
-impl JumpTarget {
-    /// Join another observed target into this one.
-    fn join(&mut self, other: &Self) {
-        *self = match (&*self, other) {
-            (Self::Bottom, x) => x.clone(),
-            (x, Self::Bottom) => x.clone(),
-            (Self::Const(a), Self::Const(b)) if a == b => Self::Const(*a),
-            (Self::Invalid, Self::Invalid) => Self::Invalid,
-            _ => Self::Top,
-        };
-    }
-}
-
 /// CFG for abstract interpretation.
 struct Cfg {
     blocks: Vec<BasicBlock>,
@@ -137,9 +134,12 @@ impl Bytecode<'_> {
             return;
         }
 
+        // Check if any jump remains unresolved (Top).
+        let has_top_jump = resolved.iter().any(|(_, t)| matches!(t, JumpTarget::Top));
+
         // Commit resolved targets.
         let mut newly_resolved = 0u32;
-        for (jump_inst, target) in resolved {
+        for &(jump_inst, ref target) in &resolved {
             let jump = &self.insts[jump_inst];
             // Skip if already resolved by static_jump_analysis.
             if jump.flags.contains(InstFlags::STATIC_JUMP) {
@@ -148,6 +148,7 @@ impl Bytecode<'_> {
 
             match target {
                 JumpTarget::Const(target_inst) => {
+                    let target_inst = *target_inst;
                     debug_assert_eq!(
                         self.insts[target_inst].opcode,
                         op::JUMPDEST,
@@ -168,11 +169,17 @@ impl Bytecode<'_> {
                     newly_resolved += 1;
                     trace!(jump_inst, "resolved invalid jump");
                 }
-                JumpTarget::Bottom => {
-                    // Unreachable jump — mark as invalid so it doesn't keep
-                    // `has_dynamic_jumps` set and force a dynamic jump table.
+                JumpTarget::Bottom if !has_top_jump => {
+                    // Truly unreachable: no unresolved jumps remain, so this
+                    // code cannot be reached at runtime. Mark as invalid.
                     self.insts[jump_inst].flags |= InstFlags::STATIC_JUMP | InstFlags::INVALID_JUMP;
                     trace!(jump_inst, "unreachable jump");
+                }
+                JumpTarget::Bottom => {
+                    // Unreachable according to the analysis, but there are
+                    // unresolved (Top) jumps that might reach this code at
+                    // runtime. Leave as-is.
+                    trace!(jump_inst, "unreachable jump (not marking, has_top_jump)");
                 }
                 JumpTarget::Top => {}
             }
@@ -288,63 +295,94 @@ impl Bytecode<'_> {
     fn run_abstract_interp(&self, cfg: &Cfg) -> (Vec<(usize, JumpTarget)>, usize) {
         let num_blocks = cfg.blocks.len();
 
-        // Collect unresolved jumps and their indices.
-        let mut jump_inst_to_idx = rustc_hash::FxHashMap::default();
-        let mut jump_targets: Vec<(usize, JumpTarget)> = Vec::new();
+        // Collect unresolved jumps.
+        let mut jump_insts: Vec<usize> = Vec::new();
         for (i, inst) in self.insts.iter().enumerate() {
             if inst.is_legacy_jump() && !inst.flags.contains(InstFlags::STATIC_JUMP) {
-                let idx = jump_targets.len();
-                jump_targets.push((i, JumpTarget::Bottom));
-                jump_inst_to_idx.insert(i, idx);
+                jump_insts.push(i);
             }
         }
 
-        if jump_targets.is_empty() {
-            return (jump_targets, 0);
+        if jump_insts.is_empty() {
+            return (Vec::new(), 0);
         }
 
-        // Phase 1: Run optimistically without widening to discover targets.
+        // Run fixpoint to compute converged block states.
         let mut block_states: Vec<BlockState> = vec![BlockState::Bottom; num_blocks];
         block_states[0] = BlockState::Known(Vec::new());
-        self.run_fixpoint(
-            cfg,
-            &mut block_states,
-            &mut jump_targets,
-            &jump_inst_to_idx,
-            &vec![false; num_blocks],
-        );
+        let _discovered_edges = self.run_fixpoint(cfg, &mut block_states, &vec![false; num_blocks]);
 
-        // Invalidate resolutions that flowed through conflicted blocks.
-        // A conflict means multiple predecessors had incompatible stack heights,
-        // so any resolution that depends on flow through that block is unsound
-        // (the optimistic pass may have seen only one predecessor's values).
-        let mut tainted = vec![false; num_blocks];
-        for (bid, state) in block_states.iter().enumerate() {
-            if matches!(state, BlockState::Conflict) {
-                tainted[bid] = true;
-            }
-        }
-        // Propagate taint to successors.
-        let mut changed = true;
-        while changed {
-            changed = false;
-            for bid in 0..num_blocks {
-                if !tainted[bid] {
-                    continue;
-                }
-                for &succ in &cfg.blocks[bid].succs {
-                    if !tainted[succ] {
-                        tainted[succ] = true;
-                        changed = true;
+        // After convergence, resolve each dynamic jump using the final block states.
+        // This avoids the problem of the fixpoint accumulating stale partial results.
+        let mut jump_targets: Vec<(usize, JumpTarget)> = Vec::new();
+        let mut has_top_jump = false;
+        for &jump_inst in &jump_insts {
+            let bid = cfg.inst_to_block[jump_inst];
+            let target = if bid >= num_blocks || bid == usize::MAX {
+                JumpTarget::Bottom
+            } else {
+                match &block_states[bid] {
+                    BlockState::Bottom => JumpTarget::Bottom,
+                    BlockState::Conflict => JumpTarget::Top,
+                    BlockState::Known(input) => {
+                        let block = &cfg.blocks[bid];
+                        // Interpret up to (but not including) the terminator to get the
+                        // pre-jump stack state.
+                        let pre_jump_stack = if block.start == block.end {
+                            input.clone()
+                        } else {
+                            self.interpret_block(block.start, block.end - 1, input)
+                                .unwrap_or_default()
+                        };
+                        let target_val = pre_jump_stack.last().cloned();
+                        match target_val {
+                            Some(AbsValue::Const(val)) => match usize::try_from(val) {
+                                Ok(target_pc) if self.is_valid_jump(target_pc) => {
+                                    JumpTarget::Const(self.pc_to_inst(target_pc))
+                                }
+                                _ => JumpTarget::Invalid,
+                            },
+                            Some(AbsValue::Top) => JumpTarget::Top,
+                            None => JumpTarget::Top,
+                        }
                     }
                 }
+            };
+            if matches!(target, JumpTarget::Top) {
+                has_top_jump = true;
             }
+            jump_targets.push((jump_inst, target));
         }
-        // Invalidate any resolution in a tainted block.
-        for (inst, target) in jump_targets.iter_mut() {
-            if matches!(target, JumpTarget::Const(_) | JumpTarget::Invalid) {
+
+        // Invalidate resolutions that may be unsound due to incomplete analysis.
+        //
+        // When there are Top (unresolved) or Conflict dynamic jumps, some blocks
+        // may have incomplete input states because:
+        // 1. A Top jump discovered only a subset of its targets during the fixpoint.
+        // 2. A Conflict block suppressed propagation, leaving successor blocks at Bottom
+        //    (unreachable) even though they ARE reachable at runtime.
+        //
+        // A Const/Invalid resolution is invalidated if the block containing the
+        // resolved jump has a Bottom predecessor that starts with a JUMPDEST.
+        // Such a predecessor could be reached at runtime by any Top (unresolved)
+        // jump, making the resolved jump's input state potentially incomplete.
+        if has_top_jump {
+            for (inst, target) in jump_targets.iter_mut() {
+                if !matches!(target, JumpTarget::Const(_) | JumpTarget::Invalid) {
+                    continue;
+                }
                 let bid = cfg.inst_to_block[*inst];
-                if bid < num_blocks && tainted[bid] {
+                if bid >= num_blocks || bid == usize::MAX {
+                    continue;
+                }
+                let has_suspect_pred = cfg.blocks[bid].preds.iter().any(|&pred| {
+                    if !matches!(block_states[pred], BlockState::Bottom) {
+                        return false;
+                    }
+                    let pred_start = cfg.blocks[pred].start;
+                    self.insts[pred_start].is_jumpdest()
+                });
+                if has_suspect_pred {
                     *target = JumpTarget::Top;
                 }
             }
@@ -358,20 +396,25 @@ impl Bytecode<'_> {
         (jump_targets, count)
     }
 
-    /// Run a single fixpoint pass of abstract interpretation.
+    /// Run a worklist-based fixpoint to compute abstract block states.
+    ///
+    /// Returns the discovered dynamic-jump target edges per block.
     fn run_fixpoint(
         &self,
         cfg: &Cfg,
         block_states: &mut [BlockState],
-        jump_targets: &mut [(usize, JumpTarget)],
-        jump_inst_to_idx: &rustc_hash::FxHashMap<usize, usize>,
         widen: &[bool],
-    ) {
+    ) -> Vec<Vec<BlockId>> {
         let num_blocks = cfg.blocks.len();
         let mut worklist = VecDeque::new();
         worklist.push_back(0usize);
         let mut in_worklist = vec![false; num_blocks];
         in_worklist[0] = true;
+
+        // Persistent set of discovered dynamic-jump target edges per block.
+        // Once a dynamic jump in block `bid` resolves to a target block, that
+        // edge is kept for all subsequent visits so updated states propagate.
+        let mut discovered_jump_edges: Vec<Vec<BlockId>> = vec![Vec::new(); num_blocks];
 
         let max_iterations = num_blocks * 8;
         let mut iterations = 0;
@@ -387,7 +430,24 @@ impl Bytecode<'_> {
             let input = match &block_states[bid] {
                 BlockState::Known(s) => s.clone(),
                 BlockState::Bottom => continue,
-                BlockState::Conflict => continue,
+                BlockState::Conflict => {
+                    // Propagate Conflict to all successors so they know their
+                    // state may be incomplete.
+                    let block = &cfg.blocks[bid];
+                    for &succ in &block.succs {
+                        if block_states[succ].conflict() && !in_worklist[succ] {
+                            worklist.push_back(succ);
+                            in_worklist[succ] = true;
+                        }
+                    }
+                    for &succ in &discovered_jump_edges[bid] {
+                        if block_states[succ].conflict() && !in_worklist[succ] {
+                            worklist.push_back(succ);
+                            in_worklist[succ] = true;
+                        }
+                    }
+                    continue;
+                }
             };
 
             let block = &cfg.blocks[bid];
@@ -404,9 +464,8 @@ impl Bytecode<'_> {
                 None => continue,
             };
 
+            // For dynamic jumps, discover target edges to propagate state through.
             let term = &self.insts[block.end];
-            let mut extra_succs: Vec<BlockId> = Vec::new();
-
             if term.is_legacy_jump() && !term.flags.contains(InstFlags::STATIC_JUMP) {
                 let pre_jump_stack = if block.start == block.end {
                     input.clone()
@@ -414,46 +473,22 @@ impl Bytecode<'_> {
                     self.interpret_block(block.start, block.end - 1, &input).unwrap_or_default()
                 };
 
-                let target_val = pre_jump_stack.last().cloned();
-
-                let resolved = match target_val {
-                    Some(AbsValue::Const(val)) => match usize::try_from(val) {
-                        Ok(target_pc) if self.is_valid_jump(target_pc) => {
-                            let target_inst = self.pc_to_inst(target_pc);
-                            JumpTarget::Const(target_inst)
-                        }
-                        _ => JumpTarget::Invalid,
-                    },
-                    Some(AbsValue::Top) => JumpTarget::Top,
-                    None => JumpTarget::Top,
-                };
-
-                if let JumpTarget::Const(target_inst) = &resolved {
-                    let target_block = cfg.inst_to_block[*target_inst];
-                    if target_block != usize::MAX && target_block < num_blocks {
-                        extra_succs.push(target_block);
+                if let Some(AbsValue::Const(val)) = pre_jump_stack.last()
+                    && let Ok(target_pc) = usize::try_from(*val)
+                    && self.is_valid_jump(target_pc)
+                {
+                    let ti = self.pc_to_inst(target_pc);
+                    let tb = cfg.inst_to_block[ti];
+                    if tb != usize::MAX
+                        && tb < num_blocks
+                        && !discovered_jump_edges[bid].contains(&tb)
+                    {
+                        discovered_jump_edges[bid].push(tb);
                     }
-                }
-
-                if term.opcode == op::JUMPI {
-                    let cond_val = pre_jump_stack
-                        .len()
-                        .checked_sub(2)
-                        .and_then(|i| pre_jump_stack.get(i).cloned());
-                    match cond_val {
-                        Some(AbsValue::Const(v)) if v.is_zero() => {
-                            extra_succs.clear();
-                        }
-                        Some(AbsValue::Const(_)) => {}
-                        _ => {}
-                    }
-                }
-
-                if let Some(&idx) = jump_inst_to_idx.get(&block.end) {
-                    jump_targets[idx].1.join(&resolved);
                 }
             }
 
+            // Propagate to static CFG successors.
             for &succ in &block.succs {
                 if block_states[succ].join(&output) && !in_worklist[succ] {
                     worklist.push_back(succ);
@@ -461,13 +496,16 @@ impl Bytecode<'_> {
                 }
             }
 
-            for succ in extra_succs {
+            // Propagate to all discovered dynamic-jump target blocks.
+            for &succ in &discovered_jump_edges[bid] {
                 if block_states[succ].join(&output) && !in_worklist[succ] {
                     worklist.push_back(succ);
                     in_worklist[succ] = true;
                 }
             }
         }
+
+        discovered_jump_edges
     }
 
     /// Interpret a sequence of instructions on the abstract stack.
@@ -735,6 +773,22 @@ mod tests {
         // should NOT incorrectly resolve any jumps (all dynamic jumps should
         // remain dynamic or be correctly resolved).
         eprintln!("{bytecode}");
+    }
+
+    #[test]
+    fn trans_storage_ok() {
+        // Test contracts from transStorageOK state test.
+        // These use TLOAD-based return addresses.
+        let contracts = [
+            "366012575b600b5f6020565b5f5260205ff35b601c6160a75f6024565b6004565b5c90565b5d56",
+            "60106001600a5f6012565b015f6016565b005b5c90565b5d56",
+            "3033146033575b303303600e57005b601b5f35806001555f608d565b5f80808080305af1600255602e60016089565b600355005b603a5f6089565b8015608757604a600182035f608d565b5f80808080305af1156083576001606191035f608d565b5f80808080305af115608357607f60016078816089565b016001608d565b6006565b5f80fd5b005b5c90565b5d56",
+            "60065f601d565b5f5560106001601d565b6001555f80808080335af1005b5c9056",
+        ];
+        for hex in &contracts {
+            let bytecode = analyze_bytecode(hex);
+            eprintln!("{bytecode}");
+        }
     }
 
     #[test]
