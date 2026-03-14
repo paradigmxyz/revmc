@@ -51,8 +51,7 @@ fn run_compile_bench(c: &mut Criterion, bench: &Bench) {
         b.iter_batched(
             || {
                 let mut compiler = new_compiler(OptimizationLevel::Aggressive);
-                let id =
-                    compiler.translate(name, bytecode.as_slice(), SPEC_ID).expect("translate");
+                let id = compiler.translate(name, bytecode.as_slice(), SPEC_ID).expect("translate");
                 (compiler, id)
             },
             |(mut compiler, id)| unsafe {
