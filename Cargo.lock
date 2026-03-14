@@ -3112,6 +3112,7 @@ dependencies = [
  "clap",
  "color-eyre",
  "criterion",
+ "eyre",
  "hex",
  "libloading",
  "lz-str",
@@ -3976,6 +3977,7 @@ checksum = "a4f6fc3baeac5d86ab90c772e9e30620fc653bf1864295029921a15ef478e6a5"
 dependencies = [
  "loom",
  "once_cell",
+ "rustc-demangle",
  "tracy-client-sys",
 ]
 
