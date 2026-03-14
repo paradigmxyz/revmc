@@ -520,7 +520,10 @@ impl<B: Backend> EvmCompiler<B> {
         let verify = r.verify.get();
         let optimize = r.optimize.get();
         let total = parse + translate + finalize;
-        let s = format!(
+        let file = fs::File::create(dump_dir.join("remarks.txt"))?;
+        let mut w = io::BufWriter::new(file);
+        write!(
+            w,
             "\
 Compilation remarks
 ===================
@@ -531,10 +534,10 @@ finalize:   {finalize:>11.3?}
 - verify:   {verify:>11.3?}
 - optimize: {optimize:>11.3?}
 
-total:     {total:>11.3?}\
+total:      {total:>11.3?}
 "
-        );
-        fs::write(dump_dir.join("remarks.txt"), s)?;
+        )?;
+        w.flush()?;
         Ok(())
     }
 
