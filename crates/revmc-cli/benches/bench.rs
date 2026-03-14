@@ -1,7 +1,7 @@
 #![allow(missing_docs)]
 
 use criterion::{
-    BenchmarkGroup, Criterion, criterion_group, criterion_main, measurement::WallTime,
+    BatchSize, BenchmarkGroup, Criterion, criterion_group, criterion_main, measurement::WallTime,
 };
 use revm_bytecode::Bytecode;
 use revm_interpreter::{
@@ -11,7 +11,8 @@ use revm_interpreter::{
     interpreter::{EthInterpreter, ExtBytecode},
 };
 use revmc::{
-    EvmCompiler, EvmCompilerFn, EvmContext, EvmLlvmBackend, EvmStack, primitives::hardfork::SpecId,
+    EvmCompiler, EvmCompilerFn, EvmContext, EvmLlvmBackend, EvmStack, OptimizationLevel,
+    primitives::hardfork::SpecId,
 };
 use revmc_cli::Bench;
 use std::time::Duration;
@@ -20,11 +21,58 @@ const SPEC_ID: SpecId = SpecId::OSAKA;
 
 fn bench(c: &mut Criterion) {
     for bench in &revmc_cli::get_benches() {
-        run_bench(c, bench);
+        run_compile_bench(c, bench);
+        run_runtime_bench(c, bench);
     }
 }
 
-fn run_bench(c: &mut Criterion, bench: &Bench) {
+// ── Compile-time benchmarks ─────────────────────────────────────────────────
+
+fn run_compile_bench(c: &mut Criterion, bench: &Bench) {
+    let name = bench.name;
+    let bytecode = &bench.bytecode;
+
+    let mut g = c.benchmark_group(format!("compile/{name}"));
+    g.sample_size(10);
+    g.warm_up_time(Duration::from_secs(1));
+    g.measurement_time(Duration::from_secs(5));
+
+    g.bench_function("translate", |b| {
+        b.iter_batched(
+            || new_compiler(OptimizationLevel::None),
+            |mut compiler| {
+                compiler.translate(name, bytecode.as_slice(), SPEC_ID).unwrap();
+            },
+            BatchSize::PerIteration,
+        )
+    });
+
+    g.bench_function("jit", |b| {
+        b.iter_batched(
+            || {
+                let mut compiler = new_compiler(OptimizationLevel::Aggressive);
+                let id =
+                    compiler.translate(name, bytecode.as_slice(), SPEC_ID).expect("translate");
+                (compiler, id)
+            },
+            |(mut compiler, id)| unsafe {
+                compiler.jit_function(id).unwrap();
+            },
+            BatchSize::PerIteration,
+        )
+    });
+
+    g.finish();
+}
+
+fn new_compiler(opt_level: OptimizationLevel) -> EvmCompiler<EvmLlvmBackend> {
+    let backend = EvmLlvmBackend::new(false, opt_level).unwrap();
+    EvmCompiler::new(backend)
+}
+
+// ── Runtime benchmarks ──────────────────────────────────────────────────────
+
+fn run_runtime_bench(c: &mut Criterion, bench: &Bench) {
     let Bench { name, bytecode, calldata, stack_input, native, requires_storage } = bench;
 
     let mut g = mk_group(c, name);

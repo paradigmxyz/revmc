@@ -74,13 +74,6 @@ harness = false
 doc = false
 
 [[bench]]
-name = "bench_compile"
-path = "benches/bench_compile.rs"
-required-features = ["llvm"]
-harness = false
-doc = false
-
-[[bench]]
 name = "bench_curve"
 path = "benches/bench_curve.rs"
 required-features = ["llvm"]
