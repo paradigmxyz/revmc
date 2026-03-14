@@ -18,8 +18,16 @@ use std::{collections::HashMap, time::Duration};
 
 const SPEC_ID: SpecId = SpecId::OSAKA;
 
+/// Benchmarks that are too slow for CI due to large bytecode (LLVM compilation time).
+const SKIP_COMPILE: &[&str] = &["snailtracer", "seaport", "fiat_token", "uniswap_v2_pair"];
+/// Benchmarks that are too slow for CI entirely (runtime is also very slow).
+const SKIP_ALL: &[&str] = &["seaport"];
+
 fn bench(c: &mut Criterion) {
     for bench in &revmc_cli::get_benches() {
+        if SKIP_ALL.contains(&bench.name) {
+            continue;
+        }
         run_bench(c, bench);
     }
 }
@@ -37,9 +45,8 @@ fn run_bench(c: &mut Criterion, bench: &Bench) {
     let bytecode_raw = Bytecode::new_raw(revmc::primitives::Bytes::copy_from_slice(bytecode));
 
     // ── Compile-time ────────────────────────────────────────────────────
-    // Skip snailtracer compile-time benchmarks because they're too slow.
 
-    if *name != "snailtracer" {
+    if !SKIP_COMPILE.contains(name) {
         g.bench_function("compile/translate", |b| {
             b.iter_batched(
                 || new_compiler(OptimizationLevel::None),
