@@ -201,6 +201,8 @@ builtins! {
 
         let ecx = size_and_align::<revmc_context::EvmContext<'static>>();
 
+        let word = || size_and_align::<revmc_context::EvmWord>();
+
         let sp_dyn = size_and_align2(None, core::mem::align_of::<revmc_context::EvmWord>());
 
         let mut sp = sp_dyn.clone();
@@ -218,19 +220,19 @@ builtins! {
 
     Panic          = __revmc_builtin_panic(ptr, usize) None,
 
-    UDiv           = __revmc_builtin_udiv(@[sp] ptr) None,
-    URem           = __revmc_builtin_urem(@[sp] ptr) None,
-    SDiv           = __revmc_builtin_sdiv(@[sp] ptr) None,
-    SRem           = __revmc_builtin_srem(@[sp] ptr) None,
-    AddMod         = __revmc_builtin_addmod(@[sp] ptr) None,
-    MulMod         = __revmc_builtin_mulmod(@[sp] ptr) None,
-    Exp            = __revmc_builtin_exp(@[ecx] ptr, @[sp] ptr) Some(u8),
-    Keccak256      = __revmc_builtin_keccak256(@[ecx] ptr, @[sp] ptr) Some(u8),
+    UDiv           = __revmc_builtin_udiv(@[word()] ptr, @[word()] ptr) None,
+    URem           = __revmc_builtin_urem(@[word()] ptr, @[word()] ptr) None,
+    SDiv           = __revmc_builtin_sdiv(@[word()] ptr, @[word()] ptr) None,
+    SRem           = __revmc_builtin_srem(@[word()] ptr, @[word()] ptr) None,
+    AddMod         = __revmc_builtin_addmod(@[word()] ptr, @[word()] ptr, @[word()] ptr) None,
+    MulMod         = __revmc_builtin_mulmod(@[word()] ptr, @[word()] ptr, @[word()] ptr) None,
+    Exp            = __revmc_builtin_exp(@[ecx] ptr, @[word()] ptr, @[word()] ptr) Some(u8),
+    Keccak256      = __revmc_builtin_keccak256(@[ecx] ptr, @[word()] ptr, @[word()] ptr) Some(u8),
     Balance        = __revmc_builtin_balance(@[ecx] ptr, @[sp] ptr, u8) Some(u8),
     Origin         = __revmc_builtin_origin(@[ecx] ptr, @[sp] ptr) None,
     CallDataLoad   = __revmc_builtin_calldataload(@[ecx] ptr, @[sp] ptr) None,
     CallDataSize   = __revmc_builtin_calldatasize(@[ecx] ptr) Some(usize),
-    CallDataCopy   = __revmc_builtin_calldatacopy(@[ecx] ptr, @[sp] ptr) Some(u8),
+    CallDataCopy   = __revmc_builtin_calldatacopy(@[ecx] ptr, @[word()] ptr, @[word()] ptr, @[word()] ptr) Some(u8),
     CodeCopy       = __revmc_builtin_codecopy(@[ecx] ptr, @[sp] ptr) Some(u8),
     GasPrice       = __revmc_builtin_gas_price(@[ecx] ptr, @[sp] ptr) None,
     ExtCodeSize    = __revmc_builtin_extcodesize(@[ecx] ptr, @[sp] ptr, u8) Some(u8),
@@ -249,7 +251,7 @@ builtins! {
     BlobHash       = __revmc_builtin_blob_hash(@[ecx] ptr, @[sp] ptr) None,
     BlobBaseFee    = __revmc_builtin_blob_base_fee(@[ecx] ptr, @[sp] ptr) None,
     Sload          = __revmc_builtin_sload(@[ecx] ptr, @[sp] ptr, u8) Some(u8),
-    Sstore         = __revmc_builtin_sstore(@[ecx] ptr, @[sp] ptr, u8) Some(u8),
+    Sstore         = __revmc_builtin_sstore(@[ecx] ptr, @[word()] ptr, @[word()] ptr, u8) Some(u8),
     Msize          = __revmc_builtin_msize(@[ecx] ptr) Some(usize),
     Tstore         = __revmc_builtin_tstore(@[ecx] ptr, @[sp] ptr) Some(u8),
     Tload          = __revmc_builtin_tload(@[ecx] ptr, @[sp] ptr) None,
@@ -258,11 +260,11 @@ builtins! {
 
     Create         = __revmc_builtin_create(@[ecx] ptr, @[sp_dyn] ptr, u8, u8) Some(u8),
     Call           = __revmc_builtin_call(@[ecx] ptr, @[sp_dyn] ptr, u8, u8) Some(u8),
-    DoReturn       = __revmc_builtin_do_return(@[ecx] ptr, @[sp] ptr, u8) Some(u8),
+    DoReturn       = __revmc_builtin_do_return(@[ecx] ptr, @[word()] ptr, @[word()] ptr, u8) Some(u8),
     SelfDestruct   = __revmc_builtin_selfdestruct(@[ecx] ptr, @[sp] ptr, u8) Some(u8),
 
     ResizeMemory   = __revmc_builtin_resize_memory(@[ecx] ptr, usize) Some(u8),
-    Mload          = __revmc_builtin_mload(@[ecx] ptr, @[sp] ptr) Some(u8),
-    Mstore         = __revmc_builtin_mstore(@[ecx] ptr, @[sp] ptr) Some(u8),
-    Mstore8        = __revmc_builtin_mstore8(@[ecx] ptr, @[sp] ptr) Some(u8),
+    Mload          = __revmc_builtin_mload(@[ecx] ptr, @[word()] ptr) Some(u8),
+    Mstore         = __revmc_builtin_mstore(@[ecx] ptr, @[word()] ptr, @[word()] ptr) Some(u8),
+    Mstore8        = __revmc_builtin_mstore8(@[ecx] ptr, @[word()] ptr, @[word()] ptr) Some(u8),
 }

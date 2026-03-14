@@ -669,32 +669,32 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             op::MUL => binop!(imul),
             op::SUB => binop!(isub),
             op::DIV => {
-                let sp = self.sp_after_inputs();
-                let _ = self.call_builtin(Builtin::UDiv, &[sp]);
+                let [a, b] = self.sp_words();
+                let _ = self.call_builtin(Builtin::UDiv, &[a, b]);
             }
             op::SDIV => {
-                let sp = self.sp_after_inputs();
-                let _ = self.call_builtin(Builtin::SDiv, &[sp]);
+                let [a, b] = self.sp_words();
+                let _ = self.call_builtin(Builtin::SDiv, &[a, b]);
             }
             op::MOD => {
-                let sp = self.sp_after_inputs();
-                let _ = self.call_builtin(Builtin::URem, &[sp]);
+                let [a, b] = self.sp_words();
+                let _ = self.call_builtin(Builtin::URem, &[a, b]);
             }
             op::SMOD => {
-                let sp = self.sp_after_inputs();
-                let _ = self.call_builtin(Builtin::SRem, &[sp]);
+                let [a, b] = self.sp_words();
+                let _ = self.call_builtin(Builtin::SRem, &[a, b]);
             }
             op::ADDMOD => {
-                let sp = self.sp_after_inputs();
-                let _ = self.call_builtin(Builtin::AddMod, &[sp]);
+                let [a, b, c] = self.sp_words();
+                let _ = self.call_builtin(Builtin::AddMod, &[a, b, c]);
             }
             op::MULMOD => {
-                let sp = self.sp_after_inputs();
-                let _ = self.call_builtin(Builtin::MulMod, &[sp]);
+                let [a, b, c] = self.sp_words();
+                let _ = self.call_builtin(Builtin::MulMod, &[a, b, c]);
             }
             op::EXP => {
-                let sp = self.sp_after_inputs();
-                self.call_fallible_builtin(Builtin::Exp, &[self.ecx, sp]);
+                let [a, b] = self.sp_words();
+                self.call_fallible_builtin(Builtin::Exp, &[self.ecx, a, b]);
             }
             op::SIGNEXTEND => {
                 let [ext, x] = self.popn();
@@ -743,8 +743,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             op::CLZ => unop!(clz),
 
             op::KECCAK256 => {
-                let sp = self.sp_after_inputs();
-                self.call_fallible_builtin(Builtin::Keccak256, &[self.ecx, sp]);
+                let [a, b] = self.sp_words();
+                self.call_fallible_builtin(Builtin::Keccak256, &[self.ecx, a, b]);
             }
 
             op::ADDRESS => {
@@ -775,8 +775,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 self.push(size);
             }
             op::CALLDATACOPY => {
-                let sp = self.sp_after_inputs();
-                self.call_fallible_builtin(Builtin::CallDataCopy, &[self.ecx, sp]);
+                let [a, b, c] = self.sp_words();
+                self.call_fallible_builtin(Builtin::CallDataCopy, &[self.ecx, a, b, c]);
             }
             op::CODESIZE => {
                 let len = self.bcx.iconst(self.word_type, self.bytecode.code.len() as i64);
@@ -862,26 +862,26 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
             op::POP => { /* Already handled in stack_io */ }
             op::MLOAD => {
-                let sp = self.sp_after_inputs();
-                self.call_fallible_builtin(Builtin::Mload, &[self.ecx, sp]);
+                let [a] = self.sp_words();
+                self.call_fallible_builtin(Builtin::Mload, &[self.ecx, a]);
             }
             op::MSTORE => {
-                let sp = self.sp_after_inputs();
-                self.call_fallible_builtin(Builtin::Mstore, &[self.ecx, sp]);
+                let [a, b] = self.sp_words();
+                self.call_fallible_builtin(Builtin::Mstore, &[self.ecx, a, b]);
             }
             op::MSTORE8 => {
-                let sp = self.sp_after_inputs();
-                self.call_fallible_builtin(Builtin::Mstore8, &[self.ecx, sp]);
+                let [a, b] = self.sp_words();
+                self.call_fallible_builtin(Builtin::Mstore8, &[self.ecx, a, b]);
             }
             op::SLOAD => {
-                let sp = self.sp_after_inputs();
+                let [a] = self.sp_words();
                 let spec_id = self.const_spec_id();
-                self.call_fallible_builtin(Builtin::Sload, &[self.ecx, sp, spec_id]);
+                self.call_fallible_builtin(Builtin::Sload, &[self.ecx, a, spec_id]);
             }
             op::SSTORE => {
-                let sp = self.sp_after_inputs();
+                let [a, b] = self.sp_words();
                 let spec_id = self.const_spec_id();
-                self.call_fallible_builtin(Builtin::Sstore, &[self.ecx, sp, spec_id]);
+                self.call_fallible_builtin(Builtin::Sstore, &[self.ecx, a, b, spec_id]);
             }
             op::JUMP | op::JUMPI => {
                 let is_invalid = data.flags.contains(InstFlags::INVALID_JUMP);
@@ -1109,9 +1109,9 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
     /// `RETURN` or `REVERT` instruction.
     fn return_common(&mut self, ir: InstructionResult) {
-        let sp = self.sp_after_inputs();
+        let [a, b] = self.sp_words();
         let ir_const = self.bcx.iconst(self.i8_type, ir as i64);
-        self.call_fallible_builtin(Builtin::DoReturn, &[self.ecx, sp, ir_const]);
+        self.call_fallible_builtin(Builtin::DoReturn, &[self.ecx, a, b, ir_const]);
         self.build_return_imm(ir);
     }
 
@@ -1218,6 +1218,21 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             len = self.bcx.isub_imm(len, inputs as i64);
         }
         self.sp_at(len)
+    }
+
+    /// Returns individual stack word pointers starting from `sp_after_inputs()`, in reverse
+    /// order (top of stack first) to match the `rev!` macro convention used by builtins.
+    fn sp_words<const N: usize>(&mut self) -> [B::Value; N] {
+        let sp = self.sp_after_inputs();
+        std::array::from_fn(|i| {
+            let idx = N - 1 - i;
+            if idx == 0 {
+                sp
+            } else {
+                let offset = self.bcx.iconst(self.isize_type, idx as i64);
+                self.bcx.gep(self.word_type, sp, &[offset], "sp")
+            }
+        })
     }
 
     /// Returns the stack pointer at `len` (`&stack[len]`).
