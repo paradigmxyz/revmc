@@ -310,7 +310,16 @@ impl Bytecode<'_> {
         // Run fixpoint to compute converged block states.
         let mut block_states: Vec<BlockState> = vec![BlockState::Bottom; num_blocks];
         block_states[0] = BlockState::Known(Vec::new());
-        let _discovered_edges = self.run_fixpoint(cfg, &mut block_states, &vec![false; num_blocks]);
+        let discovered_edges = self.run_fixpoint(cfg, &mut block_states, &vec![false; num_blocks]);
+
+        // Build reverse discovered-edge map: for each target block, which source blocks have
+        // discovered edges pointing to it.
+        let mut disc_preds: Vec<Vec<BlockId>> = vec![Vec::new(); num_blocks];
+        for (src, targets) in discovered_edges.iter().enumerate() {
+            for &tgt in targets {
+                disc_preds[tgt].push(src);
+            }
+        }
 
         // After convergence, resolve each dynamic jump using the final block states.
         // This avoids the problem of the fixpoint accumulating stale partial results.
@@ -362,11 +371,42 @@ impl Bytecode<'_> {
         // 2. A Conflict block suppressed propagation, leaving successor blocks at Bottom
         //    (unreachable) even though they ARE reachable at runtime.
         //
-        // A Const/Invalid resolution is invalidated if the block containing the
-        // resolved jump has a Bottom predecessor that starts with a JUMPDEST.
+        // A Const/Invalid resolution is invalidated if any block in the transitive
+        // predecessor set (following both static CFG edges and discovered dynamic-jump
+        // edges backwards) has a Bottom predecessor that starts with a JUMPDEST.
         // Such a predecessor could be reached at runtime by any Top (unresolved)
         // jump, making the resolved jump's input state potentially incomplete.
         if has_top_jump {
+            // Precompute: for each block, whether it has a suspect (Bottom + JUMPDEST) predecessor.
+            let mut suspect = vec![false; num_blocks];
+            for bid in 0..num_blocks {
+                // Check static predecessors.
+                let has_suspect =
+                    cfg.blocks[bid].preds.iter().chain(disc_preds[bid].iter()).any(|&pred| {
+                        if !matches!(block_states[pred], BlockState::Bottom) {
+                            return false;
+                        }
+                        let pred_start = cfg.blocks[pred].start;
+                        self.insts[pred_start].is_jumpdest()
+                    });
+                if has_suspect {
+                    suspect[bid] = true;
+                }
+            }
+
+            // Propagate suspect flag forward through the CFG: if a block is suspect,
+            // all its successors (static + discovered) are also suspect.
+            let mut propagate_worklist: VecDeque<BlockId> =
+                suspect.iter().enumerate().filter(|&(_, s)| *s).map(|(i, _)| i).collect();
+            while let Some(bid) = propagate_worklist.pop_front() {
+                for &succ in cfg.blocks[bid].succs.iter().chain(discovered_edges[bid].iter()) {
+                    if !suspect[succ] {
+                        suspect[succ] = true;
+                        propagate_worklist.push_back(succ);
+                    }
+                }
+            }
+
             for (inst, target) in jump_targets.iter_mut() {
                 if !matches!(target, JumpTarget::Const(_) | JumpTarget::Invalid) {
                     continue;
@@ -375,14 +415,7 @@ impl Bytecode<'_> {
                 if bid >= num_blocks || bid == usize::MAX {
                     continue;
                 }
-                let has_suspect_pred = cfg.blocks[bid].preds.iter().any(|&pred| {
-                    if !matches!(block_states[pred], BlockState::Bottom) {
-                        return false;
-                    }
-                    let pred_start = cfg.blocks[pred].start;
-                    self.insts[pred_start].is_jumpdest()
-                });
-                if has_suspect_pred {
+                if suspect[bid] {
                     *target = JumpTarget::Top;
                 }
             }
@@ -728,23 +761,12 @@ mod tests {
     }
 
     #[test]
-    fn revert_remote_sub_call_storage_oog_caller() {
-        let bytecode = analyze_bytecode(
-            "608060405234801561001057600080fd5b50600436106100415760003560e01c806354d1405f14\
-             610046578063b28175c414610050578063c04062261461005a575b600080fd5b61004e610064565b\
-             005b610058610110565b005b610062610116565b005b6000604051610072906101b6565b60405180\
-             9103906000f08015801561008e573d6000803e3d6000fd5b5090508073ffffffffffffffffffff\
-             ffffffffffffffffffff166373027f6d306040518263ffffffff1660e01b81526004016100ca91\
-             90610204565b600060405180830381600087803b1580156100e457600080fd5b505af11580156100\
-             f8573d6000803e3d6000fd5b50505050600360025560038055622fffff6000205050565b60028055\
-             565b6000604051610124906101b6565b604051809103906000f080158015610140573d6000803e3d\
-             6000fd5b5090508073ffffffffffffffffffffffffffffffffffffffff166373027f6d3060405182\
-             63ffffffff1660e01b815260040161017c9190610204565b600060405180830381600087803b1580\
-             1561019657600080fd5b505af11580156101aa573d6000803e3d6000fd5b50505050600360025550\
-             565b6102b48061022083390190565b600073ffffffffffffffffffffffffffffffffffffff\
-             ff82169050919050565b60006101ee826101c3565b9050919050565b6101fe816101e3565b825250\
-             50565b600060208201905061021960008301846101f5565b9291505056fe",
-        );
+    fn revert_remote_sub_call_storage_oog_deployer() {
+        // The 1289-byte deployer contract from the RevertRemoteSubCallStorageOOG
+        // state test. This contract creates a child via CREATE.
+        let bytecode = analyze_bytecode(include_str!(
+            "../../../../tests/GeneralStateTests/stRevertTest/RevertRemoteSubCallStorageOOG.hex"
+        ));
         eprintln!("{bytecode}");
     }
 
