@@ -9,10 +9,12 @@ use revmc_backend::{
 use revmc_builtins::Builtins;
 use revmc_context::RawEvmCompilerFn;
 use std::{
+    cell::Cell,
     fs,
     io::{self, Write},
     mem,
     path::{Path, PathBuf},
+    time::{Duration, Instant},
 };
 
 // TODO: Somehow have a config to tell the backend to assume that stack stores are unobservable,
@@ -28,6 +30,37 @@ use std::{
 
 mod translate;
 use translate::{FcxConfig, FunctionCx};
+
+/// Collected timing remarks for the compiler dump.
+#[derive(Default)]
+struct Remarks {
+    parse: Cell<Duration>,
+    translate: Cell<Duration>,
+    verify: Cell<Duration>,
+    optimize: Cell<Duration>,
+    finalize_total: Cell<Duration>,
+}
+
+impl Remarks {
+    fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    fn time(&self, field: impl FnOnce(&Self) -> &Cell<Duration>) -> TimingGuard<'_> {
+        TimingGuard { target: field(self), start: Instant::now() }
+    }
+}
+
+struct TimingGuard<'a> {
+    target: &'a Cell<Duration>,
+    start: Instant,
+}
+
+impl Drop for TimingGuard<'_> {
+    fn drop(&mut self) {
+        self.target.set(self.target.get() + self.start.elapsed());
+    }
+}
 
 /// EVM bytecode compiler.
 ///
@@ -55,6 +88,7 @@ pub struct EvmCompiler<B: Backend> {
     dump_assembly: bool,
     dump_unopt_assembly: bool,
 
+    remarks: Remarks,
     finalized: bool,
 }
 
@@ -69,6 +103,7 @@ impl<B: Backend> EvmCompiler<B> {
             builtins: Builtins::new(),
             dump_assembly: true,
             dump_unopt_assembly: false,
+            remarks: Remarks::default(),
             finalized: false,
         }
     }
@@ -299,6 +334,7 @@ impl<B: Backend> EvmCompiler<B> {
     /// remain valid. The module is left in a state where new functions can be translated.
     pub fn clear_ir(&mut self) -> Result<()> {
         self.builtins.clear();
+        self.remarks.clear();
         self.finalized = false;
         self.backend.clear_ir()
     }
@@ -313,6 +349,7 @@ impl<B: Backend> EvmCompiler<B> {
     /// none of the `fn` pointers are called afterwards.
     pub unsafe fn clear(&mut self) -> Result<()> {
         self.builtins.clear();
+        self.remarks.clear();
         self.finalized = false;
         self.backend.free_all_functions()
     }
@@ -324,6 +361,7 @@ impl<B: Backend> EvmCompiler<B> {
         input: EvmCompilerInput<'a>,
         spec_id: SpecId,
     ) -> Result<Bytecode<'a>> {
+        let _t = self.remarks.time(|r| &r.parse);
         let EvmCompilerInput::Code(bytecode) = input;
 
         let mut bytecode = Bytecode::new(bytecode, spec_id);
@@ -337,6 +375,7 @@ impl<B: Backend> EvmCompiler<B> {
     #[instrument(name = "translate", level = "debug", skip_all)]
     #[doc(hidden)] // Not public API.
     pub fn translate_inner(&mut self, name: &str, bytecode: &Bytecode<'_>) -> Result<B::FuncId> {
+        let _t = self.remarks.time(|r| &r.translate);
         ensure!(self.backend.function_name_is_unique(name), "function name `{name}` is not unique");
         let linkage = Linkage::Public;
         let (bcx, id) = Self::make_builder(&mut self.backend, &self.config, name, linkage)?;
@@ -351,7 +390,10 @@ impl<B: Backend> EvmCompiler<B> {
         }
         self.finalized = true;
 
-        if let Some(dump_dir) = &self.dump_dir() {
+        let finalize_start = Instant::now();
+        let dump_dir = self.dump_dir();
+
+        if let Some(dump_dir) = &dump_dir {
             let path = dump_dir.join("unopt").with_extension(self.backend.ir_extension());
             self.dump_ir(&path)?;
 
@@ -368,7 +410,7 @@ impl<B: Backend> EvmCompiler<B> {
 
         self.optimize_module()?;
 
-        if let Some(dump_dir) = &self.dump_dir() {
+        if let Some(dump_dir) = &dump_dir {
             let path = dump_dir.join("opt").with_extension(self.backend.ir_extension());
             self.dump_ir(&path)?;
 
@@ -376,6 +418,13 @@ impl<B: Backend> EvmCompiler<B> {
                 let path = dump_dir.join("opt.s");
                 self.dump_disasm(&path)?;
             }
+        }
+
+        let finalize_total = &self.remarks.finalize_total;
+        finalize_total.set(finalize_total.get() + finalize_start.elapsed());
+
+        if let Some(dump_dir) = &dump_dir {
+            self.dump_remarks(dump_dir)?;
         }
 
         Ok(())
@@ -453,12 +502,40 @@ impl<B: Backend> EvmCompiler<B> {
 
     #[instrument(level = "debug", skip_all)]
     fn verify_module(&mut self) -> Result<()> {
+        let _t = self.remarks.time(|r| &r.verify);
         self.backend.verify_module()
     }
 
     #[instrument(level = "debug", skip_all)]
     fn optimize_module(&mut self) -> Result<()> {
+        let _t = self.remarks.time(|r| &r.optimize);
         self.backend.optimize_module()
+    }
+
+    fn dump_remarks(&self, dump_dir: &Path) -> Result<()> {
+        let r = &self.remarks;
+        let parse = r.parse.get();
+        let translate = r.translate.get();
+        let finalize = r.finalize_total.get();
+        let verify = r.verify.get();
+        let optimize = r.optimize.get();
+        let total = parse + translate + finalize;
+        fs::write(
+            dump_dir.join("remarks.txt"),
+            format!(
+                "Compilation remarks\n\
+                 ===================\n\
+                 \n\
+                 parse:     {parse:>11.3?}\n\
+                 translate: {translate:>11.3?}\n\
+                 finalize:  {finalize:>11.3?}\n\
+                 \x20 verify:  {verify:>11.3?}\n\
+                 \x20 optimize:{optimize:>11.3?}\n\
+                 \x20          -----------\n\
+                 total:     {total:>11.3?}\n"
+            ),
+        )?;
+        Ok(())
     }
 
     #[instrument(level = "debug", skip_all)]
