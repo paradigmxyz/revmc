@@ -20,10 +20,6 @@ const SPEC_ID: SpecId = SpecId::OSAKA;
 
 fn bench(c: &mut Criterion) {
     for bench in &revmc_cli::get_benches() {
-        // Skip snailtracer because it's too slow for CI benchmarks.
-        if bench.name == "snailtracer" {
-            continue;
-        }
         run_bench(c, bench);
     }
 }
@@ -41,30 +37,34 @@ fn run_bench(c: &mut Criterion, bench: &Bench) {
     let bytecode_raw = Bytecode::new_raw(revmc::primitives::Bytes::copy_from_slice(bytecode));
 
     // ── Compile-time ────────────────────────────────────────────────────
+    // Skip snailtracer compile-time benchmarks because they're too slow.
 
-    g.bench_function("compile/translate", |b| {
-        b.iter_batched(
-            || new_compiler(OptimizationLevel::None),
-            |mut compiler| {
-                compiler.translate(name, bytecode.as_slice(), SPEC_ID).unwrap();
-            },
-            BatchSize::PerIteration,
-        )
-    });
+    if *name != "snailtracer" {
+        g.bench_function("compile/translate", |b| {
+            b.iter_batched(
+                || new_compiler(OptimizationLevel::None),
+                |mut compiler| {
+                    compiler.translate(name, bytecode.as_slice(), SPEC_ID).unwrap();
+                },
+                BatchSize::PerIteration,
+            )
+        });
 
-    g.bench_function("compile/jit", |b| {
-        b.iter_batched(
-            || {
-                let mut compiler = new_compiler(OptimizationLevel::Aggressive);
-                let id = compiler.translate(name, bytecode.as_slice(), SPEC_ID).expect("translate");
-                (compiler, id)
-            },
-            |(mut compiler, id)| unsafe {
-                compiler.jit_function(id).unwrap();
-            },
-            BatchSize::PerIteration,
-        )
-    });
+        g.bench_function("compile/jit", |b| {
+            b.iter_batched(
+                || {
+                    let mut compiler = new_compiler(OptimizationLevel::Aggressive);
+                    let id =
+                        compiler.translate(name, bytecode.as_slice(), SPEC_ID).expect("translate");
+                    (compiler, id)
+                },
+                |(mut compiler, id)| unsafe {
+                    compiler.jit_function(id).unwrap();
+                },
+                BatchSize::PerIteration,
+            )
+        });
+    }
 
     // ── Runtime ─────────────────────────────────────────────────────────
 
