@@ -18,10 +18,22 @@ use std::{collections::HashMap, time::Duration};
 
 const SPEC_ID: SpecId = SpecId::OSAKA;
 
-/// Benchmarks that are too slow for CI due to large bytecode (LLVM compilation time).
-const SKIP_COMPILE: &[&str] = &["snailtracer", "seaport", "fiat_token", "uniswap_v2_pair"];
-/// Benchmarks that are too slow for CI entirely (runtime is also very slow).
-const SKIP_ALL: &[&str] = &["seaport"];
+/// Benchmarks that are too slow for CI due to large bytecode (LLVM compilation time under valgrind).
+const SKIP_COMPILE: &[&str] = &[
+    "snailtracer",
+    "seaport",
+    "fiat_token",
+    "uniswap_v2_pair",
+    "airdrop",
+    "erc20_transfer",
+    "weth",
+    "usdc_proxy",
+];
+/// Benchmarks that are too slow for CI entirely (runtime is also very slow under valgrind).
+const SKIP_ALL: &[&str] = &["seaport", "snailtracer"];
+/// Benchmarks where the interpreter reverts or issues external calls without proper state.
+const SKIP_INTERPRETER: &[&str] =
+    &["erc20_transfer", "push0_proxy", "usdc_proxy", "fiat_token", "uniswap_v2_pair", "airdrop"];
 
 fn bench(c: &mut Criterion) {
     for bench in &revmc_cli::get_benches() {
@@ -124,6 +136,11 @@ fn run_bench(c: &mut Criterion, bench: &Bench) {
         g.bench_function(format!("revmc/{name}"), |b| b.iter(|| call_jit(jit)));
     }
 
+    if SKIP_INTERPRETER.contains(name) {
+        g.finish();
+        return;
+    }
+
     g.bench_function("revm-interpreter", |b| {
         b.iter(|| {
             let ext_bytecode = ExtBytecode::new(bytecode_raw.clone());
@@ -142,7 +159,13 @@ fn run_bench(c: &mut Criterion, bench: &Bench) {
 
             interpreter.stack.data_mut().extend_from_slice(stack_input);
 
-            interpreter.run_plain(&table, &mut host)
+            let action = interpreter.run_plain(&table, &mut host);
+            let result = action
+                .instruction_result()
+                .unwrap_or(revm_interpreter::InstructionResult::Stop);
+            assert!(result.is_ok(), "Interpreter failed with {result:?}");
+            assert!(action.is_return(), "Interpreter bad action: {action:?}");
+            action
         })
     });
 
