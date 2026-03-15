@@ -87,6 +87,9 @@ pub(crate) struct RunArgs {
     no_gas: bool,
     #[arg(long)]
     no_len_checks: bool,
+    /// Inspect the stack length after the function has been executed.
+    #[arg(long)]
+    inspect_stack_length: bool,
     #[arg(long, default_value = "1000000000")]
     gas_limit: u64,
 }
@@ -165,9 +168,7 @@ impl RunArgs {
 
         let mut host = DummyHost::new(spec_id);
 
-        if !stack_input.is_empty() {
-            compiler.inspect_stack_length(true);
-        }
+        compiler.inspect_stack_length(self.inspect_stack_length || !stack_input.is_empty());
 
         let bytecode = compiler.parse(bytecode_slice.into(), spec_id)?;
         if self.display || self.parse_only {
