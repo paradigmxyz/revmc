@@ -145,7 +145,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     ///             _ => unreachable, // Assumed to be valid.
     ///         };
     ///     };
-    ///     
+    ///
     ///     op.inst0: { /* ... */ };
     ///     op.inst1: { /* ... */ };
     ///     // ...
@@ -669,32 +669,32 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             op::MUL => binop!(imul),
             op::SUB => binop!(isub),
             op::DIV => {
-                let sp = self.sp_after_inputs();
-                let _ = self.call_builtin(Builtin::UDiv, &[sp]);
+                let [a, b] = self.sp_word_ptrs();
+                let _ = self.call_builtin(Builtin::UDiv, &[a, b]);
             }
             op::SDIV => {
-                let sp = self.sp_after_inputs();
-                let _ = self.call_builtin(Builtin::SDiv, &[sp]);
+                let [a, b] = self.sp_word_ptrs();
+                let _ = self.call_builtin(Builtin::SDiv, &[a, b]);
             }
             op::MOD => {
-                let sp = self.sp_after_inputs();
-                let _ = self.call_builtin(Builtin::URem, &[sp]);
+                let [a, b] = self.sp_word_ptrs();
+                let _ = self.call_builtin(Builtin::URem, &[a, b]);
             }
             op::SMOD => {
-                let sp = self.sp_after_inputs();
-                let _ = self.call_builtin(Builtin::SRem, &[sp]);
+                let [a, b] = self.sp_word_ptrs();
+                let _ = self.call_builtin(Builtin::SRem, &[a, b]);
             }
             op::ADDMOD => {
-                let sp = self.sp_after_inputs();
-                let _ = self.call_builtin(Builtin::AddMod, &[sp]);
+                let [a, b, c] = self.sp_word_ptrs();
+                let _ = self.call_builtin(Builtin::AddMod, &[a, b, c]);
             }
             op::MULMOD => {
-                let sp = self.sp_after_inputs();
-                let _ = self.call_builtin(Builtin::MulMod, &[sp]);
+                let [a, b, c] = self.sp_word_ptrs();
+                let _ = self.call_builtin(Builtin::MulMod, &[a, b, c]);
             }
             op::EXP => {
-                let sp = self.sp_after_inputs();
-                self.call_fallible_builtin(Builtin::Exp, &[self.ecx, sp]);
+                let [a, b] = self.sp_word_ptrs();
+                self.call_fallible_builtin(Builtin::Exp, &[self.ecx, a, b]);
             }
             op::SIGNEXTEND => {
                 let [ext, x] = self.popn();
@@ -743,21 +743,21 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             op::CLZ => unop!(clz),
 
             op::KECCAK256 => {
-                let sp = self.sp_after_inputs();
-                self.call_fallible_builtin(Builtin::Keccak256, &[self.ecx, sp]);
+                let [a, b] = self.sp_word_ptrs();
+                self.call_fallible_builtin(Builtin::Keccak256, &[self.ecx, a, b]);
             }
 
             op::ADDRESS => {
                 input_field!(@push @[endian = "big"] self.address_type, InputsImpl; target_address)
             }
             op::BALANCE => {
-                let sp = self.sp_after_inputs();
+                let [a] = self.sp_word_ptrs();
                 let spec_id = self.const_spec_id();
-                self.call_fallible_builtin(Builtin::Balance, &[self.ecx, sp, spec_id]);
+                self.call_fallible_builtin(Builtin::Balance, &[self.ecx, a, spec_id]);
             }
             op::ORIGIN => {
-                let slot = self.sp_at_top();
-                let _ = self.call_builtin(Builtin::Origin, &[self.ecx, slot]);
+                let [a] = self.sp_word_ptrs();
+                let _ = self.call_builtin(Builtin::Origin, &[self.ecx, a]);
             }
             op::CALLER => {
                 input_field!(@push @[endian = "big"] self.address_type, InputsImpl; caller_address)
@@ -766,8 +766,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 input_field!(@push @[endian = "little"] self.word_type, InputsImpl; call_value)
             }
             op::CALLDATALOAD => {
-                let sp = self.sp_after_inputs();
-                let _ = self.call_builtin(Builtin::CallDataLoad, &[self.ecx, sp]);
+                let [a] = self.sp_word_ptrs();
+                let _ = self.call_builtin(Builtin::CallDataLoad, &[self.ecx, a]);
             }
             op::CALLDATASIZE => {
                 let size = self.call_builtin(Builtin::CallDataSize, &[self.ecx]).unwrap();
@@ -775,113 +775,112 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 self.push(size);
             }
             op::CALLDATACOPY => {
-                let sp = self.sp_after_inputs();
-                self.call_fallible_builtin(Builtin::CallDataCopy, &[self.ecx, sp]);
+                let [a, b, c] = self.sp_word_ptrs();
+                self.call_fallible_builtin(Builtin::CallDataCopy, &[self.ecx, a, b, c]);
             }
             op::CODESIZE => {
                 let len = self.bcx.iconst(self.word_type, self.bytecode.code.len() as i64);
                 self.push(len);
             }
             op::CODECOPY => {
-                let sp = self.sp_after_inputs();
-                self.call_fallible_builtin(Builtin::CodeCopy, &[self.ecx, sp]);
+                let [a, b, c] = self.sp_word_ptrs();
+                self.call_fallible_builtin(Builtin::CodeCopy, &[self.ecx, a, b, c]);
             }
 
             op::GASPRICE => {
-                let sp = self.sp_after_inputs();
-                let _ = self.call_builtin(Builtin::GasPrice, &[self.ecx, sp]);
+                let [a] = self.sp_word_ptrs();
+                let _ = self.call_builtin(Builtin::GasPrice, &[self.ecx, a]);
             }
             op::EXTCODESIZE => {
-                let sp = self.sp_after_inputs();
+                let [a] = self.sp_word_ptrs();
                 let spec_id = self.const_spec_id();
-                self.call_fallible_builtin(Builtin::ExtCodeSize, &[self.ecx, sp, spec_id]);
+                self.call_fallible_builtin(Builtin::ExtCodeSize, &[self.ecx, a, spec_id]);
             }
             op::EXTCODECOPY => {
-                let sp = self.sp_after_inputs();
+                let [a, b, c, d] = self.sp_word_ptrs();
                 let spec_id = self.const_spec_id();
-                self.call_fallible_builtin(Builtin::ExtCodeCopy, &[self.ecx, sp, spec_id]);
+                self.call_fallible_builtin(Builtin::ExtCodeCopy, &[self.ecx, a, b, c, d, spec_id]);
             }
             op::RETURNDATASIZE => {
                 field!(ecx; @push self.isize_type, EvmContext<'_>, pf::Slice; return_data.len);
             }
             op::RETURNDATACOPY => {
-                let sp = self.sp_after_inputs();
-                self.call_fallible_builtin(Builtin::ReturnDataCopy, &[self.ecx, sp]);
+                let [a, b, c] = self.sp_word_ptrs();
+                self.call_fallible_builtin(Builtin::ReturnDataCopy, &[self.ecx, a, b, c]);
             }
             op::EXTCODEHASH => {
-                let sp = self.sp_after_inputs();
+                let [a] = self.sp_word_ptrs();
                 let spec_id = self.const_spec_id();
-                self.call_fallible_builtin(Builtin::ExtCodeHash, &[self.ecx, sp, spec_id]);
+                self.call_fallible_builtin(Builtin::ExtCodeHash, &[self.ecx, a, spec_id]);
             }
             op::BLOCKHASH => {
-                let sp = self.sp_after_inputs();
-                self.call_fallible_builtin(Builtin::BlockHash, &[self.ecx, sp]);
+                let [a] = self.sp_word_ptrs();
+                self.call_fallible_builtin(Builtin::BlockHash, &[self.ecx, a]);
             }
             op::COINBASE => {
-                let slot = self.sp_at_top();
-                let _ = self.call_builtin(Builtin::Coinbase, &[self.ecx, slot]);
+                let [a] = self.sp_word_ptrs();
+                let _ = self.call_builtin(Builtin::Coinbase, &[self.ecx, a]);
             }
             op::TIMESTAMP => {
-                let slot = self.sp_at_top();
-                let _ = self.call_builtin(Builtin::Timestamp, &[self.ecx, slot]);
+                let [a] = self.sp_word_ptrs();
+                let _ = self.call_builtin(Builtin::Timestamp, &[self.ecx, a]);
             }
             op::NUMBER => {
-                let slot = self.sp_at_top();
-                let _ = self.call_builtin(Builtin::Number, &[self.ecx, slot]);
+                let [a] = self.sp_word_ptrs();
+                let _ = self.call_builtin(Builtin::Number, &[self.ecx, a]);
             }
             op::DIFFICULTY => {
-                let slot = self.sp_at_top();
+                let [a] = self.sp_word_ptrs();
                 let spec_id = self.const_spec_id();
-                let _ = self.call_builtin(Builtin::Difficulty, &[self.ecx, slot, spec_id]);
+                let _ = self.call_builtin(Builtin::Difficulty, &[self.ecx, a, spec_id]);
             }
             op::GASLIMIT => {
-                let slot = self.sp_at_top();
-                let _ = self.call_builtin(Builtin::GasLimit, &[self.ecx, slot]);
+                let [a] = self.sp_word_ptrs();
+                let _ = self.call_builtin(Builtin::GasLimit, &[self.ecx, a]);
             }
             op::CHAINID => {
-                let slot = self.sp_at_top();
-                let _ = self.call_builtin(Builtin::ChainId, &[self.ecx, slot]);
+                let [a] = self.sp_word_ptrs();
+                let _ = self.call_builtin(Builtin::ChainId, &[self.ecx, a]);
             }
             op::SELFBALANCE => {
-                let slot = self.sp_at_top();
-                self.call_fallible_builtin(Builtin::SelfBalance, &[self.ecx, slot]);
+                let [a] = self.sp_word_ptrs();
+                self.call_fallible_builtin(Builtin::SelfBalance, &[self.ecx, a]);
             }
             op::BASEFEE => {
-                let slot = self.sp_at_top();
-                let _ = self.call_builtin(Builtin::Basefee, &[self.ecx, slot]);
+                let [a] = self.sp_word_ptrs();
+                let _ = self.call_builtin(Builtin::Basefee, &[self.ecx, a]);
             }
             op::BLOBHASH => {
-                let sp = self.sp_after_inputs();
-                let _ = self.call_builtin(Builtin::BlobHash, &[self.ecx, sp]);
+                let [a] = self.sp_word_ptrs();
+                let _ = self.call_builtin(Builtin::BlobHash, &[self.ecx, a]);
             }
             op::BLOBBASEFEE => {
-                let len = self.len_before();
-                let slot = self.sp_at(len);
-                let _ = self.call_builtin(Builtin::BlobBaseFee, &[self.ecx, slot]);
+                let [a] = self.sp_word_ptrs();
+                let _ = self.call_builtin(Builtin::BlobBaseFee, &[self.ecx, a]);
             }
 
             op::POP => { /* Already handled in stack_io */ }
             op::MLOAD => {
-                let sp = self.sp_after_inputs();
-                self.call_fallible_builtin(Builtin::Mload, &[self.ecx, sp]);
+                let [a] = self.sp_word_ptrs();
+                self.call_fallible_builtin(Builtin::Mload, &[self.ecx, a]);
             }
             op::MSTORE => {
-                let sp = self.sp_after_inputs();
-                self.call_fallible_builtin(Builtin::Mstore, &[self.ecx, sp]);
+                let [a, b] = self.sp_word_ptrs();
+                self.call_fallible_builtin(Builtin::Mstore, &[self.ecx, a, b]);
             }
             op::MSTORE8 => {
-                let sp = self.sp_after_inputs();
-                self.call_fallible_builtin(Builtin::Mstore8, &[self.ecx, sp]);
+                let [a, b] = self.sp_word_ptrs();
+                self.call_fallible_builtin(Builtin::Mstore8, &[self.ecx, a, b]);
             }
             op::SLOAD => {
-                let sp = self.sp_after_inputs();
+                let [a] = self.sp_word_ptrs();
                 let spec_id = self.const_spec_id();
-                self.call_fallible_builtin(Builtin::Sload, &[self.ecx, sp, spec_id]);
+                self.call_fallible_builtin(Builtin::Sload, &[self.ecx, a, spec_id]);
             }
             op::SSTORE => {
-                let sp = self.sp_after_inputs();
+                let [a, b] = self.sp_word_ptrs();
                 let spec_id = self.const_spec_id();
-                self.call_fallible_builtin(Builtin::Sstore, &[self.ecx, sp, spec_id]);
+                self.call_fallible_builtin(Builtin::Sstore, &[self.ecx, a, b, spec_id]);
             }
             op::JUMP | op::JUMPI => {
                 let is_invalid = data.flags.contains(InstFlags::INVALID_JUMP);
@@ -946,16 +945,16 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 self.bcx.nop();
             }
             op::TLOAD => {
-                let sp = self.sp_after_inputs();
-                let _ = self.call_builtin(Builtin::Tload, &[self.ecx, sp]);
+                let [a] = self.sp_word_ptrs();
+                let _ = self.call_builtin(Builtin::Tload, &[self.ecx, a]);
             }
             op::TSTORE => {
-                let sp = self.sp_after_inputs();
-                self.call_fallible_builtin(Builtin::Tstore, &[self.ecx, sp]);
+                let [a, b] = self.sp_word_ptrs();
+                self.call_fallible_builtin(Builtin::Tstore, &[self.ecx, a, b]);
             }
             op::MCOPY => {
-                let sp = self.sp_after_inputs();
-                self.call_fallible_builtin(Builtin::Mcopy, &[self.ecx, sp]);
+                let [a, b, c] = self.sp_word_ptrs();
+                self.call_fallible_builtin(Builtin::Mcopy, &[self.ecx, a, b, c]);
             }
 
             op::PUSH0 => {
@@ -1017,9 +1016,9 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             }
             op::INVALID => goto_return!(fail InstructionResult::InvalidFEOpcode),
             op::SELFDESTRUCT => {
-                let sp = self.sp_after_inputs();
+                let [a] = self.sp_word_ptrs();
                 let spec_id = self.const_spec_id();
-                self.call_fallible_builtin(Builtin::SelfDestruct, &[self.ecx, sp, spec_id]);
+                self.call_fallible_builtin(Builtin::SelfDestruct, &[self.ecx, a, spec_id]);
                 goto_return!(build InstructionResult::SelfDestruct);
             }
 
@@ -1109,9 +1108,9 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
     /// `RETURN` or `REVERT` instruction.
     fn return_common(&mut self, ir: InstructionResult) {
-        let sp = self.sp_after_inputs();
+        let [a, b] = self.sp_word_ptrs();
         let ir_const = self.bcx.iconst(self.i8_type, ir as i64);
-        self.call_fallible_builtin(Builtin::DoReturn, &[self.ecx, sp, ir_const]);
+        self.call_fallible_builtin(Builtin::DoReturn, &[self.ecx, a, b, ir_const]);
         self.build_return_imm(ir);
     }
 
@@ -1203,12 +1202,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         self.bcx.fn_param(2)
     }
 
-    /// Returns the stack pointer at the top (`&stack[stack.len]`).
-    fn sp_at_top(&mut self) -> B::Value {
-        let len = self.len_before();
-        self.sp_at(len)
-    }
-
     /// Returns the stack pointer after the input has been popped
     /// (`&stack[stack.len - op.input()]`).
     fn sp_after_inputs(&mut self) -> B::Value {
@@ -1218,6 +1211,21 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             len = self.bcx.isub_imm(len, inputs as i64);
         }
         self.sp_at(len)
+    }
+
+    /// Returns individual stack word pointers starting from `sp_after_inputs()`, in reverse
+    /// order (top of stack first) to match the `rev!` macro convention used by builtins.
+    fn sp_word_ptrs<const N: usize>(&mut self) -> [B::Value; N] {
+        let sp = self.sp_after_inputs();
+        std::array::from_fn(|i| {
+            let idx = N - 1 - i;
+            if idx == 0 {
+                sp
+            } else {
+                let offset = self.bcx.iconst(self.isize_type, idx as i64);
+                self.bcx.gep(self.word_type, sp, &[offset], "sp")
+            }
+        })
     }
 
     /// Returns the stack pointer at `len` (`&stack[len]`).
