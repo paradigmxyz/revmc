@@ -1324,6 +1324,8 @@ fn convert_attribute(bcx: &EvmLlvmBuilder<'_>, attr: revmc_backend::Attribute) -
         OurAttr::ReadOnly => ("readonly", AttrValue::Enum(0)),
         OurAttr::WriteOnly => ("writeonly", AttrValue::Enum(0)),
         OurAttr::Writable => ("writable", AttrValue::Enum(0)),
+        // memory(argmem: readwrite) = ModRef(3) << ArgMem(0) = 3.
+        OurAttr::ArgMemOnly => ("memory", AttrValue::Enum(3)),
 
         attr => unimplemented!("llvm attribute conversion: {attr:?}"),
     };
