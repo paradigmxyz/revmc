@@ -1595,11 +1595,15 @@ impl<B: Backend> FunctionCx<'_, B> {
 
         debug_assert_eq!(args.len(), arg_types.len());
         let linkage = revmc_backend::Linkage::Private;
-        let this = unsafe { std::mem::transmute::<&mut Self, &mut Self>(self) };
+        // SAFETY: `this` aliases `self` to work around the borrow checker: we need `self.bcx`
+        // borrowed by `get_or_build_function` while also swapping `self.bcx` inside the closure.
+        // The closure's `bcx` is a fresh builder (not `self.bcx`), so the swap is safe.
+        let this = unsafe { &mut *(self as *mut Self) };
         let f = self.bcx.get_or_build_function(name, arg_types, ret, linkage, |bcx| {
             let prev_return_block = this.return_block.take();
             let prev_failure_block = this.failure_block.take();
-            mem::swap(&mut this.bcx, bcx);
+            // SAFETY: `this.bcx` and `bcx` are non-overlapping (bcx is a fresh builder).
+            unsafe { std::ptr::swap(&mut this.bcx, bcx) };
 
             for attr in default_attrs::for_fn().chain(std::iter::once(Attribute::NoUnwind)) {
                 this.bcx.add_function_attribute(None, attr, FunctionAttributeLocation::Function)
@@ -1611,7 +1615,8 @@ impl<B: Backend> FunctionCx<'_, B> {
             }
             build(this);
 
-            mem::swap(&mut this.bcx, bcx);
+            // SAFETY: same as above.
+            unsafe { std::ptr::swap(&mut this.bcx, bcx) };
             this.failure_block = prev_failure_block;
             this.return_block = prev_return_block;
         });
