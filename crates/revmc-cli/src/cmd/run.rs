@@ -263,9 +263,8 @@ impl RunArgs {
                 interpreter.stack.data_mut().push(*input);
             }
             let action = interpreter.run_plain(&table, &mut host);
-            let ret = action
-                .instruction_result()
-                .unwrap_or(revm_interpreter::InstructionResult::Stop);
+            let ret =
+                action.instruction_result().unwrap_or(revm_interpreter::InstructionResult::Stop);
             println!("InstructionResult::{ret:?}");
             println!("InterpreterAction::{action:#?}");
         } else {
@@ -278,13 +277,11 @@ impl RunArgs {
             *stack_len = stack_input.len();
             let ret = unsafe { f.call_noinline(Some(stack), Some(stack_len), &mut ecx) };
             let action = ecx.next_action.take().unwrap_or_else(|| {
-                revm_interpreter::InterpreterAction::Return(
-                    revm_interpreter::InterpreterResult {
-                        result: ret,
-                        output: revm_primitives::Bytes::new(),
-                        gas: *ecx.gas,
-                    },
-                )
+                revm_interpreter::InterpreterAction::Return(revm_interpreter::InterpreterResult {
+                    result: ret,
+                    output: revm_primitives::Bytes::new(),
+                    gas: *ecx.gas,
+                })
             });
             println!("InstructionResult::{ret:?}");
             println!("InterpreterAction::{action:#?}");
