@@ -137,6 +137,8 @@ pub enum Attribute {
     ReadOnly,
     WriteOnly,
     Writable,
+    /// `memory(argmem: readwrite)` — function only accesses memory through pointer arguments.
+    ArgMemOnly,
     // TODO: Range?
 }
 

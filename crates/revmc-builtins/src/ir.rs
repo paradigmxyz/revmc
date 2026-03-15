@@ -63,6 +63,7 @@ impl<B: Backend> Builtins<B> {
                 Attribute::NoRecurse,
                 Attribute::NoSync,
                 Attribute::NoUnwind,
+                Attribute::ArgMemOnly,
             ]
         };
         for attr in default_attrs.iter().chain(builtin.attrs()).copied() {
