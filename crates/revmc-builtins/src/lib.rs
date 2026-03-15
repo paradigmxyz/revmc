@@ -236,10 +236,12 @@ pub unsafe extern "C" fn __revmc_builtin_calldatacopy(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __revmc_builtin_codecopy(
     ecx: &mut EvmContext<'_>,
-    sp: &mut [EvmWord; 3],
+    memory_offset: &mut EvmWord,
+    code_offset: &mut EvmWord,
+    len: &mut EvmWord,
 ) -> InstructionResult {
     let bytecode = unsafe { &*ecx.bytecode };
-    copy_operation(ecx, sp, bytecode)
+    copy_operation(ecx, memory_offset, code_offset, len, bytecode)
 }
 
 #[unsafe(no_mangle)]
@@ -268,7 +270,10 @@ pub unsafe extern "C" fn __revmc_builtin_extcodesize(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __revmc_builtin_extcodecopy(
     ecx: &mut EvmContext<'_>,
-    rev![address, memory_offset, code_offset, len]: &mut [EvmWord; 4],
+    address: &mut EvmWord,
+    memory_offset: &mut EvmWord,
+    code_offset: &mut EvmWord,
+    len: &mut EvmWord,
     spec_id: SpecId,
 ) -> InstructionResult {
     let addr = address.to_address();
@@ -298,7 +303,9 @@ pub unsafe extern "C" fn __revmc_builtin_extcodecopy(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __revmc_builtin_returndatacopy(
     ecx: &mut EvmContext<'_>,
-    rev![memory_offset, offset, len]: &mut [EvmWord; 3],
+    memory_offset: &mut EvmWord,
+    offset: &mut EvmWord,
+    len: &mut EvmWord,
 ) -> InstructionResult {
     let len = try_into_usize!(len);
     let data_offset = as_usize_saturated!(offset.to_u256());
@@ -523,7 +530,8 @@ pub unsafe extern "C" fn __revmc_builtin_msize(ecx: &mut EvmContext<'_>) -> usiz
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __revmc_builtin_tstore(
     ecx: &mut EvmContext<'_>,
-    rev![key, value]: &mut [EvmWord; 2],
+    key: &mut EvmWord,
+    value: &mut EvmWord,
 ) -> InstructionResult {
     ensure_non_staticcall!(ecx);
     ecx.host.tstore(ecx.input.target_address, key.to_u256(), value.to_u256());
@@ -538,7 +546,9 @@ pub unsafe extern "C" fn __revmc_builtin_tload(ecx: &mut EvmContext<'_>, key: &m
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __revmc_builtin_mcopy(
     ecx: &mut EvmContext<'_>,
-    rev![dst, src, len]: &mut [EvmWord; 3],
+    dst: &mut EvmWord,
+    src: &mut EvmWord,
+    len: &mut EvmWord,
 ) -> InstructionResult {
     let len = try_into_usize!(len);
     gas!(ecx, ecx.host.gas_params().mcopy_cost(len));

@@ -75,7 +75,9 @@ fn resize_memory_inner(
 
 pub(crate) unsafe fn copy_operation(
     ecx: &mut EvmContext<'_>,
-    rev![memory_offset, data_offset, len]: &mut [EvmWord; 3],
+    memory_offset: &mut EvmWord,
+    data_offset: &mut EvmWord,
+    len: &mut EvmWord,
     data: &[u8],
 ) -> InstructionResult {
     let len = try_into_usize!(len);
