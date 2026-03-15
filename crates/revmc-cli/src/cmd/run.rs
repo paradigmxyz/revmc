@@ -61,6 +61,10 @@ pub(crate) struct RunArgs {
     #[arg(long, conflicts_with = "aot")]
     interpret: bool,
 
+    /// Run JIT only (skip interpreter comparison in benchmarks).
+    #[arg(long, conflicts_with = "interpret")]
+    jit_only: bool,
+
     /// Target triple.
     #[arg(long, default_value = "native")]
     target: String,
@@ -231,61 +235,96 @@ impl RunArgs {
         };
 
         let table = instruction_table::<EthInterpreter, DummyHost>();
-        let mut run = |f: revmc::EvmCompilerFn| {
+
+        let mk_interpreter = || {
             let ext_bytecode = ExtBytecode::new(bytecode_raw.clone());
             let input = InputsImpl {
                 input: revm_interpreter::CallInput::Bytes(calldata.clone()),
                 ..Default::default()
             };
-            let mut interpreter = revm_interpreter::Interpreter::new(
+            revm_interpreter::Interpreter::new(
                 SharedMemory::new(),
                 ext_bytecode,
                 input,
                 false,
                 spec_id,
                 gas_limit,
-            );
-
-            if self.interpret {
-                let action = interpreter.run_plain(&table, &mut host);
-                let result = action
-                    .instruction_result()
-                    .unwrap_or(revm_interpreter::InstructionResult::Stop);
-                (result, action)
-            } else {
-                let (mut ecx, stack, stack_len) =
-                    EvmContext::from_interpreter_with_stack(&mut interpreter, &mut host);
-
-                for (i, input) in stack_input.iter().enumerate() {
-                    stack.as_mut_slice()[i] = (*input).into();
-                }
-                *stack_len = stack_input.len();
-
-                let r = unsafe { f.call_noinline(Some(stack), Some(stack_len), &mut ecx) };
-                let action = ecx.next_action.take().unwrap_or_else(|| {
-                    revm_interpreter::InterpreterAction::Return(
-                        revm_interpreter::InterpreterResult {
-                            result: r,
-                            output: revm_primitives::Bytes::new(),
-                            gas: *ecx.gas,
-                        },
-                    )
-                });
-                (r, action)
-            }
+            )
         };
 
         if self.n_iters == 0 {
             return Ok(());
         }
 
-        let (ret, action) = run(f);
-        println!("InstructionResult::{ret:?}");
-        println!("InterpreterAction::{action:#?}");
+        // Single run: print results.
+        if self.interpret {
+            let mut interpreter = mk_interpreter();
+            for input in &stack_input {
+                interpreter.stack.data_mut().push(*input);
+            }
+            let action = interpreter.run_plain(&table, &mut host);
+            let ret =
+                action.instruction_result().unwrap_or(revm_interpreter::InstructionResult::Stop);
+            println!("InstructionResult::{ret:?}");
+            println!("InterpreterAction::{action:#?}");
+        } else {
+            let mut interpreter = mk_interpreter();
+            let (mut ecx, stack, stack_len) =
+                EvmContext::from_interpreter_with_stack(&mut interpreter, &mut host);
+            for (i, input) in stack_input.iter().enumerate() {
+                stack.as_mut_slice()[i] = (*input).into();
+            }
+            *stack_len = stack_input.len();
+            let ret = unsafe { f.call_noinline(Some(stack), Some(stack_len), &mut ecx) };
+            let action = ecx.next_action.take().unwrap_or_else(|| {
+                revm_interpreter::InterpreterAction::Return(revm_interpreter::InterpreterResult {
+                    result: ret,
+                    output: revm_primitives::Bytes::new(),
+                    gas: *ecx.gas,
+                })
+            });
+            println!("InstructionResult::{ret:?}");
+            println!("InterpreterAction::{action:#?}");
+        }
 
         if self.n_iters > 1 {
-            bench(self.n_iters, name, || run(f));
-            return Ok(());
+            // Benchmark interpreter.
+            if self.interpret || !self.jit_only {
+                bench(self.n_iters, &format!("{name}/interpreter"), || {
+                    let mut interpreter = mk_interpreter();
+                    for input in &stack_input {
+                        interpreter.stack.data_mut().push(*input);
+                    }
+                    let action = interpreter.run_plain(&table, &mut host);
+                    let ret = action
+                        .instruction_result()
+                        .unwrap_or(revm_interpreter::InstructionResult::Stop);
+                    (ret, action)
+                });
+            }
+            // Benchmark JIT.
+            if !self.interpret {
+                bench(self.n_iters, &format!("{name}/jit"), || {
+                    let mut interpreter = mk_interpreter();
+                    let (mut ecx, stack, stack_len) =
+                        EvmContext::from_interpreter_with_stack(&mut interpreter, &mut host);
+                    for (i, input) in stack_input.iter().enumerate() {
+                        stack.as_mut_slice()[i] = (*input).into();
+                    }
+                    *stack_len = stack_input.len();
+                    let r = unsafe { f.call_noinline(Some(stack), Some(stack_len), &mut ecx) };
+                    let action = ecx.next_action.take().unwrap_or_else(|| {
+                        revm_interpreter::InterpreterAction::Return(
+                            revm_interpreter::InterpreterResult {
+                                result: r,
+                                output: revm_primitives::Bytes::new(),
+                                gas: *ecx.gas,
+                            },
+                        )
+                    });
+                    (r, action)
+                });
+            }
         }
 
         Ok(())
