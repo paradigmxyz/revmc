@@ -65,11 +65,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ["ubuntu"] # TODO: macos
+        os: ["ubuntu", "macos"]
         mode: [interpreter, jit, aot]
         include:
           - os: ubuntu
             runner: depot-ubuntu-latest-8
+          - os: macos
+            runner: depot-macos-latest
     steps:
       - uses: actions/checkout@v4
       - name: Checkout ethereum/tests
