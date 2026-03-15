@@ -1,4 +1,3 @@
-#![allow(missing_docs)]
 //! Curve StableSwap benchmark: plain interpreter vs JIT.
 //!
 //! This is the key A/B test for the DIV/MOD ruint builtin optimization.
@@ -7,6 +6,8 @@
 //! interpreter on this workload due to LLVM's poor i256 udiv codegen.
 //!
 //! Run: `cargo bench -p revmc-cli --bench bench_curve`
+
+#![allow(missing_docs)]
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use revm::{
