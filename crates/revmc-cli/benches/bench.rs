@@ -18,7 +18,8 @@ use std::{collections::HashMap, time::Duration};
 
 const SPEC_ID: SpecId = SpecId::OSAKA;
 
-/// Benchmarks that are too slow for CI due to large bytecode (LLVM compilation time under valgrind).
+/// Benchmarks that are too slow for CI due to large bytecode (LLVM compilation time under
+/// valgrind).
 const SKIP_COMPILE: &[&str] = &[
     "snailtracer",
     "seaport",
