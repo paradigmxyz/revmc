@@ -108,12 +108,12 @@ impl EvmLlvmBackend {
                 &target_info.cpu,
                 &target_info.features,
                 opt_level,
-                RelocMode::PIC,
+                if aot { RelocMode::PIC } else { RelocMode::Static },
                 if aot { CodeModel::Default } else { CodeModel::JITDefault },
             )
             .ok_or_else(|| eyre::eyre!("failed to create target machine"))?;
 
-        let module = create_module(cx, &machine)?;
+        let module = create_module(cx, &machine, aot)?;
 
         let exec_engine = if aot {
             None
@@ -364,7 +364,7 @@ impl Backend for EvmLlvmBackend {
         }
         */
 
-        self.module = create_module(self.cx, &self.machine)?;
+        self.module = create_module(self.cx, &self.machine, self.aot)?;
         if let Some(exec_engine) = &self.exec_engine {
             exec_engine.add_module(&self.module).map_err(|_| Error::msg("failed to add module"))?;
         }
@@ -1227,22 +1227,28 @@ fn get_context() -> &'static Context {
     TLS_LLVM_CONTEXT.with(|cx| unsafe { core::mem::transmute(cx) })
 }
 
-fn create_module<'ctx>(cx: &'ctx Context, machine: &TargetMachine) -> Result<Module<'ctx>> {
+fn create_module<'ctx>(
+    cx: &'ctx Context,
+    machine: &TargetMachine,
+    aot: bool,
+) -> Result<Module<'ctx>> {
     let module_name = "evm";
     let module = cx.create_module(module_name);
     module.set_source_file_name(module_name);
     module.set_data_layout(&machine.get_target_data().get_data_layout());
     module.set_triple(&machine.get_triple());
-    module.add_basic_value_flag(
-        "PIC Level",
-        FlagBehavior::Error, // TODO: Min
-        cx.i32_type().const_int(2, false),
-    );
-    module.add_basic_value_flag(
-        "RtLibUseGOT",
-        FlagBehavior::Warning,
-        cx.i32_type().const_int(1, false),
-    );
+    if aot {
+        module.add_basic_value_flag(
+            "PIC Level",
+            FlagBehavior::Error, // TODO: Min
+            cx.i32_type().const_int(2, false),
+        );
+        module.add_basic_value_flag(
+            "RtLibUseGOT",
+            FlagBehavior::Warning,
+            cx.i32_type().const_int(1, false),
+        );
+    }
     Ok(module)
 }
 
@@ -1324,6 +1330,8 @@ fn convert_attribute(bcx: &EvmLlvmBuilder<'_>, attr: revmc_backend::Attribute) -
         OurAttr::ReadOnly => ("readonly", AttrValue::Enum(0)),
         OurAttr::WriteOnly => ("writeonly", AttrValue::Enum(0)),
         OurAttr::Writable => ("writable", AttrValue::Enum(0)),
+        // memory(argmem: readwrite) = ModRef(3) << ArgMem(0) = 3.
+        OurAttr::ArgMemOnly => ("memory", AttrValue::Enum(3)),
 
         attr => unimplemented!("llvm attribute conversion: {attr:?}"),
     };
