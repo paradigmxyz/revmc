@@ -57,7 +57,7 @@ fn run_bench(c: &mut Criterion, bench: &Bench) {
     // ── Compile-time ────────────────────────────────────────────────────
 
     if !SKIP_COMPILE.contains(name) {
-        g.bench_function("compile/translate", |b| {
+        g.bench_function(format!("{name}/compile/translate"), |b| {
             b.iter_batched(
                 || new_compiler(OptimizationLevel::None),
                 |mut compiler| {
@@ -67,7 +67,7 @@ fn run_bench(c: &mut Criterion, bench: &Bench) {
             )
         });
 
-        g.bench_function("compile/jit", |b| {
+        g.bench_function(format!("{name}/compile/jit"), |b| {
             b.iter_batched(
                 || {
                     let mut compiler = new_compiler(OptimizationLevel::Aggressive);
@@ -95,7 +95,7 @@ fn run_bench(c: &mut Criterion, bench: &Bench) {
     compiler.gas_metering(true);
 
     if let Some(native) = *native {
-        g.bench_function("native", |b| b.iter(native));
+        g.bench_function(format!("{name}/rt/native"), |b| b.iter(native));
     }
 
     let mut stack = EvmStack::new();
@@ -124,17 +124,17 @@ fn run_bench(c: &mut Criterion, bench: &Bench) {
     };
 
     let jit_matrix = [("default", (true, true)), ("no_gas", (false, true))];
-    let jit_ids = jit_matrix.map(|(name, (gas, stack))| {
+    let jit_ids = jit_matrix.map(|(kind, (gas, stack))| {
         compiler.gas_metering(gas);
         unsafe { compiler.stack_bound_checks(stack) };
-        (name, compiler.translate(name, bytecode_raw.original_byte_slice(), SPEC_ID).expect(name))
+        (kind, compiler.translate(kind, bytecode_raw.original_byte_slice(), SPEC_ID).expect(kind))
     });
-    for &(name, fn_id) in &jit_ids {
-        let jit = unsafe { compiler.jit_function(fn_id) }.expect(name);
-        g.bench_function(format!("revmc/{name}"), |b| b.iter(|| call_jit(jit)));
+    for &(kind, fn_id) in &jit_ids {
+        let jit = unsafe { compiler.jit_function(fn_id) }.expect(kind);
+        g.bench_function(format!("{name}/rt/jit/{kind}"), |b| b.iter(|| call_jit(jit)));
     }
 
-    g.bench_function("revm-interpreter", |b| {
+    g.bench_function(format!("{name}/rt/interpreter"), |b| {
         b.iter(|| {
             let ext_bytecode = ExtBytecode::new(bytecode_raw.clone());
             let input = InputsImpl {
