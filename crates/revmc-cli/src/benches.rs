@@ -18,9 +18,6 @@ pub struct Bench {
     pub calldata: Vec<u8>,
     pub stack_input: Vec<U256>,
     pub native: Option<fn()>,
-    /// Whether this benchmark requires storage (SLOAD/SSTORE) support from the host.
-    /// If true, interpreter benchmarks will be skipped since DummyHost doesn't support storage.
-    pub requires_storage: bool,
 }
 
 pub fn get_bench(name: &str) -> Option<Bench> {
@@ -64,7 +61,6 @@ pub fn get_benches() -> Vec<Bench> {
             bytecode: include_code_str!("../../../data/counter.rt.hex").unwrap(),
             // `increment()`
             calldata: hex!("d09de08a").to_vec(),
-            requires_storage: true,
             ..Default::default()
         },
         Bench {
