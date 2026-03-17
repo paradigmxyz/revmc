@@ -1,0 +1,38 @@
+name: Benchmark
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  LLVM_VERSION: "21"
+
+jobs:
+  codspeed:
+    runs-on: depot-ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install LLVM
+        run: sudo .github/scripts/install_llvm_ubuntu.sh ${{ env.LLVM_VERSION }}
+      - name: llvm-config
+        run: llvm-config --version --bindir --libdir
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - name: Install cargo-codspeed
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-codspeed
+      - name: Build the benchmark target(s)
+        run: cargo codspeed build --profile profiling -p revmc-cli --bench bench
+      - name: Run the benchmarks
+        uses: CodSpeedHQ/action@v4
+        with:
+          run: cargo codspeed run -p revmc-cli --bench bench
+          mode: instrumentation
+          token: ${{ secrets.CODSPEED_TOKEN }}

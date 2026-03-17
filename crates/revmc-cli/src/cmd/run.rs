@@ -114,42 +114,40 @@ impl RunArgs {
         compiler.frame_pointers(true);
         compiler.debug_assertions(self.debug_assertions);
 
-        let Bench { name, bytecode, calldata, stack_input, native: _, requires_storage: _ } =
-            if self.bench_name == "custom" {
-                Bench {
-                    name: "custom",
-                    bytecode: read_code(self.code.as_deref(), self.code_path.as_deref())?,
-                    ..Default::default()
-                }
-            } else if Path::new(&self.bench_name).exists() {
-                let path = Path::new(&self.bench_name);
-                ensure!(path.is_file(), "argument must be a file");
-                ensure!(self.code.is_none(), "--code is not allowed with a file argument");
-                ensure!(
-                    self.code_path.is_none(),
-                    "--code-path is not allowed with a file argument"
-                );
-                Bench {
-                    name: path.file_stem().unwrap().to_str().unwrap().to_string().leak(),
-                    bytecode: read_code(None, Some(path))?,
-                    ..Default::default()
-                }
-            } else {
-                match get_benches().into_iter().find(|b| b.name == self.bench_name) {
-                    Some(b) => b,
-                    None => {
-                        if self.load.is_some() {
-                            Bench {
-                                name: self.bench_name.clone().leak(),
-                                bytecode: Vec::new(),
-                                ..Default::default()
-                            }
-                        } else {
-                            return Err(eyre!("unknown benchmark: {}", self.bench_name));
+        let Bench { name, bytecode, calldata, stack_input, native: _ } = if self.bench_name
+            == "custom"
+        {
+            Bench {
+                name: "custom",
+                bytecode: read_code(self.code.as_deref(), self.code_path.as_deref())?,
+                ..Default::default()
+            }
+        } else if Path::new(&self.bench_name).exists() {
+            let path = Path::new(&self.bench_name);
+            ensure!(path.is_file(), "argument must be a file");
+            ensure!(self.code.is_none(), "--code is not allowed with a file argument");
+            ensure!(self.code_path.is_none(), "--code-path is not allowed with a file argument");
+            Bench {
+                name: path.file_stem().unwrap().to_str().unwrap().to_string().leak(),
+                bytecode: read_code(None, Some(path))?,
+                ..Default::default()
+            }
+        } else {
+            match get_benches().into_iter().find(|b| b.name == self.bench_name) {
+                Some(b) => b,
+                None => {
+                    if self.load.is_some() {
+                        Bench {
+                            name: self.bench_name.clone().leak(),
+                            bytecode: Vec::new(),
+                            ..Default::default()
                         }
+                    } else {
+                        return Err(eyre!("unknown benchmark: {}", self.bench_name));
                     }
                 }
-            };
+            }
+        };
         compiler.set_module_name(name);
         if let Some(dump_dir) = compiler.dump_dir() {
             eprintln!("Dump directory: {}", dump_dir.display());
