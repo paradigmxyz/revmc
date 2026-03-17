@@ -10,7 +10,7 @@ use revm_interpreter::{
 };
 use revm_primitives::{Address, B256, Log, StorageKey, StorageValue, U256};
 use revmc::{
-    EvmCompiler, EvmCompilerFn, EvmContext, EvmLlvmBackend, EvmStack, OptimizationLevel,
+    EvmCompiler, EvmContext, EvmLlvmBackend, EvmStack, OptimizationLevel,
     primitives::hardfork::SpecId,
 };
 use revmc_cli::Bench;
@@ -95,32 +95,25 @@ fn run_bench(c: &mut Criterion, bench: &Bench) {
     compiler.gas_metering(true);
 
     if let Some(native) = *native {
-        g.bench_function(format!("{name}/rt/native"), |b| b.iter(native));
+        g.bench_function(format!("{name}/rt/native"), |b| {
+            b.iter_batched(|| (), |()| native(), BatchSize::SmallInput)
+        });
     }
 
-    let mut stack = EvmStack::new();
-    let mut call_jit = |f: EvmCompilerFn| {
-        for (i, input) in stack_input.iter().enumerate() {
-            stack.as_mut_slice()[i] = (*input).into();
-        }
-        let mut stack_len = stack_input.len();
-
+    let new_interpreter = || {
         let ext_bytecode = ExtBytecode::new(bytecode_raw.clone());
         let input = InputsImpl {
             input: revm_interpreter::CallInput::Bytes(calldata.clone()),
             ..Default::default()
         };
-        let mut interpreter = revm_interpreter::Interpreter::new(
+        revm_interpreter::Interpreter::new(
             SharedMemory::new(),
             ext_bytecode,
             input,
             false,
             SPEC_ID,
             gas_limit,
-        );
-        let mut ecx = EvmContext::from_interpreter(&mut interpreter, &mut host);
-
-        unsafe { f.call(Some(&mut stack), Some(&mut stack_len), &mut ecx) }
+        )
     };
 
     let jit_matrix = [("default", (true, true)), ("no_gas", (false, true))];
@@ -131,29 +124,36 @@ fn run_bench(c: &mut Criterion, bench: &Bench) {
     });
     for &(kind, fn_id) in &jit_ids {
         let jit = unsafe { compiler.jit_function(fn_id) }.expect(kind);
-        g.bench_function(format!("{name}/rt/jit/{kind}"), |b| b.iter(|| call_jit(jit)));
+        g.bench_function(format!("{name}/rt/jit/{kind}"), |b| {
+            b.iter_batched_ref(
+                || {
+                    let mut stack = EvmStack::new();
+                    for (i, input) in stack_input.iter().enumerate() {
+                        stack.as_mut_slice()[i] = (*input).into();
+                    }
+                    (new_interpreter(), stack)
+                },
+                |(interpreter, stack)| {
+                    let mut stack_len = stack_input.len();
+                    let mut ecx =
+                        EvmContext::from_interpreter(interpreter, &mut host);
+                    unsafe { jit.call(Some(stack), Some(&mut stack_len), &mut ecx) }
+                },
+                BatchSize::SmallInput,
+            )
+        });
     }
 
     g.bench_function(format!("{name}/rt/interpreter"), |b| {
-        b.iter(|| {
-            let ext_bytecode = ExtBytecode::new(bytecode_raw.clone());
-            let input = InputsImpl {
-                input: revm_interpreter::CallInput::Bytes(calldata.clone()),
-                ..Default::default()
-            };
-            let mut interpreter = revm_interpreter::Interpreter::new(
-                SharedMemory::new(),
-                ext_bytecode,
-                input,
-                false,
-                SPEC_ID,
-                gas_limit,
-            );
-
-            interpreter.stack.data_mut().extend_from_slice(stack_input);
-
-            interpreter.run_plain(&table, &mut host)
-        })
+        b.iter_batched_ref(
+            || {
+                let mut interpreter = new_interpreter();
+                interpreter.stack.data_mut().extend_from_slice(stack_input);
+                interpreter
+            },
+            |interpreter| interpreter.run_plain(&table, &mut host),
+            BatchSize::SmallInput,
+        )
     });
 
     g.finish();
