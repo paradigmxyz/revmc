@@ -135,8 +135,7 @@ fn run_bench(c: &mut Criterion, bench: &Bench) {
                 },
                 |(interpreter, stack)| {
                     let mut stack_len = stack_input.len();
-                    let mut ecx =
-                        EvmContext::from_interpreter(interpreter, &mut host);
+                    let mut ecx = EvmContext::from_interpreter(interpreter, &mut host);
                     unsafe { jit.call(Some(stack), Some(&mut stack_len), &mut ecx) }
                 },
                 BatchSize::SmallInput,
