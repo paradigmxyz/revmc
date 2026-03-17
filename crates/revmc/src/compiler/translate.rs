@@ -18,7 +18,6 @@ pub(super) struct FcxConfig {
     pub(super) debug_assertions: bool,
     pub(super) frame_pointers: bool,
 
-    pub(super) local_stack: bool,
     pub(super) inspect_stack_length: bool,
     pub(super) stack_bound_checks: bool,
     pub(super) gas_metering: bool,
@@ -30,7 +29,6 @@ impl Default for FcxConfig {
             debug_assertions: cfg!(debug_assertions),
             comments: false,
             frame_pointers: cfg!(debug_assertions),
-            local_stack: false,
             inspect_stack_length: false,
             stack_bound_checks: true,
             gas_metering: true,
@@ -73,6 +71,9 @@ pub(super) struct FunctionCx<'a, B: Backend> {
     /// The stack value. Constant throughout the function, either passed in the arguments as a
     /// pointer or allocated locally.
     stack: Pointer<B::Builder<'a>>,
+    /// The stack argument pointer. Only used when `local_stack` is enabled and the stack needs
+    /// to be copied in/out at entry/exit boundaries.
+    sp_arg: Option<B::Value>,
     /// The amount of gas remaining. `i64`. See `Gas`.
     gas_remaining: Pointer<B::Builder<'a>>,
     /// The input. Constant throughout the function.
@@ -145,7 +146,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     ///             _ => unreachable, // Assumed to be valid.
     ///         };
     ///     };
-    ///     
+    ///
     ///     op.inst0: { /* ... */ };
     ///     op.inst1: { /* ... */ };
     ///     // ...
@@ -200,8 +201,13 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         };
 
         let sp_arg = bcx.fn_param(1);
-        let stack = if config.local_stack {
-            bcx.new_stack_slot(word_type, "stack.addr")
+        // Use a local alloca for the stack to allow the backend to eliminate dead stores to
+        // stack slots above `stack_len` at function exit (e.g. `PUSH0 POP`).
+        // Disabled when `inspect_stack_length` is set because the caller observes every store.
+        let local_stack = !config.inspect_stack_length;
+        let stack = if local_stack {
+            let stack_type = bcx.type_array(word_type, STACK_CAP as u32);
+            bcx.new_stack_slot(stack_type, "stack.addr")
         } else {
             Pointer::new_address(word_type, sp_arg)
         };
@@ -242,6 +248,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             i8_type,
             stack_len,
             stack,
+            sp_arg: local_stack.then_some(sp_arg),
             gas_remaining,
             input,
             ecx,
@@ -281,7 +288,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 "gas metering is enabled",
             );
             fx.pointer_panic_with_bool(
-                !config.local_stack,
+                !local_stack,
                 sp_arg,
                 "stack pointer",
                 "local stack is disabled",
@@ -347,6 +354,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             if config.inspect_stack_length {
                 let stack_len = fx.bcx.load(fx.isize_type, stack_len_arg, "stack_len");
                 fx.stack_len.store(&mut fx.bcx, stack_len);
+                fx.copy_stack_from_arg(stack_len);
             } else {
                 fx.stack_len.store_imm(&mut fx.bcx, 0);
             }
@@ -390,6 +398,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 fx.bcx.switch_to_block(resume_block);
                 let stack_len = fx.bcx.load(fx.isize_type, stack_len_arg, "stack_len");
                 fx.stack_len.store(&mut fx.bcx, stack_len);
+                fx.copy_stack_from_arg(stack_len);
                 match kind {
                     ResumeKind::Blocks => {
                         fx.bcx.br_indirect(resume_at, &fx.resume_blocks);
@@ -450,6 +459,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         if !fx.incoming_returns.is_empty() {
             let return_value = fx.bcx.phi(fx.i8_type, &fx.incoming_returns);
             if stack_length_observable {
+                fx.copy_stack_to_arg();
                 fx.save_stack_len();
             }
             fx.bcx.ret(&[return_value]);
@@ -1196,6 +1206,28 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let len = self.stack_len.load(&mut self.bcx, "stack_len");
         let ptr = self.stack_len_arg();
         self.bcx.store(len, ptr);
+    }
+
+    /// Copies the live prefix of the stack from the argument to the local alloca.
+    /// `len` is the number of live stack elements.
+    fn copy_stack_from_arg(&mut self, len: B::Value) {
+        if let Some(src) = self.sp_arg {
+            let dst = self.stack.addr(&mut self.bcx);
+            let word_size = 32i64;
+            let byte_len = self.bcx.imul_imm(len, word_size);
+            self.bcx.memcpy(dst, src, byte_len);
+        }
+    }
+
+    /// Copies the live prefix of the stack from the local alloca to the argument.
+    fn copy_stack_to_arg(&mut self) {
+        if let Some(dst) = self.sp_arg {
+            let len = self.stack_len.load(&mut self.bcx, "stack_len");
+            let src = self.stack.addr(&mut self.bcx);
+            let word_size = 32i64;
+            let byte_len = self.bcx.imul_imm(len, word_size);
+            self.bcx.memcpy(dst, src, byte_len);
+        }
     }
 
     /// Returns the stack length argument.

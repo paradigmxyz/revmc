@@ -17,12 +17,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-// TODO: Somehow have a config to tell the backend to assume that stack stores are unobservable,
-// making it eliminate redundant stores for values outside the stack length when optimized away.
-// E.g. `PUSH0 POP` gets fully optimized away, but the `store i256 0, ptr %stack` will still get
-// emitted.
-// Use this when `stack` is passed in arguments.
-
 // TODO: Get rid of `cfg!(target_endian)` calls.
 
 // TODO: Test on big-endian hardware.
@@ -187,19 +181,6 @@ impl<B: Backend> EvmCompiler<B> {
     /// Defaults to `cfg!(debug_assertions)`.
     pub fn frame_pointers(&mut self, yes: bool) {
         self.config.frame_pointers = yes;
-    }
-
-    /// Sets whether to allocate the stack locally.
-    ///
-    /// If this is set to `true`, the stack pointer argument will be ignored and the stack will be
-    /// allocated in the function.
-    ///
-    /// This setting will fail at runtime if the bytecode suspends execution, as it cannot be
-    /// restored afterwards.
-    ///
-    /// Defaults to `false`.
-    pub fn local_stack(&mut self, yes: bool) {
-        self.config.local_stack = yes;
     }
 
     /// Sets whether to treat the stack length as observable outside the function.
