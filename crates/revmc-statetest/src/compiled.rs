@@ -569,14 +569,14 @@ use revmc::runtime::{
 
 /// Custom handler that looks up compiled functions via the runtime coordinator.
 /// Falls back to the interpreter for contracts not in the resident map.
-struct RuntimeHandler {
+struct RuntimeHandler<'a> {
     handle: JitCoordinatorHandle,
     /// Fallback: compile cache for runtime-created code (CREATE/CREATE2).
-    cache: Arc<CompileCache>,
+    cache: &'a CompileCache,
     spec_id: SpecId,
 }
 
-impl Handler for RuntimeHandler {
+impl Handler for RuntimeHandler<'_> {
     type Evm = StateTestEvm<'static>;
     type Error = StateTestError;
     type HaltReason = HaltReason;
@@ -636,7 +636,7 @@ impl Handler for RuntimeHandler {
 /// Execute a single test using the runtime coordinator handler.
 fn execute_single_test_runtime(
     handle: &JitCoordinatorHandle,
-    cache: &Arc<CompileCache>,
+    cache: &CompileCache,
     ctx: CompiledTestContext<'_>,
 ) -> Result<(), TestErrorKind> {
     let prestate = ctx.cache_state.clone();
@@ -651,11 +651,7 @@ fn execute_single_test_runtime(
             .with_tx(ctx.tx.clone())
             .with_cfg(ctx.cfg.clone())
             .with_db(db_ref);
-        let mut handler = RuntimeHandler {
-            handle: handle.clone(),
-            cache: Arc::clone(cache),
-            spec_id: ctx.spec_id,
-        };
+        let mut handler = RuntimeHandler { handle: handle.clone(), cache, spec_id: ctx.spec_id };
         let mut evm = evm_context.build_mainnet();
         let result = handler.run(&mut evm);
         if result.is_ok() {
@@ -687,7 +683,6 @@ fn execute_test_suite_runtime(
     elapsed: &Arc<Mutex<Duration>>,
     cache: &CompileCache,
     handle: &JitCoordinatorHandle,
-    cache_arc: &Arc<CompileCache>,
 ) -> Result<(), TestError> {
     if skip_test(path) {
         return Ok(());
@@ -746,7 +741,7 @@ fn execute_test_suite_runtime(
 
                 let result = execute_single_test_runtime(
                     handle,
-                    cache_arc,
+                    cache,
                     CompiledTestContext {
                         compiled: &compiled,
                         cache,
@@ -779,7 +774,6 @@ fn run_test_worker(
     mode: CompileMode,
     cache: Option<&CompileCache>,
     runtime_handle: Option<&JitCoordinatorHandle>,
-    cache_arc: Option<&Arc<CompileCache>>,
 ) -> Result<(), TestError> {
     loop {
         if !keep_going && state.n_errors.load(Ordering::SeqCst) > 0 {
@@ -802,7 +796,6 @@ fn run_test_worker(
                 &state.elapsed,
                 cache.unwrap(),
                 runtime_handle.unwrap(),
-                cache_arc.unwrap(),
             ),
         };
 
@@ -869,14 +862,7 @@ pub fn run(
         let thread = std::thread::Builder::new()
             .name(format!("runner-{i}"))
             .spawn(move || {
-                run_test_worker(
-                    state,
-                    keep_going,
-                    mode,
-                    cache.as_deref(),
-                    runtime_handle.as_ref(),
-                    cache.as_ref(),
-                )
+                run_test_worker(state, keep_going, mode, cache.as_deref(), runtime_handle.as_ref())
             })
             .unwrap();
 
