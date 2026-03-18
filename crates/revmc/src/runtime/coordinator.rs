@@ -7,7 +7,7 @@
 use crate::runtime::{
     api::CompiledProgram,
     config::RuntimeTuning,
-    storage::{ArtifactStore, ArtifactKey, ArtifactManifest, BackendSelection, RuntimeCacheKey},
+    storage::{ArtifactKey, ArtifactManifest, ArtifactStore, BackendSelection, RuntimeCacheKey},
     worker::{AotJob, JitJob, WorkerJob, WorkerPool, WorkerResult, WorkerSuccess},
 };
 use dashmap::DashMap;
@@ -359,19 +359,12 @@ impl CoordinatorState {
                     match (|| -> crate::eyre::Result<CompiledProgram> {
                         let library = unsafe { libloading::Library::new(&stored.dylib_path) }
                             .map_err(|e| {
-                                crate::eyre::eyre!(
-                                    "dlopen {:?}: {e}",
-                                    stored.dylib_path
-                                )
+                                crate::eyre::eyre!("dlopen {:?}: {e}", stored.dylib_path)
                             })?;
                         let func: crate::EvmCompilerFn = unsafe {
-                            let sym: libloading::Symbol<'_, crate::EvmCompilerFn> = library
-                                .get(success.symbol_name.as_bytes())
-                                .map_err(|e| {
-                                    crate::eyre::eyre!(
-                                        "symbol '{}': {e}",
-                                        success.symbol_name
-                                    )
+                            let sym: libloading::Symbol<'_, crate::EvmCompilerFn> =
+                                library.get(success.symbol_name.as_bytes()).map_err(|e| {
+                                    crate::eyre::eyre!("symbol '{}': {e}", success.symbol_name)
                                 })?;
                             *sym
                         };

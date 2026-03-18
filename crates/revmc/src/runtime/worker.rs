@@ -227,13 +227,11 @@ fn worker_loop(
     while let Ok(job) = job_rx.recv() {
         let (key, outcome) = match job {
             WorkerJob::Jit(job) => {
-                let span =
-                    tracing::info_span!("jit_compile", %job.key.code_hash, ?job.key.spec_id);
+                let span = tracing::info_span!("jit_compile", %job.key.code_hash, ?job.key.spec_id);
                 let _enter = span.enter();
 
-                let result = unsafe {
-                    jit_compiler.jit(&job.symbol_name, &*job.bytecode, job.key.spec_id)
-                };
+                let result =
+                    unsafe { jit_compiler.jit(&job.symbol_name, &*job.bytecode, job.key.spec_id) };
 
                 let outcome = match result {
                     Ok(func) => {
@@ -251,8 +249,7 @@ fn worker_loop(
                 (job.key, outcome)
             }
             WorkerJob::Aot(job) => {
-                let span =
-                    tracing::info_span!("aot_compile", %job.key.code_hash, ?job.key.spec_id);
+                let span = tracing::info_span!("aot_compile", %job.key.code_hash, ?job.key.spec_id);
                 let _enter = span.enter();
 
                 let outcome = compile_aot_artifact(&job);
@@ -335,8 +332,10 @@ impl Drop for TempDirGuard<'_> {
 
 /// Simple pseudo-random u64 for temp dir uniqueness.
 fn rand_u64() -> u64 {
-    use std::collections::hash_map::RandomState;
-    use std::hash::{BuildHasher, Hasher};
+    use std::{
+        collections::hash_map::RandomState,
+        hash::{BuildHasher, Hasher},
+    };
     RandomState::new().build_hasher().finish()
 }
 
