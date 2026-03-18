@@ -34,6 +34,7 @@ use crate::{
     EvmCompilerFn,
     eyre::{self, WrapErr},
 };
+use alloy_primitives::Bytes;
 use std::{
     sync::{
         Arc,
@@ -242,7 +243,7 @@ impl JitCoordinatorHandle {
         let event = Command::LookupObserved(LookupObservedEvent {
             key,
             was_hit,
-            bytecode: if was_hit { None } else { Some(Arc::<[u8]>::from(req.code)) },
+            bytecode: if was_hit { None } else { Some(Bytes::copy_from_slice(req.code)) },
         });
         match self.tx.try_send(event) {
             Ok(()) => {
@@ -263,7 +264,7 @@ impl JitCoordinatorHandle {
     pub fn compile_jit(&self, req: LookupRequest<'_>) -> eyre::Result<()> {
         let cmd = Command::CompileJit(CompileJitRequest {
             key: RuntimeCacheKey { code_hash: req.code_hash, spec_id: req.spec_id },
-            bytecode: Arc::from(req.code),
+            bytecode: Bytes::copy_from_slice(req.code),
         });
         self.tx.try_send(cmd).map_err(|_| eyre::eyre!("coordinator channel full or closed"))
     }
@@ -271,9 +272,8 @@ impl JitCoordinatorHandle {
     /// Enqueues a single AOT preparation request.
     ///
     /// This is enqueue-only and returns immediately. The compilation happens
-    /// asynchronously on the worker pool. The resulting compiled program is
-    /// placed in the resident map as a JIT entry (future work: persist through
-    /// `ArtifactStore`).
+    /// asynchronously on the worker pool. The resulting artifact is persisted
+    /// via [`ArtifactStore::store`] and loaded into the resident map.
     pub fn prepare_aot(&self, req: AotRequest<'_>) -> eyre::Result<()> {
         self.prepare_aot_batch(vec![req])
     }
@@ -286,7 +286,7 @@ impl JitCoordinatorHandle {
             .into_iter()
             .map(|r| PrepareAotRequest {
                 key: RuntimeCacheKey { code_hash: r.code_hash, spec_id: r.spec_id },
-                bytecode: Arc::from(r.code.into_owned()),
+                bytecode: Bytes::from(r.code.into_owned()),
             })
             .collect();
         let cmd = Command::PrepareAot(owned);

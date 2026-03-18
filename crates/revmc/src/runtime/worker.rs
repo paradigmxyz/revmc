@@ -8,6 +8,7 @@
 //! for that worker have been dropped, ensuring function pointers remain valid.
 
 use crate::{EvmCompilerFn, runtime::storage::RuntimeCacheKey};
+use alloy_primitives::Bytes;
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 
 /// A compilation job sent from the coordinator to a worker.
@@ -23,7 +24,7 @@ pub(crate) struct JitJob {
     /// The key to compile for.
     pub(crate) key: RuntimeCacheKey,
     /// The raw bytecode to compile.
-    pub(crate) bytecode: Arc<[u8]>,
+    pub(crate) bytecode: Bytes,
     /// The symbol name to use for the compiled function.
     pub(crate) symbol_name: String,
 }
@@ -33,7 +34,7 @@ pub(crate) struct AotJob {
     /// The key to compile for.
     pub(crate) key: RuntimeCacheKey,
     /// The raw bytecode to compile.
-    pub(crate) bytecode: Arc<[u8]>,
+    pub(crate) bytecode: Bytes,
     /// The symbol name to use for the compiled function.
     pub(crate) symbol_name: String,
     /// Optimization level for AOT compilation.
@@ -230,8 +231,9 @@ fn worker_loop(
                 let span = tracing::info_span!("jit_compile", %job.key.code_hash, ?job.key.spec_id);
                 let _enter = span.enter();
 
-                let result =
-                    unsafe { jit_compiler.jit(&job.symbol_name, &*job.bytecode, job.key.spec_id) };
+                let result = unsafe {
+                    jit_compiler.jit(&job.symbol_name, &job.bytecode[..], job.key.spec_id)
+                };
 
                 let outcome = match result {
                     Ok(func) => {
@@ -281,7 +283,7 @@ fn compile_aot_artifact(job: &AotJob) -> Result<WorkerSuccess, String> {
     let mut compiler = EvmCompiler::new(backend);
 
     compiler
-        .translate(&job.symbol_name, &*job.bytecode, job.key.spec_id)
+        .translate(&job.symbol_name, &job.bytecode[..], job.key.spec_id)
         .map_err(|e| format!("AOT translate failed: {e}"))?;
 
     let tmp_dir =

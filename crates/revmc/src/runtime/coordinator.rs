@@ -10,6 +10,7 @@ use crate::runtime::{
     storage::{ArtifactKey, ArtifactManifest, ArtifactStore, BackendSelection, RuntimeCacheKey},
     worker::{AotJob, JitJob, WorkerJob, WorkerPool, WorkerResult, WorkerSuccess},
 };
+use alloy_primitives::Bytes;
 use dashmap::DashMap;
 use rustc_hash::FxHashMap;
 use std::sync::{Arc, mpsc};
@@ -40,7 +41,7 @@ pub(crate) struct CompileJitRequest {
     /// The key to compile for.
     pub(crate) key: RuntimeCacheKey,
     /// The raw bytecode.
-    pub(crate) bytecode: Arc<[u8]>,
+    pub(crate) bytecode: Bytes,
 }
 
 /// An explicit AOT preparation request.
@@ -48,7 +49,7 @@ pub(crate) struct PrepareAotRequest {
     /// The key to compile for.
     pub(crate) key: RuntimeCacheKey,
     /// The raw bytecode.
-    pub(crate) bytecode: Arc<[u8]>,
+    pub(crate) bytecode: Bytes,
 }
 
 /// A lookup-observed event.
@@ -58,7 +59,7 @@ pub(crate) struct LookupObservedEvent {
     /// Whether the lookup was a hit (compiled found).
     pub(crate) was_hit: bool,
     /// The bytecode, present only on misses.
-    pub(crate) bytecode: Option<Arc<[u8]>>,
+    pub(crate) bytecode: Option<Bytes>,
 }
 
 /// Per-key state tracked by the coordinator.
@@ -68,7 +69,7 @@ struct EntryState {
     /// Current phase.
     phase: EntryPhase,
     /// The bytecode for this key (captured from a miss event).
-    bytecode: Arc<[u8]>,
+    bytecode: Bytes,
 }
 
 /// Phase of a coordinator entry.
@@ -129,7 +130,7 @@ impl CoordinatorState {
         let entry = self.entries.entry(event.key.clone()).or_insert_with(|| EntryState {
             hotness: 0,
             phase: EntryPhase::Cold,
-            bytecode: Arc::clone(&bytecode),
+            bytecode: bytecode.clone(),
         });
 
         // Only increment hotness for cold entries.
@@ -145,7 +146,7 @@ impl CoordinatorState {
             let symbol = format!("jit_{:x}_{:?}", event.key.code_hash, event.key.spec_id);
             let job = WorkerJob::Jit(JitJob {
                 key: event.key,
-                bytecode: Arc::clone(&entry.bytecode),
+                bytecode: entry.bytecode.clone(),
                 symbol_name: symbol,
             });
 
@@ -178,7 +179,7 @@ impl CoordinatorState {
         let symbol = format!("jit_{:x}_{:?}", req.key.code_hash, req.key.spec_id);
         let job = WorkerJob::Jit(JitJob {
             key: req.key.clone(),
-            bytecode: Arc::clone(&req.bytecode),
+            bytecode: req.bytecode.clone(),
             symbol_name: symbol,
         });
 
@@ -217,7 +218,7 @@ impl CoordinatorState {
             let symbol = format!("aot_{:x}_{:?}", req.key.code_hash, req.key.spec_id);
             let job = WorkerJob::Aot(AotJob {
                 key: req.key.clone(),
-                bytecode: Arc::clone(&req.bytecode),
+                bytecode: req.bytecode.clone(),
                 symbol_name: symbol,
                 opt_level: self.tuning.aot_opt_level,
             });
