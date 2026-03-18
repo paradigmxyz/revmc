@@ -41,6 +41,18 @@ pub(crate) struct RunArgs {
     #[arg(long)]
     parse_only: bool,
 
+    /// Print the parsed bytecode IR.
+    #[arg(long)]
+    display: bool,
+
+    /// Parse the bytecode and render the CFG as a DOT graph, then open in the browser.
+    #[arg(long)]
+    dot: bool,
+
+    /// Don't open URLs in the browser.
+    #[arg(long)]
+    no_open: bool,
+
     /// Compile and link to a shared library.
     #[arg(long)]
     aot: bool,
@@ -48,6 +60,10 @@ pub(crate) struct RunArgs {
     /// Interpret the code instead of compiling.
     #[arg(long, conflicts_with = "aot")]
     interpret: bool,
+
+    /// Run JIT only (skip interpreter comparison in benchmarks).
+    #[arg(long, conflicts_with = "interpret")]
+    jit_only: bool,
 
     /// Target triple.
     #[arg(long, default_value = "native")]
@@ -75,6 +91,9 @@ pub(crate) struct RunArgs {
     no_gas: bool,
     #[arg(long)]
     no_len_checks: bool,
+    /// Inspect the stack length after the function has been executed.
+    #[arg(long)]
+    inspect_stack_length: bool,
     #[arg(long, default_value = "1000000000")]
     gas_limit: u64,
 }
@@ -85,49 +104,57 @@ impl RunArgs {
         let target = revmc::Target::new(self.target, self.target_cpu, self.target_features);
         let backend = EvmLlvmBackend::new_for_target(self.aot, self.opt_level, &target)?;
         let mut compiler = EvmCompiler::new(backend);
-        compiler.set_dump_to(self.out_dir);
+        let out_dir = if self.out_dir.is_some() {
+            self.out_dir
+        } else if self.dot || self.display || self.parse_only {
+            Some(std::env::temp_dir().join("revmc-cli"))
+        } else {
+            None
+        };
+        compiler.set_dump_to(out_dir);
         compiler.gas_metering(!self.no_gas);
         unsafe { compiler.stack_bound_checks(!self.no_len_checks) };
         compiler.frame_pointers(true);
         compiler.debug_assertions(self.debug_assertions);
 
-        let Bench { name, bytecode, calldata, stack_input, native: _, requires_storage: _ } =
-            if self.bench_name == "custom" {
-                Bench {
-                    name: "custom",
-                    bytecode: read_code(self.code.as_deref(), self.code_path.as_deref())?,
-                    ..Default::default()
-                }
-            } else if Path::new(&self.bench_name).exists() {
-                let path = Path::new(&self.bench_name);
-                ensure!(path.is_file(), "argument must be a file");
-                ensure!(self.code.is_none(), "--code is not allowed with a file argument");
-                ensure!(
-                    self.code_path.is_none(),
-                    "--code-path is not allowed with a file argument"
-                );
-                Bench {
-                    name: path.file_stem().unwrap().to_str().unwrap().to_string().leak(),
-                    bytecode: read_code(None, Some(path))?,
-                    ..Default::default()
-                }
-            } else {
-                match get_benches().into_iter().find(|b| b.name == self.bench_name) {
-                    Some(b) => b,
-                    None => {
-                        if self.load.is_some() {
-                            Bench {
-                                name: self.bench_name.clone().leak(),
-                                bytecode: Vec::new(),
-                                ..Default::default()
-                            }
-                        } else {
-                            return Err(eyre!("unknown benchmark: {}", self.bench_name));
+        let Bench { name, bytecode, calldata, stack_input, native: _ } = if self.bench_name
+            == "custom"
+        {
+            Bench {
+                name: "custom",
+                bytecode: read_code(self.code.as_deref(), self.code_path.as_deref())?,
+                ..Default::default()
+            }
+        } else if Path::new(&self.bench_name).exists() {
+            let path = Path::new(&self.bench_name);
+            ensure!(path.is_file(), "argument must be a file");
+            ensure!(self.code.is_none(), "--code is not allowed with a file argument");
+            ensure!(self.code_path.is_none(), "--code-path is not allowed with a file argument");
+            Bench {
+                name: path.file_stem().unwrap().to_str().unwrap().to_string().leak(),
+                bytecode: read_code(None, Some(path))?,
+                ..Default::default()
+            }
+        } else {
+            match get_benches().into_iter().find(|b| b.name == self.bench_name) {
+                Some(b) => b,
+                None => {
+                    if self.load.is_some() {
+                        Bench {
+                            name: self.bench_name.clone().leak(),
+                            bytecode: Vec::new(),
+                            ..Default::default()
                         }
+                    } else {
+                        return Err(eyre!("unknown benchmark: {}", self.bench_name));
                     }
                 }
-            };
+            }
+        };
         compiler.set_module_name(name);
+        if let Some(dump_dir) = compiler.dump_dir() {
+            eprintln!("Dump directory: {}", dump_dir.display());
+        }
 
         let calldata: revmc::primitives::Bytes = if let Some(calldata) = self.calldata {
             revmc::primitives::hex::decode(calldata)?.into()
@@ -143,16 +170,21 @@ impl RunArgs {
 
         let mut host = DummyHost::new(spec_id);
 
-        if !stack_input.is_empty() {
-            compiler.inspect_stack_length(true);
-        }
+        compiler.inspect_stack_length(self.inspect_stack_length || !stack_input.is_empty());
 
+        let bytecode = compiler.parse(bytecode_slice.into(), spec_id)?;
+        if self.display || self.parse_only {
+            println!("{name}()\n{bytecode}");
+        }
+        if self.dot {
+            let dump_dir = compiler.dump_dir().expect("dump_dir should be set when --dot is used");
+            open_dot(&dump_dir.join("bytecode.dot"), !self.no_open)?;
+        }
         if self.parse_only {
-            let _ = compiler.parse(bytecode_slice.into(), spec_id)?;
             return Ok(());
         }
 
-        let f_id = compiler.translate(name, bytecode_slice, spec_id)?;
+        let f_id = compiler.translate_inner(name, &bytecode)?;
 
         let mut load = self.load;
         if self.aot {
@@ -202,65 +234,113 @@ impl RunArgs {
         };
 
         let table = instruction_table::<EthInterpreter, DummyHost>();
-        let mut run = |f: revmc::EvmCompilerFn| {
+
+        let mk_interpreter = || {
             let ext_bytecode = ExtBytecode::new(bytecode_raw.clone());
             let input = InputsImpl {
                 input: revm_interpreter::CallInput::Bytes(calldata.clone()),
                 ..Default::default()
             };
-            let mut interpreter = revm_interpreter::Interpreter::new(
+            revm_interpreter::Interpreter::new(
                 SharedMemory::new(),
                 ext_bytecode,
                 input,
                 false,
                 spec_id,
                 gas_limit,
-            );
-
-            if self.interpret {
-                let action = interpreter.run_plain(&table, &mut host);
-                let result = action
-                    .instruction_result()
-                    .unwrap_or(revm_interpreter::InstructionResult::Stop);
-                (result, action)
-            } else {
-                let (mut ecx, stack, stack_len) =
-                    EvmContext::from_interpreter_with_stack(&mut interpreter, &mut host);
-
-                for (i, input) in stack_input.iter().enumerate() {
-                    stack.as_mut_slice()[i] = (*input).into();
-                }
-                *stack_len = stack_input.len();
-
-                let r = unsafe { f.call_noinline(Some(stack), Some(stack_len), &mut ecx) };
-                let action = ecx.next_action.take().unwrap_or_else(|| {
-                    revm_interpreter::InterpreterAction::Return(
-                        revm_interpreter::InterpreterResult {
-                            result: r,
-                            output: revm_primitives::Bytes::new(),
-                            gas: *ecx.gas,
-                        },
-                    )
-                });
-                (r, action)
-            }
+            )
         };
 
         if self.n_iters == 0 {
             return Ok(());
         }
 
-        let (ret, action) = run(f);
-        println!("InstructionResult::{ret:?}");
-        println!("InterpreterAction::{action:#?}");
+        // Single run: print results.
+        if self.interpret {
+            let mut interpreter = mk_interpreter();
+            for input in &stack_input {
+                interpreter.stack.data_mut().push(*input);
+            }
+            let action = interpreter.run_plain(&table, &mut host);
+            let ret =
+                action.instruction_result().unwrap_or(revm_interpreter::InstructionResult::Stop);
+            println!("InstructionResult::{ret:?}");
+            println!("InterpreterAction::{action:#?}");
+        } else {
+            let mut interpreter = mk_interpreter();
+            let (mut ecx, stack, stack_len) =
+                EvmContext::from_interpreter_with_stack(&mut interpreter, &mut host);
+            for (i, input) in stack_input.iter().enumerate() {
+                stack.as_mut_slice()[i] = (*input).into();
+            }
+            *stack_len = stack_input.len();
+            let ret = unsafe { f.call_noinline(Some(stack), Some(stack_len), &mut ecx) };
+            let action = ecx.next_action.take().unwrap_or_else(|| {
+                revm_interpreter::InterpreterAction::Return(revm_interpreter::InterpreterResult {
+                    result: ret,
+                    output: revm_primitives::Bytes::new(),
+                    gas: *ecx.gas,
+                })
+            });
+            println!("InstructionResult::{ret:?}");
+            println!("InterpreterAction::{action:#?}");
+        }
 
         if self.n_iters > 1 {
-            bench(self.n_iters, name, || run(f));
-            return Ok(());
+            // Benchmark interpreter.
+            if self.interpret || !self.jit_only {
+                bench(self.n_iters, &format!("{name}/interpreter"), || {
+                    let mut interpreter = mk_interpreter();
+                    for input in &stack_input {
+                        interpreter.stack.data_mut().push(*input);
+                    }
+                    let action = interpreter.run_plain(&table, &mut host);
+                    let ret = action
+                        .instruction_result()
+                        .unwrap_or(revm_interpreter::InstructionResult::Stop);
+                    (ret, action)
+                });
+            }
+            // Benchmark JIT.
+            if !self.interpret {
+                bench(self.n_iters, &format!("{name}/jit"), || {
+                    let mut interpreter = mk_interpreter();
+                    let (mut ecx, stack, stack_len) =
+                        EvmContext::from_interpreter_with_stack(&mut interpreter, &mut host);
+                    for (i, input) in stack_input.iter().enumerate() {
+                        stack.as_mut_slice()[i] = (*input).into();
+                    }
+                    *stack_len = stack_input.len();
+                    let r = unsafe { f.call_noinline(Some(stack), Some(stack_len), &mut ecx) };
+                    let action = ecx.next_action.take().unwrap_or_else(|| {
+                        revm_interpreter::InterpreterAction::Return(
+                            revm_interpreter::InterpreterResult {
+                                result: r,
+                                output: revm_primitives::Bytes::new(),
+                                gas: *ecx.gas,
+                            },
+                        )
+                    });
+                    (r, action)
+                });
+            }
         }
 
         Ok(())
     }
+}
+
+fn open_dot(dot_path: &Path, open: bool) -> Result<()> {
+    let dot_source = std::fs::read_to_string(dot_path)?;
+    let compressed = lz_str::compress_to_encoded_uri_component(&dot_source);
+    let compressed = urlencoding::encode(&compressed);
+    let url =
+        format!("https://dreampuf.github.io/GraphvizOnline/?engine=dot&compressed={compressed}");
+    eprintln!("DOT graph: {url}");
+    if open {
+        let _ = open::that(&url);
+    }
+    Ok(())
 }
 
 fn bench<T>(n_iters: u64, name: &str, mut f: impl FnMut() -> T) {

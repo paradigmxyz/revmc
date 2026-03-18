@@ -32,15 +32,20 @@ revm-bytecode.workspace = true
 clap = { version = "4", features = ["derive"] }
 color-eyre.workspace = true
 libloading = "0.9"
+lz-str = "0.2"
+open = "5"
+urlencoding = "2"
 serde_json = "1.0"
-tracing-subscriber = { workspace = true, features = ["fmt", "env-filter"] }
-tracing-tracy = { workspace = true, optional = true }
+eyre.workspace = true
+tracing-subscriber = { workspace = true, features = ["registry", "fmt", "env-filter"] }
+tracing-tracy = { workspace = true, optional = true, features = ["demangle"] }
 
 [dev-dependencies]
-criterion = { version = "0.8", default-features = false }
+criterion.workspace = true
 revmc-cli-tests = { path = "../revmc-cli-tests/" }
 revmc-context = { workspace = true, default-features = false }
 revm = { workspace = true, default-features = false, features = ["std"] }
+revm-context-interface.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 hex = "0.4"

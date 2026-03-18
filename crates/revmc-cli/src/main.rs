@@ -4,6 +4,7 @@ mod cmd;
 
 use clap::{Parser, Subcommand};
 use color_eyre::Result;
+use eyre::eyre;
 
 #[derive(Parser)]
 struct Cli {
@@ -35,11 +36,47 @@ fn main() -> Result<()> {
     }
 }
 
-fn init_tracing_subscriber() -> Result<(), tracing_subscriber::util::TryInitError> {
+fn init_tracing_subscriber() -> Result<()> {
     use tracing_subscriber::prelude::*;
-    let registry = tracing_subscriber::Registry::default()
-        .with(tracing_subscriber::EnvFilter::from_default_env());
-    #[cfg(feature = "tracy")]
-    let registry = registry.with(tracing_tracy::TracyLayer::default());
-    registry.with(tracing_subscriber::fmt::layer()).try_init()
+
+    let (profile_layer, is_profiling) = match std::env::var("REVMC_PROFILE").as_deref() {
+        Ok("tracy") => {
+            if !cfg!(feature = "tracy") {
+                return Err(eyre!("tracy profiler support is not compiled in"));
+            }
+            (Some(tracy_layer().boxed()), true)
+        }
+        Ok(s) => return Err(eyre!("unknown profiler '{s}'; valid values: 'tracy'")),
+        Err(_) => (None, false),
+    };
+    // Disable the fmt layer when profiling.
+    let fmt_layer = (!is_profiling).then(tracing_subscriber::fmt::layer);
+    tracing_subscriber::Registry::default()
+        .with(tracing_subscriber::EnvFilter::from_default_env())
+        .with(profile_layer)
+        .with(fmt_layer)
+        .try_init()
+        .map_err(Into::into)
+}
+
+#[cfg(feature = "tracy")]
+fn tracy_layer() -> tracing_tracy::TracyLayer<impl tracing_tracy::Config> {
+    struct Config(tracing_subscriber::fmt::format::DefaultFields);
+    impl tracing_tracy::Config for Config {
+        type Formatter = tracing_subscriber::fmt::format::DefaultFields;
+        fn formatter(&self) -> &Self::Formatter {
+            &self.0
+        }
+        fn format_fields_in_zone_name(&self) -> bool {
+            false
+        }
+    }
+
+    tracing_tracy::client::register_demangler!();
+    tracing_tracy::TracyLayer::new(Config(Default::default()))
+}
+
+#[cfg(not(feature = "tracy"))]
+fn tracy_layer() -> tracing_subscriber::layer::Identity {
+    tracing_subscriber::layer::Identity::new()
 }

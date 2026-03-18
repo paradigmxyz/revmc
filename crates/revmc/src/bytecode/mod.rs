@@ -2,11 +2,11 @@
 
 use bitvec::vec::BitVec;
 use revm_bytecode::opcode as op;
-use revm_primitives::{hardfork::SpecId, hex};
+use revm_primitives::hardfork::SpecId;
 use revmc_backend::Result;
 use rustc_hash::FxHashMap;
-use std::fmt;
 
+mod fmt;
 mod sections;
 use sections::{Section, SectionAnalysis};
 
@@ -100,6 +100,7 @@ impl<'a> Bytecode<'a> {
 
     /// Returns an iterator over the opcodes.
     #[inline]
+    #[allow(dead_code)]
     pub(crate) fn opcodes(&self) -> OpcodesIter<'a> {
         OpcodesIter::new(self.code, self.spec_id)
     }
@@ -365,33 +366,6 @@ impl<'a> Bytecode<'a> {
     }
 }
 
-impl fmt::Display for Bytecode<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let header = format!("{:^6} | {:^6} | {:^80} | {}", "ic", "pc", "opcode", "instruction");
-        writeln!(f, "{header}")?;
-        writeln!(f, "{}", "-".repeat(header.len()))?;
-        for (inst, (pc, opcode)) in self.opcodes().with_pc().enumerate() {
-            let data = self.inst(inst);
-            let opcode = opcode.to_string();
-            writeln!(f, "{inst:>6} | {pc:>6} | {opcode:<80} | {data:?}")?;
-        }
-        Ok(())
-    }
-}
-
-impl fmt::Debug for Bytecode<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Bytecode")
-            .field("code", &hex::encode(self.code))
-            .field("insts", &self.insts)
-            .field("jumpdests", &hex::encode(bitvec_as_bytes(&self.jumpdests)))
-            .field("spec_id", &self.spec_id)
-            .field("has_dynamic_jumps", &self.has_dynamic_jumps)
-            .field("may_suspend", &self.may_suspend)
-            .finish()
-    }
-}
-
 /// A single instruction in the bytecode.
 #[derive(Clone, Default)]
 pub(crate) struct InstData {
@@ -426,18 +400,6 @@ impl PartialEq<InstData> for u8 {
     #[inline]
     fn eq(&self, other: &InstData) -> bool {
         *self == other.opcode
-    }
-}
-
-impl fmt::Debug for InstData {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("InstData")
-            .field("opcode", &self.to_op())
-            .field("flags", &format_args!("{:?}", self.flags))
-            .field("data", &self.data)
-            .field("pc", &self.pc)
-            .field("section", &self.section)
-            .finish()
     }
 }
 
