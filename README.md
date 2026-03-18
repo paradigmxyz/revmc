@@ -25,18 +25,18 @@ This repository hosts two backend implementations:
 ### LLVM backend
 
 - Linux or macOS, Windows is not supported
-- LLVM 21
+- LLVM 22
   - On Debian-based Linux distros: see [apt.llvm.org](https://apt.llvm.org/)
   - On Arch-based Linux distros: `pacman -S llvm`
-  - On macOS: `brew install llvm@21`
+  - On macOS: `brew install llvm@22`
   - The following environment variables may be required:
     ```bash
     prefix=$(llvm-config --prefix)
     # or
-    #prefix=$(llvm-config-21 --prefix)
+    #prefix=$(llvm-config-22 --prefix)
     # on macOS:
-    #prefix=$(brew --prefix llvm@21)
-    export LLVM_SYS_211_PREFIX=$prefix
+    #prefix=$(brew --prefix llvm@22)
+    export LLVM_SYS_221_PREFIX=$prefix
     ```
 
 ## Usage
