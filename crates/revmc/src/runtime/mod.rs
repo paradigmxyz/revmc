@@ -69,12 +69,13 @@ impl JitCoordinator {
         let (done_tx, done_rx) = mpsc::sync_channel::<()>(1);
 
         let tuning = config.tuning;
+        let store = config.store.clone();
         let resident_for_coord = Arc::clone(&resident);
 
         let thread = std::thread::Builder::new()
             .name(config.thread_name)
             .spawn(move || {
-                coordinator::run(rx, resident_for_coord, tuning);
+                coordinator::run(rx, resident_for_coord, store, tuning);
                 let _ = done_tx.send(());
             })
             .wrap_err("failed to spawn coordinator")?;
@@ -299,6 +300,20 @@ impl JitCoordinatorHandle {
     pub fn clear_resident(&self) -> eyre::Result<()> {
         self.tx
             .try_send(Command::ClearResident)
+            .map_err(|_| eyre::eyre!("coordinator channel full or closed"))
+    }
+
+    /// Clears persisted artifacts from the artifact store.
+    pub fn clear_persisted(&self) -> eyre::Result<()> {
+        self.tx
+            .try_send(Command::ClearPersisted)
+            .map_err(|_| eyre::eyre!("coordinator channel full or closed"))
+    }
+
+    /// Clears both the resident map and persisted artifacts.
+    pub fn clear_all(&self) -> eyre::Result<()> {
+        self.tx
+            .try_send(Command::ClearAll)
             .map_err(|_| eyre::eyre!("coordinator channel full or closed"))
     }
 

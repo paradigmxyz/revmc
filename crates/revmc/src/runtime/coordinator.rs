@@ -7,7 +7,7 @@
 use crate::runtime::{
     api::CompiledProgram,
     config::RuntimeTuning,
-    storage::RuntimeCacheKey,
+    storage::{ArtifactStore, RuntimeCacheKey},
     worker::{JitJob, WorkerPool, WorkerResult},
 };
 use dashmap::DashMap;
@@ -27,6 +27,10 @@ pub(crate) enum Command {
     PrepareAot(Vec<PrepareAotRequest>),
     /// Clear the resident compiled map.
     ClearResident,
+    /// Clear persisted artifacts from the artifact store.
+    ClearPersisted,
+    /// Clear both resident and persisted.
+    ClearAll,
     /// Shut down the coordinator.
     Shutdown,
 }
@@ -88,6 +92,8 @@ struct CoordinatorState {
     workers: WorkerPool,
     /// Receiver for worker results.
     result_rx: mpsc::Receiver<WorkerResult>,
+    /// Artifact store for persisted artifacts.
+    store: Option<Arc<dyn ArtifactStore>>,
     /// Tuning knobs.
     tuning: RuntimeTuning,
     /// Number of keys currently in Working phase.
@@ -236,6 +242,21 @@ impl CoordinatorState {
         debug!("resident map cleared");
     }
 
+    fn handle_clear_persisted(&mut self) {
+        if let Some(store) = &self.store {
+            if let Err(e) = store.clear() {
+                warn!(error = %e, "failed to clear artifact store");
+            } else {
+                debug!("artifact store cleared");
+            }
+        }
+    }
+
+    fn handle_clear_all(&mut self) {
+        self.handle_clear_resident();
+        self.handle_clear_persisted();
+    }
+
     fn handle_worker_result(&mut self, result: WorkerResult) {
         self.pending_jobs = self.pending_jobs.saturating_sub(1);
 
@@ -283,7 +304,12 @@ impl CoordinatorState {
 }
 
 /// Runs the coordinator event loop. Called on the coordinator thread.
-pub(crate) fn run(rx: mpsc::Receiver<Command>, resident: Arc<ResidentMap>, tuning: RuntimeTuning) {
+pub(crate) fn run(
+    rx: mpsc::Receiver<Command>,
+    resident: Arc<ResidentMap>,
+    store: Option<Arc<dyn ArtifactStore>>,
+    tuning: RuntimeTuning,
+) {
     debug!("coordinator thread started");
 
     let (result_tx, result_rx) = mpsc::channel::<WorkerResult>();
@@ -300,6 +326,7 @@ pub(crate) fn run(rx: mpsc::Receiver<Command>, resident: Arc<ResidentMap>, tunin
         entries: FxHashMap::default(),
         workers,
         result_rx,
+        store,
         tuning,
         pending_jobs: 0,
         jit_promotions: 0,
@@ -324,6 +351,12 @@ pub(crate) fn run(rx: mpsc::Receiver<Command>, resident: Arc<ResidentMap>, tunin
             }
             Ok(Command::ClearResident) => {
                 state.handle_clear_resident();
+            }
+            Ok(Command::ClearPersisted) => {
+                state.handle_clear_persisted();
+            }
+            Ok(Command::ClearAll) => {
+                state.handle_clear_all();
             }
             Ok(Command::Shutdown) => {
                 debug!("coordinator shutting down");
