@@ -26,8 +26,10 @@ use api::LoadedLibrary;
 use coordinator::{Command, LookupObservedEvent, ResidentMap};
 use stats::RuntimeStats;
 
-use crate::EvmCompilerFn;
-use crate::eyre::{self, WrapErr};
+use crate::{
+    EvmCompilerFn,
+    eyre::{self, WrapErr},
+};
 use std::{
     sync::{
         Arc,
@@ -111,9 +113,7 @@ impl JitCoordinator {
             }
 
             // Thread signaled done, join should return immediately.
-            thread
-                .join()
-                .map_err(|_| eyre::eyre!("coordinator thread panicked"))?;
+            thread.join().map_err(|_| eyre::eyre!("coordinator thread panicked"))?;
         }
         Ok(())
     }
@@ -169,10 +169,7 @@ impl JitCoordinator {
     }
 
     /// Loads a single artifact: `dlopen`s the dylib path and resolves the symbol.
-    fn load_artifact(
-        key: &ArtifactKey,
-        stored: &StoredArtifact,
-    ) -> eyre::Result<CompiledProgram> {
+    fn load_artifact(key: &ArtifactKey, stored: &StoredArtifact) -> eyre::Result<CompiledProgram> {
         let library = unsafe { libloading::Library::new(&stored.dylib_path) }
             .wrap_err_with(|| format!("dlopen {:?}", stored.dylib_path))?;
 
