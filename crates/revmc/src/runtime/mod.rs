@@ -257,6 +257,16 @@ impl JitCoordinatorHandle {
         decision
     }
 
+    /// Checks the resident map for a compiled program without sending any events.
+    pub fn get_compiled(
+        &self,
+        code_hash: alloy_primitives::B256,
+        spec_id: revm_primitives::hardfork::SpecId,
+    ) -> Option<Arc<CompiledProgram>> {
+        let key = RuntimeCacheKey { code_hash, spec_id };
+        self.resident.get(&key).map(|entry| Arc::clone(&entry))
+    }
+
     /// Enqueues an explicit JIT compilation request for the given bytecode.
     ///
     /// This is enqueue-only and returns immediately. The compilation happens

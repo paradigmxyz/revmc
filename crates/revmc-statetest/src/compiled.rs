@@ -563,20 +563,16 @@ fn execute_test_suite_compiled(
 
 // ── Runtime coordinator mode ─────────────────────────────────────────────────
 
-use revmc::runtime::{
-    JitCoordinator, JitCoordinatorHandle, LookupDecision, LookupRequest, RuntimeConfig,
-};
+use revmc::runtime::{JitCoordinator, JitCoordinatorHandle, LookupRequest, RuntimeConfig};
 
 /// Custom handler that looks up compiled functions via the runtime coordinator.
-/// Falls back to the interpreter for contracts not in the resident map.
-struct RuntimeHandler<'a> {
+/// On miss, enqueues JIT compilation and spin-waits for the result.
+struct RuntimeHandler {
     handle: JitCoordinatorHandle,
-    /// Fallback: compile cache for runtime-created code (CREATE/CREATE2).
-    cache: &'a CompileCache,
     spec_id: SpecId,
 }
 
-impl Handler for RuntimeHandler<'_> {
+impl Handler for RuntimeHandler {
     type Evm = StateTestEvm<'static>;
     type Error = StateTestError;
     type HaltReason = HaltReason;
@@ -596,19 +592,7 @@ impl Handler for RuntimeHandler<'_> {
                 let bytecode_hash = frame.interpreter.bytecode.get_or_calculate_hash();
                 let code = frame.interpreter.bytecode.original_byte_slice();
 
-                let req = LookupRequest { code_hash: bytecode_hash, code, spec_id: self.spec_id };
-                let decision = self.handle.lookup(req);
-
-                let f = match decision {
-                    LookupDecision::Compiled(program) => program.func,
-                    LookupDecision::Interpret(_reason) => {
-                        // Fall back: compile via cache (handles CREATE/CREATE2).
-                        self.cache
-                            .compile_single(bytecode_hash, code, self.spec_id)
-                            .expect("compilation failed for runtime bytecode")
-                    }
-                };
-
+                if let Some(f) = wait_for_compiled(&self.handle, bytecode_hash, code, self.spec_id)
                 {
                     let ctx = &mut evm.ctx;
                     let action = unsafe { f.call_with_interpreter(&mut frame.interpreter, ctx) };
@@ -617,6 +601,9 @@ impl Handler for RuntimeHandler<'_> {
                             frame.set_finished(true);
                         }
                     })?
+                } else {
+                    // Empty bytecode — fall back to interpreter.
+                    evm.frame_run()?
                 }
             };
             let result = match call_or_result {
@@ -633,11 +620,30 @@ impl Handler for RuntimeHandler<'_> {
     }
 }
 
+/// Enqueues JIT compilation for a contract and polls until it appears in the resident map.
+fn wait_for_compiled(
+    handle: &JitCoordinatorHandle,
+    code_hash: B256,
+    code: &[u8],
+    spec_id: SpecId,
+) -> Option<EvmCompilerFn> {
+    if code.is_empty() {
+        return None;
+    }
+    loop {
+        if let Some(program) = handle.get_compiled(code_hash, spec_id) {
+            return Some(program.func);
+        }
+        let req = LookupRequest { code_hash, code, spec_id };
+        let _ = handle.compile_jit(req);
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
 /// Execute a single test using the runtime coordinator handler.
 fn execute_single_test_runtime(
     handle: &JitCoordinatorHandle,
-    cache: &CompileCache,
-    ctx: CompiledTestContext<'_>,
+    ctx: RuntimeTestContext<'_>,
 ) -> Result<(), TestErrorKind> {
     let prestate = ctx.cache_state.clone();
     let mut state =
@@ -651,7 +657,7 @@ fn execute_single_test_runtime(
             .with_tx(ctx.tx.clone())
             .with_cfg(ctx.cfg.clone())
             .with_db(db_ref);
-        let mut handler = RuntimeHandler { handle: handle.clone(), cache, spec_id: ctx.spec_id };
+        let mut handler = RuntimeHandler { handle: handle.clone(), spec_id: ctx.spec_id };
         let mut evm = evm_context.build_mainnet();
         let result = handler.run(&mut evm);
         if result.is_ok() {
@@ -674,14 +680,25 @@ fn execute_single_test_runtime(
     )
 }
 
+struct RuntimeTestContext<'a> {
+    spec_id: SpecId,
+    test: &'a revm::statetest_types::Test,
+    unit: &'a TestUnit,
+    name: &'a str,
+    cfg: &'a CfgEnv,
+    block: &'a BlockEnv,
+    tx: &'a TxEnv,
+    cache_state: &'a database::CacheState,
+    elapsed: &'a Arc<Mutex<Duration>>,
+}
+
 /// Execute a test suite file using the runtime coordinator.
 ///
-/// For each test unit, we AOT-compile all contracts via `CompileCache`, then look them up
-/// through the `JitCoordinatorHandle`. This exercises the full preload → lookup path.
+/// For each test unit, we enqueue JIT compilation via the coordinator and wait for all
+/// contracts to be compiled before executing. This exercises the full JIT pipeline.
 fn execute_test_suite_runtime(
     path: &Path,
     elapsed: &Arc<Mutex<Duration>>,
-    cache: &CompileCache,
     handle: &JitCoordinatorHandle,
 ) -> Result<(), TestError> {
     if skip_test(path) {
@@ -719,12 +736,15 @@ fn execute_test_suite_runtime(
 
             let block = unit.block_env(&mut cfg);
 
-            // AOT-compile all contracts in this unit (populates the CompileCache).
-            let compiled = cache.compile(&unit, spec_id).map_err(|e| TestError {
-                name: name.clone(),
-                path: path_str.clone(),
-                kind: e,
-            })?;
+            // Enqueue JIT compilation for all contracts in this unit.
+            for info in unit.pre.values() {
+                if info.code.is_empty() {
+                    continue;
+                }
+                let code_hash = keccak256(&info.code);
+                let req = LookupRequest { code_hash, code: &info.code, spec_id };
+                let _ = handle.compile_jit(req);
+            }
 
             for test in tests.iter() {
                 let tx = match test.tx_env(&unit) {
@@ -741,10 +761,7 @@ fn execute_test_suite_runtime(
 
                 let result = execute_single_test_runtime(
                     handle,
-                    cache,
-                    CompiledTestContext {
-                        compiled: &compiled,
-                        cache,
+                    RuntimeTestContext {
                         spec_id,
                         test,
                         unit: &unit,
@@ -791,12 +808,9 @@ fn run_test_worker(
             CompileMode::Jit | CompileMode::Aot => {
                 execute_test_suite_compiled(&test_path, &state.elapsed, cache.unwrap())
             }
-            CompileMode::Runtime => execute_test_suite_runtime(
-                &test_path,
-                &state.elapsed,
-                cache.unwrap(),
-                handle.unwrap(),
-            ),
+            CompileMode::Runtime => {
+                execute_test_suite_runtime(&test_path, &state.elapsed, handle.unwrap())
+            }
         };
 
         state.console_bar.inc(1);
@@ -823,15 +837,13 @@ pub fn run(
     let state = TestRunnerState::new(test_files);
 
     let cache = match mode {
-        CompileMode::Interpreter => None,
-        CompileMode::Jit | CompileMode::Aot | CompileMode::Runtime => {
-            Some(Arc::new(CompileCache::new(mode)))
-        }
+        CompileMode::Interpreter | CompileMode::Runtime => None,
+        CompileMode::Jit | CompileMode::Aot => Some(Arc::new(CompileCache::new(mode))),
     };
 
     // For runtime mode, start the coordinator with an empty store.
-    // All lookups will miss → fall back to CompileCache → compile on demand.
-    // This exercises the full lookup → miss → fallback → event tracking path.
+    // All lookups will miss → enqueue JIT → compile on worker threads.
+    // This exercises the full JIT pipeline end-to-end.
     let coordinator = if mode == CompileMode::Runtime {
         let config = RuntimeConfig { enabled: true, ..Default::default() };
         Some(JitCoordinator::start(config).map_err(|e| TestError {

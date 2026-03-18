@@ -237,6 +237,11 @@ fn worker_loop(
 
                 let outcome = match result {
                     Ok(func) => {
+                        // Reset IR so the next job can reuse this compiler.
+                        // This frees IR but keeps JIT machine code alive.
+                        if let Err(e) = jit_compiler.clear_ir() {
+                            warn!(worker_id, error = %e, "clear_ir failed");
+                        }
                         debug!(worker_id, "JIT compilation succeeded");
                         Ok(WorkerSuccess::Jit(JitSuccess {
                             func,
