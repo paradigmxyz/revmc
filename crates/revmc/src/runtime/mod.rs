@@ -15,7 +15,9 @@ mod worker;
 #[cfg(test)]
 mod tests;
 
-pub use api::{CompiledProgram, InterpretReason, LookupDecision, LookupRequest, ProgramKind};
+pub use api::{
+    AotRequest, CompiledProgram, InterpretReason, LookupDecision, LookupRequest, ProgramKind,
+};
 pub use config::{RuntimeConfig, RuntimeTuning};
 pub use stats::RuntimeStatsSnapshot;
 pub use storage::{
@@ -23,7 +25,9 @@ pub use storage::{
 };
 
 use api::LoadedLibrary;
-use coordinator::{Command, LookupObservedEvent, ResidentMap};
+use coordinator::{
+    Command, CompileJitRequest, LookupObservedEvent, PrepareAotRequest, ResidentMap,
+};
 use stats::RuntimeStats;
 
 use crate::{
@@ -249,6 +253,53 @@ impl JitCoordinatorHandle {
         }
 
         decision
+    }
+
+    /// Enqueues an explicit JIT compilation request for the given bytecode.
+    ///
+    /// This is enqueue-only and returns immediately. The compilation happens
+    /// asynchronously on the worker pool.
+    pub fn compile_jit(&self, req: LookupRequest<'_>) -> eyre::Result<()> {
+        let cmd = Command::CompileJit(CompileJitRequest {
+            key: RuntimeCacheKey { code_hash: req.code_hash, spec_id: req.spec_id },
+            bytecode: Arc::from(req.code),
+        });
+        self.tx.try_send(cmd).map_err(|_| eyre::eyre!("coordinator channel full or closed"))
+    }
+
+    /// Enqueues a single AOT preparation request.
+    ///
+    /// This is enqueue-only and returns immediately. The compilation happens
+    /// asynchronously on the worker pool. The resulting compiled program is
+    /// placed in the resident map as a JIT entry (future work: persist through
+    /// `ArtifactStore`).
+    pub fn prepare_aot(&self, req: AotRequest<'_>) -> eyre::Result<()> {
+        self.prepare_aot_batch(vec![req])
+    }
+
+    /// Enqueues a batch of AOT preparation requests.
+    ///
+    /// This is enqueue-only and returns immediately.
+    pub fn prepare_aot_batch(&self, reqs: Vec<AotRequest<'_>>) -> eyre::Result<()> {
+        let owned: Vec<PrepareAotRequest> = reqs
+            .into_iter()
+            .map(|r| PrepareAotRequest {
+                key: RuntimeCacheKey { code_hash: r.code_hash, spec_id: r.spec_id },
+                bytecode: Arc::from(r.code.into_owned()),
+            })
+            .collect();
+        let cmd = Command::PrepareAot(owned);
+        self.tx.try_send(cmd).map_err(|_| eyre::eyre!("coordinator channel full or closed"))
+    }
+
+    /// Clears the in-memory resident compiled map.
+    ///
+    /// All compiled programs are removed from the map. Active references
+    /// held by callers remain valid until dropped.
+    pub fn clear_resident(&self) -> eyre::Result<()> {
+        self.tx
+            .try_send(Command::ClearResident)
+            .map_err(|_| eyre::eyre!("coordinator channel full or closed"))
     }
 
     /// Sets whether the runtime is enabled.

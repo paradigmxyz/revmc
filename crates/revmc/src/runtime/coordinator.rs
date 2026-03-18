@@ -21,8 +21,30 @@ pub(crate) type ResidentMap = DashMap<RuntimeCacheKey, Arc<CompiledProgram>>;
 pub(crate) enum Command {
     /// A lookup was observed on the hot path.
     LookupObserved(LookupObservedEvent),
+    /// Explicit request to JIT-compile a bytecode.
+    CompileJit(CompileJitRequest),
+    /// Explicit request to prepare AOT artifacts.
+    PrepareAot(Vec<PrepareAotRequest>),
+    /// Clear the resident compiled map.
+    ClearResident,
     /// Shut down the coordinator.
     Shutdown,
+}
+
+/// An explicit JIT compilation request.
+pub(crate) struct CompileJitRequest {
+    /// The key to compile for.
+    pub(crate) key: RuntimeCacheKey,
+    /// The raw bytecode.
+    pub(crate) bytecode: Arc<[u8]>,
+}
+
+/// An explicit AOT preparation request.
+pub(crate) struct PrepareAotRequest {
+    /// The key to compile for.
+    pub(crate) key: RuntimeCacheKey,
+    /// The raw bytecode.
+    pub(crate) bytecode: Arc<[u8]>,
 }
 
 /// A lookup-observed event.
@@ -129,6 +151,91 @@ impl CoordinatorState {
         }
     }
 
+    fn handle_compile_jit(&mut self, req: CompileJitRequest) {
+        // Already compiled.
+        if self.resident.contains_key(&req.key) {
+            return;
+        }
+
+        // Skip empty bytecodes.
+        if req.bytecode.is_empty() {
+            return;
+        }
+
+        // Check if already working or failed.
+        if let Some(entry) = self.entries.get(&req.key)
+            && entry.phase != EntryPhase::Cold
+        {
+            return;
+        }
+
+        let symbol = format!("jit_{:x}_{:?}", req.key.code_hash, req.key.spec_id);
+        let job = JitJob {
+            key: req.key.clone(),
+            bytecode: Arc::clone(&req.bytecode),
+            symbol_name: symbol,
+        };
+
+        let entry = self.entries.entry(req.key).or_insert_with(|| EntryState {
+            hotness: 0,
+            phase: EntryPhase::Cold,
+            bytecode: req.bytecode,
+        });
+
+        if self.workers.try_send(job) {
+            entry.phase = EntryPhase::Working;
+            self.pending_jobs += 1;
+            self.jit_promotions += 1;
+        }
+    }
+
+    fn handle_prepare_aot(&mut self, reqs: Vec<PrepareAotRequest>) {
+        for req in reqs {
+            // Already compiled in resident map.
+            if self.resident.contains_key(&req.key) {
+                continue;
+            }
+
+            // Skip empty bytecodes.
+            if req.bytecode.is_empty() {
+                continue;
+            }
+
+            // Check if already working or failed.
+            if let Some(entry) = self.entries.get(&req.key)
+                && entry.phase != EntryPhase::Cold
+            {
+                continue;
+            }
+
+            let symbol = format!("aot_{:x}_{:?}", req.key.code_hash, req.key.spec_id);
+            let job = JitJob {
+                key: req.key.clone(),
+                bytecode: Arc::clone(&req.bytecode),
+                symbol_name: symbol,
+            };
+
+            let entry = self.entries.entry(req.key).or_insert_with(|| EntryState {
+                hotness: 0,
+                phase: EntryPhase::Cold,
+                bytecode: req.bytecode,
+            });
+
+            if self.workers.try_send(job) {
+                entry.phase = EntryPhase::Working;
+                self.pending_jobs += 1;
+                self.jit_promotions += 1;
+            }
+        }
+    }
+
+    fn handle_clear_resident(&mut self) {
+        self.resident.clear();
+        self.entries.clear();
+        self.pending_jobs = 0;
+        debug!("resident map cleared");
+    }
+
     fn handle_worker_result(&mut self, result: WorkerResult) {
         self.pending_jobs = self.pending_jobs.saturating_sub(1);
 
@@ -208,6 +315,15 @@ pub(crate) fn run(rx: mpsc::Receiver<Command>, resident: Arc<ResidentMap>, tunin
         match rx.recv() {
             Ok(Command::LookupObserved(event)) => {
                 state.handle_lookup_observed(event);
+            }
+            Ok(Command::CompileJit(req)) => {
+                state.handle_compile_jit(req);
+            }
+            Ok(Command::PrepareAot(reqs)) => {
+                state.handle_prepare_aot(reqs);
+            }
+            Ok(Command::ClearResident) => {
+                state.handle_clear_resident();
             }
             Ok(Command::Shutdown) => {
                 debug!("coordinator shutting down");

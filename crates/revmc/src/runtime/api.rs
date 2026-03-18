@@ -6,7 +6,7 @@ use crate::{
 };
 use alloy_primitives::B256;
 use revm_primitives::hardfork::SpecId;
-use std::sync::Arc;
+use std::{borrow::Cow, sync::Arc};
 
 /// Request to look up a compiled function.
 #[derive(Clone, Debug)]
@@ -102,6 +102,17 @@ impl CompiledProgram {
             _backing: ProgramBacking::JitModule(backing),
         }
     }
+}
+
+/// Request to prepare an AOT artifact.
+#[derive(Clone, Debug)]
+pub struct AotRequest<'a> {
+    /// The code hash of the contract bytecode.
+    pub code_hash: B256,
+    /// The raw contract bytecode.
+    pub code: Cow<'a, [u8]>,
+    /// The EVM spec (hardfork) for compilation.
+    pub spec_id: SpecId,
 }
 
 /// Whether this program was compiled AOT or JIT.

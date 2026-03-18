@@ -200,3 +200,78 @@ fn startup_store_failure() {
     let result = JitCoordinator::start(config);
     assert!(result.is_err());
 }
+
+#[test]
+fn compile_jit_enqueue() {
+    let config = RuntimeConfig { enabled: true, ..Default::default() };
+    let coord = JitCoordinator::start(config).unwrap();
+    let handle = coord.handle();
+
+    let req = LookupRequest {
+        code_hash: B256::repeat_byte(0x01),
+        code: &[0x60, 0x00],
+        spec_id: SpecId::CANCUN,
+    };
+    handle.compile_jit(req).unwrap();
+
+    coord.shutdown().unwrap();
+}
+
+#[test]
+fn prepare_aot_enqueue() {
+    use std::borrow::Cow;
+
+    let config = RuntimeConfig { enabled: true, ..Default::default() };
+    let coord = JitCoordinator::start(config).unwrap();
+    let handle = coord.handle();
+
+    let req = super::AotRequest {
+        code_hash: B256::repeat_byte(0x02),
+        code: Cow::Borrowed(&[0x60, 0x00]),
+        spec_id: SpecId::CANCUN,
+    };
+    handle.prepare_aot(req).unwrap();
+
+    coord.shutdown().unwrap();
+}
+
+#[test]
+fn prepare_aot_batch_enqueue() {
+    use std::borrow::Cow;
+
+    let config = RuntimeConfig { enabled: true, ..Default::default() };
+    let coord = JitCoordinator::start(config).unwrap();
+    let handle = coord.handle();
+
+    let reqs = vec![
+        super::AotRequest {
+            code_hash: B256::repeat_byte(0x03),
+            code: Cow::Borrowed(&[0x60, 0x00]),
+            spec_id: SpecId::CANCUN,
+        },
+        super::AotRequest {
+            code_hash: B256::repeat_byte(0x04),
+            code: Cow::Borrowed(&[0x60, 0x01]),
+            spec_id: SpecId::CANCUN,
+        },
+    ];
+    handle.prepare_aot_batch(reqs).unwrap();
+
+    coord.shutdown().unwrap();
+}
+
+#[test]
+fn clear_resident() {
+    let config = RuntimeConfig { enabled: true, ..Default::default() };
+    let coord = JitCoordinator::start(config).unwrap();
+    let handle = coord.handle();
+
+    handle.clear_resident().unwrap();
+
+    // After clear, lookups should miss.
+    let req = LookupRequest { code_hash: B256::ZERO, code: &[0x00], spec_id: SpecId::CANCUN };
+    let decision = handle.lookup(req);
+    assert!(matches!(decision, LookupDecision::Interpret(InterpretReason::NotReady)));
+
+    coord.shutdown().unwrap();
+}
