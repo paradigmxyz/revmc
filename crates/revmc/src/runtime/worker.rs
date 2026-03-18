@@ -1,4 +1,4 @@
-//! Background JIT compilation workers.
+//! Background JIT and AOT compilation workers.
 //!
 //! Each worker thread owns a long-lived `EvmCompiler` instance tied to its
 //! thread-local LLVM context. Compiled function pointers remain valid as long
@@ -10,6 +10,14 @@
 use crate::{EvmCompilerFn, runtime::storage::RuntimeCacheKey};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 
+/// A compilation job sent from the coordinator to a worker.
+pub(crate) enum WorkerJob {
+    /// JIT compilation: produce an in-memory function pointer.
+    Jit(JitJob),
+    /// AOT compilation: produce shared-library bytes for persistence.
+    Aot(AotJob),
+}
+
 /// A JIT compilation job sent from the coordinator to a worker.
 pub(crate) struct JitJob {
     /// The key to compile for.
@@ -20,14 +28,34 @@ pub(crate) struct JitJob {
     pub(crate) symbol_name: String,
 }
 
-/// Result of a JIT compilation attempt, sent back from a worker to the coordinator.
+/// An AOT compilation job sent from the coordinator to a worker.
+pub(crate) struct AotJob {
+    /// The key to compile for.
+    pub(crate) key: RuntimeCacheKey,
+    /// The raw bytecode to compile.
+    pub(crate) bytecode: Arc<[u8]>,
+    /// The symbol name to use for the compiled function.
+    pub(crate) symbol_name: String,
+    /// Optimization level for AOT compilation.
+    pub(crate) opt_level: crate::OptimizationLevel,
+}
+
+/// Result of a compilation attempt, sent back from a worker to the coordinator.
 pub(crate) struct WorkerResult {
     /// The key that was compiled.
     pub(crate) key: RuntimeCacheKey,
     /// The worker that produced this result (used to get its backing Arc).
     pub(crate) worker_id: usize,
     /// The compilation outcome.
-    pub(crate) outcome: Result<JitSuccess, String>,
+    pub(crate) outcome: Result<WorkerSuccess, String>,
+}
+
+/// Successful compilation output.
+pub(crate) enum WorkerSuccess {
+    /// JIT compilation produced an in-memory function pointer.
+    Jit(JitSuccess),
+    /// AOT compilation produced shared-library bytes.
+    Aot(AotSuccess),
 }
 
 /// Successful JIT compilation output.
@@ -38,10 +66,20 @@ pub(crate) struct JitSuccess {
     pub(crate) approx_size_bytes: usize,
 }
 
+/// Successful AOT compilation output.
+pub(crate) struct AotSuccess {
+    /// The symbol name in the shared library.
+    pub(crate) symbol_name: String,
+    /// The raw shared-library bytes (.so / .dylib).
+    pub(crate) dylib_bytes: Vec<u8>,
+    /// Length of the original bytecode.
+    pub(crate) bytecode_len: usize,
+}
+
 /// Handle to the worker pool. Manages worker threads and their job queues.
 pub(crate) struct WorkerPool {
     /// Per-worker job senders.
-    job_txs: Vec<mpsc::SyncSender<JitJob>>,
+    job_txs: Vec<mpsc::SyncSender<WorkerJob>>,
     /// Worker thread handles.
     threads: Vec<Option<std::thread::JoinHandle<()>>>,
     /// Shared backing owners — one per worker, keeps JIT code alive.
@@ -95,7 +133,7 @@ impl WorkerPool {
         let mut backings = Vec::with_capacity(worker_count);
 
         for worker_id in 0..worker_count {
-            let (job_tx, job_rx) = mpsc::sync_channel::<JitJob>(job_queue_capacity);
+            let (job_tx, job_rx) = mpsc::sync_channel::<WorkerJob>(job_queue_capacity);
             let result_tx = result_tx.clone();
             let backing = Arc::new(WorkerBacking::new());
             let backing_for_worker = Arc::clone(&backing);
@@ -116,7 +154,7 @@ impl WorkerPool {
     }
 
     /// Tries to send a job to a worker (round-robin). Returns false if all queues are full.
-    pub(crate) fn try_send(&mut self, mut job: JitJob) -> bool {
+    pub(crate) fn try_send(&mut self, mut job: WorkerJob) -> bool {
         let count = self.job_txs.len();
         for _ in 0..count {
             let idx = self.next_worker % count;
@@ -161,14 +199,14 @@ impl Drop for WorkerPool {
     }
 }
 
-/// The per-worker event loop. Owns a long-lived compiler.
+/// The per-worker event loop. Owns a long-lived JIT compiler.
 ///
 /// After all jobs are processed, the worker blocks until all `Arc<WorkerBacking>`
 /// references are dropped, ensuring compiled function pointers remain valid.
 #[cfg(feature = "llvm")]
 fn worker_loop(
     worker_id: usize,
-    job_rx: mpsc::Receiver<JitJob>,
+    job_rx: mpsc::Receiver<WorkerJob>,
     result_tx: mpsc::Sender<WorkerResult>,
     opt_level: crate::OptimizationLevel,
     backing: &WorkerBacking,
@@ -184,26 +222,45 @@ fn worker_loop(
             return;
         }
     };
-    let mut compiler = EvmCompiler::new(backend);
+    let mut jit_compiler = EvmCompiler::new(backend);
 
     while let Ok(job) = job_rx.recv() {
-        let span = tracing::info_span!("jit_compile", %job.key.code_hash, ?job.key.spec_id);
-        let _enter = span.enter();
+        let (key, outcome) = match job {
+            WorkerJob::Jit(job) => {
+                let span =
+                    tracing::info_span!("jit_compile", %job.key.code_hash, ?job.key.spec_id);
+                let _enter = span.enter();
 
-        let result = unsafe { compiler.jit(&job.symbol_name, &*job.bytecode, job.key.spec_id) };
+                let result = unsafe {
+                    jit_compiler.jit(&job.symbol_name, &*job.bytecode, job.key.spec_id)
+                };
 
-        let outcome = match result {
-            Ok(func) => {
-                debug!(worker_id, "JIT compilation succeeded");
-                Ok(JitSuccess { func, approx_size_bytes: job.bytecode.len() })
+                let outcome = match result {
+                    Ok(func) => {
+                        debug!(worker_id, "JIT compilation succeeded");
+                        Ok(WorkerSuccess::Jit(JitSuccess {
+                            func,
+                            approx_size_bytes: job.bytecode.len(),
+                        }))
+                    }
+                    Err(e) => {
+                        warn!(worker_id, error = %e, "JIT compilation failed");
+                        Err(format!("{e}"))
+                    }
+                };
+                (job.key, outcome)
             }
-            Err(e) => {
-                warn!(worker_id, error = %e, "JIT compilation failed");
-                Err(format!("{e}"))
+            WorkerJob::Aot(job) => {
+                let span =
+                    tracing::info_span!("aot_compile", %job.key.code_hash, ?job.key.spec_id);
+                let _enter = span.enter();
+
+                let outcome = compile_aot_artifact(&job);
+                (job.key, outcome)
             }
         };
 
-        let _ = result_tx.send(WorkerResult { key: job.key, worker_id, outcome });
+        let _ = result_tx.send(WorkerResult { key, worker_id, outcome });
     }
 
     debug!(worker_id, "compile worker done processing jobs, waiting for backing refs to drop");
@@ -213,13 +270,80 @@ fn worker_loop(
     backing.wait_for_exit();
 
     debug!(worker_id, "compile worker shutting down");
-    // `compiler` is dropped here, freeing all JIT machine code.
+    // `jit_compiler` is dropped here, freeing all JIT machine code.
+}
+
+/// Compiles a single bytecode to a shared library and returns the raw bytes.
+#[cfg(feature = "llvm")]
+fn compile_aot_artifact(job: &AotJob) -> Result<WorkerSuccess, String> {
+    use crate::{EvmCompiler, EvmLlvmBackend, Linker};
+    use std::io::Read;
+
+    let backend = EvmLlvmBackend::new(true, job.opt_level)
+        .map_err(|e| format!("AOT backend creation failed: {e}"))?;
+    let mut compiler = EvmCompiler::new(backend);
+
+    compiler
+        .translate(&job.symbol_name, &*job.bytecode, job.key.spec_id)
+        .map_err(|e| format!("AOT translate failed: {e}"))?;
+
+    let tmp_dir =
+        std::env::temp_dir().join(format!("revmc-aot-{}-{:x}", std::process::id(), rand_u64()));
+    std::fs::create_dir_all(&tmp_dir)
+        .map_err(|e| format!("failed to create temp dir {}: {e}", tmp_dir.display()))?;
+
+    let _cleanup = TempDirGuard(&tmp_dir);
+
+    let obj_path = tmp_dir.join("a.o");
+    let so_path = tmp_dir.join("a.so");
+
+    compiler
+        .write_object_to_file(&obj_path)
+        .map_err(|e| format!("AOT write object failed: {e}"))?;
+
+    let linker = Linker::new();
+    linker
+        .link(&so_path, [obj_path.to_str().unwrap()])
+        .map_err(|e| format!("AOT link failed: {e}"))?;
+
+    let mut dylib_bytes = Vec::new();
+    std::fs::File::open(&so_path)
+        .and_then(|mut f| f.read_to_end(&mut dylib_bytes))
+        .map_err(|e| format!("failed to read linked .so: {e}"))?;
+
+    debug!(
+        bytecode_len = job.bytecode.len(),
+        dylib_len = dylib_bytes.len(),
+        "AOT compilation succeeded",
+    );
+
+    Ok(WorkerSuccess::Aot(AotSuccess {
+        symbol_name: job.symbol_name.clone(),
+        dylib_bytes,
+        bytecode_len: job.bytecode.len(),
+    }))
+}
+
+/// RAII guard that removes a temp directory on drop.
+struct TempDirGuard<'a>(&'a std::path::Path);
+
+impl Drop for TempDirGuard<'_> {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(self.0);
+    }
+}
+
+/// Simple pseudo-random u64 for temp dir uniqueness.
+fn rand_u64() -> u64 {
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hasher};
+    RandomState::new().build_hasher().finish()
 }
 
 #[cfg(not(feature = "llvm"))]
 fn worker_loop(
     worker_id: usize,
-    job_rx: mpsc::Receiver<JitJob>,
+    job_rx: mpsc::Receiver<WorkerJob>,
     result_tx: mpsc::Sender<WorkerResult>,
     _opt_level: crate::OptimizationLevel,
     backing: &WorkerBacking,
@@ -227,8 +351,12 @@ fn worker_loop(
     debug!(worker_id, "compile worker started (no LLVM, all jobs will fail)");
 
     while let Ok(job) = job_rx.recv() {
+        let key = match &job {
+            WorkerJob::Jit(j) => j.key.clone(),
+            WorkerJob::Aot(j) => j.key.clone(),
+        };
         let _ = result_tx.send(WorkerResult {
-            key: job.key,
+            key,
             worker_id,
             outcome: Err("LLVM backend not available".into()),
         });

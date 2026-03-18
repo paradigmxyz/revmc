@@ -75,6 +75,11 @@ pub struct RuntimeTuning {
     ///
     /// Defaults to [`OptimizationLevel::Default`](crate::OptimizationLevel::Default).
     pub jit_opt_level: crate::OptimizationLevel,
+
+    /// Optimization level for AOT compilation.
+    ///
+    /// Defaults to [`OptimizationLevel::Aggressive`](crate::OptimizationLevel::Aggressive).
+    pub aot_opt_level: crate::OptimizationLevel,
 }
 
 impl Default for RuntimeTuning {
@@ -90,6 +95,7 @@ impl Default for RuntimeTuning {
             jit_worker_count: worker_count,
             jit_worker_queue_capacity: 64,
             jit_opt_level: crate::OptimizationLevel::Default,
+            aot_opt_level: crate::OptimizationLevel::Aggressive,
         }
     }
 }

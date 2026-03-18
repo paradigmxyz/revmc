@@ -7,8 +7,8 @@
 use crate::runtime::{
     api::CompiledProgram,
     config::RuntimeTuning,
-    storage::{ArtifactStore, RuntimeCacheKey},
-    worker::{JitJob, WorkerPool, WorkerResult},
+    storage::{ArtifactStore, ArtifactKey, ArtifactManifest, BackendSelection, RuntimeCacheKey},
+    worker::{AotJob, JitJob, WorkerJob, WorkerPool, WorkerResult, WorkerSuccess},
 };
 use dashmap::DashMap;
 use rustc_hash::FxHashMap;
@@ -143,11 +143,11 @@ impl CoordinatorState {
             && self.pending_jobs < self.tuning.max_pending_jit_jobs
         {
             let symbol = format!("jit_{:x}_{:?}", event.key.code_hash, event.key.spec_id);
-            let job = JitJob {
+            let job = WorkerJob::Jit(JitJob {
                 key: event.key,
                 bytecode: Arc::clone(&entry.bytecode),
                 symbol_name: symbol,
-            };
+            });
 
             if self.workers.try_send(job) {
                 entry.phase = EntryPhase::Working;
@@ -176,11 +176,11 @@ impl CoordinatorState {
         }
 
         let symbol = format!("jit_{:x}_{:?}", req.key.code_hash, req.key.spec_id);
-        let job = JitJob {
+        let job = WorkerJob::Jit(JitJob {
             key: req.key.clone(),
             bytecode: Arc::clone(&req.bytecode),
             symbol_name: symbol,
-        };
+        });
 
         let entry = self.entries.entry(req.key).or_insert_with(|| EntryState {
             hotness: 0,
@@ -215,11 +215,12 @@ impl CoordinatorState {
             }
 
             let symbol = format!("aot_{:x}_{:?}", req.key.code_hash, req.key.spec_id);
-            let job = JitJob {
+            let job = WorkerJob::Aot(AotJob {
                 key: req.key.clone(),
                 bytecode: Arc::clone(&req.bytecode),
                 symbol_name: symbol,
-            };
+                opt_level: self.tuning.aot_opt_level,
+            });
 
             let entry = self.entries.entry(req.key).or_insert_with(|| EntryState {
                 hotness: 0,
@@ -261,7 +262,7 @@ impl CoordinatorState {
         self.pending_jobs = self.pending_jobs.saturating_sub(1);
 
         match result.outcome {
-            Ok(success) => {
+            Ok(WorkerSuccess::Jit(success)) => {
                 let backing = self.workers.backing(result.worker_id);
                 let program = Arc::new(CompiledProgram::new_jit(
                     result.key.clone(),
@@ -280,6 +281,9 @@ impl CoordinatorState {
                     "JIT program published to resident map",
                 );
             }
+            Ok(WorkerSuccess::Aot(success)) => {
+                self.handle_aot_success(result.key, success);
+            }
             Err(err) => {
                 if let Some(entry) = self.entries.get_mut(&result.key) {
                     entry.phase = EntryPhase::Failed;
@@ -289,9 +293,153 @@ impl CoordinatorState {
                 warn!(
                     code_hash = %result.key.code_hash,
                     error = %err,
-                    "JIT compilation failed",
+                    "compilation failed",
                 );
             }
+        }
+    }
+
+    fn handle_aot_success(
+        &mut self,
+        key: RuntimeCacheKey,
+        success: crate::runtime::worker::AotSuccess,
+    ) {
+        use crate::runtime::api::LoadedLibrary;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let artifact_key = ArtifactKey {
+            runtime: key.clone(),
+            backend: BackendSelection::Llvm,
+            target: revmc_backend::Target::Native,
+            opt_level: self.tuning.aot_opt_level,
+            revmc_semver: env!("CARGO_PKG_VERSION").to_string(),
+            compiler_fingerprint: String::new(),
+            abi_version: 0,
+        };
+
+        let sha256 = alloy_primitives::keccak256(&success.dylib_bytes).0;
+
+        let manifest = ArtifactManifest {
+            artifact_key: artifact_key.clone(),
+            symbol_name: success.symbol_name.clone(),
+            bytecode_len: success.bytecode_len,
+            artifact_len: success.dylib_bytes.len(),
+            created_at_unix_secs: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+            sha256,
+        };
+
+        // Persist to store if available.
+        if let Some(store) = &self.store {
+            if let Err(e) = store.store(&artifact_key, &manifest, &success.dylib_bytes) {
+                warn!(
+                    code_hash = %key.code_hash,
+                    error = %e,
+                    "failed to persist AOT artifact",
+                );
+                if let Some(entry) = self.entries.get_mut(&key) {
+                    entry.phase = EntryPhase::Failed;
+                }
+                self.jit_failures += 1;
+                return;
+            }
+
+            debug!(
+                code_hash = %key.code_hash,
+                spec_id = ?key.spec_id,
+                dylib_len = success.dylib_bytes.len(),
+                "AOT artifact persisted to store",
+            );
+
+            // Load from store to get the canonical path, then dlopen.
+            match store.load(&artifact_key) {
+                Ok(Some(stored)) => {
+                    match (|| -> crate::eyre::Result<CompiledProgram> {
+                        let library = unsafe { libloading::Library::new(&stored.dylib_path) }
+                            .map_err(|e| {
+                                crate::eyre::eyre!(
+                                    "dlopen {:?}: {e}",
+                                    stored.dylib_path
+                                )
+                            })?;
+                        let func: crate::EvmCompilerFn = unsafe {
+                            let sym: libloading::Symbol<'_, crate::EvmCompilerFn> = library
+                                .get(success.symbol_name.as_bytes())
+                                .map_err(|e| {
+                                    crate::eyre::eyre!(
+                                        "symbol '{}': {e}",
+                                        success.symbol_name
+                                    )
+                                })?;
+                            *sym
+                        };
+                        let library = Arc::new(LoadedLibrary::new(library));
+                        Ok(CompiledProgram::new_aot(
+                            key.clone(),
+                            func,
+                            stored.manifest.artifact_len,
+                            library,
+                        ))
+                    })() {
+                        Ok(program) => {
+                            self.resident.insert(key.clone(), Arc::new(program));
+                            self.entries.remove(&key);
+                            self.jit_successes += 1;
+
+                            debug!(
+                                code_hash = %key.code_hash,
+                                spec_id = ?key.spec_id,
+                                "AOT program loaded into resident map",
+                            );
+                        }
+                        Err(e) => {
+                            warn!(
+                                code_hash = %key.code_hash,
+                                error = %e,
+                                "failed to load persisted AOT artifact",
+                            );
+                            // Persisted successfully but couldn't load — mark as failed.
+                            if let Some(entry) = self.entries.get_mut(&key) {
+                                entry.phase = EntryPhase::Failed;
+                            }
+                            self.jit_failures += 1;
+                        }
+                    }
+                }
+                Ok(None) => {
+                    warn!(
+                        code_hash = %key.code_hash,
+                        "stored AOT artifact not found on reload",
+                    );
+                    if let Some(entry) = self.entries.get_mut(&key) {
+                        entry.phase = EntryPhase::Failed;
+                    }
+                    self.jit_failures += 1;
+                }
+                Err(e) => {
+                    warn!(
+                        code_hash = %key.code_hash,
+                        error = %e,
+                        "failed to reload persisted AOT artifact",
+                    );
+                    if let Some(entry) = self.entries.get_mut(&key) {
+                        entry.phase = EntryPhase::Failed;
+                    }
+                    self.jit_failures += 1;
+                }
+            }
+        } else {
+            // No store configured — can't persist, mark as failed.
+            warn!(
+                code_hash = %key.code_hash,
+                "AOT compilation completed but no artifact store configured",
+            );
+            if let Some(entry) = self.entries.get_mut(&key) {
+                entry.phase = EntryPhase::Failed;
+            }
+            self.jit_failures += 1;
         }
     }
 
