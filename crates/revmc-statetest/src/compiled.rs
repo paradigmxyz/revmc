@@ -773,7 +773,7 @@ fn run_test_worker(
     keep_going: bool,
     mode: CompileMode,
     cache: Option<&CompileCache>,
-    runtime_handle: Option<&JitCoordinatorHandle>,
+    handle: Option<&JitCoordinatorHandle>,
 ) -> Result<(), TestError> {
     loop {
         if !keep_going && state.n_errors.load(Ordering::SeqCst) > 0 {
@@ -795,7 +795,7 @@ fn run_test_worker(
                 &test_path,
                 &state.elapsed,
                 cache.unwrap(),
-                runtime_handle.unwrap(),
+                handle.unwrap(),
             ),
         };
 
@@ -842,7 +842,7 @@ pub fn run(
     } else {
         None
     };
-    let runtime_handle = coordinator.as_ref().map(|c| c.handle());
+    let handle = coordinator.as_ref().map(|c| c.handle());
 
     let num_threads = if single_thread {
         1
@@ -857,12 +857,12 @@ pub fn run(
     for i in 0..num_threads {
         let state = state.clone();
         let cache = cache.clone();
-        let runtime_handle = runtime_handle.clone();
+        let handle = handle.clone();
 
         let thread = std::thread::Builder::new()
             .name(format!("runner-{i}"))
             .spawn(move || {
-                run_test_worker(state, keep_going, mode, cache.as_deref(), runtime_handle.as_ref())
+                run_test_worker(state, keep_going, mode, cache.as_deref(), handle.as_ref())
             })
             .unwrap();
 
@@ -894,7 +894,7 @@ pub fn run(
     }
 
     // Print runtime coordinator stats.
-    if let Some(handle) = &runtime_handle {
+    if let Some(handle) = &handle {
         let stats = handle.stats();
         println!(
             "Runtime coordinator: {} hits, {} misses, {} disabled, {} events sent, {} events dropped, {} resident",
