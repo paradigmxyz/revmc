@@ -3,7 +3,7 @@
 use super::*;
 use alloy_primitives::B256;
 use revm_primitives::hardfork::SpecId;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// A no-op artifact store that returns no artifacts.
 struct EmptyStore;
@@ -274,4 +274,249 @@ fn clear_resident() {
     assert!(matches!(decision, LookupDecision::Interpret(InterpretReason::NotReady)));
 
     coord.shutdown().unwrap();
+}
+
+/// An artifact store backed by a temp directory on disk.
+///
+/// `store()` writes the dylib bytes to a file. `load()` returns the path to it.
+struct TempDirStore {
+    dir: std::path::PathBuf,
+    artifacts: Mutex<std::collections::HashMap<String, (ArtifactManifest, std::path::PathBuf)>>,
+}
+
+impl TempDirStore {
+    fn new() -> Self {
+        let dir = std::env::temp_dir().join(format!("revmc-test-store-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        Self { dir, artifacts: Mutex::new(std::collections::HashMap::new()) }
+    }
+
+    fn artifact_file_key(key: &ArtifactKey) -> String {
+        format!("{:x}_{:?}", key.runtime.code_hash, key.runtime.spec_id)
+    }
+
+    fn stored_count(&self) -> usize {
+        self.artifacts.lock().unwrap().len()
+    }
+}
+
+impl Drop for TempDirStore {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+impl ArtifactStore for TempDirStore {
+    fn load_all(&self) -> eyre::Result<Vec<(ArtifactKey, StoredArtifact)>> {
+        let map = self.artifacts.lock().unwrap();
+        Ok(map
+            .values()
+            .map(|(manifest, path)| {
+                (
+                    manifest.artifact_key.clone(),
+                    StoredArtifact { manifest: manifest.clone(), dylib_path: path.clone() },
+                )
+            })
+            .collect())
+    }
+
+    fn load(&self, key: &ArtifactKey) -> eyre::Result<Option<StoredArtifact>> {
+        let map = self.artifacts.lock().unwrap();
+        let file_key = Self::artifact_file_key(key);
+        Ok(map.get(&file_key).map(|(manifest, path)| StoredArtifact {
+            manifest: manifest.clone(),
+            dylib_path: path.clone(),
+        }))
+    }
+
+    fn store(
+        &self,
+        key: &ArtifactKey,
+        manifest: &ArtifactManifest,
+        dylib_bytes: &[u8],
+    ) -> eyre::Result<()> {
+        let file_key = Self::artifact_file_key(key);
+        let path = self.dir.join(format!("{file_key}.so"));
+        std::fs::write(&path, dylib_bytes)?;
+        self.artifacts.lock().unwrap().insert(file_key, (manifest.clone(), path));
+        Ok(())
+    }
+
+    fn delete(&self, key: &ArtifactKey) -> eyre::Result<()> {
+        let file_key = Self::artifact_file_key(key);
+        let mut map = self.artifacts.lock().unwrap();
+        if let Some((_, path)) = map.remove(&file_key) {
+            let _ = std::fs::remove_file(path);
+        }
+        Ok(())
+    }
+
+    fn clear(&self) -> eyre::Result<()> {
+        let mut map = self.artifacts.lock().unwrap();
+        for (_, path) in map.values() {
+            let _ = std::fs::remove_file(path);
+        }
+        map.clear();
+        Ok(())
+    }
+}
+
+#[test]
+#[cfg(feature = "llvm")]
+fn prepare_aot_persist_and_load() {
+    use std::borrow::Cow;
+
+    let store = Arc::new(TempDirStore::new());
+    let config = RuntimeConfig {
+        enabled: true,
+        store: Some(store.clone()),
+        tuning: RuntimeTuning { jit_worker_count: 1, ..Default::default() },
+        ..Default::default()
+    };
+    let coord = JitCoordinator::start(config).unwrap();
+    let handle = coord.handle();
+
+    // Simple bytecode: PUSH1 0x42 PUSH0 MSTORE PUSH1 0x20 PUSH0 RETURN.
+    let bytecode: &[u8] = &[0x60, 0x42, 0x5f, 0x52, 0x60, 0x20, 0x5f, 0xf3];
+    let code_hash = alloy_primitives::keccak256(bytecode);
+
+    let req = AotRequest { code_hash, code: Cow::Borrowed(bytecode), spec_id: SpecId::CANCUN };
+    handle.prepare_aot(req).unwrap();
+
+    // Poll until the artifact appears in the resident map.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let req = LookupRequest { code_hash, code: bytecode, spec_id: SpecId::CANCUN };
+        if let LookupDecision::Compiled(program) = handle.lookup(req) {
+            assert_eq!(program.kind, ProgramKind::Aot);
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "timed out waiting for AOT compilation");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    // Verify the artifact was persisted to the store.
+    assert_eq!(store.stored_count(), 1);
+
+    coord.shutdown().unwrap();
+}
+
+#[test]
+#[cfg(feature = "llvm")]
+fn prepare_aot_batch_persist_and_load() {
+    use std::borrow::Cow;
+
+    let store = Arc::new(TempDirStore::new());
+    let config = RuntimeConfig {
+        enabled: true,
+        store: Some(store.clone()),
+        tuning: RuntimeTuning { jit_worker_count: 1, ..Default::default() },
+        ..Default::default()
+    };
+    let coord = JitCoordinator::start(config).unwrap();
+    let handle = coord.handle();
+
+    let bytecodes: &[&[u8]] = &[
+        &[0x60, 0x42, 0x5f, 0x52, 0x60, 0x20, 0x5f, 0xf3],
+        &[0x60, 0x01, 0x60, 0x01, 0x01, 0x5f, 0x52, 0x60, 0x20, 0x5f, 0xf3],
+    ];
+    let hashes: Vec<B256> = bytecodes.iter().map(alloy_primitives::keccak256).collect();
+
+    let reqs: Vec<AotRequest<'_>> = bytecodes
+        .iter()
+        .zip(&hashes)
+        .map(|(code, hash)| AotRequest {
+            code_hash: *hash,
+            code: Cow::Borrowed(*code),
+            spec_id: SpecId::CANCUN,
+        })
+        .collect();
+    handle.prepare_aot_batch(reqs).unwrap();
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let all_ready = hashes.iter().zip(bytecodes.iter()).all(|(hash, code)| {
+            let req = LookupRequest { code_hash: *hash, code, spec_id: SpecId::CANCUN };
+            matches!(handle.lookup(req), LookupDecision::Compiled(_))
+        });
+        if all_ready {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for AOT batch compilation",
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    assert_eq!(store.stored_count(), 2);
+
+    coord.shutdown().unwrap();
+}
+
+#[test]
+#[cfg(feature = "llvm")]
+fn aot_artifacts_survive_restart() {
+    use std::borrow::Cow;
+
+    let store = Arc::new(TempDirStore::new());
+
+    // First coordinator: compile and persist an AOT artifact.
+    {
+        let config = RuntimeConfig {
+            enabled: true,
+            store: Some(store.clone()),
+            tuning: RuntimeTuning { jit_worker_count: 1, ..Default::default() },
+            ..Default::default()
+        };
+        let coord = JitCoordinator::start(config).unwrap();
+        let handle = coord.handle();
+
+        let bytecode: &[u8] = &[0x60, 0x42, 0x5f, 0x52, 0x60, 0x20, 0x5f, 0xf3];
+        let code_hash = alloy_primitives::keccak256(bytecode);
+
+        handle
+            .prepare_aot(AotRequest {
+                code_hash,
+                code: Cow::Borrowed(bytecode),
+                spec_id: SpecId::CANCUN,
+            })
+            .unwrap();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let req = LookupRequest { code_hash, code: bytecode, spec_id: SpecId::CANCUN };
+            if matches!(handle.lookup(req), LookupDecision::Compiled(_)) {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "timed out waiting for AOT compilation",);
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+
+        coord.shutdown().unwrap();
+    }
+
+    assert_eq!(store.stored_count(), 1);
+
+    // Second coordinator: should preload the artifact at startup.
+    {
+        let config = RuntimeConfig { enabled: true, store: Some(store), ..Default::default() };
+        let coord = JitCoordinator::start(config).unwrap();
+        let handle = coord.handle();
+
+        let bytecode: &[u8] = &[0x60, 0x42, 0x5f, 0x52, 0x60, 0x20, 0x5f, 0xf3];
+        let code_hash = alloy_primitives::keccak256(bytecode);
+
+        // Should be available immediately from AOT preload — no waiting.
+        let req = LookupRequest { code_hash, code: bytecode, spec_id: SpecId::CANCUN };
+        let decision = handle.lookup(req);
+        assert!(
+            matches!(&decision, LookupDecision::Compiled(p) if p.kind == ProgramKind::Aot),
+            "expected AOT hit after restart, got: {decision:?}",
+        );
+
+        assert_eq!(handle.stats().resident_entries, 1);
+
+        coord.shutdown().unwrap();
+    }
 }
