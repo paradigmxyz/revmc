@@ -22,7 +22,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc, Mutex, OnceLock,
+        Arc, Barrier, Mutex, OnceLock,
     },
     time::{Duration, Instant},
 };
@@ -616,14 +616,24 @@ pub fn run(
         }
     };
 
+    let barrier = Arc::new(Barrier::new(num_threads));
+
     let mut handles = Vec::with_capacity(num_threads);
     for i in 0..num_threads {
         let state = state.clone();
         let cache = cache.clone();
+        let barrier = barrier.clone();
 
         let thread = std::thread::Builder::new()
             .name(format!("runner-{i}"))
-            .spawn(move || run_test_worker(state, keep_going, mode, cache.as_deref()))
+            .spawn(move || {
+                let result = run_test_worker(state, keep_going, mode, cache.as_deref());
+                // Wait for all threads before exiting. Each thread holds a thread-local
+                // LLVM context that is destroyed on thread exit; concurrent context
+                // disposal crashes LLVM.
+                barrier.wait();
+                result
+            })
             .unwrap();
 
         handles.push(thread);
