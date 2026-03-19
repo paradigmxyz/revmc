@@ -560,9 +560,8 @@ fn run_test_worker(
     keep_going: bool,
     mode: CompileMode,
     cache: Option<&CompileCache>,
-    barrier: &Barrier,
 ) -> Result<(), TestError> {
-    let result = (|| loop {
+    loop {
         if !keep_going && state.n_errors.load(Ordering::SeqCst) > 0 {
             return Ok(());
         }
@@ -588,13 +587,7 @@ fn run_test_worker(
                 return Err(err);
             }
         }
-    })();
-
-    // Wait for all threads before exiting. Each thread holds a thread-local LLVM context
-    // that is destroyed on thread exit; concurrent context disposal crashes LLVM.
-    barrier.wait();
-
-    result
+    }
 }
 
 /// Run all test files.
@@ -633,7 +626,14 @@ pub fn run(
 
         let thread = std::thread::Builder::new()
             .name(format!("runner-{i}"))
-            .spawn(move || run_test_worker(state, keep_going, mode, cache.as_deref(), &barrier))
+            .spawn(move || {
+                let result = run_test_worker(state, keep_going, mode, cache.as_deref());
+                // Wait for all threads before exiting. Each thread holds a thread-local
+                // LLVM context that is destroyed on thread exit; concurrent context
+                // disposal crashes LLVM.
+                barrier.wait();
+                result
+            })
             .unwrap();
 
         handles.push(thread);
