@@ -22,7 +22,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc, Mutex, OnceLock,
+        Arc, Barrier, Mutex, OnceLock,
     },
     time::{Duration, Instant},
 };
@@ -560,8 +560,9 @@ fn run_test_worker(
     keep_going: bool,
     mode: CompileMode,
     cache: Option<&CompileCache>,
+    barrier: &Barrier,
 ) -> Result<(), TestError> {
-    loop {
+    let result = (|| loop {
         if !keep_going && state.n_errors.load(Ordering::SeqCst) > 0 {
             return Ok(());
         }
@@ -587,7 +588,13 @@ fn run_test_worker(
                 return Err(err);
             }
         }
-    }
+    })();
+
+    // Wait for all threads before exiting. Each thread holds a thread-local LLVM context
+    // that is destroyed on thread exit; concurrent context disposal crashes LLVM.
+    barrier.wait();
+
+    result
 }
 
 /// Run all test files.
@@ -616,14 +623,17 @@ pub fn run(
         }
     };
 
+    let barrier = Arc::new(Barrier::new(num_threads));
+
     let mut handles = Vec::with_capacity(num_threads);
     for i in 0..num_threads {
         let state = state.clone();
         let cache = cache.clone();
+        let barrier = barrier.clone();
 
         let thread = std::thread::Builder::new()
             .name(format!("runner-{i}"))
-            .spawn(move || run_test_worker(state, keep_going, mode, cache.as_deref()))
+            .spawn(move || run_test_worker(state, keep_going, mode, cache.as_deref(), &barrier))
             .unwrap();
 
         handles.push(thread);
