@@ -54,7 +54,7 @@ revmc-context = { workspace = true, features = ["host-ext-any"] }
 revmc-statetest = { path = "../revmc-statetest" }
 paste.workspace = true
 similar-asserts = "1.5"
-snapbox = "0.6"
+snapbox = "1.1"
 tempfile = "3.10"
 
 [features]
