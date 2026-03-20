@@ -615,7 +615,7 @@ impl Handler for RuntimeHandler {
     }
 }
 
-/// Enqueues JIT compilation for a contract and polls until it appears in the resident map.
+/// Enqueues JIT compilation for a contract and waits for it to complete.
 fn wait_for_compiled(
     handle: &JitCoordinatorHandle,
     code_hash: B256,
@@ -625,14 +625,12 @@ fn wait_for_compiled(
     if code.is_empty() {
         return None;
     }
-    loop {
-        if let Some(program) = handle.get_compiled(code_hash, spec_id) {
-            return Some(program.func);
-        }
-        let req = LookupRequest { code_hash, code, spec_id };
-        let _ = handle.compile_jit(req);
-        std::thread::sleep(Duration::from_millis(1));
+    if let Some(program) = handle.get_compiled(code_hash, spec_id) {
+        return Some(program.func);
     }
+    let req = LookupRequest { code_hash, code, spec_id };
+    let _ = handle.compile_jit_sync(req);
+    handle.get_compiled(code_hash, spec_id).map(|p| p.func)
 }
 
 /// Execute a single test using the runtime coordinator handler.

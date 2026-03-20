@@ -278,6 +278,24 @@ impl JitCoordinatorHandle {
         self.tx.try_send(cmd).map_err(|_| eyre::eyre!("coordinator channel full or closed"))
     }
 
+    /// Enqueues a JIT compilation request and blocks until the compilation completes.
+    ///
+    /// Returns `Ok(())` when the compiled function is available in the resident map,
+    /// or when the compilation fails. Use [`get_compiled`](Self::get_compiled) to
+    /// retrieve the result after this returns.
+    pub fn compile_jit_sync(&self, req: LookupRequest<'_>) -> eyre::Result<()> {
+        let (tx, rx) = mpsc::sync_channel(1);
+        let cmd = Command::CompileJitSync(
+            CompileJitRequest {
+                key: RuntimeCacheKey { code_hash: req.code_hash, spec_id: req.spec_id },
+                bytecode: Bytes::copy_from_slice(req.code),
+            },
+            tx,
+        );
+        self.tx.try_send(cmd).map_err(|_| eyre::eyre!("coordinator channel full or closed"))?;
+        rx.recv().map_err(|_| eyre::eyre!("coordinator shut down before compilation completed"))
+    }
+
     /// Enqueues a single AOT preparation request.
     ///
     /// This is enqueue-only and returns immediately. The compilation happens

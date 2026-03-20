@@ -24,6 +24,8 @@ pub(crate) enum Command {
     LookupObserved(LookupObservedEvent),
     /// Explicit request to JIT-compile a bytecode.
     CompileJit(CompileJitRequest),
+    /// Blocking JIT compilation request with a notification channel.
+    CompileJitSync(CompileJitRequest, mpsc::SyncSender<()>),
     /// Explicit request to prepare AOT artifacts.
     PrepareAot(Vec<PrepareAotRequest>),
     /// Clear the resident compiled map.
@@ -89,6 +91,8 @@ struct CoordinatorState {
     resident: Arc<ResidentMap>,
     /// Per-key tracking state (coordinator-only).
     entries: FxHashMap<RuntimeCacheKey, EntryState>,
+    /// Pending sync waiters: key → list of senders to notify on completion.
+    sync_waiters: FxHashMap<RuntimeCacheKey, Vec<mpsc::SyncSender<()>>>,
     /// Worker pool for JIT compilation.
     workers: WorkerPool,
     /// Receiver for worker results.
@@ -196,6 +200,29 @@ impl CoordinatorState {
         }
     }
 
+    fn handle_compile_jit_sync(&mut self, req: CompileJitRequest, tx: mpsc::SyncSender<()>) {
+        // Already compiled — notify immediately.
+        if self.resident.contains_key(&req.key) {
+            let _ = tx.send(());
+            return;
+        }
+
+        // Register the waiter.
+        self.sync_waiters.entry(req.key.clone()).or_default().push(tx);
+
+        // Enqueue the compilation (same logic as handle_compile_jit).
+        self.handle_compile_jit(req);
+    }
+
+    /// Notifies any sync waiters for the given key.
+    fn notify_sync_waiters(&mut self, key: &RuntimeCacheKey) {
+        if let Some(waiters) = self.sync_waiters.remove(key) {
+            for tx in waiters {
+                let _ = tx.send(());
+            }
+        }
+    }
+
     fn handle_prepare_aot(&mut self, reqs: Vec<PrepareAotRequest>) {
         for req in reqs {
             // Already compiled in resident map.
@@ -275,6 +302,7 @@ impl CoordinatorState {
                 self.resident.insert(result.key.clone(), program);
                 self.entries.remove(&result.key);
                 self.jit_successes += 1;
+                self.notify_sync_waiters(&result.key);
 
                 debug!(
                     code_hash = %result.key.code_hash,
@@ -283,13 +311,15 @@ impl CoordinatorState {
                 );
             }
             Ok(WorkerSuccess::Aot(success)) => {
-                self.handle_aot_success(result.key, success);
+                self.handle_aot_success(result.key.clone(), success);
+                self.notify_sync_waiters(&result.key);
             }
             Err(err) => {
                 if let Some(entry) = self.entries.get_mut(&result.key) {
                     entry.phase = EntryPhase::Failed;
                 }
                 self.jit_failures += 1;
+                self.notify_sync_waiters(&result.key);
 
                 warn!(
                     code_hash = %result.key.code_hash,
@@ -466,6 +496,7 @@ pub(crate) fn run(
     let mut state = CoordinatorState {
         resident,
         entries: FxHashMap::default(),
+        sync_waiters: FxHashMap::default(),
         workers,
         result_rx,
         store,
@@ -487,6 +518,9 @@ pub(crate) fn run(
             }
             Ok(Command::CompileJit(req)) => {
                 state.handle_compile_jit(req);
+            }
+            Ok(Command::CompileJitSync(req, tx)) => {
+                state.handle_compile_jit_sync(req, tx);
             }
             Ok(Command::PrepareAot(reqs)) => {
                 state.handle_prepare_aot(reqs);
