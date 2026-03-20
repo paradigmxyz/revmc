@@ -255,10 +255,8 @@ impl CompileCache {
 
         match self.mode {
             CompileMode::Jit => self.compile_jit_batch(&claimed, &mut compiled, spec_id)?,
-            CompileMode::Aot | CompileMode::Runtime => {
-                self.compile_aot_batch(&claimed, &mut compiled, spec_id)?
-            }
-            CompileMode::Interpreter => unreachable!(),
+            CompileMode::Aot => self.compile_aot_batch(&claimed, &mut compiled, spec_id)?,
+            CompileMode::Runtime | CompileMode::Interpreter => unreachable!(),
         }
 
         // Wait for contracts claimed by other threads.
@@ -299,10 +297,8 @@ impl CompileCache {
 
                 match self.mode {
                     CompileMode::Jit => self.compile_jit_batch(&claimed, &mut compiled, spec_id)?,
-                    CompileMode::Aot | CompileMode::Runtime => {
-                        self.compile_aot_batch(&claimed, &mut compiled, spec_id)?
-                    }
-                    CompileMode::Interpreter => unreachable!(),
+                    CompileMode::Aot => self.compile_aot_batch(&claimed, &mut compiled, spec_id)?,
+                    CompileMode::Runtime | CompileMode::Interpreter => unreachable!(),
                 }
 
                 Ok(compiled.get(&code_hash).unwrap())
@@ -394,8 +390,7 @@ impl CompileCache {
             let label = match self.mode {
                 CompileMode::Jit => "JIT",
                 CompileMode::Aot => "AOT",
-                CompileMode::Runtime => "Runtime",
-                CompileMode::Interpreter => unreachable!(),
+                CompileMode::Runtime | CompileMode::Interpreter => unreachable!(),
             };
             let rate = hits as f64 / total as f64 * 100.0;
             let n_libs = self.libs.lock().unwrap().len();
