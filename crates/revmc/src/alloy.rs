@@ -184,64 +184,6 @@ impl EvmFactory for JitEvmFactory {
     }
 }
 
-/// Runs the execution loop with JIT dispatch on the concrete `InnerEvm` type.
-///
-/// Uses direct field access to avoid borrow conflicts between `frame_stack` and `ctx`.
-fn run_exec_loop_jit<DB, I, P>(
-    evm: &mut InnerEvm<DB, I, P>,
-    handle: &JitCoordinatorHandle,
-    first_frame_input: FrameInit,
-) -> Result<FrameResult, EVMError<DB::Error>>
-where
-    DB: Database,
-    I: Inspector<EthEvmContext<DB>>,
-    P: PrecompileProvider<EthEvmContext<DB>, Output = InterpreterResult>,
-{
-    let res = evm.frame_init(first_frame_input)?;
-    if let ItemOrResult::Result(frame_result) = res {
-        return Ok(frame_result);
-    }
-
-    let spec_id = evm.ctx.cfg.spec;
-
-    loop {
-        let call_or_result = {
-            let frame = evm.frame_stack.get();
-            let bytecode_hash = frame.interpreter.bytecode.get_or_calculate_hash();
-            let code = frame.interpreter.bytecode.original_byte_slice();
-
-            let req = LookupRequest { code_hash: bytecode_hash, code, spec_id };
-            match handle.lookup(req) {
-                LookupDecision::Compiled(program) => {
-                    let ctx = &mut evm.ctx;
-                    let action =
-                        unsafe { program.func.call_with_interpreter(&mut frame.interpreter, ctx) };
-                    frame.process_next_action::<_, EVMError<DB::Error>>(ctx, action).inspect(
-                        |i| {
-                            if i.is_result() {
-                                frame.set_finished(true);
-                            }
-                        },
-                    )?
-                }
-                LookupDecision::Interpret(_) => evm.frame_run()?,
-            }
-        };
-
-        let result = match call_or_result {
-            ItemOrResult::Item(init) => match evm.frame_init(init)? {
-                ItemOrResult::Item(_) => continue,
-                ItemOrResult::Result(result) => result,
-            },
-            ItemOrResult::Result(result) => result,
-        };
-
-        if let Some(result) = evm.frame_return_result(result)? {
-            return Ok(result);
-        }
-    }
-}
-
 /// Custom handler that overrides only `run_exec_loop` with JIT dispatch.
 struct JitHandler<'a, DB: Database, I, P> {
     handle: &'a JitCoordinatorHandle,
@@ -263,6 +205,47 @@ where
         evm: &mut Self::Evm,
         first_frame_input: FrameInit,
     ) -> Result<FrameResult, Self::Error> {
-        run_exec_loop_jit(evm, self.handle, first_frame_input)
+        let res = evm.frame_init(first_frame_input)?;
+        if let ItemOrResult::Result(frame_result) = res {
+            return Ok(frame_result);
+        }
+
+        let spec_id = evm.ctx.cfg.spec;
+
+        loop {
+            let call_or_result = {
+                let frame = evm.frame_stack.get();
+                let bytecode_hash = frame.interpreter.bytecode.get_or_calculate_hash();
+                let code = frame.interpreter.bytecode.original_byte_slice();
+
+                let req = LookupRequest { code_hash: bytecode_hash, code, spec_id };
+                match self.handle.lookup(req) {
+                    LookupDecision::Compiled(program) => {
+                        let ctx = &mut evm.ctx;
+                        let action = unsafe {
+                            program.func.call_with_interpreter(&mut frame.interpreter, ctx)
+                        };
+                        frame.process_next_action::<_, Self::Error>(ctx, action).inspect(|i| {
+                            if i.is_result() {
+                                frame.set_finished(true);
+                            }
+                        })?
+                    }
+                    LookupDecision::Interpret(_) => evm.frame_run()?,
+                }
+            };
+
+            let result = match call_or_result {
+                ItemOrResult::Item(init) => match evm.frame_init(init)? {
+                    ItemOrResult::Item(_) => continue,
+                    ItemOrResult::Result(result) => result,
+                },
+                ItemOrResult::Result(result) => result,
+            };
+
+            if let Some(result) = evm.frame_return_result(result)? {
+                return Ok(result);
+            }
+        }
     }
 }
