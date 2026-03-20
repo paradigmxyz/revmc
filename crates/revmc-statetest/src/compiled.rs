@@ -918,8 +918,8 @@ pub fn run(
     if let Some(handle) = &handle {
         let stats = handle.stats();
         println!(
-            "Runtime coordinator: {} hits, {} misses, {} disabled, {} events sent, {} events dropped, {} resident",
-            stats.lookup_hits, stats.lookup_misses, stats.lookup_disabled,
+            "Runtime coordinator: {} hits, {} misses, {} events sent, {} events dropped, {} resident",
+            stats.lookup_hits, stats.lookup_misses,
             stats.events_sent, stats.events_dropped, stats.resident_entries,
         );
     }

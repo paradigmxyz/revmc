@@ -224,7 +224,6 @@ impl JitCoordinatorHandle {
     /// This never blocks, never touches storage, and never waits for compilation.
     pub fn lookup(&self, req: LookupRequest<'_>) -> LookupDecision {
         if !self.enabled.load(Ordering::Relaxed) {
-            self.stats.lookup_disabled.fetch_add(1, Ordering::Relaxed);
             return LookupDecision::Interpret(InterpretReason::Disabled);
         }
 

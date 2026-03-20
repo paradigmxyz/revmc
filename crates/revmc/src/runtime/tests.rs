@@ -64,7 +64,6 @@ fn lookup_disabled() {
     assert!(matches!(decision, LookupDecision::Interpret(InterpretReason::Disabled)));
 
     let stats = handle.stats();
-    assert_eq!(stats.lookup_disabled, 1);
     assert_eq!(stats.lookup_hits, 0);
     assert_eq!(stats.lookup_misses, 0);
 

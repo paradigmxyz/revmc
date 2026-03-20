@@ -9,8 +9,6 @@ pub(crate) struct RuntimeStats {
     pub(crate) lookup_hits: AtomicU64,
     /// Total lookups that returned interpret (not ready).
     pub(crate) lookup_misses: AtomicU64,
-    /// Total lookups that returned interpret (disabled).
-    pub(crate) lookup_disabled: AtomicU64,
     /// Lookup-observed events successfully enqueued.
     pub(crate) events_sent: AtomicU64,
     /// Lookup-observed events dropped (channel full).
@@ -24,8 +22,6 @@ pub struct RuntimeStatsSnapshot {
     pub lookup_hits: u64,
     /// Total lookups that returned interpret (not ready).
     pub lookup_misses: u64,
-    /// Total lookups that returned interpret (disabled).
-    pub lookup_disabled: u64,
     /// Lookup-observed events successfully enqueued.
     pub events_sent: u64,
     /// Lookup-observed events dropped (channel full).
@@ -39,7 +35,6 @@ impl RuntimeStats {
         RuntimeStatsSnapshot {
             lookup_hits: self.lookup_hits.load(Ordering::Relaxed),
             lookup_misses: self.lookup_misses.load(Ordering::Relaxed),
-            lookup_disabled: self.lookup_disabled.load(Ordering::Relaxed),
             events_sent: self.events_sent.load(Ordering::Relaxed),
             events_dropped: self.events_dropped.load(Ordering::Relaxed),
             resident_entries,
