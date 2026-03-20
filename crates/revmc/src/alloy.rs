@@ -1,0 +1,231 @@
+//! [`alloy_evm`] bindings for the revmc runtime.
+//!
+//! Provides [`JitEvm`] and [`JitEvmFactory`] which wrap the standard Ethereum EVM with
+//! JIT-compiled function dispatch via [`JitCoordinatorHandle`].
+
+use crate::runtime::{JitCoordinatorHandle, LookupDecision, LookupRequest};
+use alloy_evm::{
+    Database,
+    env::EvmEnv,
+    eth::{EthEvmBuilder, EthEvmContext},
+    evm::{Evm, EvmFactory},
+    precompiles::PrecompilesMap,
+};
+use alloy_primitives::{Address, Bytes};
+use revm::{
+    InspectEvm, Inspector, SystemCallEvm,
+    context::{BlockEnv, ContextSetters, Evm as RevmEvm, TxEnv},
+    context_interface::{
+        ContextTr, JournalTr,
+        result::{EVMError, HaltReason, ResultAndState},
+    },
+    handler::{EthFrame, EvmTr, FrameResult, Handler, ItemOrResult, instructions::EthInstructions},
+    inspector::NoOpInspector,
+    interpreter::{interpreter::EthInterpreter, interpreter_action::FrameInit},
+    primitives::hardfork::SpecId,
+};
+use std::marker::PhantomData;
+
+type InnerEvm<DB, I> = RevmEvm<
+    EthEvmContext<DB>,
+    I,
+    EthInstructions<EthInterpreter, EthEvmContext<DB>>,
+    PrecompilesMap,
+    EthFrame,
+>;
+
+/// Ethereum EVM with JIT-compiled function dispatch.
+///
+/// Wraps the standard revm EVM and overrides execution to look up compiled functions via
+/// [`JitCoordinatorHandle`] before falling back to the interpreter.
+#[expect(missing_debug_implementations)]
+pub struct JitEvm<DB: Database, I = NoOpInspector> {
+    inner: InnerEvm<DB, I>,
+    inspect: bool,
+    handle: JitCoordinatorHandle,
+}
+
+impl<DB: Database, I> JitEvm<DB, I> {
+    /// Creates a new JIT EVM from an inner revm EVM and coordinator handle.
+    pub const fn new(inner: InnerEvm<DB, I>, inspect: bool, handle: JitCoordinatorHandle) -> Self {
+        Self { inner, inspect, handle }
+    }
+
+    /// Returns a reference to the coordinator handle.
+    pub const fn handle(&self) -> &JitCoordinatorHandle {
+        &self.handle
+    }
+}
+
+impl<DB, I> Evm for JitEvm<DB, I>
+where
+    DB: Database,
+    I: Inspector<EthEvmContext<DB>>,
+{
+    type DB = DB;
+    type Tx = TxEnv;
+    type Error = EVMError<DB::Error>;
+    type HaltReason = HaltReason;
+    type Spec = SpecId;
+    type BlockEnv = BlockEnv;
+    type Precompiles = PrecompilesMap;
+    type Inspector = I;
+
+    fn block(&self) -> &BlockEnv {
+        &self.inner.ctx.block
+    }
+
+    fn chain_id(&self) -> u64 {
+        self.inner.ctx.cfg.chain_id
+    }
+
+    fn transact_raw(
+        &mut self,
+        tx: Self::Tx,
+    ) -> Result<ResultAndState<Self::HaltReason>, Self::Error> {
+        if self.inspect {
+            // Inspector path: use the standard mainnet handler with inspection.
+            // JIT dispatch is not applied when inspecting, as the inspector needs
+            // to observe each opcode step.
+            self.inner.inspect_tx(tx)
+        } else {
+            self.inner.ctx.set_tx(tx);
+            let mut handler: JitHandler<'_, DB, I> =
+                JitHandler { handle: &self.handle, _pd: PhantomData };
+            let result = handler.run(&mut self.inner)?;
+            let state = self.inner.ctx.journal_mut().finalize();
+            Ok(ResultAndState::new(result, state))
+        }
+    }
+
+    fn transact_system_call(
+        &mut self,
+        caller: Address,
+        contract: Address,
+        data: Bytes,
+    ) -> Result<ResultAndState<Self::HaltReason>, Self::Error> {
+        self.inner.system_call_with_caller(caller, contract, data)
+    }
+
+    fn finish(self) -> (Self::DB, EvmEnv<Self::Spec>) {
+        let revm::Context { block: block_env, cfg: cfg_env, journaled_state, .. } = self.inner.ctx;
+        (journaled_state.database, EvmEnv { block_env, cfg_env })
+    }
+
+    fn set_inspector_enabled(&mut self, enabled: bool) {
+        self.inspect = enabled;
+    }
+
+    fn components(&self) -> (&Self::DB, &Self::Inspector, &Self::Precompiles) {
+        (&self.inner.ctx.journaled_state.database, &self.inner.inspector, &self.inner.precompiles)
+    }
+
+    fn components_mut(&mut self) -> (&mut Self::DB, &mut Self::Inspector, &mut Self::Precompiles) {
+        (
+            &mut self.inner.ctx.journaled_state.database,
+            &mut self.inner.inspector,
+            &mut self.inner.precompiles,
+        )
+    }
+}
+
+/// Factory producing [`JitEvm`] instances.
+#[expect(missing_debug_implementations)]
+pub struct JitEvmFactory {
+    handle: JitCoordinatorHandle,
+}
+
+impl JitEvmFactory {
+    /// Creates a new factory from a coordinator handle.
+    pub const fn new(handle: JitCoordinatorHandle) -> Self {
+        Self { handle }
+    }
+}
+
+impl EvmFactory for JitEvmFactory {
+    type Evm<DB: Database, I: Inspector<EthEvmContext<DB>>> = JitEvm<DB, I>;
+    type Context<DB: Database> = EthEvmContext<DB>;
+    type Tx = TxEnv;
+    type Error<DBError: core::error::Error + Send + Sync + 'static> = EVMError<DBError>;
+    type HaltReason = HaltReason;
+    type Spec = SpecId;
+    type BlockEnv = BlockEnv;
+    type Precompiles = PrecompilesMap;
+
+    fn create_evm<DB: Database>(&self, db: DB, input: EvmEnv) -> Self::Evm<DB, NoOpInspector> {
+        let eth = EthEvmBuilder::new(db, input).build();
+        JitEvm::new(eth.into_inner(), false, self.handle.clone())
+    }
+
+    fn create_evm_with_inspector<DB: Database, I: Inspector<Self::Context<DB>>>(
+        &self,
+        db: DB,
+        input: EvmEnv,
+        inspector: I,
+    ) -> Self::Evm<DB, I> {
+        let eth = EthEvmBuilder::new(db, input).activate_inspector(inspector).build();
+        JitEvm::new(eth.into_inner(), true, self.handle.clone())
+    }
+}
+
+/// Custom handler that dispatches to JIT-compiled functions when available,
+/// falling back to the interpreter on miss.
+struct JitHandler<'a, DB: Database, I> {
+    handle: &'a JitCoordinatorHandle,
+    _pd: PhantomData<(DB, I)>,
+}
+
+impl<DB, I> Handler for JitHandler<'_, DB, I>
+where
+    DB: Database,
+    I: Inspector<EthEvmContext<DB>>,
+{
+    type Evm = InnerEvm<DB, I>;
+    type Error = EVMError<DB::Error>;
+    type HaltReason = HaltReason;
+
+    fn run_exec_loop(
+        &mut self,
+        evm: &mut Self::Evm,
+        first_frame_input: FrameInit,
+    ) -> Result<FrameResult, Self::Error> {
+        let res = evm.frame_init(first_frame_input)?;
+        if let ItemOrResult::Result(frame_result) = res {
+            return Ok(frame_result);
+        }
+        loop {
+            let call_or_result = {
+                let frame = evm.frame_stack.get();
+                let bytecode_hash = frame.interpreter.bytecode.get_or_calculate_hash();
+                let code = frame.interpreter.bytecode.original_byte_slice();
+                let spec_id = evm.ctx.cfg.spec;
+
+                let req = LookupRequest { code_hash: bytecode_hash, code, spec_id };
+                match self.handle.lookup(req) {
+                    LookupDecision::Compiled(program) => {
+                        let ctx = &mut evm.ctx;
+                        let action = unsafe {
+                            program.func.call_with_interpreter(&mut frame.interpreter, ctx)
+                        };
+                        frame.process_next_action::<_, Self::Error>(ctx, action).inspect(|i| {
+                            if i.is_result() {
+                                frame.set_finished(true);
+                            }
+                        })?
+                    }
+                    LookupDecision::Interpret(_) => evm.frame_run()?,
+                }
+            };
+            let result = match call_or_result {
+                ItemOrResult::Item(init) => match evm.frame_init(init)? {
+                    ItemOrResult::Item(_) => continue,
+                    ItemOrResult::Result(result) => result,
+                },
+                ItemOrResult::Result(result) => result,
+            };
+            if let Some(result) = evm.frame_return_result(result)? {
+                return Ok(result);
+            }
+        }
+    }
+}

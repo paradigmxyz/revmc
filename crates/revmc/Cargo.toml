@@ -28,6 +28,8 @@ revmc-cranelift = { workspace = true, optional = true }
 revmc-llvm = { workspace = true, optional = true }
 
 alloy-primitives = { workspace = true, features = ["std"] }
+alloy-evm = { workspace = true, optional = true }
+revm = { workspace = true, optional = true }
 revm-bytecode.workspace = true
 revm-context-interface.workspace = true
 revm-interpreter.workspace = true
@@ -63,6 +65,8 @@ llvm = ["dep:revmc-llvm"]
 llvm-prefer-static = ["llvm", "revmc-llvm?/prefer-static"]
 llvm-prefer-dynamic = ["llvm", "revmc-llvm?/prefer-dynamic"]
 cranelift = ["dep:revmc-cranelift"]
+
+alloy-evm = ["dep:alloy-evm", "dep:revm"]
 
 asm-keccak = ["alloy-primitives/asm-keccak"]
 

@@ -18,6 +18,10 @@ pub use compiler::{EvmCompiler, EvmCompilerInput};
 mod linker;
 pub use linker::Linker;
 
+#[cfg(feature = "alloy-evm")]
+#[cfg_attr(docsrs, doc(cfg(feature = "alloy-evm")))]
+pub mod alloy;
+
 pub mod runtime;
 
 /// Internal tests and testing utilities. Not public API.
