@@ -19,8 +19,7 @@ mod linker;
 pub use linker::Linker;
 
 #[cfg(feature = "alloy-evm")]
-#[cfg_attr(docsrs, doc(cfg(feature = "alloy-evm")))]
-pub mod alloy;
+pub mod alloy_evm;
 
 pub mod runtime;
 
