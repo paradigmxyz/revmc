@@ -1,15 +1,3 @@
-//! Curve StableSwap benchmark: plain interpreter vs JIT.
-//!
-//! This is the key A/B test for the DIV/MOD ruint builtin optimization.
-//! Curve's `exchange()` calls `get_y()` which runs a Newton iteration with
-//! heavy uint256 division. Before the fix, JIT was 43% SLOWER than the
-//! interpreter on this workload due to LLVM's poor i256 udiv codegen.
-//!
-//! Run: `cargo bench -p revmc-cli --bench bench_curve`
-
-#![allow(missing_docs)]
-
-use criterion::{Criterion, criterion_group, criterion_main};
 use revm::{
     ExecuteEvm, MainnetEvm,
     bytecode::Bytecode,
@@ -28,14 +16,9 @@ use revm::{
 use revmc::{EvmCompiler, EvmLlvmBackend, OptimizationLevel};
 use revmc_context::{EvmCompilerFn, RawEvmCompilerFn};
 use serde::Deserialize;
-use std::{
-    collections::{BTreeMap, HashMap, HashSet},
-    fs,
-    hint::black_box,
-    path::PathBuf,
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::collections::{BTreeMap, HashMap, HashSet};
+
+use crate::FixtureBenchDef;
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -45,7 +28,7 @@ type BenchError = EVMError<core::convert::Infallible, InvalidTransaction>;
 // ── JIT Handler ──────────────────────────────────────────────────────────────
 
 struct JitHandler {
-    functions: Arc<HashMap<B256, RawEvmCompilerFn>>,
+    functions: HashMap<B256, RawEvmCompilerFn>,
 }
 
 impl Handler for JitHandler {
@@ -93,7 +76,7 @@ impl Handler for JitHandler {
     }
 }
 
-// ── Fixture ──────────────────────────────────────────────────────────────────
+// ── Fixture Serde ────────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
 struct FixtureFile {
@@ -141,38 +124,51 @@ struct RawTransaction {
     #[serde(default, rename = "gasPrice")]
     gas_price: Option<String>,
     nonce: Option<String>,
+    #[allow(dead_code)]
+    sender: Option<String>,
     #[serde(rename = "secretKey")]
     #[allow(dead_code)]
-    secret_key: String,
+    secret_key: Option<String>,
     to: Option<String>,
     #[serde(default)]
     value: Option<String>,
 }
 
-// ── Setup ────────────────────────────────────────────────────────────────────
+// ── Parsed fixture state ─────────────────────────────────────────────────────
 
-struct CurveBench {
-    db: Arc<CacheDB<EmptyDB>>,
+/// Pre-parsed fixture state; cheap to clone for building a fresh DB per run.
+#[derive(Clone)]
+struct ParsedAccount {
+    address: Address,
+    balance: U256,
+    nonce: u64,
+    bytecode: Bytecode,
+    code_hash: B256,
+    storage: StorageKeyMap<StorageValue>,
+}
+
+/// A prepared transaction-fixture benchmark, ready to run.
+pub struct PreparedFixtureBench {
+    accounts: Vec<ParsedAccount>,
     block: BlockEnv,
     cfg: CfgEnv,
     tx: TxEnv,
-    functions: Arc<HashMap<B256, RawEvmCompilerFn>>,
-    // Prevent drop of compiler/context while JIT functions are alive.
-    _compiler: &'static mut EvmCompiler<EvmLlvmBackend>,
+    functions: HashMap<B256, RawEvmCompilerFn>,
+    // Prevent drop of compiler while JIT functions are alive.
+    _compiler: Box<EvmCompiler<EvmLlvmBackend>>,
 }
 
-impl CurveBench {
-    fn load() -> Self {
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../data/curve-stableswap-2pool.json");
-        let json = fs::read_to_string(&path).expect("failed to read fixture");
-        let file: FixtureFile = serde_json::from_str(&json).expect("failed to parse fixture");
+impl PreparedFixtureBench {
+    /// Load and JIT-compile a fixture benchmark.
+    pub fn load(def: &FixtureBenchDef) -> Self {
+        let file: FixtureFile =
+            serde_json::from_str(def.fixture_json).expect("failed to parse fixture JSON");
         let case = file.cases.into_values().next().expect("no cases in fixture");
         let first_tx = case.transaction.into_iter().next().expect("no transactions");
+        let spec_id = def.spec_id;
 
-        // Build DB
-        let mut db = CacheDB::new(EmptyDB::new());
-        let mut code_hashes = Vec::new();
+        // Parse accounts.
+        let mut accounts = Vec::new();
         for (addr_hex, raw) in &case.pre {
             let address = parse_address(addr_hex);
             let balance = parse_u256(&raw.balance);
@@ -182,25 +178,10 @@ impl CurveBench {
             let code_hash = bytecode.hash_slow();
             let storage: StorageKeyMap<StorageValue> =
                 raw.storage.iter().map(|(k, v)| (parse_u256(k), parse_u256(v))).collect();
-            db.insert_account_info(
-                address,
-                AccountInfo {
-                    balance,
-                    nonce,
-                    code_hash,
-                    code: Some(bytecode.clone()),
-                    account_id: None,
-                },
-            );
-            if !storage.is_empty() {
-                db.replace_account_storage(address, storage).unwrap();
-            }
-            if !bytecode.is_empty() {
-                code_hashes.push((code_hash, bytecode));
-            }
+            accounts.push(ParsedAccount { address, balance, nonce, bytecode, code_hash, storage });
         }
 
-        // Build block env
+        // Build block env.
         let env = &case.env;
         let mut block = BlockEnv {
             number: parse_u256(env.current_number.as_deref().unwrap_or("0x1")),
@@ -222,9 +203,13 @@ impl CurveBench {
             revm::primitives::eip4844::BLOB_BASE_FEE_UPDATE_FRACTION_CANCUN,
         );
 
-        // Build tx (hardcoded sender — derived from the fixture's secret key)
-        let caller = parse_address("0x89d5e72a8a4a0330a65bbcef3032be2f728264a8");
-        let cfg = CfgEnv::new_with_spec(SpecId::CANCUN);
+        // Build tx (use sender from fixture, or derive from secret key).
+        let caller = first_tx
+            .sender
+            .as_deref()
+            .map(parse_address)
+            .unwrap_or_else(|| parse_address("0x89d5e72a8a4a0330a65bbcef3032be2f728264a8"));
+        let cfg = CfgEnv::new_with_spec(spec_id);
         let tx = TxEnv {
             tx_type: 0,
             caller,
@@ -247,22 +232,21 @@ impl CurveBench {
             authorization_list: Vec::new(),
         };
 
-        // JIT compile
+        // JIT compile all contract bytecodes.
         let backend =
             EvmLlvmBackend::new(false, OptimizationLevel::Aggressive).expect("LLVM backend");
-        let compiler: &'static mut EvmCompiler<EvmLlvmBackend> =
-            Box::leak(Box::new(EvmCompiler::new(backend)));
+        let mut compiler = Box::new(EvmCompiler::new(backend));
         let mut seen = HashSet::new();
         let mut pending = Vec::new();
-        for (hash, bytecode) in &code_hashes {
-            if !seen.insert(*hash) {
+        for acct in &accounts {
+            if acct.bytecode.is_empty() || !seen.insert(acct.code_hash) {
                 continue;
             }
-            let name = format!("contract_{}", hex::encode(hash.as_slice()));
+            let name = format!("contract_{}", revmc::primitives::hex::encode(acct.code_hash));
             let func_id = compiler
-                .translate(&name, bytecode.original_byte_slice(), SpecId::CANCUN)
+                .translate(&name, acct.bytecode.original_byte_slice(), spec_id)
                 .expect("translation failed");
-            pending.push((*hash, func_id));
+            pending.push((acct.code_hash, func_id));
         }
         let mut functions = HashMap::new();
         for (hash, func_id) in pending {
@@ -270,28 +254,44 @@ impl CurveBench {
             functions.insert(hash, fn_ptr.into_inner());
         }
 
-        Self {
-            db: Arc::new(db),
-            block,
-            cfg,
-            tx,
-            functions: Arc::new(functions),
-            _compiler: compiler,
-        }
+        Self { accounts, block, cfg, tx, functions, _compiler: compiler }
     }
 
-    fn run_plain(&self) -> ResultAndState {
-        let db_ref = unsafe { &mut *(Arc::as_ptr(&self.db) as *mut CacheDB<EmptyDB>) };
-        let ctx = revm::context::Context::<BlockEnv, TxEnv, CfgEnv, _, revm::context::Journal<_>, ()>::new(db_ref, SpecId::CANCUN);
+    /// Build a fresh `CacheDB` from the parsed prestate.
+    fn fresh_db(&self) -> CacheDB<EmptyDB> {
+        let mut db = CacheDB::new(EmptyDB::new());
+        for acct in &self.accounts {
+            db.insert_account_info(
+                acct.address,
+                AccountInfo {
+                    balance: acct.balance,
+                    nonce: acct.nonce,
+                    code_hash: acct.code_hash,
+                    code: Some(acct.bytecode.clone()),
+                    account_id: None,
+                },
+            );
+            if !acct.storage.is_empty() {
+                db.replace_account_storage(acct.address, acct.storage.clone()).unwrap();
+            }
+        }
+        db
+    }
+
+    /// Run via the plain interpreter.
+    pub fn run_interpreter(&self) -> ResultAndState {
+        let mut db = self.fresh_db();
+        let ctx = revm::context::Context::<BlockEnv, TxEnv, CfgEnv, _, revm::context::Journal<_>, ()>::new(&mut db, self.cfg.spec);
         let mut evm = ctx.build_mainnet();
         evm.ctx.block = self.block.clone();
         evm.ctx.cfg = self.cfg.clone();
-        evm.transact(self.tx.clone()).expect("plain execution failed")
+        evm.transact(self.tx.clone()).expect("interpreter execution failed")
     }
 
-    fn run_jit(&self) -> ResultAndState {
-        let db_ref = unsafe { &mut *(Arc::as_ptr(&self.db) as *mut CacheDB<EmptyDB>) };
-        let ctx = revm::context::Context::<BlockEnv, TxEnv, CfgEnv, _, revm::context::Journal<_>, ()>::new(db_ref, SpecId::CANCUN);
+    /// Run via the JIT-compiled handler.
+    pub fn run_jit(&self) -> ResultAndState {
+        let mut db = self.fresh_db();
+        let ctx = revm::context::Context::<BlockEnv, TxEnv, CfgEnv, _, revm::context::Journal<_>, ()>::new(&mut db, self.cfg.spec);
         let mut evm = ctx.build_mainnet();
         evm.ctx.block = self.block.clone();
         evm.ctx.cfg = self.cfg.clone();
@@ -302,50 +302,6 @@ impl CurveBench {
         ResultAndState::new(result, state)
     }
 }
-
-// ── Benchmark ────────────────────────────────────────────────────────────────
-
-/// Benchmark Curve StableSwap: plain interpreter vs JIT-compiled execution.
-pub fn bench_curve_stableswap(c: &mut Criterion) {
-    let bench = CurveBench::load();
-
-    // Sanity check
-    assert!(bench.run_plain().result.is_success(), "plain execution reverted");
-    assert!(
-        bench.run_jit().result.is_success(),
-        "JIT execution reverted — check revmc/revm version compatibility"
-    );
-
-    let mut group = c.benchmark_group("curve_stableswap");
-    group.bench_function("plain_execution", |b| {
-        b.iter_custom(|iters| {
-            let mut total = Duration::ZERO;
-            for _ in 0..iters {
-                let start = Instant::now();
-                let result = bench.run_plain();
-                total += start.elapsed();
-                black_box(result);
-            }
-            total
-        });
-    });
-    group.bench_function("jit_optimized", |b| {
-        b.iter_custom(|iters| {
-            let mut total = Duration::ZERO;
-            for _ in 0..iters {
-                let start = Instant::now();
-                let result = bench.run_jit();
-                total += start.elapsed();
-                black_box(result);
-            }
-            total
-        });
-    });
-    group.finish();
-}
-
-criterion_group!(benches, bench_curve_stableswap);
-criterion_main!(benches);
 
 // ── Hex parsing helpers ──────────────────────────────────────────────────────
 
@@ -375,7 +331,7 @@ fn parse_hex_bytes(value: &str) -> Vec<u8> {
     }
     let even =
         if trimmed.len().is_multiple_of(2) { trimmed.to_owned() } else { format!("0{trimmed}") };
-    hex::decode(even).unwrap()
+    revmc::primitives::hex::decode(even).unwrap()
 }
 
 fn parse_fixed_bytes(value: &str, expected_len: usize) -> Vec<u8> {
