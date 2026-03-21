@@ -8,14 +8,15 @@ use revm::{
     },
     database::{CacheDB, EmptyDB},
     handler::{EvmTr, FrameResult, Handler, ItemOrResult, MainBuilder},
-    primitives::{
-        Address, B256, Bytes, StorageKeyMap, StorageValue, TxKind, U256, hardfork::SpecId,
-    },
+    primitives::{Address, B256, Bytes, StorageKeyMap, StorageValue, TxKind, U256},
     state::AccountInfo,
 };
 use revmc::{EvmCompiler, EvmCompilerFn, EvmLlvmBackend, OptimizationLevel, RawEvmCompilerFn};
 use serde::Deserialize;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::{
+    collections::{BTreeMap, HashMap, HashSet},
+    sync::Arc,
+};
 
 use crate::FixtureBenchDef;
 
@@ -289,8 +290,12 @@ impl PreparedFixtureBench {
 
     /// Run via the JIT-compiled handler.
     pub fn run_jit(&self) -> ResultAndState {
-        let mut db = self.fresh_db();
-        let ctx = revm::context::Context::<BlockEnv, TxEnv, CfgEnv, _, revm::context::Journal<_>, ()>::new(&mut db, self.cfg.spec);
+        let db = Arc::new(self.fresh_db());
+        // SAFETY: The `JitHandler` requires `BenchEvm<'static>` due to the `Handler` trait
+        // associated types. The `Arc` keeps the DB alive for the duration of the call, and
+        // the mutable reference is not aliased since we hold the only `Arc`.
+        let db_ref = unsafe { &mut *(Arc::as_ptr(&db) as *mut CacheDB<EmptyDB>) };
+        let ctx = revm::context::Context::<BlockEnv, TxEnv, CfgEnv, _, revm::context::Journal<_>, ()>::new(db_ref, self.cfg.spec);
         let mut evm = ctx.build_mainnet();
         evm.ctx.block = self.block.clone();
         evm.ctx.cfg = self.cfg.clone();
