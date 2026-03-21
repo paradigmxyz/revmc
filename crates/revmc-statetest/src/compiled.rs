@@ -731,7 +731,7 @@ fn execute_test_suite_runtime(
                 }
                 let code_hash = keccak256(&info.code);
                 let req = LookupRequest { code_hash, code: info.code.clone(), spec_id };
-                let _ = handle.compile_jit(req);
+                handle.compile_jit(req);
             }
 
             for test in tests.iter() {

@@ -215,15 +215,9 @@ where
         loop {
             let call_or_result = {
                 let frame = evm.frame_stack.get();
-                let bytecode_hash = frame.interpreter.bytecode.get_or_calculate_hash();
-                let code = frame.interpreter.bytecode.original_byte_slice();
-
-                let req = LookupRequest {
-                    code_hash: bytecode_hash,
-                    code: Bytes::copy_from_slice(code),
-                    spec_id,
-                };
-                match self.handle.lookup(req) {
+                let code_hash = frame.interpreter.bytecode.get_or_calculate_hash();
+                let code = frame.interpreter.bytecode.original_bytes();
+                match self.handle.lookup(LookupRequest { code_hash, code, spec_id }) {
                     LookupDecision::Compiled(program) => {
                         let ctx = &mut evm.ctx;
                         let action = unsafe {
