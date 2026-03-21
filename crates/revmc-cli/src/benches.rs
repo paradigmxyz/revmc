@@ -32,6 +32,7 @@ pub struct FixtureBenchDef {
 
 impl Bench {
     /// Returns the bytecode fields, if this is a bytecode bench.
+    #[allow(clippy::type_complexity)]
     pub fn as_bytecode(&self) -> Option<(&[u8], &[u8], &[U256], Option<fn()>)> {
         match &self.kind {
             BenchKind::Bytecode { bytecode, calldata, stack_input, native } => {

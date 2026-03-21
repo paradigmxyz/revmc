@@ -148,6 +148,7 @@ struct ParsedAccount {
 }
 
 /// A prepared transaction-fixture benchmark, ready to run.
+#[allow(missing_debug_implementations)]
 pub struct PreparedFixtureBench {
     accounts: Vec<ParsedAccount>,
     block: BlockEnv,
