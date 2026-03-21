@@ -1,6 +1,7 @@
 //! EVM bytecode compiler implementation.
 
 use crate::{Backend, Builder, Bytecode, EvmCompilerFn, EvmContext, EvmStack, Result};
+use revm_bytecode::opcode::OPCODE_INFO;
 use revm_interpreter::{Gas, InputsImpl};
 use revm_primitives::{Bytes, hardfork::SpecId};
 use revmc_backend::{
@@ -571,8 +572,6 @@ total:      {total:>11.3?}
     /// continuation bytes get blank lines. This ensures `line_number == pc + 1`.
     #[instrument(level = "debug", skip_all)]
     fn dump_evm_source(path: &Path, bytecode: &Bytecode<'_>) -> Result<()> {
-        use revm_bytecode::opcode::OPCODE_INFO;
-
         let code = bytecode.code;
         let file = fs::File::create(path)?;
         let mut w = io::BufWriter::new(file);
