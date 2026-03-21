@@ -558,7 +558,9 @@ fn execute_test_suite_compiled(
 
 // ── Runtime coordinator mode ─────────────────────────────────────────────────
 
-use revmc::runtime::{JitCoordinator, JitCoordinatorHandle, LookupRequest, RuntimeConfig};
+use revmc::runtime::{
+    JitCoordinator, JitCoordinatorHandle, LookupRequest, RuntimeConfig, RuntimeTuning,
+};
 
 /// Custom handler that looks up compiled functions via the runtime coordinator.
 /// On miss, enqueues JIT compilation and spin-waits for the result.
@@ -843,7 +845,15 @@ pub fn run(
     // All lookups will miss → enqueue JIT → compile on worker threads.
     // This exercises the full JIT pipeline end-to-end.
     let coordinator = if mode == CompileMode::Runtime {
-        let config = RuntimeConfig { enabled: true, ..Default::default() };
+        let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+        let config = RuntimeConfig {
+            enabled: true,
+            tuning: RuntimeTuning {
+                jit_worker_count: cpus.div_ceil(2).max(1),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         Some(JitCoordinator::start(config).map_err(|e| TestError {
             name: "coordinator".to_string(),
             path: String::new(),
