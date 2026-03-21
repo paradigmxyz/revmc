@@ -58,29 +58,11 @@ fn run_fixture_bench(c: &mut Criterion, name: &str, def: &revmc_cli::FixtureBenc
     g.measurement_time(Duration::from_secs(5));
 
     g.bench_function(format!("{name}/rt/interpreter"), |b| {
-        b.iter_custom(|iters| {
-            let mut total = Duration::ZERO;
-            for _ in 0..iters {
-                let start = std::time::Instant::now();
-                let result = prepared.run_interpreter();
-                total += start.elapsed();
-                std::hint::black_box(result);
-            }
-            total
-        });
+        b.iter(|| prepared.run_interpreter());
     });
 
     g.bench_function(format!("{name}/rt/jit"), |b| {
-        b.iter_custom(|iters| {
-            let mut total = Duration::ZERO;
-            for _ in 0..iters {
-                let start = std::time::Instant::now();
-                let result = prepared.run_jit();
-                total += start.elapsed();
-                std::hint::black_box(result);
-            }
-            total
-        });
+        b.iter(|| prepared.run_jit());
     });
 
     g.finish();
