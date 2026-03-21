@@ -361,12 +361,12 @@ impl<B: Backend> EvmCompiler<B> {
         ensure!(self.backend.function_name_is_unique(name), "function name `{name}` is not unique");
 
         // Generate the synthetic .evm source file and enable debug info on the backend.
-        if self.config.debug {
-            if let Some(dump_dir) = &self.dump_dir() {
-                let evm_path = dump_dir.join(format!("{name}.evm"));
-                Self::dump_evm_source(&evm_path, bytecode)?;
-                self.backend.set_debug_file(Some(evm_path));
-            }
+        if self.config.debug
+            && let Some(dump_dir) = &self.dump_dir()
+        {
+            let evm_path = dump_dir.join(format!("{name}.evm"));
+            Self::dump_evm_source(&evm_path, bytecode)?;
+            self.backend.set_debug_file(Some(evm_path));
         }
 
         let linkage = Linkage::Public;
@@ -579,9 +579,7 @@ total:      {total:>11.3?}
         let mut pc = 0usize;
         while pc < code.len() {
             let opcode = code[pc];
-            let name = OPCODE_INFO[opcode as usize]
-                .map(|info| info.name())
-                .unwrap_or("UNKNOWN");
+            let name = OPCODE_INFO[opcode as usize].map(|info| info.name()).unwrap_or("UNKNOWN");
             let imm_len =
                 OPCODE_INFO[opcode as usize].map_or(0, |info| info.immediate_size() as usize);
             if imm_len > 0 {

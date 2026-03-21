@@ -225,11 +225,8 @@ impl EvmLlvmBackend {
 
         let filename =
             debug_file.file_name().map(|f| f.to_string_lossy()).unwrap_or_default().into_owned();
-        let directory = debug_file
-            .parent()
-            .map(|p| p.to_string_lossy())
-            .unwrap_or_default()
-            .into_owned();
+        let directory =
+            debug_file.parent().map(|p| p.to_string_lossy()).unwrap_or_default().into_owned();
 
         // Add required module flags for debug info.
         self.module.add_basic_value_flag(
@@ -347,11 +344,11 @@ impl Backend for EvmLlvmBackend {
     }
 
     fn finalize_debug_info(&mut self) -> Result<()> {
-        if let Some(di) = &mut self.di_state {
-            if !di.finalized {
-                di.dibuilder.finalize();
-                di.finalized = true;
-            }
+        if let Some(di) = &mut self.di_state
+            && !di.finalized
+        {
+            di.dibuilder.finalize();
+            di.finalized = true;
         }
         Ok(())
     }
