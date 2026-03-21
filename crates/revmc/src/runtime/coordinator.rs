@@ -147,6 +147,12 @@ impl CoordinatorState {
         if entry.hotness >= self.tuning.jit_hot_threshold
             && self.pending_jobs < self.tuning.max_pending_jit_jobs
         {
+            debug!(
+                code_hash = %event.key.code_hash,
+                spec_id = ?event.key.spec_id,
+                hotness = entry.hotness,
+                "promoting hot key to JIT compilation",
+            );
             let symbol = format!("jit_{:x}_{:?}", event.key.code_hash, event.key.spec_id);
             let job = WorkerJob::Jit(JitJob {
                 key: event.key,
@@ -165,6 +171,7 @@ impl CoordinatorState {
     fn handle_compile_jit(&mut self, req: CompileJitRequest) {
         // Already compiled.
         if self.resident.contains_key(&req.key) {
+            debug!(code_hash = %req.key.code_hash, "compile_jit: already resident");
             return;
         }
 
@@ -180,6 +187,7 @@ impl CoordinatorState {
             return;
         }
 
+        let code_hash = req.key.code_hash;
         let symbol = format!("jit_{:x}_{:?}", req.key.code_hash, req.key.spec_id);
         let job = WorkerJob::Jit(JitJob {
             key: req.key.clone(),
@@ -194,6 +202,11 @@ impl CoordinatorState {
         });
 
         if self.workers.try_send(job) {
+            debug!(
+                %code_hash,
+                pending_jobs = self.pending_jobs + 1,
+                "compile_jit: dispatched to worker",
+            );
             entry.phase = EntryPhase::Working;
             self.pending_jobs += 1;
             self.jit_promotions += 1;
@@ -203,9 +216,12 @@ impl CoordinatorState {
     fn handle_compile_jit_sync(&mut self, req: CompileJitRequest, tx: mpsc::SyncSender<()>) {
         // Already compiled — notify immediately.
         if self.resident.contains_key(&req.key) {
+            debug!(code_hash = %req.key.code_hash, "compile_jit_sync: already resident, notifying");
             let _ = tx.send(());
             return;
         }
+
+        debug!(code_hash = %req.key.code_hash, "compile_jit_sync: registering waiter");
 
         // Register the waiter.
         self.sync_waiters.entry(req.key.clone()).or_default().push(tx);
@@ -217,6 +233,7 @@ impl CoordinatorState {
     /// Notifies any sync waiters for the given key.
     fn notify_sync_waiters(&mut self, key: &RuntimeCacheKey) {
         if let Some(waiters) = self.sync_waiters.remove(key) {
+            debug!(code_hash = %key.code_hash, n_waiters = waiters.len(), "notifying sync waiters");
             for tx in waiters {
                 let _ = tx.send(());
             }

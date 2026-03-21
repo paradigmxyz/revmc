@@ -61,6 +61,13 @@ impl JitCoordinator {
     /// Starts the coordinator: loads AOT artifacts, builds the resident map, and spawns the
     /// coordinator thread.
     pub fn start(config: RuntimeConfig) -> eyre::Result<Self> {
+        debug!(
+            enabled = config.enabled,
+            workers = config.tuning.jit_worker_count,
+            hot_threshold = config.tuning.jit_hot_threshold,
+            channel_capacity = config.tuning.lookup_event_channel_capacity,
+            "starting JIT coordinator",
+        );
         let resident = Self::preload_aot(config.store.as_deref())?;
         let resident = Arc::new(resident);
         let stats = Arc::new(RuntimeStats::default());
@@ -102,6 +109,7 @@ impl JitCoordinator {
     }
 
     fn shutdown_inner(&mut self) -> eyre::Result<()> {
+        debug!("shutting down JIT coordinator");
         if let Some(thread) = self.thread.take() {
             // Ignoring send error — coordinator may already be gone.
             let _ = self.handle.tx.send(Command::Shutdown);
@@ -231,9 +239,11 @@ impl JitCoordinatorHandle {
 
         let decision = if let Some(program) = self.resident.get(&key) {
             self.stats.lookup_hits.fetch_add(1, Ordering::Relaxed);
+            trace!(code_hash = %req.code_hash, "lookup hit");
             LookupDecision::Compiled(Arc::clone(&program))
         } else {
             self.stats.lookup_misses.fetch_add(1, Ordering::Relaxed);
+            trace!(code_hash = %req.code_hash, "lookup miss");
             LookupDecision::Interpret(InterpretReason::NotReady)
         };
 
@@ -346,6 +356,7 @@ impl JitCoordinatorHandle {
 
     /// Sets whether the runtime is enabled.
     pub fn set_enabled(&self, enabled: bool) {
+        debug!(enabled, "set_enabled");
         self.enabled.store(enabled, Ordering::Relaxed);
     }
 
