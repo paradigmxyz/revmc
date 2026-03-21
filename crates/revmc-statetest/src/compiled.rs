@@ -849,7 +849,7 @@ pub fn run(
         let config = RuntimeConfig {
             enabled: true,
             tuning: RuntimeTuning {
-                jit_worker_count: cpus.div_ceil(2).max(1),
+                jit_worker_count: cpus,
                 ..Default::default()
             },
             ..Default::default()
