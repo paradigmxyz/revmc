@@ -473,7 +473,13 @@ impl<'a> Builder for EvmCraneliftBuilder<'a> {
         self.bcx.ins().load(ty, MemFlags::trusted(), ptr, 0)
     }
 
-    fn load_unaligned(&mut self, ty: Self::Type, ptr: Self::Value, name: &str) -> Self::Value {
+    fn load_aligned(
+        &mut self,
+        ty: Self::Type,
+        ptr: Self::Value,
+        _align: usize,
+        name: &str,
+    ) -> Self::Value {
         let _ = name;
         self.bcx.ins().load(ty, MemFlags::new().with_notrap(), ptr, 0)
     }
@@ -482,7 +488,7 @@ impl<'a> Builder for EvmCraneliftBuilder<'a> {
         self.bcx.ins().store(MemFlags::trusted(), value, ptr, 0);
     }
 
-    fn store_unaligned(&mut self, value: Self::Value, ptr: Self::Value) {
+    fn store_aligned(&mut self, value: Self::Value, ptr: Self::Value, _align: usize) {
         self.bcx.ins().store(MemFlags::new().with_notrap(), value, ptr, 0);
     }
 

@@ -10,7 +10,7 @@ use core::{fmt, mem::MaybeUninit, ptr};
 use revm_interpreter::{
     Gas, Host, InputsImpl, InstructionResult, Interpreter, InterpreterAction, InterpreterResult,
     SharedMemory,
-    interpreter_types::{Jumps, ReturnData},
+    interpreter_types::{Jumps, LegacyBytecode, ReturnData},
 };
 use revm_primitives::{Address, Bytes, U256, ruint};
 
@@ -78,8 +78,6 @@ impl<'a> EvmContext<'a> {
         interpreter: &'a mut Interpreter,
         host: &'b mut dyn HostExt,
     ) -> (Self, &'a mut EvmStack, &'a mut usize) {
-        use revm_interpreter::interpreter_types::LegacyBytecode;
-
         let (stack, stack_len) = EvmStack::from_interpreter_stack(&mut interpreter.stack);
         let bytecode_slice = interpreter.bytecode.bytecode_slice();
         let resume_at = ResumeAt::load(interpreter.bytecode.pc(), bytecode_slice);
