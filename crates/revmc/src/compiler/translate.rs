@@ -18,6 +18,7 @@ pub(super) struct FcxConfig {
     pub(super) debug_assertions: bool,
     pub(super) frame_pointers: bool,
 
+    pub(super) debug: bool,
     pub(super) inspect_stack_length: bool,
     pub(super) stack_bound_checks: bool,
     pub(super) gas_metering: bool,
@@ -29,6 +30,7 @@ impl Default for FcxConfig {
             debug_assertions: cfg!(debug_assertions),
             comments: false,
             frame_pointers: cfg!(debug_assertions),
+            debug: false,
             inspect_stack_length: false,
             stack_bound_checks: true,
             gas_metering: true,

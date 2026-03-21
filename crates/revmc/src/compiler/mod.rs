@@ -128,6 +128,7 @@ impl<B: Backend> EvmCompiler<B> {
     pub fn set_dump_to(&mut self, output_dir: Option<PathBuf>) {
         self.backend.set_is_dumping(output_dir.is_some());
         self.config.comments = output_dir.is_some();
+        self.config.debug = output_dir.is_some();
         self.out_dir = output_dir;
     }
 
