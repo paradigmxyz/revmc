@@ -383,7 +383,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
                 fx.bcx.switch_to_block(post_entry_block);
                 let resume_at = get_ecx_resume_at_ptr(&mut fx);
-                let resume_at = fx.bcx.load(resume_ty, resume_at, "ecx.resume_at");
+                let resume_at = fx.bcx.load_aligned(resume_ty, resume_at, 1, "ecx.resume_at");
                 let no_resume = match kind {
                     ResumeKind::Blocks => fx.bcx.is_null(resume_at),
                     ResumeKind::Indexes => fx.bcx.icmp_imm(IntCC::Equal, resume_at, 0),
@@ -425,7 +425,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 fx.bcx.switch_to_block(fx.suspend_block);
                 let resume_value = fx.bcx.phi(resume_ty, &fx.suspend_blocks);
                 let resume_at = get_ecx_resume_at_ptr(&mut fx);
-                fx.bcx.store(resume_value, resume_at);
+                fx.bcx.store_aligned(resume_value, resume_at, 1);
 
                 // Signal that execution suspended - caller checks next_action for Call/Create
                 fx.build_return_imm(InstructionResult::Stop);
@@ -649,8 +649,10 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             // `@[endian]` is the endianness of the value. If native, omit it.
             ($field:ident; @load $(@[endian = $endian:tt])? $ty:expr, $($paths:path),*; $($spec:tt).*) => {{
                 let ptr = field!($field; @get $($paths),*; $($spec).*);
+                // Use align=1 because the pointer comes from a byte-offset GEP and may not
+                // satisfy the type's natural alignment.
                 #[allow(unused_mut)]
-                let mut value = self.bcx.load($ty, ptr, stringify!($field.$($spec).*));
+                let mut value = self.bcx.load_aligned($ty, ptr, 1, stringify!($field.$($spec).*));
                 $(
                     if !cfg!(target_endian = $endian) {
                         value = self.bcx.bswap(value);
@@ -1055,7 +1057,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             };
             self.len_offset += 1;
             let sp = self.sp_at(len);
-            self.bcx.store_aligned(value, sp, 8);
+            self.bcx.store(value, sp);
         }
     }
 
@@ -1113,8 +1115,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let b_sp = self.sp_from_top(len, n + m + 1);
         let b = self.load_word(b_sp, "swap.b");
         // Store.
-        self.bcx.store_aligned(a, b_sp, 8);
-        self.bcx.store_aligned(b, a_sp, 8);
+        self.bcx.store(a, b_sp);
+        self.bcx.store(b, a_sp);
     }
 
     /// `RETURN` or `REVERT` instruction.
@@ -1173,8 +1175,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
     /// Loads the word at the given pointer.
     fn load_word(&mut self, ptr: B::Value, name: &str) -> B::Value {
-        // EvmWord is repr(C, align(8)), so stack word pointers are 8-byte aligned.
-        self.bcx.load_aligned(self.word_type, ptr, 8, name)
+        self.bcx.load(self.word_type, ptr, name)
     }
 
     /// Gets the stack length before the current instruction.
