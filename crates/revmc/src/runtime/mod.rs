@@ -19,6 +19,7 @@ pub use api::{
     AotRequest, CompiledProgram, InterpretReason, LookupDecision, LookupRequest, ProgramKind,
 };
 pub use config::{RuntimeConfig, RuntimeTuning};
+use revm_primitives::{B256, hardfork::SpecId};
 pub use stats::RuntimeStatsSnapshot;
 pub use storage::{
     ArtifactKey, ArtifactManifest, ArtifactStore, BackendSelection, RuntimeCacheKey, StoredArtifact,
@@ -266,11 +267,7 @@ impl JitCoordinatorHandle {
     }
 
     /// Checks the resident map for a compiled program without sending any events.
-    pub fn get_compiled(
-        &self,
-        code_hash: alloy_primitives::B256,
-        spec_id: revm_primitives::hardfork::SpecId,
-    ) -> Option<Arc<CompiledProgram>> {
+    pub fn get_compiled(&self, code_hash: B256, spec_id: SpecId) -> Option<Arc<CompiledProgram>> {
         let key = RuntimeCacheKey { code_hash, spec_id };
         self.resident.get(&key).map(|entry| Arc::clone(&entry))
     }
