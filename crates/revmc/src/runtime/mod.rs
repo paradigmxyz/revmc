@@ -277,14 +277,14 @@ impl JitCoordinatorHandle {
 
     /// Enqueues an explicit JIT compilation request for the given bytecode.
     ///
-    /// This is enqueue-only and returns immediately. The compilation happens
-    /// asynchronously on the worker pool.
-    pub fn compile_jit(&self, req: LookupRequest) -> eyre::Result<()> {
+    /// This is fire-and-forget: returns immediately and silently drops the request
+    /// if the coordinator channel is full.
+    pub fn compile_jit(&self, req: LookupRequest) {
         let cmd = Command::CompileJit(CompileJitRequest {
             key: RuntimeCacheKey { code_hash: req.code_hash, spec_id: req.spec_id },
             bytecode: req.code,
         });
-        self.tx.try_send(cmd).map_err(|_| eyre::eyre!("coordinator channel full or closed"))
+        let _ = self.tx.try_send(cmd);
     }
 
     /// Enqueues a JIT compilation request and blocks until the compilation completes.

@@ -216,7 +216,7 @@ fn compile_jit_enqueue() {
         code: Bytes::from_static(&[0x60, 0x00]),
         spec_id: SpecId::CANCUN,
     };
-    handle.compile_jit(req).unwrap();
+    handle.compile_jit(req);
 
     coord.shutdown().unwrap();
 }
