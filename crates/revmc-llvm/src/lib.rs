@@ -719,23 +719,25 @@ impl Builder for EvmLlvmBuilder<'_> {
 
     fn load(&mut self, ty: Self::Type, ptr: Self::Value, name: &str) -> Self::Value {
         let value = self.bcx.build_load(ty, ptr.into_pointer_value(), name).unwrap();
-        if ty == self.ty_i256.into() {
-            self.current_block().unwrap().get_last_instruction().unwrap().set_alignment(8).unwrap();
-        }
+        // i256 pointers are guaranteed at least 8-byte aligned (EvmWord is repr(C, align(8))).
+        // All other pointers may come from arbitrary byte-offset GEPs into structs, so we
+        // must assume worst-case alignment to prevent LLVM from emitting aligned SIMD moves
+        // (e.g. vmovdqa) that would fault on unaligned addresses.
+        let align = if ty == self.ty_i256.into() { 8 } else { 1 };
+        self.current_block().unwrap().get_last_instruction().unwrap().set_alignment(align).unwrap();
         value
     }
 
     fn load_unaligned(&mut self, ty: Self::Type, ptr: Self::Value, name: &str) -> Self::Value {
-        let value = self.load(ty, ptr, name);
+        let value = self.bcx.build_load(ty, ptr.into_pointer_value(), name).unwrap();
         self.current_block().unwrap().get_last_instruction().unwrap().set_alignment(1).unwrap();
         value
     }
 
     fn store(&mut self, value: Self::Value, ptr: Self::Value) {
         let inst = self.bcx.build_store(ptr.into_pointer_value(), value).unwrap();
-        if value.get_type() == self.ty_i256.into() {
-            inst.set_alignment(8).unwrap();
-        }
+        let align = if value.get_type() == self.ty_i256.into() { 8 } else { 1 };
+        inst.set_alignment(align).unwrap();
     }
 
     fn store_unaligned(&mut self, value: Self::Value, ptr: Self::Value) {
