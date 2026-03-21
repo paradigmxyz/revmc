@@ -100,23 +100,7 @@ pub(crate) struct RunArgs {
 
 impl RunArgs {
     pub(crate) fn run(self) -> Result<()> {
-        // Build the compiler.
-        let target = revmc::Target::new(self.target, self.target_cpu, self.target_features);
-        let backend = EvmLlvmBackend::new_for_target(self.aot, self.opt_level, &target)?;
-        let mut compiler = EvmCompiler::new(backend);
-        let out_dir = if self.out_dir.is_some() {
-            self.out_dir
-        } else if self.dot || self.display || self.parse_only {
-            Some(std::env::temp_dir().join("revmc-cli"))
-        } else {
-            None
-        };
-        compiler.set_dump_to(out_dir);
-        compiler.gas_metering(!self.no_gas);
-        unsafe { compiler.stack_bound_checks(!self.no_len_checks) };
-        compiler.frame_pointers(true);
-        compiler.debug_assertions(self.debug_assertions);
-
+        // Resolve bench entry first (before any partial moves of self).
         let bench_entry = if self.bench_name == "custom" {
             Bench {
                 name: "custom",
@@ -174,6 +158,23 @@ impl RunArgs {
         let bytecode = bytecode.to_vec();
         let calldata = calldata.to_vec();
         let stack_input = stack_input.to_vec();
+
+        // Build the compiler.
+        let target = revmc::Target::new(self.target, self.target_cpu, self.target_features);
+        let backend = EvmLlvmBackend::new_for_target(self.aot, self.opt_level, &target)?;
+        let mut compiler = EvmCompiler::new(backend);
+        let out_dir = if self.out_dir.is_some() {
+            self.out_dir
+        } else if self.dot || self.display || self.parse_only {
+            Some(std::env::temp_dir().join("revmc-cli"))
+        } else {
+            None
+        };
+        compiler.set_dump_to(out_dir);
+        compiler.gas_metering(!self.no_gas);
+        unsafe { compiler.stack_bound_checks(!self.no_len_checks) };
+        compiler.frame_pointers(true);
+        compiler.debug_assertions(self.debug_assertions);
 
         compiler.set_module_name(name);
         if let Some(dump_dir) = compiler.dump_dir() {
