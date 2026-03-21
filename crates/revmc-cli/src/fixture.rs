@@ -13,8 +13,7 @@ use revm::{
     },
     state::AccountInfo,
 };
-use revmc::{EvmCompiler, EvmLlvmBackend, OptimizationLevel};
-use revmc_context::{EvmCompilerFn, RawEvmCompilerFn};
+use revmc::{EvmCompiler, EvmCompilerFn, EvmLlvmBackend, OptimizationLevel, RawEvmCompilerFn};
 use serde::Deserialize;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
