@@ -35,6 +35,7 @@ libloading = "0.9"
 lz-str = "0.2"
 open = "5"
 urlencoding = "2"
+serde = { version = "1", features = ["derive"] }
 serde_json = "1.0"
 eyre.workspace = true
 tracing-subscriber = { workspace = true, features = ["registry", "fmt", "env-filter"] }
@@ -43,11 +44,8 @@ tracing-tracy = { workspace = true, optional = true, features = ["demangle"] }
 [dev-dependencies]
 criterion.workspace = true
 revmc-cli-tests = { path = "../revmc-cli-tests/" }
-revmc-context = { workspace = true, default-features = false }
 revm = { workspace = true, default-features = false, features = ["std"] }
 revm-context-interface.workspace = true
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
 hex = "0.4"
 
 [build-dependencies]
@@ -71,13 +69,6 @@ doc = false
 [[bench]]
 name = "bench"
 path = "benches/bench.rs"
-required-features = ["llvm"]
-harness = false
-doc = false
-
-[[bench]]
-name = "bench_curve"
-path = "benches/bench_curve.rs"
 required-features = ["llvm"]
 harness = false
 doc = false

@@ -13,7 +13,7 @@ use revmc::{
     EvmCompiler, EvmContext, EvmLlvmBackend, EvmStack, OptimizationLevel,
     primitives::hardfork::SpecId,
 };
-use revmc_cli::Bench;
+use revmc_cli::{Bench, BenchKind, PreparedFixtureBench};
 use std::{collections::HashMap, time::Duration};
 
 const SPEC_ID: SpecId = SpecId::OSAKA;
@@ -38,30 +38,58 @@ fn bench(c: &mut Criterion) {
         if SKIP_ALL.contains(&bench.name) {
             continue;
         }
-        run_bench(c, bench);
+        match &bench.kind {
+            BenchKind::Bytecode { .. } => run_bytecode_bench(c, bench),
+            BenchKind::TxFixture(def) => run_fixture_bench(c, bench.name, def),
+        }
     }
 }
 
-fn run_bench(c: &mut Criterion, bench: &Bench) {
-    let Bench { name, bytecode, calldata, stack_input, native } = bench;
+fn run_fixture_bench(c: &mut Criterion, name: &str, def: &revmc_cli::FixtureBenchDef) {
+    let prepared = PreparedFixtureBench::load(def);
 
-    let mut g = c.benchmark_group(*name);
+    // Sanity check.
+    assert!(prepared.run_interpreter().result.is_success(), "interpreter execution reverted");
+    assert!(prepared.run_jit().result.is_success(), "JIT execution reverted");
+
+    let mut g = c.benchmark_group(name);
+    g.sample_size(10);
+    g.warm_up_time(Duration::from_secs(1));
+    g.measurement_time(Duration::from_secs(5));
+
+    g.bench_function(format!("{name}/rt/interpreter"), |b| {
+        b.iter(|| prepared.run_interpreter());
+    });
+
+    g.bench_function(format!("{name}/rt/jit"), |b| {
+        b.iter(|| prepared.run_jit());
+    });
+
+    g.finish();
+}
+
+fn run_bytecode_bench(c: &mut Criterion, bench: &Bench) {
+    let (bytecode, calldata, stack_input, native) =
+        bench.as_bytecode().expect("expected bytecode bench");
+    let name = bench.name;
+
+    let mut g = c.benchmark_group(name);
     g.sample_size(10);
     g.warm_up_time(Duration::from_secs(1));
     g.measurement_time(Duration::from_secs(5));
 
     let gas_limit = u64::MAX / 2;
-    let calldata: revmc::primitives::Bytes = calldata.clone().into();
+    let calldata: revmc::primitives::Bytes = calldata.to_vec().into();
     let bytecode_raw = Bytecode::new_raw(revmc::primitives::Bytes::copy_from_slice(bytecode));
 
     // ── Compile-time ────────────────────────────────────────────────────
 
-    if !SKIP_COMPILE.contains(name) {
+    if !SKIP_COMPILE.contains(&name) {
         g.bench_function(format!("{name}/compile/translate"), |b| {
             b.iter_batched(
                 || new_compiler(OptimizationLevel::None),
                 |mut compiler| {
-                    compiler.translate(name, bytecode.as_slice(), SPEC_ID).unwrap();
+                    compiler.translate(name, bytecode, SPEC_ID).unwrap();
                 },
                 BatchSize::PerIteration,
             )
@@ -71,8 +99,7 @@ fn run_bench(c: &mut Criterion, bench: &Bench) {
             b.iter_batched(
                 || {
                     let mut compiler = new_compiler(OptimizationLevel::Aggressive);
-                    let id =
-                        compiler.translate(name, bytecode.as_slice(), SPEC_ID).expect("translate");
+                    let id = compiler.translate(name, bytecode, SPEC_ID).expect("translate");
                     (compiler, id)
                 },
                 |(mut compiler, id)| unsafe {
@@ -94,7 +121,7 @@ fn run_bench(c: &mut Criterion, bench: &Bench) {
     compiler.inspect_stack_length(!stack_input.is_empty());
     compiler.gas_metering(true);
 
-    if let Some(native) = *native {
+    if let Some(native) = native {
         g.bench_function(format!("{name}/rt/native"), |b| {
             b.iter_batched(|| (), |()| native(), BatchSize::SmallInput)
         });
