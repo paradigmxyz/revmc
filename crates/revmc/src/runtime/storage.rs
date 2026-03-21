@@ -28,12 +28,6 @@ pub struct ArtifactKey {
     pub target: Target,
     /// The optimization level used.
     pub opt_level: OptimizationLevel,
-    /// The revmc semver at compile time.
-    pub revmc_semver: String,
-    /// A fingerprint of the compiler configuration.
-    pub compiler_fingerprint: String,
-    /// The ABI version of the compiled artifact.
-    pub abi_version: u32,
 }
 
 /// A stored artifact consisting of a manifest and a path to the compiled dylib.

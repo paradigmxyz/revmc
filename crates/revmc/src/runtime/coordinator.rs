@@ -5,14 +5,18 @@
 //! the shared resident `DashMap`.
 
 use crate::runtime::{
-    api::CompiledProgram,
+    api::{CompiledProgram, LoadedLibrary},
     config::RuntimeTuning,
     storage::{ArtifactKey, ArtifactManifest, ArtifactStore, BackendSelection, RuntimeCacheKey},
     worker::{AotJob, JitJob, WorkerJob, WorkerPool, WorkerResult, WorkerSuccess},
 };
-use alloy_primitives::{Bytes, map::HashMap};
+use alloy_primitives::{Bytes, keccak256, map::HashMap};
 use dashmap::DashMap;
-use std::sync::{Arc, mpsc};
+use revmc_backend::Target;
+use std::{
+    sync::{Arc, mpsc},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 /// The resident map type: code_hash+spec_id → compiled program.
 pub(crate) type ResidentMap = DashMap<RuntimeCacheKey, Arc<CompiledProgram>>;
@@ -351,20 +355,14 @@ impl CoordinatorState {
         key: RuntimeCacheKey,
         success: crate::runtime::worker::AotSuccess,
     ) {
-        use crate::runtime::api::LoadedLibrary;
-        use std::time::{SystemTime, UNIX_EPOCH};
-
         let artifact_key = ArtifactKey {
             runtime: key.clone(),
             backend: BackendSelection::Llvm,
-            target: revmc_backend::Target::Native,
+            target: Target::Native,
             opt_level: self.tuning.aot_opt_level,
-            revmc_semver: env!("CARGO_PKG_VERSION").to_string(),
-            compiler_fingerprint: String::new(),
-            abi_version: 0,
         };
 
-        let sha256 = alloy_primitives::keccak256(&success.dylib_bytes).0;
+        let sha256 = keccak256(&success.dylib_bytes).0;
 
         let manifest = ArtifactManifest {
             artifact_key: artifact_key.clone(),
