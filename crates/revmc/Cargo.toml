@@ -27,7 +27,7 @@ revmc-context.workspace = true
 revmc-cranelift = { workspace = true, optional = true }
 revmc-llvm = { workspace = true, optional = true }
 
-alloy-primitives = { workspace = true, features = ["std"] }
+alloy-primitives = { workspace = true, features = ["std", "map"] }
 alloy-evm = { workspace = true, optional = true }
 revm = { workspace = true, optional = true }
 revm-bytecode.workspace = true

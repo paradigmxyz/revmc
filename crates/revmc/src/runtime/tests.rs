@@ -1,7 +1,7 @@
 //! Tests for the runtime module.
 
 use super::*;
-use alloy_primitives::B256;
+use alloy_primitives::{B256, Bytes};
 use revm_primitives::hardfork::SpecId;
 use std::sync::{Arc, Mutex};
 
@@ -59,7 +59,7 @@ fn lookup_disabled() {
     let coord = JitCoordinator::start(config).unwrap();
     let handle = coord.handle();
 
-    let req = LookupRequest { code_hash: B256::ZERO, code: &[], spec_id: SpecId::CANCUN };
+    let req = LookupRequest { code_hash: B256::ZERO, code: Bytes::new(), spec_id: SpecId::CANCUN };
     let decision = handle.lookup(req);
     assert!(matches!(decision, LookupDecision::Interpret(InterpretReason::Disabled)));
 
@@ -76,7 +76,11 @@ fn lookup_miss_when_enabled() {
     let coord = JitCoordinator::start(config).unwrap();
     let handle = coord.handle();
 
-    let req = LookupRequest { code_hash: B256::ZERO, code: &[0x00], spec_id: SpecId::CANCUN };
+    let req = LookupRequest {
+        code_hash: B256::ZERO,
+        code: Bytes::from_static(&[0x00]),
+        spec_id: SpecId::CANCUN,
+    };
     let decision = handle.lookup(req);
     assert!(matches!(decision, LookupDecision::Interpret(InterpretReason::NotReady)));
 
@@ -93,7 +97,7 @@ fn set_enabled_toggle() {
     let coord = JitCoordinator::start(config).unwrap();
     let handle = coord.handle();
 
-    let req = LookupRequest { code_hash: B256::ZERO, code: &[], spec_id: SpecId::CANCUN };
+    let req = LookupRequest { code_hash: B256::ZERO, code: Bytes::new(), spec_id: SpecId::CANCUN };
 
     // Initially disabled.
     assert!(matches!(
@@ -122,7 +126,8 @@ fn events_sent_on_lookup() {
     let handle = coord.handle();
 
     for _ in 0..10 {
-        let req = LookupRequest { code_hash: B256::ZERO, code: &[], spec_id: SpecId::CANCUN };
+        let req =
+            LookupRequest { code_hash: B256::ZERO, code: Bytes::new(), spec_id: SpecId::CANCUN };
         let _ = handle.lookup(req);
     }
 
@@ -140,7 +145,7 @@ fn drop_shuts_down_coordinator() {
     drop(coord);
 
     // Lookups still work (no panic), events will be dropped since coordinator is gone.
-    let req = LookupRequest { code_hash: B256::ZERO, code: &[], spec_id: SpecId::CANCUN };
+    let req = LookupRequest { code_hash: B256::ZERO, code: Bytes::new(), spec_id: SpecId::CANCUN };
     let _ = handle.lookup(req);
 }
 
@@ -151,7 +156,7 @@ fn handle_clone() {
     let h1 = coord.handle();
     let h2 = h1.clone();
 
-    let req = LookupRequest { code_hash: B256::ZERO, code: &[], spec_id: SpecId::CANCUN };
+    let req = LookupRequest { code_hash: B256::ZERO, code: Bytes::new(), spec_id: SpecId::CANCUN };
     let _ = h1.lookup(req.clone());
     let _ = h2.lookup(req);
 
@@ -208,7 +213,7 @@ fn compile_jit_enqueue() {
 
     let req = LookupRequest {
         code_hash: B256::repeat_byte(0x01),
-        code: &[0x60, 0x00],
+        code: Bytes::from_static(&[0x60, 0x00]),
         spec_id: SpecId::CANCUN,
     };
     handle.compile_jit(req).unwrap();
@@ -218,15 +223,13 @@ fn compile_jit_enqueue() {
 
 #[test]
 fn prepare_aot_enqueue() {
-    use std::borrow::Cow;
-
     let config = RuntimeConfig { enabled: true, ..Default::default() };
     let coord = JitCoordinator::start(config).unwrap();
     let handle = coord.handle();
 
     let req = super::AotRequest {
         code_hash: B256::repeat_byte(0x02),
-        code: Cow::Borrowed(&[0x60, 0x00]),
+        code: Bytes::from_static(&[0x60, 0x00]),
         spec_id: SpecId::CANCUN,
     };
     handle.prepare_aot(req).unwrap();
@@ -236,8 +239,6 @@ fn prepare_aot_enqueue() {
 
 #[test]
 fn prepare_aot_batch_enqueue() {
-    use std::borrow::Cow;
-
     let config = RuntimeConfig { enabled: true, ..Default::default() };
     let coord = JitCoordinator::start(config).unwrap();
     let handle = coord.handle();
@@ -245,12 +246,12 @@ fn prepare_aot_batch_enqueue() {
     let reqs = vec![
         super::AotRequest {
             code_hash: B256::repeat_byte(0x03),
-            code: Cow::Borrowed(&[0x60, 0x00]),
+            code: Bytes::from_static(&[0x60, 0x00]),
             spec_id: SpecId::CANCUN,
         },
         super::AotRequest {
             code_hash: B256::repeat_byte(0x04),
-            code: Cow::Borrowed(&[0x60, 0x01]),
+            code: Bytes::from_static(&[0x60, 0x01]),
             spec_id: SpecId::CANCUN,
         },
     ];
@@ -268,7 +269,11 @@ fn clear_resident() {
     handle.clear_resident().unwrap();
 
     // After clear, lookups should miss.
-    let req = LookupRequest { code_hash: B256::ZERO, code: &[0x00], spec_id: SpecId::CANCUN };
+    let req = LookupRequest {
+        code_hash: B256::ZERO,
+        code: Bytes::from_static(&[0x00]),
+        spec_id: SpecId::CANCUN,
+    };
     let decision = handle.lookup(req);
     assert!(matches!(decision, LookupDecision::Interpret(InterpretReason::NotReady)));
 
@@ -363,8 +368,6 @@ impl ArtifactStore for TempDirStore {
 #[test]
 #[cfg(feature = "llvm")]
 fn prepare_aot_persist_and_load() {
-    use std::borrow::Cow;
-
     let store = Arc::new(TempDirStore::new());
     let config = RuntimeConfig {
         enabled: true,
@@ -379,13 +382,18 @@ fn prepare_aot_persist_and_load() {
     let bytecode: &[u8] = &[0x60, 0x42, 0x5f, 0x52, 0x60, 0x20, 0x5f, 0xf3];
     let code_hash = alloy_primitives::keccak256(bytecode);
 
-    let req = AotRequest { code_hash, code: Cow::Borrowed(bytecode), spec_id: SpecId::CANCUN };
+    let req =
+        AotRequest { code_hash, code: Bytes::copy_from_slice(bytecode), spec_id: SpecId::CANCUN };
     handle.prepare_aot(req).unwrap();
 
     // Poll until the artifact appears in the resident map.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     loop {
-        let req = LookupRequest { code_hash, code: bytecode, spec_id: SpecId::CANCUN };
+        let req = LookupRequest {
+            code_hash,
+            code: Bytes::copy_from_slice(bytecode),
+            spec_id: SpecId::CANCUN,
+        };
         if let LookupDecision::Compiled(program) = handle.lookup(req) {
             assert_eq!(program.kind, ProgramKind::Aot);
             break;
@@ -403,8 +411,6 @@ fn prepare_aot_persist_and_load() {
 #[test]
 #[cfg(feature = "llvm")]
 fn prepare_aot_batch_persist_and_load() {
-    use std::borrow::Cow;
-
     let store = Arc::new(TempDirStore::new());
     let config = RuntimeConfig {
         enabled: true,
@@ -421,12 +427,12 @@ fn prepare_aot_batch_persist_and_load() {
     ];
     let hashes: Vec<B256> = bytecodes.iter().map(alloy_primitives::keccak256).collect();
 
-    let reqs: Vec<AotRequest<'_>> = bytecodes
+    let reqs: Vec<AotRequest> = bytecodes
         .iter()
         .zip(&hashes)
         .map(|(code, hash)| AotRequest {
             code_hash: *hash,
-            code: Cow::Borrowed(*code),
+            code: Bytes::copy_from_slice(code),
             spec_id: SpecId::CANCUN,
         })
         .collect();
@@ -435,7 +441,11 @@ fn prepare_aot_batch_persist_and_load() {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     loop {
         let all_ready = hashes.iter().zip(bytecodes.iter()).all(|(hash, code)| {
-            let req = LookupRequest { code_hash: *hash, code, spec_id: SpecId::CANCUN };
+            let req = LookupRequest {
+                code_hash: *hash,
+                code: Bytes::copy_from_slice(code),
+                spec_id: SpecId::CANCUN,
+            };
             matches!(handle.lookup(req), LookupDecision::Compiled(_))
         });
         if all_ready {
@@ -456,8 +466,6 @@ fn prepare_aot_batch_persist_and_load() {
 #[test]
 #[cfg(feature = "llvm")]
 fn aot_artifacts_survive_restart() {
-    use std::borrow::Cow;
-
     let store = Arc::new(TempDirStore::new());
 
     // First coordinator: compile and persist an AOT artifact.
@@ -477,14 +485,18 @@ fn aot_artifacts_survive_restart() {
         handle
             .prepare_aot(AotRequest {
                 code_hash,
-                code: Cow::Borrowed(bytecode),
+                code: Bytes::copy_from_slice(bytecode),
                 spec_id: SpecId::CANCUN,
             })
             .unwrap();
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         loop {
-            let req = LookupRequest { code_hash, code: bytecode, spec_id: SpecId::CANCUN };
+            let req = LookupRequest {
+                code_hash,
+                code: Bytes::copy_from_slice(bytecode),
+                spec_id: SpecId::CANCUN,
+            };
             if matches!(handle.lookup(req), LookupDecision::Compiled(_)) {
                 break;
             }
@@ -507,7 +519,11 @@ fn aot_artifacts_survive_restart() {
         let code_hash = alloy_primitives::keccak256(bytecode);
 
         // Should be available immediately from AOT preload — no waiting.
-        let req = LookupRequest { code_hash, code: bytecode, spec_id: SpecId::CANCUN };
+        let req = LookupRequest {
+            code_hash,
+            code: Bytes::copy_from_slice(bytecode),
+            spec_id: SpecId::CANCUN,
+        };
         let decision = handle.lookup(req);
         assert!(
             matches!(&decision, LookupDecision::Compiled(p) if p.kind == ProgramKind::Aot),

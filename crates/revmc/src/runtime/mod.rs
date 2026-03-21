@@ -34,7 +34,6 @@ use crate::{
     EvmCompilerFn,
     eyre::{self, WrapErr},
 };
-use alloy_primitives::Bytes;
 use std::{
     sync::{
         Arc,
@@ -230,7 +229,7 @@ impl JitCoordinatorHandle {
     /// Looks up a compiled function for the given request.
     ///
     /// This never blocks, never touches storage, and never waits for compilation.
-    pub fn lookup(&self, req: LookupRequest<'_>) -> LookupDecision {
+    pub fn lookup(&self, req: LookupRequest) -> LookupDecision {
         if !self.enabled.load(Ordering::Relaxed) {
             return LookupDecision::Interpret(InterpretReason::Disabled);
         }
@@ -252,7 +251,7 @@ impl JitCoordinatorHandle {
         let event = Command::LookupObserved(LookupObservedEvent {
             key,
             was_hit,
-            bytecode: if was_hit { None } else { Some(Bytes::copy_from_slice(req.code)) },
+            bytecode: if was_hit { None } else { Some(req.code) },
         });
         match self.tx.try_send(event) {
             Ok(()) => {
@@ -280,10 +279,10 @@ impl JitCoordinatorHandle {
     ///
     /// This is enqueue-only and returns immediately. The compilation happens
     /// asynchronously on the worker pool.
-    pub fn compile_jit(&self, req: LookupRequest<'_>) -> eyre::Result<()> {
+    pub fn compile_jit(&self, req: LookupRequest) -> eyre::Result<()> {
         let cmd = Command::CompileJit(CompileJitRequest {
             key: RuntimeCacheKey { code_hash: req.code_hash, spec_id: req.spec_id },
-            bytecode: Bytes::copy_from_slice(req.code),
+            bytecode: req.code,
         });
         self.tx.try_send(cmd).map_err(|_| eyre::eyre!("coordinator channel full or closed"))
     }
@@ -293,12 +292,12 @@ impl JitCoordinatorHandle {
     /// Returns `Ok(())` when the compiled function is available in the resident map,
     /// or when the compilation fails. Use [`get_compiled`](Self::get_compiled) to
     /// retrieve the result after this returns.
-    pub fn compile_jit_sync(&self, req: LookupRequest<'_>) -> eyre::Result<()> {
+    pub fn compile_jit_sync(&self, req: LookupRequest) -> eyre::Result<()> {
         let (tx, rx) = mpsc::sync_channel(1);
         let cmd = Command::CompileJitSync(
             CompileJitRequest {
                 key: RuntimeCacheKey { code_hash: req.code_hash, spec_id: req.spec_id },
-                bytecode: Bytes::copy_from_slice(req.code),
+                bytecode: req.code,
             },
             tx,
         );
@@ -311,19 +310,19 @@ impl JitCoordinatorHandle {
     /// This is enqueue-only and returns immediately. The compilation happens
     /// asynchronously on the worker pool. The resulting artifact is persisted
     /// via [`ArtifactStore::store`] and loaded into the resident map.
-    pub fn prepare_aot(&self, req: AotRequest<'_>) -> eyre::Result<()> {
+    pub fn prepare_aot(&self, req: AotRequest) -> eyre::Result<()> {
         self.prepare_aot_batch(vec![req])
     }
 
     /// Enqueues a batch of AOT preparation requests.
     ///
     /// This is enqueue-only and returns immediately.
-    pub fn prepare_aot_batch(&self, reqs: Vec<AotRequest<'_>>) -> eyre::Result<()> {
+    pub fn prepare_aot_batch(&self, reqs: Vec<AotRequest>) -> eyre::Result<()> {
         let owned: Vec<PrepareAotRequest> = reqs
             .into_iter()
             .map(|r| PrepareAotRequest {
                 key: RuntimeCacheKey { code_hash: r.code_hash, spec_id: r.spec_id },
-                bytecode: Bytes::from(r.code.into_owned()),
+                bytecode: r.code,
             })
             .collect();
         let cmd = Command::PrepareAot(owned);

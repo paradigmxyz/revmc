@@ -218,7 +218,11 @@ where
                 let bytecode_hash = frame.interpreter.bytecode.get_or_calculate_hash();
                 let code = frame.interpreter.bytecode.original_byte_slice();
 
-                let req = LookupRequest { code_hash: bytecode_hash, code, spec_id };
+                let req = LookupRequest {
+                    code_hash: bytecode_hash,
+                    code: Bytes::copy_from_slice(code),
+                    spec_id,
+                };
                 match self.handle.lookup(req) {
                     LookupDecision::Compiled(program) => {
                         let ctx = &mut evm.ctx;

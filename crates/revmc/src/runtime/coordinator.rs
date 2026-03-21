@@ -10,9 +10,8 @@ use crate::runtime::{
     storage::{ArtifactKey, ArtifactManifest, ArtifactStore, BackendSelection, RuntimeCacheKey},
     worker::{AotJob, JitJob, WorkerJob, WorkerPool, WorkerResult, WorkerSuccess},
 };
-use alloy_primitives::Bytes;
+use alloy_primitives::{Bytes, map::HashMap};
 use dashmap::DashMap;
-use rustc_hash::FxHashMap;
 use std::sync::{Arc, mpsc};
 
 /// The resident map type: code_hash+spec_id → compiled program.
@@ -90,9 +89,9 @@ struct CoordinatorState {
     /// The shared resident map (handles read, coordinator writes).
     resident: Arc<ResidentMap>,
     /// Per-key tracking state (coordinator-only).
-    entries: FxHashMap<RuntimeCacheKey, EntryState>,
+    entries: HashMap<RuntimeCacheKey, EntryState>,
     /// Pending sync waiters: key → list of senders to notify on completion.
-    sync_waiters: FxHashMap<RuntimeCacheKey, Vec<mpsc::SyncSender<()>>>,
+    sync_waiters: HashMap<RuntimeCacheKey, Vec<mpsc::SyncSender<()>>>,
     /// Worker pool for JIT compilation.
     workers: WorkerPool,
     /// Receiver for worker results.
@@ -512,8 +511,8 @@ pub(crate) fn run(
 
     let mut state = CoordinatorState {
         resident,
-        entries: FxHashMap::default(),
-        sync_waiters: FxHashMap::default(),
+        entries: HashMap::default(),
+        sync_waiters: HashMap::default(),
         workers,
         result_rx,
         store,

@@ -4,17 +4,17 @@ use crate::{
     EvmCompilerFn,
     runtime::{storage::RuntimeCacheKey, worker::WorkerBacking},
 };
-use alloy_primitives::B256;
+use alloy_primitives::{B256, Bytes};
 use revm_primitives::hardfork::SpecId;
-use std::{borrow::Cow, sync::Arc};
+use std::sync::Arc;
 
 /// Request to look up a compiled function.
 #[derive(Clone, Debug)]
-pub struct LookupRequest<'a> {
+pub struct LookupRequest {
     /// The code hash of the contract bytecode.
     pub code_hash: B256,
     /// The raw contract bytecode.
-    pub code: &'a [u8],
+    pub code: Bytes,
     /// The EVM spec (hardfork) for this execution.
     pub spec_id: SpecId,
 }
@@ -106,11 +106,11 @@ impl CompiledProgram {
 
 /// Request to prepare an AOT artifact.
 #[derive(Clone, Debug)]
-pub struct AotRequest<'a> {
+pub struct AotRequest {
     /// The code hash of the contract bytecode.
     pub code_hash: B256,
     /// The raw contract bytecode.
-    pub code: Cow<'a, [u8]>,
+    pub code: Bytes,
     /// The EVM spec (hardfork) for compilation.
     pub spec_id: SpecId,
 }

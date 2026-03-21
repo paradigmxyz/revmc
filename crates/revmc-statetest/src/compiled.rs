@@ -10,7 +10,7 @@ use revm::{
     database::{self, bal::EvmDatabaseError},
     database_interface::{DatabaseCommit, EmptyDB},
     handler::{EvmTr, FrameResult, Handler, ItemOrResult},
-    primitives::{hardfork::SpecId, keccak256, B256, U256},
+    primitives::{hardfork::SpecId, keccak256, Bytes, B256, U256},
     statetest_types::{SpecName, TestSuite, TestUnit},
     Context, MainBuilder, MainContext, MainnetEvm,
 };
@@ -634,7 +634,7 @@ fn wait_for_compiled(
         if let Some(program) = handle.get_compiled(code_hash, spec_id) {
             return Some(program.func);
         }
-        let req = LookupRequest { code_hash, code, spec_id };
+        let req = LookupRequest { code_hash, code: Bytes::copy_from_slice(code), spec_id };
         let _ = handle.compile_jit(req);
         std::thread::yield_now();
     }
@@ -742,7 +742,7 @@ fn execute_test_suite_runtime(
                     continue;
                 }
                 let code_hash = keccak256(&info.code);
-                let req = LookupRequest { code_hash, code: &info.code, spec_id };
+                let req = LookupRequest { code_hash, code: info.code.clone(), spec_id };
                 let _ = handle.compile_jit(req);
             }
 
@@ -848,10 +848,7 @@ pub fn run(
         let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
         let config = RuntimeConfig {
             enabled: true,
-            tuning: RuntimeTuning {
-                jit_worker_count: cpus,
-                ..Default::default()
-            },
+            tuning: RuntimeTuning { jit_worker_count: cpus, ..Default::default() },
             ..Default::default()
         };
         Some(JitCoordinator::start(config).map_err(|e| TestError {
