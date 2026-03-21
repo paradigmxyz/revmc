@@ -725,9 +725,20 @@ impl Builder for EvmLlvmBuilder<'_> {
         value
     }
 
-    fn load_unaligned(&mut self, ty: Self::Type, ptr: Self::Value, name: &str) -> Self::Value {
-        let value = self.load(ty, ptr, name);
-        self.current_block().unwrap().get_last_instruction().unwrap().set_alignment(1).unwrap();
+    fn load_aligned(
+        &mut self,
+        ty: Self::Type,
+        ptr: Self::Value,
+        align: usize,
+        name: &str,
+    ) -> Self::Value {
+        let value = self.bcx.build_load(ty, ptr.into_pointer_value(), name).unwrap();
+        self.current_block()
+            .unwrap()
+            .get_last_instruction()
+            .unwrap()
+            .set_alignment(align as u32)
+            .unwrap();
         value
     }
 
@@ -738,9 +749,9 @@ impl Builder for EvmLlvmBuilder<'_> {
         }
     }
 
-    fn store_unaligned(&mut self, value: Self::Value, ptr: Self::Value) {
+    fn store_aligned(&mut self, value: Self::Value, ptr: Self::Value, align: usize) {
         let inst = self.bcx.build_store(ptr.into_pointer_value(), value).unwrap();
-        inst.set_alignment(1).unwrap();
+        inst.set_alignment(align as u32).unwrap();
     }
 
     fn nop(&mut self) {
