@@ -140,7 +140,7 @@ impl WorkerPool {
             let backing_for_worker = Arc::clone(&backing);
 
             let thread = std::thread::Builder::new()
-                .name(format!("revmc-compile-{worker_id}"))
+                .name(format!("revmc-{worker_id:02}"))
                 .spawn(move || {
                     worker_loop(worker_id, job_rx, result_tx, opt_level, &backing_for_worker);
                 })
