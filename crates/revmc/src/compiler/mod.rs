@@ -359,6 +359,16 @@ impl<B: Backend> EvmCompiler<B> {
     pub fn translate_inner(&mut self, name: &str, bytecode: &Bytecode<'_>) -> Result<B::FuncId> {
         let _t = self.remarks.time(|r| &r.translate);
         ensure!(self.backend.function_name_is_unique(name), "function name `{name}` is not unique");
+
+        // Generate the synthetic .evm source file and enable debug info on the backend.
+        if self.config.debug {
+            if let Some(dump_dir) = &self.dump_dir() {
+                let evm_path = dump_dir.join(format!("{name}.evm"));
+                Self::dump_evm_source(&evm_path, bytecode)?;
+                self.backend.set_debug_file(Some(evm_path));
+            }
+        }
+
         let linkage = Linkage::Public;
         let (bcx, id) = Self::make_builder(&mut self.backend, &self.config, name, linkage)?;
         FunctionCx::translate(bcx, self.config, &mut self.builtins, bytecode)?;
@@ -373,6 +383,10 @@ impl<B: Backend> EvmCompiler<B> {
         self.finalized = true;
 
         let finalize_start = Instant::now();
+
+        // Finalize debug info before any verification or code generation.
+        self.backend.finalize_debug_info()?;
+
         let dump_dir = self.dump_dir();
 
         if let Some(dump_dir) = &dump_dir {
@@ -548,6 +562,43 @@ total:      {total:>11.3?}
             writer.flush()?;
         }
 
+        Ok(())
+    }
+
+    /// Writes a synthetic `.evm` source file with one line per bytecode PC.
+    ///
+    /// Opcode bytes get a descriptive line (e.g. `0000: PUSH1 0x80`), while PUSH immediate
+    /// continuation bytes get blank lines. This ensures `line_number == pc + 1`.
+    #[instrument(level = "debug", skip_all)]
+    fn dump_evm_source(path: &Path, bytecode: &Bytecode<'_>) -> Result<()> {
+        use revm_bytecode::opcode::OPCODE_INFO;
+
+        let code = bytecode.code;
+        let file = fs::File::create(path)?;
+        let mut w = io::BufWriter::new(file);
+        let mut pc = 0usize;
+        while pc < code.len() {
+            let opcode = code[pc];
+            let name = OPCODE_INFO[opcode as usize]
+                .map(|info| info.name())
+                .unwrap_or("UNKNOWN");
+            let imm_len =
+                OPCODE_INFO[opcode as usize].map_or(0, |info| info.immediate_size() as usize);
+            if imm_len > 0 {
+                let end = (pc + 1 + imm_len).min(code.len());
+                let imm = &code[pc + 1..end];
+                writeln!(w, "{pc:04}: {name} 0x{}", revm_primitives::hex::encode(imm))?;
+            } else {
+                writeln!(w, "{pc:04}: {name}")?;
+            }
+            pc += 1;
+            // Blank lines for immediate bytes so line_number == pc + 1 holds.
+            for _ in 0..imm_len.min(code.len() - pc) {
+                writeln!(w)?;
+                pc += 1;
+            }
+        }
+        w.flush()?;
         Ok(())
     }
 

@@ -186,6 +186,11 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     ) -> Result<()> {
         let entry_block = bcx.current_block().unwrap();
 
+        // Clear debug location for prologue code.
+        if config.debug {
+            bcx.clear_debug_location();
+        }
+
         // Get common types.
         let ptr_type = bcx.type_ptr();
         let isize_type = bcx.type_ptr_sized_int();
@@ -318,6 +323,11 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         // Translate individual instructions into their respective blocks.
         for (inst, _) in bytecode.iter_insts() {
             fx.translate_inst(inst)?;
+        }
+
+        // Clear debug location for all synthetic / epilogue blocks.
+        if config.debug {
+            fx.bcx.clear_debug_location();
         }
 
         // Finalize the dynamic jump table.
@@ -481,6 +491,11 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let opcode = data.opcode;
         let entry_block = self.inst_entries[inst];
         self.bcx.switch_to_block(entry_block);
+
+        if self.config.debug {
+            // line = pc + 1 to match the synthetic .evm source file.
+            self.bcx.set_debug_location(data.pc + 1, 1);
+        }
 
         // self.call_printf(format_printf!("{}\n", self.op_block_name("")), &[]);
 
