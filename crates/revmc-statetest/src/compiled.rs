@@ -617,22 +617,15 @@ impl Handler for RuntimeHandler {
     }
 }
 
-/// Enqueues JIT compilation for a contract and waits for it to complete.
+/// Looks up a compiled function, blocking until compilation completes if needed.
 fn wait_for_compiled(
     handle: &JitCoordinatorHandle,
     code_hash: B256,
     code: &[u8],
     spec_id: SpecId,
 ) -> Option<EvmCompilerFn> {
-    if code.is_empty() {
-        return None;
-    }
-    if let Some(program) = handle.get_compiled(code_hash, spec_id) {
-        return Some(program.func);
-    }
     let req = LookupRequest { code_hash, code: Bytes::copy_from_slice(code), spec_id };
-    let _ = handle.compile_jit_sync(req);
-    handle.get_compiled(code_hash, spec_id).map(|p| p.func)
+    handle.lookup_blocking(req).map(|p| p.func)
 }
 
 /// Execute a single test using the runtime coordinator handler.

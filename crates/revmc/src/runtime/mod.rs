@@ -275,6 +275,24 @@ impl JitCoordinatorHandle {
         self.resident.get(&key).map(|entry| Arc::clone(&entry))
     }
 
+    /// Looks up a compiled function, blocking until compilation completes if not yet ready.
+    ///
+    /// If the function is already compiled, returns it immediately. Otherwise, enqueues
+    /// a synchronous JIT compilation request and blocks until the result is available.
+    /// Returns `None` only if the bytecode is empty or compilation fails.
+    pub fn lookup_blocking(&self, req: LookupRequest) -> Option<Arc<CompiledProgram>> {
+        if req.code.is_empty() {
+            return None;
+        }
+        let code_hash = req.code_hash;
+        let spec_id = req.spec_id;
+        if let Some(program) = self.get_compiled(code_hash, spec_id) {
+            return Some(program);
+        }
+        let _ = self.compile_jit_sync(req);
+        self.get_compiled(code_hash, spec_id)
+    }
+
     /// Enqueues an explicit JIT compilation request for the given bytecode.
     ///
     /// This is fire-and-forget: returns immediately and silently drops the request
