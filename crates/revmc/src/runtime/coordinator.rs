@@ -511,35 +511,76 @@ pub(crate) fn run(
         // Drain pending worker results first (non-blocking).
         state.drain_worker_results();
 
-        // Block on the command channel.
-        match rx.recv() {
-            Ok(Command::LookupObserved(event)) => {
+        // When there are sync waiters, we must interleave checking worker results
+        // with command processing to avoid deadlocking — the coordinator would
+        // otherwise block on `rx.recv()` and never see the worker result that
+        // would unblock the waiters.
+        let cmd = if state.sync_waiters.is_empty() {
+            match rx.recv() {
+                Ok(cmd) => cmd,
+                Err(_) => {
+                    debug!("coordinator channel closed, shutting down");
+                    break;
+                }
+            }
+        } else {
+            // Poll: try commands, then worker results, with a short sleep to avoid busy-wait.
+            loop {
+                match rx.try_recv() {
+                    Ok(cmd) => break cmd,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        debug!("coordinator channel closed, shutting down");
+                        // Notify remaining waiters before exiting.
+                        for (_, waiters) in state.sync_waiters.drain() {
+                            for tx in waiters {
+                                let _ = tx.send(());
+                            }
+                        }
+                        // Use a sentinel to break the outer loop.
+                        break Command::Shutdown;
+                    }
+                    Err(mpsc::TryRecvError::Empty) => {}
+                }
+                // Drain worker results — this may unblock sync waiters.
+                state.drain_worker_results();
+                if state.sync_waiters.is_empty() {
+                    // All waiters resolved, go back to blocking recv.
+                    break match rx.recv() {
+                        Ok(cmd) => cmd,
+                        Err(_) => {
+                            debug!("coordinator channel closed, shutting down");
+                            break Command::Shutdown;
+                        }
+                    };
+                }
+                std::thread::sleep(std::time::Duration::from_micros(100));
+            }
+        };
+
+        match cmd {
+            Command::LookupObserved(event) => {
                 state.handle_lookup_observed(event);
             }
-            Ok(Command::CompileJit(req)) => {
+            Command::CompileJit(req) => {
                 state.handle_compile_jit(req);
             }
-            Ok(Command::CompileJitSync(req, tx)) => {
+            Command::CompileJitSync(req, tx) => {
                 state.handle_compile_jit_sync(req, tx);
             }
-            Ok(Command::PrepareAot(reqs)) => {
+            Command::PrepareAot(reqs) => {
                 state.handle_prepare_aot(reqs);
             }
-            Ok(Command::ClearResident) => {
+            Command::ClearResident => {
                 state.handle_clear_resident();
             }
-            Ok(Command::ClearPersisted) => {
+            Command::ClearPersisted => {
                 state.handle_clear_persisted();
             }
-            Ok(Command::ClearAll) => {
+            Command::ClearAll => {
                 state.handle_clear_all();
             }
-            Ok(Command::Shutdown) => {
+            Command::Shutdown => {
                 debug!("coordinator shutting down");
-                break;
-            }
-            Err(_) => {
-                debug!("coordinator channel closed, shutting down");
                 break;
             }
         }
