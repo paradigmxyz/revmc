@@ -1055,7 +1055,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             };
             self.len_offset += 1;
             let sp = self.sp_at(len);
-            self.bcx.store(value, sp);
+            self.bcx.store_aligned(value, sp, 8);
         }
     }
 
@@ -1113,8 +1113,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let b_sp = self.sp_from_top(len, n + m + 1);
         let b = self.load_word(b_sp, "swap.b");
         // Store.
-        self.bcx.store(a, b_sp);
-        self.bcx.store(b, a_sp);
+        self.bcx.store_aligned(a, b_sp, 8);
+        self.bcx.store_aligned(b, a_sp, 8);
     }
 
     /// `RETURN` or `REVERT` instruction.
@@ -1173,7 +1173,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
     /// Loads the word at the given pointer.
     fn load_word(&mut self, ptr: B::Value, name: &str) -> B::Value {
-        self.bcx.load(self.word_type, ptr, name)
+        // EvmWord is repr(C, align(8)), so stack word pointers are 8-byte aligned.
+        self.bcx.load_aligned(self.word_type, ptr, 8, name)
     }
 
     /// Gets the stack length before the current instruction.

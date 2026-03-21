@@ -275,14 +275,20 @@ pub trait Builder: BackendTypes + TypeMethods {
     fn stack_store(&mut self, value: Self::Value, slot: Self::StackSlot);
     fn stack_addr(&mut self, ty: Self::Type, slot: Self::StackSlot) -> Self::Value;
 
-    fn load(&mut self, ty: Self::Type, ptr: Self::Value, name: &str) -> Self::Value {
-        self.load_unaligned(ty, ptr, name)
-    }
-    fn load_unaligned(&mut self, ty: Self::Type, ptr: Self::Value, name: &str) -> Self::Value;
-    fn store(&mut self, value: Self::Value, ptr: Self::Value) {
-        self.store_unaligned(value, ptr);
-    }
-    fn store_unaligned(&mut self, value: Self::Value, ptr: Self::Value);
+    /// Loads a value from a pointer with no alignment guarantee (align=1).
+    fn load(&mut self, ty: Self::Type, ptr: Self::Value, name: &str) -> Self::Value;
+    /// Loads a value from a pointer with a known minimum alignment.
+    fn load_aligned(
+        &mut self,
+        ty: Self::Type,
+        ptr: Self::Value,
+        align: usize,
+        name: &str,
+    ) -> Self::Value;
+    /// Stores a value to a pointer with no alignment guarantee (align=1).
+    fn store(&mut self, value: Self::Value, ptr: Self::Value);
+    /// Stores a value to a pointer with a known minimum alignment.
+    fn store_aligned(&mut self, value: Self::Value, ptr: Self::Value, align: usize);
 
     fn nop(&mut self);
     fn ret(&mut self, values: &[Self::Value]);
