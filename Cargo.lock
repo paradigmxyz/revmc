@@ -3388,7 +3388,6 @@ dependencies = [
  "revmc",
  "revmc-build",
  "revmc-cli-tests",
- "revmc-context",
  "revmc-statetest",
  "serde",
  "serde_json",
