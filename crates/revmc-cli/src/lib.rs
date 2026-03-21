@@ -11,6 +11,11 @@ use std::{cmp::Ordering, path::Path, str::FromStr};
 mod benches;
 pub use benches::*;
 
+#[cfg(feature = "llvm")]
+mod fixture;
+#[cfg(feature = "llvm")]
+pub use fixture::*;
+
 pub fn read_code(code: Option<&str>, code_path: Option<&Path>) -> Result<Vec<u8>> {
     if let Some(code) = code {
         return read_code_string(code.trim().as_bytes(), None);
