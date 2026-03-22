@@ -1,6 +1,9 @@
 use crate::{Pointer, Result};
 use ruint::aliases::U256;
-use std::{fmt, path::Path};
+use std::{
+    fmt,
+    path::{Path, PathBuf},
+};
 
 /// Target machine.
 #[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -201,6 +204,18 @@ pub trait Backend: BackendTypes + TypeMethods {
 
     fn set_is_dumping(&mut self, yes: bool);
     fn set_debug_assertions(&mut self, yes: bool);
+
+    /// Sets the debug info source file path for generated code.
+    ///
+    /// Passing `Some(path)` enables debug info emission; `None` disables it.
+    fn set_debug_file(&mut self, _path: Option<PathBuf>) {}
+
+    /// Finalizes any pending debug info metadata.
+    ///
+    /// Must be called before verification, optimization, or code emission.
+    fn finalize_debug_info(&mut self) -> Result<()> {
+        Ok(())
+    }
     fn opt_level(&self) -> OptimizationLevel;
     fn set_opt_level(&mut self, level: OptimizationLevel);
     fn dump_ir(&mut self, path: &Path) -> Result<()>;
@@ -252,6 +267,12 @@ pub trait Builder: BackendTypes + TypeMethods {
     fn block_addr(&mut self, block: Self::BasicBlock) -> Option<Self::Value>;
 
     fn add_comment_to_current_inst(&mut self, comment: &str);
+
+    /// Sets the current debug source location for subsequently emitted instructions.
+    fn set_debug_location(&mut self, _line: u32, _col: u32) {}
+
+    /// Clears the current debug source location.
+    fn clear_debug_location(&mut self) {}
 
     fn fn_param(&mut self, index: usize) -> Self::Value;
     fn num_fn_params(&self) -> usize;

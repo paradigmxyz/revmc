@@ -2,7 +2,7 @@ use super::{Bytecode, InstData, InstFlags, bitvec_as_bytes};
 use revm_bytecode::opcode as op;
 use revm_primitives::hex;
 use rustc_hash::FxHashMap;
-use std::{borrow::Cow, fmt};
+use std::{borrow::Cow, fmt, fmt::Write};
 
 /// Basic block info collected from bytecode analysis.
 struct BlockInfo {
@@ -37,16 +37,12 @@ impl Bytecode<'_> {
         }
         BlockInfo { blocks, inst_to_block }
     }
-}
 
-impl fmt::Display for Bytecode<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        use std::fmt::Write;
-
+    /// Collects formatted lines and builds the inst-to-line map stored in `self.inst_lines`.
+    fn collect_lines(&self) -> Vec<(String, String)> {
         let info = self.collect_blocks();
-
-        // First pass: collect lines with their text and comments.
         let mut lines: Vec<(String, String)> = Vec::new();
+        let mut inst_lines = vec![0u32; self.insts.len()];
 
         lines.push((
             String::new(),
@@ -82,11 +78,15 @@ impl fmt::Display for Bytecode<'_> {
             lines.push((header, comment));
 
             // Instructions.
+            #[allow(clippy::needless_range_loop)]
             for inst in first_inst..=last_inst {
                 let data = self.inst(inst);
                 if data.is_dead_code() {
                     continue;
                 }
+
+                // 1-based line number (lines.len() is the 0-based index of the next line).
+                inst_lines[inst] = lines.len() as u32 + 1;
 
                 // Instruction text.
                 let mut text = String::from("  ");
@@ -131,7 +131,16 @@ impl fmt::Display for Bytecode<'_> {
             }
         }
 
-        // Second pass: find max text width and write with aligned comments.
+        *self.inst_lines.borrow_mut() = inst_lines;
+        lines
+    }
+}
+
+impl fmt::Display for Bytecode<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let lines = self.collect_lines();
+
+        // Find max text width and write with aligned comments.
         let max_text_width = lines.iter().map(|(t, _)| t.len()).max().unwrap_or(0);
         let comment_col = max_text_width.clamp(4, 20);
         for (text, comment) in &lines {

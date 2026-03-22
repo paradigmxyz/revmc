@@ -8,6 +8,7 @@ use revmc_backend::{
 };
 use revmc_builtins::Builtins;
 use revmc_context::RawEvmCompilerFn;
+use rustc_hash::FxHashMap;
 use std::{
     cell::Cell,
     fs,
@@ -128,6 +129,7 @@ impl<B: Backend> EvmCompiler<B> {
     pub fn set_dump_to(&mut self, output_dir: Option<PathBuf>) {
         self.backend.set_is_dumping(output_dir.is_some());
         self.config.comments = output_dir.is_some();
+        self.config.debug = output_dir.is_some();
         self.out_dir = output_dir;
     }
 
@@ -358,6 +360,14 @@ impl<B: Backend> EvmCompiler<B> {
     pub fn translate_inner(&mut self, name: &str, bytecode: &Bytecode<'_>) -> Result<B::FuncId> {
         let _t = self.remarks.time(|r| &r.translate);
         ensure!(self.backend.function_name_is_unique(name), "function name `{name}` is not unique");
+
+        // Use bytecode.txt as the debug info source file.
+        if self.config.debug
+            && let Some(dump_dir) = &self.dump_dir()
+        {
+            self.backend.set_debug_file(Some(dump_dir.join("bytecode.txt")));
+        }
+
         let linkage = Linkage::Public;
         let (bcx, id) = Self::make_builder(&mut self.backend, &self.config, name, linkage)?;
         FunctionCx::translate(bcx, self.config, &mut self.builtins, bytecode)?;
@@ -372,6 +382,10 @@ impl<B: Backend> EvmCompiler<B> {
         self.finalized = true;
 
         let finalize_start = Instant::now();
+
+        // Finalize debug info before any verification or code generation.
+        self.backend.finalize_debug_info()?;
+
         let dump_dir = self.dump_dir();
 
         if let Some(dump_dir) = &dump_dir {
@@ -473,7 +487,16 @@ impl<B: Backend> EvmCompiler<B> {
 
     #[instrument(level = "debug", skip_all)]
     fn dump_ir(&mut self, path: &Path) -> Result<()> {
-        self.backend.dump_ir(path)
+        self.backend.dump_ir(path)?;
+        if self.config.debug
+            && let Some(dump_dir) = &self.dump_dir()
+        {
+            let src_path = dump_dir.join("bytecode.txt");
+            if src_path.exists() {
+                Self::annotate_ir(path, &src_path)?;
+            }
+        }
+        Ok(())
     }
 
     #[instrument(level = "debug", skip_all)]
@@ -547,6 +570,50 @@ total:      {total:>11.3?}
             writer.flush()?;
         }
 
+        Ok(())
+    }
+
+    /// Rewrites an IR dump file in-place, appending bytecode source lines as comments.
+    ///
+    /// For each IR instruction with `!dbg !N`, resolves the `!DILocation(line: L, ...)`
+    /// metadata and appends `; >> <source line>`.
+    fn annotate_ir(ir_path: &Path, src_path: &Path) -> Result<()> {
+        let src = fs::read_to_string(src_path)?;
+        let src_lines: Vec<&str> = src.lines().collect();
+        let ir = fs::read_to_string(ir_path)?;
+
+        // Parse `!N = !DILocation(line: L, ...)` metadata.
+        let mut di_locs = FxHashMap::default();
+        for line in ir.lines() {
+            let line = line.trim_start();
+            if !line.starts_with('!') {
+                continue;
+            }
+            // Match: !N = !DILocation(line: L, ...)
+            let Some(rest) = line.strip_prefix('!') else { continue };
+            let Some((id_str, rest)) = rest.split_once(" = !DILocation(line: ") else { continue };
+            let Ok(id) = id_str.parse::<u32>() else { continue };
+            let Some((line_str, _)) = rest.split_once(',') else { continue };
+            let Ok(line_no) = line_str.parse::<u32>() else { continue };
+            di_locs.insert(id, line_no);
+        }
+
+        if di_locs.is_empty() {
+            return Ok(());
+        }
+
+        // Rewrite the file with annotations.
+        let file = fs::File::create(ir_path)?;
+        let mut w = io::BufWriter::new(file);
+        for line in ir.lines() {
+            // Find `!dbg !N` in the line.
+            if let Some(src_line) = resolve_dbg_line(line, &di_locs, &src_lines) {
+                writeln!(w, "{line}  ; >> {src_line}")?;
+                continue;
+            }
+            writeln!(w, "{line}")?;
+        }
+        w.flush()?;
         Ok(())
     }
 
@@ -634,4 +701,20 @@ mod default_attrs {
     pub(crate) fn size_align<T>() -> (usize, usize) {
         (std::mem::size_of::<T>(), std::mem::align_of::<T>())
     }
+}
+
+/// Resolves a `!dbg !N` reference in an IR line to the corresponding source line.
+fn resolve_dbg_line<'a>(
+    ir_line: &str,
+    di_locs: &FxHashMap<u32, u32>,
+    src_lines: &[&'a str],
+) -> Option<&'a str> {
+    let pos = ir_line.find("!dbg !")?;
+    let after = &ir_line[pos + 6..];
+    let id_len = after.find(|c: char| !c.is_ascii_digit()).unwrap_or(after.len());
+    let id: u32 = after[..id_len].parse().ok()?;
+    let line_no = *di_locs.get(&id)?;
+    let idx = line_no.checked_sub(1)? as usize;
+    let src_line = src_lines.get(idx)?.trim();
+    (!src_line.is_empty()).then_some(src_line)
 }
