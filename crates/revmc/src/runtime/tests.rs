@@ -37,134 +37,127 @@ impl ArtifactStore for EmptyStore {
 
 #[test]
 fn start_no_store() {
-    let coord = JitCoordinator::start(RuntimeConfig::default()).unwrap();
-    let handle = coord.handle();
-    assert_eq!(handle.stats().resident_entries, 0);
-    coord.shutdown().unwrap();
+    let backend = JitBackend::start(RuntimeConfig::default()).unwrap();
+    assert_eq!(backend.stats().resident_entries, 0);
+    backend.shutdown().unwrap();
 }
 
 #[test]
 fn start_empty_store() {
     let config =
         RuntimeConfig { enabled: true, store: Some(Arc::new(EmptyStore)), ..Default::default() };
-    let coord = JitCoordinator::start(config).unwrap();
-    let handle = coord.handle();
-    assert_eq!(handle.stats().resident_entries, 0);
-    coord.shutdown().unwrap();
+    let backend = JitBackend::start(config).unwrap();
+    assert_eq!(backend.stats().resident_entries, 0);
+    backend.shutdown().unwrap();
 }
 
 #[test]
 fn lookup_disabled() {
     let config = RuntimeConfig { enabled: false, ..Default::default() };
-    let coord = JitCoordinator::start(config).unwrap();
-    let handle = coord.handle();
+    let backend = JitBackend::start(config).unwrap();
 
     let req = LookupRequest { code_hash: B256::ZERO, code: Bytes::new(), spec_id: SpecId::CANCUN };
-    let decision = handle.lookup(req);
+    let decision = backend.lookup(req);
     assert!(matches!(decision, LookupDecision::Interpret(InterpretReason::Disabled)));
 
-    let stats = handle.stats();
+    let stats = backend.stats();
     assert_eq!(stats.lookup_hits, 0);
     assert_eq!(stats.lookup_misses, 0);
 
-    coord.shutdown().unwrap();
+    backend.shutdown().unwrap();
 }
 
 #[test]
 fn lookup_miss_when_enabled() {
     let config = RuntimeConfig { enabled: true, ..Default::default() };
-    let coord = JitCoordinator::start(config).unwrap();
-    let handle = coord.handle();
+    let backend = JitBackend::start(config).unwrap();
 
     let req = LookupRequest {
         code_hash: B256::ZERO,
         code: Bytes::from_static(&[0x00]),
         spec_id: SpecId::CANCUN,
     };
-    let decision = handle.lookup(req);
+    let decision = backend.lookup(req);
     assert!(matches!(decision, LookupDecision::Interpret(InterpretReason::NotReady)));
 
-    let stats = handle.stats();
+    let stats = backend.stats();
     assert_eq!(stats.lookup_misses, 1);
     assert_eq!(stats.lookup_hits, 0);
 
-    coord.shutdown().unwrap();
+    backend.shutdown().unwrap();
 }
 
 #[test]
 fn set_enabled_toggle() {
     let config = RuntimeConfig { enabled: false, ..Default::default() };
-    let coord = JitCoordinator::start(config).unwrap();
-    let handle = coord.handle();
+    let backend = JitBackend::start(config).unwrap();
 
     let req = LookupRequest { code_hash: B256::ZERO, code: Bytes::new(), spec_id: SpecId::CANCUN };
 
     // Initially disabled.
     assert!(matches!(
-        handle.lookup(req.clone()),
+        backend.lookup(req.clone()),
         LookupDecision::Interpret(InterpretReason::Disabled)
     ));
 
     // Enable.
-    handle.set_enabled(true);
+    backend.set_enabled(true);
     assert!(matches!(
-        handle.lookup(req.clone()),
+        backend.lookup(req.clone()),
         LookupDecision::Interpret(InterpretReason::NotReady)
     ));
 
     // Disable again.
-    handle.set_enabled(false);
-    assert!(matches!(handle.lookup(req), LookupDecision::Interpret(InterpretReason::Disabled)));
+    backend.set_enabled(false);
+    assert!(matches!(backend.lookup(req), LookupDecision::Interpret(InterpretReason::Disabled)));
 
-    coord.shutdown().unwrap();
+    backend.shutdown().unwrap();
 }
 
 #[test]
 fn events_sent_on_lookup() {
     let config = RuntimeConfig { enabled: true, ..Default::default() };
-    let coord = JitCoordinator::start(config).unwrap();
-    let handle = coord.handle();
+    let backend = JitBackend::start(config).unwrap();
 
     for _ in 0..10 {
         let req =
             LookupRequest { code_hash: B256::ZERO, code: Bytes::new(), spec_id: SpecId::CANCUN };
-        let _ = handle.lookup(req);
+        let _ = backend.lookup(req);
     }
 
-    let stats = handle.stats();
+    let stats = backend.stats();
     assert_eq!(stats.events_sent, 10);
     assert_eq!(stats.events_dropped, 0);
 
-    coord.shutdown().unwrap();
+    backend.shutdown().unwrap();
 }
 
 #[test]
-fn drop_shuts_down_coordinator() {
-    let coord = JitCoordinator::start(RuntimeConfig::default()).unwrap();
-    let handle = coord.handle();
-    drop(coord);
+fn drop_shuts_down_backend() {
+    let backend = JitBackend::start(RuntimeConfig::default()).unwrap();
+    let backend2 = backend.clone();
+    drop(backend);
 
-    // Lookups still work (no panic), events will be dropped since coordinator is gone.
+    // Lookups still work (no panic) — coordinator is still running because backend2 holds a ref.
     let req = LookupRequest { code_hash: B256::ZERO, code: Bytes::new(), spec_id: SpecId::CANCUN };
-    let _ = handle.lookup(req);
+    let _ = backend2.lookup(req);
 }
 
 #[test]
-fn handle_clone() {
+fn backend_clone() {
     let config = RuntimeConfig { enabled: true, ..Default::default() };
-    let coord = JitCoordinator::start(config).unwrap();
-    let h1 = coord.handle();
-    let h2 = h1.clone();
+    let b1 = JitBackend::start(config).unwrap();
+    let b2 = b1.clone();
 
     let req = LookupRequest { code_hash: B256::ZERO, code: Bytes::new(), spec_id: SpecId::CANCUN };
-    let _ = h1.lookup(req.clone());
-    let _ = h2.lookup(req);
+    let _ = b1.lookup(req.clone());
+    let _ = b2.lookup(req);
 
     // Both share the same stats.
-    let stats = h1.stats();
+    let stats = b1.stats();
     assert_eq!(stats.lookup_misses, 2);
 
-    coord.shutdown().unwrap();
+    b1.shutdown().unwrap();
 }
 
 /// A store that fails on load_all.
@@ -201,47 +194,44 @@ impl ArtifactStore for FailingStore {
 fn startup_store_failure() {
     let config =
         RuntimeConfig { enabled: true, store: Some(Arc::new(FailingStore)), ..Default::default() };
-    let result = JitCoordinator::start(config);
+    let result = JitBackend::start(config);
     assert!(result.is_err());
 }
 
 #[test]
 fn compile_jit_enqueue() {
     let config = RuntimeConfig { enabled: true, ..Default::default() };
-    let coord = JitCoordinator::start(config).unwrap();
-    let handle = coord.handle();
+    let backend = JitBackend::start(config).unwrap();
 
     let req = LookupRequest {
         code_hash: B256::repeat_byte(0x01),
         code: Bytes::from_static(&[0x60, 0x00]),
         spec_id: SpecId::CANCUN,
     };
-    handle.compile_jit(req);
+    backend.compile_jit(req);
 
-    coord.shutdown().unwrap();
+    backend.shutdown().unwrap();
 }
 
 #[test]
 fn prepare_aot_enqueue() {
     let config = RuntimeConfig { enabled: true, ..Default::default() };
-    let coord = JitCoordinator::start(config).unwrap();
-    let handle = coord.handle();
+    let backend = JitBackend::start(config).unwrap();
 
     let req = super::AotRequest {
         code_hash: B256::repeat_byte(0x02),
         code: Bytes::from_static(&[0x60, 0x00]),
         spec_id: SpecId::CANCUN,
     };
-    handle.prepare_aot(req).unwrap();
+    backend.prepare_aot(req).unwrap();
 
-    coord.shutdown().unwrap();
+    backend.shutdown().unwrap();
 }
 
 #[test]
 fn prepare_aot_batch_enqueue() {
     let config = RuntimeConfig { enabled: true, ..Default::default() };
-    let coord = JitCoordinator::start(config).unwrap();
-    let handle = coord.handle();
+    let backend = JitBackend::start(config).unwrap();
 
     let reqs = vec![
         super::AotRequest {
@@ -255,18 +245,17 @@ fn prepare_aot_batch_enqueue() {
             spec_id: SpecId::CANCUN,
         },
     ];
-    handle.prepare_aot_batch(reqs).unwrap();
+    backend.prepare_aot_batch(reqs).unwrap();
 
-    coord.shutdown().unwrap();
+    backend.shutdown().unwrap();
 }
 
 #[test]
 fn clear_resident() {
     let config = RuntimeConfig { enabled: true, ..Default::default() };
-    let coord = JitCoordinator::start(config).unwrap();
-    let handle = coord.handle();
+    let backend = JitBackend::start(config).unwrap();
 
-    handle.clear_resident().unwrap();
+    backend.clear_resident().unwrap();
 
     // After clear, lookups should miss.
     let req = LookupRequest {
@@ -274,10 +263,10 @@ fn clear_resident() {
         code: Bytes::from_static(&[0x00]),
         spec_id: SpecId::CANCUN,
     };
-    let decision = handle.lookup(req);
+    let decision = backend.lookup(req);
     assert!(matches!(decision, LookupDecision::Interpret(InterpretReason::NotReady)));
 
-    coord.shutdown().unwrap();
+    backend.shutdown().unwrap();
 }
 
 /// An artifact store backed by a temp directory on disk.
@@ -375,8 +364,7 @@ fn prepare_aot_persist_and_load() {
         tuning: RuntimeTuning { jit_worker_count: 1, ..Default::default() },
         ..Default::default()
     };
-    let coord = JitCoordinator::start(config).unwrap();
-    let handle = coord.handle();
+    let backend = JitBackend::start(config).unwrap();
 
     // Simple bytecode: PUSH1 0x42 PUSH0 MSTORE PUSH1 0x20 PUSH0 RETURN.
     let bytecode: &[u8] = &[0x60, 0x42, 0x5f, 0x52, 0x60, 0x20, 0x5f, 0xf3];
@@ -384,7 +372,7 @@ fn prepare_aot_persist_and_load() {
 
     let req =
         AotRequest { code_hash, code: Bytes::copy_from_slice(bytecode), spec_id: SpecId::CANCUN };
-    handle.prepare_aot(req).unwrap();
+    backend.prepare_aot(req).unwrap();
 
     // Poll until the artifact appears in the resident map.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
@@ -394,7 +382,7 @@ fn prepare_aot_persist_and_load() {
             code: Bytes::copy_from_slice(bytecode),
             spec_id: SpecId::CANCUN,
         };
-        if let LookupDecision::Compiled(program) = handle.lookup(req) {
+        if let LookupDecision::Compiled(program) = backend.lookup(req) {
             assert_eq!(program.kind, ProgramKind::Aot);
             break;
         }
@@ -405,7 +393,7 @@ fn prepare_aot_persist_and_load() {
     // Verify the artifact was persisted to the store.
     assert_eq!(store.stored_count(), 1);
 
-    coord.shutdown().unwrap();
+    backend.shutdown().unwrap();
 }
 
 #[test]
@@ -418,8 +406,7 @@ fn prepare_aot_batch_persist_and_load() {
         tuning: RuntimeTuning { jit_worker_count: 1, ..Default::default() },
         ..Default::default()
     };
-    let coord = JitCoordinator::start(config).unwrap();
-    let handle = coord.handle();
+    let backend = JitBackend::start(config).unwrap();
 
     let bytecodes: &[&[u8]] = &[
         &[0x60, 0x42, 0x5f, 0x52, 0x60, 0x20, 0x5f, 0xf3],
@@ -436,7 +423,7 @@ fn prepare_aot_batch_persist_and_load() {
             spec_id: SpecId::CANCUN,
         })
         .collect();
-    handle.prepare_aot_batch(reqs).unwrap();
+    backend.prepare_aot_batch(reqs).unwrap();
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     loop {
@@ -446,7 +433,7 @@ fn prepare_aot_batch_persist_and_load() {
                 code: Bytes::copy_from_slice(code),
                 spec_id: SpecId::CANCUN,
             };
-            matches!(handle.lookup(req), LookupDecision::Compiled(_))
+            matches!(backend.lookup(req), LookupDecision::Compiled(_))
         });
         if all_ready {
             break;
@@ -460,7 +447,7 @@ fn prepare_aot_batch_persist_and_load() {
 
     assert_eq!(store.stored_count(), 2);
 
-    coord.shutdown().unwrap();
+    backend.shutdown().unwrap();
 }
 
 #[test]
@@ -468,7 +455,7 @@ fn prepare_aot_batch_persist_and_load() {
 fn aot_artifacts_survive_restart() {
     let store = Arc::new(TempDirStore::new());
 
-    // First coordinator: compile and persist an AOT artifact.
+    // First backend: compile and persist an AOT artifact.
     {
         let config = RuntimeConfig {
             enabled: true,
@@ -476,13 +463,12 @@ fn aot_artifacts_survive_restart() {
             tuning: RuntimeTuning { jit_worker_count: 1, ..Default::default() },
             ..Default::default()
         };
-        let coord = JitCoordinator::start(config).unwrap();
-        let handle = coord.handle();
+        let backend = JitBackend::start(config).unwrap();
 
         let bytecode: &[u8] = &[0x60, 0x42, 0x5f, 0x52, 0x60, 0x20, 0x5f, 0xf3];
         let code_hash = alloy_primitives::keccak256(bytecode);
 
-        handle
+        backend
             .prepare_aot(AotRequest {
                 code_hash,
                 code: Bytes::copy_from_slice(bytecode),
@@ -497,23 +483,22 @@ fn aot_artifacts_survive_restart() {
                 code: Bytes::copy_from_slice(bytecode),
                 spec_id: SpecId::CANCUN,
             };
-            if matches!(handle.lookup(req), LookupDecision::Compiled(_)) {
+            if matches!(backend.lookup(req), LookupDecision::Compiled(_)) {
                 break;
             }
             assert!(std::time::Instant::now() < deadline, "timed out waiting for AOT compilation",);
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
 
-        coord.shutdown().unwrap();
+        backend.shutdown().unwrap();
     }
 
     assert_eq!(store.stored_count(), 1);
 
-    // Second coordinator: should preload the artifact at startup.
+    // Second backend: should preload the artifact at startup.
     {
         let config = RuntimeConfig { enabled: true, store: Some(store), ..Default::default() };
-        let coord = JitCoordinator::start(config).unwrap();
-        let handle = coord.handle();
+        let backend = JitBackend::start(config).unwrap();
 
         let bytecode: &[u8] = &[0x60, 0x42, 0x5f, 0x52, 0x60, 0x20, 0x5f, 0xf3];
         let code_hash = alloy_primitives::keccak256(bytecode);
@@ -524,14 +509,14 @@ fn aot_artifacts_survive_restart() {
             code: Bytes::copy_from_slice(bytecode),
             spec_id: SpecId::CANCUN,
         };
-        let decision = handle.lookup(req);
+        let decision = backend.lookup(req);
         assert!(
             matches!(&decision, LookupDecision::Compiled(p) if p.kind == ProgramKind::Aot),
             "expected AOT hit after restart, got: {decision:?}",
         );
 
-        assert_eq!(handle.stats().resident_entries, 1);
+        assert_eq!(backend.stats().resident_entries, 1);
 
-        coord.shutdown().unwrap();
+        backend.shutdown().unwrap();
     }
 }

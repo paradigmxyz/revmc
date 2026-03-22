@@ -1,9 +1,9 @@
 //! [`alloy_evm`] bindings for the revmc runtime.
 //!
 //! Provides [`JitEvm`] and [`JitEvmFactory`] which wrap the standard Ethereum EVM with
-//! JIT-compiled function dispatch via [`JitCoordinatorHandle`].
+//! JIT-compiled function dispatch via [`JitBackend`].
 
-use crate::runtime::{JitCoordinatorHandle, LookupDecision, LookupRequest};
+use crate::runtime::{JitBackend, LookupDecision, LookupRequest};
 use alloy_evm::{
     Database,
     env::EvmEnv,
@@ -32,27 +32,23 @@ type InnerEvm<DB, I, P> =
 /// Ethereum EVM with JIT-compiled function dispatch.
 ///
 /// Wraps the standard revm EVM and overrides execution to look up compiled functions via
-/// [`JitCoordinatorHandle`] before falling back to the interpreter.
+/// [`JitBackend`] before falling back to the interpreter.
 #[expect(missing_debug_implementations)]
 pub struct JitEvm<DB: Database, I, PRECOMPILE = PrecompilesMap> {
     inner: InnerEvm<DB, I, PRECOMPILE>,
     inspect: bool,
-    handle: JitCoordinatorHandle,
+    backend: JitBackend,
 }
 
 impl<DB: Database, I, P> JitEvm<DB, I, P> {
-    /// Creates a new JIT EVM from an inner revm EVM and coordinator handle.
-    pub const fn new(
-        inner: InnerEvm<DB, I, P>,
-        inspect: bool,
-        handle: JitCoordinatorHandle,
-    ) -> Self {
-        Self { inner, inspect, handle }
+    /// Creates a new JIT EVM from an inner revm EVM and backend.
+    pub const fn new(inner: InnerEvm<DB, I, P>, inspect: bool, backend: JitBackend) -> Self {
+        Self { inner, inspect, backend }
     }
 
-    /// Returns a reference to the coordinator handle.
-    pub const fn handle(&self) -> &JitCoordinatorHandle {
-        &self.handle
+    /// Returns a reference to the JIT backend.
+    pub const fn backend(&self) -> &JitBackend {
+        &self.backend
     }
 }
 
@@ -104,7 +100,7 @@ where
         } else {
             self.inner.ctx.set_tx(tx);
             let mut handler: JitHandler<'_, DB, I, P> =
-                JitHandler { handle: &self.handle, _pd: PhantomData };
+                JitHandler { backend: &self.backend, _pd: PhantomData };
             handler.run(&mut self.inner).map(|result| {
                 let state = self.inner.finalize();
                 ResultAndState::new(result, state)
@@ -147,13 +143,13 @@ where
 #[derive(Clone)]
 #[expect(missing_debug_implementations)]
 pub struct JitEvmFactory {
-    handle: JitCoordinatorHandle,
+    backend: JitBackend,
 }
 
 impl JitEvmFactory {
-    /// Creates a new factory from a coordinator handle.
-    pub const fn new(handle: JitCoordinatorHandle) -> Self {
-        Self { handle }
+    /// Creates a new factory from a JIT backend.
+    pub const fn new(backend: JitBackend) -> Self {
+        Self { backend }
     }
 }
 
@@ -169,7 +165,7 @@ impl EvmFactory for JitEvmFactory {
 
     fn create_evm<DB: Database>(&self, db: DB, input: EvmEnv) -> Self::Evm<DB, NoOpInspector> {
         let inner = EthEvmBuilder::new(db, input).build().into_inner();
-        JitEvm::new(inner, false, self.handle.clone())
+        JitEvm::new(inner, false, self.backend.clone())
     }
 
     fn create_evm_with_inspector<DB: Database, I: Inspector<Self::Context<DB>>>(
@@ -180,13 +176,13 @@ impl EvmFactory for JitEvmFactory {
     ) -> Self::Evm<DB, I> {
         let inner =
             EthEvmBuilder::new(db, input).activate_inspector(inspector).build().into_inner();
-        JitEvm::new(inner, true, self.handle.clone())
+        JitEvm::new(inner, true, self.backend.clone())
     }
 }
 
 /// Custom handler that overrides only `run_exec_loop` with JIT dispatch.
 struct JitHandler<'a, DB: Database, I, P> {
-    handle: &'a JitCoordinatorHandle,
+    backend: &'a JitBackend,
     _pd: PhantomData<(DB, I, P)>,
 }
 
@@ -217,7 +213,7 @@ where
                 let frame = evm.frame_stack.get();
                 let code_hash = frame.interpreter.bytecode.get_or_calculate_hash();
                 let code = frame.interpreter.bytecode.original_bytes();
-                match self.handle.lookup(LookupRequest { code_hash, code, spec_id }) {
+                match self.backend.lookup(LookupRequest { code_hash, code, spec_id }) {
                     LookupDecision::Compiled(program) => {
                         let ctx = &mut evm.ctx;
                         let action = unsafe {

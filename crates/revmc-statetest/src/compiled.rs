@@ -40,8 +40,8 @@ pub enum CompileMode {
     Jit,
     /// AOT-compile all bytecodes to a shared library, then load and execute.
     Aot,
-    /// Use the runtime coordinator: AOT-compile, load through `JitCoordinator`, and look up
-    /// compiled functions via `JitCoordinatorHandle::lookup()`.
+    /// Use the runtime backend: AOT-compile, load through `JitBackend`, and look up
+    /// compiled functions via `JitBackend::lookup()`.
     Runtime,
 }
 
@@ -558,14 +558,12 @@ fn execute_test_suite_compiled(
 
 // ── Runtime coordinator mode ─────────────────────────────────────────────────
 
-use revmc::runtime::{
-    JitCoordinator, JitCoordinatorHandle, LookupRequest, RuntimeConfig, RuntimeTuning,
-};
+use revmc::runtime::{JitBackend, LookupRequest, RuntimeConfig, RuntimeTuning};
 
 /// Custom handler that looks up compiled functions via the runtime coordinator.
 /// On miss, enqueues JIT compilation and spin-waits for the result.
 struct RuntimeHandler {
-    handle: JitCoordinatorHandle,
+    backend: JitBackend,
     spec_id: SpecId,
 }
 
@@ -589,7 +587,7 @@ impl Handler for RuntimeHandler {
                 let bytecode_hash = frame.interpreter.bytecode.get_or_calculate_hash();
                 let code = frame.interpreter.bytecode.original_byte_slice();
 
-                if let Some(f) = wait_for_compiled(&self.handle, bytecode_hash, code, self.spec_id)
+                if let Some(f) = wait_for_compiled(&self.backend, bytecode_hash, code, self.spec_id)
                 {
                     let ctx = &mut evm.ctx;
                     let action = unsafe { f.call_with_interpreter(&mut frame.interpreter, ctx) };
@@ -619,18 +617,18 @@ impl Handler for RuntimeHandler {
 
 /// Looks up a compiled function, blocking until compilation completes if needed.
 fn wait_for_compiled(
-    handle: &JitCoordinatorHandle,
+    backend: &JitBackend,
     code_hash: B256,
     code: &[u8],
     spec_id: SpecId,
 ) -> Option<EvmCompilerFn> {
     let req = LookupRequest { code_hash, code: Bytes::copy_from_slice(code), spec_id };
-    handle.lookup_blocking(req).map(|p| p.func)
+    backend.lookup_blocking(req).map(|p| p.func)
 }
 
 /// Execute a single test using the runtime coordinator handler.
 fn execute_single_test_runtime(
-    handle: &JitCoordinatorHandle,
+    backend: &JitBackend,
     ctx: RuntimeTestContext<'_>,
 ) -> Result<(), TestErrorKind> {
     let prestate = ctx.cache_state.clone();
@@ -645,7 +643,7 @@ fn execute_single_test_runtime(
             .with_tx(ctx.tx.clone())
             .with_cfg(ctx.cfg.clone())
             .with_db(db_ref);
-        let mut handler = RuntimeHandler { handle: handle.clone(), spec_id: ctx.spec_id };
+        let mut handler = RuntimeHandler { backend: backend.clone(), spec_id: ctx.spec_id };
         let mut evm = evm_context.build_mainnet();
         let result = handler.run(&mut evm);
         if result.is_ok() {
@@ -687,7 +685,7 @@ struct RuntimeTestContext<'a> {
 fn execute_test_suite_runtime(
     path: &Path,
     elapsed: &Arc<Mutex<Duration>>,
-    handle: &JitCoordinatorHandle,
+    backend: &JitBackend,
 ) -> Result<(), TestError> {
     if skip_test(path) {
         return Ok(());
@@ -731,7 +729,7 @@ fn execute_test_suite_runtime(
                 }
                 let code_hash = keccak256(&info.code);
                 let req = LookupRequest { code_hash, code: info.code.clone(), spec_id };
-                handle.compile_jit(req);
+                backend.compile_jit(req);
             }
 
             for test in tests.iter() {
@@ -748,7 +746,7 @@ fn execute_test_suite_runtime(
                 };
 
                 let result = execute_single_test_runtime(
-                    handle,
+                    backend,
                     RuntimeTestContext {
                         spec_id,
                         test,
@@ -778,7 +776,7 @@ fn run_test_worker(
     keep_going: bool,
     mode: CompileMode,
     cache: Option<&CompileCache>,
-    handle: Option<&JitCoordinatorHandle>,
+    backend: Option<&JitBackend>,
 ) -> Result<(), TestError> {
     loop {
         if !keep_going && state.n_errors.load(Ordering::SeqCst) > 0 {
@@ -797,7 +795,7 @@ fn run_test_worker(
                 execute_test_suite_compiled(&test_path, &state.elapsed, cache.unwrap())
             }
             CompileMode::Runtime => {
-                execute_test_suite_runtime(&test_path, &state.elapsed, handle.unwrap())
+                execute_test_suite_runtime(&test_path, &state.elapsed, backend.unwrap())
             }
         };
 
@@ -829,25 +827,24 @@ pub fn run(
         CompileMode::Jit | CompileMode::Aot => Some(Arc::new(CompileCache::new(mode))),
     };
 
-    // For runtime mode, start the coordinator with an empty store.
+    // For runtime mode, start the backend with an empty store.
     // All lookups will miss → enqueue JIT → compile on worker threads.
     // This exercises the full JIT pipeline end-to-end.
-    let coordinator = if mode == CompileMode::Runtime {
+    let backend = if mode == CompileMode::Runtime {
         let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
         let config = RuntimeConfig {
             enabled: true,
             tuning: RuntimeTuning { jit_worker_count: cpus, ..Default::default() },
             ..Default::default()
         };
-        Some(JitCoordinator::start(config).map_err(|e| TestError {
-            name: "coordinator".to_string(),
+        Some(JitBackend::start(config).map_err(|e| TestError {
+            name: "backend".to_string(),
             path: String::new(),
-            kind: TestErrorKind::CompilationError(format!("coordinator start: {e}")),
+            kind: TestErrorKind::CompilationError(format!("backend start: {e}")),
         })?)
     } else {
         None
     };
-    let handle = coordinator.as_ref().map(|c| c.handle());
 
     let num_threads = if single_thread {
         1
@@ -864,14 +861,14 @@ pub fn run(
     for i in 0..num_threads {
         let state = state.clone();
         let cache = cache.clone();
-        let handle = handle.clone();
+        let backend = backend.clone();
         let barrier = barrier.clone();
 
         let thread = std::thread::Builder::new()
             .name(format!("runner-{i}"))
             .spawn(move || {
                 let result =
-                    run_test_worker(state, keep_going, mode, cache.as_deref(), handle.as_ref());
+                    run_test_worker(state, keep_going, mode, cache.as_deref(), backend.as_ref());
                 // Wait for all threads before exiting. Each thread holds a thread-local
                 // LLVM context that is destroyed on thread exit; concurrent context
                 // disposal crashes LLVM.
@@ -907,19 +904,22 @@ pub fn run(
         cache.print_stats();
     }
 
-    // Print runtime coordinator stats.
-    if let Some(handle) = &handle {
-        let stats = handle.stats();
+    // Print runtime backend stats.
+    if let Some(backend) = &backend {
+        let stats = backend.stats();
         println!(
-            "Runtime coordinator: {} hits, {} misses, {} events sent, {} events dropped, {} resident",
-            stats.lookup_hits, stats.lookup_misses,
-            stats.events_sent, stats.events_dropped, stats.resident_entries,
+            "Runtime backend: {} hits, {} misses, {} events sent, {} events dropped, {} resident",
+            stats.lookup_hits,
+            stats.lookup_misses,
+            stats.events_sent,
+            stats.events_dropped,
+            stats.resident_entries,
         );
     }
 
-    // Shutdown coordinator.
-    if let Some(coord) = coordinator {
-        let _ = coord.shutdown();
+    // Shutdown backend.
+    if let Some(backend) = &backend {
+        let _ = backend.shutdown();
     }
 
     let n_errors = state.n_errors.load(Ordering::SeqCst);
