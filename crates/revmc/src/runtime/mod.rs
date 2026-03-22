@@ -54,12 +54,16 @@ struct JitBackendInner {
     tx: mpsc::SyncSender<Command>,
     /// Shared stats counters.
     stats: RuntimeStats,
-    /// Coordinator thread handle. `None` after shutdown.
-    thread: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
-    /// Receives a signal when the coordinator thread exits.
-    thread_done_rx: std::sync::Mutex<mpsc::Receiver<()>>,
+    /// Coordinator thread + done signal. `None` after shutdown.
+    thread: std::sync::Mutex<Option<CoordinatorThread>>,
     /// Shutdown timeout.
     shutdown_timeout: Duration,
+}
+
+/// Coordinator thread handle and its completion signal.
+struct CoordinatorThread {
+    handle: std::thread::JoinHandle<()>,
+    done_rx: mpsc::Receiver<()>,
 }
 
 /// JIT compilation backend with O(1) compiled-function lookup.
@@ -106,8 +110,7 @@ impl JitBackend {
             enabled: AtomicBool::new(config.enabled),
             tx,
             stats: RuntimeStats::default(),
-            thread: std::sync::Mutex::new(Some(thread)),
-            thread_done_rx: std::sync::Mutex::new(done_rx),
+            thread: std::sync::Mutex::new(Some(CoordinatorThread { handle: thread, done_rx })),
             shutdown_timeout: config.tuning.shutdown_timeout,
         };
 
@@ -116,33 +119,7 @@ impl JitBackend {
 
     /// Shuts down the coordinator thread and waits for it to finish.
     pub fn shutdown(&self) -> eyre::Result<()> {
-        debug!("shutting down JIT backend");
-        if let Some(thread) = self.inner.thread.lock().unwrap().take() {
-            // Ignoring send error — coordinator may already be gone.
-            let _ = self.inner.tx.send(Command::Shutdown);
-
-            // Wait for the thread to signal completion, with a timeout.
-            match self
-                .inner
-                .thread_done_rx
-                .lock()
-                .unwrap()
-                .recv_timeout(self.inner.shutdown_timeout)
-            {
-                Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => {}
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    warn!(
-                        timeout = ?self.inner.shutdown_timeout,
-                        "coordinator thread did not exit within timeout",
-                    );
-                    eyre::bail!("coordinator thread did not exit within timeout");
-                }
-            }
-
-            // Thread signaled done, join should return immediately.
-            thread.join().map_err(|_| eyre::eyre!("coordinator thread panicked"))?;
-        }
-        Ok(())
+        self.inner.shutdown()
     }
 
     /// Looks up a compiled function for the given request.
@@ -375,24 +352,34 @@ impl JitBackend {
     }
 }
 
-impl Drop for JitBackendInner {
-    fn drop(&mut self) {
+impl JitBackendInner {
+    fn shutdown(&self) -> eyre::Result<()> {
         debug!("shutting down JIT backend");
-        if let Some(thread) = self.thread.lock().unwrap().take() {
+        if let Some(ct) = self.thread.lock().unwrap().take() {
+            // Ignoring send error — coordinator may already be gone.
             let _ = self.tx.send(Command::Shutdown);
 
-            match self.thread_done_rx.lock().unwrap().recv_timeout(self.shutdown_timeout) {
+            // Wait for the thread to signal completion, with a timeout.
+            match ct.done_rx.recv_timeout(self.shutdown_timeout) {
                 Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => {}
                 Err(mpsc::RecvTimeoutError::Timeout) => {
                     warn!(
                         timeout = ?self.shutdown_timeout,
                         "coordinator thread did not exit within timeout",
                     );
-                    return;
+                    eyre::bail!("coordinator thread did not exit within timeout");
                 }
             }
 
-            let _ = thread.join();
+            // Thread signaled done, join should return immediately.
+            ct.handle.join().map_err(|_| eyre::eyre!("coordinator thread panicked"))?;
         }
+        Ok(())
+    }
+}
+
+impl Drop for JitBackendInner {
+    fn drop(&mut self) {
+        let _ = self.shutdown();
     }
 }
