@@ -602,16 +602,25 @@ total:      {total:>11.3?}
             return Ok(());
         }
 
-        // Rewrite the file with annotations.
+        // Collect lines and find max width for comment alignment.
+        let annotated: Vec<_> =
+            ir.lines().map(|line| (line, resolve_dbg_line(line, &di_locs, &src_lines))).collect();
+        let comment_col = annotated
+            .iter()
+            .filter_map(|(line, src)| src.is_some().then_some(line.len()))
+            .max()
+            .unwrap_or(0)
+            .min(100);
+
+        // Rewrite the file with aligned annotations.
         let file = fs::File::create(ir_path)?;
         let mut w = io::BufWriter::new(file);
-        for line in ir.lines() {
-            // Find `!dbg !N` in the line.
-            if let Some(src_line) = resolve_dbg_line(line, &di_locs, &src_lines) {
-                writeln!(w, "{line}  ; >> {src_line}")?;
-                continue;
+        for (line, src_line) in &annotated {
+            if let Some(src_line) = src_line {
+                writeln!(w, "{line:<comment_col$} ; >> {src_line}")?;
+            } else {
+                writeln!(w, "{line}")?;
             }
-            writeln!(w, "{line}")?;
         }
         w.flush()?;
         Ok(())
