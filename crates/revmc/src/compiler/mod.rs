@@ -714,6 +714,7 @@ fn resolve_dbg_line<'a>(
     let id_len = after.find(|c: char| !c.is_ascii_digit()).unwrap_or(after.len());
     let id: u32 = after[..id_len].parse().ok()?;
     let line_no = *di_locs.get(&id)?;
-    let src_line = src_lines.get(line_no as usize - 1)?.trim();
+    let idx = line_no.checked_sub(1)? as usize;
+    let src_line = src_lines.get(idx)?.trim();
     (!src_line.is_empty()).then_some(src_line)
 }
