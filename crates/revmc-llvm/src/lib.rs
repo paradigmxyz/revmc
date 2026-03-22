@@ -411,13 +411,9 @@ impl Backend for EvmLlvmBackend {
         // Attach debug info subprogram if debug is active.
         self.ensure_di_state();
         let debug_scope = if let Some(di) = &self.di_state {
-            let is_optimized = self.opt_level != OptimizationLevel::None;
-            let is_local = linkage == revmc_backend::Linkage::Private;
-            let flags = if is_local { DIFlags::PRIVATE } else { DIFlags::PUBLIC };
-
             let file = di.compile_unit.get_file();
             let subroutine_type =
-                di.dibuilder.create_subroutine_type(file, None, &[], flags);
+                di.dibuilder.create_subroutine_type(file, None, &[], DIFlags::PUBLIC);
             let subprogram = di.dibuilder.create_function(
                 di.compile_unit.as_debug_info_scope(),
                 name,
@@ -425,11 +421,11 @@ impl Backend for EvmLlvmBackend {
                 file,
                 0,
                 subroutine_type,
-                is_local,
+                true,
                 true,
                 0,
-                flags,
-                is_optimized,
+                DIFlags::PUBLIC,
+                self.opt_level != OptimizationLevel::None,
             );
             function.set_subprogram(subprogram);
             Some(subprogram)
