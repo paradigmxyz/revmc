@@ -89,6 +89,8 @@ pub(super) struct FunctionCx<'a, B: Backend> {
 
     /// The bytecode being translated.
     bytecode: &'a Bytecode<'a>,
+    /// Instruction index to 1-based line number in bytecode.txt (for debug info).
+    inst_lines: Vec<u32>,
     /// All entry blocks for each instruction.
     inst_entries: Vec<B::BasicBlock>,
     /// The current instruction being translated.
@@ -264,6 +266,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             bcx,
 
             bytecode,
+            inst_lines: if config.debug { bytecode.inst_to_line_map() } else { Vec::new() },
             inst_entries,
             current_inst: usize::MAX,
 
@@ -493,8 +496,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         self.bcx.switch_to_block(entry_block);
 
         if self.config.debug {
-            // line = pc + 1 to match the synthetic .evm source file.
-            self.bcx.set_debug_location(data.pc + 1, 1);
+            self.bcx.set_debug_location(self.inst_lines[inst], 1);
         }
 
         // self.call_printf(format_printf!("{}\n", self.op_block_name("")), &[]);
