@@ -8,9 +8,9 @@ use revmc_backend::{
 };
 use revmc_builtins::Builtins;
 use revmc_context::RawEvmCompilerFn;
+use rustc_hash::FxHashMap;
 use std::{
     cell::Cell,
-    collections::HashMap,
     fs,
     io::{self, Write},
     mem,
@@ -583,7 +583,7 @@ total:      {total:>11.3?}
         let ir = fs::read_to_string(ir_path)?;
 
         // Parse `!N = !DILocation(line: L, ...)` metadata.
-        let mut di_locs: HashMap<u32, u32> = HashMap::new();
+        let mut di_locs = FxHashMap::default();
         for line in ir.lines() {
             let line = line.trim_start();
             if !line.starts_with('!') {
@@ -706,7 +706,7 @@ mod default_attrs {
 /// Resolves a `!dbg !N` reference in an IR line to the corresponding source line.
 fn resolve_dbg_line<'a>(
     ir_line: &str,
-    di_locs: &HashMap<u32, u32>,
+    di_locs: &FxHashMap<u32, u32>,
     src_lines: &[&'a str],
 ) -> Option<&'a str> {
     let pos = ir_line.find("!dbg !")?;
