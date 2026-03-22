@@ -598,10 +598,22 @@ impl EvmWord {
         Self::from_be(Self(bytes))
     }
 
+    /// Create a new word from big-endian bytes.
+    #[inline]
+    pub fn from_be_slice(bytes: &[u8]) -> Self {
+        Self::from_u256(U256::from_be_slice(bytes))
+    }
+
     /// Create a new word from little-endian bytes.
     #[inline]
     pub fn from_le_bytes(bytes: [u8; 32]) -> Self {
         Self::from_le(Self(bytes))
+    }
+
+    /// Create a new word from little-endian slice.
+    #[inline]
+    pub fn from_le_slice(bytes: &[u8]) -> Self {
+        Self::from_u256(U256::from_le_slice(bytes))
     }
 
     /// Create a new word from native-endian bytes.

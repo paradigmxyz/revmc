@@ -829,24 +829,13 @@ pub unsafe extern "C" fn __revmc_builtin_selfdestruct(
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn __revmc_builtin_resize_memory(
-    ecx: &mut EvmContext<'_>,
-    new_size: usize,
-) -> InstructionResult {
-    resize_memory(ecx, new_size)
-}
-
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn __revmc_builtin_mload(
     ecx: &mut EvmContext<'_>,
     rev![offset_ptr]: &mut [EvmWord; 1],
 ) -> InstructionResult {
     let offset = try_into_usize!(offset_ptr);
     ensure_memory!(ecx, offset, 32);
-    let slice = ecx.memory.slice(offset..offset + 32);
-    let mut word = [0u8; 32];
-    word.copy_from_slice(&slice);
-    *offset_ptr = EvmWord::from_be_bytes(word);
+    *offset_ptr = EvmWord::from_be_slice(&ecx.memory.slice(offset..offset + 32));
     InstructionResult::Stop
 }
 
@@ -868,7 +857,6 @@ pub unsafe extern "C" fn __revmc_builtin_mstore8(
 ) -> InstructionResult {
     let offset = try_into_usize!(offset);
     ensure_memory!(ecx, offset, 1);
-    let byte = value.to_be_bytes()[31];
-    ecx.memory.set(offset, &[byte]);
+    ecx.memory.set(offset, &[value.to_u256().byte(0)]);
     InstructionResult::Stop
 }
