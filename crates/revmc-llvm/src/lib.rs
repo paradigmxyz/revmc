@@ -241,17 +241,15 @@ impl EvmLlvmBackend {
         );
 
         let is_optimized = self.opt_level != OptimizationLevel::None;
-        let opt_flag = match self.opt_level {
+        let mut flags = Vec::new();
+        flags.push(match self.opt_level {
             OptimizationLevel::None => "-O0",
             OptimizationLevel::Less => "-O1",
             OptimizationLevel::Default => "-O2",
             OptimizationLevel::Aggressive => "-O3",
-        };
-        let flags = if self.aot {
-            format!("{opt_flag} --aot")
-        } else {
-            format!("{opt_flag} --jit")
-        };
+        });
+        flags.push(if self.aot { "--aot" } else { "--jit" });
+        let flags = flags.join(" ");
 
         let (dibuilder, compile_unit) = self.module.create_debug_info_builder(
             true,
