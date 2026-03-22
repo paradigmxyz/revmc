@@ -240,14 +240,27 @@ impl EvmLlvmBackend {
             self.ty_i32.const_int(5, false),
         );
 
+        let is_optimized = self.opt_level != OptimizationLevel::None;
+        let opt_flag = match self.opt_level {
+            OptimizationLevel::None => "-O0",
+            OptimizationLevel::Less => "-O1",
+            OptimizationLevel::Default => "-O2",
+            OptimizationLevel::Aggressive => "-O3",
+        };
+        let flags = if self.aot {
+            format!("{opt_flag} --aot")
+        } else {
+            format!("{opt_flag} --jit")
+        };
+
         let (dibuilder, compile_unit) = self.module.create_debug_info_builder(
             true,
-            DWARFSourceLanguage::C, // closest to a low-level bytecode language
+            DWARFSourceLanguage::C,
             &filename,
             &directory,
             "revmc",
-            self.opt_level != OptimizationLevel::None,
-            "",
+            is_optimized,
+            &flags,
             0,
             "",
             DWARFEmissionKind::Full,
