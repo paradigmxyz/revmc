@@ -237,7 +237,7 @@ impl EvmLlvmBackend {
         self.module.add_basic_value_flag(
             "Dwarf Version",
             FlagBehavior::Warning,
-            self.ty_i32.const_int(4, false),
+            self.ty_i32.const_int(5, false),
         );
 
         let (dibuilder, compile_unit) = self.module.create_debug_info_builder(
