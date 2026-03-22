@@ -10,6 +10,7 @@ use revmc_builtins::Builtins;
 use revmc_context::RawEvmCompilerFn;
 use std::{
     cell::Cell,
+    collections::HashMap,
     fs,
     io::{self, Write},
     mem,
@@ -486,7 +487,16 @@ impl<B: Backend> EvmCompiler<B> {
 
     #[instrument(level = "debug", skip_all)]
     fn dump_ir(&mut self, path: &Path) -> Result<()> {
-        self.backend.dump_ir(path)
+        self.backend.dump_ir(path)?;
+        if self.config.debug
+            && let Some(dump_dir) = &self.dump_dir()
+        {
+            let src_path = dump_dir.join("bytecode.txt");
+            if src_path.exists() {
+                Self::annotate_ir(path, &src_path)?;
+            }
+        }
+        Ok(())
     }
 
     #[instrument(level = "debug", skip_all)]
@@ -560,6 +570,50 @@ total:      {total:>11.3?}
             writer.flush()?;
         }
 
+        Ok(())
+    }
+
+    /// Rewrites an IR dump file in-place, appending bytecode source lines as comments.
+    ///
+    /// For each IR instruction with `!dbg !N`, resolves the `!DILocation(line: L, ...)`
+    /// metadata and appends `; >> <source line>`.
+    fn annotate_ir(ir_path: &Path, src_path: &Path) -> Result<()> {
+        let src = fs::read_to_string(src_path)?;
+        let src_lines: Vec<&str> = src.lines().collect();
+        let ir = fs::read_to_string(ir_path)?;
+
+        // Parse `!N = !DILocation(line: L, ...)` metadata.
+        let mut di_locs: HashMap<u32, u32> = HashMap::new();
+        for line in ir.lines() {
+            let line = line.trim_start();
+            if !line.starts_with('!') {
+                continue;
+            }
+            // Match: !N = !DILocation(line: L, ...)
+            let Some(rest) = line.strip_prefix('!') else { continue };
+            let Some((id_str, rest)) = rest.split_once(" = !DILocation(line: ") else { continue };
+            let Ok(id) = id_str.parse::<u32>() else { continue };
+            let Some((line_str, _)) = rest.split_once(',') else { continue };
+            let Ok(line_no) = line_str.parse::<u32>() else { continue };
+            di_locs.insert(id, line_no);
+        }
+
+        if di_locs.is_empty() {
+            return Ok(());
+        }
+
+        // Rewrite the file with annotations.
+        let file = fs::File::create(ir_path)?;
+        let mut w = io::BufWriter::new(file);
+        for line in ir.lines() {
+            // Find `!dbg !N` in the line.
+            if let Some(src_line) = resolve_dbg_line(line, &di_locs, &src_lines) {
+                writeln!(w, "{line}  ; >> {src_line}")?;
+                continue;
+            }
+            writeln!(w, "{line}")?;
+        }
+        w.flush()?;
         Ok(())
     }
 
@@ -647,4 +701,19 @@ mod default_attrs {
     pub(crate) fn size_align<T>() -> (usize, usize) {
         (std::mem::size_of::<T>(), std::mem::align_of::<T>())
     }
+}
+
+/// Resolves a `!dbg !N` reference in an IR line to the corresponding source line.
+fn resolve_dbg_line<'a>(
+    ir_line: &str,
+    di_locs: &HashMap<u32, u32>,
+    src_lines: &[&'a str],
+) -> Option<&'a str> {
+    let pos = ir_line.find("!dbg !")?;
+    let after = &ir_line[pos + 6..];
+    let id_len = after.find(|c: char| !c.is_ascii_digit()).unwrap_or(after.len());
+    let id: u32 = after[..id_len].parse().ok()?;
+    let line_no = *di_locs.get(&id)?;
+    let src_line = src_lines.get(line_no as usize - 1)?.trim();
+    (!src_line.is_empty()).then_some(src_line)
 }
