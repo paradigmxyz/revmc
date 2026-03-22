@@ -155,7 +155,6 @@ macro_rules! builtins {
                 const PANIC: u8 = 0;
                 const LOG: u8 = LOG0;
                 const DORETURN: u8 = RETURN;
-                const RESIZEMEMORY: u8 = 0;
                 const UDIV: u8 = DIV;
                 const UREM: u8 = MOD;
                 const SREM: u8 = SMOD;
@@ -262,7 +261,6 @@ builtins! {
     DoReturn       = __revmc_builtin_do_return(@[ecx] ptr, @[sp] ptr, u8) Some(u8),
     SelfDestruct   = __revmc_builtin_selfdestruct(@[ecx] ptr, @[sp] ptr, u8) Some(u8),
 
-    ResizeMemory   = __revmc_builtin_resize_memory(@[ecx] ptr, usize) Some(u8),
     Mload          = __revmc_builtin_mload(@[ecx] ptr, @[sp] ptr) Some(u8),
     Mstore         = __revmc_builtin_mstore(@[ecx] ptr, @[sp] ptr) Some(u8),
     Mstore8        = __revmc_builtin_mstore8(@[ecx] ptr, @[sp] ptr) Some(u8),
