@@ -238,6 +238,11 @@ pub trait Backend: BackendTypes + TypeMethods {
     fn write_object<W: std::io::Write>(&mut self, w: W) -> Result<()>;
     fn jit_function(&mut self, id: Self::FuncId) -> Result<usize>;
 
+    /// Returns the estimated sizes of compiled functions as `(name, size)` pairs.
+    fn function_sizes(&self) -> Vec<(String, usize)> {
+        Vec::new()
+    }
+
     /// Clears the IR module, freeing memory used by IR representations.
     ///
     /// This does **not** free JIT-compiled machine code, so previously obtained function pointers
