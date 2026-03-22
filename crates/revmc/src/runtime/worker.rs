@@ -319,15 +319,10 @@ fn compile_aot_artifact(job: &AotJob) -> Result<WorkerSuccess, String> {
         .translate(&job.symbol_name, &job.bytecode[..], job.key.spec_id)
         .map_err(|e| format!("AOT translate failed: {e}"))?;
 
-    let tmp_dir =
-        std::env::temp_dir().join(format!("revmc-aot-{}-{:x}", std::process::id(), rand_u64()));
-    std::fs::create_dir_all(&tmp_dir)
-        .map_err(|e| format!("failed to create temp dir {}: {e}", tmp_dir.display()))?;
+    let tmp_dir = tempfile::tempdir().map_err(|e| format!("failed to create temp dir: {e}"))?;
 
-    let _cleanup = TempDirGuard(&tmp_dir);
-
-    let obj_path = tmp_dir.join("a.o");
-    let so_path = tmp_dir.join("a.so");
+    let obj_path = tmp_dir.path().join("a.o");
+    let so_path = tmp_dir.path().join("a.so");
 
     compiler
         .write_object_to_file(&obj_path)
@@ -354,24 +349,6 @@ fn compile_aot_artifact(job: &AotJob) -> Result<WorkerSuccess, String> {
         dylib_bytes,
         bytecode_len: job.bytecode.len(),
     }))
-}
-
-/// RAII guard that removes a temp directory on drop.
-struct TempDirGuard<'a>(&'a std::path::Path);
-
-impl Drop for TempDirGuard<'_> {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(self.0);
-    }
-}
-
-/// Simple pseudo-random u64 for temp dir uniqueness.
-fn rand_u64() -> u64 {
-    use std::{
-        collections::hash_map::RandomState,
-        hash::{BuildHasher, Hasher},
-    };
-    RandomState::new().build_hasher().finish()
 }
 
 #[cfg(not(feature = "llvm"))]
