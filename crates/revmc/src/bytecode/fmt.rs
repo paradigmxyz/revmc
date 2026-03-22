@@ -78,9 +78,9 @@ impl Bytecode<'_> {
             lines.push((header, comment));
 
             // Instructions.
-            for (inst, data) in
-                self.iter_all_insts().skip(first_inst).take(last_inst - first_inst + 1)
-            {
+            #[allow(clippy::needless_range_loop)]
+            for inst in first_inst..=last_inst {
+                let data = self.inst(inst);
                 if data.is_dead_code() {
                     continue;
                 }
