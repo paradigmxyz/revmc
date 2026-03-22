@@ -11,10 +11,11 @@ use crate::runtime::{
     worker::{AotJob, JitJob, SyncNotifier, WorkerJob, WorkerPool, WorkerResult, WorkerSuccess},
 };
 use alloy_primitives::{Bytes, keccak256, map::HashMap};
+use crossbeam_channel as chan;
 use dashmap::DashMap;
 use revmc_backend::Target;
 use std::{
-    sync::{Arc, mpsc},
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -97,7 +98,7 @@ struct CoordinatorState {
     /// Worker pool for JIT compilation.
     workers: WorkerPool,
     /// Receiver for worker results.
-    result_rx: mpsc::Receiver<WorkerResult>,
+    result_rx: chan::Receiver<WorkerResult>,
     /// Artifact store for persisted artifacts.
     store: Option<Arc<dyn ArtifactStore>>,
     /// Tuning knobs.
@@ -456,25 +457,18 @@ impl CoordinatorState {
             self.jit_failures += 1;
         }
     }
-
-    /// Drains all pending worker results (non-blocking).
-    fn drain_worker_results(&mut self) {
-        while let Ok(result) = self.result_rx.try_recv() {
-            self.handle_worker_result(result);
-        }
-    }
 }
 
 /// Runs the coordinator event loop. Called on the coordinator thread.
 pub(crate) fn run(
-    rx: mpsc::Receiver<Command>,
+    cmd_rx: chan::Receiver<Command>,
     resident: Arc<ResidentMap>,
     store: Option<Arc<dyn ArtifactStore>>,
     tuning: RuntimeTuning,
 ) {
     debug!("coordinator thread started");
 
-    let (result_tx, result_rx) = mpsc::channel::<WorkerResult>();
+    let (result_tx, result_rx) = chan::unbounded::<WorkerResult>();
 
     let workers = WorkerPool::new(
         tuning.jit_worker_count,
@@ -497,45 +491,40 @@ pub(crate) fn run(
     };
 
     loop {
-        // Drain pending worker results first (non-blocking).
-        state.drain_worker_results();
-
-        let cmd = match rx.recv() {
-            Ok(cmd) => cmd,
-            Err(_) => {
-                debug!("coordinator channel closed, shutting down");
-                break;
+        chan::select! {
+            recv(cmd_rx) -> msg => {
+                let cmd = match msg {
+                    Ok(cmd) => cmd,
+                    Err(_) => {
+                        debug!("coordinator channel closed, shutting down");
+                        break;
+                    }
+                };
+                match cmd {
+                    Command::LookupObserved(event) => state.handle_lookup_observed(event),
+                    Command::CompileJit(req) => state.handle_compile_jit(req),
+                    Command::PrepareAot(reqs) => state.handle_prepare_aot(reqs),
+                    Command::ClearResident => state.handle_clear_resident(),
+                    Command::ClearPersisted => state.handle_clear_persisted(),
+                    Command::ClearAll => state.handle_clear_all(),
+                    Command::Shutdown => {
+                        debug!("coordinator shutting down");
+                        break;
+                    }
+                }
             }
-        };
-
-        match cmd {
-            Command::LookupObserved(event) => {
-                state.handle_lookup_observed(event);
-            }
-            Command::CompileJit(req) => {
-                state.handle_compile_jit(req);
-            }
-            Command::PrepareAot(reqs) => {
-                state.handle_prepare_aot(reqs);
-            }
-            Command::ClearResident => {
-                state.handle_clear_resident();
-            }
-            Command::ClearPersisted => {
-                state.handle_clear_persisted();
-            }
-            Command::ClearAll => {
-                state.handle_clear_all();
-            }
-            Command::Shutdown => {
-                debug!("coordinator shutting down");
-                break;
+            recv(state.result_rx) -> msg => {
+                if let Ok(result) = msg {
+                    state.handle_worker_result(result);
+                }
             }
         }
     }
 
     // Drain remaining worker results before shutdown.
-    state.drain_worker_results();
+    while let Ok(result) = state.result_rx.try_recv() {
+        state.handle_worker_result(result);
+    }
 
     info!(
         jit_promotions = state.jit_promotions,

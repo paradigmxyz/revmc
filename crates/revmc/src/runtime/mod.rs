@@ -13,13 +13,13 @@ use api::LoadedLibrary;
 use coordinator::{
     Command, CompileJitRequest, LookupObservedEvent, PrepareAotRequest, ResidentMap,
 };
+use crossbeam_channel as chan;
 use revm_primitives::{B256, hardfork::SpecId};
 use stats::RuntimeStats;
 use std::{
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
-        mpsc,
     },
     time::Duration,
 };
@@ -55,7 +55,7 @@ struct JitBackendInner {
     /// Global enable flag.
     enabled: AtomicBool,
     /// Channel for sending commands to the coordinator thread.
-    tx: mpsc::SyncSender<Command>,
+    tx: chan::Sender<Command>,
     /// Shared stats counters.
     stats: RuntimeStats,
     /// Coordinator thread + done signal. `None` after shutdown.
@@ -67,7 +67,7 @@ struct JitBackendInner {
 /// Coordinator thread handle and its completion signal.
 struct CoordinatorThread {
     handle: std::thread::JoinHandle<()>,
-    done_rx: mpsc::Receiver<()>,
+    done_rx: chan::Receiver<()>,
 }
 
 /// JIT compilation backend with O(1) compiled-function lookup.
@@ -94,8 +94,8 @@ impl JitBackend {
         let resident = Self::preload_aot(config.store.as_deref())?;
         let resident = Arc::new(resident);
 
-        let (tx, rx) = mpsc::sync_channel::<Command>(config.tuning.lookup_event_channel_capacity);
-        let (done_tx, done_rx) = mpsc::sync_channel::<()>(1);
+        let (tx, rx) = chan::bounded::<Command>(config.tuning.lookup_event_channel_capacity);
+        let (done_tx, done_rx) = chan::bounded::<()>(1);
 
         let tuning = config.tuning;
         let store = config.store.clone();
@@ -157,7 +157,7 @@ impl JitBackend {
             Ok(()) => {
                 self.inner.stats.events_sent.fetch_add(1, Ordering::Relaxed);
             }
-            Err(mpsc::TrySendError::Full(_) | mpsc::TrySendError::Disconnected(_)) => {
+            Err(chan::TrySendError::Full(_) | chan::TrySendError::Disconnected(_)) => {
                 self.inner.stats.events_dropped.fetch_add(1, Ordering::Relaxed);
             }
         }
@@ -208,7 +208,7 @@ impl JitBackend {
     /// or when the compilation fails. Use [`get_compiled`](Self::get_compiled) to
     /// retrieve the result after this returns.
     pub fn compile_jit_sync(&self, req: LookupRequest) -> eyre::Result<()> {
-        let (tx, rx) = mpsc::sync_channel(1);
+        let (tx, rx) = chan::bounded(1);
         let cmd = Command::CompileJit(CompileJitRequest {
             key: RuntimeCacheKey { code_hash: req.code_hash, spec_id: req.spec_id },
             bytecode: req.code,
@@ -364,8 +364,8 @@ impl JitBackendInner {
 
             // Wait for the thread to signal completion, with a timeout.
             match ct.done_rx.recv_timeout(self.shutdown_timeout) {
-                Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => {}
-                Err(mpsc::RecvTimeoutError::Timeout) => {
+                Ok(()) | Err(chan::RecvTimeoutError::Disconnected) => {}
+                Err(chan::RecvTimeoutError::Timeout) => {
                     warn!(
                         timeout = ?self.shutdown_timeout,
                         "coordinator thread did not exit within timeout",

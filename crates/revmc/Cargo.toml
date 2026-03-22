@@ -37,6 +37,7 @@ revm-primitives.workspace = true
 revm-state.workspace = true
 
 bitflags = "2.5"
+crossbeam-channel.workspace = true
 dashmap = "6"
 bitvec = "1.0"
 either = "1.13"

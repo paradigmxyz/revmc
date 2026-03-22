@@ -9,21 +9,22 @@
 
 use crate::{EvmCompilerFn, runtime::storage::RuntimeCacheKey};
 use alloy_primitives::Bytes;
-use std::sync::{Arc, Condvar, Mutex, mpsc};
+use crossbeam_channel as chan;
+use std::sync::{Arc, Condvar, Mutex};
 
 /// Notifier for synchronous compilation requests.
 ///
-/// Wraps an optional `SyncSender` that is notified when the compilation
+/// Wraps an optional sender that is notified when the compilation
 /// completes (success or failure). Passed from the coordinator through
 /// the worker and back, then fired after the result is processed.
-pub(crate) struct SyncNotifier(Option<mpsc::SyncSender<()>>);
+pub(crate) struct SyncNotifier(Option<chan::Sender<()>>);
 
 impl SyncNotifier {
     pub(crate) fn none() -> Self {
         Self(None)
     }
 
-    pub(crate) fn new(tx: mpsc::SyncSender<()>) -> Self {
+    pub(crate) fn new(tx: chan::Sender<()>) -> Self {
         Self(Some(tx))
     }
 
@@ -107,7 +108,7 @@ pub(crate) struct AotSuccess {
 /// Handle to the worker pool. Manages worker threads and their job queues.
 pub(crate) struct WorkerPool {
     /// Per-worker job senders.
-    job_txs: Vec<mpsc::SyncSender<WorkerJob>>,
+    job_txs: Vec<chan::Sender<WorkerJob>>,
     /// Worker thread handles.
     threads: Vec<Option<std::thread::JoinHandle<()>>>,
     /// Shared backing owners — one per worker, keeps JIT code alive.
@@ -153,7 +154,7 @@ impl WorkerPool {
     pub(crate) fn new(
         worker_count: usize,
         job_queue_capacity: usize,
-        result_tx: mpsc::Sender<WorkerResult>,
+        result_tx: chan::Sender<WorkerResult>,
         opt_level: crate::OptimizationLevel,
     ) -> Self {
         let mut job_txs = Vec::with_capacity(worker_count);
@@ -161,7 +162,7 @@ impl WorkerPool {
         let mut backings = Vec::with_capacity(worker_count);
 
         for worker_id in 0..worker_count {
-            let (job_tx, job_rx) = mpsc::sync_channel::<WorkerJob>(job_queue_capacity);
+            let (job_tx, job_rx) = chan::bounded::<WorkerJob>(job_queue_capacity);
             let result_tx = result_tx.clone();
             let backing = Arc::new(WorkerBacking::new());
             let backing_for_worker = Arc::clone(&backing);
@@ -189,8 +190,8 @@ impl WorkerPool {
             self.next_worker = self.next_worker.wrapping_add(1);
             match self.job_txs[idx].try_send(job) {
                 Ok(()) => return true,
-                Err(mpsc::TrySendError::Full(j)) => job = j,
-                Err(mpsc::TrySendError::Disconnected(_)) => return false,
+                Err(chan::TrySendError::Full(j)) => job = j,
+                Err(chan::TrySendError::Disconnected(_)) => return false,
             }
         }
         false
@@ -234,8 +235,8 @@ impl Drop for WorkerPool {
 #[cfg(feature = "llvm")]
 fn worker_loop(
     worker_id: usize,
-    job_rx: mpsc::Receiver<WorkerJob>,
-    result_tx: mpsc::Sender<WorkerResult>,
+    job_rx: chan::Receiver<WorkerJob>,
+    result_tx: chan::Sender<WorkerResult>,
     opt_level: crate::OptimizationLevel,
     backing: &WorkerBacking,
 ) {
@@ -376,8 +377,8 @@ fn rand_u64() -> u64 {
 #[cfg(not(feature = "llvm"))]
 fn worker_loop(
     worker_id: usize,
-    job_rx: mpsc::Receiver<WorkerJob>,
-    result_tx: mpsc::Sender<WorkerResult>,
+    job_rx: chan::Receiver<WorkerJob>,
+    result_tx: chan::Sender<WorkerResult>,
     _opt_level: crate::OptimizationLevel,
     backing: &WorkerBacking,
 ) {
