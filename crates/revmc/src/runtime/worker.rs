@@ -11,6 +11,29 @@ use crate::{EvmCompilerFn, runtime::storage::RuntimeCacheKey};
 use alloy_primitives::Bytes;
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 
+/// Notifier for synchronous compilation requests.
+///
+/// Wraps an optional `SyncSender` that is notified when the compilation
+/// completes (success or failure). Passed from the coordinator through
+/// the worker and back, then fired after the result is processed.
+pub(crate) struct SyncNotifier(Option<mpsc::SyncSender<()>>);
+
+impl SyncNotifier {
+    pub(crate) fn none() -> Self {
+        Self(None)
+    }
+
+    pub(crate) fn new(tx: mpsc::SyncSender<()>) -> Self {
+        Self(Some(tx))
+    }
+
+    pub(crate) fn notify(self) {
+        if let Some(tx) = self.0 {
+            let _ = tx.send(());
+        }
+    }
+}
+
 /// A compilation job sent from the coordinator to a worker.
 pub(crate) enum WorkerJob {
     /// JIT compilation: produce an in-memory function pointer.
@@ -27,6 +50,8 @@ pub(crate) struct JitJob {
     pub(crate) bytecode: Bytes,
     /// The symbol name to use for the compiled function.
     pub(crate) symbol_name: String,
+    /// Optional notifier for synchronous callers.
+    pub(crate) sync_notifier: SyncNotifier,
 }
 
 /// An AOT compilation job sent from the coordinator to a worker.
@@ -49,6 +74,8 @@ pub(crate) struct WorkerResult {
     pub(crate) worker_id: usize,
     /// The compilation outcome.
     pub(crate) outcome: Result<WorkerSuccess, String>,
+    /// Optional notifier for synchronous callers, passed through from the job.
+    pub(crate) sync_notifier: SyncNotifier,
 }
 
 /// Successful compilation output.
@@ -226,7 +253,7 @@ fn worker_loop(
     let mut jit_compiler = EvmCompiler::new(backend);
 
     while let Ok(job) = job_rx.recv() {
-        let (key, outcome) = match job {
+        let (key, outcome, sync_notifier) = match job {
             WorkerJob::Jit(job) => {
                 let span = tracing::info_span!("jit_compile", %job.key.code_hash, ?job.key.spec_id);
                 let _enter = span.enter();
@@ -253,18 +280,18 @@ fn worker_loop(
                         Err(format!("{e}"))
                     }
                 };
-                (job.key, outcome)
+                (job.key, outcome, job.sync_notifier)
             }
             WorkerJob::Aot(job) => {
                 let span = tracing::info_span!("aot_compile", %job.key.code_hash, ?job.key.spec_id);
                 let _enter = span.enter();
 
                 let outcome = compile_aot_artifact(&job);
-                (job.key, outcome)
+                (job.key, outcome, SyncNotifier::none())
             }
         };
 
-        let _ = result_tx.send(WorkerResult { key, worker_id, outcome });
+        let _ = result_tx.send(WorkerResult { key, worker_id, outcome, sync_notifier });
     }
 
     debug!(worker_id, "compile worker done processing jobs, waiting for backing refs to drop");
@@ -357,14 +384,15 @@ fn worker_loop(
     debug!(worker_id, "compile worker started (no LLVM, all jobs will fail)");
 
     while let Ok(job) = job_rx.recv() {
-        let key = match &job {
-            WorkerJob::Jit(j) => j.key.clone(),
-            WorkerJob::Aot(j) => j.key.clone(),
+        let (key, sync_notifier) = match job {
+            WorkerJob::Jit(j) => (j.key, j.sync_notifier),
+            WorkerJob::Aot(j) => (j.key, SyncNotifier::none()),
         };
         let _ = result_tx.send(WorkerResult {
             key,
             worker_id,
             outcome: Err("LLVM backend not available".into()),
+            sync_notifier,
         });
     }
 

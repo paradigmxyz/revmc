@@ -8,7 +8,7 @@ use crate::runtime::{
     api::{CompiledProgram, LoadedLibrary},
     config::RuntimeTuning,
     storage::{ArtifactKey, ArtifactManifest, ArtifactStore, BackendSelection, RuntimeCacheKey},
-    worker::{AotJob, JitJob, WorkerJob, WorkerPool, WorkerResult, WorkerSuccess},
+    worker::{AotJob, JitJob, SyncNotifier, WorkerJob, WorkerPool, WorkerResult, WorkerSuccess},
 };
 use alloy_primitives::{Bytes, keccak256, map::HashMap};
 use dashmap::DashMap;
@@ -27,8 +27,6 @@ pub(crate) enum Command {
     LookupObserved(LookupObservedEvent),
     /// Explicit request to JIT-compile a bytecode.
     CompileJit(CompileJitRequest),
-    /// Blocking JIT compilation request with a notification channel.
-    CompileJitSync(CompileJitRequest, mpsc::SyncSender<()>),
     /// Explicit request to prepare AOT artifacts.
     PrepareAot(Vec<PrepareAotRequest>),
     /// Clear the resident compiled map.
@@ -47,6 +45,8 @@ pub(crate) struct CompileJitRequest {
     pub(crate) key: RuntimeCacheKey,
     /// The raw bytecode.
     pub(crate) bytecode: Bytes,
+    /// Optional notifier for synchronous callers.
+    pub(crate) sync_notifier: SyncNotifier,
 }
 
 /// An explicit AOT preparation request.
@@ -94,8 +94,6 @@ struct CoordinatorState {
     resident: Arc<ResidentMap>,
     /// Per-key tracking state (coordinator-only).
     entries: HashMap<RuntimeCacheKey, EntryState>,
-    /// Pending sync waiters: key → list of senders to notify on completion.
-    sync_waiters: HashMap<RuntimeCacheKey, Vec<mpsc::SyncSender<()>>>,
     /// Worker pool for JIT compilation.
     workers: WorkerPool,
     /// Receiver for worker results.
@@ -161,6 +159,7 @@ impl CoordinatorState {
                 key: event.key,
                 bytecode: entry.bytecode.clone(),
                 symbol_name: symbol,
+                sync_notifier: SyncNotifier::none(),
             });
 
             if self.workers.try_send(job) {
@@ -172,14 +171,16 @@ impl CoordinatorState {
     }
 
     fn handle_compile_jit(&mut self, req: CompileJitRequest) {
-        // Already compiled.
+        // Already compiled — notify and return.
         if self.resident.contains_key(&req.key) {
             debug!(code_hash = %req.key.code_hash, "compile_jit: already resident");
+            req.sync_notifier.notify();
             return;
         }
 
         // Skip empty bytecodes.
         if req.bytecode.is_empty() {
+            req.sync_notifier.notify();
             return;
         }
 
@@ -187,6 +188,7 @@ impl CoordinatorState {
         if let Some(entry) = self.entries.get(&req.key)
             && entry.phase != EntryPhase::Cold
         {
+            req.sync_notifier.notify();
             return;
         }
 
@@ -196,6 +198,7 @@ impl CoordinatorState {
             key: req.key.clone(),
             bytecode: req.bytecode.clone(),
             symbol_name: symbol,
+            sync_notifier: req.sync_notifier,
         });
 
         let entry = self.entries.entry(req.key).or_insert_with(|| EntryState {
@@ -213,33 +216,6 @@ impl CoordinatorState {
             entry.phase = EntryPhase::Working;
             self.pending_jobs += 1;
             self.jit_promotions += 1;
-        }
-    }
-
-    fn handle_compile_jit_sync(&mut self, req: CompileJitRequest, tx: mpsc::SyncSender<()>) {
-        // Already compiled — notify immediately.
-        if self.resident.contains_key(&req.key) {
-            debug!(code_hash = %req.key.code_hash, "compile_jit_sync: already resident, notifying");
-            let _ = tx.send(());
-            return;
-        }
-
-        debug!(code_hash = %req.key.code_hash, "compile_jit_sync: registering waiter");
-
-        // Register the waiter.
-        self.sync_waiters.entry(req.key.clone()).or_default().push(tx);
-
-        // Enqueue the compilation (same logic as handle_compile_jit).
-        self.handle_compile_jit(req);
-    }
-
-    /// Notifies any sync waiters for the given key.
-    fn notify_sync_waiters(&mut self, key: &RuntimeCacheKey) {
-        if let Some(waiters) = self.sync_waiters.remove(key) {
-            debug!(code_hash = %key.code_hash, n_waiters = waiters.len(), "notifying sync waiters");
-            for tx in waiters {
-                let _ = tx.send(());
-            }
         }
     }
 
@@ -322,7 +298,6 @@ impl CoordinatorState {
                 self.resident.insert(result.key.clone(), program);
                 self.entries.remove(&result.key);
                 self.jit_successes += 1;
-                self.notify_sync_waiters(&result.key);
 
                 debug!(
                     code_hash = %result.key.code_hash,
@@ -332,14 +307,12 @@ impl CoordinatorState {
             }
             Ok(WorkerSuccess::Aot(success)) => {
                 self.handle_aot_success(result.key.clone(), success);
-                self.notify_sync_waiters(&result.key);
             }
             Err(err) => {
                 if let Some(entry) = self.entries.get_mut(&result.key) {
                     entry.phase = EntryPhase::Failed;
                 }
                 self.jit_failures += 1;
-                self.notify_sync_waiters(&result.key);
 
                 warn!(
                     code_hash = %result.key.code_hash,
@@ -348,6 +321,9 @@ impl CoordinatorState {
                 );
             }
         }
+
+        // Notify synchronous callers after the result has been fully processed.
+        result.sync_notifier.notify();
     }
 
     fn handle_aot_success(
@@ -510,7 +486,6 @@ pub(crate) fn run(
     let mut state = CoordinatorState {
         resident,
         entries: HashMap::default(),
-        sync_waiters: HashMap::default(),
         workers,
         result_rx,
         store,
@@ -525,49 +500,11 @@ pub(crate) fn run(
         // Drain pending worker results first (non-blocking).
         state.drain_worker_results();
 
-        // When there are sync waiters, we must interleave checking worker results
-        // with command processing to avoid deadlocking — the coordinator would
-        // otherwise block on `rx.recv()` and never see the worker result that
-        // would unblock the waiters.
-        let cmd = if state.sync_waiters.is_empty() {
-            match rx.recv() {
-                Ok(cmd) => cmd,
-                Err(_) => {
-                    debug!("coordinator channel closed, shutting down");
-                    break;
-                }
-            }
-        } else {
-            // Poll: try commands, then worker results, with a short sleep to avoid busy-wait.
-            loop {
-                match rx.try_recv() {
-                    Ok(cmd) => break cmd,
-                    Err(mpsc::TryRecvError::Disconnected) => {
-                        debug!("coordinator channel closed, shutting down");
-                        // Notify remaining waiters before exiting.
-                        for (_, waiters) in state.sync_waiters.drain() {
-                            for tx in waiters {
-                                let _ = tx.send(());
-                            }
-                        }
-                        // Use a sentinel to break the outer loop.
-                        break Command::Shutdown;
-                    }
-                    Err(mpsc::TryRecvError::Empty) => {}
-                }
-                // Drain worker results — this may unblock sync waiters.
-                state.drain_worker_results();
-                if state.sync_waiters.is_empty() {
-                    // All waiters resolved, go back to blocking recv.
-                    break match rx.recv() {
-                        Ok(cmd) => cmd,
-                        Err(_) => {
-                            debug!("coordinator channel closed, shutting down");
-                            break Command::Shutdown;
-                        }
-                    };
-                }
-                std::thread::sleep(std::time::Duration::from_micros(100));
+        let cmd = match rx.recv() {
+            Ok(cmd) => cmd,
+            Err(_) => {
+                debug!("coordinator channel closed, shutting down");
+                break;
             }
         };
 
@@ -577,9 +514,6 @@ pub(crate) fn run(
             }
             Command::CompileJit(req) => {
                 state.handle_compile_jit(req);
-            }
-            Command::CompileJitSync(req, tx) => {
-                state.handle_compile_jit_sync(req, tx);
             }
             Command::PrepareAot(reqs) => {
                 state.handle_prepare_aot(reqs);

@@ -5,36 +5,16 @@
 //! - Fire-and-forget lookup-observed events to the coordinator thread.
 //! - Background JIT compilation for hot keys (threshold-based promotion).
 
-mod api;
-mod config;
-mod coordinator;
-mod stats;
-mod storage;
-mod worker;
-
-#[cfg(test)]
-mod tests;
-
-pub use api::{
-    AotRequest, CompiledProgram, InterpretReason, LookupDecision, LookupRequest, ProgramKind,
-};
-pub use config::{RuntimeConfig, RuntimeTuning};
-use revm_primitives::{B256, hardfork::SpecId};
-pub use stats::RuntimeStatsSnapshot;
-pub use storage::{
-    ArtifactKey, ArtifactManifest, ArtifactStore, BackendSelection, RuntimeCacheKey, StoredArtifact,
-};
-
-use api::LoadedLibrary;
-use coordinator::{
-    Command, CompileJitRequest, LookupObservedEvent, PrepareAotRequest, ResidentMap,
-};
-use stats::RuntimeStats;
-
 use crate::{
     EvmCompilerFn,
     eyre::{self, WrapErr},
 };
+use api::LoadedLibrary;
+use coordinator::{
+    Command, CompileJitRequest, LookupObservedEvent, PrepareAotRequest, ResidentMap,
+};
+use revm_primitives::{B256, hardfork::SpecId};
+use stats::RuntimeStats;
 use std::{
     sync::{
         Arc,
@@ -43,6 +23,30 @@ use std::{
     },
     time::Duration,
 };
+use worker::SyncNotifier;
+
+mod api;
+pub use api::{
+    AotRequest, CompiledProgram, InterpretReason, LookupDecision, LookupRequest, ProgramKind,
+};
+
+mod config;
+pub use config::{RuntimeConfig, RuntimeTuning};
+
+mod coordinator;
+
+mod stats;
+pub use stats::RuntimeStatsSnapshot;
+
+mod storage;
+pub use storage::{
+    ArtifactKey, ArtifactManifest, ArtifactStore, BackendSelection, RuntimeCacheKey, StoredArtifact,
+};
+
+mod worker;
+
+#[cfg(test)]
+mod tests;
 
 /// Shared inner state for [`JitBackend`].
 struct JitBackendInner {
@@ -193,6 +197,7 @@ impl JitBackend {
         let cmd = Command::CompileJit(CompileJitRequest {
             key: RuntimeCacheKey { code_hash: req.code_hash, spec_id: req.spec_id },
             bytecode: req.code,
+            sync_notifier: SyncNotifier::none(),
         });
         let _ = self.inner.tx.try_send(cmd);
     }
@@ -204,13 +209,11 @@ impl JitBackend {
     /// retrieve the result after this returns.
     pub fn compile_jit_sync(&self, req: LookupRequest) -> eyre::Result<()> {
         let (tx, rx) = mpsc::sync_channel(1);
-        let cmd = Command::CompileJitSync(
-            CompileJitRequest {
-                key: RuntimeCacheKey { code_hash: req.code_hash, spec_id: req.spec_id },
-                bytecode: req.code,
-            },
-            tx,
-        );
+        let cmd = Command::CompileJit(CompileJitRequest {
+            key: RuntimeCacheKey { code_hash: req.code_hash, spec_id: req.spec_id },
+            bytecode: req.code,
+            sync_notifier: SyncNotifier::new(tx),
+        });
         self.inner
             .tx
             .try_send(cmd)
