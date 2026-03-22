@@ -266,7 +266,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             bcx,
 
             bytecode,
-            inst_lines: if config.debug { bytecode.inst_to_line_map() } else { Vec::new() },
+            inst_lines: if config.debug { bytecode.take_inst_lines() } else { Vec::new() },
             inst_entries,
             current_inst: usize::MAX,
 

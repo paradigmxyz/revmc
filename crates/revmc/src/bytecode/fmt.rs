@@ -2,7 +2,7 @@ use super::{Bytecode, InstData, InstFlags, bitvec_as_bytes};
 use revm_bytecode::opcode as op;
 use revm_primitives::hex;
 use rustc_hash::FxHashMap;
-use std::{borrow::Cow, fmt};
+use std::{borrow::Cow, fmt, fmt::Write};
 
 /// Basic block info collected from bytecode analysis.
 struct BlockInfo {
@@ -38,15 +38,11 @@ impl Bytecode<'_> {
         BlockInfo { blocks, inst_to_block }
     }
 
-    /// Collects formatted lines and optionally builds an inst-to-line map.
-    ///
-    /// Each entry in the returned vec is `(text, comment)`. If `inst_lines` is provided,
-    /// it is populated with a mapping from instruction index to 1-based line number.
-    fn collect_lines(&self, mut inst_lines: Option<&mut Vec<u32>>) -> Vec<(String, String)> {
-        use std::fmt::Write;
-
+    /// Collects formatted lines and builds the inst-to-line map stored in `self.inst_lines`.
+    fn collect_lines(&self) -> Vec<(String, String)> {
         let info = self.collect_blocks();
         let mut lines: Vec<(String, String)> = Vec::new();
+        let mut inst_lines = vec![0u32; self.insts.len()];
 
         lines.push((
             String::new(),
@@ -82,16 +78,15 @@ impl Bytecode<'_> {
             lines.push((header, comment));
 
             // Instructions.
-            for inst in first_inst..=last_inst {
-                let data = self.inst(inst);
+            for (inst, data) in
+                self.iter_all_insts().skip(first_inst).take(last_inst - first_inst + 1)
+            {
                 if data.is_dead_code() {
                     continue;
                 }
 
-                if let Some(map) = inst_lines.as_deref_mut() {
-                    // 1-based line number (lines.len() is the 0-based index of the next line).
-                    map[inst] = lines.len() as u32 + 1;
-                }
+                // 1-based line number (lines.len() is the 0-based index of the next line).
+                inst_lines[inst] = lines.len() as u32 + 1;
 
                 // Instruction text.
                 let mut text = String::from("  ");
@@ -136,22 +131,14 @@ impl Bytecode<'_> {
             }
         }
 
+        *self.inst_lines.borrow_mut() = inst_lines;
         lines
-    }
-
-    /// Returns a mapping from instruction index to 1-based line number in the `bytecode.txt` dump.
-    ///
-    /// The line numbers correspond to the output of the `Display` implementation.
-    pub(crate) fn inst_to_line_map(&self) -> Vec<u32> {
-        let mut map = vec![0u32; self.insts.len()];
-        self.collect_lines(Some(&mut map));
-        map
     }
 }
 
 impl fmt::Display for Bytecode<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let lines = self.collect_lines(None);
+        let lines = self.collect_lines();
 
         // Find max text width and write with aligned comments.
         let max_text_width = lines.iter().map(|(t, _)| t.len()).max().unwrap_or(0);
