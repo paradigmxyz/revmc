@@ -9,6 +9,10 @@ use inkwell::{
     AddressSpace, IntPredicate, OptimizationLevel,
     attributes::{Attribute, AttributeLoc},
     basic_block::BasicBlock,
+    debug_info::{
+        AsDIScope, DICompileUnit, DIFlags, DIFlagsConstants, DISubprogram, DWARFEmissionKind,
+        DWARFSourceLanguage, DebugInfoBuilder,
+    },
     execution_engine::ExecutionEngine,
     module::{FlagBehavior, Module},
     passes::PassBuilderOptions,
@@ -32,7 +36,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use std::{
     borrow::Cow,
     iter,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Once, OnceLock},
 };
 
@@ -75,6 +79,24 @@ pub struct EvmLlvmBackend {
     /// Symbol names that have been registered via `add_global_mapping` in the MCJIT engine.
     /// Used to avoid re-registering builtins when a new module is created after `clear_ir`.
     mapped_symbols: FxHashSet<String>,
+
+    /// Debug info source file path set by the compiler.
+    debug_file: Option<PathBuf>,
+    /// LLVM debug info builder and compile unit, created lazily when `debug_file` is set.
+    di_state: Option<DiState>,
+}
+
+/// LLVM debug info state for a module.
+struct DiState {
+    dibuilder: DebugInfoBuilder<'static>,
+    compile_unit: DICompileUnit<'static>,
+    finalized: bool,
+}
+
+impl std::fmt::Debug for DiState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DiState").field("finalized", &self.finalized).finish()
+    }
 }
 
 unsafe impl Send for EvmLlvmBackend {}
@@ -162,6 +184,8 @@ impl EvmLlvmBackend {
             function_counter: 0,
             functions: FxHashMap::default(),
             mapped_symbols: FxHashSet::default(),
+            debug_file: None,
+            di_state: None,
         })
     }
 
@@ -190,6 +214,62 @@ impl EvmLlvmBackend {
 
     fn id_to_name(&self, id: u32) -> &str {
         &self.functions[&id].0
+    }
+
+    /// Lazily initializes the debug info builder and compile unit for the module.
+    fn ensure_di_state(&mut self) {
+        if self.di_state.is_some() {
+            return;
+        }
+        let Some(debug_file) = &self.debug_file else { return };
+
+        let filename =
+            debug_file.file_name().map(|f| f.to_string_lossy()).unwrap_or_default().into_owned();
+        let directory =
+            debug_file.parent().map(|p| p.to_string_lossy()).unwrap_or_default().into_owned();
+
+        // Add required module flags for debug info.
+        self.module.add_basic_value_flag(
+            "Debug Info Version",
+            FlagBehavior::Warning,
+            self.ty_i32.const_int(inkwell::debug_info::debug_metadata_version() as u64, false),
+        );
+        self.module.add_basic_value_flag(
+            "Dwarf Version",
+            FlagBehavior::Warning,
+            self.ty_i32.const_int(5, false),
+        );
+
+        let is_optimized = self.opt_level != OptimizationLevel::None;
+        let mut flags = Vec::new();
+        flags.push(match self.opt_level {
+            OptimizationLevel::None => "-O0",
+            OptimizationLevel::Less => "-O1",
+            OptimizationLevel::Default => "-O2",
+            OptimizationLevel::Aggressive => "-O3",
+        });
+        flags.push(if self.aot { "--aot" } else { "--jit" });
+        let flags = flags.join(" ");
+
+        let (dibuilder, compile_unit) = self.module.create_debug_info_builder(
+            true,
+            DWARFSourceLanguage::C,
+            &filename,
+            &directory,
+            "revmc",
+            is_optimized,
+            &flags,
+            0,
+            "",
+            DWARFEmissionKind::Full,
+            0,
+            false,
+            false,
+            "",
+            "",
+        );
+
+        self.di_state = Some(DiState { dibuilder, compile_unit, finalized: false });
     }
 
     // Delete IR to lower memory consumption.
@@ -270,6 +350,20 @@ impl Backend for EvmLlvmBackend {
         self.debug_assertions = yes;
     }
 
+    fn set_debug_file(&mut self, path: Option<PathBuf>) {
+        self.debug_file = path;
+    }
+
+    fn finalize_debug_info(&mut self) -> Result<()> {
+        if let Some(di) = &mut self.di_state
+            && !di.finalized
+        {
+            di.dibuilder.finalize();
+            di.finalized = true;
+        }
+        Ok(())
+    }
+
     fn opt_level(&self) -> revmc_backend::OptimizationLevel {
         convert_opt_level_rev(self.opt_level)
     }
@@ -324,7 +418,33 @@ impl Backend for EvmLlvmBackend {
             self.functions.insert(id, (name.to_string(), function));
             (id, function)
         };
-        let builder = EvmLlvmBuilder { backend: self, function };
+
+        // Attach debug info subprogram if debug is active.
+        self.ensure_di_state();
+        let debug_scope = if let Some(di) = &self.di_state {
+            let file = di.compile_unit.get_file();
+            let subroutine_type =
+                di.dibuilder.create_subroutine_type(file, None, &[], DIFlags::PUBLIC);
+            let subprogram = di.dibuilder.create_function(
+                di.compile_unit.as_debug_info_scope(),
+                name,
+                None,
+                file,
+                0,
+                subroutine_type,
+                true,
+                true,
+                0,
+                DIFlags::PUBLIC,
+                self.opt_level != OptimizationLevel::None,
+            );
+            function.set_subprogram(subprogram);
+            Some(subprogram)
+        } else {
+            None
+        };
+
+        let builder = EvmLlvmBuilder { backend: self, function, debug_scope };
         Ok((builder, id))
     }
 
@@ -367,6 +487,9 @@ impl Backend for EvmLlvmBackend {
             }
         }
         */
+
+        // Drop the old DI state before replacing the module, since DIBuilder references the module.
+        self.di_state = None;
 
         self.module = create_module(self.cx, &self.machine, self.aot)?;
         if let Some(exec_engine) = &self.exec_engine {
@@ -457,6 +580,7 @@ impl TargetInfo {
 pub struct EvmLlvmBuilder<'a> {
     backend: &'a mut EvmLlvmBackend,
     function: FunctionValue<'static>,
+    debug_scope: Option<DISubprogram<'static>>,
 }
 
 impl std::ops::Deref for EvmLlvmBuilder<'_> {
@@ -658,6 +782,25 @@ impl Builder for EvmLlvmBuilder<'_> {
         let metadata = self.cx.metadata_string(comment);
         let metadata = self.cx.metadata_node(&[metadata.into()]);
         ins.set_metadata(metadata, self.cx.get_kind_id("annotation")).unwrap();
+    }
+
+    fn set_debug_location(&mut self, line: u32, col: u32) {
+        let Some(scope) = self.debug_scope else { return };
+        let Some(di) = &self.di_state else { return };
+        let loc = di.dibuilder.create_debug_location(
+            self.cx,
+            line,
+            col,
+            scope.as_debug_info_scope(),
+            None,
+        );
+        self.bcx.set_current_debug_location(loc);
+    }
+
+    fn clear_debug_location(&mut self) {
+        if self.debug_scope.is_some() {
+            self.bcx.unset_current_debug_location();
+        }
     }
 
     fn fn_param(&mut self, index: usize) -> Self::Value {

@@ -18,6 +18,7 @@ pub(super) struct FcxConfig {
     pub(super) debug_assertions: bool,
     pub(super) frame_pointers: bool,
 
+    pub(super) debug: bool,
     pub(super) inspect_stack_length: bool,
     pub(super) stack_bound_checks: bool,
     pub(super) gas_metering: bool,
@@ -29,6 +30,7 @@ impl Default for FcxConfig {
             debug_assertions: cfg!(debug_assertions),
             comments: false,
             frame_pointers: cfg!(debug_assertions),
+            debug: false,
             inspect_stack_length: false,
             stack_bound_checks: true,
             gas_metering: true,
@@ -87,6 +89,8 @@ pub(super) struct FunctionCx<'a, B: Backend> {
 
     /// The bytecode being translated.
     bytecode: &'a Bytecode<'a>,
+    /// Instruction index to 1-based line number in bytecode.txt (for debug info).
+    inst_lines: Vec<u32>,
     /// All entry blocks for each instruction.
     inst_entries: Vec<B::BasicBlock>,
     /// The current instruction being translated.
@@ -184,6 +188,11 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     ) -> Result<()> {
         let entry_block = bcx.current_block().unwrap();
 
+        // Clear debug location for prologue code.
+        if config.debug {
+            bcx.clear_debug_location();
+        }
+
         // Get common types.
         let ptr_type = bcx.type_ptr();
         let isize_type = bcx.type_ptr_sized_int();
@@ -257,6 +266,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             bcx,
 
             bytecode,
+            inst_lines: if config.debug { bytecode.take_inst_lines() } else { Vec::new() },
             inst_entries,
             current_inst: usize::MAX,
 
@@ -316,6 +326,11 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         // Translate individual instructions into their respective blocks.
         for (inst, _) in bytecode.iter_insts() {
             fx.translate_inst(inst)?;
+        }
+
+        // Clear debug location for all synthetic / epilogue blocks.
+        if config.debug {
+            fx.bcx.clear_debug_location();
         }
 
         // Finalize the dynamic jump table.
@@ -479,6 +494,10 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let opcode = data.opcode;
         let entry_block = self.inst_entries[inst];
         self.bcx.switch_to_block(entry_block);
+
+        if self.config.debug {
+            self.bcx.set_debug_location(self.inst_lines[inst], 1);
+        }
 
         // self.call_printf(format_printf!("{}\n", self.op_block_name("")), &[]);
 
