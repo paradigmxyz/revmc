@@ -7,7 +7,7 @@ resolver = "2"
 version = "0.1.0"
 authors = ["DaniPopes <57450786+DaniPopes@users.noreply.github.com>"]
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.94"
 license = "MIT OR Apache-2.0"
 categories = ["compilers", "cryptography::cryptocurrencies"]
 keywords = ["compile", "compiler", "jit", "evm", "ethereum"]
@@ -54,6 +54,7 @@ revm-state = { version = "10.0", default-features = false }
 ruint = { version = "1.17", default-features = false }
 
 color-eyre = "0.6"
+criterion = { package = "codspeed-criterion-compat", version = "4", default-features = false, features = ["cargo_bench_support"] }
 eyre = "0.6"
 rustc-hash = "2.1"
 tracing = "0.1"
@@ -63,22 +64,22 @@ paste = "1.0"
 
 [profile.release]
 opt-level = 3
-lto = true
-debug = "line-tables-only"
-strip = true
+lto = "thin"
+debug = "none"
+strip = "debuginfo" # "symbols" for less binary size but no backtraces
 panic = "abort"
-codegen-units = 1
+codegen-units = 16
 
 # Use the `--profile profiling` flag to show symbols in release mode.
 # e.g. `cargo build --profile profiling`
 [profile.profiling]
 inherits = "release"
-debug = 2
+debug = "full"
 strip = false
+
+[profile.bench]
+inherits = "profiling"
 
 [profile.ethtests]
 inherits = "dev"
 opt-level = 3
-
-[profile.bench]
-inherits = "profiling"

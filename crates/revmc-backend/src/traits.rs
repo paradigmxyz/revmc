@@ -1,6 +1,9 @@
 use crate::{Pointer, Result};
 use ruint::aliases::U256;
-use std::{fmt, path::Path};
+use std::{
+    fmt,
+    path::{Path, PathBuf},
+};
 
 /// Target machine.
 #[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -137,6 +140,8 @@ pub enum Attribute {
     ReadOnly,
     WriteOnly,
     Writable,
+    /// `memory(argmem: readwrite)` — function only accesses memory through pointer arguments.
+    ArgMemOnly,
     // TODO: Range?
 }
 
@@ -199,6 +204,18 @@ pub trait Backend: BackendTypes + TypeMethods {
 
     fn set_is_dumping(&mut self, yes: bool);
     fn set_debug_assertions(&mut self, yes: bool);
+
+    /// Sets the debug info source file path for generated code.
+    ///
+    /// Passing `Some(path)` enables debug info emission; `None` disables it.
+    fn set_debug_file(&mut self, _path: Option<PathBuf>) {}
+
+    /// Finalizes any pending debug info metadata.
+    ///
+    /// Must be called before verification, optimization, or code emission.
+    fn finalize_debug_info(&mut self) -> Result<()> {
+        Ok(())
+    }
     fn opt_level(&self) -> OptimizationLevel;
     fn set_opt_level(&mut self, level: OptimizationLevel);
     fn dump_ir(&mut self, path: &Path) -> Result<()>;
@@ -251,6 +268,12 @@ pub trait Builder: BackendTypes + TypeMethods {
 
     fn add_comment_to_current_inst(&mut self, comment: &str);
 
+    /// Sets the current debug source location for subsequently emitted instructions.
+    fn set_debug_location(&mut self, _line: u32, _col: u32) {}
+
+    /// Clears the current debug source location.
+    fn clear_debug_location(&mut self) {}
+
     fn fn_param(&mut self, index: usize) -> Self::Value;
     fn num_fn_params(&self) -> usize;
 
@@ -273,14 +296,20 @@ pub trait Builder: BackendTypes + TypeMethods {
     fn stack_store(&mut self, value: Self::Value, slot: Self::StackSlot);
     fn stack_addr(&mut self, ty: Self::Type, slot: Self::StackSlot) -> Self::Value;
 
-    fn load(&mut self, ty: Self::Type, ptr: Self::Value, name: &str) -> Self::Value {
-        self.load_unaligned(ty, ptr, name)
-    }
-    fn load_unaligned(&mut self, ty: Self::Type, ptr: Self::Value, name: &str) -> Self::Value;
-    fn store(&mut self, value: Self::Value, ptr: Self::Value) {
-        self.store_unaligned(value, ptr);
-    }
-    fn store_unaligned(&mut self, value: Self::Value, ptr: Self::Value);
+    /// Loads a value from a pointer, assuming natural alignment.
+    fn load(&mut self, ty: Self::Type, ptr: Self::Value, name: &str) -> Self::Value;
+    /// Loads a value from a pointer with an explicit alignment override.
+    fn load_aligned(
+        &mut self,
+        ty: Self::Type,
+        ptr: Self::Value,
+        align: usize,
+        name: &str,
+    ) -> Self::Value;
+    /// Stores a value to a pointer, assuming natural alignment.
+    fn store(&mut self, value: Self::Value, ptr: Self::Value);
+    /// Stores a value to a pointer with an explicit alignment override.
+    fn store_aligned(&mut self, value: Self::Value, ptr: Self::Value, align: usize);
 
     fn nop(&mut self);
     fn ret(&mut self, values: &[Self::Value]);

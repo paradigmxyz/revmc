@@ -11,7 +11,7 @@ use revmc::{
     EvmCompiler, EvmContext, EvmLlvmBackend, OptimizationLevel, eyre::ensure,
     primitives::hardfork::SpecId,
 };
-use revmc_cli::{Bench, get_benches, read_code};
+use revmc_cli::{Bench, BenchKind, PreparedFixtureBench, get_benches, read_code};
 use std::{
     hint::black_box,
     path::{Path, PathBuf},
@@ -61,6 +61,10 @@ pub(crate) struct RunArgs {
     #[arg(long, conflicts_with = "aot")]
     interpret: bool,
 
+    /// Run JIT only (skip interpreter comparison in benchmarks).
+    #[arg(long, conflicts_with = "interpret")]
+    jit_only: bool,
+
     /// Target triple.
     #[arg(long, default_value = "native")]
     target: String,
@@ -87,12 +91,74 @@ pub(crate) struct RunArgs {
     no_gas: bool,
     #[arg(long)]
     no_len_checks: bool,
+    /// Inspect the stack length after the function has been executed.
+    #[arg(long)]
+    inspect_stack_length: bool,
     #[arg(long, default_value = "1000000000")]
     gas_limit: u64,
 }
 
 impl RunArgs {
     pub(crate) fn run(self) -> Result<()> {
+        // Resolve bench entry first (before any partial moves of self).
+        let bench_entry = if self.bench_name == "custom" {
+            Bench {
+                name: "custom",
+                kind: BenchKind::Bytecode {
+                    bytecode: read_code(self.code.as_deref(), self.code_path.as_deref())?,
+                    calldata: Vec::new(),
+                    stack_input: Vec::new(),
+                    native: None,
+                },
+            }
+        } else if Path::new(&self.bench_name).exists() {
+            let path = Path::new(&self.bench_name);
+            ensure!(path.is_file(), "argument must be a file");
+            ensure!(self.code.is_none(), "--code is not allowed with a file argument");
+            ensure!(self.code_path.is_none(), "--code-path is not allowed with a file argument");
+            Bench {
+                name: path.file_stem().unwrap().to_str().unwrap().to_string().leak(),
+                kind: BenchKind::Bytecode {
+                    bytecode: read_code(None, Some(path))?,
+                    calldata: Vec::new(),
+                    stack_input: Vec::new(),
+                    native: None,
+                },
+            }
+        } else {
+            match get_benches().into_iter().find(|b| b.name == self.bench_name) {
+                Some(b) => b,
+                None => {
+                    if self.load.is_some() {
+                        Bench {
+                            name: self.bench_name.clone().leak(),
+                            kind: BenchKind::Bytecode {
+                                bytecode: Vec::new(),
+                                calldata: Vec::new(),
+                                stack_input: Vec::new(),
+                                native: None,
+                            },
+                        }
+                    } else {
+                        return Err(eyre!("unknown benchmark: {}", self.bench_name));
+                    }
+                }
+            }
+        };
+
+        let name = bench_entry.name;
+
+        // Handle TxFixture benchmarks separately.
+        if let BenchKind::TxFixture(ref def) = bench_entry.kind {
+            return self.run_fixture(name, def);
+        }
+
+        let (bytecode, calldata, stack_input, _native) =
+            bench_entry.as_bytecode().expect("expected bytecode bench");
+        let bytecode = bytecode.to_vec();
+        let calldata = calldata.to_vec();
+        let stack_input = stack_input.to_vec();
+
         // Build the compiler.
         let target = revmc::Target::new(self.target, self.target_cpu, self.target_features);
         let backend = EvmLlvmBackend::new_for_target(self.aot, self.opt_level, &target)?;
@@ -110,42 +176,6 @@ impl RunArgs {
         compiler.frame_pointers(true);
         compiler.debug_assertions(self.debug_assertions);
 
-        let Bench { name, bytecode, calldata, stack_input, native: _, requires_storage: _ } =
-            if self.bench_name == "custom" {
-                Bench {
-                    name: "custom",
-                    bytecode: read_code(self.code.as_deref(), self.code_path.as_deref())?,
-                    ..Default::default()
-                }
-            } else if Path::new(&self.bench_name).exists() {
-                let path = Path::new(&self.bench_name);
-                ensure!(path.is_file(), "argument must be a file");
-                ensure!(self.code.is_none(), "--code is not allowed with a file argument");
-                ensure!(
-                    self.code_path.is_none(),
-                    "--code-path is not allowed with a file argument"
-                );
-                Bench {
-                    name: path.file_stem().unwrap().to_str().unwrap().to_string().leak(),
-                    bytecode: read_code(None, Some(path))?,
-                    ..Default::default()
-                }
-            } else {
-                match get_benches().into_iter().find(|b| b.name == self.bench_name) {
-                    Some(b) => b,
-                    None => {
-                        if self.load.is_some() {
-                            Bench {
-                                name: self.bench_name.clone().leak(),
-                                bytecode: Vec::new(),
-                                ..Default::default()
-                            }
-                        } else {
-                            return Err(eyre!("unknown benchmark: {}", self.bench_name));
-                        }
-                    }
-                }
-            };
         compiler.set_module_name(name);
         if let Some(dump_dir) = compiler.dump_dir() {
             eprintln!("Dump directory: {}", dump_dir.display());
@@ -165,9 +195,7 @@ impl RunArgs {
 
         let mut host = DummyHost::new(spec_id);
 
-        if !stack_input.is_empty() {
-            compiler.inspect_stack_length(true);
-        }
+        compiler.inspect_stack_length(self.inspect_stack_length || !stack_input.is_empty());
 
         let bytecode = compiler.parse(bytecode_slice.into(), spec_id)?;
         if self.display || self.parse_only {
@@ -231,61 +259,128 @@ impl RunArgs {
         };
 
         let table = instruction_table::<EthInterpreter, DummyHost>();
-        let mut run = |f: revmc::EvmCompilerFn| {
+
+        let mk_interpreter = || {
             let ext_bytecode = ExtBytecode::new(bytecode_raw.clone());
             let input = InputsImpl {
                 input: revm_interpreter::CallInput::Bytes(calldata.clone()),
                 ..Default::default()
             };
-            let mut interpreter = revm_interpreter::Interpreter::new(
+            revm_interpreter::Interpreter::new(
                 SharedMemory::new(),
                 ext_bytecode,
                 input,
                 false,
                 spec_id,
                 gas_limit,
-            );
-
-            if self.interpret {
-                let action = interpreter.run_plain(&table, &mut host);
-                let result = action
-                    .instruction_result()
-                    .unwrap_or(revm_interpreter::InstructionResult::Stop);
-                (result, action)
-            } else {
-                let (mut ecx, stack, stack_len) =
-                    EvmContext::from_interpreter_with_stack(&mut interpreter, &mut host);
-
-                for (i, input) in stack_input.iter().enumerate() {
-                    stack.as_mut_slice()[i] = (*input).into();
-                }
-                *stack_len = stack_input.len();
-
-                let r = unsafe { f.call_noinline(Some(stack), Some(stack_len), &mut ecx) };
-                let action = ecx.next_action.take().unwrap_or_else(|| {
-                    revm_interpreter::InterpreterAction::Return(
-                        revm_interpreter::InterpreterResult {
-                            result: r,
-                            output: revm_primitives::Bytes::new(),
-                            gas: *ecx.gas,
-                        },
-                    )
-                });
-                (r, action)
-            }
+            )
         };
 
         if self.n_iters == 0 {
             return Ok(());
         }
 
-        let (ret, action) = run(f);
-        println!("InstructionResult::{ret:?}");
-        println!("InterpreterAction::{action:#?}");
+        // Single run: print results.
+        if self.interpret {
+            let mut interpreter = mk_interpreter();
+            for input in &stack_input {
+                interpreter.stack.data_mut().push(*input);
+            }
+            let action = interpreter.run_plain(&table, &mut host);
+            let ret =
+                action.instruction_result().unwrap_or(revm_interpreter::InstructionResult::Stop);
+            println!("InstructionResult::{ret:?}");
+            println!("InterpreterAction::{action:#?}");
+        } else {
+            let mut interpreter = mk_interpreter();
+            let (mut ecx, stack, stack_len) =
+                EvmContext::from_interpreter_with_stack(&mut interpreter, &mut host);
+            for (i, input) in stack_input.iter().enumerate() {
+                stack.as_mut_slice()[i] = (*input).into();
+            }
+            *stack_len = stack_input.len();
+            let ret = unsafe { f.call_noinline(Some(stack), Some(stack_len), &mut ecx) };
+            let action = ecx.next_action.take().unwrap_or_else(|| {
+                revm_interpreter::InterpreterAction::Return(revm_interpreter::InterpreterResult {
+                    result: ret,
+                    output: revm_primitives::Bytes::new(),
+                    gas: *ecx.gas,
+                })
+            });
+            println!("InstructionResult::{ret:?}");
+            println!("InterpreterAction::{action:#?}");
+        }
 
         if self.n_iters > 1 {
-            bench(self.n_iters, name, || run(f));
+            // Benchmark interpreter.
+            if self.interpret || !self.jit_only {
+                bench(self.n_iters, &format!("{name}/interpreter"), || {
+                    let mut interpreter = mk_interpreter();
+                    for input in &stack_input {
+                        interpreter.stack.data_mut().push(*input);
+                    }
+                    let action = interpreter.run_plain(&table, &mut host);
+                    let ret = action
+                        .instruction_result()
+                        .unwrap_or(revm_interpreter::InstructionResult::Stop);
+                    (ret, action)
+                });
+            }
+            // Benchmark JIT.
+            if !self.interpret {
+                bench(self.n_iters, &format!("{name}/jit"), || {
+                    let mut interpreter = mk_interpreter();
+                    let (mut ecx, stack, stack_len) =
+                        EvmContext::from_interpreter_with_stack(&mut interpreter, &mut host);
+                    for (i, input) in stack_input.iter().enumerate() {
+                        stack.as_mut_slice()[i] = (*input).into();
+                    }
+                    *stack_len = stack_input.len();
+                    let r = unsafe { f.call_noinline(Some(stack), Some(stack_len), &mut ecx) };
+                    let action = ecx.next_action.take().unwrap_or_else(|| {
+                        revm_interpreter::InterpreterAction::Return(
+                            revm_interpreter::InterpreterResult {
+                                result: r,
+                                output: revm_primitives::Bytes::new(),
+                                gas: *ecx.gas,
+                            },
+                        )
+                    });
+                    (r, action)
+                });
+            }
+        }
+
+        Ok(())
+    }
+
+    fn run_fixture(&self, name: &str, def: &revmc_cli::FixtureBenchDef) -> Result<()> {
+        let prepared = PreparedFixtureBench::load(def);
+
+        // Sanity check.
+        let result = prepared.run_interpreter();
+        assert!(result.result.is_success(), "fixture interpreter execution reverted");
+        let result = prepared.run_jit();
+        assert!(result.result.is_success(), "fixture JIT execution reverted");
+
+        if self.n_iters <= 1 {
+            if self.interpret {
+                let result = prepared.run_interpreter();
+                println!("Interpreter result: {:?}", result.result);
+            } else {
+                let result = prepared.run_jit();
+                println!("JIT result: {:?}", result.result);
+            }
             return Ok(());
+        }
+
+        if self.interpret || !self.jit_only {
+            bench(self.n_iters, &format!("{name}/interpreter"), || {
+                black_box(prepared.run_interpreter())
+            });
+        }
+        if !self.interpret {
+            bench(self.n_iters, &format!("{name}/jit"), || black_box(prepared.run_jit()));
         }
 
         Ok(())

@@ -5,6 +5,7 @@ use revm_bytecode::opcode as op;
 use revm_primitives::hardfork::SpecId;
 use revmc_backend::Result;
 use rustc_hash::FxHashMap;
+use std::cell::RefCell;
 
 mod block_analysis;
 mod fmt;
@@ -46,6 +47,8 @@ pub struct Bytecode<'a> {
     may_suspend: bool,
     /// Mapping from program counter to instruction.
     pc_to_inst: FxHashMap<u32, u32>,
+    /// Instruction index to 1-based line number in the formatted dump, built during formatting.
+    inst_lines: RefCell<Vec<u32>>,
 }
 
 impl<'a> Bytecode<'a> {
@@ -89,6 +92,7 @@ impl<'a> Bytecode<'a> {
             has_dynamic_jumps: false,
             may_suspend: false,
             pc_to_inst,
+            inst_lines: RefCell::new(Vec::new()),
         };
 
         // Pad code to ensure there is at least one diverging instruction.
@@ -97,6 +101,13 @@ impl<'a> Bytecode<'a> {
         }
 
         bytecode
+    }
+
+    /// Takes the instruction-to-line map built during formatting.
+    ///
+    /// Returns an empty `Vec` if the bytecode has not been formatted yet.
+    pub(crate) fn take_inst_lines(&self) -> Vec<u32> {
+        self.inst_lines.take()
     }
 
     /// Returns an iterator over the opcodes.

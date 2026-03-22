@@ -19,10 +19,10 @@ workspace = true
 [dependencies]
 revmc-backend.workspace = true
 
-inkwell = { version = "0.8", features = ["llvm21-1"] }
+inkwell = { git = "https://github.com/TheDan64/inkwell", rev = "d20c58f320d1eee62911ce1a274ed32a6aa99861", features = ["llvm22-1"] }
 rustc-hash.workspace = true
 tracing.workspace = true
 
 [features]
-prefer-static = ["inkwell/llvm21-1-prefer-static"]
-prefer-dynamic = ["inkwell/llvm21-1-prefer-dynamic"]
+prefer-static = ["inkwell/llvm22-1-prefer-static"]
+prefer-dynamic = ["inkwell/llvm22-1-prefer-dynamic"]

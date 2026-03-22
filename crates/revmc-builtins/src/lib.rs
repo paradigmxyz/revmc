@@ -17,7 +17,7 @@ use revm_interpreter::{
     host::LoadError,
     interpreter_types::{InputsTr, MemoryTr},
 };
-use revm_primitives::{Bytes, KECCAK_EMPTY, Log, LogData, U256, hardfork::SpecId};
+use revm_primitives::{B256, Bytes, KECCAK_EMPTY, Log, LogData, U256, hardfork::SpecId};
 use revmc_context::{EvmContext, EvmWord};
 
 pub mod gas;
@@ -76,7 +76,7 @@ pub enum CreateKind {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn __revmc_builtin_panic(data: *const u8, len: usize) -> ! {
-    let msg = core::str::from_utf8_unchecked(core::slice::from_raw_parts(data, len));
+    let msg = unsafe { core::str::from_utf8_unchecked(core::slice::from_raw_parts(data, len)) };
     panic!("{msg}");
 }
 
@@ -130,13 +130,13 @@ pub unsafe extern "C" fn __revmc_builtin_keccak256(
 ) -> InstructionResult {
     let len = try_into_usize!(len_ptr);
     *len_ptr = EvmWord::from_be_bytes(if len == 0 {
-        KECCAK_EMPTY.0
+        KECCAK_EMPTY
     } else {
         gas!(ecx, ecx.host.gas_params().keccak256_cost(len));
         let offset = try_into_usize!(offset);
         ensure_memory!(ecx, offset, len);
         let data = ecx.memory.slice(offset..offset + len);
-        revm_primitives::keccak256(&*data).0
+        revm_primitives::keccak256(&*data)
     });
     InstructionResult::Stop
 }
@@ -162,39 +162,33 @@ pub unsafe extern "C" fn __revmc_builtin_balance(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __revmc_builtin_origin(ecx: &mut EvmContext<'_>, slot: &mut EvmWord) {
-    // In the Host trait, `caller()` returns the transaction origin
-    let addr = ecx.host.caller();
-    let mut word = [0u8; 32];
-    word[12..32].copy_from_slice(addr.as_slice());
-    *slot = EvmWord::from_be_bytes(word);
+    *slot = EvmWord::from_be_bytes(ecx.host.caller().into_word());
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __revmc_builtin_calldataload(
     ecx: &mut EvmContext<'_>,
-    offset: &mut EvmWord,
+    offset_ptr: &mut EvmWord,
 ) {
-    let offset_usize = as_usize_saturated!(offset.to_u256());
-    let mut word = [0u8; 32];
-
-    match ecx.input.input() {
-        CallInput::Bytes(bytes) => {
-            let len = bytes.len().saturating_sub(offset_usize).min(32);
-            if len > 0 && offset_usize < bytes.len() {
-                word[..len].copy_from_slice(&bytes[offset_usize..offset_usize + len]);
-            }
-        }
-        CallInput::SharedBuffer(range) => {
-            let input_slice = ecx.memory.global_slice(range.clone());
-            let input_len = input_slice.len();
-            if offset_usize < input_len {
-                let count = 32.min(input_len - offset_usize);
-                word[..count].copy_from_slice(&input_slice[offset_usize..offset_usize + count]);
-            }
-        }
+    let mut word = B256::ZERO;
+    let offset = as_usize_saturated!(offset_ptr.to_u256());
+    let input = ecx.input.input();
+    let input_len = input.len();
+    if offset < input_len {
+        let count = 32.min(input_len - offset);
+        let input = match ecx.input.input() {
+            CallInput::Bytes(bytes) => &bytes[..],
+            CallInput::SharedBuffer(range) => &*ecx.memory.global_slice(range.clone()),
+        };
+        // SAFETY: `count` is bounded by the calldata length.
+        // This is `word[..count].copy_from_slice(input[offset..offset + count])`, written using
+        // raw pointers as apparently the compiler cannot optimize the slice version, and using
+        // `get_unchecked` twice is uglier.
+        unsafe {
+            core::ptr::copy_nonoverlapping(input.as_ptr().add(offset), word.as_mut_ptr(), count)
+        };
     }
-
-    *offset = EvmWord::from_be_bytes(word);
+    *offset_ptr = EvmWord::from_be_bytes(word);
 }
 
 #[unsafe(no_mangle)]
@@ -328,7 +322,7 @@ pub unsafe extern "C" fn __revmc_builtin_extcodehash(
         try_host!(ecx.host.load_account_info_skip_cold_load(addr, false, false).ok())
     };
     let code_hash = if account.is_empty { revm_primitives::B256::ZERO } else { account.code_hash };
-    *address = EvmWord::from_be_bytes(code_hash.0);
+    *address = EvmWord::from_be_bytes(code_hash);
     InstructionResult::Stop
 }
 
@@ -359,7 +353,7 @@ pub unsafe extern "C" fn __revmc_builtin_blockhash(
 
     if diff <= BLOCK_HASH_HISTORY {
         let hash = try_host!(ecx.host.block_hash(as_u64_saturated!(requested_number)));
-        *number_ptr = EvmWord::from_be_bytes(hash.0);
+        *number_ptr = EvmWord::from_be_bytes(hash);
     } else {
         // Too old, return 0
         *number_ptr = EvmWord::ZERO;
@@ -370,11 +364,7 @@ pub unsafe extern "C" fn __revmc_builtin_blockhash(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __revmc_builtin_coinbase(ecx: &mut EvmContext<'_>, slot: &mut EvmWord) {
-    // In the Host trait, `beneficiary()` returns the coinbase address
-    let addr = ecx.host.beneficiary();
-    let mut word = [0u8; 32];
-    word[12..32].copy_from_slice(addr.as_slice());
-    *slot = EvmWord::from_be_bytes(word);
+    *slot = EvmWord::from_be_bytes(ecx.host.beneficiary().into_word());
 }
 
 #[unsafe(no_mangle)]
@@ -568,7 +558,7 @@ pub unsafe extern "C" fn __revmc_builtin_log(
 
     let mut topics = Vec::with_capacity(n as usize);
     for i in 1..=n {
-        topics.push(sp.sub(i as usize).read().to_be_bytes().into());
+        topics.push(sp.sub(i as usize).read().to_be_bytes());
     }
 
     ecx.host.log(Log {
@@ -829,24 +819,13 @@ pub unsafe extern "C" fn __revmc_builtin_selfdestruct(
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn __revmc_builtin_resize_memory(
-    ecx: &mut EvmContext<'_>,
-    new_size: usize,
-) -> InstructionResult {
-    resize_memory(ecx, new_size)
-}
-
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn __revmc_builtin_mload(
     ecx: &mut EvmContext<'_>,
     rev![offset_ptr]: &mut [EvmWord; 1],
 ) -> InstructionResult {
     let offset = try_into_usize!(offset_ptr);
     ensure_memory!(ecx, offset, 32);
-    let slice = ecx.memory.slice(offset..offset + 32);
-    let mut word = [0u8; 32];
-    word.copy_from_slice(&slice);
-    *offset_ptr = EvmWord::from_be_bytes(word);
+    *offset_ptr = EvmWord::from_be_slice(&ecx.memory.slice(offset..offset + 32));
     InstructionResult::Stop
 }
 
@@ -857,7 +836,7 @@ pub unsafe extern "C" fn __revmc_builtin_mstore(
 ) -> InstructionResult {
     let offset = try_into_usize!(offset);
     ensure_memory!(ecx, offset, 32);
-    ecx.memory.set(offset, &value.to_be_bytes());
+    ecx.memory.set(offset, value.to_be_bytes().as_ref());
     InstructionResult::Stop
 }
 
@@ -868,7 +847,6 @@ pub unsafe extern "C" fn __revmc_builtin_mstore8(
 ) -> InstructionResult {
     let offset = try_into_usize!(offset);
     ensure_memory!(ecx, offset, 1);
-    let byte = value.to_be_bytes()[31];
-    ecx.memory.set(offset, &[byte]);
+    ecx.memory.set(offset, &[value.to_u256().byte(0)]);
     InstructionResult::Stop
 }

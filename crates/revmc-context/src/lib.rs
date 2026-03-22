@@ -10,9 +10,9 @@ use core::{fmt, mem::MaybeUninit, ptr};
 use revm_interpreter::{
     Gas, Host, InputsImpl, InstructionResult, Interpreter, InterpreterAction, InterpreterResult,
     SharedMemory,
-    interpreter_types::{Jumps, ReturnData},
+    interpreter_types::{Jumps, LegacyBytecode, ReturnData},
 };
-use revm_primitives::{Address, Bytes, U256, ruint};
+use revm_primitives::{Address, B256, Bytes, U256, ruint};
 
 #[cfg(feature = "host-ext-any")]
 use core::any::Any;
@@ -78,8 +78,6 @@ impl<'a> EvmContext<'a> {
         interpreter: &'a mut Interpreter,
         host: &'b mut dyn HostExt,
     ) -> (Self, &'a mut EvmStack, &'a mut usize) {
-        use revm_interpreter::interpreter_types::LegacyBytecode;
-
         let (stack, stack_len) = EvmStack::from_interpreter_stack(&mut interpreter.stack);
         let bytecode_slice = interpreter.bytecode.bytecode_slice();
         let resume_at = ResumeAt::load(interpreter.bytecode.pc(), bytecode_slice);
@@ -148,7 +146,7 @@ impl dyn HostExt {
 /// use revmc_context::{EvmCompilerFn, extern_revmc};
 ///
 /// extern_revmc! {
-///    /// A simple function that returns `Continue`.
+///    /// A simple function.
 ///    pub fn test_fn;
 /// }
 ///
@@ -399,8 +397,9 @@ impl EvmStack {
     ///
     /// See [`from_vec`](Self::from_vec).
     #[inline]
-    pub const unsafe fn from_ptr(ptr: *const EvmWord) -> &'static Self {
-        &*ptr.cast::<Self>()
+    pub unsafe fn from_ptr<'a>(ptr: *const EvmWord) -> &'a Self {
+        debug_assert!(ptr.is_aligned());
+        unsafe { &*ptr.cast::<Self>() }
     }
 
     /// Creates a stack from a mutable pointer to a buffer.
@@ -409,8 +408,9 @@ impl EvmStack {
     ///
     /// See [`from_mut_vec`](Self::from_mut_vec).
     #[inline]
-    pub unsafe fn from_mut_ptr(ptr: *mut EvmWord) -> &'static mut Self {
-        &mut *ptr.cast::<Self>()
+    pub unsafe fn from_mut_ptr<'a>(ptr: *mut EvmWord) -> &'a mut Self {
+        debug_assert!(ptr.is_aligned());
+        unsafe { &mut *ptr.cast::<Self>() }
     }
 
     /// Returns a pointer to the stack.
@@ -428,14 +428,14 @@ impl EvmStack {
     /// Returns a slice of the stack.
     #[inline]
     pub fn as_slice(&self) -> &[EvmWord] {
-        // SAFETY: EvmWord is repr(C) and same layout as [u8; 32]
+        // SAFETY: EvmWord is repr(C) and same layout as B256.
         unsafe { core::slice::from_raw_parts(self.as_ptr(), Self::CAPACITY) }
     }
 
     /// Returns a mutable slice of the stack.
     #[inline]
     pub fn as_mut_slice(&mut self) -> &mut [EvmWord] {
-        // SAFETY: EvmWord is repr(C) and same layout as [u8; 32]
+        // SAFETY: EvmWord is repr(C) and same layout as B256.
         unsafe { core::slice::from_raw_parts_mut(self.as_mut_ptr(), Self::CAPACITY) }
     }
 
@@ -536,8 +536,7 @@ impl EvmStack {
 /// An EVM stack word, which is stored in native-endian order.
 #[repr(C, align(8))]
 #[derive(Clone, Copy, PartialEq, Eq)]
-#[allow(missing_debug_implementations)]
-pub struct EvmWord([u8; 32]);
+pub struct EvmWord(B256);
 
 impl Default for EvmWord {
     #[inline]
@@ -548,11 +547,13 @@ impl Default for EvmWord {
 
 impl fmt::Debug for EvmWord {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "0x")?;
-        for byte in &self.to_be_bytes() {
-            write!(f, "{byte:02x}")?;
-        }
-        Ok(())
+        self.to_u256().fmt(f)
+    }
+}
+
+impl fmt::Display for EvmWord {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.to_u256().fmt(f)
     }
 }
 
@@ -592,23 +593,35 @@ impl From<U256> for EvmWord {
 
 impl EvmWord {
     /// Zero.
-    pub const ZERO: Self = Self([0; 32]);
+    pub const ZERO: Self = Self(B256::ZERO);
 
     /// Create a new word from big-endian bytes.
     #[inline]
-    pub fn from_be_bytes(bytes: [u8; 32]) -> Self {
+    pub const fn from_be_bytes(bytes: B256) -> Self {
         Self::from_be(Self(bytes))
+    }
+
+    /// Create a new word from big-endian bytes.
+    #[inline]
+    pub const fn from_be_slice(bytes: &[u8]) -> Self {
+        Self::from_u256(U256::from_be_slice(bytes))
     }
 
     /// Create a new word from little-endian bytes.
     #[inline]
-    pub fn from_le_bytes(bytes: [u8; 32]) -> Self {
+    pub const fn from_le_bytes(bytes: B256) -> Self {
         Self::from_le(Self(bytes))
+    }
+
+    /// Create a new word from little-endian slice.
+    #[inline]
+    pub const fn from_le_slice(bytes: &[u8]) -> Self {
+        Self::from_u256(U256::from_le_slice(bytes))
     }
 
     /// Create a new word from native-endian bytes.
     #[inline]
-    pub const fn from_ne_bytes(bytes: [u8; 32]) -> Self {
+    pub const fn from_ne_bytes(bytes: B256) -> Self {
         Self(bytes)
     }
 
@@ -618,12 +631,12 @@ impl EvmWord {
         #[cfg(target_endian = "little")]
         return unsafe { core::mem::transmute::<U256, Self>(u) };
         #[cfg(target_endian = "big")]
-        return Self(u.to_be_bytes());
+        return Self(B256::new(u.to_be_bytes()));
     }
 
     /// Converts a big-endian representation into a native one.
     #[inline]
-    pub fn from_be(x: Self) -> Self {
+    pub const fn from_be(x: Self) -> Self {
         #[cfg(target_endian = "little")]
         return x.swap_bytes();
         #[cfg(target_endian = "big")]
@@ -632,7 +645,7 @@ impl EvmWord {
 
     /// Converts a little-endian representation into a native one.
     #[inline]
-    pub fn from_le(x: Self) -> Self {
+    pub const fn from_le(x: Self) -> Self {
         #[cfg(target_endian = "little")]
         return x;
         #[cfg(target_endian = "big")]
@@ -641,26 +654,26 @@ impl EvmWord {
 
     /// Return the memory representation of this integer as a byte array in big-endian byte order.
     #[inline]
-    pub fn to_be_bytes(self) -> [u8; 32] {
+    pub const fn to_be_bytes(self) -> B256 {
         self.to_be().to_ne_bytes()
     }
 
     /// Return the memory representation of this integer as a byte array in little-endian byte
     /// order.
     #[inline]
-    pub fn to_le_bytes(self) -> [u8; 32] {
+    pub const fn to_le_bytes(self) -> B256 {
         self.to_le().to_ne_bytes()
     }
 
     /// Return the memory representation of this integer as a byte array in native byte order.
     #[inline]
-    pub const fn to_ne_bytes(self) -> [u8; 32] {
+    pub const fn to_ne_bytes(self) -> B256 {
         self.0
     }
 
     /// Converts `self` to big endian from the target's endianness.
     #[inline]
-    pub fn to_be(self) -> Self {
+    pub const fn to_be(self) -> Self {
         #[cfg(target_endian = "little")]
         return self.swap_bytes();
         #[cfg(target_endian = "big")]
@@ -669,7 +682,7 @@ impl EvmWord {
 
     /// Converts `self` to little endian from the target's endianness.
     #[inline]
-    pub fn to_le(self) -> Self {
+    pub const fn to_le(self) -> Self {
         #[cfg(target_endian = "little")]
         return self;
         #[cfg(target_endian = "big")]
@@ -678,8 +691,8 @@ impl EvmWord {
 
     /// Reverses the byte order of the integer.
     #[inline]
-    pub fn swap_bytes(mut self) -> Self {
-        self.0.reverse();
+    pub const fn swap_bytes(mut self) -> Self {
+        self.0.0.reverse();
         self
     }
 
@@ -693,7 +706,7 @@ impl EvmWord {
     /// Casts this value to a [`U256`]. This is a no-op on little-endian systems.
     #[cfg(target_endian = "little")]
     #[inline]
-    pub fn as_u256_mut(&mut self) -> &mut U256 {
+    pub const fn as_u256_mut(&mut self) -> &mut U256 {
         unsafe { &mut *(self as *mut Self as *mut U256) }
     }
 
@@ -703,7 +716,7 @@ impl EvmWord {
         #[cfg(target_endian = "little")]
         return *self.as_u256();
         #[cfg(target_endian = "big")]
-        return U256::from_be_bytes(self.0);
+        return U256::from_be_bytes(self.0.0);
     }
 
     /// Converts this value to a [`U256`]. This is a no-op on little-endian systems.
@@ -712,13 +725,13 @@ impl EvmWord {
         #[cfg(target_endian = "little")]
         return unsafe { core::mem::transmute::<Self, U256>(self) };
         #[cfg(target_endian = "big")]
-        return U256::from_be_bytes(self.0);
+        return U256::from_be_bytes(self.0.0);
     }
 
     /// Converts this value to an [`Address`].
     #[inline]
     pub fn to_address(self) -> Address {
-        Address::from_word(self.to_be_bytes().into())
+        Address::from_word(self.to_be_bytes())
     }
 }
 
@@ -779,8 +792,8 @@ mod tests {
 
     #[test]
     fn extern_macro() {
-        let _f1 = EvmCompilerFn::new(test_fn);
-        let _f2 = EvmCompilerFn::new(__test_fn);
-        assert_eq!(test_fn as *const () as usize, __test_fn as *const () as usize);
+        let f1 = EvmCompilerFn::new(test_fn).0;
+        let f2 = EvmCompilerFn::new(__test_fn).0;
+        assert!(core::ptr::fn_addr_eq(f1, f2), "{f1:?} != {f2:?}");
     }
 }

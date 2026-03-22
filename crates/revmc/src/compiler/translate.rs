@@ -18,7 +18,7 @@ pub(super) struct FcxConfig {
     pub(super) debug_assertions: bool,
     pub(super) frame_pointers: bool,
 
-    pub(super) local_stack: bool,
+    pub(super) debug: bool,
     pub(super) inspect_stack_length: bool,
     pub(super) stack_bound_checks: bool,
     pub(super) gas_metering: bool,
@@ -30,7 +30,7 @@ impl Default for FcxConfig {
             debug_assertions: cfg!(debug_assertions),
             comments: false,
             frame_pointers: cfg!(debug_assertions),
-            local_stack: false,
+            debug: false,
             inspect_stack_length: false,
             stack_bound_checks: true,
             gas_metering: true,
@@ -73,6 +73,9 @@ pub(super) struct FunctionCx<'a, B: Backend> {
     /// The stack value. Constant throughout the function, either passed in the arguments as a
     /// pointer or allocated locally.
     stack: Pointer<B::Builder<'a>>,
+    /// The stack argument pointer. Only used when `local_stack` is enabled and the stack needs
+    /// to be copied in/out at entry/exit boundaries.
+    sp_arg: Option<B::Value>,
     /// The amount of gas remaining. `i64`. See `Gas`.
     gas_remaining: Pointer<B::Builder<'a>>,
     /// The input. Constant throughout the function.
@@ -86,6 +89,8 @@ pub(super) struct FunctionCx<'a, B: Backend> {
 
     /// The bytecode being translated.
     bytecode: &'a Bytecode<'a>,
+    /// Instruction index to 1-based line number in bytecode.txt (for debug info).
+    inst_lines: Vec<u32>,
     /// All entry blocks for each instruction.
     inst_entries: Vec<B::BasicBlock>,
     /// The current instruction being translated.
@@ -145,7 +150,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     ///             _ => unreachable, // Assumed to be valid.
     ///         };
     ///     };
-    ///     
+    ///
     ///     op.inst0: { /* ... */ };
     ///     op.inst1: { /* ... */ };
     ///     // ...
@@ -183,6 +188,11 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     ) -> Result<()> {
         let entry_block = bcx.current_block().unwrap();
 
+        // Clear debug location for prologue code.
+        if config.debug {
+            bcx.clear_debug_location();
+        }
+
         // Get common types.
         let ptr_type = bcx.type_ptr();
         let isize_type = bcx.type_ptr_sized_int();
@@ -200,8 +210,13 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         };
 
         let sp_arg = bcx.fn_param(1);
-        let stack = if config.local_stack {
-            bcx.new_stack_slot(word_type, "stack.addr")
+        // Use a local alloca for the stack to allow the backend to eliminate dead stores to
+        // stack slots above `stack_len` at function exit (e.g. `PUSH0 POP`).
+        // Disabled when `inspect_stack_length` is set because the caller observes every store.
+        let local_stack = !config.inspect_stack_length;
+        let stack = if local_stack {
+            let stack_type = bcx.type_array(word_type, STACK_CAP as u32);
+            bcx.new_stack_slot(stack_type, "stack.addr")
         } else {
             Pointer::new_address(word_type, sp_arg)
         };
@@ -242,6 +257,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             i8_type,
             stack_len,
             stack,
+            sp_arg: local_stack.then_some(sp_arg),
             gas_remaining,
             input,
             ecx,
@@ -250,6 +266,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             bcx,
 
             bytecode,
+            inst_lines: if config.debug { bytecode.take_inst_lines() } else { Vec::new() },
             inst_entries,
             current_inst: usize::MAX,
 
@@ -281,7 +298,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 "gas metering is enabled",
             );
             fx.pointer_panic_with_bool(
-                !config.local_stack,
+                !local_stack,
                 sp_arg,
                 "stack pointer",
                 "local stack is disabled",
@@ -309,6 +326,11 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         // Translate individual instructions into their respective blocks.
         for (inst, _) in bytecode.iter_insts() {
             fx.translate_inst(inst)?;
+        }
+
+        // Clear debug location for all synthetic / epilogue blocks.
+        if config.debug {
+            fx.bcx.clear_debug_location();
         }
 
         // Finalize the dynamic jump table.
@@ -347,6 +369,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             if config.inspect_stack_length {
                 let stack_len = fx.bcx.load(fx.isize_type, stack_len_arg, "stack_len");
                 fx.stack_len.store(&mut fx.bcx, stack_len);
+                fx.copy_stack_from_arg(stack_len);
             } else {
                 fx.stack_len.store_imm(&mut fx.bcx, 0);
             }
@@ -375,7 +398,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
                 fx.bcx.switch_to_block(post_entry_block);
                 let resume_at = get_ecx_resume_at_ptr(&mut fx);
-                let resume_at = fx.bcx.load(resume_ty, resume_at, "ecx.resume_at");
+                let resume_at = fx.bcx.load_aligned(resume_ty, resume_at, 1, "ecx.resume_at");
                 let no_resume = match kind {
                     ResumeKind::Blocks => fx.bcx.is_null(resume_at),
                     ResumeKind::Indexes => fx.bcx.icmp_imm(IntCC::Equal, resume_at, 0),
@@ -390,6 +413,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 fx.bcx.switch_to_block(resume_block);
                 let stack_len = fx.bcx.load(fx.isize_type, stack_len_arg, "stack_len");
                 fx.stack_len.store(&mut fx.bcx, stack_len);
+                fx.copy_stack_from_arg(stack_len);
                 match kind {
                     ResumeKind::Blocks => {
                         fx.bcx.br_indirect(resume_at, &fx.resume_blocks);
@@ -416,7 +440,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 fx.bcx.switch_to_block(fx.suspend_block);
                 let resume_value = fx.bcx.phi(resume_ty, &fx.suspend_blocks);
                 let resume_at = get_ecx_resume_at_ptr(&mut fx);
-                fx.bcx.store(resume_value, resume_at);
+                fx.bcx.store_aligned(resume_value, resume_at, 1);
 
                 // Signal that execution suspended - caller checks next_action for Call/Create
                 fx.build_return_imm(InstructionResult::Stop);
@@ -450,6 +474,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         if !fx.incoming_returns.is_empty() {
             let return_value = fx.bcx.phi(fx.i8_type, &fx.incoming_returns);
             if stack_length_observable {
+                fx.copy_stack_to_arg();
                 fx.save_stack_len();
             }
             fx.bcx.ret(&[return_value]);
@@ -469,6 +494,10 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let opcode = data.opcode;
         let entry_block = self.inst_entries[inst];
         self.bcx.switch_to_block(entry_block);
+
+        if self.config.debug {
+            self.bcx.set_debug_location(self.inst_lines[inst], 1);
+        }
 
         // self.call_printf(format_printf!("{}\n", self.op_block_name("")), &[]);
 
@@ -639,8 +668,10 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             // `@[endian]` is the endianness of the value. If native, omit it.
             ($field:ident; @load $(@[endian = $endian:tt])? $ty:expr, $($paths:path),*; $($spec:tt).*) => {{
                 let ptr = field!($field; @get $($paths),*; $($spec).*);
+                // Use align=1 because the pointer comes from a byte-offset GEP and may not
+                // satisfy the type's natural alignment.
                 #[allow(unused_mut)]
-                let mut value = self.bcx.load($ty, ptr, stringify!($field.$($spec).*));
+                let mut value = self.bcx.load_aligned($ty, ptr, 1, stringify!($field.$($spec).*));
                 $(
                     if !cfg!(target_endian = $endian) {
                         value = self.bcx.bswap(value);
@@ -1207,6 +1238,28 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         self.bcx.store(len, ptr);
     }
 
+    /// Copies the live prefix of the stack from the argument to the local alloca.
+    /// `len` is the number of live stack elements.
+    fn copy_stack_from_arg(&mut self, len: B::Value) {
+        if let Some(src) = self.sp_arg {
+            let dst = self.stack.addr(&mut self.bcx);
+            let word_size = 32i64;
+            let byte_len = self.bcx.imul_imm(len, word_size);
+            self.bcx.memcpy(dst, src, byte_len);
+        }
+    }
+
+    /// Copies the live prefix of the stack from the local alloca to the argument.
+    fn copy_stack_to_arg(&mut self) {
+        if let Some(dst) = self.sp_arg {
+            let len = self.stack_len.load(&mut self.bcx, "stack_len");
+            let src = self.stack.addr(&mut self.bcx);
+            let word_size = 32i64;
+            let byte_len = self.bcx.imul_imm(len, word_size);
+            self.bcx.memcpy(dst, src, byte_len);
+        }
+    }
+
     /// Returns the stack length argument.
     fn stack_len_arg(&mut self) -> B::Value {
         self.bcx.fn_param(2)
@@ -1604,11 +1657,15 @@ impl<B: Backend> FunctionCx<'_, B> {
 
         debug_assert_eq!(args.len(), arg_types.len());
         let linkage = revmc_backend::Linkage::Private;
-        let this = unsafe { std::mem::transmute::<&mut Self, &mut Self>(self) };
+        // SAFETY: `this` aliases `self` to work around the borrow checker: we need `self.bcx`
+        // borrowed by `get_or_build_function` while also swapping `self.bcx` inside the closure.
+        // The closure's `bcx` is a fresh builder (not `self.bcx`), so the swap is safe.
+        let this = unsafe { &mut *(self as *mut Self) };
         let f = self.bcx.get_or_build_function(name, arg_types, ret, linkage, |bcx| {
             let prev_return_block = this.return_block.take();
             let prev_failure_block = this.failure_block.take();
-            mem::swap(&mut this.bcx, bcx);
+            // SAFETY: `this.bcx` and `bcx` are non-overlapping (bcx is a fresh builder).
+            unsafe { std::ptr::swap(&mut this.bcx, bcx) };
 
             for attr in default_attrs::for_fn().chain(std::iter::once(Attribute::NoUnwind)) {
                 this.bcx.add_function_attribute(None, attr, FunctionAttributeLocation::Function)
@@ -1620,7 +1677,8 @@ impl<B: Backend> FunctionCx<'_, B> {
             }
             build(this);
 
-            mem::swap(&mut this.bcx, bcx);
+            // SAFETY: same as above.
+            unsafe { std::ptr::swap(&mut this.bcx, bcx) };
             this.failure_block = prev_failure_block;
             this.return_block = prev_return_block;
         });
