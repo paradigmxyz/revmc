@@ -37,6 +37,39 @@ impl Bytecode<'_> {
         }
         BlockInfo { blocks, inst_to_block }
     }
+
+    /// Returns a mapping from instruction index to 1-based line number in the `bytecode.txt` dump.
+    ///
+    /// The line numbers correspond to the output of the `Display` implementation.
+    pub(crate) fn inst_to_line_map(&self) -> Vec<u32> {
+        let info = self.collect_blocks();
+        let mut map = vec![0u32; self.insts.len()];
+
+        // Line 1: header comment, line 2: blank.
+        let mut line = 3u32;
+
+        for &(_block_idx, first_inst, last_inst) in &info.blocks {
+            // Blank line between blocks.
+            if first_inst > 0 {
+                line += 1;
+            }
+            // Block header line.
+            line += 1;
+
+            // Instructions.
+            for (inst, data) in
+                self.iter_all_insts().skip(first_inst).take(last_inst - first_inst + 1)
+            {
+                if data.is_dead_code() {
+                    continue;
+                }
+                map[inst] = line;
+                line += 1;
+            }
+        }
+
+        map
+    }
 }
 
 impl fmt::Display for Bytecode<'_> {
@@ -145,39 +178,6 @@ impl fmt::Display for Bytecode<'_> {
         }
 
         Ok(())
-    }
-}
-
-impl Bytecode<'_> {
-    /// Returns a mapping from instruction index to 1-based line number in the `bytecode.txt` dump.
-    ///
-    /// The line numbers correspond to the output of the `Display` implementation.
-    pub(crate) fn inst_to_line_map(&self) -> Vec<u32> {
-        let info = self.collect_blocks();
-        let mut map = vec![0u32; self.insts.len()];
-
-        // Line 1: header comment, line 2: blank.
-        let mut line = 3u32;
-
-        for &(_block_idx, first_inst, last_inst) in &info.blocks {
-            // Blank line between blocks.
-            if first_inst > 0 {
-                line += 1;
-            }
-            // Block header line.
-            line += 1;
-
-            // Instructions.
-            for (inst, data) in self.iter_all_insts().skip(first_inst).take(last_inst - first_inst + 1) {
-                if data.is_dead_code() {
-                    continue;
-                }
-                map[inst] = line;
-                line += 1;
-            }
-        }
-
-        map
     }
 }
 
