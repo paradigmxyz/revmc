@@ -761,16 +761,6 @@ mod tests {
     }
 
     #[test]
-    fn revert_remote_sub_call_storage_oog_deployer() {
-        // The 1289-byte deployer contract from the RevertRemoteSubCallStorageOOG
-        // state test. This contract creates a child via CREATE.
-        let bytecode = analyze_bytecode(include_str!(
-            "../../../../tests/GeneralStateTests/stRevertTest/RevertRemoteSubCallStorageOOG.hex"
-        ));
-        eprintln!("{bytecode}");
-    }
-
-    #[test]
     fn revert_remote_sub_call_storage_oog() {
         let bytecode = analyze_bytecode(
             "608060405234801561001057600080fd5b506004361061002b5760003560e01c806373027f6d14\
