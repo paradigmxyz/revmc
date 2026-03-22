@@ -17,7 +17,7 @@ use revm_interpreter::{
     host::LoadError,
     interpreter_types::{InputsTr, MemoryTr},
 };
-use revm_primitives::{Bytes, KECCAK_EMPTY, Log, LogData, U256, hardfork::SpecId};
+use revm_primitives::{B256, Bytes, KECCAK_EMPTY, Log, LogData, U256, hardfork::SpecId};
 use revmc_context::{EvmContext, EvmWord};
 
 pub mod gas;
@@ -172,29 +172,27 @@ pub unsafe extern "C" fn __revmc_builtin_origin(ecx: &mut EvmContext<'_>, slot: 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __revmc_builtin_calldataload(
     ecx: &mut EvmContext<'_>,
-    offset: &mut EvmWord,
+    offset_ptr: &mut EvmWord,
 ) {
-    let offset_usize = as_usize_saturated!(offset.to_u256());
-    let mut word = [0u8; 32];
-
-    match ecx.input.input() {
-        CallInput::Bytes(bytes) => {
-            let len = bytes.len().saturating_sub(offset_usize).min(32);
-            if len > 0 && offset_usize < bytes.len() {
-                word[..len].copy_from_slice(&bytes[offset_usize..offset_usize + len]);
-            }
-        }
-        CallInput::SharedBuffer(range) => {
-            let input_slice = ecx.memory.global_slice(range.clone());
-            let input_len = input_slice.len();
-            if offset_usize < input_len {
-                let count = 32.min(input_len - offset_usize);
-                word[..count].copy_from_slice(&input_slice[offset_usize..offset_usize + count]);
-            }
-        }
+    let mut word = B256::ZERO;
+    let offset = as_usize_saturated!(offset_ptr.to_u256());
+    let input = ecx.input.input();
+    let input_len = input.len();
+    if offset < input_len {
+        let count = 32.min(input_len - offset);
+        let input = match ecx.input.input() {
+            CallInput::Bytes(bytes) => &bytes[..],
+            CallInput::SharedBuffer(range) => &*ecx.memory.global_slice(range.clone()),
+        };
+        // SAFETY: `count` is bounded by the calldata length.
+        // This is `word[..count].copy_from_slice(input[offset..offset + count])`, written using
+        // raw pointers as apparently the compiler cannot optimize the slice version, and using
+        // `get_unchecked` twice is uglier.
+        unsafe {
+            core::ptr::copy_nonoverlapping(input.as_ptr().add(offset), word.as_mut_ptr(), count)
+        };
     }
-
-    *offset = EvmWord::from_be_bytes(word);
+    *offset_ptr = EvmWord::from_be_bytes(word.0);
 }
 
 #[unsafe(no_mangle)]
