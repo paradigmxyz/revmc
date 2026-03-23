@@ -1,7 +1,7 @@
 //! Runtime configuration.
 
 use crate::runtime::storage::ArtifactStore;
-use std::{sync::Arc, time::Duration};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 /// Runtime configuration.
 #[allow(missing_debug_implementations)]
@@ -23,6 +23,14 @@ pub struct RuntimeConfig {
 
     /// Tuning knobs.
     pub tuning: RuntimeTuning,
+
+    /// Base directory for compiler debug dumps.
+    ///
+    /// When set, the compiler dumps IR, assembly, and bytecode for each compiled contract
+    /// to `{dump_dir}/{spec_id}/{code_hash}/`.
+    ///
+    /// Defaults to `None` (no dumps).
+    pub dump_dir: Option<PathBuf>,
 }
 
 impl Default for RuntimeConfig {
@@ -32,6 +40,7 @@ impl Default for RuntimeConfig {
             thread_name: "revmc-coordinator".into(),
             store: None,
             tuning: RuntimeTuning::default(),
+            dump_dir: None,
         }
     }
 }

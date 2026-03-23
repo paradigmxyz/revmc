@@ -10,7 +10,10 @@
 use crate::{EvmCompilerFn, runtime::storage::RuntimeCacheKey};
 use alloy_primitives::Bytes;
 use crossbeam_channel as chan;
-use std::sync::{Arc, Condvar, Mutex};
+use std::{
+    path::PathBuf,
+    sync::{Arc, Condvar, Mutex},
+};
 
 /// Notifier for synchronous compilation requests.
 ///
@@ -156,7 +159,9 @@ impl WorkerPool {
         job_queue_capacity: usize,
         result_tx: chan::Sender<WorkerResult>,
         opt_level: crate::OptimizationLevel,
+        dump_dir: Option<PathBuf>,
     ) -> Self {
+        let dump_dir = dump_dir.map(Arc::new);
         let mut job_txs = Vec::with_capacity(worker_count);
         let mut threads = Vec::with_capacity(worker_count);
         let mut backings = Vec::with_capacity(worker_count);
@@ -166,11 +171,19 @@ impl WorkerPool {
             let result_tx = result_tx.clone();
             let backing = Arc::new(WorkerBacking::new());
             let backing_for_worker = Arc::clone(&backing);
+            let dump_dir = dump_dir.clone();
 
             let thread = std::thread::Builder::new()
                 .name(format!("revmc-{worker_id:02}"))
                 .spawn(move || {
-                    worker_loop(worker_id, job_rx, result_tx, opt_level, &backing_for_worker);
+                    worker_loop(
+                        worker_id,
+                        job_rx,
+                        result_tx,
+                        opt_level,
+                        &backing_for_worker,
+                        dump_dir.as_deref().map(|p| p.as_path()),
+                    );
                 })
                 .expect("failed to spawn compile worker");
 
@@ -239,6 +252,7 @@ fn worker_loop(
     result_tx: chan::Sender<WorkerResult>,
     opt_level: crate::OptimizationLevel,
     backing: &WorkerBacking,
+    dump_dir: Option<&std::path::Path>,
 ) {
     use crate::{EvmCompiler, EvmLlvmBackend};
 
@@ -258,6 +272,14 @@ fn worker_loop(
             WorkerJob::Jit(job) => {
                 let span = tracing::info_span!("jit_compile", %job.key.code_hash, ?job.key.spec_id);
                 let _enter = span.enter();
+
+                if let Some(base) = dump_dir {
+                    let dir = base
+                        .join(format!("{:?}", job.key.spec_id))
+                        .join(format!("{}", job.key.code_hash));
+                    let _ = std::fs::create_dir_all(&dir);
+                    jit_compiler.set_dump_to(Some(dir));
+                }
 
                 let result = unsafe {
                     jit_compiler.jit(&job.symbol_name, &job.bytecode[..], job.key.spec_id)
@@ -358,6 +380,7 @@ fn worker_loop(
     result_tx: chan::Sender<WorkerResult>,
     _opt_level: crate::OptimizationLevel,
     backing: &WorkerBacking,
+    _dump_dir: Option<&std::path::Path>,
 ) {
     debug!(worker_id, "compile worker started (no LLVM, all jobs will fail)");
 

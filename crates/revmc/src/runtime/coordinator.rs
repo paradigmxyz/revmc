@@ -465,6 +465,7 @@ pub(crate) fn run(
     resident: Arc<ResidentMap>,
     store: Option<Arc<dyn ArtifactStore>>,
     tuning: RuntimeTuning,
+    dump_dir: Option<std::path::PathBuf>,
 ) {
     debug!("coordinator thread started");
 
@@ -475,6 +476,7 @@ pub(crate) fn run(
         tuning.jit_worker_queue_capacity,
         result_tx,
         tuning.jit_opt_level,
+        dump_dir,
     );
 
     let mut state = CoordinatorState {

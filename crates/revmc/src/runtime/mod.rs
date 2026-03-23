@@ -99,12 +99,13 @@ impl JitBackend {
 
         let tuning = config.tuning;
         let store = config.store.clone();
+        let dump_dir = config.dump_dir;
         let resident_for_coord = Arc::clone(&resident);
 
         let thread = std::thread::Builder::new()
             .name(config.thread_name)
             .spawn(move || {
-                coordinator::run(rx, resident_for_coord, store, tuning);
+                coordinator::run(rx, resident_for_coord, store, tuning, dump_dir);
                 let _ = done_tx.send(());
             })
             .wrap_err("failed to spawn coordinator")?;
