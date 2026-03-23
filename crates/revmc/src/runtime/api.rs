@@ -53,6 +53,8 @@ pub struct CompiledProgram {
     pub kind: ProgramKind,
     /// The callable compiled function.
     pub func: EvmCompilerFn,
+    /// Approximate size in bytes of the compiled code backing this program.
+    pub approx_size_bytes: usize,
     /// Keeps the backing memory (shared library / JIT module) alive.
     _backing: ProgramBacking,
 }
@@ -73,8 +75,15 @@ impl CompiledProgram {
         key: RuntimeCacheKey,
         func: EvmCompilerFn,
         library: Arc<LoadedLibrary>,
+        approx_size_bytes: usize,
     ) -> Self {
-        Self { key, kind: ProgramKind::Aot, func, _backing: ProgramBacking::LoadedLibrary(library) }
+        Self {
+            key,
+            kind: ProgramKind::Aot,
+            func,
+            approx_size_bytes,
+            _backing: ProgramBacking::LoadedLibrary(library),
+        }
     }
 
     /// Creates a new compiled program backed by a JIT worker's compiler.
@@ -82,8 +91,15 @@ impl CompiledProgram {
         key: RuntimeCacheKey,
         func: EvmCompilerFn,
         backing: Arc<WorkerBacking>,
+        approx_size_bytes: usize,
     ) -> Self {
-        Self { key, kind: ProgramKind::Jit, func, _backing: ProgramBacking::JitModule(backing) }
+        Self {
+            key,
+            kind: ProgramKind::Jit,
+            func,
+            approx_size_bytes,
+            _backing: ProgramBacking::JitModule(backing),
+        }
     }
 }
 

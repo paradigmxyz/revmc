@@ -162,6 +162,7 @@ impl WorkerPool {
         result_tx: chan::Sender<WorkerResult>,
         opt_level: crate::OptimizationLevel,
         dump_dir: Option<PathBuf>,
+        debug_assertions: bool,
     ) -> Self {
         let mut job_txs = Vec::with_capacity(worker_count);
         let mut threads = Vec::with_capacity(worker_count);
@@ -184,6 +185,7 @@ impl WorkerPool {
                         opt_level,
                         &backing_for_worker,
                         dump_dir.as_deref(),
+                        debug_assertions,
                     );
                 })
                 .expect("failed to spawn compile worker");
@@ -254,6 +256,7 @@ fn worker_loop(
     opt_level: crate::OptimizationLevel,
     backing: &WorkerBacking,
     dump_dir: Option<&Path>,
+    debug_assertions: bool,
 ) {
     use crate::{EvmCompiler, EvmLlvmBackend};
 
@@ -268,6 +271,7 @@ fn worker_loop(
         }
     };
     let mut jit_compiler = EvmCompiler::new(backend);
+    jit_compiler.debug_assertions(debug_assertions);
 
     while let Ok(job) = job_rx.recv() {
         debug!(?job, "received job");
@@ -384,6 +388,7 @@ fn worker_loop(
     _opt_level: crate::OptimizationLevel,
     backing: &WorkerBacking,
     _dump_dir: Option<&Path>,
+    _debug_assertions: bool,
 ) {
     debug!(worker_id, "compile worker started (no LLVM, all jobs will fail)");
 

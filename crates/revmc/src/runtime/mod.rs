@@ -11,7 +11,7 @@ use crate::{
 };
 use api::LoadedLibrary;
 use coordinator::{
-    Command, CompileJitRequest, LookupObservedEvent, PrepareAotRequest, ResidentMap,
+    Command, CompileJitRequest, LookupObservedEvent, PrepareAotRequest, ResidentBytes, ResidentMap,
 };
 use crossbeam_channel as chan;
 use revm_primitives::{B256, hardfork::SpecId};
@@ -52,6 +52,8 @@ mod tests;
 struct JitBackendInner {
     /// Shared resident compiled map.
     resident: Arc<ResidentMap>,
+    /// Shared atomic counter for total resident bytes.
+    resident_bytes: Arc<ResidentBytes>,
     /// Global enable flag.
     enabled: AtomicBool,
     /// Channel for sending commands to the coordinator thread.
@@ -93,6 +95,7 @@ impl JitBackend {
         );
         let resident = Self::preload_aot(config.store.as_deref())?;
         let resident = Arc::new(resident);
+        let resident_bytes = Arc::new(ResidentBytes::new());
 
         let (tx, rx) = chan::bounded::<Command>(config.tuning.lookup_event_channel_capacity);
         let (done_tx, done_rx) = chan::bounded::<()>(1);
@@ -100,18 +103,29 @@ impl JitBackend {
         let tuning = config.tuning;
         let store = config.store.clone();
         let dump_dir = config.dump_dir;
+        let debug_assertions = config.debug_assertions;
         let resident_for_coord = Arc::clone(&resident);
+        let resident_bytes_for_coord = Arc::clone(&resident_bytes);
 
         let thread = std::thread::Builder::new()
             .name(config.thread_name)
             .spawn(move || {
-                coordinator::run(rx, resident_for_coord, store, tuning, dump_dir);
+                coordinator::run(
+                    rx,
+                    resident_for_coord,
+                    resident_bytes_for_coord,
+                    store,
+                    tuning,
+                    dump_dir,
+                    debug_assertions,
+                );
                 let _ = done_tx.send(());
             })
             .wrap_err("failed to spawn coordinator")?;
 
         let inner = JitBackendInner {
             resident,
+            resident_bytes,
             enabled: AtomicBool::new(config.enabled),
             tx,
             stats: RuntimeStats::default(),
@@ -281,7 +295,9 @@ impl JitBackend {
 
     /// Returns a point-in-time snapshot of runtime statistics.
     pub fn stats(&self) -> RuntimeStatsSnapshot {
-        self.inner.stats.snapshot(self.inner.resident.len() as u64)
+        self.inner
+            .stats
+            .snapshot(self.inner.resident.len() as u64, self.inner.resident_bytes.load() as u64)
     }
 
     /// Preloads AOT artifacts from the store into the resident map.
@@ -346,8 +362,9 @@ impl JitBackend {
             *sym
         };
 
+        let approx_size_bytes = stored.manifest.artifact_len;
         let library = Arc::new(LoadedLibrary::new(library));
-        Ok(CompiledProgram::new_aot(key.runtime.clone(), func, library))
+        Ok(CompiledProgram::new_aot(key.runtime.clone(), func, library, approx_size_bytes))
     }
 }
 

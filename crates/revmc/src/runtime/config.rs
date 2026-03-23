@@ -31,6 +31,14 @@ pub struct RuntimeConfig {
     ///
     /// Defaults to `None` (no dumps).
     pub dump_dir: Option<PathBuf>,
+
+    /// Enable debug assertions in compiled code.
+    ///
+    /// When `true`, the compiler inserts runtime checks (e.g. stack bounds)
+    /// that `panic!` on violation. Useful for diagnosing JIT correctness bugs.
+    ///
+    /// Defaults to `false`.
+    pub debug_assertions: bool,
 }
 
 impl Default for RuntimeConfig {
@@ -41,6 +49,7 @@ impl Default for RuntimeConfig {
             store: None,
             tuning: RuntimeTuning::default(),
             dump_dir: None,
+            debug_assertions: false,
         }
     }
 }
@@ -64,6 +73,16 @@ pub struct RuntimeTuning {
     ///
     /// Defaults to `8`.
     pub jit_hot_threshold: u32,
+
+    /// Maximum bytecode length eligible for JIT compilation.
+    ///
+    /// Contracts with bytecode larger than this are never promoted to JIT.
+    /// Large contracts have diminishing JIT returns and long compile times.
+    ///
+    /// `0` means no limit.
+    ///
+    /// Defaults to `0` (no limit).
+    pub jit_max_bytecode_len: usize,
 
     /// Maximum number of JIT compilation jobs in flight.
     ///
@@ -89,6 +108,32 @@ pub struct RuntimeTuning {
     ///
     /// Defaults to [`OptimizationLevel::Aggressive`](crate::OptimizationLevel::Aggressive).
     pub aot_opt_level: crate::OptimizationLevel,
+
+    /// Maximum total resident compiled code size in bytes.
+    ///
+    /// When the total `approx_size_bytes` of all resident programs exceeds this limit,
+    /// the coordinator evicts the least-recently-used entries until under budget.
+    ///
+    /// `0` means no limit.
+    ///
+    /// Defaults to `0` (no limit).
+    pub resident_code_cache_bytes: usize,
+
+    /// Duration after which a resident program with no lookup hits is evicted.
+    ///
+    /// When a compiled program has not been hit for this duration, the coordinator
+    /// removes it from the resident map. This naturally cleans up stale entries
+    /// after hardfork transitions (old `spec_id` contracts stop being looked up).
+    ///
+    /// `None` means idle eviction is disabled.
+    ///
+    /// Defaults to `None` (disabled).
+    pub idle_evict_duration: Option<Duration>,
+
+    /// How often the coordinator runs eviction sweeps.
+    ///
+    /// Defaults to `60s`.
+    pub eviction_sweep_interval: Duration,
 }
 
 impl Default for RuntimeTuning {
@@ -100,11 +145,15 @@ impl Default for RuntimeTuning {
             lookup_event_channel_capacity: 4096,
             shutdown_timeout: Duration::from_secs(5),
             jit_hot_threshold: 8,
+            jit_max_bytecode_len: 0,
             max_pending_jit_jobs: 2048,
             jit_worker_count: worker_count,
             jit_worker_queue_capacity: 64,
             jit_opt_level: crate::OptimizationLevel::Default,
             aot_opt_level: crate::OptimizationLevel::Aggressive,
+            resident_code_cache_bytes: 0,
+            idle_evict_duration: None,
+            eviction_sweep_interval: Duration::from_secs(60),
         }
     }
 }

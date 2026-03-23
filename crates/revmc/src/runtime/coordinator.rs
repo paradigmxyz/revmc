@@ -15,12 +15,48 @@ use crossbeam_channel as chan;
 use dashmap::DashMap;
 use revmc_backend::Target;
 use std::{
-    sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 /// The resident map type: code_hash+spec_id → compiled program.
 pub(crate) type ResidentMap = DashMap<RuntimeCacheKey, Arc<CompiledProgram>>;
+
+/// Per-entry metadata tracked alongside the resident map for eviction decisions.
+struct ResidentMeta {
+    /// When this entry was last hit by a lookup.
+    last_hit_at: Instant,
+    /// Approximate size in bytes.
+    approx_size_bytes: usize,
+}
+
+/// Shared atomic counter for total resident bytes, readable from stats without coordinator.
+pub(crate) struct ResidentBytes(AtomicUsize);
+
+impl ResidentBytes {
+    pub(crate) fn new() -> Self {
+        Self(AtomicUsize::new(0))
+    }
+
+    pub(crate) fn load(&self) -> usize {
+        self.0.load(Ordering::Relaxed)
+    }
+
+    fn add(&self, bytes: usize) {
+        self.0.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    fn sub(&self, bytes: usize) {
+        self.0.fetch_sub(bytes, Ordering::Relaxed);
+    }
+
+    fn store(&self, val: usize) {
+        self.0.store(val, Ordering::Relaxed);
+    }
+}
 
 /// Commands sent to the coordinator thread.
 pub(crate) enum Command {
@@ -93,6 +129,10 @@ enum EntryPhase {
 struct CoordinatorState {
     /// The shared resident map (handles read, coordinator writes).
     resident: Arc<ResidentMap>,
+    /// Per-key metadata for eviction (coordinator-only).
+    resident_meta: HashMap<RuntimeCacheKey, ResidentMeta>,
+    /// Shared atomic counter for total resident bytes.
+    resident_bytes: Arc<ResidentBytes>,
     /// Per-key tracking state (coordinator-only).
     entries: HashMap<RuntimeCacheKey, EntryState>,
     /// Worker pool for JIT compilation.
@@ -105,16 +145,22 @@ struct CoordinatorState {
     tuning: RuntimeTuning,
     /// Number of keys currently in Working phase.
     pending_jobs: usize,
+    /// Last time an eviction sweep was run.
+    last_sweep: Instant,
     /// JIT stats.
     jit_promotions: u64,
     jit_successes: u64,
     jit_failures: u64,
+    evictions: u64,
 }
 
 impl CoordinatorState {
     fn handle_lookup_observed(&mut self, event: LookupObservedEvent) {
-        // Hits don't need any action.
+        // Update last-hit time for eviction tracking.
         if event.was_hit {
+            if let Some(meta) = self.resident_meta.get_mut(&event.key) {
+                meta.last_hit_at = Instant::now();
+            }
             return;
         }
 
@@ -130,6 +176,12 @@ impl CoordinatorState {
 
         // Skip empty bytecodes.
         if bytecode.is_empty() {
+            return;
+        }
+
+        // Skip bytecodes that exceed the maximum length.
+        if self.tuning.jit_max_bytecode_len > 0 && bytecode.len() > self.tuning.jit_max_bytecode_len
+        {
             return;
         }
 
@@ -263,6 +315,8 @@ impl CoordinatorState {
 
     fn handle_clear_resident(&mut self) {
         self.resident.clear();
+        self.resident_meta.clear();
+        self.resident_bytes.store(0);
         self.entries.clear();
         self.pending_jobs = 0;
         debug!("resident map cleared");
@@ -283,16 +337,41 @@ impl CoordinatorState {
         self.handle_clear_persisted();
     }
 
+    fn insert_resident(&mut self, key: RuntimeCacheKey, program: Arc<CompiledProgram>) {
+        let size = program.approx_size_bytes;
+        self.resident_meta.insert(
+            key.clone(),
+            ResidentMeta { last_hit_at: Instant::now(), approx_size_bytes: size },
+        );
+        self.resident_bytes.add(size);
+        self.resident.insert(key, program);
+    }
+
+    fn remove_resident(&mut self, key: &RuntimeCacheKey) {
+        if let Some((_, _program)) = self.resident.remove(key) {
+            if let Some(meta) = self.resident_meta.remove(key) {
+                self.resident_bytes.sub(meta.approx_size_bytes);
+            }
+        }
+    }
+
     fn handle_worker_result(&mut self, result: WorkerResult) {
         self.pending_jobs = self.pending_jobs.saturating_sub(1);
 
         match result.outcome {
             Ok(WorkerSuccess::Jit(success)) => {
                 let backing = self.workers.backing(result.worker_id);
-                let program =
-                    Arc::new(CompiledProgram::new_jit(result.key.clone(), success.func, backing));
+                // Use the bytecode length as a rough proxy for JIT code size.
+                let approx_size =
+                    self.entries.get(&result.key).map(|e| e.bytecode.len()).unwrap_or(0);
+                let program = Arc::new(CompiledProgram::new_jit(
+                    result.key.clone(),
+                    success.func,
+                    backing,
+                    approx_size,
+                ));
 
-                self.resident.insert(result.key.clone(), program);
+                self.insert_resident(result.key.clone(), program);
                 self.entries.remove(&result.key);
                 self.jit_successes += 1;
 
@@ -386,11 +465,12 @@ impl CoordinatorState {
                                 })?;
                             *sym
                         };
+                        let approx_size_bytes = success.dylib_bytes.len();
                         let library = Arc::new(LoadedLibrary::new(library));
-                        Ok(CompiledProgram::new_aot(key.clone(), func, library))
+                        Ok(CompiledProgram::new_aot(key.clone(), func, library, approx_size_bytes))
                     })() {
                         Ok(program) => {
-                            self.resident.insert(key.clone(), Arc::new(program));
+                            self.insert_resident(key.clone(), Arc::new(program));
                             self.entries.remove(&key);
                             self.jit_successes += 1;
 
@@ -448,15 +528,80 @@ impl CoordinatorState {
             self.jit_failures += 1;
         }
     }
+
+    /// Runs an eviction sweep: removes idle entries and enforces the memory budget.
+    fn run_eviction_sweep(&mut self) {
+        let now = Instant::now();
+        self.last_sweep = now;
+
+        let idle_duration = self.tuning.idle_evict_duration;
+        let budget = self.tuning.resident_code_cache_bytes;
+
+        // Phase 1: evict idle entries.
+        if let Some(idle) = idle_duration {
+            let idle_keys: Vec<RuntimeCacheKey> = self
+                .resident_meta
+                .iter()
+                .filter(|(_, meta)| now.duration_since(meta.last_hit_at) > idle)
+                .map(|(key, _)| key.clone())
+                .collect();
+
+            for key in &idle_keys {
+                debug!(
+                    code_hash = %key.code_hash,
+                    spec_id = ?key.spec_id,
+                    "evicting idle entry",
+                );
+                self.remove_resident(key);
+                self.entries.remove(key);
+                self.evictions += 1;
+            }
+        }
+
+        // Phase 2: enforce memory budget by evicting LRU entries.
+        if budget > 0 && self.resident_bytes.load() > budget {
+            // Collect entries sorted by last_hit_at ascending (oldest first).
+            let mut entries: Vec<(RuntimeCacheKey, Instant, usize)> = self
+                .resident_meta
+                .iter()
+                .map(|(key, meta)| (key.clone(), meta.last_hit_at, meta.approx_size_bytes))
+                .collect();
+            entries.sort_by_key(|(_, t, _)| *t);
+
+            for (key, _, _) in entries {
+                if self.resident_bytes.load() <= budget {
+                    break;
+                }
+                debug!(
+                    code_hash = %key.code_hash,
+                    spec_id = ?key.spec_id,
+                    "evicting entry to stay within memory budget",
+                );
+                self.remove_resident(&key);
+                self.entries.remove(&key);
+                self.evictions += 1;
+            }
+        }
+    }
+
+    /// Returns whether eviction is configured and a sweep is due.
+    fn should_sweep(&self) -> bool {
+        let has_idle = self.tuning.idle_evict_duration.is_some();
+        let has_budget = self.tuning.resident_code_cache_bytes > 0
+            && self.resident_bytes.load() > self.tuning.resident_code_cache_bytes;
+        (has_idle || has_budget) && self.last_sweep.elapsed() >= self.tuning.eviction_sweep_interval
+    }
 }
 
 /// Runs the coordinator event loop. Called on the coordinator thread.
 pub(crate) fn run(
     cmd_rx: chan::Receiver<Command>,
     resident: Arc<ResidentMap>,
+    resident_bytes: Arc<ResidentBytes>,
     store: Option<Arc<dyn ArtifactStore>>,
     tuning: RuntimeTuning,
     dump_dir: Option<std::path::PathBuf>,
+    debug_assertions: bool,
 ) {
     debug!("coordinator thread started");
 
@@ -468,19 +613,26 @@ pub(crate) fn run(
         result_tx,
         tuning.jit_opt_level,
         dump_dir,
+        debug_assertions,
     );
+
+    let sweep_interval = tuning.eviction_sweep_interval;
 
     let mut state = CoordinatorState {
         resident,
+        resident_meta: HashMap::default(),
+        resident_bytes,
         entries: HashMap::default(),
         workers,
         result_rx,
         store,
         tuning,
         pending_jobs: 0,
+        last_sweep: Instant::now(),
         jit_promotions: 0,
         jit_successes: 0,
         jit_failures: 0,
+        evictions: 0,
     };
 
     loop {
@@ -511,6 +663,11 @@ pub(crate) fn run(
                     state.handle_worker_result(result);
                 }
             }
+            default(sweep_interval) => {}
+        }
+
+        if state.should_sweep() {
+            state.run_eviction_sweep();
         }
     }
 
@@ -523,7 +680,9 @@ pub(crate) fn run(
         jit_promotions = state.jit_promotions,
         jit_successes = state.jit_successes,
         jit_failures = state.jit_failures,
+        evictions = state.evictions,
         resident_entries = state.resident.len(),
+        resident_bytes = state.resident_bytes.load(),
         "coordinator stats at shutdown",
     );
 
