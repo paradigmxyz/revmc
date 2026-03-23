@@ -276,6 +276,9 @@ impl<B: Backend> EvmCompiler<B> {
         self.finalize()?;
         let addr = self.backend.jit_function(id)?;
         debug_assert!(addr != 0);
+        if let Some(dump_dir) = &self.dump_dir() {
+            self.append_jit_remarks(dump_dir);
+        }
         Ok(EvmCompilerFn::new(unsafe { std::mem::transmute::<usize, RawEvmCompilerFn>(addr) }))
     }
 
@@ -308,7 +311,7 @@ impl<B: Backend> EvmCompiler<B> {
     /// should only be used when none of the functions from that module are currently executing and
     /// none of the `fn` pointers are called afterwards.
     pub unsafe fn free_function(&mut self, id: B::FuncId) -> Result<()> {
-        self.backend.free_function(id)
+        unsafe { self.backend.free_function(id) }
     }
 
     /// Clears the IR module, freeing memory used by IR representations.
@@ -334,7 +337,7 @@ impl<B: Backend> EvmCompiler<B> {
         self.builtins.clear();
         self.remarks.clear();
         self.finalized = false;
-        self.backend.free_all_functions()
+        unsafe { self.backend.free_all_functions() }
     }
 
     /// Parses the given EVM bytecode. Not public API.
@@ -398,6 +401,12 @@ impl<B: Backend> EvmCompiler<B> {
             if self.dump_assembly && self.dump_unopt_assembly {
                 let path = dump_dir.join("unopt.s");
                 self.dump_disasm(&path)?;
+                if self.config.debug {
+                    let src_path = dump_dir.join("bytecode.txt");
+                    if src_path.exists() {
+                        Self::annotate_asm(&path, &src_path)?;
+                    }
+                }
             }
         } else {
             self.verify_module()?;
@@ -412,6 +421,12 @@ impl<B: Backend> EvmCompiler<B> {
             if self.dump_assembly {
                 let path = dump_dir.join("opt.s");
                 self.dump_disasm(&path)?;
+                if self.config.debug {
+                    let src_path = dump_dir.join("bytecode.txt");
+                    if src_path.exists() {
+                        Self::annotate_asm(&path, &src_path)?;
+                    }
+                }
             }
         }
 
@@ -541,8 +556,48 @@ finalize:   {finalize:>11.3?}
 total:      {total:>11.3?}
 "
         )?;
+
+        // Display sizes of generated files.
+        let mut files: Vec<_> = fs::read_dir(dump_dir)?
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+            .filter(|e| e.file_name() != "remarks.txt")
+            .collect();
+        if !files.is_empty() {
+            files.sort_by_key(|e| e.file_name());
+            writeln!(w)?;
+            writeln!(w, "Generated files")?;
+            writeln!(w, "===============")?;
+            for entry in &files {
+                let name = entry.file_name();
+                let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                writeln!(w, "{}: {}", name.to_string_lossy(), format_size(size))?;
+            }
+        }
+
         w.flush()?;
         Ok(())
+    }
+
+    fn append_jit_remarks(&self, dump_dir: &Path) {
+        let sizes = self.backend.function_sizes();
+        if sizes.is_empty() {
+            return;
+        }
+        let remarks_path = dump_dir.join("remarks.txt");
+        let Ok(mut file) = fs::OpenOptions::new().append(true).open(&remarks_path) else {
+            return;
+        };
+        let total: usize = sizes.iter().map(|(_, s)| *s).sum();
+        let _ = writeln!(file);
+        let _ = writeln!(file, "JIT code sizes (estimated)");
+        let _ = writeln!(file, "==========================");
+        for (name, size) in &sizes {
+            let _ = writeln!(file, "{name}: {}", format_size(*size as u64));
+        }
+        if sizes.len() > 1 {
+            let _ = writeln!(file, "total: {}", format_size(total as u64));
+        }
     }
 
     #[instrument(level = "debug", skip_all)]
@@ -602,16 +657,60 @@ total:      {total:>11.3?}
             return Ok(());
         }
 
-        // Rewrite the file with annotations.
+        // Collect lines and find max width for comment alignment.
+        let annotated: Vec<_> =
+            ir.lines().map(|line| (line, resolve_dbg_line(line, &di_locs, &src_lines))).collect();
+        let comment_col = annotated
+            .iter()
+            .filter_map(|(line, src)| src.is_some().then_some(line.len()))
+            .max()
+            .unwrap_or(0)
+            .min(100);
+
+        // Rewrite the file with aligned annotations.
         let file = fs::File::create(ir_path)?;
         let mut w = io::BufWriter::new(file);
-        for line in ir.lines() {
-            // Find `!dbg !N` in the line.
-            if let Some(src_line) = resolve_dbg_line(line, &di_locs, &src_lines) {
-                writeln!(w, "{line}  ; >> {src_line}")?;
-                continue;
+        for (line, src_line) in &annotated {
+            if let Some(src_line) = src_line {
+                writeln!(w, "{line:<comment_col$} ; >> {src_line}")?;
+            } else {
+                writeln!(w, "{line}")?;
             }
-            writeln!(w, "{line}")?;
+        }
+        w.flush()?;
+        Ok(())
+    }
+
+    /// Rewrites an assembly dump file in-place, replacing `# bytecode.txt:LL:CC` comments
+    /// with the corresponding source line from `bytecode.txt`.
+    fn annotate_asm(asm_path: &Path, src_path: &Path) -> Result<()> {
+        let src = fs::read_to_string(src_path)?;
+        let src_lines: Vec<&str> = src.lines().collect();
+        let asm = fs::read_to_string(asm_path)?;
+
+        let annotated: Vec<_> = asm
+            .lines()
+            .map(|line| {
+                let resolved = resolve_asm_source_line(line, &src_lines);
+                // Strip the original `# bytecode.txt:...` comment when we have a resolved line.
+                let stripped = if resolved.is_some() {
+                    line.find("# bytecode.txt:").map(|pos| line[..pos].trim_end()).unwrap_or(line)
+                } else {
+                    line
+                };
+                (stripped, resolved)
+            })
+            .collect();
+        let comment_col = 40;
+
+        let file = fs::File::create(asm_path)?;
+        let mut w = io::BufWriter::new(file);
+        for (line, src_line) in &annotated {
+            if let Some(src_line) = src_line {
+                writeln!(w, "{line:<comment_col$} # {src_line}")?;
+            } else {
+                writeln!(w, "{line}")?;
+            }
         }
         w.flush()?;
         Ok(())
@@ -701,6 +800,30 @@ mod default_attrs {
     pub(crate) fn size_align<T>() -> (usize, usize) {
         (std::mem::size_of::<T>(), std::mem::align_of::<T>())
     }
+}
+
+fn format_size(bytes: u64) -> String {
+    const KIB: u64 = 1024;
+    const MIB: u64 = 1024 * KIB;
+    if bytes >= MIB {
+        format!("{:.1} MiB", bytes as f64 / MIB as f64)
+    } else if bytes >= KIB {
+        format!("{:.1} KiB", bytes as f64 / KIB as f64)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+/// Resolves a `# bytecode.txt:LL:CC` or `# bytecode.txt:LL` comment in an assembly line
+/// to the corresponding source line.
+fn resolve_asm_source_line<'a>(line: &str, src_lines: &[&'a str]) -> Option<&'a str> {
+    let pos = line.find("# bytecode.txt:")?;
+    let after = &line[pos + "# bytecode.txt:".len()..];
+    let num_len = after.find(|c: char| !c.is_ascii_digit()).unwrap_or(after.len());
+    let line_no: u32 = after[..num_len].parse().ok()?;
+    let idx = line_no.checked_sub(1)? as usize;
+    let src_line = src_lines.get(idx)?.trim();
+    (!src_line.is_empty()).then_some(src_line)
 }
 
 /// Resolves a `!dbg !N` reference in an IR line to the corresponding source line.

@@ -29,6 +29,7 @@ use inkwell::{
         PointerValue,
     },
 };
+use object::{Object, ObjectSymbol};
 use revmc_backend::{
     Backend, BackendTypes, Builder, Error, IntCC, Result, TailCallKind, TypeMethods, U256, eyre,
 };
@@ -477,6 +478,27 @@ impl Backend for EvmLlvmBackend {
         let name = self.id_to_name(id);
         let addr = self.exec_engine().get_function_address(name)?;
         Ok(addr)
+    }
+
+    fn function_sizes(&self) -> Vec<(String, usize)> {
+        let buffer = match self.machine.write_to_memory_buffer(&self.module, FileType::Object) {
+            Ok(buf) => buf,
+            Err(_) => return Vec::new(),
+        };
+        let data = buffer.as_slice();
+        let Ok(obj) = object::File::parse(data) else { return Vec::new() };
+
+        let mut result: Vec<_> = obj
+            .symbols()
+            .filter(|sym| sym.is_definition())
+            .filter_map(|sym| {
+                let name = sym.name().ok()?;
+                self.functions.values().any(|(n, _)| n == name).then_some(())?;
+                Some((name.to_string(), sym.size() as usize))
+            })
+            .collect();
+        result.sort_by_key(|(_, size)| std::cmp::Reverse(*size));
+        result
     }
 
     fn clear_ir(&mut self) -> Result<()> {

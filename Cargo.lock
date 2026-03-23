@@ -3472,6 +3472,7 @@ name = "revmc-llvm"
 version = "0.1.0"
 dependencies = [
  "inkwell",
+ "object",
  "revmc-backend",
  "rustc-hash",
  "tracing",
