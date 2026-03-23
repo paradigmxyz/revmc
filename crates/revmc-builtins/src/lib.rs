@@ -145,10 +145,9 @@ pub unsafe extern "C" fn __revmc_builtin_keccak256(
 pub unsafe extern "C" fn __revmc_builtin_balance(
     ecx: &mut EvmContext<'_>,
     address: &mut EvmWord,
-    spec_id: SpecId,
 ) -> InstructionResult {
     let addr = address.to_address();
-    if spec_id.is_enabled_in(SpecId::BERLIN) {
+    if ecx.spec_id.is_enabled_in(SpecId::BERLIN) {
         // Warm base cost; cold additional charged by the macro if cold.
         gas!(ecx, ecx.host.gas_params().warm_storage_read_cost());
         let account = berlin_load_account!(ecx, addr, false);
@@ -241,10 +240,9 @@ pub unsafe extern "C" fn __revmc_builtin_gas_price(ecx: &mut EvmContext<'_>, slo
 pub unsafe extern "C" fn __revmc_builtin_extcodesize(
     ecx: &mut EvmContext<'_>,
     address: &mut EvmWord,
-    spec_id: SpecId,
 ) -> InstructionResult {
     let addr = address.to_address();
-    if spec_id.is_enabled_in(SpecId::BERLIN) {
+    if ecx.spec_id.is_enabled_in(SpecId::BERLIN) {
         gas!(ecx, ecx.host.gas_params().warm_storage_read_cost());
         let account = berlin_load_account!(ecx, addr, true);
         *address = U256::from(account.code.as_ref().unwrap().len()).into();
@@ -259,7 +257,6 @@ pub unsafe extern "C" fn __revmc_builtin_extcodesize(
 pub unsafe extern "C" fn __revmc_builtin_extcodecopy(
     ecx: &mut EvmContext<'_>,
     rev![address, memory_offset, code_offset, len]: &mut [EvmWord; 4],
-    spec_id: SpecId,
 ) -> InstructionResult {
     let addr = address.to_address();
     let len = try_into_usize!(len);
@@ -271,7 +268,7 @@ pub unsafe extern "C" fn __revmc_builtin_extcodecopy(
         ensure_memory!(ecx, memory_offset_usize, len);
     }
 
-    let code = if spec_id.is_enabled_in(SpecId::BERLIN) {
+    let code = if ecx.spec_id.is_enabled_in(SpecId::BERLIN) {
         gas!(ecx, ecx.host.gas_params().warm_storage_read_cost());
         let account = berlin_load_account!(ecx, addr, true);
         account.code.as_ref().unwrap().original_bytes()
@@ -312,10 +309,9 @@ pub unsafe extern "C" fn __revmc_builtin_returndatacopy(
 pub unsafe extern "C" fn __revmc_builtin_extcodehash(
     ecx: &mut EvmContext<'_>,
     address: &mut EvmWord,
-    spec_id: SpecId,
 ) -> InstructionResult {
     let addr = address.to_address();
-    let account = if spec_id.is_enabled_in(SpecId::BERLIN) {
+    let account = if ecx.spec_id.is_enabled_in(SpecId::BERLIN) {
         gas!(ecx, ecx.host.gas_params().warm_storage_read_cost());
         berlin_load_account!(ecx, addr, false)
     } else {
@@ -393,12 +389,8 @@ pub unsafe extern "C" fn __revmc_builtin_basefee(ecx: &mut EvmContext<'_>, slot:
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn __revmc_builtin_difficulty(
-    ecx: &mut EvmContext<'_>,
-    slot: &mut EvmWord,
-    spec_id: SpecId,
-) {
-    *slot = if spec_id.is_enabled_in(SpecId::MERGE) {
+pub unsafe extern "C" fn __revmc_builtin_difficulty(ecx: &mut EvmContext<'_>, slot: &mut EvmWord) {
+    *slot = if ecx.spec_id.is_enabled_in(SpecId::MERGE) {
         ecx.host.prevrandao().unwrap_or_default().into()
     } else {
         ecx.host.difficulty().into()
@@ -437,11 +429,10 @@ pub unsafe extern "C" fn __revmc_builtin_blob_base_fee(
 pub unsafe extern "C" fn __revmc_builtin_sload(
     ecx: &mut EvmContext<'_>,
     index: &mut EvmWord,
-    spec_id: SpecId,
 ) -> InstructionResult {
     let address = ecx.input.target_address;
     let key = index.to_u256();
-    if spec_id.is_enabled_in(SpecId::BERLIN) {
+    if ecx.spec_id.is_enabled_in(SpecId::BERLIN) {
         gas!(ecx, ecx.host.gas_params().warm_storage_read_cost());
         let additional_cold_cost = ecx.host.gas_params().cold_storage_additional_cost();
         let skip_cold = ecx.gas.remaining() < additional_cold_cost;
@@ -457,7 +448,7 @@ pub unsafe extern "C" fn __revmc_builtin_sload(
         }
     } else {
         let storage = try_host!(ecx.host.sload(address, key));
-        gas!(ecx, gas::sload_cost(spec_id, storage.is_cold));
+        gas!(ecx, gas::sload_cost(ecx.spec_id, storage.is_cold));
         *index = storage.data.into();
     }
 
@@ -468,12 +459,11 @@ pub unsafe extern "C" fn __revmc_builtin_sload(
 pub unsafe extern "C" fn __revmc_builtin_sstore(
     ecx: &mut EvmContext<'_>,
     rev![index, value]: &mut [EvmWord; 2],
-    spec_id: SpecId,
 ) -> InstructionResult {
     ensure_non_staticcall!(ecx);
 
     let target = ecx.input.target_address;
-    let is_istanbul = spec_id.is_enabled_in(SpecId::ISTANBUL);
+    let is_istanbul = ecx.spec_id.is_enabled_in(SpecId::ISTANBUL);
 
     // EIP-2200: If gasleft is less than or equal to gas stipend, fail with OOG.
     if is_istanbul && ecx.gas.remaining() <= ecx.host.gas_params().call_stipend() {
@@ -482,7 +472,7 @@ pub unsafe extern "C" fn __revmc_builtin_sstore(
 
     gas!(ecx, ecx.host.gas_params().sstore_static_gas());
 
-    let state_load = if spec_id.is_enabled_in(SpecId::BERLIN) {
+    let state_load = if ecx.spec_id.is_enabled_in(SpecId::BERLIN) {
         let additional_cold_cost = ecx.host.gas_params().cold_storage_additional_cost();
         let skip_cold = ecx.gas.remaining() < additional_cold_cost;
         match ecx.host.sstore_skip_cold_load(target, index.to_u256(), value.to_u256(), skip_cold) {
@@ -575,7 +565,6 @@ pub unsafe extern "C" fn __revmc_builtin_log(
 pub unsafe extern "C" fn __revmc_builtin_create(
     ecx: &mut EvmContext<'_>,
     sp: *mut EvmWord,
-    spec_id: SpecId,
     create_kind: CreateKind,
 ) -> InstructionResult {
     ensure_non_staticcall!(ecx);
@@ -589,7 +578,7 @@ pub unsafe extern "C" fn __revmc_builtin_create(
 
     let len = try_into_usize!(len);
     let code = if len != 0 {
-        if spec_id.is_enabled_in(SpecId::SHANGHAI) {
+        if ecx.spec_id.is_enabled_in(SpecId::SHANGHAI) {
             // Limit is set as double of max contract bytecode size
             let max_initcode_size = ecx.host.max_initcode_size();
             if len > max_initcode_size {
@@ -617,7 +606,7 @@ pub unsafe extern "C" fn __revmc_builtin_create(
     };
 
     let mut gas_limit = ecx.gas.remaining();
-    if spec_id.is_enabled_in(SpecId::TANGERINE) {
+    if ecx.spec_id.is_enabled_in(SpecId::TANGERINE) {
         gas_limit = ecx.host.gas_params().call_stipend_reduction(gas_limit);
     }
     gas!(ecx, gas_limit);
@@ -634,7 +623,6 @@ pub unsafe extern "C" fn __revmc_builtin_create(
 pub unsafe extern "C" fn __revmc_builtin_call(
     ecx: &mut EvmContext<'_>,
     sp: *mut EvmWord,
-    spec_id: SpecId,
     call_kind: CallKind,
 ) -> InstructionResult {
     let len = match call_kind {
@@ -699,7 +687,7 @@ pub unsafe extern "C" fn __revmc_builtin_call(
     let (dynamic_gas, bytecode, code_hash) =
         match revm_interpreter::instructions::contract::load_account_delegated(
             ecx.host,
-            spec_id,
+            ecx.spec_id,
             ecx.gas.remaining(),
             to,
             transfers_value,
@@ -713,7 +701,7 @@ pub unsafe extern "C" fn __revmc_builtin_call(
     gas!(ecx, dynamic_gas);
 
     // EIP-150: Gas cost changes for IO-heavy operations
-    let mut gas_limit = if spec_id.is_enabled_in(SpecId::TANGERINE) {
+    let mut gas_limit = if ecx.spec_id.is_enabled_in(SpecId::TANGERINE) {
         let gas = ecx.gas.remaining();
         ecx.host.gas_params().call_stipend_reduction(gas).min(local_gas_limit)
     } else {
@@ -780,13 +768,12 @@ pub unsafe extern "C" fn __revmc_builtin_do_return(
 pub unsafe extern "C" fn __revmc_builtin_selfdestruct(
     ecx: &mut EvmContext<'_>,
     target: &mut EvmWord,
-    spec_id: SpecId,
 ) -> InstructionResult {
     ensure_non_staticcall!(ecx);
 
     // EIP-150: SELFDESTRUCT static gas is 5000 in Tangerine+.
     // revm charges this via the instruction table; revmc marks SELFDESTRUCT as DYNAMIC.
-    if spec_id.is_enabled_in(SpecId::TANGERINE) {
+    if ecx.spec_id.is_enabled_in(SpecId::TANGERINE) {
         gas!(ecx, 5000);
     }
 
@@ -803,7 +790,7 @@ pub unsafe extern "C" fn __revmc_builtin_selfdestruct(
     };
 
     // EIP-161: State trie clearing (invariant-preserving alternative)
-    let should_charge_topup = if spec_id.is_enabled_in(SpecId::SPURIOUS_DRAGON) {
+    let should_charge_topup = if ecx.spec_id.is_enabled_in(SpecId::SPURIOUS_DRAGON) {
         res.had_value && !res.target_exists
     } else {
         !res.target_exists
