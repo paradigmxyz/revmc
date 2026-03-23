@@ -11,7 +11,7 @@ use crate::{EvmCompilerFn, runtime::storage::RuntimeCacheKey};
 use alloy_primitives::Bytes;
 use crossbeam_channel as chan;
 use std::{
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Condvar, Mutex},
 };
 
@@ -161,7 +161,6 @@ impl WorkerPool {
         opt_level: crate::OptimizationLevel,
         dump_dir: Option<PathBuf>,
     ) -> Self {
-        let dump_dir = dump_dir.map(Arc::new);
         let mut job_txs = Vec::with_capacity(worker_count);
         let mut threads = Vec::with_capacity(worker_count);
         let mut backings = Vec::with_capacity(worker_count);
@@ -182,7 +181,7 @@ impl WorkerPool {
                         result_tx,
                         opt_level,
                         &backing_for_worker,
-                        dump_dir.as_deref().map(|p| p.as_path()),
+                        dump_dir.as_deref(),
                     );
                 })
                 .expect("failed to spawn compile worker");
@@ -252,7 +251,7 @@ fn worker_loop(
     result_tx: chan::Sender<WorkerResult>,
     opt_level: crate::OptimizationLevel,
     backing: &WorkerBacking,
-    dump_dir: Option<&std::path::Path>,
+    dump_dir: Option<&Path>,
 ) {
     use crate::{EvmCompiler, EvmLlvmBackend};
 
@@ -277,7 +276,6 @@ fn worker_loop(
                     let dir = base
                         .join(format!("{:?}", job.key.spec_id))
                         .join(format!("{}", job.key.code_hash));
-                    let _ = std::fs::create_dir_all(&dir);
                     jit_compiler.set_dump_to(Some(dir));
                 }
 
@@ -380,7 +378,7 @@ fn worker_loop(
     result_tx: chan::Sender<WorkerResult>,
     _opt_level: crate::OptimizationLevel,
     backing: &WorkerBacking,
-    _dump_dir: Option<&std::path::Path>,
+    _dump_dir: Option<&Path>,
 ) {
     debug!(worker_id, "compile worker started (no LLVM, all jobs will fail)");
 
