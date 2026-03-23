@@ -57,14 +57,7 @@ impl<B: Backend> Builtins<B> {
                 Attribute::NoSync,
             ]
         } else if builtin == Builtin::AssertSpecId {
-            // May panic, so no NoUnwind/WillReturn.
-            &[
-                Attribute::Cold,
-                Attribute::NoFree,
-                Attribute::NoRecurse,
-                Attribute::NoSync,
-                Attribute::ArgMemOnly,
-            ]
+            &[Attribute::NoFree, Attribute::NoRecurse, Attribute::NoSync, Attribute::ArgMemOnly]
         } else {
             &[
                 Attribute::WillReturn,
