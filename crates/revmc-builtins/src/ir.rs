@@ -56,6 +56,15 @@ impl<B: Backend> Builtins<B> {
                 Attribute::NoRecurse,
                 Attribute::NoSync,
             ]
+        } else if builtin == Builtin::AssertSpecId {
+            // May panic, so no NoUnwind/WillReturn.
+            &[
+                Attribute::Cold,
+                Attribute::NoFree,
+                Attribute::NoRecurse,
+                Attribute::NoSync,
+                Attribute::ArgMemOnly,
+            ]
         } else {
             &[
                 Attribute::WillReturn,
@@ -152,7 +161,10 @@ macro_rules! builtins {
 
             fn op(self) -> u8 {
                 use revm_bytecode::opcode::*;
+
                 const PANIC: u8 = 0;
+                const ASSERTSPECID: u8 = 0;
+
                 const LOG: u8 = LOG0;
                 const DORETURN: u8 = RETURN;
                 const UDIV: u8 = DIV;
@@ -217,6 +229,7 @@ builtins! {
     }
 
     Panic          = __revmc_builtin_panic(ptr, usize) None,
+    AssertSpecId   = __revmc_builtin_assert_spec_id(@[ecx] ptr, u8) None,
 
     UDiv           = __revmc_builtin_udiv(@[sp] ptr) None,
     URem           = __revmc_builtin_urem(@[sp] ptr) None,

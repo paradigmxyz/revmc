@@ -316,26 +316,9 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             fx.pointer_panic_with_bool(true, input, "input pointer", "");
             fx.pointer_panic_with_bool(true, ecx, "EVM context pointer", "");
 
-            // TODO(revmc): Assert that the runtime spec_id matches the compilation
-            // spec_id. Currently disabled because the load at the spec_id offset
-            // produces incorrect results under LLVM aggressive optimization.
-            /*
-            {
-                let spec_id_ptr =
-                    fx.get_field(ecx, mem::offset_of!(EvmContext<'_>, spec_id), "ecx.spec_id.addr");
-                let runtime_spec_id = fx.bcx.load(i8_type, spec_id_ptr, "ecx.spec_id");
-                let spec_mismatch =
-                    fx.bcx.icmp_imm(IntCC::NotEqual, runtime_spec_id, bytecode.spec_id as i64);
-                fx.build_assertion(
-                    spec_mismatch,
-                    &format!(
-                        "revmc panic: runtime spec_id does not match compilation spec_id \
-                     (expected {:?})",
-                        bytecode.spec_id,
-                    ),
-                );
-            }
-            */
+            // Assert that the runtime spec_id matches the compilation spec_id.
+            let compiled_spec = fx.bcx.iconst(fx.i8_type, bytecode.spec_id as i64);
+            let _ = fx.call_builtin(Builtin::AssertSpecId, &[ecx, compiled_spec]);
         }
 
         // The bytecode is guaranteed to have at least one instruction.

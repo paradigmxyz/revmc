@@ -80,6 +80,18 @@ pub unsafe extern "C-unwind" fn __revmc_builtin_panic(data: *const u8, len: usiz
     panic!("{msg}");
 }
 
+/// Debug assertion: panics if `ecx.spec_id != expected`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn __revmc_builtin_assert_spec_id(
+    ecx: &EvmContext<'_>,
+    expected: SpecId,
+) {
+    assert_eq!(
+        ecx.spec_id, expected,
+        "revmc panic: runtime spec_id does not match compilation spec_id"
+    );
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __revmc_builtin_udiv(rev![a, b]: &mut [EvmWord; 2]) {
     let divisor = b.to_u256();
