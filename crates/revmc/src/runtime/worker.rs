@@ -250,7 +250,7 @@ impl Drop for WorkerPool {
 /// references are dropped, ensuring compiled function pointers remain valid.
 #[cfg(feature = "llvm")]
 fn worker_loop(
-    worker_id: usize,
+    id: usize,
     job_rx: chan::Receiver<WorkerJob>,
     result_tx: chan::Sender<WorkerResult>,
     opt_level: crate::OptimizationLevel,
@@ -259,12 +259,13 @@ fn worker_loop(
 ) {
     use crate::{EvmCompiler, EvmLlvmBackend};
 
-    debug!(worker_id, "compile worker started");
+    let _span = debug_span!("revmc_worker", id).entered();
+    debug!("compile worker started");
 
     let backend = match EvmLlvmBackend::new(false, opt_level) {
         Ok(b) => b,
         Err(e) => {
-            error!(worker_id, error = %e, "failed to create LLVM backend, worker exiting");
+            error!(error = %e, "failed to create LLVM backend, worker exiting");
             return;
         }
     };
@@ -291,22 +292,24 @@ fn worker_loop(
 
                 let outcome = match result {
                     Ok(func) => {
-                        // Reset IR so the next job can reuse this compiler.
-                        // This frees IR but keeps JIT machine code alive.
-                        if let Err(e) = jit_compiler.clear_ir() {
-                            warn!(worker_id, error = %e, "clear_ir failed");
-                        }
-                        debug!(worker_id, "JIT compilation succeeded");
+                        debug!("JIT compilation succeeded");
                         Ok(WorkerSuccess::Jit(JitSuccess {
                             func,
                             approx_size_bytes: job.bytecode.len(),
                         }))
                     }
-                    Err(e) => {
-                        warn!(worker_id, error = %e, "JIT compilation failed");
-                        Err(format!("{e}"))
+                    Err(err) => {
+                        warn!(%err, "JIT compilation failed");
+                        Err(format!("{err}"))
                     }
                 };
+
+                // Reset IR so the next job can reuse this compiler.
+                // This frees IR but keeps JIT machine code alive.
+                if let Err(err) = jit_compiler.clear_ir() {
+                    warn!(%err, "clear_ir failed");
+                }
+
                 (job.key, outcome, job.sync_notifier)
             }
             WorkerJob::Aot(job) => {
@@ -319,16 +322,16 @@ fn worker_loop(
             }
         };
 
-        let _ = result_tx.send(WorkerResult { key, worker_id, outcome, sync_notifier });
+        let _ = result_tx.send(WorkerResult { key, worker_id: id, outcome, sync_notifier });
     }
 
-    debug!(worker_id, "compile worker done processing jobs, waiting for backing refs to drop");
+    debug!("compile worker done processing jobs, waiting for backing refs to drop");
 
     // Block until the coordinator signals exit (all external program refs dropped).
     // This keeps the compiler (and its JIT machine code) alive on this thread.
     backing.wait_for_exit();
 
-    debug!(worker_id, "compile worker shutting down");
+    debug!("compile worker shutting down");
     // `jit_compiler` is dropped here, freeing all JIT machine code.
 }
 
