@@ -176,7 +176,6 @@ builtins! {
     @types |bcx| {
         let ptr = bcx.type_ptr();
         let usize = bcx.type_ptr_sized_int();
-        let bool = bcx.type_int(1);
         let u8 = bcx.type_int(8);
     }
 
