@@ -289,12 +289,8 @@ impl CoordinatorState {
         match result.outcome {
             Ok(WorkerSuccess::Jit(success)) => {
                 let backing = self.workers.backing(result.worker_id);
-                let program = Arc::new(CompiledProgram::new_jit(
-                    result.key.clone(),
-                    success.func,
-                    success.approx_size_bytes,
-                    backing,
-                ));
+                let program =
+                    Arc::new(CompiledProgram::new_jit(result.key.clone(), success.func, backing));
 
                 self.resident.insert(result.key.clone(), program);
                 self.entries.remove(&result.key);
@@ -391,12 +387,7 @@ impl CoordinatorState {
                             *sym
                         };
                         let library = Arc::new(LoadedLibrary::new(library));
-                        Ok(CompiledProgram::new_aot(
-                            key.clone(),
-                            func,
-                            stored.manifest.artifact_len,
-                            library,
-                        ))
+                        Ok(CompiledProgram::new_aot(key.clone(), func, library))
                     })() {
                         Ok(program) => {
                             self.resident.insert(key.clone(), Arc::new(program));

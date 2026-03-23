@@ -53,8 +53,6 @@ pub struct CompiledProgram {
     pub kind: ProgramKind,
     /// The callable compiled function.
     pub func: EvmCompilerFn,
-    /// Approximate size of the compiled code in bytes.
-    pub approx_size_bytes: usize,
     /// Keeps the backing memory (shared library / JIT module) alive.
     _backing: ProgramBacking,
 }
@@ -65,7 +63,6 @@ impl std::fmt::Debug for CompiledProgram {
             .field("key", &self.key)
             .field("kind", &self.kind)
             .field("func", &self.func)
-            .field("approx_size_bytes", &self.approx_size_bytes)
             .finish_non_exhaustive()
     }
 }
@@ -75,32 +72,18 @@ impl CompiledProgram {
     pub(crate) fn new_aot(
         key: RuntimeCacheKey,
         func: EvmCompilerFn,
-        approx_size_bytes: usize,
         library: Arc<LoadedLibrary>,
     ) -> Self {
-        Self {
-            key,
-            kind: ProgramKind::Aot,
-            func,
-            approx_size_bytes,
-            _backing: ProgramBacking::LoadedLibrary(library),
-        }
+        Self { key, kind: ProgramKind::Aot, func, _backing: ProgramBacking::LoadedLibrary(library) }
     }
 
     /// Creates a new compiled program backed by a JIT worker's compiler.
     pub(crate) fn new_jit(
         key: RuntimeCacheKey,
         func: EvmCompilerFn,
-        approx_size_bytes: usize,
         backing: Arc<WorkerBacking>,
     ) -> Self {
-        Self {
-            key,
-            kind: ProgramKind::Jit,
-            func,
-            approx_size_bytes,
-            _backing: ProgramBacking::JitModule(backing),
-        }
+        Self { key, kind: ProgramKind::Jit, func, _backing: ProgramBacking::JitModule(backing) }
     }
 }
 

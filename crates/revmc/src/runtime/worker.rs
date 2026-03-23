@@ -98,8 +98,6 @@ pub(crate) enum WorkerSuccess {
 pub(crate) struct JitSuccess {
     /// The compiled function pointer.
     pub(crate) func: EvmCompilerFn,
-    /// Approximate size of the compiled code in bytes.
-    pub(crate) approx_size_bytes: usize,
 }
 
 /// Successful AOT compilation output.
@@ -293,10 +291,7 @@ fn worker_loop(
                 let outcome = match result {
                     Ok(func) => {
                         debug!("JIT compilation succeeded");
-                        Ok(WorkerSuccess::Jit(JitSuccess {
-                            func,
-                            approx_size_bytes: job.bytecode.len(),
-                        }))
+                        Ok(WorkerSuccess::Jit(JitSuccess { func }))
                     }
                     Err(err) => {
                         warn!(%err, "JIT compilation failed");

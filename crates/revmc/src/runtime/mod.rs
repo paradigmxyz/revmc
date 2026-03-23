@@ -347,12 +347,7 @@ impl JitBackend {
         };
 
         let library = Arc::new(LoadedLibrary::new(library));
-        Ok(CompiledProgram::new_aot(
-            key.runtime.clone(),
-            func,
-            stored.manifest.artifact_len,
-            library,
-        ))
+        Ok(CompiledProgram::new_aot(key.runtime.clone(), func, library))
     }
 }
 
