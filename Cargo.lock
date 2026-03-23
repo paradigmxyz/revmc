@@ -3329,6 +3329,7 @@ dependencies = [
  "bitvec",
  "crossbeam-channel",
  "dashmap",
+ "derive_more",
  "either",
  "libloading",
  "paste",

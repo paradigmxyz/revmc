@@ -39,6 +39,7 @@ revm-state.workspace = true
 bitflags = "2.5"
 crossbeam-channel.workspace = true
 dashmap = "6"
+derive_more = { version = "2", default-features = false, features = ["debug"] }
 bitvec = "1.0"
 either = "1.13"
 libloading = "0.9"

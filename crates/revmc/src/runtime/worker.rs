@@ -39,6 +39,7 @@ impl SyncNotifier {
 }
 
 /// A compilation job sent from the coordinator to a worker.
+#[derive(Debug)]
 pub(crate) enum WorkerJob {
     /// JIT compilation: produce an in-memory function pointer.
     Jit(JitJob),
@@ -47,6 +48,7 @@ pub(crate) enum WorkerJob {
 }
 
 /// A JIT compilation job sent from the coordinator to a worker.
+#[derive(derive_more::Debug)]
 pub(crate) struct JitJob {
     /// The key to compile for.
     pub(crate) key: RuntimeCacheKey,
@@ -55,10 +57,12 @@ pub(crate) struct JitJob {
     /// The symbol name to use for the compiled function.
     pub(crate) symbol_name: String,
     /// Optional notifier for synchronous callers.
+    #[debug(skip)]
     pub(crate) sync_notifier: SyncNotifier,
 }
 
 /// An AOT compilation job sent from the coordinator to a worker.
+#[derive(Debug)]
 pub(crate) struct AotJob {
     /// The key to compile for.
     pub(crate) key: RuntimeCacheKey,
@@ -267,10 +271,12 @@ fn worker_loop(
     let mut jit_compiler = EvmCompiler::new(backend);
 
     while let Ok(job) = job_rx.recv() {
+        debug!(?job, "received job");
         let (key, outcome, sync_notifier) = match job {
             WorkerJob::Jit(job) => {
-                let span = tracing::info_span!("jit_compile", %job.key.code_hash, ?job.key.spec_id);
-                let _enter = span.enter();
+                let _span =
+                    debug_span!("jit_compile", hash=%job.key.code_hash, spec_id=?job.key.spec_id)
+                        .entered();
 
                 if let Some(base) = dump_dir {
                     let dir = base
@@ -304,8 +310,9 @@ fn worker_loop(
                 (job.key, outcome, job.sync_notifier)
             }
             WorkerJob::Aot(job) => {
-                let span = tracing::info_span!("aot_compile", %job.key.code_hash, ?job.key.spec_id);
-                let _enter = span.enter();
+                let _span =
+                    debug_span!("aot_compile", hash=%job.key.code_hash, spec_id=?job.key.spec_id)
+                        .entered();
 
                 let outcome = compile_aot_artifact(&job);
                 (job.key, outcome, SyncNotifier::none())
