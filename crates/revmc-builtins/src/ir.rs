@@ -56,6 +56,8 @@ impl<B: Backend> Builtins<B> {
                 Attribute::NoRecurse,
                 Attribute::NoSync,
             ]
+        } else if builtin == Builtin::AssertSpecId {
+            &[Attribute::NoFree, Attribute::NoRecurse, Attribute::NoSync, Attribute::ArgMemOnly]
         } else {
             &[
                 Attribute::WillReturn,
@@ -152,7 +154,10 @@ macro_rules! builtins {
 
             fn op(self) -> u8 {
                 use revm_bytecode::opcode::*;
+
                 const PANIC: u8 = 0;
+                const ASSERTSPECID: u8 = 0;
+
                 const LOG: u8 = LOG0;
                 const DORETURN: u8 = RETURN;
                 const UDIV: u8 = DIV;
@@ -171,7 +176,6 @@ builtins! {
     @types |bcx| {
         let ptr = bcx.type_ptr();
         let usize = bcx.type_ptr_sized_int();
-        let bool = bcx.type_int(1);
         let u8 = bcx.type_int(8);
     }
 
@@ -217,6 +221,7 @@ builtins! {
     }
 
     Panic          = __revmc_builtin_panic(ptr, usize) None,
+    AssertSpecId   = __revmc_builtin_assert_spec_id(@[ecx] ptr, u8) None,
 
     UDiv           = __revmc_builtin_udiv(@[sp] ptr) None,
     URem           = __revmc_builtin_urem(@[sp] ptr) None,
@@ -226,40 +231,40 @@ builtins! {
     MulMod         = __revmc_builtin_mulmod(@[sp] ptr) None,
     Exp            = __revmc_builtin_exp(@[ecx] ptr, @[sp] ptr) Some(u8),
     Keccak256      = __revmc_builtin_keccak256(@[ecx] ptr, @[sp] ptr) Some(u8),
-    Balance        = __revmc_builtin_balance(@[ecx] ptr, @[sp] ptr, u8) Some(u8),
+    Balance        = __revmc_builtin_balance(@[ecx] ptr, @[sp] ptr) Some(u8),
     Origin         = __revmc_builtin_origin(@[ecx] ptr, @[sp] ptr) None,
     CallDataLoad   = __revmc_builtin_calldataload(@[ecx] ptr, @[sp] ptr) None,
     CallDataSize   = __revmc_builtin_calldatasize(@[ecx] ptr) Some(usize),
     CallDataCopy   = __revmc_builtin_calldatacopy(@[ecx] ptr, @[sp] ptr) Some(u8),
     CodeCopy       = __revmc_builtin_codecopy(@[ecx] ptr, @[sp] ptr) Some(u8),
     GasPrice       = __revmc_builtin_gas_price(@[ecx] ptr, @[sp] ptr) None,
-    ExtCodeSize    = __revmc_builtin_extcodesize(@[ecx] ptr, @[sp] ptr, u8) Some(u8),
-    ExtCodeCopy    = __revmc_builtin_extcodecopy(@[ecx] ptr, @[sp] ptr, u8) Some(u8),
+    ExtCodeSize    = __revmc_builtin_extcodesize(@[ecx] ptr, @[sp] ptr) Some(u8),
+    ExtCodeCopy    = __revmc_builtin_extcodecopy(@[ecx] ptr, @[sp] ptr) Some(u8),
     ReturnDataCopy = __revmc_builtin_returndatacopy(@[ecx] ptr, @[sp] ptr) Some(u8),
-    ExtCodeHash    = __revmc_builtin_extcodehash(@[ecx] ptr, @[sp] ptr, u8) Some(u8),
+    ExtCodeHash    = __revmc_builtin_extcodehash(@[ecx] ptr, @[sp] ptr) Some(u8),
     BlockHash      = __revmc_builtin_blockhash(@[ecx] ptr, @[sp] ptr) Some(u8),
     Coinbase       = __revmc_builtin_coinbase(@[ecx] ptr, @[sp] ptr) None,
     Timestamp      = __revmc_builtin_timestamp(@[ecx] ptr, @[sp] ptr) None,
     Number         = __revmc_builtin_number(@[ecx] ptr, @[sp] ptr) None,
-    Difficulty     = __revmc_builtin_difficulty(@[ecx] ptr, @[sp] ptr, u8) None,
+    Difficulty     = __revmc_builtin_difficulty(@[ecx] ptr, @[sp] ptr) None,
     GasLimit       = __revmc_builtin_gaslimit(@[ecx] ptr, @[sp] ptr) None,
     ChainId        = __revmc_builtin_chainid(@[ecx] ptr, @[sp] ptr) None,
     SelfBalance    = __revmc_builtin_self_balance(@[ecx] ptr, @[sp] ptr) Some(u8),
     Basefee        = __revmc_builtin_basefee(@[ecx] ptr, @[sp] ptr) None,
     BlobHash       = __revmc_builtin_blob_hash(@[ecx] ptr, @[sp] ptr) None,
     BlobBaseFee    = __revmc_builtin_blob_base_fee(@[ecx] ptr, @[sp] ptr) None,
-    Sload          = __revmc_builtin_sload(@[ecx] ptr, @[sp] ptr, u8) Some(u8),
-    Sstore         = __revmc_builtin_sstore(@[ecx] ptr, @[sp] ptr, u8) Some(u8),
+    Sload          = __revmc_builtin_sload(@[ecx] ptr, @[sp] ptr) Some(u8),
+    Sstore         = __revmc_builtin_sstore(@[ecx] ptr, @[sp] ptr) Some(u8),
     Msize          = __revmc_builtin_msize(@[ecx] ptr) Some(usize),
     Tstore         = __revmc_builtin_tstore(@[ecx] ptr, @[sp] ptr) Some(u8),
     Tload          = __revmc_builtin_tload(@[ecx] ptr, @[sp] ptr) None,
     Mcopy          = __revmc_builtin_mcopy(@[ecx] ptr, @[sp] ptr) Some(u8),
     Log            = __revmc_builtin_log(@[ecx] ptr, @[sp_dyn] ptr, u8) Some(u8),
 
-    Create         = __revmc_builtin_create(@[ecx] ptr, @[sp_dyn] ptr, u8, u8) Some(u8),
-    Call           = __revmc_builtin_call(@[ecx] ptr, @[sp_dyn] ptr, u8, u8) Some(u8),
+    Create         = __revmc_builtin_create(@[ecx] ptr, @[sp_dyn] ptr, u8) Some(u8),
+    Call           = __revmc_builtin_call(@[ecx] ptr, @[sp_dyn] ptr, u8) Some(u8),
     DoReturn       = __revmc_builtin_do_return(@[ecx] ptr, @[sp] ptr, u8) Some(u8),
-    SelfDestruct   = __revmc_builtin_selfdestruct(@[ecx] ptr, @[sp] ptr, u8) Some(u8),
+    SelfDestruct   = __revmc_builtin_selfdestruct(@[ecx] ptr, @[sp] ptr) Some(u8),
 
     Mload          = __revmc_builtin_mload(@[ecx] ptr, @[sp] ptr) Some(u8),
     Mstore         = __revmc_builtin_mstore(@[ecx] ptr, @[sp] ptr) Some(u8),
