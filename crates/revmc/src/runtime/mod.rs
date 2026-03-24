@@ -148,10 +148,11 @@ impl JitBackend {
         Ok(Self { inner: Arc::new(inner) })
     }
 
-    /// Shuts down the coordinator thread and waits for it to finish.
-    /// NOTE: this should not be exposed! It's unsafe to use any JIT'd functions after shutdown.
-    #[cfg(test)]
-    pub(crate) fn shutdown(&self) -> eyre::Result<()> {
+    /// Shuts down the backend thread and waits for it to finish.
+    ///
+    /// After shutdown, any previously returned [`CompiledProgram`] references remain valid
+    /// (they hold `Arc` references to the backing memory), but no new compilations will occur.
+    pub fn shutdown(&self) -> eyre::Result<()> {
         self.inner.shutdown()
     }
 

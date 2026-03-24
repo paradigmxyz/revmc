@@ -854,6 +854,8 @@ fn aot_artifacts_survive_restart() {
             assert!(std::time::Instant::now() < deadline, "timed out waiting for AOT compilation",);
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
+
+        backend.shutdown().unwrap();
     }
 
     assert_eq!(store.stored_count(), 1);
@@ -879,5 +881,7 @@ fn aot_artifacts_survive_restart() {
         );
 
         assert_eq!(backend.stats().resident_entries, 1);
+
+        backend.shutdown().unwrap();
     }
 }
