@@ -917,10 +917,7 @@ pub fn run(
         );
     }
 
-    // Shutdown backend.
-    if let Some(backend) = &backend {
-        let _ = backend.shutdown();
-    }
+    drop(backend);
 
     let n_errors = state.n_errors.load(Ordering::SeqCst);
     let n_thread_errors = thread_errors.len();

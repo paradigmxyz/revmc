@@ -149,11 +149,8 @@ impl JitBackend {
     }
 
     /// Shuts down the backend thread and waits for it to finish.
-    ///
-    /// After shutdown, any previously returned [`CompiledProgram`] references remain valid
-    /// (they hold `Arc` references to the backing memory), but no new compilations will occur.
-    #[doc(hidden)]
-    pub fn shutdown(&self) -> eyre::Result<()> {
+    #[cfg(test)]
+    pub(crate) fn shutdown(&self) -> eyre::Result<()> {
         self.inner.shutdown()
     }
 
