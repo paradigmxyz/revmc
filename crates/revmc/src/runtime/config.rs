@@ -39,6 +39,20 @@ pub struct RuntimeConfig {
     ///
     /// Defaults to `false`.
     pub debug_assertions: bool,
+
+    /// Blocking mode: every lookup synchronously JIT-compiles on miss and never
+    /// falls back to the interpreter.
+    ///
+    /// When `true`, [`lookup()`](super::JitBackend::lookup) behaves like
+    /// [`lookup_blocking()`](super::JitBackend::lookup_blocking): if the
+    /// compiled function is not already resident, the calling thread blocks
+    /// until JIT compilation completes. This implies `enabled = true` and
+    /// `jit_hot_threshold = 0`.
+    ///
+    /// Intended for debugging and testing only — not for production use.
+    ///
+    /// Defaults to `false`.
+    pub blocking: bool,
 }
 
 impl Default for RuntimeConfig {
@@ -50,6 +64,7 @@ impl Default for RuntimeConfig {
             tuning: RuntimeTuning::default(),
             dump_dir: None,
             debug_assertions: false,
+            blocking: false,
         }
     }
 }

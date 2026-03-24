@@ -283,6 +283,45 @@ fn poll_until<T>(timeout: std::time::Duration, mut f: impl FnMut() -> Option<T>)
 
 #[test]
 #[cfg(feature = "llvm")]
+fn blocking_mode() {
+    let config = RuntimeConfig {
+        blocking: true,
+        tuning: RuntimeTuning { jit_worker_count: 1, ..Default::default() },
+        ..Default::default()
+    };
+    let backend = JitBackend::start(config).unwrap();
+
+    // Simple bytecode: PUSH1 0x42 PUSH0 MSTORE PUSH1 0x20 PUSH0 RETURN.
+    let bytecode: &[u8] = &[0x60, 0x42, 0x5f, 0x52, 0x60, 0x20, 0x5f, 0xf3];
+    let code_hash = alloy_primitives::keccak256(bytecode);
+    let req = || LookupRequest {
+        code_hash,
+        code: Bytes::copy_from_slice(bytecode),
+        spec_id: SpecId::CANCUN,
+    };
+
+    // First lookup should block until JIT finishes, then return Compiled.
+    let decision = backend.lookup(req());
+    assert!(
+        matches!(&decision, LookupDecision::Compiled(p) if p.kind == ProgramKind::Jit),
+        "blocking mode should return Compiled on first lookup, got: {decision:?}",
+    );
+
+    // Second lookup should hit the resident map immediately.
+    let decision = backend.lookup(req());
+    assert!(matches!(decision, LookupDecision::Compiled(_)));
+
+    // Empty bytecodes return JitFailed (nothing to compile).
+    let empty_req =
+        LookupRequest { code_hash: B256::ZERO, code: Bytes::new(), spec_id: SpecId::CANCUN };
+    let decision = backend.lookup(empty_req);
+    assert!(matches!(decision, LookupDecision::Interpret(InterpretReason::JitFailed)));
+
+    backend.shutdown().unwrap();
+}
+
+#[test]
+#[cfg(feature = "llvm")]
 fn jit_hotness_promotion() {
     let config = RuntimeConfig {
         enabled: true,

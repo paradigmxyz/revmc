@@ -56,6 +56,8 @@ struct JitBackendInner {
     resident_bytes: Arc<ResidentBytes>,
     /// Global enable flag.
     enabled: AtomicBool,
+    /// Blocking mode: every lookup synchronously compiles and never falls back.
+    blocking: bool,
     /// Channel for sending commands to the coordinator thread.
     tx: chan::Sender<Command>,
     /// Shared stats counters.
@@ -85,9 +87,16 @@ pub struct JitBackend {
 impl JitBackend {
     /// Starts the backend: loads AOT artifacts, builds the resident map, and spawns the
     /// coordinator thread.
-    pub fn start(config: RuntimeConfig) -> eyre::Result<Self> {
+    pub fn start(mut config: RuntimeConfig) -> eyre::Result<Self> {
+        // Blocking mode forces enabled and zero threshold.
+        if config.blocking {
+            config.enabled = true;
+            config.tuning.jit_hot_threshold = 0;
+        }
+
         debug!(
             enabled = config.enabled,
+            blocking = config.blocking,
             workers = config.tuning.jit_worker_count,
             hot_threshold = config.tuning.jit_hot_threshold,
             channel_capacity = config.tuning.lookup_event_channel_capacity,
@@ -129,6 +138,7 @@ impl JitBackend {
             resident,
             resident_bytes,
             enabled: AtomicBool::new(config.enabled),
+            blocking: config.blocking,
             tx,
             stats: RuntimeStats::default(),
             thread: std::sync::Mutex::new(Some(CoordinatorThread { handle: thread, done_rx })),
@@ -145,10 +155,19 @@ impl JitBackend {
 
     /// Looks up a compiled function for the given request.
     ///
-    /// This never blocks, never touches storage, and never waits for compilation.
+    /// In normal mode this never blocks. In [`blocking`](RuntimeConfig::blocking) mode,
+    /// a miss triggers synchronous JIT compilation and the call blocks until it completes.
     pub fn lookup(&self, req: LookupRequest) -> LookupDecision {
         if !self.inner.enabled.load(Ordering::Relaxed) {
             return LookupDecision::Interpret(InterpretReason::Disabled);
+        }
+
+        // Blocking mode: synchronously compile on miss, never fall back.
+        if self.inner.blocking {
+            return match self.lookup_blocking(req) {
+                Some(program) => LookupDecision::Compiled(program),
+                None => LookupDecision::Interpret(InterpretReason::JitFailed),
+            };
         }
 
         let key = RuntimeCacheKey { code_hash: req.code_hash, spec_id: req.spec_id };
