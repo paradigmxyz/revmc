@@ -223,7 +223,7 @@ fn prepare_aot_enqueue() {
         code: Bytes::from_static(&[0x60, 0x00]),
         spec_id: SpecId::CANCUN,
     };
-    backend.prepare_aot(req).unwrap();
+    backend.prepare_aot(req);
 
     backend.shutdown().unwrap();
 }
@@ -245,7 +245,7 @@ fn prepare_aot_batch_enqueue() {
             spec_id: SpecId::CANCUN,
         },
     ];
-    backend.prepare_aot_batch(reqs).unwrap();
+    backend.prepare_aot_batch(reqs);
 
     backend.shutdown().unwrap();
 }
@@ -255,7 +255,7 @@ fn clear_resident() {
     let config = RuntimeConfig { enabled: true, ..Default::default() };
     let backend = JitBackend::start(config).unwrap();
 
-    backend.clear_resident().unwrap();
+    backend.clear_resident();
 
     // After clear, lookups should miss.
     let req = LookupRequest {
@@ -430,7 +430,7 @@ fn clear_resident_discards_inflight_jit() {
     }
 
     // Immediately clear — in-flight JIT results should be discarded.
-    backend.clear_resident().unwrap();
+    backend.clear_resident();
 
     // Give time for worker to finish and coordinator to process.
     std::thread::sleep(std::time::Duration::from_millis(500));
@@ -479,7 +479,7 @@ fn resident_bytes_tracks_jit() {
     assert_eq!(stats.resident_entries, 1);
 
     // Clear and verify bytes go back to zero.
-    backend.clear_resident().unwrap();
+    backend.clear_resident();
     // Give coordinator time to process the clear.
     std::thread::sleep(std::time::Duration::from_millis(100));
     let stats = backend.stats();
@@ -603,13 +603,11 @@ fn preload_aot_seeds_resident_bytes() {
         };
         let backend = JitBackend::start(config).unwrap();
 
-        backend
-            .prepare_aot(AotRequest {
-                code_hash,
-                code: Bytes::copy_from_slice(bytecode),
-                spec_id: SpecId::CANCUN,
-            })
-            .unwrap();
+        backend.prepare_aot(AotRequest {
+            code_hash,
+            code: Bytes::copy_from_slice(bytecode),
+            spec_id: SpecId::CANCUN,
+        });
 
         poll_until(std::time::Duration::from_secs(30), || {
             match backend.lookup(LookupRequest {
@@ -741,7 +739,7 @@ fn prepare_aot_persist_and_load() {
 
     let req =
         AotRequest { code_hash, code: Bytes::copy_from_slice(bytecode), spec_id: SpecId::CANCUN };
-    backend.prepare_aot(req).unwrap();
+    backend.prepare_aot(req);
 
     // Poll until the artifact appears in the resident map.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
@@ -792,7 +790,7 @@ fn prepare_aot_batch_persist_and_load() {
             spec_id: SpecId::CANCUN,
         })
         .collect();
-    backend.prepare_aot_batch(reqs).unwrap();
+    backend.prepare_aot_batch(reqs);
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     loop {
@@ -837,13 +835,11 @@ fn aot_artifacts_survive_restart() {
         let bytecode: &[u8] = &[0x60, 0x42, 0x5f, 0x52, 0x60, 0x20, 0x5f, 0xf3];
         let code_hash = alloy_primitives::keccak256(bytecode);
 
-        backend
-            .prepare_aot(AotRequest {
-                code_hash,
-                code: Bytes::copy_from_slice(bytecode),
-                spec_id: SpecId::CANCUN,
-            })
-            .unwrap();
+        backend.prepare_aot(AotRequest {
+            code_hash,
+            code: Bytes::copy_from_slice(bytecode),
+            spec_id: SpecId::CANCUN,
+        });
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         loop {

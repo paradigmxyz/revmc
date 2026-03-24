@@ -262,14 +262,14 @@ impl JitBackend {
     /// This is enqueue-only and returns immediately. The compilation happens
     /// asynchronously on the worker pool. The resulting artifact is persisted
     /// via [`ArtifactStore::store`] and loaded into the resident map.
-    pub fn prepare_aot(&self, req: AotRequest) -> eyre::Result<()> {
-        self.prepare_aot_batch(vec![req])
+    pub fn prepare_aot(&self, req: AotRequest) {
+        self.prepare_aot_batch(vec![req]);
     }
 
     /// Enqueues a batch of AOT preparation requests.
     ///
     /// This is enqueue-only and returns immediately.
-    pub fn prepare_aot_batch(&self, reqs: Vec<AotRequest>) -> eyre::Result<()> {
+    pub fn prepare_aot_batch(&self, reqs: Vec<AotRequest>) {
         let owned: Vec<PrepareAotRequest> = reqs
             .into_iter()
             .map(|r| PrepareAotRequest {
@@ -278,34 +278,25 @@ impl JitBackend {
             })
             .collect();
         let cmd = Command::PrepareAot(owned);
-        self.inner.tx.try_send(cmd).map_err(|_| eyre::eyre!("coordinator channel full or closed"))
+        let _ = self.inner.tx.try_send(cmd);
     }
 
     /// Clears the in-memory resident compiled map.
     ///
     /// All compiled programs are removed from the map. Active references
     /// held by callers remain valid until dropped.
-    pub fn clear_resident(&self) -> eyre::Result<()> {
-        self.inner
-            .tx
-            .try_send(Command::ClearResident)
-            .map_err(|_| eyre::eyre!("coordinator channel full or closed"))
+    pub fn clear_resident(&self) {
+        let _ = self.inner.tx.try_send(Command::ClearResident);
     }
 
     /// Clears persisted artifacts from the artifact store.
-    pub fn clear_persisted(&self) -> eyre::Result<()> {
-        self.inner
-            .tx
-            .try_send(Command::ClearPersisted)
-            .map_err(|_| eyre::eyre!("coordinator channel full or closed"))
+    pub fn clear_persisted(&self) {
+        let _ = self.inner.tx.try_send(Command::ClearPersisted);
     }
 
     /// Clears both the resident map and persisted artifacts.
-    pub fn clear_all(&self) -> eyre::Result<()> {
-        self.inner
-            .tx
-            .try_send(Command::ClearAll)
-            .map_err(|_| eyre::eyre!("coordinator channel full or closed"))
+    pub fn clear_all(&self) {
+        let _ = self.inner.tx.try_send(Command::ClearAll);
     }
 
     /// Sets whether the runtime is enabled.
