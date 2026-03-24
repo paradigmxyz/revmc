@@ -94,8 +94,10 @@ impl JitBackend {
             "starting JIT backend",
         );
         let resident = Self::preload_aot(config.store.as_deref())?;
+        let preload_bytes: usize = resident.iter().map(|e| e.value().approx_size_bytes).sum();
         let resident = Arc::new(resident);
         let resident_bytes = Arc::new(ResidentBytes::new());
+        resident_bytes.store(preload_bytes);
 
         let (tx, rx) = chan::bounded::<Command>(config.tuning.lookup_event_channel_capacity);
         let (done_tx, done_rx) = chan::bounded::<()>(1);

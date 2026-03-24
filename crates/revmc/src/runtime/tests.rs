@@ -269,6 +269,336 @@ fn clear_resident() {
     backend.shutdown().unwrap();
 }
 
+/// Helper: polls `f` until it returns `Some(T)` or the deadline is reached.
+fn poll_until<T>(timeout: std::time::Duration, mut f: impl FnMut() -> Option<T>) -> T {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if let Some(v) = f() {
+            return v;
+        }
+        assert!(std::time::Instant::now() < deadline, "timed out polling");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+#[test]
+#[cfg(feature = "llvm")]
+fn jit_hotness_promotion() {
+    let config = RuntimeConfig {
+        enabled: true,
+        tuning: RuntimeTuning { jit_hot_threshold: 3, jit_worker_count: 1, ..Default::default() },
+        ..Default::default()
+    };
+    let backend = JitBackend::start(config).unwrap();
+
+    // Simple bytecode: PUSH1 0x42 PUSH0 MSTORE PUSH1 0x20 PUSH0 RETURN.
+    let bytecode: &[u8] = &[0x60, 0x42, 0x5f, 0x52, 0x60, 0x20, 0x5f, 0xf3];
+    let code_hash = alloy_primitives::keccak256(bytecode);
+    let req = || LookupRequest {
+        code_hash,
+        code: Bytes::copy_from_slice(bytecode),
+        spec_id: SpecId::CANCUN,
+    };
+
+    // Below threshold: should remain NotReady.
+    for _ in 0..2 {
+        assert!(matches!(
+            backend.lookup(req()),
+            LookupDecision::Interpret(InterpretReason::NotReady)
+        ));
+    }
+
+    // Hit threshold and beyond: JIT should eventually compile.
+    for _ in 0..5 {
+        let _ = backend.lookup(req());
+    }
+
+    poll_until(std::time::Duration::from_secs(30), || match backend.lookup(req()) {
+        LookupDecision::Compiled(p) => {
+            assert_eq!(p.kind, ProgramKind::Jit);
+            Some(())
+        }
+        _ => None,
+    });
+
+    let stats = backend.stats();
+    assert!(stats.resident_entries >= 1);
+    assert!(stats.lookup_hits >= 1);
+
+    backend.shutdown().unwrap();
+}
+
+#[test]
+#[cfg(feature = "llvm")]
+fn jit_max_bytecode_len_prevents_promotion() {
+    let config = RuntimeConfig {
+        enabled: true,
+        tuning: RuntimeTuning {
+            jit_hot_threshold: 1,
+            jit_max_bytecode_len: 4,
+            jit_worker_count: 1,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let backend = JitBackend::start(config).unwrap();
+
+    // 8-byte bytecode exceeds the 4-byte limit.
+    let bytecode: &[u8] = &[0x60, 0x42, 0x5f, 0x52, 0x60, 0x20, 0x5f, 0xf3];
+    let code_hash = alloy_primitives::keccak256(bytecode);
+    let req = || LookupRequest {
+        code_hash,
+        code: Bytes::copy_from_slice(bytecode),
+        spec_id: SpecId::CANCUN,
+    };
+
+    // Send many lookups to exceed any threshold.
+    for _ in 0..20 {
+        let _ = backend.lookup(req());
+    }
+
+    // Give the coordinator time to process events.
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    // Should still be NotReady — never promoted due to bytecode length.
+    assert!(matches!(backend.lookup(req()), LookupDecision::Interpret(InterpretReason::NotReady)));
+
+    backend.shutdown().unwrap();
+}
+
+#[test]
+#[cfg(feature = "llvm")]
+fn clear_resident_discards_inflight_jit() {
+    let config = RuntimeConfig {
+        enabled: true,
+        tuning: RuntimeTuning { jit_hot_threshold: 1, jit_worker_count: 1, ..Default::default() },
+        ..Default::default()
+    };
+    let backend = JitBackend::start(config).unwrap();
+
+    // Simple bytecode: PUSH1 0x42 PUSH0 MSTORE PUSH1 0x20 PUSH0 RETURN.
+    let bytecode: &[u8] = &[0x60, 0x42, 0x5f, 0x52, 0x60, 0x20, 0x5f, 0xf3];
+    let code_hash = alloy_primitives::keccak256(bytecode);
+    let req = || LookupRequest {
+        code_hash,
+        code: Bytes::copy_from_slice(bytecode),
+        spec_id: SpecId::CANCUN,
+    };
+
+    // Trigger JIT promotion.
+    for _ in 0..5 {
+        let _ = backend.lookup(req());
+    }
+
+    // Immediately clear — in-flight JIT results should be discarded.
+    backend.clear_resident().unwrap();
+
+    // Give time for worker to finish and coordinator to process.
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    // The result from the old generation should have been discarded.
+    // The entry should not be in the resident map.
+    assert!(
+        matches!(backend.lookup(req()), LookupDecision::Interpret(InterpretReason::NotReady)),
+        "stale JIT result should not appear after clear_resident",
+    );
+
+    backend.shutdown().unwrap();
+}
+
+#[test]
+#[cfg(feature = "llvm")]
+fn resident_bytes_tracks_jit() {
+    let config = RuntimeConfig {
+        enabled: true,
+        tuning: RuntimeTuning { jit_hot_threshold: 1, jit_worker_count: 1, ..Default::default() },
+        ..Default::default()
+    };
+    let backend = JitBackend::start(config).unwrap();
+
+    assert_eq!(backend.stats().resident_bytes, 0);
+
+    let bytecode: &[u8] = &[0x60, 0x42, 0x5f, 0x52, 0x60, 0x20, 0x5f, 0xf3];
+    let code_hash = alloy_primitives::keccak256(bytecode);
+    let req = || LookupRequest {
+        code_hash,
+        code: Bytes::copy_from_slice(bytecode),
+        spec_id: SpecId::CANCUN,
+    };
+
+    // Trigger JIT and wait for it.
+    for _ in 0..5 {
+        let _ = backend.lookup(req());
+    }
+    poll_until(std::time::Duration::from_secs(30), || match backend.lookup(req()) {
+        LookupDecision::Compiled(_) => Some(()),
+        _ => None,
+    });
+
+    let stats = backend.stats();
+    assert!(stats.resident_bytes > 0, "resident_bytes should be non-zero after JIT");
+    assert_eq!(stats.resident_entries, 1);
+
+    // Clear and verify bytes go back to zero.
+    backend.clear_resident().unwrap();
+    // Give coordinator time to process the clear.
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    let stats = backend.stats();
+    assert_eq!(stats.resident_bytes, 0);
+    assert_eq!(stats.resident_entries, 0);
+
+    backend.shutdown().unwrap();
+}
+
+#[test]
+#[cfg(feature = "llvm")]
+fn idle_eviction() {
+    let config = RuntimeConfig {
+        enabled: true,
+        tuning: RuntimeTuning {
+            jit_hot_threshold: 1,
+            jit_worker_count: 1,
+            // Evict after 100ms idle.
+            idle_evict_duration: Some(std::time::Duration::from_millis(100)),
+            // Sweep every 50ms.
+            eviction_sweep_interval: std::time::Duration::from_millis(50),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let backend = JitBackend::start(config).unwrap();
+
+    let bytecode: &[u8] = &[0x60, 0x42, 0x5f, 0x52, 0x60, 0x20, 0x5f, 0xf3];
+    let code_hash = alloy_primitives::keccak256(bytecode);
+    let req = || LookupRequest {
+        code_hash,
+        code: Bytes::copy_from_slice(bytecode),
+        spec_id: SpecId::CANCUN,
+    };
+
+    // Trigger JIT and wait for compilation.
+    for _ in 0..5 {
+        let _ = backend.lookup(req());
+    }
+    poll_until(std::time::Duration::from_secs(30), || match backend.lookup(req()) {
+        LookupDecision::Compiled(_) => Some(()),
+        _ => None,
+    });
+
+    assert_eq!(backend.stats().resident_entries, 1);
+
+    // Stop hitting the entry and wait for idle eviction.
+    poll_until(std::time::Duration::from_secs(5), || {
+        let stats = backend.stats();
+        if stats.resident_entries == 0 { Some(()) } else { None }
+    });
+
+    assert_eq!(backend.stats().resident_entries, 0);
+    assert_eq!(backend.stats().resident_bytes, 0);
+
+    backend.shutdown().unwrap();
+}
+
+#[test]
+#[cfg(feature = "llvm")]
+fn memory_budget_eviction() {
+    let config = RuntimeConfig {
+        enabled: true,
+        tuning: RuntimeTuning {
+            jit_hot_threshold: 1,
+            jit_worker_count: 1,
+            // Tiny budget: 1 byte — any entry should be evicted.
+            resident_code_cache_bytes: 1,
+            // Sweep frequently.
+            eviction_sweep_interval: std::time::Duration::from_millis(50),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let backend = JitBackend::start(config).unwrap();
+
+    let bytecode: &[u8] = &[0x60, 0x42, 0x5f, 0x52, 0x60, 0x20, 0x5f, 0xf3];
+    let code_hash = alloy_primitives::keccak256(bytecode);
+    let req = || LookupRequest {
+        code_hash,
+        code: Bytes::copy_from_slice(bytecode),
+        spec_id: SpecId::CANCUN,
+    };
+
+    // Trigger JIT and wait for compilation.
+    for _ in 0..5 {
+        let _ = backend.lookup(req());
+    }
+    poll_until(std::time::Duration::from_secs(30), || match backend.lookup(req()) {
+        LookupDecision::Compiled(_) => Some(()),
+        _ => None,
+    });
+
+    // Wait for budget eviction to kick in.
+    poll_until(std::time::Duration::from_secs(5), || {
+        // Don't send lookup events so the entry doesn't get re-promoted.
+        let stats = backend.stats();
+        if stats.resident_entries == 0 { Some(()) } else { None }
+    });
+
+    assert_eq!(backend.stats().resident_entries, 0);
+    assert_eq!(backend.stats().resident_bytes, 0);
+
+    backend.shutdown().unwrap();
+}
+
+#[test]
+#[cfg(feature = "llvm")]
+fn preload_aot_seeds_resident_bytes() {
+    let store = Arc::new(TempDirStore::new());
+
+    // First backend: compile and persist an AOT artifact.
+    let bytecode: &[u8] = &[0x60, 0x42, 0x5f, 0x52, 0x60, 0x20, 0x5f, 0xf3];
+    let code_hash = alloy_primitives::keccak256(bytecode);
+    {
+        let config = RuntimeConfig {
+            enabled: true,
+            store: Some(store.clone()),
+            tuning: RuntimeTuning { jit_worker_count: 1, ..Default::default() },
+            ..Default::default()
+        };
+        let backend = JitBackend::start(config).unwrap();
+
+        backend
+            .prepare_aot(AotRequest {
+                code_hash,
+                code: Bytes::copy_from_slice(bytecode),
+                spec_id: SpecId::CANCUN,
+            })
+            .unwrap();
+
+        poll_until(std::time::Duration::from_secs(30), || {
+            match backend.lookup(LookupRequest {
+                code_hash,
+                code: Bytes::copy_from_slice(bytecode),
+                spec_id: SpecId::CANCUN,
+            }) {
+                LookupDecision::Compiled(_) => Some(()),
+                _ => None,
+            }
+        });
+
+        backend.shutdown().unwrap();
+    }
+
+    // Second backend: preloaded AOT should have resident_bytes > 0 immediately.
+    {
+        let config = RuntimeConfig { enabled: true, store: Some(store), ..Default::default() };
+        let backend = JitBackend::start(config).unwrap();
+
+        let stats = backend.stats();
+        assert_eq!(stats.resident_entries, 1);
+        assert!(stats.resident_bytes > 0, "preloaded AOT should seed resident_bytes");
+
+        backend.shutdown().unwrap();
+    }
+}
+
 /// An artifact store backed by a temp directory on disk.
 ///
 /// `store()` writes the dylib bytes to a file. `load()` returns the path to it.

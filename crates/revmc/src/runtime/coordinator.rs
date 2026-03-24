@@ -45,16 +45,16 @@ impl ResidentBytes {
         self.0.load(Ordering::Relaxed)
     }
 
+    pub(crate) fn store(&self, val: usize) {
+        self.0.store(val, Ordering::Relaxed);
+    }
+
     fn add(&self, bytes: usize) {
         self.0.fetch_add(bytes, Ordering::Relaxed);
     }
 
     fn sub(&self, bytes: usize) {
         self.0.fetch_sub(bytes, Ordering::Relaxed);
-    }
-
-    fn store(&self, val: usize) {
-        self.0.store(val, Ordering::Relaxed);
     }
 }
 
