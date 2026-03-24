@@ -48,7 +48,7 @@ similar-asserts = { version = "1.5", optional = true }
 revmc-build.workspace = true
 
 [dev-dependencies]
-revmc-context = { workspace = true, features = ["host-ext-any"] }
+revmc-context.workspace = true
 revmc-statetest = { path = "../revmc-statetest" }
 paste.workspace = true
 similar-asserts = "1.5"
