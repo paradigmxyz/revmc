@@ -18,12 +18,12 @@ use revm::{
     context::{BlockEnv, ContextSetters, Evm as RevmEvm, TxEnv},
     context_interface::result::{EVMError, HaltReason, ResultAndState},
     handler::{
-        EthFrame, EvmTr, FrameResult, Handler, ItemOrResult, PrecompileProvider,
+        EthFrame, EvmTr, FrameInitOrResult, FrameResult, Handler, ItemOrResult, PrecompileProvider,
         instructions::EthInstructions,
     },
     inspector::NoOpInspector,
     interpreter::{InterpreterResult, interpreter::EthInterpreter, interpreter_action::FrameInit},
-    primitives::hardfork::SpecId,
+    primitives::{B256Map, hardfork::SpecId},
 };
 
 type InnerEvm<DB, I, P> =
@@ -38,12 +38,25 @@ pub struct JitEvm<DB: Database, I, PRECOMPILE = PrecompilesMap> {
     inner: InnerEvm<DB, I, PRECOMPILE>,
     inspect: bool,
     backend: JitBackend,
+
+    /// Cached lookup decisions keyed by `code_hash` alone.
+    /// Invalidated when the `spec_id` changes.
+    lookup_cache: B256Map<LookupDecision>,
+    /// The `spec_id` the cache was built for; cleared on mismatch.
+    lookup_cache_spec_id: SpecId,
 }
 
 impl<DB: Database, I, P> JitEvm<DB, I, P> {
     /// Creates a new JIT EVM from an inner revm EVM and backend.
-    pub const fn new(inner: InnerEvm<DB, I, P>, inspect: bool, backend: JitBackend) -> Self {
-        Self { inner, inspect, backend }
+    pub fn new(inner: InnerEvm<DB, I, P>, inspect: bool, backend: JitBackend) -> Self {
+        let spec_id = inner.cfg.spec;
+        Self {
+            inner,
+            inspect,
+            backend,
+            lookup_cache: B256Map::with_capacity_and_hasher(16, Default::default()),
+            lookup_cache_spec_id: spec_id,
+        }
     }
 
     /// Returns a reference to the JIT backend.
@@ -99,11 +112,14 @@ where
             self.inner.inspect_tx(tx)
         } else {
             self.inner.ctx.set_tx(tx);
-            let mut handler: JitHandler<'_, DB, I, P> =
-                JitHandler { backend: &self.backend, _pd: PhantomData };
-            handler.run(&mut self.inner).map(|result| {
+            let spec_id = self.inner.ctx.cfg.spec;
+            if spec_id != self.lookup_cache_spec_id {
+                self.lookup_cache.clear();
+                self.lookup_cache_spec_id = spec_id;
+            }
+            JitHandler::new(&self.backend, &mut self.lookup_cache).run(&mut self.inner).map(|r| {
                 let state = self.inner.finalize();
-                ResultAndState::new(result, state)
+                ResultAndState::new(r, state)
             })
         }
     }
@@ -183,7 +199,61 @@ impl EvmFactory for JitEvmFactory {
 /// Custom handler that overrides only `run_exec_loop` with JIT dispatch.
 struct JitHandler<'a, DB: Database, I, P> {
     backend: &'a JitBackend,
+    /// Lookup decision cache borrowed from [`JitEvm`], keyed by `code_hash` alone.
+    /// The `spec_id` is constant within an execution; the caller invalidates on change.
+    lookup_cache: &'a mut B256Map<LookupDecision>,
     _pd: PhantomData<(DB, I, P)>,
+}
+
+impl<'a, DB, I, P> JitHandler<'a, DB, I, P>
+where
+    DB: Database,
+    I: Inspector<EthEvmContext<DB>>,
+    P: PrecompileProvider<EthEvmContext<DB>, Output = InterpreterResult>,
+{
+    #[inline]
+    fn new(backend: &'a JitBackend, lookup_cache: &'a mut B256Map<LookupDecision>) -> Self {
+        Self { backend, lookup_cache, _pd: PhantomData }
+    }
+
+    #[inline]
+    fn frame_run(
+        &mut self,
+        evm: &mut <Self as Handler>::Evm,
+    ) -> Result<FrameInitOrResult<<<Self as Handler>::Evm as EvmTr>::Frame>, <Self as Handler>::Error>
+    {
+        let spec_id = evm.cfg.spec;
+        let frame = evm.frame_stack.get();
+        let code_hash = frame.interpreter.bytecode.get_or_calculate_hash();
+
+        // let mut cache_hit = true;
+        let decision = self.lookup_cache.entry(code_hash).or_insert_with(|| {
+            // cache_hit = false;
+            let code = frame.interpreter.bytecode.original_bytes();
+            self.backend.lookup(LookupRequest { code_hash, code, spec_id })
+        });
+
+        // if cache_hit && matches!(decision, LookupDecision::Interpret(InterpretReason::NotReady))
+        // {     let code = frame.interpreter.bytecode.original_bytes();
+        //     *decision = self.backend.lookup(LookupRequest { code_hash, code, spec_id });
+        // }
+
+        Ok(match decision {
+            LookupDecision::Compiled(program) => {
+                let ctx = &mut evm.ctx;
+                let action =
+                    unsafe { program.func.call_with_interpreter(&mut frame.interpreter, ctx) };
+                frame.process_next_action::<_, <Self as Handler>::Error>(ctx, action).inspect(
+                    |i| {
+                        if i.is_result() {
+                            frame.set_finished(true);
+                        }
+                    },
+                )?
+            }
+            LookupDecision::Interpret(_) => evm.frame_run()?,
+        })
+    }
 }
 
 impl<DB, I, P> Handler for JitHandler<'_, DB, I, P>
@@ -196,44 +266,31 @@ where
     type Error = EVMError<DB::Error>;
     type HaltReason = HaltReason;
 
+    #[inline]
     fn run_exec_loop(
         &mut self,
         evm: &mut Self::Evm,
         first_frame_input: FrameInit,
     ) -> Result<FrameResult, Self::Error> {
         let res = evm.frame_init(first_frame_input)?;
+
         if let ItemOrResult::Result(frame_result) = res {
             return Ok(frame_result);
         }
 
-        let spec_id = evm.ctx.cfg.spec;
-
         loop {
-            let call_or_result = {
-                let frame = evm.frame_stack.get();
-                let code_hash = frame.interpreter.bytecode.get_or_calculate_hash();
-                let code = frame.interpreter.bytecode.original_bytes();
-                match self.backend.lookup(LookupRequest { code_hash, code, spec_id }) {
-                    LookupDecision::Compiled(program) => {
-                        let ctx = &mut evm.ctx;
-                        let action = unsafe {
-                            program.func.call_with_interpreter(&mut frame.interpreter, ctx)
-                        };
-                        frame.process_next_action::<_, Self::Error>(ctx, action).inspect(|i| {
-                            if i.is_result() {
-                                frame.set_finished(true);
-                            }
-                        })?
-                    }
-                    LookupDecision::Interpret(_) => evm.frame_run()?,
-                }
-            };
+            let call_or_result = self.frame_run(evm)?;
 
             let result = match call_or_result {
-                ItemOrResult::Item(init) => match evm.frame_init(init)? {
-                    ItemOrResult::Item(_) => continue,
-                    ItemOrResult::Result(result) => result,
-                },
+                ItemOrResult::Item(init) => {
+                    match evm.frame_init(init)? {
+                        ItemOrResult::Item(_) => {
+                            continue;
+                        }
+                        // Do not pop the frame since no new frame was created
+                        ItemOrResult::Result(result) => result,
+                    }
+                }
                 ItemOrResult::Result(result) => result,
             };
 

@@ -174,11 +174,9 @@ impl JitBackend {
 
         let decision = if let Some(program) = self.inner.resident.get(&key) {
             self.inner.stats.lookup_hits.fetch_add(1, Ordering::Relaxed);
-            trace!(code_hash = %req.code_hash, "lookup hit");
             LookupDecision::Compiled(Arc::clone(&program))
         } else {
             self.inner.stats.lookup_misses.fetch_add(1, Ordering::Relaxed);
-            trace!(code_hash = %req.code_hash, "lookup miss");
             LookupDecision::Interpret(InterpretReason::NotReady)
         };
 
