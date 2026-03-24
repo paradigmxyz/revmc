@@ -217,6 +217,21 @@ pub fn get_benches() -> Vec<Bench> {
                 native: None,
             },
         },
+        // EIP-4788 beacon block root contract.
+        // https://eips.ethereum.org/EIPS/eip-4788
+        Bench {
+            name: "eip4788",
+            kind: BenchKind::Bytecode {
+                bytecode: hex!(
+                    "3373fffffffffffffffffffffffffffffffffffffffe14604d57602036146024575f5ffd5b5f35801560495762001fff810690815414603c575f5ffd5b62001fff01545f5260205ff35b5f5ffd5b62001fff42064281555f359062001fff015500"
+                )
+                .to_vec(),
+                // `get` path: 32-byte timestamp query.
+                calldata: U256::from(1).to_be_bytes_vec(),
+                stack_input: Vec::new(),
+                native: None,
+            },
+        },
         Bench {
             name: "curve_stableswap",
             kind: BenchKind::TxFixture(FixtureBenchDef {
