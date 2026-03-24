@@ -348,10 +348,10 @@ impl CoordinatorState {
     }
 
     fn remove_resident(&mut self, key: &RuntimeCacheKey) {
-        if let Some((_, _program)) = self.resident.remove(key) {
-            if let Some(meta) = self.resident_meta.remove(key) {
-                self.resident_bytes.sub(meta.approx_size_bytes);
-            }
+        if let Some((_, _program)) = self.resident.remove(key)
+            && let Some(meta) = self.resident_meta.remove(key)
+        {
+            self.resident_bytes.sub(meta.approx_size_bytes);
         }
     }
 

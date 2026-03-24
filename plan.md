@@ -314,7 +314,10 @@ pub enum StorageConfig {
 | `aot_opt_level` | `Aggressive` | Better persisted artifact quality |
 | `negative_jit_ttl` | `300 s` | Avoid failing-JIT retry storms |
 | `enqueue_cooldown` | `1 s` | Avoid queue hammering |
-| `resident_code_cache_bytes` | `128 MiB` | Predictable memory bound |
+| `jit_max_bytecode_len` | `0` (no limit) | Skip oversized contracts |
+| `resident_code_cache_bytes` | `0` (no limit) | Predictable memory bound |
+| `idle_evict_duration` | `None` (disabled) | Downgrade stale entries after hardforks |
+| `eviction_sweep_interval` | `60 s` | Periodic eviction sweep cadence |
 | `worker_count` | `min(max(1, cpus/2), 4)` | Leave CPU headroom |
 
 ## Data Model
@@ -467,13 +470,19 @@ No compile wait API is exposed.
 1. Stale generation results are discarded.
 1. Function pointer lifetime is tied to backing owner.
 
-## Eviction And Invalidation
+## Eviction And Downgrading
 
-Coordinator-managed LRU-ish eviction by `last_used_at` and `approx_size_bytes` against `resident_code_cache_bytes`.
+Coordinator-managed eviction via periodic sweeps (every `eviction_sweep_interval`).
 
-When over budget:
+Two eviction modes (both optional, composable):
 
-1. Evict least-recently-used `Ready` entries.
+1. **Idle eviction** (`idle_evict_duration`): entries with no lookup hits for longer than this duration are evicted. This naturally handles hardfork transitions — when a new `SpecId` activates, contracts compiled for old spec IDs stop being looked up and are cleaned up after the idle timeout.
+1. **Memory budget** (`resident_code_cache_bytes`): when total `approx_size_bytes` exceeds the budget, least-recently-used entries are evicted until under budget.
+
+When evicting:
+
+1. Remove from resident map and metadata.
+1. Reset coordinator entry state (key can be re-promoted if it becomes hot again).
 1. Drop runtime strong refs.
 1. Let memory free naturally as outstanding `Arc` refs drop.
 
@@ -487,7 +496,7 @@ Expose metrics for:
 1. JIT compile attempts/success/failure/latency.
 1. AOT prepare probe/compile/store success/failure/latency.
 1. Startup `load_all` count/failure/latency.
-1. Resident bytes and evictions.
+1. Resident entries, bytes, and evictions.
 
 Add tracing spans around startup preload, lookup-observed handling, JIT jobs, AOT prepare jobs, and lifecycle operations.
 
