@@ -303,9 +303,11 @@ impl JitBackend {
 
     /// Returns a point-in-time snapshot of runtime statistics.
     pub fn stats(&self) -> RuntimeStatsSnapshot {
-        self.inner
-            .stats
-            .snapshot(self.inner.resident.len() as u64, self.inner.resident_bytes.load() as u64)
+        self.inner.stats.snapshot(
+            self.inner.resident.len() as u64,
+            self.inner.resident_bytes.load() as u64,
+            self.inner.tx.len() as u64,
+        )
     }
 
     /// Preloads AOT artifacts from the store into the resident map.

@@ -30,6 +30,8 @@ pub struct RuntimeStatsSnapshot {
     pub resident_entries: u64,
     /// Approximate total bytes of compiled code in the resident map.
     pub resident_bytes: u64,
+    /// Number of commands pending in the backend command queue.
+    pub jit_queue_len: u64,
 }
 
 impl RuntimeStats {
@@ -37,6 +39,7 @@ impl RuntimeStats {
         &self,
         resident_entries: u64,
         resident_bytes: u64,
+        jit_queue_len: u64,
     ) -> RuntimeStatsSnapshot {
         RuntimeStatsSnapshot {
             lookup_hits: self.lookup_hits.load(Ordering::Relaxed),
@@ -45,6 +48,7 @@ impl RuntimeStats {
             events_dropped: self.events_dropped.load(Ordering::Relaxed),
             resident_entries,
             resident_bytes,
+            jit_queue_len,
         }
     }
 }
