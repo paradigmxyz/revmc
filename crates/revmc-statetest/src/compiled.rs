@@ -206,7 +206,7 @@ impl CompileCache {
                     claimed.push((
                         code_hash,
                         &info.code[..],
-                        format!("contract_{code_hash:x}"),
+                        format!("contract_{code_hash:x}_{spec_id}"),
                         lock,
                     ));
                 }
@@ -291,7 +291,7 @@ impl CompileCache {
                 e.insert(lock.clone());
                 self.n_misses.fetch_add(1, Ordering::Relaxed);
 
-                let name = format!("runtime_{code_hash:x}");
+                let name = format!("runtime_{code_hash:x}_{spec_id}");
                 let claimed = vec![(code_hash, code, name, lock)];
                 let mut compiled = CompiledContracts::new();
 
