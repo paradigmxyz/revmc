@@ -616,6 +616,8 @@ total:      {total:>11.3?}
             writer.flush()?;
         }
 
+        fs::write(dump_dir.join("bytecode.bin"), bytecode.code)?;
+
         {
             let file = fs::File::create(dump_dir.join("bytecode.dot"))?;
             let mut writer = io::BufWriter::new(file);
