@@ -634,8 +634,8 @@ fn run_compiled_test_case(test_case: &TestCase<'_>, f: EvmCompilerFn) {
         assert_actions(actual_next_action, expected_next_action);
 
         if let Some(_assert_host) = assert_host {
-            #[cfg(not(feature = "__fuzzing"))]
-            _assert_host(ecx.host.downcast_ref().unwrap());
+            let host = unsafe { &*(ecx.host as *mut dyn Host as *mut TestHost) };
+            _assert_host(host);
         }
 
         if let Some(assert_ecx) = assert_ecx {

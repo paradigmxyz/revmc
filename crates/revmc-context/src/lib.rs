@@ -14,9 +14,6 @@ use revm_interpreter::{
 };
 use revm_primitives::{Address, B256, Bytes, U256, hardfork::SpecId, ruint};
 
-#[cfg(feature = "host-ext-any")]
-use core::any::Any;
-
 /// The EVM bytecode compiler runtime context.
 ///
 /// This is a simple wrapper around the interpreter's resources, allowing the compiled function to
@@ -34,7 +31,7 @@ pub struct EvmContext<'a> {
     /// The gas.
     pub gas: &'a mut Gas,
     /// The host.
-    pub host: &'a mut dyn HostExt,
+    pub host: &'a mut dyn Host,
     /// The return action.
     pub next_action: &'a mut Option<InterpreterAction>,
     /// The return data.
@@ -71,7 +68,7 @@ impl fmt::Debug for EvmContext<'_> {
 impl<'a> EvmContext<'a> {
     /// Creates a new context from an interpreter.
     #[inline]
-    pub fn from_interpreter(interpreter: &'a mut Interpreter, host: &'a mut dyn HostExt) -> Self {
+    pub fn from_interpreter(interpreter: &'a mut Interpreter, host: &'a mut dyn Host) -> Self {
         Self::from_interpreter_with_stack(interpreter, host).0
     }
 
@@ -79,7 +76,7 @@ impl<'a> EvmContext<'a> {
     #[inline]
     pub fn from_interpreter_with_stack<'b: 'a>(
         interpreter: &'a mut Interpreter,
-        host: &'b mut dyn HostExt,
+        host: &'b mut dyn Host,
     ) -> (Self, &'a mut EvmStack, &'a mut usize) {
         let (stack, stack_len) = EvmStack::from_interpreter_stack(&mut interpreter.stack);
         let bytecode_slice = interpreter.bytecode.bytecode_slice();
@@ -98,47 +95,6 @@ impl<'a> EvmContext<'a> {
             bytecode,
         };
         (this, stack, stack_len)
-    }
-}
-
-/// Extension trait for [`Host`].
-#[cfg(not(feature = "host-ext-any"))]
-pub trait HostExt: Host {}
-
-/// Extension trait for [`Host`].
-#[cfg(feature = "host-ext-any")]
-pub trait HostExt: Host + Any {
-    #[doc(hidden)]
-    fn as_any(&self) -> &dyn Any;
-    #[doc(hidden)]
-    fn as_any_mut(&mut self) -> &mut dyn Any;
-}
-
-#[cfg(not(feature = "host-ext-any"))]
-impl<T: Host> HostExt for T {}
-
-#[cfg(feature = "host-ext-any")]
-impl<T: Host + Any> HostExt for T {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
-}
-
-#[cfg(feature = "host-ext-any")]
-#[doc(hidden)]
-impl dyn HostExt {
-    /// Attempts to downcast the host to a concrete type.
-    pub fn downcast_ref<T: Any>(&self) -> Option<&T> {
-        self.as_any().downcast_ref()
-    }
-
-    /// Attempts to downcast the host to a concrete type.
-    pub fn downcast_mut<T: Any>(&mut self) -> Option<&mut T> {
-        self.as_any_mut().downcast_mut()
     }
 }
 
@@ -232,7 +188,7 @@ impl EvmCompilerFn {
         self,
         interpreter: &mut Interpreter,
         memory: &mut SharedMemory,
-        host: &mut dyn HostExt,
+        host: &mut dyn Host,
     ) -> InterpreterAction {
         interpreter.memory = core::mem::replace(memory, SharedMemory::invalid());
         let result = self.call_with_interpreter(interpreter, host);
@@ -252,7 +208,7 @@ impl EvmCompilerFn {
     pub unsafe fn call_with_interpreter(
         self,
         interpreter: &mut Interpreter,
-        host: &mut dyn HostExt,
+        host: &mut dyn Host,
     ) -> InterpreterAction {
         interpreter.bytecode.action = None;
 
