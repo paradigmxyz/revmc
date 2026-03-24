@@ -21,6 +21,9 @@ pub use linker::Linker;
 #[cfg(feature = "alloy-evm")]
 pub mod alloy_evm;
 
+#[cfg(feature = "alloy-evm")]
+pub mod revm_evm;
+
 pub mod runtime;
 
 /// ABI version of compiled artifacts. Bump when the calling convention changes.
