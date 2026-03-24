@@ -112,6 +112,8 @@ struct EntryState {
     phase: EntryPhase,
     /// The bytecode for this key (captured from a miss event).
     bytecode: Bytes,
+    /// Sync notifiers waiting for this entry to finish compiling.
+    pending_notifiers: Vec<SyncNotifier>,
 }
 
 /// Phase of a backend entry.
@@ -191,6 +193,7 @@ impl BackendState {
             hotness: 0,
             phase: EntryPhase::Cold,
             bytecode: bytecode.clone(),
+            pending_notifiers: Vec::new(),
         });
 
         // Only increment hotness for cold entries.
@@ -240,12 +243,20 @@ impl BackendState {
             return;
         }
 
-        // Check if already working or failed.
-        if let Some(entry) = self.entries.get(&req.key)
-            && entry.phase != EntryPhase::Cold
-        {
-            req.sync_notifier.notify();
-            return;
+        // If already working, queue the notifier to fire when the result arrives.
+        // If failed, notify immediately (compilation won't be retried).
+        if let Some(entry) = self.entries.get_mut(&req.key) {
+            match entry.phase {
+                EntryPhase::Working => {
+                    entry.pending_notifiers.push(req.sync_notifier);
+                    return;
+                }
+                EntryPhase::Failed => {
+                    req.sync_notifier.notify();
+                    return;
+                }
+                EntryPhase::Cold => {}
+            }
         }
 
         let code_hash = req.key.code_hash;
@@ -262,6 +273,7 @@ impl BackendState {
             hotness: 0,
             phase: EntryPhase::Cold,
             bytecode: req.bytecode,
+            pending_notifiers: Vec::new(),
         });
 
         if self.workers.try_send(job) {
@@ -308,6 +320,7 @@ impl BackendState {
                 hotness: 0,
                 phase: EntryPhase::Cold,
                 bytecode: req.bytecode,
+                pending_notifiers: Vec::new(),
             });
 
             if self.workers.try_send(job) {
@@ -322,7 +335,12 @@ impl BackendState {
         self.resident.clear();
         self.resident_meta.clear();
         self.resident_bytes.store(0);
-        self.entries.clear();
+        // Notify any pending sync callers before clearing entries.
+        for (_, entry) in self.entries.drain() {
+            for n in entry.pending_notifiers {
+                n.notify();
+            }
+        }
         // Bump generation so in-flight worker results from before the clear are discarded.
         self.generation += 1;
         debug!(generation = self.generation, "resident map cleared");
@@ -364,6 +382,13 @@ impl BackendState {
     fn handle_worker_result(&mut self, result: WorkerResult) {
         self.pending_jobs = self.pending_jobs.saturating_sub(1);
 
+        // Drain pending notifiers from the entry before processing.
+        let pending_notifiers = self
+            .entries
+            .get_mut(&result.key)
+            .map(|e| std::mem::take(&mut e.pending_notifiers))
+            .unwrap_or_default();
+
         // Discard stale results from a previous generation (e.g. after clear).
         if result.generation != self.generation {
             debug!(
@@ -373,6 +398,9 @@ impl BackendState {
                 "discarding stale worker result",
             );
             result.sync_notifier.notify();
+            for n in pending_notifiers {
+                n.notify();
+            }
             return;
         }
 
@@ -418,6 +446,9 @@ impl BackendState {
 
         // Notify synchronous callers after the result has been fully processed.
         result.sync_notifier.notify();
+        for n in pending_notifiers {
+            n.notify();
+        }
     }
 
     fn handle_aot_success(
