@@ -11,9 +11,9 @@ pub struct RuntimeConfig {
     /// Defaults to `false` (safe rollout default).
     pub enabled: bool,
 
-    /// Name for the coordinator thread.
+    /// Name for the backend thread.
     ///
-    /// Defaults to `"revmc-coordinator"`.
+    /// Defaults to `"revmc-backend"`.
     pub thread_name: String,
 
     /// Artifact store for loading precompiled AOT artifacts.
@@ -59,7 +59,7 @@ impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            thread_name: "revmc-coordinator".into(),
+            thread_name: "revmc-backend".into(),
             store: None,
             tuning: RuntimeTuning::default(),
             dump_dir: None,
@@ -79,7 +79,7 @@ pub struct RuntimeTuning {
     /// Defaults to `4096`.
     pub lookup_event_channel_capacity: usize,
 
-    /// Timeout for joining the coordinator thread during shutdown.
+    /// Timeout for joining the backend thread during shutdown.
     ///
     /// Defaults to `5s`.
     pub shutdown_timeout: Duration,
@@ -127,7 +127,7 @@ pub struct RuntimeTuning {
     /// Maximum total resident compiled code size in bytes.
     ///
     /// When the total `approx_size_bytes` of all resident programs exceeds this limit,
-    /// the coordinator evicts the least-recently-used entries until under budget.
+    /// the backend evicts the least-recently-used entries until under budget.
     ///
     /// `0` means no limit.
     ///
@@ -136,7 +136,7 @@ pub struct RuntimeTuning {
 
     /// Duration after which a resident program with no lookup hits is evicted.
     ///
-    /// When a compiled program has not been hit for this duration, the coordinator
+    /// When a compiled program has not been hit for this duration, the backend
     /// removes it from the resident map. This naturally cleans up stale entries
     /// after hardfork transitions (old `spec_id` contracts stop being looked up).
     ///
@@ -145,7 +145,7 @@ pub struct RuntimeTuning {
     /// Defaults to `None` (disabled).
     pub idle_evict_duration: Option<Duration>,
 
-    /// How often the coordinator runs eviction sweeps.
+    /// How often the backend runs eviction sweeps.
     ///
     /// Defaults to `60s`.
     pub eviction_sweep_interval: Duration,

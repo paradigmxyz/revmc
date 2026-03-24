@@ -138,7 +138,7 @@ fn drop_shuts_down_backend() {
     let backend2 = backend.clone();
     drop(backend);
 
-    // Lookups still work (no panic) — coordinator is still running because backend2 holds a ref.
+    // Lookups still work (no panic) — backend is still running because backend2 holds a ref.
     let req = LookupRequest { code_hash: B256::ZERO, code: Bytes::new(), spec_id: SpecId::CANCUN };
     let _ = backend2.lookup(req);
 }
@@ -396,7 +396,7 @@ fn jit_max_bytecode_len_prevents_promotion() {
         let _ = backend.lookup(req());
     }
 
-    // Give the coordinator time to process events.
+    // Give the backend time to process events.
     std::thread::sleep(std::time::Duration::from_millis(200));
 
     // Should still be NotReady — never promoted due to bytecode length.
@@ -432,7 +432,7 @@ fn clear_resident_discards_inflight_jit() {
     // Immediately clear — in-flight JIT results should be discarded.
     backend.clear_resident();
 
-    // Give time for worker to finish and coordinator to process.
+    // Give time for worker to finish and backend to process.
     std::thread::sleep(std::time::Duration::from_millis(500));
 
     // The result from the old generation should have been discarded.
@@ -480,7 +480,7 @@ fn resident_bytes_tracks_jit() {
 
     // Clear and verify bytes go back to zero.
     backend.clear_resident();
-    // Give coordinator time to process the clear.
+    // Give backend time to process the clear.
     std::thread::sleep(std::time::Duration::from_millis(100));
     let stats = backend.stats();
     assert_eq!(stats.resident_bytes, 0);
@@ -854,8 +854,6 @@ fn aot_artifacts_survive_restart() {
             assert!(std::time::Instant::now() < deadline, "timed out waiting for AOT compilation",);
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
-
-        backend.shutdown().unwrap();
     }
 
     assert_eq!(store.stored_count(), 1);
@@ -881,7 +879,5 @@ fn aot_artifacts_survive_restart() {
         );
 
         assert_eq!(backend.stats().resident_entries, 1);
-
-        backend.shutdown().unwrap();
     }
 }

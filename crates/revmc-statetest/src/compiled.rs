@@ -556,11 +556,11 @@ fn execute_test_suite_compiled(
     Ok(())
 }
 
-// ── Runtime coordinator mode ─────────────────────────────────────────────────
+// ── Runtime backend mode ─────────────────────────────────────────────────────
 
 use revmc::runtime::{JitBackend, LookupRequest, RuntimeConfig, RuntimeTuning};
 
-/// Custom handler that looks up compiled functions via the runtime coordinator.
+/// Custom handler that looks up compiled functions via the runtime backend.
 /// On miss, enqueues JIT compilation and spin-waits for the result.
 struct RuntimeHandler {
     backend: JitBackend,
@@ -626,7 +626,7 @@ fn wait_for_compiled(
     backend.lookup_blocking(req).map(|p| p.func)
 }
 
-/// Execute a single test using the runtime coordinator handler.
+/// Execute a single test using the runtime backend handler.
 fn execute_single_test_runtime(
     backend: &JitBackend,
     ctx: RuntimeTestContext<'_>,
@@ -678,9 +678,9 @@ struct RuntimeTestContext<'a> {
     elapsed: &'a Arc<Mutex<Duration>>,
 }
 
-/// Execute a test suite file using the runtime coordinator.
+/// Execute a test suite file using the runtime backend.
 ///
-/// For each test unit, we enqueue JIT compilation via the coordinator and wait for all
+/// For each test unit, we enqueue JIT compilation via the backend and wait for all
 /// contracts to be compiled before executing. This exercises the full JIT pipeline.
 fn execute_test_suite_runtime(
     path: &Path,
@@ -917,10 +917,7 @@ pub fn run(
         );
     }
 
-    // Shutdown backend.
-    if let Some(backend) = &backend {
-        let _ = backend.shutdown();
-    }
+    drop(backend);
 
     let n_errors = state.n_errors.load(Ordering::SeqCst);
     let n_thread_errors = thread_errors.len();

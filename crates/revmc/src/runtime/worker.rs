@@ -18,7 +18,7 @@ use std::{
 /// Notifier for synchronous compilation requests.
 ///
 /// Wraps an optional sender that is notified when the compilation
-/// completes (success or failure). Passed from the coordinator through
+/// completes (success or failure). Passed from the backend through
 /// the worker and back, then fired after the result is processed.
 pub(crate) struct SyncNotifier(Option<chan::Sender<()>>);
 
@@ -38,7 +38,7 @@ impl SyncNotifier {
     }
 }
 
-/// A compilation job sent from the coordinator to a worker.
+/// A compilation job sent from the backend to a worker.
 #[derive(Debug)]
 pub(crate) enum WorkerJob {
     /// JIT compilation: produce an in-memory function pointer.
@@ -47,7 +47,7 @@ pub(crate) enum WorkerJob {
     Aot(AotJob),
 }
 
-/// A JIT compilation job sent from the coordinator to a worker.
+/// A JIT compilation job sent from the backend to a worker.
 #[derive(derive_more::Debug)]
 pub(crate) struct JitJob {
     /// The key to compile for.
@@ -63,7 +63,7 @@ pub(crate) struct JitJob {
     pub(crate) generation: u64,
 }
 
-/// An AOT compilation job sent from the coordinator to a worker.
+/// An AOT compilation job sent from the backend to a worker.
 #[derive(Debug)]
 pub(crate) struct AotJob {
     /// The key to compile for.
@@ -78,7 +78,7 @@ pub(crate) struct AotJob {
     pub(crate) generation: u64,
 }
 
-/// Result of a compilation attempt, sent back from a worker to the coordinator.
+/// Result of a compilation attempt, sent back from a worker to the backend.
 pub(crate) struct WorkerResult {
     /// The key that was compiled.
     pub(crate) key: RuntimeCacheKey,
@@ -334,7 +334,7 @@ fn worker_loop(
 
     debug!("compile worker done processing jobs, waiting for backing refs to drop");
 
-    // Block until the coordinator signals exit (all external program refs dropped).
+    // Block until the backend signals exit (all external program refs dropped).
     // This keeps the compiler (and its JIT machine code) alive on this thread.
     backing.wait_for_exit();
 

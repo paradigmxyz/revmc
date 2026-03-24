@@ -71,7 +71,7 @@ pub enum BackendSelection {
 /// Trait for loading and storing compiled artifacts.
 ///
 /// Implementations manage artifact files on the filesystem. The store owns the dylib files and
-/// returns paths to them. The coordinator loads shared libraries directly from these paths.
+/// returns paths to them. The backend loads shared libraries directly from these paths.
 pub trait ArtifactStore: Send + Sync + 'static {
     /// Loads all available artifacts from storage.
     fn load_all(&self) -> eyre::Result<Vec<(ArtifactKey, StoredArtifact)>>;

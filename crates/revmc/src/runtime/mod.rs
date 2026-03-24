@@ -2,7 +2,7 @@
 //!
 //! - Startup AOT preload from [`ArtifactStore::load_all`] into an immutable in-memory map.
 //! - O(1) [`JitBackend::lookup`] that only reads the resident map.
-//! - Fire-and-forget lookup-observed events to the coordinator thread.
+//! - Fire-and-forget lookup-observed events to the backend thread.
 //! - Background JIT compilation for hot keys (threshold-based promotion).
 
 use crate::{
@@ -10,7 +10,7 @@ use crate::{
     eyre::{self, WrapErr},
 };
 use api::LoadedLibrary;
-use coordinator::{
+use backend::{
     Command, CompileJitRequest, LookupObservedEvent, PrepareAotRequest, ResidentBytes, ResidentMap,
 };
 use crossbeam_channel as chan;
@@ -33,7 +33,7 @@ pub use api::{
 mod config;
 pub use config::{RuntimeConfig, RuntimeTuning};
 
-mod coordinator;
+mod backend;
 
 mod stats;
 pub use stats::RuntimeStatsSnapshot;
@@ -49,7 +49,7 @@ mod worker;
 mod tests;
 
 /// Shared inner state for [`JitBackend`].
-struct JitBackendInner {
+struct BackendInner {
     /// Shared resident compiled map.
     resident: Arc<ResidentMap>,
     /// Shared atomic counter for total resident bytes.
@@ -58,18 +58,18 @@ struct JitBackendInner {
     enabled: AtomicBool,
     /// Blocking mode: every lookup synchronously compiles and never falls back.
     blocking: bool,
-    /// Channel for sending commands to the coordinator thread.
+    /// Channel for sending commands to the backend thread.
     tx: chan::Sender<Command>,
     /// Shared stats counters.
     stats: RuntimeStats,
-    /// Coordinator thread + done signal. `None` after shutdown.
-    thread: std::sync::Mutex<Option<CoordinatorThread>>,
+    /// Backend thread + done signal. `None` after shutdown.
+    thread: std::sync::Mutex<Option<BackendThread>>,
     /// Shutdown timeout.
     shutdown_timeout: Duration,
 }
 
-/// Coordinator thread handle and its completion signal.
-struct CoordinatorThread {
+/// Backend thread handle and its completion signal.
+struct BackendThread {
     handle: std::thread::JoinHandle<()>,
     done_rx: chan::Receiver<()>,
 }
@@ -77,16 +77,16 @@ struct CoordinatorThread {
 /// JIT compilation backend with O(1) compiled-function lookup.
 ///
 /// Created via [`JitBackend::start`]. This type is cheaply clonable (backed by `Arc`).
-/// All clones share the same coordinator thread, resident map, and statistics.
+/// All clones share the same backend thread, resident map, and statistics.
 #[derive(Clone)]
 #[allow(missing_debug_implementations)]
 pub struct JitBackend {
-    inner: Arc<JitBackendInner>,
+    inner: Arc<BackendInner>,
 }
 
 impl JitBackend {
     /// Starts the backend: loads AOT artifacts, builds the resident map, and spawns the
-    /// coordinator thread.
+    /// backend thread.
     pub fn start(mut config: RuntimeConfig) -> eyre::Result<Self> {
         // Blocking mode forces enabled and zero threshold.
         if config.blocking {
@@ -115,16 +115,16 @@ impl JitBackend {
         let store = config.store.clone();
         let dump_dir = config.dump_dir;
         let debug_assertions = config.debug_assertions;
-        let resident_for_coord = Arc::clone(&resident);
-        let resident_bytes_for_coord = Arc::clone(&resident_bytes);
+        let resident_for_thread = Arc::clone(&resident);
+        let resident_bytes_for_thread = Arc::clone(&resident_bytes);
 
         let thread = std::thread::Builder::new()
             .name(config.thread_name)
             .spawn(move || {
-                coordinator::run(
+                backend::run(
                     rx,
-                    resident_for_coord,
-                    resident_bytes_for_coord,
+                    resident_for_thread,
+                    resident_bytes_for_thread,
                     store,
                     tuning,
                     dump_dir,
@@ -132,16 +132,16 @@ impl JitBackend {
                 );
                 let _ = done_tx.send(());
             })
-            .wrap_err("failed to spawn coordinator")?;
+            .wrap_err("failed to spawn backend thread")?;
 
-        let inner = JitBackendInner {
+        let inner = BackendInner {
             resident,
             resident_bytes,
             enabled: AtomicBool::new(config.enabled),
             blocking: config.blocking,
             tx,
             stats: RuntimeStats::default(),
-            thread: std::sync::Mutex::new(Some(CoordinatorThread { handle: thread, done_rx })),
+            thread: std::sync::Mutex::new(Some(BackendThread { handle: thread, done_rx })),
             shutdown_timeout: config.tuning.shutdown_timeout,
         };
 
@@ -149,7 +149,9 @@ impl JitBackend {
     }
 
     /// Shuts down the coordinator thread and waits for it to finish.
-    pub fn shutdown(&self) -> eyre::Result<()> {
+    /// NOTE: this should not be exposed! It's unsafe to use any JIT'd functions after shutdown.
+    #[cfg(test)]
+    pub(crate) fn shutdown(&self) -> eyre::Result<()> {
         self.inner.shutdown()
     }
 
@@ -226,7 +228,7 @@ impl JitBackend {
     /// Enqueues an explicit JIT compilation request for the given bytecode.
     ///
     /// This is fire-and-forget: returns immediately and silently drops the request
-    /// if the coordinator channel is full.
+    /// if the backend channel is full.
     pub fn compile_jit(&self, req: LookupRequest) {
         let cmd = Command::CompileJit(CompileJitRequest {
             key: RuntimeCacheKey { code_hash: req.code_hash, spec_id: req.spec_id },
@@ -248,11 +250,8 @@ impl JitBackend {
             bytecode: req.code,
             sync_notifier: SyncNotifier::new(tx),
         });
-        self.inner
-            .tx
-            .try_send(cmd)
-            .map_err(|_| eyre::eyre!("coordinator channel full or closed"))?;
-        rx.recv().map_err(|_| eyre::eyre!("coordinator shut down before compilation completed"))
+        self.inner.tx.try_send(cmd).map_err(|_| eyre::eyre!("backend channel full or closed"))?;
+        rx.recv().map_err(|_| eyre::eyre!("backend shut down before compilation completed"))
     }
 
     /// Enqueues a single AOT preparation request.
@@ -378,34 +377,35 @@ impl JitBackend {
     }
 }
 
-impl JitBackendInner {
+impl BackendInner {
     fn shutdown(&self) -> eyre::Result<()> {
         debug!("shutting down JIT backend");
         if let Some(ct) = self.thread.lock().unwrap().take() {
-            // Ignoring send error — coordinator may already be gone.
+            // Ignoring send error — backend may already be gone.
             let _ = self.tx.send(Command::Shutdown);
 
             // Wait for the thread to signal completion, with a timeout.
             match ct.done_rx.recv_timeout(self.shutdown_timeout) {
                 Ok(()) | Err(chan::RecvTimeoutError::Disconnected) => {}
                 Err(chan::RecvTimeoutError::Timeout) => {
-                    warn!(
-                        timeout = ?self.shutdown_timeout,
-                        "coordinator thread did not exit within timeout",
+                    eyre::bail!(
+                        "backend thread did not exit within timeout ({:?})",
+                        self.shutdown_timeout
                     );
-                    eyre::bail!("coordinator thread did not exit within timeout");
                 }
             }
 
             // Thread signaled done, join should return immediately.
-            ct.handle.join().map_err(|_| eyre::eyre!("coordinator thread panicked"))?;
+            ct.handle.join().map_err(|_| eyre::eyre!("backend thread panicked"))?;
         }
         Ok(())
     }
 }
 
-impl Drop for JitBackendInner {
+impl Drop for BackendInner {
     fn drop(&mut self) {
-        let _ = self.shutdown();
+        if let Err(err) = self.shutdown() {
+            warn!(%err, "failed to shutdown JIT backend");
+        }
     }
 }

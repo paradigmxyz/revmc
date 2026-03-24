@@ -1,6 +1,6 @@
-//! Coordinator thread: single-threaded event loop for runtime state management.
+//! Backend thread: single-threaded event loop for runtime state management.
 //!
-//! The coordinator is the sole writer of mutable state. It processes lookup-observed
+//! The backend thread is the sole writer of mutable state. It processes lookup-observed
 //! events, tracks hotness, admits JIT compilation jobs, and inserts results into
 //! the shared resident `DashMap`.
 
@@ -33,7 +33,7 @@ struct ResidentMeta {
     approx_size_bytes: usize,
 }
 
-/// Shared atomic counter for total resident bytes, readable from stats without coordinator.
+/// Shared atomic counter for total resident bytes, readable from stats without the backend thread.
 pub(crate) struct ResidentBytes(AtomicUsize);
 
 impl ResidentBytes {
@@ -58,7 +58,7 @@ impl ResidentBytes {
     }
 }
 
-/// Commands sent to the coordinator thread.
+/// Commands sent to the backend thread.
 pub(crate) enum Command {
     /// A lookup was observed on the hot path.
     LookupObserved(LookupObservedEvent),
@@ -72,7 +72,7 @@ pub(crate) enum Command {
     ClearPersisted,
     /// Clear both resident and persisted.
     ClearAll,
-    /// Shut down the coordinator.
+    /// Shut down the backend.
     Shutdown,
 }
 
@@ -104,7 +104,7 @@ pub(crate) struct LookupObservedEvent {
     pub(crate) bytecode: Option<Bytes>,
 }
 
-/// Per-key state tracked by the coordinator.
+/// Per-key state tracked by the backend.
 struct EntryState {
     /// Number of observed misses.
     hotness: u32,
@@ -114,7 +114,7 @@ struct EntryState {
     bytecode: Bytes,
 }
 
-/// Phase of a coordinator entry.
+/// Phase of a backend entry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum EntryPhase {
     /// Not yet hot enough for JIT.
@@ -125,15 +125,15 @@ enum EntryPhase {
     Failed,
 }
 
-/// All coordinator-owned mutable state.
-struct CoordinatorState {
-    /// The shared resident map (handles read, coordinator writes).
+/// All backend-thread-owned mutable state.
+struct BackendState {
+    /// The shared resident map (handles read, backend writes).
     resident: Arc<ResidentMap>,
-    /// Per-key metadata for eviction (coordinator-only).
+    /// Per-key metadata for eviction (backend-only).
     resident_meta: HashMap<RuntimeCacheKey, ResidentMeta>,
     /// Shared atomic counter for total resident bytes.
     resident_bytes: Arc<ResidentBytes>,
-    /// Per-key tracking state (coordinator-only).
+    /// Per-key tracking state (backend-only).
     entries: HashMap<RuntimeCacheKey, EntryState>,
     /// Worker pool for JIT compilation.
     workers: WorkerPool,
@@ -156,7 +156,7 @@ struct CoordinatorState {
     evictions: u64,
 }
 
-impl CoordinatorState {
+impl BackendState {
     fn handle_lookup_observed(&mut self, event: LookupObservedEvent) {
         // Update last-hit time for eviction tracking.
         if event.was_hit {
@@ -611,7 +611,7 @@ impl CoordinatorState {
     }
 }
 
-/// Runs the coordinator event loop. Called on the coordinator thread.
+/// Runs the backend event loop. Called on the backend thread.
 pub(crate) fn run(
     cmd_rx: chan::Receiver<Command>,
     resident: Arc<ResidentMap>,
@@ -621,7 +621,7 @@ pub(crate) fn run(
     dump_dir: Option<std::path::PathBuf>,
     debug_assertions: bool,
 ) {
-    debug!("coordinator thread started");
+    debug!("backend thread started");
 
     let (result_tx, result_rx) = chan::unbounded::<WorkerResult>();
 
@@ -650,7 +650,7 @@ pub(crate) fn run(
     }
     resident_bytes.store(preload_bytes);
 
-    let mut state = CoordinatorState {
+    let mut state = BackendState {
         resident,
         resident_meta: preload_meta,
         resident_bytes,
@@ -674,7 +674,7 @@ pub(crate) fn run(
                 let cmd = match msg {
                     Ok(cmd) => cmd,
                     Err(_) => {
-                        debug!("coordinator channel closed, shutting down");
+                        debug!("backend channel closed, shutting down");
                         break;
                     }
                 };
@@ -686,7 +686,7 @@ pub(crate) fn run(
                     Command::ClearPersisted => state.handle_clear_persisted(),
                     Command::ClearAll => state.handle_clear_all(),
                     Command::Shutdown => {
-                        debug!("coordinator shutting down");
+                        debug!("backend thread shutting down");
                         break;
                     }
                 }
@@ -716,7 +716,7 @@ pub(crate) fn run(
         evictions = state.evictions,
         resident_entries = state.resident.len(),
         resident_bytes = state.resident_bytes.load(),
-        "coordinator stats at shutdown",
+        "backend stats at shutdown",
     );
 
     state.workers.shutdown();
