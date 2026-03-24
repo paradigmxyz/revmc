@@ -145,6 +145,10 @@ pub struct CompileCache {
     compiler: ManuallyDrop<ThreadLocal<RefCell<EvmCompiler<EvmLlvmBackend>>>>,
     n_hits: AtomicUsize,
     n_misses: AtomicUsize,
+    /// Current number of in-flight (claimed but not yet compiled) entries.
+    n_pending: AtomicUsize,
+    /// Peak number of in-flight entries observed.
+    n_pending_peak: AtomicUsize,
 }
 
 impl CompileCache {
@@ -156,6 +160,8 @@ impl CompileCache {
             compiler: Default::default(),
             n_hits: Default::default(),
             n_misses: Default::default(),
+            n_pending: Default::default(),
+            n_pending_peak: Default::default(),
         }
     }
 
@@ -200,6 +206,8 @@ impl CompileCache {
                     let lock = Arc::new(OnceLock::new());
                     e.insert(lock.clone());
                     self.n_misses.fetch_add(1, Ordering::Relaxed);
+                    let pending = self.n_pending.fetch_add(1, Ordering::Relaxed) + 1;
+                    self.n_pending_peak.fetch_max(pending, Ordering::Relaxed);
                     claimed.push((
                         code_hash,
                         &info.code[..],
@@ -287,6 +295,8 @@ impl CompileCache {
                 let lock = Arc::new(OnceLock::new());
                 e.insert(lock.clone());
                 self.n_misses.fetch_add(1, Ordering::Relaxed);
+                let pending = self.n_pending.fetch_add(1, Ordering::Relaxed) + 1;
+                self.n_pending_peak.fetch_max(pending, Ordering::Relaxed);
 
                 let name = format!("runtime_{code_hash:x}_{spec_id}");
                 let claimed = vec![(code_hash, code, name, lock)];
@@ -325,6 +335,7 @@ impl CompileCache {
             })?;
             claimed[i].3.set(func).ok();
             compiled.insert(code_hash, func);
+            self.n_pending.fetch_sub(1, Ordering::Relaxed);
         }
 
         let _ = compiler.clear_ir();
@@ -370,6 +381,7 @@ impl CompileCache {
                 .map_err(|e| TestErrorKind::CompilationError(format!("symbol {name}: {e}")))?;
             claimed[i].3.set(*f).ok();
             compiled.insert(*code_hash, *f);
+            self.n_pending.fetch_sub(1, Ordering::Relaxed);
         }
 
         self.libs.lock().unwrap().push((tmp_dir, lib));
@@ -391,14 +403,15 @@ impl CompileCache {
             };
             let rate = hits as f64 / total as f64 * 100.0;
             let n_libs = self.libs.lock().unwrap().len();
+            let peak_pending = self.n_pending_peak.load(Ordering::Relaxed);
             if n_libs > 0 {
                 println!(
-                    "{label} cache: {total} lookups, {hits} hits, {misses} misses ({rate:.1}% hit rate), {} unique, {n_libs} shared libs",
+                    "{label} cache: {total} lookups, {hits} hits, {misses} misses ({rate:.1}% hit rate), {} unique, {n_libs} shared libs, {peak_pending} peak queue len",
                     self.functions.len()
                 );
             } else {
                 println!(
-                    "{label} cache: {total} lookups, {hits} hits, {misses} misses ({rate:.1}% hit rate), {} unique",
+                    "{label} cache: {total} lookups, {hits} hits, {misses} misses ({rate:.1}% hit rate), {} unique, {peak_pending} peak queue len",
                     self.functions.len()
                 );
             }
