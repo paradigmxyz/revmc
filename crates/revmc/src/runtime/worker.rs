@@ -59,6 +59,8 @@ pub(crate) struct JitJob {
     /// Optional notifier for synchronous callers.
     #[debug(skip)]
     pub(crate) sync_notifier: SyncNotifier,
+    /// Generation at the time the job was dispatched.
+    pub(crate) generation: u64,
 }
 
 /// An AOT compilation job sent from the coordinator to a worker.
@@ -72,6 +74,8 @@ pub(crate) struct AotJob {
     pub(crate) symbol_name: String,
     /// Optimization level for AOT compilation.
     pub(crate) opt_level: crate::OptimizationLevel,
+    /// Generation at the time the job was dispatched.
+    pub(crate) generation: u64,
 }
 
 /// Result of a compilation attempt, sent back from a worker to the coordinator.
@@ -84,6 +88,8 @@ pub(crate) struct WorkerResult {
     pub(crate) outcome: Result<WorkerSuccess, String>,
     /// Optional notifier for synchronous callers, passed through from the job.
     pub(crate) sync_notifier: SyncNotifier,
+    /// Generation at the time the job was dispatched.
+    pub(crate) generation: u64,
 }
 
 /// Successful compilation output.
@@ -275,7 +281,7 @@ fn worker_loop(
 
     while let Ok(job) = job_rx.recv() {
         debug!(?job, "received job");
-        let (key, outcome, sync_notifier) = match job {
+        let (key, outcome, sync_notifier, generation) = match job {
             WorkerJob::Jit(job) => {
                 let _span =
                     debug_span!("jit_compile", hash=%job.key.code_hash, spec_id=?job.key.spec_id)
@@ -309,19 +315,21 @@ fn worker_loop(
                     warn!(%err, "clear_ir failed");
                 }
 
-                (job.key, outcome, job.sync_notifier)
+                (job.key, outcome, job.sync_notifier, job.generation)
             }
             WorkerJob::Aot(job) => {
                 let _span =
                     debug_span!("aot_compile", hash=%job.key.code_hash, spec_id=?job.key.spec_id)
                         .entered();
 
+                let generation = job.generation;
                 let outcome = compile_aot_artifact(&job);
-                (job.key, outcome, SyncNotifier::none())
+                (job.key, outcome, SyncNotifier::none(), generation)
             }
         };
 
-        let _ = result_tx.send(WorkerResult { key, worker_id: id, outcome, sync_notifier });
+        let _ =
+            result_tx.send(WorkerResult { key, worker_id: id, outcome, sync_notifier, generation });
     }
 
     debug!("compile worker done processing jobs, waiting for backing refs to drop");
@@ -393,15 +401,16 @@ fn worker_loop(
     debug!(worker_id, "compile worker started (no LLVM, all jobs will fail)");
 
     while let Ok(job) = job_rx.recv() {
-        let (key, sync_notifier) = match job {
-            WorkerJob::Jit(j) => (j.key, j.sync_notifier),
-            WorkerJob::Aot(j) => (j.key, SyncNotifier::none()),
+        let (key, sync_notifier, generation) = match job {
+            WorkerJob::Jit(j) => (j.key, j.sync_notifier, j.generation),
+            WorkerJob::Aot(j) => (j.key, SyncNotifier::none(), j.generation),
         };
         let _ = result_tx.send(WorkerResult {
             key,
             worker_id,
             outcome: Err("LLVM backend not available".into()),
             sync_notifier,
+            generation,
         });
     }
 

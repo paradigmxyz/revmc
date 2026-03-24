@@ -145,6 +145,8 @@ struct CoordinatorState {
     tuning: RuntimeTuning,
     /// Number of keys currently in Working phase.
     pending_jobs: usize,
+    /// Monotonically increasing generation counter, bumped on clear/invalidation.
+    generation: u64,
     /// Last time an eviction sweep was run.
     last_sweep: Instant,
     /// JIT stats.
@@ -213,6 +215,7 @@ impl CoordinatorState {
                 bytecode: entry.bytecode.clone(),
                 symbol_name: symbol,
                 sync_notifier: SyncNotifier::none(),
+                generation: self.generation,
             });
 
             if self.workers.try_send(job) {
@@ -252,6 +255,7 @@ impl CoordinatorState {
             bytecode: req.bytecode.clone(),
             symbol_name: symbol,
             sync_notifier: req.sync_notifier,
+            generation: self.generation,
         });
 
         let entry = self.entries.entry(req.key).or_insert_with(|| EntryState {
@@ -297,6 +301,7 @@ impl CoordinatorState {
                 bytecode: req.bytecode.clone(),
                 symbol_name: symbol,
                 opt_level: self.tuning.aot_opt_level,
+                generation: self.generation,
             });
 
             let entry = self.entries.entry(req.key).or_insert_with(|| EntryState {
@@ -318,8 +323,9 @@ impl CoordinatorState {
         self.resident_meta.clear();
         self.resident_bytes.store(0);
         self.entries.clear();
-        self.pending_jobs = 0;
-        debug!("resident map cleared");
+        // Bump generation so in-flight worker results from before the clear are discarded.
+        self.generation += 1;
+        debug!(generation = self.generation, "resident map cleared");
     }
 
     fn handle_clear_persisted(&mut self) {
@@ -357,6 +363,18 @@ impl CoordinatorState {
 
     fn handle_worker_result(&mut self, result: WorkerResult) {
         self.pending_jobs = self.pending_jobs.saturating_sub(1);
+
+        // Discard stale results from a previous generation (e.g. after clear).
+        if result.generation != self.generation {
+            debug!(
+                code_hash = %result.key.code_hash,
+                result_gen = result.generation,
+                current_gen = self.generation,
+                "discarding stale worker result",
+            );
+            result.sync_notifier.notify();
+            return;
+        }
 
         match result.outcome {
             Ok(WorkerSuccess::Jit(success)) => {
@@ -414,7 +432,7 @@ impl CoordinatorState {
             opt_level: self.tuning.aot_opt_level,
         };
 
-        let sha256 = keccak256(&success.dylib_bytes).0;
+        let content_hash = keccak256(&success.dylib_bytes).0;
 
         let manifest = ArtifactManifest {
             artifact_key: artifact_key.clone(),
@@ -425,7 +443,7 @@ impl CoordinatorState {
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0),
-            sha256,
+            content_hash,
         };
 
         // Persist to store if available.
@@ -618,9 +636,23 @@ pub(crate) fn run(
 
     let sweep_interval = tuning.eviction_sweep_interval;
 
+    // Seed resident metadata from startup-preloaded AOT entries.
+    let now = Instant::now();
+    let mut preload_meta = HashMap::default();
+    let mut preload_bytes: usize = 0;
+    for entry in resident.iter() {
+        let size = entry.value().approx_size_bytes;
+        preload_meta.insert(
+            entry.key().clone(),
+            ResidentMeta { last_hit_at: now, approx_size_bytes: size },
+        );
+        preload_bytes += size;
+    }
+    resident_bytes.store(preload_bytes);
+
     let mut state = CoordinatorState {
         resident,
-        resident_meta: HashMap::default(),
+        resident_meta: preload_meta,
         resident_bytes,
         entries: HashMap::default(),
         workers,
@@ -628,7 +660,8 @@ pub(crate) fn run(
         store,
         tuning,
         pending_jobs: 0,
-        last_sweep: Instant::now(),
+        generation: 0,
+        last_sweep: now,
         jit_promotions: 0,
         jit_successes: 0,
         jit_failures: 0,

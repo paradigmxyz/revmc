@@ -52,8 +52,8 @@ pub struct ArtifactManifest {
     pub artifact_len: usize,
     /// Creation timestamp (unix seconds).
     pub created_at_unix_secs: u64,
-    /// SHA-256 digest of the dylib bytes.
-    pub sha256: [u8; 32],
+    /// Keccak-256 digest of the dylib bytes.
+    pub content_hash: [u8; 32],
 }
 
 /// Backend selection for compilation.
