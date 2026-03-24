@@ -10,9 +10,9 @@ use core::{fmt, mem::MaybeUninit, ptr};
 use revm_interpreter::{
     Gas, Host, InputsImpl, InstructionResult, Interpreter, InterpreterAction, InterpreterResult,
     SharedMemory,
-    interpreter_types::{Jumps, LegacyBytecode, ReturnData},
+    interpreter_types::{Jumps, LegacyBytecode, ReturnData, RuntimeFlag},
 };
-use revm_primitives::{Address, B256, Bytes, U256, ruint};
+use revm_primitives::{Address, B256, Bytes, U256, hardfork::SpecId, ruint};
 
 #[cfg(feature = "host-ext-any")]
 use core::any::Any;
@@ -41,6 +41,8 @@ pub struct EvmContext<'a> {
     pub return_data: &'a [u8],
     /// Whether the context is static.
     pub is_static: bool,
+    /// The spec ID for the current execution.
+    pub spec_id: SpecId,
     /// An index that is used internally to keep track of where execution should resume.
     /// `0` is the initial state.
     #[doc(hidden)]
@@ -56,6 +58,7 @@ const _: () = {
     assert!(core::mem::size_of::<EvmContext<'_>>() == 96);
     // Key fields accessed by JIT code
     assert!(offset_of!(EvmContext<'_>, memory) == 0);
+    assert!(offset_of!(EvmContext<'_>, spec_id) == 65);
     assert!(offset_of!(EvmContext<'_>, resume_at) == 72);
 };
 
@@ -89,7 +92,8 @@ impl<'a> EvmContext<'a> {
             host,
             next_action: &mut interpreter.bytecode.action,
             return_data: interpreter.return_data.buffer(),
-            is_static: interpreter.runtime_flag.is_static,
+            is_static: interpreter.runtime_flag.is_static(),
+            spec_id: interpreter.runtime_flag.spec_id(),
             resume_at,
             bytecode,
         };

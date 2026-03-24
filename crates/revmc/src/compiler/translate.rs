@@ -315,6 +315,10 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             );
             fx.pointer_panic_with_bool(true, input, "input pointer", "");
             fx.pointer_panic_with_bool(true, ecx, "EVM context pointer", "");
+
+            // Assert that the runtime spec_id matches the compilation spec_id.
+            let compiled_spec = fx.bcx.iconst(fx.i8_type, bytecode.spec_id as i64);
+            let _ = fx.call_builtin(Builtin::AssertSpecId, &[ecx, compiled_spec]);
         }
 
         // The bytecode is guaranteed to have at least one instruction.
@@ -783,8 +787,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             }
             op::BALANCE => {
                 let sp = self.sp_after_inputs();
-                let spec_id = self.const_spec_id();
-                self.call_fallible_builtin(Builtin::Balance, &[self.ecx, sp, spec_id]);
+                self.call_fallible_builtin(Builtin::Balance, &[self.ecx, sp]);
             }
             op::ORIGIN => {
                 let slot = self.sp_at_top();
@@ -824,13 +827,11 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             }
             op::EXTCODESIZE => {
                 let sp = self.sp_after_inputs();
-                let spec_id = self.const_spec_id();
-                self.call_fallible_builtin(Builtin::ExtCodeSize, &[self.ecx, sp, spec_id]);
+                self.call_fallible_builtin(Builtin::ExtCodeSize, &[self.ecx, sp]);
             }
             op::EXTCODECOPY => {
                 let sp = self.sp_after_inputs();
-                let spec_id = self.const_spec_id();
-                self.call_fallible_builtin(Builtin::ExtCodeCopy, &[self.ecx, sp, spec_id]);
+                self.call_fallible_builtin(Builtin::ExtCodeCopy, &[self.ecx, sp]);
             }
             op::RETURNDATASIZE => {
                 field!(ecx; @push self.isize_type, EvmContext<'_>, pf::Slice; return_data.len);
@@ -841,8 +842,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             }
             op::EXTCODEHASH => {
                 let sp = self.sp_after_inputs();
-                let spec_id = self.const_spec_id();
-                self.call_fallible_builtin(Builtin::ExtCodeHash, &[self.ecx, sp, spec_id]);
+                self.call_fallible_builtin(Builtin::ExtCodeHash, &[self.ecx, sp]);
             }
             op::BLOCKHASH => {
                 let sp = self.sp_after_inputs();
@@ -862,8 +862,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             }
             op::DIFFICULTY => {
                 let slot = self.sp_at_top();
-                let spec_id = self.const_spec_id();
-                let _ = self.call_builtin(Builtin::Difficulty, &[self.ecx, slot, spec_id]);
+                let _ = self.call_builtin(Builtin::Difficulty, &[self.ecx, slot]);
             }
             op::GASLIMIT => {
                 let slot = self.sp_at_top();
@@ -906,13 +905,11 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             }
             op::SLOAD => {
                 let sp = self.sp_after_inputs();
-                let spec_id = self.const_spec_id();
-                self.call_fallible_builtin(Builtin::Sload, &[self.ecx, sp, spec_id]);
+                self.call_fallible_builtin(Builtin::Sload, &[self.ecx, sp]);
             }
             op::SSTORE => {
                 let sp = self.sp_after_inputs();
-                let spec_id = self.const_spec_id();
-                self.call_fallible_builtin(Builtin::Sstore, &[self.ecx, sp, spec_id]);
+                self.call_fallible_builtin(Builtin::Sstore, &[self.ecx, sp]);
             }
             op::JUMP | op::JUMPI => {
                 let is_invalid = data.flags.contains(InstFlags::INVALID_JUMP);
@@ -1058,8 +1055,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             op::INVALID => goto_return!(fail InstructionResult::InvalidFEOpcode),
             op::SELFDESTRUCT => {
                 let sp = self.sp_after_inputs();
-                let spec_id = self.const_spec_id();
-                self.call_fallible_builtin(Builtin::SelfDestruct, &[self.ecx, sp, spec_id]);
+                self.call_fallible_builtin(Builtin::SelfDestruct, &[self.ecx, sp]);
                 goto_return!(build InstructionResult::SelfDestruct);
             }
 
@@ -1158,18 +1154,16 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     /// Builds a `CREATE` or `CREATE2` instruction.
     fn create_common(&mut self, create_kind: CreateKind) {
         let sp = self.sp_after_inputs();
-        let spec_id = self.const_spec_id();
         let create_kind = self.bcx.iconst(self.i8_type, create_kind as i64);
-        self.call_fallible_builtin(Builtin::Create, &[self.ecx, sp, spec_id, create_kind]);
+        self.call_fallible_builtin(Builtin::Create, &[self.ecx, sp, create_kind]);
         self.suspend();
     }
 
     /// Builds `*CALL*` instructions.
     fn call_common(&mut self, call_kind: CallKind) {
         let sp = self.sp_after_inputs();
-        let spec_id = self.const_spec_id();
         let call_kind = self.bcx.iconst(self.i8_type, call_kind as i64);
-        self.call_fallible_builtin(Builtin::Call, &[self.ecx, sp, spec_id, call_kind]);
+        self.call_fallible_builtin(Builtin::Call, &[self.ecx, sp, call_kind]);
         self.suspend();
     }
 
@@ -1209,11 +1203,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     /// Gets the stack length before the current instruction.
     fn len_before(&mut self) -> B::Value {
         self.len_before
-    }
-
-    /// Returns the spec ID as a value.
-    fn const_spec_id(&mut self) -> B::Value {
-        self.bcx.iconst(self.i8_type, self.bytecode.spec_id as i64)
     }
 
     /// Gets a field at the given offset.
