@@ -18,7 +18,7 @@ use std::{
     sync::Arc,
 };
 
-use crate::BenchDef;
+use crate::Bench;
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -161,9 +161,9 @@ pub struct PreparedFixtureBench {
 
 impl PreparedFixtureBench {
     /// Load and JIT-compile a fixture benchmark.
-    pub fn load(def: &BenchDef) -> Self {
-        let fixture_json = def.fixture_json.expect("fixture_json required for fixture bench");
-        let spec_id = def.spec_id.expect("spec_id required for fixture bench");
+    pub fn load(bench: &Bench) -> Self {
+        let fixture_json = bench.fixture_json.expect("fixture_json required for fixture bench");
+        let spec_id = bench.spec_id.expect("spec_id required for fixture bench");
         let file: FixtureFile =
             serde_json::from_str(fixture_json).expect("failed to parse fixture JSON");
         let case = file.cases.into_values().next().expect("no cases in fixture");

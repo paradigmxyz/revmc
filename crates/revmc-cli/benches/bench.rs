@@ -10,7 +10,7 @@ use revmc::{
     EvmCompiler, EvmContext, EvmLlvmBackend, EvmStack, OptimizationLevel,
     primitives::hardfork::SpecId,
 };
-use revmc_cli::{Bench, BenchHost, PreparedFixtureBench};
+use revmc_cli::{BenchHost, PreparedFixtureBench};
 use std::time::Duration;
 
 const SPEC_ID: SpecId = SpecId::OSAKA;
@@ -35,7 +35,7 @@ fn bench(c: &mut Criterion) {
         if SKIP_ALL.contains(&bench.name) {
             continue;
         }
-        if bench.def.is_fixture() {
+        if bench.is_fixture() {
             run_fixture_bench(c, bench);
         } else {
             run_bytecode_bench(c, bench);
@@ -43,9 +43,9 @@ fn bench(c: &mut Criterion) {
     }
 }
 
-fn run_fixture_bench(c: &mut Criterion, bench: &Bench) {
+fn run_fixture_bench(c: &mut Criterion, bench: &revmc_cli::Bench) {
     let name = bench.name;
-    let prepared = PreparedFixtureBench::load(&bench.def);
+    let prepared = PreparedFixtureBench::load(bench);
 
     // Sanity check.
     assert!(prepared.run_interpreter().result.is_success(), "interpreter execution reverted");
@@ -67,8 +67,8 @@ fn run_fixture_bench(c: &mut Criterion, bench: &Bench) {
     g.finish();
 }
 
-fn run_bytecode_bench(c: &mut Criterion, bench: &Bench) {
-    let def = &bench.def;
+fn run_bytecode_bench(c: &mut Criterion, bench: &revmc_cli::Bench) {
+    let def = bench;
     let name = bench.name;
 
     let mut g = c.benchmark_group(name);
@@ -111,7 +111,7 @@ fn run_bytecode_bench(c: &mut Criterion, bench: &Bench) {
     // ── Runtime ─────────────────────────────────────────────────────────
 
     let mut host = BenchHost::new(SPEC_ID);
-    host.apply_def(def);
+    host.apply_bench(def);
     let table = instruction_table::<EthInterpreter, BenchHost>();
 
     let opt_level = revmc::OptimizationLevel::Aggressive;
