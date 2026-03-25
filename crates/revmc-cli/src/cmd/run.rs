@@ -9,9 +9,7 @@ use revmc::{
     EvmCompiler, EvmContext, EvmLlvmBackend, OptimizationLevel, eyre::ensure,
     primitives::hardfork::SpecId,
 };
-use revmc_cli::{
-    Bench, BenchHost, BenchKind, BytecodeBenchDef, PreparedFixtureBench, get_benches, read_code,
-};
+use revmc_cli::{Bench, BenchDef, BenchHost, PreparedFixtureBench, get_benches, read_code};
 use std::{
     hint::black_box,
     path::{Path, PathBuf},
@@ -104,10 +102,10 @@ impl RunArgs {
         let bench_entry = if self.bench_name == "custom" {
             Bench {
                 name: "custom",
-                kind: BenchKind::Bytecode(BytecodeBenchDef {
+                def: BenchDef {
                     bytecode: read_code(self.code.as_deref(), self.code_path.as_deref())?,
                     ..Default::default()
-                }),
+                },
             }
         } else if Path::new(&self.bench_name).exists() {
             let path = Path::new(&self.bench_name);
@@ -116,20 +114,14 @@ impl RunArgs {
             ensure!(self.code_path.is_none(), "--code-path is not allowed with a file argument");
             Bench {
                 name: path.file_stem().unwrap().to_str().unwrap().to_string().leak(),
-                kind: BenchKind::Bytecode(BytecodeBenchDef {
-                    bytecode: read_code(None, Some(path))?,
-                    ..Default::default()
-                }),
+                def: BenchDef { bytecode: read_code(None, Some(path))?, ..Default::default() },
             }
         } else {
             match get_benches().into_iter().find(|b| b.name == self.bench_name) {
                 Some(b) => b,
                 None => {
                     if self.load.is_some() {
-                        Bench {
-                            name: self.bench_name.clone().leak(),
-                            kind: BenchKind::Bytecode(BytecodeBenchDef::default()),
-                        }
+                        Bench { name: self.bench_name.clone().leak(), def: BenchDef::default() }
                     } else {
                         return Err(eyre!("unknown benchmark: {}", self.bench_name));
                     }
@@ -140,12 +132,11 @@ impl RunArgs {
         let name = bench_entry.name;
 
         // Handle TxFixture benchmarks separately.
-        if let BenchKind::TxFixture(ref def) = bench_entry.kind {
-            return self.run_fixture(name, def);
+        if bench_entry.def.is_fixture() {
+            return self.run_fixture(name, &bench_entry.def);
         }
 
-        let bench_def = bench_entry.as_bytecode().expect("expected bytecode bench");
-        let BytecodeBenchDef { bytecode, calldata, stack_input, .. } = bench_def.clone();
+        let BenchDef { bytecode, calldata, stack_input, .. } = bench_entry.def.clone();
 
         // Build the compiler.
         let target = revmc::Target::new(self.target, self.target_cpu, self.target_features);
@@ -182,7 +173,7 @@ impl RunArgs {
         let bytecode_slice = bytecode_raw.original_byte_slice();
 
         let mut host = BenchHost::new(spec_id);
-        host.apply_def(bench_def);
+        host.apply_def(&bench_entry.def);
 
         compiler.inspect_stack_length(self.inspect_stack_length || !stack_input.is_empty());
 
@@ -305,7 +296,7 @@ impl RunArgs {
             if self.interpret || !self.jit_only {
                 bench(self.n_iters, &format!("{name}/interpreter"), || {
                     let mut interpreter = mk_interpreter();
-                    for input in &bench_def.stack_input {
+                    for input in &stack_input {
                         interpreter.stack.data_mut().push(*input);
                     }
                     let action = interpreter.run_plain(&table, &mut host);
@@ -321,10 +312,10 @@ impl RunArgs {
                     let mut interpreter = mk_interpreter();
                     let (mut ecx, stack, stack_len) =
                         EvmContext::from_interpreter_with_stack(&mut interpreter, &mut host);
-                    for (i, input) in bench_def.stack_input.iter().enumerate() {
+                    for (i, input) in stack_input.iter().enumerate() {
                         stack.as_mut_slice()[i] = (*input).into();
                     }
-                    *stack_len = bench_def.stack_input.len();
+                    *stack_len = stack_input.len();
                     let r = unsafe { f.call_noinline(Some(stack), Some(stack_len), &mut ecx) };
                     let action = ecx.next_action.take().unwrap_or_else(|| {
                         revm_interpreter::InterpreterAction::Return(
@@ -343,7 +334,7 @@ impl RunArgs {
         Ok(())
     }
 
-    fn run_fixture(&self, name: &str, def: &revmc_cli::FixtureBenchDef) -> Result<()> {
+    fn run_fixture(&self, name: &str, def: &BenchDef) -> Result<()> {
         let prepared = PreparedFixtureBench::load(def);
 
         // Sanity check.

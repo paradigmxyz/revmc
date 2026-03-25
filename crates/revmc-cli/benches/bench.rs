@@ -10,7 +10,7 @@ use revmc::{
     EvmCompiler, EvmContext, EvmLlvmBackend, EvmStack, OptimizationLevel,
     primitives::hardfork::SpecId,
 };
-use revmc_cli::{Bench, BenchHost, BenchKind, PreparedFixtureBench};
+use revmc_cli::{Bench, BenchHost, PreparedFixtureBench};
 use std::time::Duration;
 
 const SPEC_ID: SpecId = SpecId::OSAKA;
@@ -35,15 +35,17 @@ fn bench(c: &mut Criterion) {
         if SKIP_ALL.contains(&bench.name) {
             continue;
         }
-        match &bench.kind {
-            BenchKind::Bytecode(_) => run_bytecode_bench(c, bench),
-            BenchKind::TxFixture(def) => run_fixture_bench(c, bench.name, def),
+        if bench.def.is_fixture() {
+            run_fixture_bench(c, bench);
+        } else {
+            run_bytecode_bench(c, bench);
         }
     }
 }
 
-fn run_fixture_bench(c: &mut Criterion, name: &str, def: &revmc_cli::FixtureBenchDef) {
-    let prepared = PreparedFixtureBench::load(def);
+fn run_fixture_bench(c: &mut Criterion, bench: &Bench) {
+    let name = bench.name;
+    let prepared = PreparedFixtureBench::load(&bench.def);
 
     // Sanity check.
     assert!(prepared.run_interpreter().result.is_success(), "interpreter execution reverted");
@@ -66,7 +68,7 @@ fn run_fixture_bench(c: &mut Criterion, name: &str, def: &revmc_cli::FixtureBenc
 }
 
 fn run_bytecode_bench(c: &mut Criterion, bench: &Bench) {
-    let def = bench.as_bytecode().expect("expected bytecode bench");
+    let def = &bench.def;
     let name = bench.name;
 
     let mut g = c.benchmark_group(name);
