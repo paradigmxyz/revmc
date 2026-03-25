@@ -11,6 +11,9 @@ use std::{cmp::Ordering, path::Path, str::FromStr};
 mod benches;
 pub use benches::*;
 
+mod host;
+pub use host::BenchHost;
+
 #[cfg(feature = "llvm")]
 mod fixture;
 #[cfg(feature = "llvm")]

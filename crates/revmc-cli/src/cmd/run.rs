@@ -2,16 +2,16 @@ use clap::{Parser, ValueEnum};
 use color_eyre::{Result, eyre::eyre};
 use revm_bytecode::Bytecode;
 use revm_interpreter::{
-    InputsImpl, SharedMemory,
-    host::DummyHost,
-    instruction_table,
+    InputsImpl, SharedMemory, instruction_table,
     interpreter::{EthInterpreter, ExtBytecode},
 };
 use revmc::{
     EvmCompiler, EvmContext, EvmLlvmBackend, OptimizationLevel, eyre::ensure,
     primitives::hardfork::SpecId,
 };
-use revmc_cli::{Bench, BenchKind, PreparedFixtureBench, get_benches, read_code};
+use revmc_cli::{
+    Bench, BenchHost, BenchKind, HostConfig, PreparedFixtureBench, get_benches, read_code,
+};
 use std::{
     hint::black_box,
     path::{Path, PathBuf},
@@ -109,6 +109,7 @@ impl RunArgs {
                     calldata: Vec::new(),
                     stack_input: Vec::new(),
                     native: None,
+                    host: HostConfig::default(),
                 },
             }
         } else if Path::new(&self.bench_name).exists() {
@@ -123,6 +124,7 @@ impl RunArgs {
                     calldata: Vec::new(),
                     stack_input: Vec::new(),
                     native: None,
+                    host: HostConfig::default(),
                 },
             }
         } else {
@@ -137,6 +139,7 @@ impl RunArgs {
                                 calldata: Vec::new(),
                                 stack_input: Vec::new(),
                                 native: None,
+                                host: HostConfig::default(),
                             },
                         }
                     } else {
@@ -153,11 +156,12 @@ impl RunArgs {
             return self.run_fixture(name, def);
         }
 
-        let (bytecode, calldata, stack_input, _native) =
+        let (bytecode, calldata, stack_input, _native, host_config) =
             bench_entry.as_bytecode().expect("expected bytecode bench");
         let bytecode = bytecode.to_vec();
         let calldata = calldata.to_vec();
         let stack_input = stack_input.to_vec();
+        let host_config = host_config.clone();
 
         // Build the compiler.
         let target = revmc::Target::new(self.target, self.target_cpu, self.target_features);
@@ -193,7 +197,8 @@ impl RunArgs {
         let bytecode_raw = Bytecode::new_raw(revmc::primitives::Bytes::copy_from_slice(&bytecode));
         let bytecode_slice = bytecode_raw.original_byte_slice();
 
-        let mut host = DummyHost::new(spec_id);
+        let mut host = BenchHost::new(spec_id);
+        host.apply_config(&host_config);
 
         compiler.inspect_stack_length(self.inspect_stack_length || !stack_input.is_empty());
 
@@ -258,7 +263,7 @@ impl RunArgs {
             unsafe { compiler.jit_function(f_id)? }
         };
 
-        let table = instruction_table::<EthInterpreter, DummyHost>();
+        let table = instruction_table::<EthInterpreter, BenchHost>();
 
         let mk_interpreter = || {
             let ext_bytecode = ExtBytecode::new(bytecode_raw.clone());
