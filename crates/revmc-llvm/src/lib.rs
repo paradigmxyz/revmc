@@ -491,8 +491,12 @@ impl Backend for EvmLlvmBackend {
         // compute on functions with thousands of basic blocks, even though the loop passes
         // themselves do nothing useful — EVM has no natural loops to optimize.
         //
+        // Can be overridden with `REVMC_PASSES` env var for experimentation.
         // From `opt --help`, `-passes`.
-        let passes = match self.opt_level {
+        static PASSES_OVERRIDE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+        let passes_override = PASSES_OVERRIDE.get_or_init(|| std::env::var("REVMC_PASSES").ok());
+
+        let passes = passes_override.as_deref().unwrap_or(match self.opt_level {
             OptimizationLevel::None => "default<O0>",
             OptimizationLevel::Less
             | OptimizationLevel::Default
@@ -515,7 +519,7 @@ impl Backend for EvmLlvmBackend {
                 "),",
                 "globaldce",
             ),
-        };
+        });
         let opts = PassBuilderOptions::create();
         self.module.run_passes(passes, &self.machine, opts).map_err(error_msg)
     }
