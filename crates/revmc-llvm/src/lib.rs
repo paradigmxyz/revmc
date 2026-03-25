@@ -418,8 +418,10 @@ impl Backend for EvmLlvmBackend {
         } else {
             let fn_type = self.fn_type(ret, params);
             let function = self.module.add_function(name, fn_type, Some(convert_linkage(linkage)));
-            for (i, &name) in param_names.iter().enumerate() {
-                function.get_nth_param(i as u32).expect(name).set_name(self.name(name));
+            if self.is_dumping {
+                for (i, &name) in param_names.iter().enumerate() {
+                    function.get_nth_param(i as u32).expect(name).set_name(self.name(name));
+                }
             }
 
             let entry = self.cx.append_basic_block(function, self.name("entry"));
@@ -874,7 +876,7 @@ impl Builder for EvmLlvmBuilder<'_> {
 
     fn new_stack_slot_raw(&mut self, ty: Self::Type, name: &str) -> Self::StackSlot {
         // let ty = self.ty_i8.array_type(size);
-        // let ptr = self.bcx.build_alloca(ty, name).unwrap();
+        // let ptr = self.bcx.build_alloca(ty, self.name(name)).unwrap();
         // ptr.as_instruction().unwrap().set_alignment(align).unwrap();
         // ptr
         self.bcx.build_alloca(ty, self.name(name)).unwrap()
