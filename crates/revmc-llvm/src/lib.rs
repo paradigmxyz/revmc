@@ -509,6 +509,7 @@ impl Backend for EvmLlvmBackend {
                 "early-cse,",
                 "sccp,",
                 "instcombine<no-verify-fixpoint>,",
+                "dse,",
                 "adce,",
                 "simplifycfg",
                 "),",
