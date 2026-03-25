@@ -276,9 +276,6 @@ impl EvmLlvmBackend {
     // Delete IR to lower memory consumption.
     // For some reason this does not happen when `Drop`ping either the `Module` or the engine.
     fn clear_module(&mut self) -> Result<()> {
-        if let Some(exec_engine) = &self.exec_engine {
-            exec_engine.remove_module(&self.module).map_err(|e| Error::msg(e.to_string()))?;
-        }
         self.functions.clear();
         self.mapped_symbols.clear();
         self.clear_ir()
@@ -502,16 +499,14 @@ impl Backend for EvmLlvmBackend {
     }
 
     fn clear_ir(&mut self) -> Result<()> {
-        /*
-        for func in self.module.get_functions() {
-            if !func.as_global_value().is_declaration() {
-                func_delete_body(func);
-            }
-        }
-        */
-
         // Drop the old DI state before replacing the module, since DIBuilder references the module.
         self.di_state = None;
+
+        // Remove the old module from the execution engine before replacing it.
+        // Without this, each clear_ir() cycle leaks a module in the engine.
+        if let Some(exec_engine) = &self.exec_engine {
+            exec_engine.remove_module(&self.module).map_err(|e| Error::msg(e.to_string()))?;
+        }
 
         self.module = create_module(self.cx, &self.machine, self.aot)?;
         if let Some(exec_engine) = &self.exec_engine {
