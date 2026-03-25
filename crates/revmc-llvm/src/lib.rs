@@ -291,11 +291,8 @@ impl EvmLlvmBackend {
         self.exec_engine = None;
         self.module = create_module(self.cx, &self.machine, self.aot)?;
         if !self.aot {
-            self.exec_engine = Some(
-                self.module
-                    .create_jit_execution_engine(self.opt_level)
-                    .map_err(error_msg)?,
-            );
+            self.exec_engine =
+                Some(self.module.create_jit_execution_engine(self.opt_level).map_err(error_msg)?);
         }
 
         Ok(())
