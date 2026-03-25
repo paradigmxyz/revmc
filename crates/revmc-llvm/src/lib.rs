@@ -549,15 +549,6 @@ impl Backend for EvmLlvmBackend {
     }
 }
 
-impl Drop for EvmLlvmBackend {
-    fn drop(&mut self) {
-        self.di_state = None;
-        // Drop the execution engine first so its `LLVMDisposeExecutionEngine` runs before the
-        // module is dropped. The EE owns the module's underlying `LLVMModuleRef`, so this order
-        // prevents the module's `Drop` from calling `LLVMDisposeModule` on already-freed memory.
-        self.exec_engine = None;
-    }
-}
 
 /// Cached target information for the host machine.
 #[derive(Debug)]
