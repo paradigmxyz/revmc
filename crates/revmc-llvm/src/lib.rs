@@ -862,10 +862,8 @@ impl Builder for EvmLlvmBuilder<'_> {
     }
 
     fn new_stack_slot_raw(&mut self, ty: Self::Type, name: &str) -> Self::StackSlot {
-        // let ty = self.ty_i8.array_type(size);
-        // let ptr = self.bcx.build_alloca(ty, name).unwrap();
-        // ptr.as_instruction().unwrap().set_alignment(align).unwrap();
-        // ptr
+        let size = ty.size_of().unwrap().get_zero_extended_constant().unwrap().try_into().unwrap();
+        let ty = self.ty_i8.array_type(size);
         self.bcx.build_alloca(ty, name).unwrap()
     }
 
