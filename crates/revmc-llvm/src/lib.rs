@@ -549,7 +549,6 @@ impl Backend for EvmLlvmBackend {
     }
 }
 
-
 /// Cached target information for the host machine.
 #[derive(Debug)]
 struct TargetInfo {
