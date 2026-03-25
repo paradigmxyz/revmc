@@ -481,12 +481,39 @@ impl Backend for EvmLlvmBackend {
     }
 
     fn optimize_module(&mut self) -> Result<()> {
+        // We use a custom pipeline instead of `default<O3>` because GVN is extremely slow on
+        // the huge single-function modules that EVM compilation produces. Replacing GVN with
+        // `early-cse` + `sccp` achieves equivalent or better code size and runtime performance
+        // at ~5x faster compile time.
+        //
+        // The standard `default<O1>` is also slow (~730ms on snailtracer) because the loop
+        // analysis infrastructure (LoopInfo, DominatorTree, MemorySSA, LCSSA) is expensive to
+        // compute on functions with thousands of basic blocks, even though the loop passes
+        // themselves do nothing useful — EVM has no natural loops to optimize.
+        //
         // From `opt --help`, `-passes`.
         let passes = match self.opt_level {
             OptimizationLevel::None => "default<O0>",
-            OptimizationLevel::Less => "default<O1>",
-            OptimizationLevel::Default => "default<O2>",
-            OptimizationLevel::Aggressive => "default<O3>",
+            OptimizationLevel::Less
+            | OptimizationLevel::Default
+            | OptimizationLevel::Aggressive => concat!(
+                "function(",
+                "simplifycfg,",
+                "sroa,",
+                "early-cse,",
+                "jump-threading,",
+                "correlated-propagation,",
+                "simplifycfg,",
+                "instcombine<no-verify-fixpoint>,",
+                "sroa,",
+                "early-cse,",
+                "sccp,",
+                "instcombine<no-verify-fixpoint>,",
+                "adce,",
+                "simplifycfg",
+                "),",
+                "globaldce",
+            ),
         };
         let opts = PassBuilderOptions::create();
         self.module.run_passes(passes, &self.machine, opts).map_err(error_msg)
