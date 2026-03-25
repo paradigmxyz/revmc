@@ -170,7 +170,6 @@ macro_rules! builtins {
                     $(Self::$ident => [<$ident:upper>]),*
                 }
             }
-
         }
     }};
 }
