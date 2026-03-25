@@ -1559,33 +1559,3 @@ fn error_msg(msg: inkwell::support::LLVMString) -> revmc_backend::Error {
 fn fmt_ty(ty: BasicTypeEnum<'_>) -> impl std::fmt::Display {
     ty.print_to_string().to_str().unwrap().trim_matches('"').to_string()
 }
-
-// TODO: `LLVMSetOperand` is not the same as `Use::set(nullptr)`.
-/*
-/// Mimics `llvm::Function::deleteBody`.
-fn func_delete_body(func: FunctionValue<'_>) {
-    for block in func.get_basic_block_iter() {
-        for inst in block.get_instructions() {
-            for i in 0..inst.get_num_operands() {
-                unsafe { LLVMSetOperand(inst.as_value_ref(), i, core::ptr::null_mut()) }
-            }
-        }
-    }
-
-    for_each_2(func.get_basic_block_iter(), |b| unsafe {
-        for_each_2(b.get_instructions(), |inst| {
-            inst.erase_from_basic_block();
-        });
-        let _ = b.delete();
-    });
-}
-
-fn for_each_2<T>(iter: impl IntoIterator<Item = T>, mut f: impl FnMut(T)) {
-    let mut iter = iter.into_iter();
-    let mut next = iter.next();
-    while let Some(x) = next {
-        next = iter.next();
-        f(x);
-    }
-}
-*/
