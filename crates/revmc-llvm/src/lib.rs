@@ -5,6 +5,7 @@
 #[macro_use]
 extern crate tracing;
 
+use eyre::eyre;
 use inkwell::{
     AddressSpace, IntPredicate, OptimizationLevel,
     attributes::{Attribute, AttributeLoc},
@@ -31,7 +32,7 @@ use inkwell::{
 };
 use object::{Object, ObjectSymbol};
 use revmc_backend::{
-    Backend, BackendTypes, Builder, Error, IntCC, Result, TailCallKind, TypeMethods, U256, eyre,
+    Backend, BackendTypes, Builder, IntCC, Result, TailCallKind, TypeMethods, U256, eyre,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::{
@@ -505,12 +506,14 @@ impl Backend for EvmLlvmBackend {
         // Remove the old module from the execution engine before replacing it.
         // Without this, each clear_ir() cycle leaks a module in the engine.
         if let Some(exec_engine) = &self.exec_engine {
-            exec_engine.remove_module(&self.module).map_err(|e| Error::msg(e.to_string()))?;
+            exec_engine
+                .remove_module(&self.module)
+                .map_err(|e| eyre!("failed to remove module: {e}"))?;
         }
 
         self.module = create_module(self.cx, &self.machine, self.aot)?;
         if let Some(exec_engine) = &self.exec_engine {
-            exec_engine.add_module(&self.module).map_err(|_| Error::msg("failed to add module"))?;
+            exec_engine.add_module(&self.module).map_err(|()| eyre!("failed to add module"))?;
         }
 
         Ok(())
