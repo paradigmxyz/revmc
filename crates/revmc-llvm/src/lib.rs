@@ -407,11 +407,15 @@ impl Backend for EvmLlvmBackend {
         } else {
             let fn_type = self.fn_type(ret, params);
             let function = self.module.add_function(name, fn_type, Some(convert_linkage(linkage)));
-            for (i, &name) in param_names.iter().enumerate() {
-                function.get_nth_param(i as u32).expect(name).set_name(name);
+            if self.debug_assertions {
+                for (i, &name) in param_names.iter().enumerate() {
+                    function.get_nth_param(i as u32).expect(name).set_name(name);
+                }
             }
 
-            let entry = self.cx.append_basic_block(function, "entry");
+            let entry = self
+                .cx
+                .append_basic_block(function, if self.debug_assertions { "entry" } else { "" });
             self.bcx.position_at_end(entry);
 
             let id = self.function_counter;
@@ -622,6 +626,13 @@ impl std::ops::DerefMut for EvmLlvmBuilder<'_> {
 }
 
 impl EvmLlvmBuilder<'_> {
+    /// Returns the given name if debug assertions are enabled, otherwise an empty string.
+    /// LLVM skips internal name processing for empty names, avoiding overhead in release builds.
+    #[inline]
+    fn name<'a>(&self, name: &'a str) -> &'a str {
+        if self.debug_assertions { name } else { "" }
+    }
+
     #[allow(dead_code)]
     fn extract_value(
         &mut self,
@@ -629,7 +640,7 @@ impl EvmLlvmBuilder<'_> {
         index: u32,
         name: &str,
     ) -> BasicValueEnum<'static> {
-        self.bcx.build_extract_value(value.into_struct_value(), index, name).unwrap()
+        self.bcx.build_extract_value(value.into_struct_value(), index, self.name(name)).unwrap()
     }
 
     fn memcpy_inner(
@@ -760,11 +771,11 @@ impl TypeMethods for EvmLlvmBuilder<'_> {
 
 impl Builder for EvmLlvmBuilder<'_> {
     fn create_block(&mut self, name: &str) -> Self::BasicBlock {
-        self.cx.append_basic_block(self.function, name)
+        self.cx.append_basic_block(self.function, self.name(name))
     }
 
     fn create_block_after(&mut self, after: Self::BasicBlock, name: &str) -> Self::BasicBlock {
-        self.cx.insert_basic_block_after(after, name)
+        self.cx.insert_basic_block_after(after, self.name(name))
     }
 
     fn switch_to_block(&mut self, block: Self::BasicBlock) {
@@ -866,7 +877,7 @@ impl Builder for EvmLlvmBuilder<'_> {
         // let ptr = self.bcx.build_alloca(ty, name).unwrap();
         // ptr.as_instruction().unwrap().set_alignment(align).unwrap();
         // ptr
-        self.bcx.build_alloca(ty, name).unwrap()
+        self.bcx.build_alloca(ty, self.name(name)).unwrap()
     }
 
     fn stack_load(&mut self, ty: Self::Type, slot: Self::StackSlot, name: &str) -> Self::Value {
@@ -883,7 +894,7 @@ impl Builder for EvmLlvmBuilder<'_> {
     }
 
     fn load(&mut self, ty: Self::Type, ptr: Self::Value, name: &str) -> Self::Value {
-        let value = self.bcx.build_load(ty, ptr.into_pointer_value(), name).unwrap();
+        let value = self.bcx.build_load(ty, ptr.into_pointer_value(), self.name(name)).unwrap();
         if ty == self.ty_i256.into() {
             self.current_block().unwrap().get_last_instruction().unwrap().set_alignment(8).unwrap();
         }
@@ -897,7 +908,7 @@ impl Builder for EvmLlvmBuilder<'_> {
         align: usize,
         name: &str,
     ) -> Self::Value {
-        let value = self.bcx.build_load(ty, ptr.into_pointer_value(), name).unwrap();
+        let value = self.bcx.build_load(ty, ptr.into_pointer_value(), self.name(name)).unwrap();
         self.current_block()
             .unwrap()
             .get_last_instruction()
@@ -1232,9 +1243,16 @@ impl Builder for EvmLlvmBuilder<'_> {
         name: &str,
     ) -> Self::Value {
         let indexes = indexes.iter().map(|idx| idx.into_int_value()).collect::<Vec<_>>();
-        unsafe { self.bcx.build_in_bounds_gep(elem_ty, ptr.into_pointer_value(), &indexes, name) }
-            .unwrap()
-            .into()
+        unsafe {
+            self.bcx.build_in_bounds_gep(
+                elem_ty,
+                ptr.into_pointer_value(),
+                &indexes,
+                self.name(name),
+            )
+        }
+        .unwrap()
+        .into()
     }
 
     fn tail_call(
@@ -1290,7 +1308,8 @@ impl Builder for EvmLlvmBuilder<'_> {
         let function = self.module.add_function(name, func_ty, Some(convert_linkage(linkage)));
         let prev_function = std::mem::replace(&mut self.function, function);
 
-        let entry = self.cx.append_basic_block(function, "entry");
+        let entry =
+            self.cx.append_basic_block(function, if self.debug_assertions { "entry" } else { "" });
         self.bcx.position_at_end(entry);
         build(self);
         if let Some(before) = before {
