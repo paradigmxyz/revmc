@@ -1107,7 +1107,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         debug_assert_ne!(n, 0);
         let len = self.len_before();
         let sp = self.sp_from_top(len, n);
-        let value = self.load_word(sp, &format!("dup{n}"));
+        let name = if self.config.debug { &format!("dup{n}") } else { "" };
+        let value = self.load_word(sp, name);
         self.push(value);
     }
 
@@ -1525,6 +1526,9 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
     /// Returns the block name for the current opcode with the given suffix.
     fn op_block_name(&self, name: &str) -> String {
+        if !self.config.debug {
+            return String::new();
+        }
         self.bytecode.op_block_name(self.current_inst, name)
     }
 }
