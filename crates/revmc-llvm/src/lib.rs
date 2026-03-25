@@ -274,12 +274,31 @@ impl EvmLlvmBackend {
         self.di_state = Some(DiState { dibuilder, compile_unit, finalized: false });
     }
 
-    // Delete IR to lower memory consumption.
-    // For some reason this does not happen when `Drop`ping either the `Module` or the engine.
+    // Delete IR and free JIT-compiled machine code.
+    //
+    // With MCJIT, machine code pages are owned by `RuntimeDyld` inside the `ExecutionEngine` and
+    // are only freed when the engine is dropped. `free_fn_machine_code` is a no-op in modern LLVM.
+    // So we drop the old engine entirely and create a fresh one.
     fn clear_module(&mut self) -> Result<()> {
         self.functions.clear();
         self.mapped_symbols.clear();
-        self.clear_ir()
+
+        // Drop the old DI state before replacing the module, since DIBuilder references the module.
+        self.di_state = None;
+
+        // Drop the old execution engine to free machine code memory, then create a fresh module
+        // and a new engine.
+        self.exec_engine = None;
+        self.module = create_module(self.cx, &self.machine, self.aot)?;
+        if !self.aot {
+            self.exec_engine = Some(
+                self.module
+                    .create_jit_execution_engine(self.opt_level)
+                    .map_err(error_msg)?,
+            );
+        }
+
+        Ok(())
     }
 }
 
@@ -529,11 +548,6 @@ impl Backend for EvmLlvmBackend {
     }
 
     unsafe fn free_all_functions(&mut self) -> Result<()> {
-        if let Some(exec_engine) = &self.exec_engine {
-            for (_, function) in self.functions.values() {
-                exec_engine.free_fn_machine_code(*function);
-            }
-        }
         self.clear_module()
     }
 }
