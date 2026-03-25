@@ -3173,7 +3173,6 @@ dependencies = [
  "open",
  "revm",
  "revm-bytecode",
- "revm-context-interface",
  "revm-interpreter",
  "revm-primitives",
  "revmc",

@@ -3,18 +3,15 @@
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use revm_bytecode::Bytecode;
 use revm_interpreter::{
-    InputsImpl, SharedMemory,
-    host::LoadError,
-    instruction_table,
+    InputsImpl, SharedMemory, instruction_table,
     interpreter::{EthInterpreter, ExtBytecode},
 };
-use revm_primitives::{Address, B256, Log, StorageKey, StorageValue, U256};
 use revmc::{
     EvmCompiler, EvmContext, EvmLlvmBackend, EvmStack, OptimizationLevel,
     primitives::hardfork::SpecId,
 };
-use revmc_cli::{Bench, BenchKind, PreparedFixtureBench};
-use std::{collections::HashMap, time::Duration};
+use revmc_cli::{Bench, BenchHost, BenchKind, PreparedFixtureBench};
+use std::time::Duration;
 
 const SPEC_ID: SpecId = SpecId::OSAKA;
 
@@ -188,129 +185,6 @@ fn run_bytecode_bench(c: &mut Criterion, bench: &Bench) {
 fn new_compiler(opt_level: OptimizationLevel) -> EvmCompiler<EvmLlvmBackend> {
     let backend = EvmLlvmBackend::new(false, opt_level).unwrap();
     EvmCompiler::new(backend)
-}
-
-// ── Minimal Host with storage support ───────────────────────────────────────
-
-use revm_context_interface::cfg::GasParams;
-use revm_interpreter::{Host, SStoreResult, SelfDestructResult, StateLoad};
-
-struct BenchHost {
-    gas_params: GasParams,
-    storage: HashMap<(Address, StorageKey), StorageValue>,
-}
-
-impl BenchHost {
-    fn new(spec_id: SpecId) -> Self {
-        Self { gas_params: GasParams::new_spec(spec_id), storage: HashMap::new() }
-    }
-}
-
-impl Host for BenchHost {
-    fn basefee(&self) -> U256 {
-        U256::ZERO
-    }
-    fn blob_gasprice(&self) -> U256 {
-        U256::ZERO
-    }
-    fn gas_limit(&self) -> U256 {
-        U256::MAX
-    }
-    fn difficulty(&self) -> U256 {
-        U256::ZERO
-    }
-    fn prevrandao(&self) -> Option<U256> {
-        None
-    }
-    fn block_number(&self) -> U256 {
-        U256::ZERO
-    }
-    fn timestamp(&self) -> U256 {
-        U256::ZERO
-    }
-    fn beneficiary(&self) -> Address {
-        Address::ZERO
-    }
-    fn slot_num(&self) -> U256 {
-        U256::ZERO
-    }
-    fn chain_id(&self) -> U256 {
-        U256::from(1)
-    }
-    fn effective_gas_price(&self) -> U256 {
-        U256::ZERO
-    }
-    fn caller(&self) -> Address {
-        Address::ZERO
-    }
-    fn blob_hash(&self, _number: usize) -> Option<U256> {
-        None
-    }
-    fn max_initcode_size(&self) -> usize {
-        usize::MAX
-    }
-    fn gas_params(&self) -> &GasParams {
-        &self.gas_params
-    }
-    fn block_hash(&mut self, _number: u64) -> Option<B256> {
-        Some(B256::ZERO)
-    }
-    fn log(&mut self, _log: Log) {}
-    fn tstore(&mut self, _address: Address, _key: StorageKey, _value: StorageValue) {}
-    fn tload(&mut self, _address: Address, _key: StorageKey) -> StorageValue {
-        StorageValue::ZERO
-    }
-
-    fn selfdestruct(
-        &mut self,
-        _address: Address,
-        _target: Address,
-        _skip_cold_load: bool,
-    ) -> Result<StateLoad<SelfDestructResult>, LoadError> {
-        Ok(StateLoad::new(Default::default(), false))
-    }
-
-    fn load_account_info_skip_cold_load(
-        &mut self,
-        _address: Address,
-        _load_code: bool,
-        _skip_cold_load: bool,
-    ) -> Result<revm_context_interface::journaled_state::AccountInfoLoad<'_>, LoadError> {
-        use revm::state::AccountInfo;
-        use revm_context_interface::journaled_state::AccountInfoLoad;
-        static ACCOUNT: AccountInfo = AccountInfo {
-            balance: U256::ZERO,
-            nonce: 0,
-            code_hash: B256::ZERO,
-            code: None,
-            account_id: None,
-        };
-        Ok(AccountInfoLoad::new(&ACCOUNT, false, false))
-    }
-
-    fn sload_skip_cold_load(
-        &mut self,
-        address: Address,
-        key: StorageKey,
-        _skip_cold_load: bool,
-    ) -> Result<StateLoad<StorageValue>, LoadError> {
-        let value = self.storage.get(&(address, key)).copied().unwrap_or(StorageValue::ZERO);
-        Ok(StateLoad::new(value, false))
-    }
-
-    fn sstore_skip_cold_load(
-        &mut self,
-        address: Address,
-        key: StorageKey,
-        value: StorageValue,
-        _skip_cold_load: bool,
-    ) -> Result<StateLoad<SStoreResult>, LoadError> {
-        let old = self.storage.insert((address, key), value).unwrap_or(StorageValue::ZERO);
-        Ok(StateLoad::new(
-            SStoreResult { original_value: old, present_value: old, new_value: value },
-            false,
-        ))
-    }
 }
 
 criterion_group!(benches, bench);
