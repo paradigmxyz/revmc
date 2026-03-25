@@ -24,6 +24,9 @@ object = { version = "0.37", default-features = false, features = ["read_core", 
 rustc-hash.workspace = true
 tracing.workspace = true
 
+[build-dependencies]
+cc = "1"
+
 [features]
 prefer-static = ["inkwell/llvm22-1-prefer-static"]
 prefer-dynamic = ["inkwell/llvm22-1-prefer-dynamic"]
