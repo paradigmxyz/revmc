@@ -7,7 +7,7 @@ use revmc::{
 };
 use std::collections::HashMap;
 
-use crate::HostConfig;
+use crate::BytecodeBenchDef;
 
 /// Minimal [`Host`] with in-memory storage, suitable for benchmarking bytecode
 /// that uses SLOAD/SSTORE without needing a full EVM database.
@@ -29,15 +29,15 @@ impl BenchHost {
         }
     }
 
-    /// Apply a [`HostConfig`] to pre-seed storage and override block context.
-    pub fn apply_config(&mut self, config: &HostConfig) {
-        for &(key, value) in &config.storage {
+    /// Apply host overrides from a [`BytecodeBenchDef`].
+    pub fn apply_def(&mut self, def: &BytecodeBenchDef) {
+        for &(key, value) in &def.storage {
             self.storage.insert((Address::ZERO, key), value);
         }
-        if let Some(n) = config.block_number {
+        if let Some(n) = def.block_number {
             self.block_number = n;
         }
-        if let Some(t) = config.timestamp {
+        if let Some(t) = def.timestamp {
             self.timestamp = t;
         }
     }

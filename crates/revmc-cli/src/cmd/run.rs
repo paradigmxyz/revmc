@@ -10,7 +10,7 @@ use revmc::{
     primitives::hardfork::SpecId,
 };
 use revmc_cli::{
-    Bench, BenchHost, BenchKind, HostConfig, PreparedFixtureBench, get_benches, read_code,
+    Bench, BenchHost, BenchKind, BytecodeBenchDef, PreparedFixtureBench, get_benches, read_code,
 };
 use std::{
     hint::black_box,
@@ -104,13 +104,10 @@ impl RunArgs {
         let bench_entry = if self.bench_name == "custom" {
             Bench {
                 name: "custom",
-                kind: BenchKind::Bytecode {
+                kind: BenchKind::Bytecode(BytecodeBenchDef {
                     bytecode: read_code(self.code.as_deref(), self.code_path.as_deref())?,
-                    calldata: Vec::new(),
-                    stack_input: Vec::new(),
-                    native: None,
-                    host: HostConfig::default(),
-                },
+                    ..Default::default()
+                }),
             }
         } else if Path::new(&self.bench_name).exists() {
             let path = Path::new(&self.bench_name);
@@ -119,13 +116,10 @@ impl RunArgs {
             ensure!(self.code_path.is_none(), "--code-path is not allowed with a file argument");
             Bench {
                 name: path.file_stem().unwrap().to_str().unwrap().to_string().leak(),
-                kind: BenchKind::Bytecode {
+                kind: BenchKind::Bytecode(BytecodeBenchDef {
                     bytecode: read_code(None, Some(path))?,
-                    calldata: Vec::new(),
-                    stack_input: Vec::new(),
-                    native: None,
-                    host: HostConfig::default(),
-                },
+                    ..Default::default()
+                }),
             }
         } else {
             match get_benches().into_iter().find(|b| b.name == self.bench_name) {
@@ -134,13 +128,7 @@ impl RunArgs {
                     if self.load.is_some() {
                         Bench {
                             name: self.bench_name.clone().leak(),
-                            kind: BenchKind::Bytecode {
-                                bytecode: Vec::new(),
-                                calldata: Vec::new(),
-                                stack_input: Vec::new(),
-                                native: None,
-                                host: HostConfig::default(),
-                            },
+                            kind: BenchKind::Bytecode(BytecodeBenchDef::default()),
                         }
                     } else {
                         return Err(eyre!("unknown benchmark: {}", self.bench_name));
@@ -156,12 +144,8 @@ impl RunArgs {
             return self.run_fixture(name, def);
         }
 
-        let (bytecode, calldata, stack_input, _native, host_config) =
-            bench_entry.as_bytecode().expect("expected bytecode bench");
-        let bytecode = bytecode.to_vec();
-        let calldata = calldata.to_vec();
-        let stack_input = stack_input.to_vec();
-        let host_config = host_config.clone();
+        let bench_def = bench_entry.as_bytecode().expect("expected bytecode bench");
+        let BytecodeBenchDef { bytecode, calldata, stack_input, .. } = bench_def.clone();
 
         // Build the compiler.
         let target = revmc::Target::new(self.target, self.target_cpu, self.target_features);
@@ -198,7 +182,7 @@ impl RunArgs {
         let bytecode_slice = bytecode_raw.original_byte_slice();
 
         let mut host = BenchHost::new(spec_id);
-        host.apply_config(&host_config);
+        host.apply_def(bench_def);
 
         compiler.inspect_stack_length(self.inspect_stack_length || !stack_input.is_empty());
 
@@ -321,7 +305,7 @@ impl RunArgs {
             if self.interpret || !self.jit_only {
                 bench(self.n_iters, &format!("{name}/interpreter"), || {
                     let mut interpreter = mk_interpreter();
-                    for input in &stack_input {
+                    for input in &bench_def.stack_input {
                         interpreter.stack.data_mut().push(*input);
                     }
                     let action = interpreter.run_plain(&table, &mut host);
@@ -337,10 +321,10 @@ impl RunArgs {
                     let mut interpreter = mk_interpreter();
                     let (mut ecx, stack, stack_len) =
                         EvmContext::from_interpreter_with_stack(&mut interpreter, &mut host);
-                    for (i, input) in stack_input.iter().enumerate() {
+                    for (i, input) in bench_def.stack_input.iter().enumerate() {
                         stack.as_mut_slice()[i] = (*input).into();
                     }
-                    *stack_len = stack_input.len();
+                    *stack_len = bench_def.stack_input.len();
                     let r = unsafe { f.call_noinline(Some(stack), Some(stack_len), &mut ecx) };
                     let action = ecx.next_action.take().unwrap_or_else(|| {
                         revm_interpreter::InterpreterAction::Return(

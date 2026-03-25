@@ -36,7 +36,7 @@ fn bench(c: &mut Criterion) {
             continue;
         }
         match &bench.kind {
-            BenchKind::Bytecode { .. } => run_bytecode_bench(c, bench),
+            BenchKind::Bytecode(_) => run_bytecode_bench(c, bench),
             BenchKind::TxFixture(def) => run_fixture_bench(c, bench.name, def),
         }
     }
@@ -66,8 +66,7 @@ fn run_fixture_bench(c: &mut Criterion, name: &str, def: &revmc_cli::FixtureBenc
 }
 
 fn run_bytecode_bench(c: &mut Criterion, bench: &Bench) {
-    let (bytecode, calldata, stack_input, native, host_config) =
-        bench.as_bytecode().expect("expected bytecode bench");
+    let def = bench.as_bytecode().expect("expected bytecode bench");
     let name = bench.name;
 
     let mut g = c.benchmark_group(name);
@@ -76,8 +75,8 @@ fn run_bytecode_bench(c: &mut Criterion, bench: &Bench) {
     g.measurement_time(Duration::from_secs(5));
 
     let gas_limit = u64::MAX / 2;
-    let calldata: revmc::primitives::Bytes = calldata.to_vec().into();
-    let bytecode_raw = Bytecode::new_raw(revmc::primitives::Bytes::copy_from_slice(bytecode));
+    let calldata: revmc::primitives::Bytes = def.calldata.clone().into();
+    let bytecode_raw = Bytecode::new_raw(revmc::primitives::Bytes::copy_from_slice(&def.bytecode));
 
     // ── Compile-time ────────────────────────────────────────────────────
 
@@ -86,7 +85,7 @@ fn run_bytecode_bench(c: &mut Criterion, bench: &Bench) {
             b.iter_batched(
                 || new_compiler(OptimizationLevel::None),
                 |mut compiler| {
-                    compiler.translate(name, bytecode, SPEC_ID).unwrap();
+                    compiler.translate(name, &def.bytecode, SPEC_ID).unwrap();
                 },
                 BatchSize::PerIteration,
             )
@@ -96,7 +95,7 @@ fn run_bytecode_bench(c: &mut Criterion, bench: &Bench) {
             b.iter_batched(
                 || {
                     let mut compiler = new_compiler(OptimizationLevel::Aggressive);
-                    let id = compiler.translate(name, bytecode, SPEC_ID).expect("translate");
+                    let id = compiler.translate(name, &def.bytecode, SPEC_ID).expect("translate");
                     (compiler, id)
                 },
                 |(mut compiler, id)| unsafe {
@@ -110,16 +109,16 @@ fn run_bytecode_bench(c: &mut Criterion, bench: &Bench) {
     // ── Runtime ─────────────────────────────────────────────────────────
 
     let mut host = BenchHost::new(SPEC_ID);
-    host.apply_config(host_config);
+    host.apply_def(def);
     let table = instruction_table::<EthInterpreter, BenchHost>();
 
     let opt_level = revmc::OptimizationLevel::Aggressive;
     let backend = EvmLlvmBackend::new(false, opt_level).unwrap();
     let mut compiler = EvmCompiler::new(backend);
-    compiler.inspect_stack_length(!stack_input.is_empty());
+    compiler.inspect_stack_length(!def.stack_input.is_empty());
     compiler.gas_metering(true);
 
-    if let Some(native) = native {
+    if let Some(native) = def.native {
         g.bench_function(format!("{name}/rt/native"), |b| {
             b.iter_batched(|| (), |()| native(), BatchSize::SmallInput)
         });
@@ -153,13 +152,13 @@ fn run_bytecode_bench(c: &mut Criterion, bench: &Bench) {
             b.iter_batched_ref(
                 || {
                     let mut stack = EvmStack::new();
-                    for (i, input) in stack_input.iter().enumerate() {
+                    for (i, input) in def.stack_input.iter().enumerate() {
                         stack.as_mut_slice()[i] = (*input).into();
                     }
                     (new_interpreter(), stack)
                 },
                 |(interpreter, stack)| {
-                    let mut stack_len = stack_input.len();
+                    let mut stack_len = def.stack_input.len();
                     let mut ecx = EvmContext::from_interpreter(interpreter, &mut host);
                     unsafe { jit.call(Some(stack), Some(&mut stack_len), &mut ecx) }
                 },
@@ -172,7 +171,7 @@ fn run_bytecode_bench(c: &mut Criterion, bench: &Bench) {
         b.iter_batched_ref(
             || {
                 let mut interpreter = new_interpreter();
-                interpreter.stack.data_mut().extend_from_slice(stack_input);
+                interpreter.stack.data_mut().extend_from_slice(&def.stack_input);
                 interpreter
             },
             |interpreter| interpreter.run_plain(&table, &mut host),
