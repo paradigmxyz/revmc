@@ -74,6 +74,7 @@ pub struct EvmLlvmBackend {
 
     aot: bool,
     debug_assertions: bool,
+    is_dumping: bool,
     opt_level: OptimizationLevel,
     /// Separate from `functions` to have always increasing IDs.
     function_counter: u32,
@@ -182,6 +183,7 @@ impl EvmLlvmBackend {
             ty_ptr,
             aot,
             debug_assertions: cfg!(debug_assertions),
+            is_dumping: false,
             opt_level,
             function_counter: 0,
             functions: FxHashMap::default(),
@@ -212,6 +214,14 @@ impl EvmLlvmBackend {
             Some(ret) => ret.fn_type(&params, false),
             None => self.ty_void.fn_type(&params, false),
         }
+    }
+
+    /// Returns the given name if IR output is being dumped, otherwise an empty string.
+    /// LLVM skips internal name processing for empty names, avoiding overhead when names
+    /// are not needed for readability.
+    #[inline]
+    fn name<'a>(&self, name: &'a str) -> &'a str {
+        if self.is_dumping { name } else { "" }
     }
 
     fn id_to_name(&self, id: u32) -> &str {
@@ -358,6 +368,7 @@ impl Backend for EvmLlvmBackend {
     }
 
     fn set_is_dumping(&mut self, yes: bool) {
+        self.is_dumping = yes;
         self.machine.set_asm_verbosity(yes);
     }
 
@@ -421,11 +432,13 @@ impl Backend for EvmLlvmBackend {
         } else {
             let fn_type = self.fn_type(ret, params);
             let function = self.module.add_function(name, fn_type, Some(convert_linkage(linkage)));
-            for (i, &name) in param_names.iter().enumerate() {
-                function.get_nth_param(i as u32).expect(name).set_name(name);
+            if self.is_dumping {
+                for (i, &name) in param_names.iter().enumerate() {
+                    function.get_nth_param(i as u32).expect(name).set_name(self.name(name));
+                }
             }
 
-            let entry = self.cx.append_basic_block(function, "entry");
+            let entry = self.cx.append_basic_block(function, self.name("entry"));
             self.bcx.position_at_end(entry);
 
             let id = self.function_counter;
@@ -632,7 +645,7 @@ impl EvmLlvmBuilder<'_> {
         index: u32,
         name: &str,
     ) -> BasicValueEnum<'static> {
-        self.bcx.build_extract_value(value.into_struct_value(), index, name).unwrap()
+        self.bcx.build_extract_value(value.into_struct_value(), index, self.name(name)).unwrap()
     }
 
     fn memcpy_inner(
@@ -763,11 +776,11 @@ impl TypeMethods for EvmLlvmBuilder<'_> {
 
 impl Builder for EvmLlvmBuilder<'_> {
     fn create_block(&mut self, name: &str) -> Self::BasicBlock {
-        self.cx.append_basic_block(self.function, name)
+        self.cx.append_basic_block(self.function, self.name(name))
     }
 
     fn create_block_after(&mut self, after: Self::BasicBlock, name: &str) -> Self::BasicBlock {
-        self.cx.insert_basic_block_after(after, name)
+        self.cx.insert_basic_block_after(after, self.name(name))
     }
 
     fn switch_to_block(&mut self, block: Self::BasicBlock) {
@@ -866,10 +879,10 @@ impl Builder for EvmLlvmBuilder<'_> {
 
     fn new_stack_slot_raw(&mut self, ty: Self::Type, name: &str) -> Self::StackSlot {
         // let ty = self.ty_i8.array_type(size);
-        // let ptr = self.bcx.build_alloca(ty, name).unwrap();
+        // let ptr = self.bcx.build_alloca(ty, self.name(name)).unwrap();
         // ptr.as_instruction().unwrap().set_alignment(align).unwrap();
         // ptr
-        self.bcx.build_alloca(ty, name).unwrap()
+        self.bcx.build_alloca(ty, self.name(name)).unwrap()
     }
 
     fn stack_load(&mut self, ty: Self::Type, slot: Self::StackSlot, name: &str) -> Self::Value {
@@ -886,7 +899,7 @@ impl Builder for EvmLlvmBuilder<'_> {
     }
 
     fn load(&mut self, ty: Self::Type, ptr: Self::Value, name: &str) -> Self::Value {
-        let value = self.bcx.build_load(ty, ptr.into_pointer_value(), name).unwrap();
+        let value = self.bcx.build_load(ty, ptr.into_pointer_value(), self.name(name)).unwrap();
         if ty == self.ty_i256.into() {
             self.current_block().unwrap().get_last_instruction().unwrap().set_alignment(8).unwrap();
         }
@@ -900,7 +913,7 @@ impl Builder for EvmLlvmBuilder<'_> {
         align: usize,
         name: &str,
     ) -> Self::Value {
-        let value = self.bcx.build_load(ty, ptr.into_pointer_value(), name).unwrap();
+        let value = self.bcx.build_load(ty, ptr.into_pointer_value(), self.name(name)).unwrap();
         self.current_block()
             .unwrap()
             .get_last_instruction()
@@ -1235,9 +1248,16 @@ impl Builder for EvmLlvmBuilder<'_> {
         name: &str,
     ) -> Self::Value {
         let indexes = indexes.iter().map(|idx| idx.into_int_value()).collect::<Vec<_>>();
-        unsafe { self.bcx.build_in_bounds_gep(elem_ty, ptr.into_pointer_value(), &indexes, name) }
-            .unwrap()
-            .into()
+        unsafe {
+            self.bcx.build_in_bounds_gep(
+                elem_ty,
+                ptr.into_pointer_value(),
+                &indexes,
+                self.name(name),
+            )
+        }
+        .unwrap()
+        .into()
     }
 
     fn tail_call(
@@ -1293,7 +1313,7 @@ impl Builder for EvmLlvmBuilder<'_> {
         let function = self.module.add_function(name, func_ty, Some(convert_linkage(linkage)));
         let prev_function = std::mem::replace(&mut self.function, function);
 
-        let entry = self.cx.append_basic_block(function, "entry");
+        let entry = self.cx.append_basic_block(function, self.name("entry"));
         self.bcx.position_at_end(entry);
         build(self);
         if let Some(before) = before {
