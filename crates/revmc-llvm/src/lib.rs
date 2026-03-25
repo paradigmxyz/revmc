@@ -44,6 +44,8 @@ use std::{
 
 pub use inkwell::{self, context::Context};
 
+mod cpp;
+
 mod dh;
 pub mod orc;
 
@@ -1365,9 +1367,10 @@ impl Builder for EvmLlvmBuilder<'_> {
         attribute: revmc_backend::Attribute,
         loc: revmc_backend::FunctionAttributeLocation,
     ) {
+        let func = function.unwrap_or(self.function);
         let loc = convert_attribute_loc(loc);
         let attr = convert_attribute(self, attribute);
-        function.unwrap_or(self.function).add_attribute(loc, attr);
+        func.add_attribute(loc, attr);
     }
 }
 
@@ -1535,6 +1538,10 @@ fn convert_attribute(bcx: &EvmLlvmBuilder<'_>, attr: revmc_backend::Attribute) -
         OurAttr::Writable => ("writable", AttrValue::Enum(0)),
         // memory(argmem: readwrite) = ModRef(3) << ArgMem(0) = 3.
         OurAttr::ArgMemOnly => ("memory", AttrValue::Enum(3)),
+
+        OurAttr::Initializes(size) => {
+            return cpp::create_initializes_attr(bcx.cx, 0, size as i64);
+        }
 
         attr => unimplemented!("llvm attribute conversion: {attr:?}"),
     };

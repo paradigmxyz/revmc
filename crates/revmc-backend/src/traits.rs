@@ -142,6 +142,8 @@ pub enum Attribute {
     Writable,
     /// `memory(argmem: readwrite)` — function only accesses memory through pointer arguments.
     ArgMemOnly,
+    /// `initializes((0, N))` — function initializes bytes `[0, N)` through this pointer.
+    Initializes(u64),
     // TODO: Range?
 }
 
