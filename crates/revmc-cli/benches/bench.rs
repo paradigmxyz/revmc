@@ -66,7 +66,7 @@ fn run_fixture_bench(c: &mut Criterion, name: &str, def: &revmc_cli::FixtureBenc
 }
 
 fn run_bytecode_bench(c: &mut Criterion, bench: &Bench) {
-    let (bytecode, calldata, stack_input, native) =
+    let (bytecode, calldata, stack_input, native, host_config) =
         bench.as_bytecode().expect("expected bytecode bench");
     let name = bench.name;
 
@@ -110,6 +110,7 @@ fn run_bytecode_bench(c: &mut Criterion, bench: &Bench) {
     // ── Runtime ─────────────────────────────────────────────────────────
 
     let mut host = BenchHost::new(SPEC_ID);
+    host.apply_config(host_config);
     let table = instruction_table::<EthInterpreter, BenchHost>();
 
     let opt_level = revmc::OptimizationLevel::Aggressive;

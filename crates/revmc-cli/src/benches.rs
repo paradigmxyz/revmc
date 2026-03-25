@@ -19,8 +19,26 @@ pub struct Bench {
 
 #[derive(Clone, Debug)]
 pub enum BenchKind {
-    Bytecode { bytecode: Vec<u8>, calldata: Vec<u8>, stack_input: Vec<U256>, native: Option<fn()> },
+    Bytecode {
+        bytecode: Vec<u8>,
+        calldata: Vec<u8>,
+        stack_input: Vec<U256>,
+        native: Option<fn()>,
+        /// Pre-seeded storage and block context overrides for the bench host.
+        host: HostConfig,
+    },
     TxFixture(FixtureBenchDef),
+}
+
+/// Host configuration for bytecode benchmarks.
+#[derive(Clone, Debug, Default)]
+pub struct HostConfig {
+    /// Pre-seeded storage entries `(key, value)` inserted at `Address::ZERO`.
+    pub storage: Vec<(U256, U256)>,
+    /// Override for `Host::block_number()`.
+    pub block_number: Option<U256>,
+    /// Override for `Host::timestamp()`.
+    pub timestamp: Option<U256>,
 }
 
 /// Definition for a full-EVM transaction fixture benchmark.
@@ -33,10 +51,10 @@ pub struct FixtureBenchDef {
 impl Bench {
     /// Returns the bytecode fields, if this is a bytecode bench.
     #[allow(clippy::type_complexity)]
-    pub fn as_bytecode(&self) -> Option<(&[u8], &[u8], &[U256], Option<fn()>)> {
+    pub fn as_bytecode(&self) -> Option<(&[u8], &[u8], &[U256], Option<fn()>, &HostConfig)> {
         match &self.kind {
-            BenchKind::Bytecode { bytecode, calldata, stack_input, native } => {
-                Some((bytecode, calldata, stack_input, *native))
+            BenchKind::Bytecode { bytecode, calldata, stack_input, native, host } => {
+                Some((bytecode, calldata, stack_input, *native, host))
             }
             BenchKind::TxFixture(_) => None,
         }
@@ -58,6 +76,7 @@ pub fn get_benches() -> Vec<Bench> {
                     black_box(fibonacci_rust(black_box(U256::from(70))));
                 }),
                 calldata: Vec::new(),
+                host: HostConfig::default(),
             },
         },
         // https://github.com/lambdaclass/evm_mlir/blob/b766d0bbc2093bbfa4feb3aa25baf82b512aee74/bench/revm_comparison/src/lib.rs#L12-L15
@@ -73,6 +92,7 @@ pub fn get_benches() -> Vec<Bench> {
                 calldata: U256::from(1000).to_be_bytes_vec(),
                 stack_input: Vec::new(),
                 native: None,
+                host: HostConfig::default(),
             },
         },
         Bench {
@@ -85,6 +105,7 @@ pub fn get_benches() -> Vec<Bench> {
                 calldata: U256::from(1000).to_be_bytes_vec(),
                 stack_input: Vec::new(),
                 native: None,
+                host: HostConfig::default(),
             },
         },
         Bench {
@@ -95,6 +116,7 @@ pub fn get_benches() -> Vec<Bench> {
                 calldata: hex!("d09de08a").to_vec(),
                 stack_input: Vec::new(),
                 native: None,
+                host: HostConfig::default(),
             },
         },
         Bench {
@@ -105,6 +127,7 @@ pub fn get_benches() -> Vec<Bench> {
                 calldata: hex!("30627b7c").to_vec(),
                 stack_input: Vec::new(),
                 native: None,
+                host: HostConfig::default(),
             },
         },
         Bench {
@@ -114,6 +137,7 @@ pub fn get_benches() -> Vec<Bench> {
                 calldata: Vec::new(),
                 stack_input: Vec::new(),
                 native: None,
+                host: HostConfig::default(),
             },
         },
         Bench {
@@ -124,6 +148,7 @@ pub fn get_benches() -> Vec<Bench> {
                 calldata: hex!("30627b7c").to_vec(),
                 stack_input: Vec::new(),
                 native: None,
+                host: HostConfig::default(),
             },
         },
         Bench {
@@ -134,6 +159,7 @@ pub fn get_benches() -> Vec<Bench> {
                 calldata: hex!("30627b7c").to_vec(),
                 stack_input: Vec::new(),
                 native: None,
+                host: HostConfig::default(),
             },
         },
         Bench {
@@ -143,6 +169,7 @@ pub fn get_benches() -> Vec<Bench> {
                 calldata: Vec::new(),
                 stack_input: Vec::new(),
                 native: None,
+                host: HostConfig::default(),
             },
         },
         Bench {
@@ -152,6 +179,7 @@ pub fn get_benches() -> Vec<Bench> {
                 calldata: Vec::new(),
                 stack_input: Vec::new(),
                 native: None,
+                host: HostConfig::default(),
             },
         },
         Bench {
@@ -161,6 +189,7 @@ pub fn get_benches() -> Vec<Bench> {
                 calldata: Vec::new(),
                 stack_input: Vec::new(),
                 native: None,
+                host: HostConfig::default(),
             },
         },
         Bench {
@@ -170,6 +199,7 @@ pub fn get_benches() -> Vec<Bench> {
                 calldata: Vec::new(),
                 stack_input: Vec::new(),
                 native: None,
+                host: HostConfig::default(),
             },
         },
         Bench {
@@ -179,6 +209,7 @@ pub fn get_benches() -> Vec<Bench> {
                 calldata: Vec::new(),
                 stack_input: Vec::new(),
                 native: None,
+                host: HostConfig::default(),
             },
         },
         Bench {
@@ -189,6 +220,7 @@ pub fn get_benches() -> Vec<Bench> {
                 calldata: hex!("5c975abb").to_vec(),
                 stack_input: Vec::new(),
                 native: None,
+                host: HostConfig::default(),
             },
         },
         Bench {
@@ -202,6 +234,7 @@ pub fn get_benches() -> Vec<Bench> {
                 .to_vec(),
                 stack_input: Vec::new(),
                 native: None,
+                host: HostConfig::default(),
             },
         },
         Bench {
@@ -215,6 +248,7 @@ pub fn get_benches() -> Vec<Bench> {
                 .to_vec(),
                 stack_input: Vec::new(),
                 native: None,
+                host: HostConfig::default(),
             },
         },
         // EIP-4788 beacon block root contract.
@@ -230,6 +264,16 @@ pub fn get_benches() -> Vec<Bench> {
                 calldata: U256::from(1774396307).to_be_bytes_vec(),
                 stack_input: Vec::new(),
                 native: None,
+                // ring_index = 1774396307 % 8191 = 4550
+                // slot 4550: stored timestamp must equal query.
+                // slot 4550 + 8191 = 12741: the beacon block root to return.
+                host: HostConfig {
+                    storage: vec![
+                        (U256::from(4550), U256::from(1774396307)),
+                        (U256::from(12741), U256::from(0xbeacu64)),
+                    ],
+                    ..Default::default()
+                },
             },
         },
         // EIP-2935 historical block hashes contract.
@@ -245,6 +289,13 @@ pub fn get_benches() -> Vec<Bench> {
                 calldata: U256::from(1).to_be_bytes_vec(),
                 stack_input: Vec::new(),
                 native: None,
+                // Needs NUMBER > query (1) and NUMBER - query <= 8191.
+                // ring_index = 1 % 8191 = 1; slot 1 holds the block hash.
+                host: HostConfig {
+                    storage: vec![(U256::from(1), U256::from(0xb10c_ba5eu64))],
+                    block_number: Some(U256::from(100)),
+                    ..Default::default()
+                },
             },
         },
         Bench {

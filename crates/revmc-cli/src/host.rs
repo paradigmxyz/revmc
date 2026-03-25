@@ -7,17 +7,39 @@ use revmc::{
 };
 use std::collections::HashMap;
 
+use crate::HostConfig;
+
 /// Minimal [`Host`] with in-memory storage, suitable for benchmarking bytecode
 /// that uses SLOAD/SSTORE without needing a full EVM database.
 #[allow(missing_debug_implementations)]
 pub struct BenchHost {
     gas_params: GasParams,
     storage: HashMap<(Address, StorageKey), StorageValue>,
+    block_number: U256,
+    timestamp: U256,
 }
 
 impl BenchHost {
     pub fn new(spec_id: SpecId) -> Self {
-        Self { gas_params: GasParams::new_spec(spec_id), storage: HashMap::new() }
+        Self {
+            gas_params: GasParams::new_spec(spec_id),
+            storage: HashMap::new(),
+            block_number: U256::ZERO,
+            timestamp: U256::ZERO,
+        }
+    }
+
+    /// Apply a [`HostConfig`] to pre-seed storage and override block context.
+    pub fn apply_config(&mut self, config: &HostConfig) {
+        for &(key, value) in &config.storage {
+            self.storage.insert((Address::ZERO, key), value);
+        }
+        if let Some(n) = config.block_number {
+            self.block_number = n;
+        }
+        if let Some(t) = config.timestamp {
+            self.timestamp = t;
+        }
     }
 }
 
@@ -38,10 +60,10 @@ impl Host for BenchHost {
         None
     }
     fn block_number(&self) -> U256 {
-        U256::ZERO
+        self.block_number
     }
     fn timestamp(&self) -> U256 {
-        U256::ZERO
+        self.timestamp
     }
     fn beneficiary(&self) -> Address {
         Address::ZERO
