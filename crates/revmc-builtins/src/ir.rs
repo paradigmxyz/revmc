@@ -68,7 +68,9 @@ impl<B: Backend> Builtins<B> {
                 Attribute::ArgMemOnly,
             ]
         };
-        for attr in default_attrs.iter().chain(builtin.attrs()).copied() {
+        let speculatable_attr =
+            if is_opcode_speculatable(builtin.op()) { Some(Attribute::Speculatable) } else { None };
+        for attr in default_attrs.iter().chain(builtin.attrs()).copied().chain(speculatable_attr) {
             bcx.add_function_attribute(Some(f), attr, FunctionAttributeLocation::Function);
         }
         let param_attrs = builtin.param_attrs();
@@ -168,8 +170,39 @@ macro_rules! builtins {
                     $(Self::$ident => [<$ident:upper>]),*
                 }
             }
+
         }
     }};
+}
+
+/// Whether the given opcode is speculatable (pure, no side effects).
+fn is_opcode_speculatable(op: u8) -> bool {
+    use revm_bytecode::opcode::*;
+    matches!(
+        op,
+        DIV | SDIV
+            | MOD
+            | SMOD
+            | ADDMOD
+            | MULMOD
+            | SIGNEXTEND
+            | ORIGIN
+            | CALLER
+            | CALLVALUE
+            | CALLDATALOAD
+            | CALLDATASIZE
+            | CODESIZE
+            | GASPRICE
+            | COINBASE
+            | TIMESTAMP
+            | NUMBER
+            | DIFFICULTY
+            | GASLIMIT
+            | CHAINID
+            | BASEFEE
+            | BLOBBASEFEE
+            | BLOBHASH
+    )
 }
 
 builtins! {
