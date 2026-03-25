@@ -5,6 +5,7 @@
 #[macro_use]
 extern crate tracing;
 
+use eyre::eyre;
 use inkwell::{
     AddressSpace, IntPredicate, OptimizationLevel,
     attributes::{Attribute, AttributeLoc},
@@ -31,7 +32,7 @@ use inkwell::{
 };
 use object::{Object, ObjectSymbol};
 use revmc_backend::{
-    Backend, BackendTypes, Builder, Error, IntCC, Result, TailCallKind, TypeMethods, U256, eyre,
+    Backend, BackendTypes, Builder, IntCC, Result, TailCallKind, TypeMethods, U256, eyre,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::{
@@ -273,15 +274,28 @@ impl EvmLlvmBackend {
         self.di_state = Some(DiState { dibuilder, compile_unit, finalized: false });
     }
 
-    // Delete IR to lower memory consumption.
-    // For some reason this does not happen when `Drop`ping either the `Module` or the engine.
+    // Delete IR and free JIT-compiled machine code.
+    //
+    // With MCJIT, machine code pages are owned by `RuntimeDyld` inside the `ExecutionEngine` and
+    // are only freed when the engine is dropped. `free_fn_machine_code` is a no-op in modern LLVM.
+    // So we drop the old engine entirely and create a fresh one.
     fn clear_module(&mut self) -> Result<()> {
-        if let Some(exec_engine) = &self.exec_engine {
-            exec_engine.remove_module(&self.module).map_err(|e| Error::msg(e.to_string()))?;
-        }
         self.functions.clear();
         self.mapped_symbols.clear();
-        self.clear_ir()
+
+        // Drop the old DI state before replacing the module, since DIBuilder references the module.
+        self.di_state = None;
+
+        // Drop the old execution engine to free machine code memory, then create a fresh module
+        // and a new engine.
+        self.exec_engine = None;
+        self.module = create_module(self.cx, &self.machine, self.aot)?;
+        if !self.aot {
+            self.exec_engine =
+                Some(self.module.create_jit_execution_engine(self.opt_level).map_err(error_msg)?);
+        }
+
+        Ok(())
     }
 }
 
@@ -502,20 +516,20 @@ impl Backend for EvmLlvmBackend {
     }
 
     fn clear_ir(&mut self) -> Result<()> {
-        /*
-        for func in self.module.get_functions() {
-            if !func.as_global_value().is_declaration() {
-                func_delete_body(func);
-            }
-        }
-        */
-
         // Drop the old DI state before replacing the module, since DIBuilder references the module.
         self.di_state = None;
 
+        // Remove the old module from the execution engine before replacing it.
+        // Without this, each clear_ir() cycle leaks a module in the engine.
+        if let Some(exec_engine) = &self.exec_engine {
+            exec_engine
+                .remove_module(&self.module)
+                .map_err(|e| eyre!("failed to remove module: {e}"))?;
+        }
+
         self.module = create_module(self.cx, &self.machine, self.aot)?;
         if let Some(exec_engine) = &self.exec_engine {
-            exec_engine.add_module(&self.module).map_err(|_| Error::msg("failed to add module"))?;
+            exec_engine.add_module(&self.module).map_err(|()| eyre!("failed to add module"))?;
         }
 
         Ok(())
@@ -531,18 +545,7 @@ impl Backend for EvmLlvmBackend {
     }
 
     unsafe fn free_all_functions(&mut self) -> Result<()> {
-        if let Some(exec_engine) = &self.exec_engine {
-            for (_, function) in self.functions.values() {
-                exec_engine.free_fn_machine_code(*function);
-            }
-        }
         self.clear_module()
-    }
-}
-
-impl Drop for EvmLlvmBackend {
-    fn drop(&mut self) {
-        let _ = self.clear_module();
     }
 }
 
@@ -1561,33 +1564,3 @@ fn error_msg(msg: inkwell::support::LLVMString) -> revmc_backend::Error {
 fn fmt_ty(ty: BasicTypeEnum<'_>) -> impl std::fmt::Display {
     ty.print_to_string().to_str().unwrap().trim_matches('"').to_string()
 }
-
-// TODO: `LLVMSetOperand` is not the same as `Use::set(nullptr)`.
-/*
-/// Mimics `llvm::Function::deleteBody`.
-fn func_delete_body(func: FunctionValue<'_>) {
-    for block in func.get_basic_block_iter() {
-        for inst in block.get_instructions() {
-            for i in 0..inst.get_num_operands() {
-                unsafe { LLVMSetOperand(inst.as_value_ref(), i, core::ptr::null_mut()) }
-            }
-        }
-    }
-
-    for_each_2(func.get_basic_block_iter(), |b| unsafe {
-        for_each_2(b.get_instructions(), |inst| {
-            inst.erase_from_basic_block();
-        });
-        let _ = b.delete();
-    });
-}
-
-fn for_each_2<T>(iter: impl IntoIterator<Item = T>, mut f: impl FnMut(T)) {
-    let mut iter = iter.into_iter();
-    let mut next = iter.next();
-    while let Some(x) = next {
-        next = iter.next();
-        f(x);
-    }
-}
-*/
