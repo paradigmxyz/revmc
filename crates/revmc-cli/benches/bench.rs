@@ -84,9 +84,9 @@ fn run_bytecode_bench(c: &mut Criterion, bench: &revmc_cli::Bench) {
 
     if !SKIP_COMPILE.contains(&name) {
         g.bench_function(format!("{name}/compile/translate"), |b| {
-            b.iter_batched(
+            b.iter_batched_ref(
                 || new_compiler(OptimizationLevel::None),
-                |mut compiler| {
+                |compiler| {
                     compiler.translate(name, &def.bytecode, SPEC_ID).unwrap();
                 },
                 BatchSize::PerIteration,
@@ -94,14 +94,14 @@ fn run_bytecode_bench(c: &mut Criterion, bench: &revmc_cli::Bench) {
         });
 
         g.bench_function(format!("{name}/compile/jit"), |b| {
-            b.iter_batched(
+            b.iter_batched_ref(
                 || {
                     let mut compiler = new_compiler(OptimizationLevel::Aggressive);
                     let id = compiler.translate(name, &def.bytecode, SPEC_ID).expect("translate");
                     (compiler, id)
                 },
-                |(mut compiler, id)| unsafe {
-                    compiler.jit_function(id).unwrap();
+                |(compiler, id)| unsafe {
+                    compiler.jit_function(*id).unwrap();
                 },
                 BatchSize::PerIteration,
             )
