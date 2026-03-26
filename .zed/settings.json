@@ -7,7 +7,7 @@
         },
         "cargo": {
           "allTargets": true,
-          "features": ["llvm", "cranelift"],
+          "features": ["llvm", "cranelift", "alloy-evm"],
           "sysroot": "discover",
         },
       },
