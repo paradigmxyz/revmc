@@ -103,9 +103,13 @@ pub fn op_info_map(spec_id: SpecId) -> &'static [OpcodeInfo; 256] {
 const DYNAMIC_WITH_BASE_GAS: &[u8] = &[
     op::EXP,
     op::KECCAK256,
+    op::BALANCE,
     op::CALLDATACOPY,
     op::CODECOPY,
+    op::EXTCODESIZE,
+    op::EXTCODECOPY,
     op::RETURNDATACOPY,
+    op::EXTCODEHASH,
     op::MLOAD,
     op::MSTORE,
     op::MSTORE8,
@@ -115,29 +119,18 @@ const DYNAMIC_WITH_BASE_GAS: &[u8] = &[
     op::LOG2,
     op::LOG3,
     op::LOG4,
+    op::SLOAD,
+    op::CALL,
+    op::CALLCODE,
+    op::DELEGATECALL,
+    op::STATICCALL,
 ];
 
 /// Opcodes whose gas cost is entirely dynamic — computed fully in builtins at runtime.
 /// The upstream instruction table may assign a non-zero static gas to some of these (e.g.
 /// SELFDESTRUCT=5000 post-Tangerine), but revmc handles their full gas in builtins,
 /// so their base gas is always 0.
-const FULLY_DYNAMIC: &[u8] = &[
-    op::BALANCE,
-    op::EXTCODESIZE,
-    op::EXTCODECOPY,
-    op::EXTCODEHASH,
-    op::SLOAD,
-    op::SSTORE,
-    op::CREATE,
-    op::CALL,
-    op::CALLCODE,
-    op::RETURN,
-    op::DELEGATECALL,
-    op::CREATE2,
-    op::STATICCALL,
-    op::REVERT,
-    op::SELFDESTRUCT,
-];
+const FULLY_DYNAMIC: &[u8] = &[op::SSTORE, op::CREATE, op::CREATE2, op::SELFDESTRUCT];
 
 /// Opcodes that are gated behind a specific `SpecId`, paired with the spec they were introduced in.
 const SPEC_GATED_OPCODES: &[(u8, SpecId)] = &[
@@ -299,10 +292,6 @@ mod tests {
         assert_eq!(cancun[op::KECCAK256 as usize].base_gas(), 30);
         assert!(cancun[op::KECCAK256 as usize].is_dynamic());
 
-        // Storage: fully dynamic, base gas is 0.
-        assert!(cancun[op::SLOAD as usize].is_dynamic());
-        assert_eq!(cancun[op::SLOAD as usize].base_gas(), 0);
-
         // Transient storage (Cancun).
         assert_eq!(cancun[op::TLOAD as usize].base_gas(), 100);
         assert!(!cancun[op::TLOAD as usize].is_disabled());
@@ -315,10 +304,23 @@ mod tests {
         assert!(pre_shanghai[op::PUSH0 as usize].is_disabled());
         assert!(!cancun[op::PUSH0 as usize].is_disabled());
 
-        // Fully dynamic opcodes: base gas is always 0 regardless of spec.
+        // Dynamic-with-base-gas opcodes: base gas varies by spec.
         let frontier = op_info_map(SpecId::FRONTIER);
-        assert_eq!(frontier[op::SLOAD as usize].base_gas(), 0);
-        assert!(frontier[op::SELFDESTRUCT as usize].is_dynamic());
-        assert_eq!(frontier[op::SELFDESTRUCT as usize].base_gas(), 0);
+        assert_eq!(frontier[op::SLOAD as usize].base_gas(), 50);
+        assert_eq!(frontier[op::SELFDESTRUCT as usize].base_gas(), 0); // FULLY_DYNAMIC (5000 > MASK)
+        assert_eq!(frontier[op::CALL as usize].base_gas(), 40);
+        assert_eq!(frontier[op::BALANCE as usize].base_gas(), 20);
+        assert_eq!(frontier[op::EXTCODESIZE as usize].base_gas(), 20);
+        let tangerine = op_info_map(SpecId::TANGERINE);
+        assert_eq!(tangerine[op::SLOAD as usize].base_gas(), 200);
+        assert_eq!(tangerine[op::SELFDESTRUCT as usize].base_gas(), 0);
+        assert_eq!(tangerine[op::CALL as usize].base_gas(), 700);
+        assert_eq!(tangerine[op::BALANCE as usize].base_gas(), 400);
+        assert_eq!(tangerine[op::EXTCODESIZE as usize].base_gas(), 700);
+        let berlin = op_info_map(SpecId::BERLIN);
+        assert_eq!(berlin[op::SLOAD as usize].base_gas(), 100);
+        assert_eq!(berlin[op::CALL as usize].base_gas(), 100);
+        assert_eq!(berlin[op::BALANCE as usize].base_gas(), 100);
+        assert_eq!(berlin[op::EXTCODESIZE as usize].base_gas(), 100);
     }
 }
