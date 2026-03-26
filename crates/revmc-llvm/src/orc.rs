@@ -1372,18 +1372,12 @@ impl LLJIT {
     }
 
     /// Look up the given symbol in the main JITDylib of the given LLJIT instance.
-    pub fn lookup(&self, name: &CStr) -> Result<usize, LLVMString> {
-        self.lookup_unmangled(&self.mangle_and_intern(name))
-    }
-
-    /// Look up the given symbol in the main JITDylib of the given LLJIT instance.
     ///
-    /// The name should be mangled.
-    pub fn lookup_unmangled(&self, unmangled_name: &CStr) -> Result<usize, LLVMString> {
+    /// The name is **unmangled** — `LLVMOrcLLJITLookup` applies the data layout
+    /// prefix (e.g. `_` on macOS) internally.
+    pub fn lookup(&self, name: &CStr) -> Result<usize, LLVMString> {
         let mut res = MaybeUninit::uninit();
-        cvt(unsafe {
-            LLVMOrcLLJITLookup(self.as_inner(), res.as_mut_ptr(), unmangled_name.as_ptr())
-        })?;
+        cvt(unsafe { LLVMOrcLLJITLookup(self.as_inner(), res.as_mut_ptr(), name.as_ptr()) })?;
         Ok(unsafe { res.assume_init() }.try_into().unwrap())
     }
 
@@ -1716,8 +1710,7 @@ mod tests {
 
         let jit = LLJIT::new_empty().unwrap();
         jit.add_module(tsm).unwrap();
-        let address =
-            jit.lookup_unmangled(&jit.mangle_and_intern(&CString::new(fn_name).unwrap())).unwrap();
+        let address = jit.lookup(&CString::new(fn_name).unwrap()).unwrap();
         eprintln!("address: {address:#x}");
         let f = unsafe { std::mem::transmute::<usize, extern "C" fn() -> u64>(address) };
         let r = f();
