@@ -82,4 +82,3 @@ strip = false
 
 [profile.bench]
 inherits = "profiling"
-
