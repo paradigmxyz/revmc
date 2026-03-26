@@ -453,7 +453,6 @@ pub unsafe extern "C" fn __revmc_builtin_sload(
             Err(LoadError::DBError) => return InstructionResult::FatalExternalError,
         }
     } else {
-        // Pre-Berlin SLOAD cost is purely static; already deducted by JIT.
         let storage = try_host!(ecx.host.sload(address, key));
         *index = storage.data.into();
     }
