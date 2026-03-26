@@ -35,6 +35,7 @@ use revmc_backend::{
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::{
     borrow::Cow,
+    cell::Cell,
     ffi::CString,
     fmt, iter,
     mem::ManuallyDrop,
@@ -99,6 +100,39 @@ pub struct EvmLlvmBackend {
     function_names: FxHashMap<u32, String>,
 }
 
+// Thread-local slot for capturing compiled object buffers from the ObjectTransformLayer.
+// Safe because LLJIT uses InPlaceTaskDispatcher — compilation runs inline on the calling thread.
+thread_local! {
+    static OBJ_CAPTURE: Cell<*mut Option<Vec<u8>>> = const { Cell::new(std::ptr::null_mut()) };
+}
+
+/// RAII guard that arms the thread-local object capture for the duration of a JIT commit.
+struct ScopedObjCapture {
+    prev: *mut Option<Vec<u8>>,
+}
+
+impl ScopedObjCapture {
+    fn install(slot: &mut Option<Vec<u8>>) -> Self {
+        Self { prev: OBJ_CAPTURE.replace(slot as *mut _) }
+    }
+}
+
+impl Drop for ScopedObjCapture {
+    fn drop(&mut self) {
+        OBJ_CAPTURE.set(self.prev);
+    }
+}
+
+fn obj_capture_transform(obj: &[u8]) -> Result<Option<Vec<u8>>, String> {
+    OBJ_CAPTURE.with(|tls| {
+        let ptr = tls.get();
+        if !ptr.is_null() {
+            unsafe { *ptr = Some(obj.to_vec()) };
+        }
+    });
+    Ok(None)
+}
+
 /// Process-global shared LLJIT instance.
 ///
 /// ORC/LLJIT is thread-safe and designed to be shared. Individual compilers get
@@ -130,6 +164,7 @@ impl GlobalOrcJit {
             let jit =
                 orc::LLJIT::builder().concurrent_compiler().build().map_err(|e| e.to_string())?;
             jit.get_execution_session().set_default_error_reporter();
+            jit.get_obj_transform_layer().set_transform(obj_capture_transform);
 
             let builtins_jd = jit.get_execution_session().create_bare_jit_dylib(c"revmc.builtins");
 
@@ -224,6 +259,9 @@ struct OrcJitState {
     loaded_trackers: Vec<orc::ResourceTracker>,
     /// Maps committed function ID → index into `loaded_trackers`.
     committed_functions: FxHashMap<u32, usize>,
+    /// Cached object buffer from the last `commit_staged_module`, captured via
+    /// ObjectTransformLayer.
+    last_compiled_object: Option<Vec<u8>>,
     /// Per-compiler JITDylib in the global LLJIT. Provides symbol namespace isolation.
     jd: Option<orc::JITDylibRef>,
 }
@@ -248,6 +286,7 @@ impl OrcJitState {
             pending_symbols: Vec::new(),
             loaded_trackers: Vec::new(),
             committed_functions: FxHashMap::default(),
+            last_compiled_object: None,
             jd: Some(global.acquire_jit_dylib()),
         })
     }
@@ -258,6 +297,7 @@ impl OrcJitState {
         self.pending_symbols.clear();
         self.loaded_trackers.clear();
         self.committed_functions.clear();
+        self.last_compiled_object = None;
         self.jd().clear().map_err(error_msg)?;
         Ok(())
     }
@@ -531,7 +571,11 @@ impl EvmLlvmBackend {
         let tracker = orc.jd().create_resource_tracker();
 
         let tsm = create_thread_safe_module(tscx, old_module);
+        let mut captured = None;
+        let _guard = ScopedObjCapture::install(&mut captured);
         orc.global.jit.add_module_with_rt(tsm, &tracker).map_err(error_msg)?;
+        drop(_guard);
+        orc.last_compiled_object = captured;
 
         let tracker_idx = orc.loaded_trackers.len();
         for &id in orc.staged_functions.keys() {
@@ -766,11 +810,8 @@ impl Backend for EvmLlvmBackend {
     }
 
     fn function_sizes(&self) -> Vec<(String, usize)> {
-        let buffer = match self.machine.write_to_memory_buffer(self.module(), FileType::Object) {
-            Ok(buf) => buf,
-            Err(_) => return Vec::new(),
-        };
-        let data = buffer.as_slice();
+        let Some(orc) = &self.orc else { return Vec::new() };
+        let Some(data) = orc.last_compiled_object.as_deref() else { return Vec::new() };
         let Ok(obj) = object::File::parse(data) else { return Vec::new() };
 
         let mut result: Vec<_> = obj

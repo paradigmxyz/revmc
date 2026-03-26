@@ -1478,6 +1478,9 @@ impl ObjectLayerRef {
     }
 }
 
+/// Callback for [`ObjectTransformLayerRef::set_transform`].
+type ObjTransformFn = fn(&[u8]) -> Result<Option<Vec<u8>>, String>;
+
 /// A reference to an object transform layer.
 ///
 /// The transform layer sits between the IR compiler and the object linking layer.
@@ -1497,18 +1500,42 @@ impl ObjectTransformLayerRef {
         self.ptr
     }
 
+    // TODO: avoid copying, better api for mutation
     /// Set the transform function on this object transform layer.
-    pub fn set_transform(&self, f: fn(&mut LLVMMemoryBufferRef) -> Result<(), String>) {
+    ///
+    /// The callback receives the compiled object buffer as `&[u8]`. Returning `Ok(None)`
+    /// passes the buffer through unchanged; returning `Ok(Some(new_bytes))` replaces it.
+    /// Returning `Err` aborts materialization.
+    pub fn set_transform(&self, f: ObjTransformFn) {
         extern "C" fn shim(ctx: *mut c_void, obj_in_out: *mut LLVMMemoryBufferRef) -> LLVMErrorRef {
-            let f: fn(&mut LLVMMemoryBufferRef) -> Result<(), String> =
-                unsafe { mem::transmute(ctx) };
-            let buf = unsafe { &mut *obj_in_out };
-            let res = std::panic::catch_unwind(AssertUnwindSafe(|| f(buf)));
-            cvt_cb_res(res)
+            use inkwell::llvm_sys::core::{
+                LLVMCreateMemoryBufferWithMemoryRangeCopy, LLVMDisposeMemoryBuffer,
+                LLVMGetBufferSize, LLVMGetBufferStart,
+            };
+            let f: ObjTransformFn = unsafe { mem::transmute(ctx) };
+            let buf = unsafe { *obj_in_out };
+            let data = unsafe {
+                let start = LLVMGetBufferStart(buf);
+                let size = LLVMGetBufferSize(buf);
+                std::slice::from_raw_parts(start.cast::<u8>(), size)
+            };
+            let res = std::panic::catch_unwind(AssertUnwindSafe(|| f(data)));
+            cvt_cb_res_t(res, |new_bytes| {
+                if let Some(new_bytes) = new_bytes {
+                    unsafe {
+                        LLVMDisposeMemoryBuffer(buf);
+                        *obj_in_out = LLVMCreateMemoryBufferWithMemoryRangeCopy(
+                            new_bytes.as_ptr().cast(),
+                            new_bytes.len(),
+                            c"".as_ptr(),
+                        );
+                    }
+                }
+            })
         }
 
         let ctx = f as *mut c_void;
-        unsafe { LLVMOrcObjectTransformLayerSetTransform(self.as_inner(), shim, ctx) };
+        unsafe { self.set_transform_raw(shim, ctx) }
     }
 
     /// Set a raw transform function on this object transform layer.
@@ -1617,8 +1644,18 @@ pub(crate) fn cvt(ptr: LLVMErrorRef) -> Result<(), LLVMString> {
 }
 
 fn cvt_cb_res(res: Result<Result<(), String>, Box<dyn std::any::Any + Send>>) -> LLVMErrorRef {
+    cvt_cb_res_t(res, drop)
+}
+
+fn cvt_cb_res_t<T>(
+    res: Result<Result<T, String>, Box<dyn std::any::Any + Send>>,
+    f: impl FnOnce(T),
+) -> LLVMErrorRef {
     let msg = match res {
-        Ok(Ok(())) => return ptr::null_mut(), // LLVMErrorSuccess
+        Ok(Ok(x)) => {
+            f(x);
+            return ptr::null_mut(); // LLVMErrorSuccess
+        }
         Ok(Err(e)) => e,
         Err(e) => format!("callback panicked, payload: {:?}", panic_payload(&e)),
     };
