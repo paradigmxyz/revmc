@@ -9,9 +9,6 @@ pub(crate) struct DiagnosticHandlerGuard {
     cx: LLVMContextRef,
     prev_dh: LLVMDiagnosticHandler,
     prev_dhc: *mut c_void,
-    /// When true, the guard will NOT restore the previous handler on drop.
-    /// Used when the LLVM context is about to be destroyed.
-    defused: bool,
 }
 
 impl fmt::Debug for DiagnosticHandlerGuard {
@@ -27,14 +24,8 @@ impl DiagnosticHandlerGuard {
             let prev_dh = LLVMContextGetDiagnosticHandler(c);
             let prev_dhc = LLVMContextGetDiagnosticContext(c);
             LLVMContextSetDiagnosticHandler(c, Some(Self::diagnostic_handler), ptr::null_mut());
-            Self { cx: c, prev_dh, prev_dhc, defused: false }
+            Self { cx: c, prev_dh, prev_dhc }
         }
-    }
-
-    /// Defuse the guard so it does not restore the previous handler on drop.
-    /// Use this when the LLVM context is about to be destroyed.
-    pub(crate) fn defuse(&mut self) {
-        self.defused = true;
     }
 
     extern "C" fn diagnostic_handler(di: LLVMDiagnosticInfoRef, _context: *mut c_void) {
@@ -54,10 +45,8 @@ impl DiagnosticHandlerGuard {
 
 impl Drop for DiagnosticHandlerGuard {
     fn drop(&mut self) {
-        if !self.defused {
-            unsafe {
-                LLVMContextSetDiagnosticHandler(self.cx, self.prev_dh, self.prev_dhc);
-            }
+        unsafe {
+            LLVMContextSetDiagnosticHandler(self.cx, self.prev_dh, self.prev_dhc);
         }
     }
 }

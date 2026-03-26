@@ -58,41 +58,24 @@ const DEFAULT_WEIGHT: u32 = 20000;
 #[derive(Debug)]
 #[must_use]
 pub struct EvmLlvmBackend {
-    // NOTE: Drop order matters! Rust drops fields in declaration order.
-    // 1. Debug info must be dropped before the module.
-    // 2. Resource trackers must be dropped before LLJIT.
-    // 3. LLJIT must be dropped before the staging module and TSC.
-    // 4. The staging module must be dropped before the TSC (which owns the LLVM context).
     cx: &'static Context,
     _dh: dh::DiagnosticHandlerGuard,
     bcx: inkwell::builder::Builder<'static>,
+    module: Option<Module<'static>>,
+    machine: TargetMachine,
+
+    /// ORC JIT state. `None` in AOT mode.
+    /// Dropped before `_tscx` so the JIT engine is disposed before the context.
+    orc: Option<OrcJitState>,
+    /// ORC thread-safe context that owns the LLVM context (JIT mode only).
+    _tscx: Option<orc::ThreadSafeContext>,
+    /// Non-owning context handle for JIT mode. See [`create_orc_context`].
+    _cx_handle: Option<Box<ManuallyDrop<Context>>>,
 
     /// Debug info source file path set by the compiler.
     debug_file: Option<PathBuf>,
     /// LLVM debug info builder and compile unit, created lazily when `debug_file` is set.
     di_state: Option<DiState>,
-
-    /// Functions in the current staging module (not yet committed to JIT).
-    staged_functions: FxHashMap<u32, FunctionValue<'static>>,
-    /// Resource trackers for committed JIT modules, used for code removal.
-    /// Dropped before LLJIT to release JIT resources first.
-    loaded_trackers: Vec<orc::ResourceTracker>,
-    /// OrcV2 JIT engine (JIT mode only).
-    /// Dropped before the staging module and TSC.
-    jit: Option<orc::LLJIT>,
-    /// Staging module where IR is built before being committed to the JIT.
-    /// Wrapped in `Option` to allow taking ownership for ORC module transfer.
-    /// Dropped before the TSC (which owns the LLVM context).
-    module: Option<Module<'static>>,
-    machine: TargetMachine,
-
-    /// ORC thread-safe context that owns the LLVM context for JIT mode.
-    /// `None` in AOT mode. The `cx` field is derived from this via `_cx_handle`.
-    /// Dropped last among ORC resources.
-    tscx: Option<orc::ThreadSafeContext>,
-    /// Non-owning context handle for JIT mode. Heap-allocated to provide a stable address
-    /// that `cx` can reference. The `ManuallyDrop` prevents double-free (TSC owns the context).
-    _cx_handle: Option<Box<ManuallyDrop<Context>>>,
 
     ty_void: VoidType<'static>,
     ty_ptr: PointerType<'static>,
@@ -111,8 +94,76 @@ pub struct EvmLlvmBackend {
     function_counter: u32,
     /// Persistent mapping from function ID to symbol name.
     function_names: FxHashMap<u32, String>,
+}
+
+/// ORC JIT state for the LLVM backend (JIT mode only).
+///
+/// The LLVM context is owned separately (via `tscx`) and persists across JIT resets.
+/// Only the LLJIT engine and its associated resources are recreated on reset.
+///
+/// Drop order: `staged_functions` → `loaded_trackers` → `jit` (field declaration order).
+/// The context (`tscx`) outlives all of these since it lives on `EvmLlvmBackend`.
+struct OrcJitState {
+    /// Functions in the current staging module (not yet committed to JIT).
+    staged_functions: FxHashMap<u32, FunctionValue<'static>>,
     /// Symbol names that have been registered via `absolute_symbols` in the ORC JIT.
     registered_symbols: FxHashSet<String>,
+    /// Resource trackers for committed JIT modules, used for code removal.
+    loaded_trackers: Vec<orc::ResourceTracker>,
+    /// OrcV2 JIT engine.
+    jit: orc::LLJIT,
+}
+
+impl fmt::Debug for OrcJitState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OrcJitState")
+            .field("staged_functions", &self.staged_functions.len())
+            .field("registered_symbols", &self.registered_symbols.len())
+            .field("loaded_trackers", &self.loaded_trackers.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl OrcJitState {
+    fn new(target_info: &Cow<'_, TargetInfo>, opt_level: OptimizationLevel) -> Result<Self> {
+        Ok(Self {
+            staged_functions: FxHashMap::default(),
+            registered_symbols: FxHashSet::default(),
+            loaded_trackers: Vec::new(),
+            jit: create_lljit(target_info, opt_level)?,
+        })
+    }
+}
+
+/// Wraps a module in a [`orc::ThreadSafeModule`] for transfer to LLJIT.
+///
+/// Uses a raw pointer cast to work around `Module<'ctx>` invariance — the module's
+/// context is genuinely owned by `tscx`.
+fn create_thread_safe_module(
+    tscx: &orc::ThreadSafeContext,
+    module: Module<'static>,
+) -> orc::ThreadSafeModule {
+    let module = std::mem::ManuallyDrop::new(module);
+    // SAFETY: The module was created in the context owned by `tscx`.
+    unsafe { orc::ThreadSafeModule::create_in_context(Module::new(module.as_mut_ptr()), tscx) }
+}
+
+/// Creates an ORC-owned LLVM context, returning a `&'static` reference to it.
+///
+/// In JIT mode, ORC owns the context via a [`orc::ThreadSafeContext`] so that modules can be
+/// safely transferred to the JIT. A non-owning handle ([`ManuallyDrop<Context>`]) is
+/// heap-allocated to provide a stable address for the `&'static` reference.
+fn create_orc_context() -> (&'static Context, orc::ThreadSafeContext, Box<ManuallyDrop<Context>>) {
+    let cx = Context::create();
+    let raw = cx.raw();
+    let tscx = orc::ThreadSafeContext::from_context(cx);
+    // SAFETY: The TSC now owns the context. `from_context` uses `ManuallyDrop` internally,
+    // so the LLVM context is still valid — ownership was just transferred to the TSC.
+    let cx_handle = Box::new(ManuallyDrop::new(unsafe { Context::new(raw) }));
+    // SAFETY: The Box provides a stable heap address. The context is valid as long as
+    // the TSC lives.
+    let cx: &'static Context = unsafe { &*(&**cx_handle as *const Context) };
+    (cx, tscx, cx_handle)
 }
 
 /// LLVM debug info state for a module.
@@ -165,26 +216,8 @@ impl EvmLlvmBackend {
         // In JIT mode, ORC owns the context via a ThreadSafeContext so that modules can be
         // safely transferred to the JIT without double-ownership issues with the TLS context.
         // In AOT mode, we use the thread-local context directly.
-        let (cx, tscx, cx_handle) = if aot {
-            (get_context(), None, None)
-        } else {
-            let cx = Context::create();
-            let raw = cx.raw();
-            let tscx = orc::ThreadSafeContext::from_context(cx);
-            // SAFETY: The TSC now owns the context. We create a non-owning handle from the
-            // raw pointer. `from_context` uses `ManuallyDrop` internally, so the LLVM context
-            // is still valid — ownership was just transferred to the TSC.
-            let cx_handle = Box::new(ManuallyDrop::new(unsafe { Context::new(raw) }));
-            // SAFETY: The Box provides a stable heap address. The context is valid as long
-            // as the ThreadSafeContext lives (which is in `self`).
-            let cx: &'static Context = unsafe { &*(&**cx_handle as *const Context) };
-            (cx, Some(tscx), Some(cx_handle))
-        };
-
-        let module = Some(create_module(cx, &machine, aot)?);
-
-        let (tscx, cx_handle, jit) = if aot {
-            (None, None, None)
+        let (cx, tscx, cx_handle, orc) = if aot {
+            (get_context(), None, None, None)
         } else {
             if !target.has_jit() {
                 return Err(eyre::eyre!("target {:?} does not support JIT", target.get_name()));
@@ -196,10 +229,12 @@ impl EvmLlvmBackend {
                 ));
             }
 
-            let jit = create_lljit(&target_info, opt_level)?;
-            (tscx, cx_handle, Some(jit))
+            let (cx, tscx, cx_handle) = create_orc_context();
+            let orc = OrcJitState::new(&target_info, opt_level)?;
+            (cx, Some(tscx), Some(cx_handle), Some(orc))
         };
 
+        let module = Some(create_module(cx, &machine, aot)?);
         let bcx = cx.create_builder();
 
         let ty_void = cx.void_type();
@@ -217,9 +252,9 @@ impl EvmLlvmBackend {
             bcx,
             module,
             machine,
-            tscx,
+            orc,
+            _tscx: tscx,
             _cx_handle: cx_handle,
-            jit,
             ty_void,
             ty_i1,
             ty_i8,
@@ -234,9 +269,6 @@ impl EvmLlvmBackend {
             opt_level,
             function_counter: 0,
             function_names: FxHashMap::default(),
-            staged_functions: FxHashMap::default(),
-            registered_symbols: FxHashSet::default(),
-            loaded_trackers: Vec::new(),
             debug_file: None,
             di_state: None,
         })
@@ -253,9 +285,12 @@ impl EvmLlvmBackend {
         self.module.as_ref().unwrap()
     }
 
-    fn jit(&self) -> &orc::LLJIT {
-        assert!(!self.aot, "requested JIT on AOT");
-        self.jit.as_ref().expect("missing LLJIT")
+    fn orc(&self) -> &OrcJitState {
+        self.orc.as_ref().expect("requested ORC JIT state on AOT backend")
+    }
+
+    fn orc_mut(&mut self) -> &mut OrcJitState {
+        self.orc.as_mut().expect("requested ORC JIT state on AOT backend")
     }
 
     fn fn_type(
@@ -340,72 +375,34 @@ impl EvmLlvmBackend {
 
     /// Commits the current staging module to the ORC JIT if there are pending functions.
     fn commit_staged_module(&mut self) -> Result<()> {
-        if self.aot || self.staged_functions.is_empty() {
+        if self.aot || self.orc().staged_functions.is_empty() {
             return Ok(());
         }
 
-        self.staged_functions.clear();
+        self.orc_mut().staged_functions.clear();
         self.di_state = None;
 
         commit_module_to_jit(self as *mut _)
     }
 
     /// Drops and recreates the LLJIT, freeing all JIT-compiled code.
+    /// The LLVM context is reused across resets.
     fn reset_jit(&mut self) -> Result<()> {
         self.function_names.clear();
-        self.staged_functions.clear();
-        self.registered_symbols.clear();
         self.di_state = None;
-
-        // Drop in correct order: trackers → JIT → module → TSC.
-        // The diagnostic handler guard references the LLVM context, so defuse it
-        // before dropping the TSC (which owns the context in JIT mode).
-        self.loaded_trackers.clear();
-        self.jit = None;
         self.module = None;
 
         if !self.aot {
-            // Defuse the old diagnostic handler guard so it doesn't try to restore
-            // the handler on the about-to-be-destroyed context.
-            self._dh.defuse();
-            self._cx_handle = None;
-            self.tscx = None;
-
-            let cx = Context::create();
-            let raw = cx.raw();
-            let tscx = orc::ThreadSafeContext::from_context(cx);
-            // SAFETY: Same as in `new_for_target`.
-            let cx_handle = Box::new(ManuallyDrop::new(unsafe { Context::new(raw) }));
-            self.cx = unsafe { &*(&**cx_handle as *const Context) };
-            self._cx_handle = Some(cx_handle);
-            self.tscx = Some(tscx);
-
-            self._dh = dh::DiagnosticHandlerGuard::new(self.cx);
-            self.bcx = self.cx.create_builder();
-            self.ty_void = self.cx.void_type();
-            self.ty_i1 = self.cx.bool_type();
-            self.ty_i8 = self.cx.i8_type();
-            self.ty_i32 = self.cx.i32_type();
-            self.ty_i64 = self.cx.i64_type();
-            self.ty_i256 = self
-                .cx
-                .custom_width_int_type(std::num::NonZeroU32::new(256).unwrap())
-                .expect("i256");
-            self.ty_isize = self.cx.ptr_sized_int_type(&self.machine.get_target_data(), None);
-            self.ty_ptr = self.cx.ptr_type(AddressSpace::default());
-
+            // Drop the old ORC JIT state, then create a fresh one.
+            // The context (`_tscx`) is kept alive — only the JIT engine is recreated.
+            self.orc = None;
             let target_info = TargetInfo::new(&revmc_backend::Target::Native)?;
-            self.jit = Some(create_lljit(&target_info, self.opt_level)?);
+            self.orc = Some(OrcJitState::new(&target_info, self.opt_level)?);
         }
 
         self.module = Some(create_module(self.cx, &self.machine, self.aot)?);
 
         Ok(())
-    }
-
-    /// Replace `self.module` with a new module, dropping the old one.
-    fn replace_module(&mut self, new_module: Module<'static>) {
-        self.module = Some(new_module);
     }
 }
 
@@ -524,7 +521,8 @@ impl Backend for EvmLlvmBackend {
     ) -> Result<(Self::Builder<'_>, Self::FuncId)> {
         let (id, function) = if let Some((&id, _fname)) =
             self.function_names.iter().find(|(_k, fname)| fname.as_str() == name)
-            && let Some(function) = self.staged_functions.get(&id).copied()
+            && let Some(orc) = &self.orc
+            && let Some(function) = orc.staged_functions.get(&id).copied()
             && let Some(function2) = self.module().get_function(name)
             && function == function2
         {
@@ -546,7 +544,9 @@ impl Backend for EvmLlvmBackend {
             let id = self.function_counter;
             self.function_counter += 1;
             self.function_names.insert(id, name.to_string());
-            self.staged_functions.insert(id, function);
+            if let Some(orc) = &mut self.orc {
+                orc.staged_functions.insert(id, function);
+            }
             (id, function)
         };
 
@@ -608,7 +608,7 @@ impl Backend for EvmLlvmBackend {
         self.commit_staged_module()?;
         let name_str = self.id_to_name(id);
         let name = CString::new(name_str).unwrap();
-        let addr = self.jit().lookup(&name).map_err(error_msg)?;
+        let addr = self.orc().jit.lookup(&name).map_err(error_msg)?;
         Ok(addr)
     }
 
@@ -635,13 +635,17 @@ impl Backend for EvmLlvmBackend {
 
     fn clear_ir(&mut self) -> Result<()> {
         self.di_state = None;
-        self.replace_module(create_module(self.cx, &self.machine, self.aot)?);
-        self.staged_functions.clear();
+        self.module = Some(create_module(self.cx, &self.machine, self.aot)?);
+        if let Some(orc) = &mut self.orc {
+            orc.staged_functions.clear();
+        }
         Ok(())
     }
 
     unsafe fn free_function(&mut self, id: Self::FuncId) -> Result<()> {
-        if let Some(function) = self.staged_functions.remove(&id) {
+        if let Some(orc) = &mut self.orc
+            && let Some(function) = orc.staged_functions.remove(&id)
+        {
             unsafe { function.delete() };
         }
         self.function_names.remove(&id);
@@ -1441,24 +1445,25 @@ impl Builder for EvmLlvmBuilder<'_> {
         let func_ty = self.fn_type(ret, params);
         let function = self.module().add_function(name, func_ty, Some(convert_linkage(linkage)));
         if let Some(address) = address
-            && let Some(jit) = &self.jit
-            && !self.registered_symbols.contains(name)
+            && let Some(orc) = &mut self.orc
+            && !orc.registered_symbols.contains(name)
         {
             let name_cstr = CString::new(name).unwrap();
             let sym = orc::SymbolMapPair::new(
-                jit.mangle_and_intern(&name_cstr),
+                orc.jit.mangle_and_intern(&name_cstr),
                 orc::EvaluatedSymbol::new(
                     address as u64,
                     orc::SymbolFlags::none().with_exported().callable(),
                 ),
             );
-            if let Err((e, _)) = jit
+            if let Err((e, _)) = orc
+                .jit
                 .get_main_jit_dylib()
                 .define(orc::MaterializationUnit::absolute_symbols(vec![sym]))
             {
                 warn!("failed to define absolute symbol {name:?}: {e}");
             }
-            self.registered_symbols.insert(name.to_string());
+            orc.registered_symbols.insert(name.to_string());
         }
         function
     }
@@ -1569,15 +1574,15 @@ fn commit_module_to_jit(backend: *mut EvmLlvmBackend) -> Result<()> {
         (*backend).module =
             Some(create_module((*backend).cx, &(*backend).machine, (*backend).aot)?);
 
-        let tscx = (*backend).tscx.as_ref().expect("missing ThreadSafeContext");
-        let jit = (*backend).jit.as_ref().expect("missing LLJIT");
-        let jd = jit.get_main_jit_dylib();
+        let tscx = (*backend)._tscx.as_ref().expect("missing ThreadSafeContext");
+        let orc = (*backend).orc.as_mut().expect("missing ORC JIT state");
+        let jd = orc.jit.get_main_jit_dylib();
         let tracker = jd.create_resource_tracker();
 
-        let tsm = tscx.create_module(old_module);
-        jit.add_module_with_rt(tsm, &tracker).map_err(error_msg)?;
+        let tsm = create_thread_safe_module(tscx, old_module);
+        orc.jit.add_module_with_rt(tsm, &tracker).map_err(error_msg)?;
 
-        (*backend).loaded_trackers.push(tracker);
+        orc.loaded_trackers.push(tracker);
     }
 
     Ok(())
