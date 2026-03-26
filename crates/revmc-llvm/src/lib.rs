@@ -5,6 +5,7 @@
 #[macro_use]
 extern crate tracing;
 
+use alloy_primitives::map::{HashMap, HashSet};
 use inkwell::{
     AddressSpace, IntPredicate, OptimizationLevel,
     attributes::{Attribute, AttributeLoc},
@@ -32,7 +33,6 @@ use object::{Object, ObjectSymbol};
 use revmc_backend::{
     Backend, BackendTypes, Builder, IntCC, Result, TailCallKind, TypeMethods, U256, eyre,
 };
-use alloy_primitives::map::{HashMap, HashSet};
 use std::{
     borrow::Cow,
     cell::Cell,

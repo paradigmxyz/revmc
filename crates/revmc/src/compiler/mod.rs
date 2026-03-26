@@ -1,6 +1,7 @@
 //! EVM bytecode compiler implementation.
 
 use crate::{Backend, Builder, Bytecode, EvmCompilerFn, EvmContext, EvmStack, Result};
+use alloy_primitives::map::HashMap;
 use revm_interpreter::{Gas, InputsImpl};
 use revm_primitives::{Bytes, hardfork::SpecId};
 use revmc_backend::{
@@ -8,7 +9,6 @@ use revmc_backend::{
 };
 use revmc_builtins::Builtins;
 use revmc_context::RawEvmCompilerFn;
-use alloy_primitives::map::HashMap;
 use std::{
     cell::Cell,
     fs,

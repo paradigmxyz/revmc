@@ -1,10 +1,10 @@
 //! Internal EVM bytecode and opcode representation.
 
+use alloy_primitives::map::HashMap;
 use bitvec::vec::BitVec;
 use revm_bytecode::opcode as op;
 use revm_primitives::hardfork::SpecId;
 use revmc_backend::Result;
-use alloy_primitives::map::HashMap;
 use std::cell::RefCell;
 
 mod fmt;

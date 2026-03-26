@@ -1,7 +1,7 @@
 use super::{Bytecode, InstData, InstFlags, bitvec_as_bytes};
+use alloy_primitives::map::HashMap;
 use revm_bytecode::opcode as op;
 use revm_primitives::hex;
-use alloy_primitives::map::HashMap;
 use std::{borrow::Cow, fmt, fmt::Write};
 
 /// Basic block info collected from bytecode analysis.
