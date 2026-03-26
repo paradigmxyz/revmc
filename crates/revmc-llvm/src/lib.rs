@@ -198,12 +198,11 @@ impl GlobalOrcJit {
             })
             .collect();
         drop(defined);
-        if !new_syms.is_empty() {
-            if let Err((e, _)) =
+        if !new_syms.is_empty()
+            && let Err((e, _)) =
                 self.builtins_jd.define(orc::MaterializationUnit::absolute_symbols(new_syms))
-            {
-                error!("failed to define builtins: {e}");
-            }
+        {
+            error!("failed to define builtins: {e}");
         }
     }
 }
@@ -527,7 +526,7 @@ impl EvmLlvmBackend {
         // Flush pending absolute symbols to the shared builtins JITDylib.
         let pending = &mut orc.pending_symbols;
         if !pending.is_empty() {
-            orc.global.define_builtins(&pending);
+            orc.global.define_builtins(pending);
             pending.clear();
         }
 

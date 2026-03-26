@@ -975,7 +975,7 @@ impl JITDylibRef {
     /// Add another JITDylib to this JITDylib's link order.
     ///
     /// Symbols not found in this JITDylib will be searched for in `other`.
-    pub fn add_to_link_order(&self, other: &JITDylibRef) {
+    pub fn add_to_link_order(&self, other: &Self) {
         unsafe {
             crate::cpp::revmc_llvm_jit_dylib_add_to_link_order(self.as_inner(), other.as_inner())
         };
