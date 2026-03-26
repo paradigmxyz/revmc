@@ -1443,8 +1443,14 @@ impl LLJIT {
 unsafe impl Send for LLJIT {}
 unsafe impl Sync for LLJIT {}
 
-// SAFETY: JITDylibRef is a non-owning handle into a thread-safe ExecutionSession.
+// SAFETY: These are non-owning handles into ORC's thread-safe ExecutionSession.
+// All ORC session operations are internally synchronized.
+unsafe impl Send for ExecutionSessionRef<'_> {}
+unsafe impl Sync for ExecutionSessionRef<'_> {}
 unsafe impl Send for JITDylibRef {}
+unsafe impl Sync for JITDylibRef {}
+unsafe impl Send for ResourceTracker {}
+unsafe impl Sync for ResourceTracker {}
 
 impl Drop for LLJIT {
     fn drop(&mut self) {
