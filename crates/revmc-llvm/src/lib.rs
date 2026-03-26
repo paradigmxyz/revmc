@@ -164,6 +164,8 @@ impl GlobalOrcJit {
 /// Drop order: `staged_functions` → `loaded_trackers` → `jd` (field declaration order).
 /// The context (`tscx`) outlives all of these since it lives on `EvmLlvmBackend`.
 struct OrcJitState {
+    /// Reference to the global LLJIT instance.
+    global: &'static GlobalOrcJit,
     /// Functions in the current staging module (not yet committed to JIT).
     staged_functions: FxHashMap<u32, FunctionValue<'static>>,
     /// Symbol names that have been registered via `absolute_symbols` in this compiler's JITDylib.
@@ -181,6 +183,7 @@ struct OrcJitState {
 impl fmt::Debug for OrcJitState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("OrcJitState")
+            .field("jd", &self.jd.as_inner())
             .field("staged_functions", &self.staged_functions.len())
             .field("committed_functions", &self.committed_functions.len())
             .field("registered_symbols", &self.registered_symbols.len())
@@ -191,15 +194,15 @@ impl fmt::Debug for OrcJitState {
 
 impl OrcJitState {
     fn new() -> Result<Self> {
-        let g = GlobalOrcJit::get()?;
-        let jd = g.acquire_jit_dylib();
+        let global = GlobalOrcJit::get()?;
         Ok(Self {
+            global,
             staged_functions: FxHashMap::default(),
             registered_symbols: FxHashSet::default(),
             pending_symbols: Vec::new(),
             loaded_trackers: Vec::new(),
             committed_functions: FxHashMap::default(),
-            jd,
+            jd: global.acquire_jit_dylib(),
         })
     }
 
@@ -217,10 +220,8 @@ impl OrcJitState {
 
 impl Drop for OrcJitState {
     fn drop(&mut self) {
-        if let Ok(g) = GlobalOrcJit::get() {
-            let jd = std::mem::replace(&mut self.jd, orc::JITDylibRef::dangling());
-            g.release_jit_dylib(jd);
-        }
+        let jd = std::mem::replace(&mut self.jd, orc::JITDylibRef::dangling());
+        self.global.release_jit_dylib(jd);
     }
 }
 
@@ -471,7 +472,6 @@ impl EvmLlvmBackend {
 
         let tscx = self._tscx.as_ref().expect("missing ThreadSafeContext");
         let orc = self.orc.as_mut().expect("missing ORC JIT state");
-        let g = GlobalOrcJit::get()?;
 
         // Flush pending absolute symbols in a single batch into this compiler's JITDylib.
         let pending = std::mem::take(&mut orc.pending_symbols);
@@ -480,7 +480,7 @@ impl EvmLlvmBackend {
                 .iter()
                 .map(|(name, addr)| {
                     orc::SymbolMapPair::new(
-                        g.jit.mangle_and_intern(name),
+                        orc.global.jit.mangle_and_intern(name),
                         orc::EvaluatedSymbol::new(
                             *addr as u64,
                             orc::SymbolFlags::none().with_exported().callable(),
@@ -496,7 +496,7 @@ impl EvmLlvmBackend {
         let tracker = orc.jd.create_resource_tracker();
 
         let tsm = create_thread_safe_module(tscx, old_module);
-        g.jit.add_module_with_rt(tsm, &tracker).map_err(error_msg)?;
+        orc.global.jit.add_module_with_rt(tsm, &tracker).map_err(error_msg)?;
 
         let tracker_idx = orc.loaded_trackers.len();
         for &id in orc.staged_functions.keys() {
@@ -725,8 +725,8 @@ impl Backend for EvmLlvmBackend {
         self.commit_staged_module()?;
         let name_str = self.id_to_name(id);
         let name = CString::new(name_str).unwrap();
-        let g = GlobalOrcJit::get()?;
-        let addr = g.jit.lookup_in(&self.orc().jd, &name).map_err(error_msg)?;
+        let orc = self.orc();
+        let addr = orc.global.jit.lookup_in(&orc.jd, &name).map_err(error_msg)?;
         Ok(addr)
     }
 
