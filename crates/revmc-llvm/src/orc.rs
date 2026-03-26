@@ -84,8 +84,6 @@ impl ThreadSafeContext {
     }
 }
 
-unsafe impl Send for ThreadSafeContext {}
-
 impl Drop for ThreadSafeContext {
     fn drop(&mut self) {
         unsafe { LLVMOrcDisposeThreadSafeContext(self.ctx) };
@@ -155,8 +153,6 @@ impl ThreadSafeModule {
         cvt(unsafe { LLVMOrcThreadSafeModuleWithModuleDo(self.as_inner(), shim, ctx) })
     }
 }
-
-unsafe impl Send for ThreadSafeModule {}
 
 impl Drop for ThreadSafeModule {
     fn drop(&mut self) {
@@ -1442,15 +1438,24 @@ impl LLJIT {
 // All session operations are internally synchronized.
 unsafe impl Send for LLJIT {}
 unsafe impl Sync for LLJIT {}
-
-// SAFETY: These are non-owning handles into ORC's thread-safe ExecutionSession.
-// All ORC session operations are internally synchronized.
 unsafe impl Send for ExecutionSessionRef<'_> {}
 unsafe impl Sync for ExecutionSessionRef<'_> {}
 unsafe impl Send for JITDylibRef {}
 unsafe impl Sync for JITDylibRef {}
 unsafe impl Send for ResourceTracker {}
 unsafe impl Sync for ResourceTracker {}
+unsafe impl Send for IRTransformLayerRef {}
+unsafe impl Sync for IRTransformLayerRef {}
+unsafe impl Send for SymbolStringPoolRef {}
+unsafe impl Sync for SymbolStringPoolRef {}
+unsafe impl Send for SymbolStringPoolEntry {}
+unsafe impl Sync for SymbolStringPoolEntry {}
+unsafe impl Send for ThreadSafeContext {}
+unsafe impl Send for ThreadSafeModule {}
+unsafe impl Send for MaterializationUnit {}
+unsafe impl Send for DefinitionGenerator {}
+unsafe impl Send for JITTargetMachineBuilder {}
+unsafe impl Send for LLJITBuilder {}
 
 impl Drop for LLJIT {
     fn drop(&mut self) {
