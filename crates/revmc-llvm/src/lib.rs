@@ -39,7 +39,10 @@ use std::{
     fmt, iter,
     mem::ManuallyDrop,
     path::{Path, PathBuf},
-    sync::{Once, OnceLock},
+    sync::{
+        Once, OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 pub use inkwell::{self, context::Context};
@@ -96,17 +99,42 @@ pub struct EvmLlvmBackend {
     function_names: FxHashMap<u32, String>,
 }
 
+/// Process-global shared LLJIT instance.
+///
+/// ORC/LLJIT is thread-safe and designed to be shared. Individual compilers get
+/// their own [`JITDylib`](orc::JITDylibRef) for symbol isolation.
+struct GlobalOrcJit {
+    jit: orc::LLJIT,
+    next_dylib_id: AtomicU64,
+}
+
+impl GlobalOrcJit {
+    fn get() -> Result<&'static Self> {
+        static GLOBAL: OnceLock<std::result::Result<GlobalOrcJit, String>> = OnceLock::new();
+        let result = GLOBAL.get_or_init(|| {
+            init().map_err(|e| e.to_string())?;
+            let jit = orc::LLJIT::new().map_err(|e| e.to_string())?;
+            jit.get_execution_session().set_default_error_reporter();
+            Ok(Self { jit, next_dylib_id: AtomicU64::new(0) })
+        });
+        match result {
+            Ok(g) => Ok(g),
+            Err(e) => Err(eyre::eyre!("{e}")),
+        }
+    }
+}
+
 /// ORC JIT state for the LLVM backend (JIT mode only).
 ///
 /// The LLVM context is owned separately (via `tscx`) and persists across JIT resets.
-/// Only the LLJIT engine and its associated resources are recreated on reset.
+/// Each compiler gets its own JITDylib in the global LLJIT for symbol isolation.
 ///
-/// Drop order: `staged_functions` → `loaded_trackers` → `jit` (field declaration order).
+/// Drop order: `staged_functions` → `loaded_trackers` → `jd` (field declaration order).
 /// The context (`tscx`) outlives all of these since it lives on `EvmLlvmBackend`.
 struct OrcJitState {
     /// Functions in the current staging module (not yet committed to JIT).
     staged_functions: FxHashMap<u32, FunctionValue<'static>>,
-    /// Symbol names that have been registered via `absolute_symbols` in the ORC JIT.
+    /// Symbol names that have been registered via `absolute_symbols` in this compiler's JITDylib.
     registered_symbols: FxHashSet<String>,
     /// Absolute symbols collected during translation, flushed in bulk before commit.
     pending_symbols: Vec<(CString, usize)>,
@@ -114,8 +142,8 @@ struct OrcJitState {
     loaded_trackers: Vec<orc::ResourceTracker>,
     /// Maps committed function ID → index into `loaded_trackers`.
     committed_functions: FxHashMap<u32, usize>,
-    /// OrcV2 JIT engine.
-    jit: orc::LLJIT,
+    /// Per-compiler JITDylib in the global LLJIT. Provides symbol namespace isolation.
+    jd: orc::JITDylibRef,
 }
 
 impl fmt::Debug for OrcJitState {
@@ -131,31 +159,45 @@ impl fmt::Debug for OrcJitState {
 
 impl OrcJitState {
     fn new() -> Result<Self> {
+        let g = GlobalOrcJit::get()?;
+        let id = g.next_dylib_id.fetch_add(1, Ordering::Relaxed);
+        let name = CString::new(format!("revmc.compiler.{id}")).unwrap();
+        let jd = g.jit.get_execution_session().create_bare_jit_dylib(&name);
+        // Attach a process symbol generator so the JITDylib can resolve libc and other
+        // process-level symbols (e.g. printf, memcpy) that JIT-compiled code may reference.
+        let prefix = g.jit.get_global_prefix();
+        if let Ok(generator) = orc::DefinitionGenerator::for_current_process(prefix) {
+            jd.add_generator(generator);
+        }
         Ok(Self {
             staged_functions: FxHashMap::default(),
             registered_symbols: FxHashSet::default(),
             pending_symbols: Vec::new(),
             loaded_trackers: Vec::new(),
             committed_functions: FxHashMap::default(),
-            jit: Self::new_jit()?,
+            jd,
         })
     }
 
-    /// Resets the JIT state by dropping the old engine and creating a fresh one.
+    /// Clears all code and symbols from this compiler's JITDylib.
     fn clear(&mut self) -> Result<()> {
         self.staged_functions.clear();
         self.registered_symbols.clear();
         self.pending_symbols.clear();
         self.loaded_trackers.clear();
         self.committed_functions.clear();
-        self.jit = Self::new_jit()?;
+        self.jd.clear().map_err(error_msg)?;
         Ok(())
     }
+}
 
-    fn new_jit() -> Result<orc::LLJIT> {
-        let jit = orc::LLJIT::builder().build().map_err(error_msg)?;
-        jit.get_execution_session().set_default_error_reporter();
-        Ok(jit)
+impl Drop for OrcJitState {
+    fn drop(&mut self) {
+        if let Ok(g) = GlobalOrcJit::get()
+            && let Err(e) = g.jit.get_execution_session().remove_jit_dylib(&self.jd)
+        {
+            error!("failed to remove JITDylib on drop: {e}");
+        }
     }
 }
 
@@ -406,15 +448,16 @@ impl EvmLlvmBackend {
 
         let tscx = self._tscx.as_ref().expect("missing ThreadSafeContext");
         let orc = self.orc.as_mut().expect("missing ORC JIT state");
+        let g = GlobalOrcJit::get()?;
 
-        // Flush pending absolute symbols in a single batch.
+        // Flush pending absolute symbols in a single batch into this compiler's JITDylib.
         let pending = std::mem::take(&mut orc.pending_symbols);
         if !pending.is_empty() {
             let syms: Vec<_> = pending
                 .iter()
                 .map(|(name, addr)| {
                     orc::SymbolMapPair::new(
-                        orc.jit.mangle_and_intern(name),
+                        g.jit.mangle_and_intern(name),
                         orc::EvaluatedSymbol::new(
                             *addr as u64,
                             orc::SymbolFlags::none().with_exported().callable(),
@@ -422,17 +465,15 @@ impl EvmLlvmBackend {
                     )
                 })
                 .collect();
-            orc.jit
-                .get_main_jit_dylib()
+            orc.jd
                 .define(orc::MaterializationUnit::absolute_symbols(syms))
                 .map_err(|(e, _)| error_msg(e))?;
         }
 
-        let jd = orc.jit.get_main_jit_dylib();
-        let tracker = jd.create_resource_tracker();
+        let tracker = orc.jd.create_resource_tracker();
 
         let tsm = create_thread_safe_module(tscx, old_module);
-        orc.jit.add_module_with_rt(tsm, &tracker).map_err(error_msg)?;
+        g.jit.add_module_with_rt(tsm, &tracker).map_err(error_msg)?;
 
         let tracker_idx = orc.loaded_trackers.len();
         for &id in orc.staged_functions.keys() {
@@ -443,8 +484,8 @@ impl EvmLlvmBackend {
         Ok(())
     }
 
-    /// Drops and recreates the LLJIT, freeing all JIT-compiled code.
-    /// The LLVM context is reused across resets.
+    /// Clears all code from this compiler's JITDylib, freeing JIT-compiled code.
+    /// The LLVM context and global LLJIT are reused across resets.
     fn reset_jit(&mut self) -> Result<()> {
         self.function_names.clear();
         self.di_state = None;
@@ -661,7 +702,8 @@ impl Backend for EvmLlvmBackend {
         self.commit_staged_module()?;
         let name_str = self.id_to_name(id);
         let name = CString::new(name_str).unwrap();
-        let addr = self.orc().jit.lookup(&name).map_err(error_msg)?;
+        let g = GlobalOrcJit::get()?;
+        let addr = g.jit.lookup_in(&self.orc().jd, &name).map_err(error_msg)?;
         Ok(addr)
     }
 

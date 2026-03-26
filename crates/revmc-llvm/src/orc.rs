@@ -450,6 +450,12 @@ pub struct MaterializationUnit {
     mu: LLVMOrcMaterializationUnitRef,
 }
 
+impl fmt::Debug for MaterializationUnit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MaterializationUnit").finish_non_exhaustive()
+    }
+}
+
 impl MaterializationUnit {
     /// Create a custom MaterializationUnit.
     pub fn new_custom(
@@ -889,6 +895,17 @@ impl ExecutionSessionRef<'_> {
         Ok(unsafe { JITDylibRef::from_inner_unchecked(res.assume_init()) })
     }
 
+    /// Remove a JITDylib from the ExecutionSession, freeing all its resources once the last handle
+    /// is dropped.
+    pub fn remove_jit_dylib(&self, jd: &JITDylibRef) -> Result<(), LLVMString> {
+        cvt(unsafe {
+            crate::cpp::revmc_llvm_execution_session_remove_jit_dylib(
+                self.as_inner(),
+                jd.as_inner(),
+            )
+        })
+    }
+
     /// Sets the default error reporter to the ExecutionSession.
     ///
     /// Uses [`tracing::error!`] to log the error message.
@@ -899,9 +916,9 @@ impl ExecutionSessionRef<'_> {
     /// Attach a custom error reporter function to the ExecutionSession.
     pub fn set_error_reporter(&self, f: fn(&CStr)) {
         extern "C" fn shim(ctx: *mut c_void, err: LLVMErrorRef) {
-            let f = ctx as *mut fn(&CStr);
+            let f: fn(&CStr) = unsafe { mem::transmute(ctx) };
             let Err(e) = cvt(err) else { return };
-            let res = std::panic::catch_unwind(AssertUnwindSafe(|| unsafe { (*f)(&e) }));
+            let res = std::panic::catch_unwind(AssertUnwindSafe(|| f(&e)));
             if let Err(e) = res {
                 error!(msg=?panic_payload(&e), "error reporter closure panicked");
             }
@@ -1381,6 +1398,24 @@ impl LLJIT {
         Ok(unsafe { res.assume_init() }.try_into().unwrap())
     }
 
+    /// Look up a symbol in a specific JITDylib.
+    ///
+    /// Unlike [`lookup`](Self::lookup), which only searches the main JITDylib,
+    /// this searches the given `jd`. The name is **unmangled** — the LLJIT
+    /// applies the data layout prefix (e.g. `_` on macOS) internally.
+    pub fn lookup_in(&self, jd: &JITDylibRef, name: &CStr) -> Result<usize, LLVMString> {
+        let mut res = MaybeUninit::uninit();
+        cvt(unsafe {
+            crate::cpp::revmc_llvm_lljit_lookup_in(
+                self.as_inner(),
+                jd.as_inner(),
+                res.as_mut_ptr(),
+                name.as_ptr(),
+            )
+        })?;
+        Ok(unsafe { res.assume_init() }.try_into().unwrap())
+    }
+
     /// Returns a non-owning reference to the LLJIT instance's IR transform layer.
     pub fn get_ir_transform_layer(&self) -> IRTransformLayerRef {
         unsafe { IRTransformLayerRef::from_inner(LLVMOrcLLJITGetIRTransformLayer(self.as_inner())) }
@@ -1397,6 +1432,11 @@ impl LLJIT {
     }
     */
 }
+
+// SAFETY: ORC/LLJIT is designed for concurrent use from multiple threads.
+// All session operations are internally synchronized.
+unsafe impl Send for LLJIT {}
+unsafe impl Sync for LLJIT {}
 
 impl Drop for LLJIT {
     fn drop(&mut self) {
@@ -1654,6 +1694,78 @@ mod tests {
         eprintln!("dropping tscx...");
         drop(tscx);
         eprintln!("all dropped, test done");
+    }
+
+    #[test]
+    fn lookup_in_custom_jd() {
+        use std::mem::ManuallyDrop;
+
+        Target::initialize_native(&Default::default()).unwrap();
+        let triple = TargetMachine::get_default_triple();
+        let cpu = TargetMachine::get_host_cpu_name();
+        let features = TargetMachine::get_host_cpu_features();
+        let target = Target::from_triple(&triple).unwrap();
+
+        let cx = Context::create();
+        let raw = cx.raw();
+        let tscx = ThreadSafeContext::from_context(cx);
+        let cx_handle = Box::new(ManuallyDrop::new(unsafe { Context::new(raw) }));
+        let cx: &Context = unsafe { &*(&**cx_handle as *const Context) };
+
+        let machine = target
+            .create_target_machine(
+                &triple,
+                &cpu.to_string_lossy(),
+                &features.to_string_lossy(),
+                inkwell::OptimizationLevel::None,
+                inkwell::targets::RelocMode::Static,
+                inkwell::targets::CodeModel::JITDefault,
+            )
+            .unwrap();
+
+        let jit = LLJITBuilder::new().build().unwrap();
+
+        // Create two custom JITDylibs with functions returning different values.
+        let jd_a = jit.get_execution_session().create_bare_jit_dylib(c"test_a");
+        let jd_b = jit.get_execution_session().create_bare_jit_dylib(c"test_b");
+
+        for (jd, value) in [(&jd_a, 111u64), (&jd_b, 222u64)] {
+            let m = cx.create_module("test");
+            m.set_data_layout(&machine.get_target_data().get_data_layout());
+            m.set_triple(&triple);
+
+            let fn_name = "test_fn";
+            let bcx = cx.create_builder();
+            let ty = cx.i64_type().fn_type(&[], false);
+            let f = m.add_function(fn_name, ty, Some(inkwell::module::Linkage::External));
+            let bb = cx.append_basic_block(f, "entry");
+            bcx.position_at_end(bb);
+            bcx.build_return(Some(&cx.i64_type().const_int(value, false))).unwrap();
+            m.verify().unwrap();
+
+            let module = ManuallyDrop::new(m);
+            let tsm = unsafe {
+                ThreadSafeModule::create_in_context(Module::new(module.as_mut_ptr()), &tscx)
+            };
+            jit.add_module_with_dylib(tsm, unsafe {
+                JITDylibRef::from_inner_unchecked(jd.as_inner())
+            })
+            .unwrap();
+        }
+
+        // Lookup in each JD should return the correct function.
+        let addr_a = jit.lookup_in(&jd_a, c"test_fn").unwrap();
+        let addr_b = jit.lookup_in(&jd_b, c"test_fn").unwrap();
+        assert_ne!(addr_a, addr_b);
+
+        let f_a = unsafe { std::mem::transmute::<usize, extern "C" fn() -> u64>(addr_a) };
+        let f_b = unsafe { std::mem::transmute::<usize, extern "C" fn() -> u64>(addr_b) };
+        assert_eq!(f_a(), 111);
+        assert_eq!(f_b(), 222);
+
+        // Clearing one JD should not affect the other.
+        jd_a.clear().unwrap();
+        assert_eq!(f_b(), 222);
     }
 
     #[test]

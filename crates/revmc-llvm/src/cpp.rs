@@ -3,8 +3,16 @@
 use inkwell::{
     attributes::Attribute,
     context::Context,
-    llvm_sys::prelude::{LLVMAttributeRef, LLVMContextRef},
+    llvm_sys::{
+        error::LLVMErrorRef,
+        orc2::{
+            LLVMOrcExecutionSessionRef, LLVMOrcExecutorAddress, LLVMOrcJITDylibRef,
+            lljit::LLVMOrcLLJITRef,
+        },
+        prelude::{LLVMAttributeRef, LLVMContextRef},
+    },
 };
+use std::ffi::c_char;
 
 #[link(name = "revmc_llvm_cpp", kind = "static")]
 unsafe extern "C" {
@@ -13,6 +21,18 @@ unsafe extern "C" {
         lower: i64,
         upper: i64,
     ) -> LLVMAttributeRef;
+
+    pub(crate) fn revmc_llvm_execution_session_remove_jit_dylib(
+        es: LLVMOrcExecutionSessionRef,
+        jd: LLVMOrcJITDylibRef,
+    ) -> LLVMErrorRef;
+
+    pub(crate) fn revmc_llvm_lljit_lookup_in(
+        jit: LLVMOrcLLJITRef,
+        jd: LLVMOrcJITDylibRef,
+        result: *mut LLVMOrcExecutorAddress,
+        name: *const c_char,
+    ) -> LLVMErrorRef;
 }
 
 pub(crate) fn create_initializes_attr(cx: &Context, lower: i64, upper: i64) -> Attribute {
