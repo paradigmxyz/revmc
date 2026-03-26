@@ -1597,17 +1597,6 @@ mod tests {
             )
             .unwrap();
 
-        let jit_tm = target
-            .create_target_machine(
-                &triple,
-                &cpu.to_string_lossy(),
-                &features.to_string_lossy(),
-                inkwell::OptimizationLevel::None,
-                inkwell::targets::RelocMode::Static,
-                inkwell::targets::CodeModel::JITDefault,
-            )
-            .unwrap();
-
         let jit = LLJITBuilder::new().build().unwrap();
 
         // Build module.
@@ -1656,7 +1645,7 @@ mod tests {
         eprintln!("address: {address:#x}");
         // Check the first few bytes at the address to see if it's valid code.
         let code = unsafe { std::slice::from_raw_parts(address as *const u8, 16) };
-        eprintln!("code bytes: {:02x?}", code);
+        eprintln!("code bytes: {code:02x?}");
         let f = unsafe { std::mem::transmute::<usize, extern "C" fn() -> u64>(address) };
         eprintln!("about to call...");
         let r = f();
