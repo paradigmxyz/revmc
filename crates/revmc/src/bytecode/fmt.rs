@@ -1,7 +1,7 @@
 use super::{Bytecode, InstData, InstFlags, bitvec_as_bytes};
 use revm_bytecode::opcode as op;
 use revm_primitives::hex;
-use rustc_hash::FxHashMap;
+use alloy_primitives::map::HashMap;
 use std::{borrow::Cow, fmt, fmt::Write};
 
 /// Basic block info collected from bytecode analysis.
@@ -9,13 +9,13 @@ struct BlockInfo {
     /// `(block_idx, first_inst, last_inst)` for each block.
     blocks: Vec<(usize, usize, usize)>,
     /// Maps instruction index to block index.
-    inst_to_block: FxHashMap<usize, usize>,
+    inst_to_block: HashMap<usize, usize>,
 }
 
 impl Bytecode<'_> {
     fn collect_blocks(&self) -> BlockInfo {
         let mut blocks = Vec::new();
-        let mut inst_to_block = FxHashMap::default();
+        let mut inst_to_block = HashMap::default();
         let mut block_idx = 0usize;
         let mut need_header = true;
         for (inst, data) in self.iter_all_insts() {

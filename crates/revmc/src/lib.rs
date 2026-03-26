@@ -6,9 +6,6 @@
 #[macro_use]
 extern crate tracing;
 
-// For features.
-use alloy_primitives as _;
-
 mod bytecode;
 pub use bytecode::*;
 
