@@ -27,7 +27,7 @@ unsafe extern "C" {
         other: LLVMOrcJITDylibRef,
     );
 
-    pub(crate) fn revmc_llvm_lljit_builder_set_support_concurrent_compilation(
+    pub(crate) fn revmc_llvm_lljit_builder_set_concurrent_compiler(
         builder: inkwell::llvm_sys::orc2::lljit::LLVMOrcLLJITBuilderRef,
     );
 

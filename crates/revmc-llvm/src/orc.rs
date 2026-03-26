@@ -1268,18 +1268,15 @@ impl LLJITBuilder {
     }
     */
 
-    /// Make the compilation pipeline safe for concurrent callers.
+    /// Use a thread-safe compiler without spawning background threads.
     ///
-    /// Uses `ConcurrentIRCompiler` (fresh `TargetMachine` per compilation)
-    /// instead of the default `SimpleCompiler` (shared `TargetMachine`).
-    /// Compilation still runs inline on the calling thread; this only makes
-    /// the compile functor reentrant so multiple threads can compile through
-    /// the same LLJIT without data races.
-    pub fn support_concurrent_compilation(mut self) -> Self {
+    /// Installs `ConcurrentIRCompiler` (fresh `TargetMachine` per compilation)
+    /// so multiple caller threads can compile through the same LLJIT safely.
+    /// The default `InPlaceTaskDispatcher` is preserved, meaning compilation
+    /// runs inline on the thread that triggers it — no background threads.
+    pub fn concurrent_compiler(mut self) -> Self {
         unsafe {
-            crate::cpp::revmc_llvm_lljit_builder_set_support_concurrent_compilation(
-                self.as_inner_init(),
-            )
+            crate::cpp::revmc_llvm_lljit_builder_set_concurrent_compiler(self.as_inner_init())
         };
         self
     }

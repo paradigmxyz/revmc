@@ -1,6 +1,7 @@
 #include <llvm-c/Core.h>
 #include <llvm-c/LLJIT.h>
 #include <llvm-c/Orc.h>
+#include <llvm/ExecutionEngine/Orc/CompileUtils.h>
 #include <llvm/ExecutionEngine/Orc/LLJIT.h>
 #include <llvm/IR/Attributes.h>
 #include <llvm/IR/ConstantRangeList.h>
@@ -34,14 +35,20 @@ revmc_llvm_jit_dylib_add_to_link_order(LLVMOrcJITDylibRef JD,
   Dylib->addToLinkOrder(*OtherDylib);
 }
 
-/// Enable concurrent compilation on an LLJIT builder so that multiple threads
-/// can compile modules through the same LLJIT instance safely.
-/// When enabled, LLJIT uses ConcurrentIRCompiler (a fresh TargetMachine per
-/// compilation) instead of SimpleCompiler (single shared TargetMachine).
-extern "C" void revmc_llvm_lljit_builder_set_support_concurrent_compilation(
-    LLVMOrcLLJITBuilderRef Builder) {
+/// Use ConcurrentIRCompiler (thread-safe, fresh TargetMachine per compilation)
+/// while keeping the default InPlaceTaskDispatcher (no background threads).
+///
+/// setSupportConcurrentCompilation(true) would also switch the dispatcher to
+/// DynamicThreadPoolTaskDispatcher, spawning background threads. We only want
+/// the thread-safe compiler, not the thread pool.
+extern "C" void
+revmc_llvm_lljit_builder_set_concurrent_compiler(LLVMOrcLLJITBuilderRef Builder) {
   auto *B = reinterpret_cast<orc::LLJITBuilder *>(Builder);
-  B->setSupportConcurrentCompilation(true);
+  B->setCompileFunctionCreator(
+      [](orc::JITTargetMachineBuilder JTMB)
+          -> Expected<std::unique_ptr<orc::IRCompileLayer::IRCompiler>> {
+        return std::make_unique<orc::ConcurrentIRCompiler>(std::move(JTMB));
+      });
 }
 
 /// Synchronous symbol lookup in a specific JITDylib.
