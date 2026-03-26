@@ -160,8 +160,6 @@ pub unsafe extern "C" fn __revmc_builtin_balance(
 ) -> InstructionResult {
     let addr = address.to_address();
     if ecx.spec_id.is_enabled_in(SpecId::BERLIN) {
-        // Warm base cost; cold additional charged by the macro if cold.
-        gas!(ecx, ecx.host.gas_params().warm_storage_read_cost());
         let account = berlin_load_account!(ecx, addr, false);
         *address = account.balance.into();
     } else {
@@ -255,7 +253,6 @@ pub unsafe extern "C" fn __revmc_builtin_extcodesize(
 ) -> InstructionResult {
     let addr = address.to_address();
     if ecx.spec_id.is_enabled_in(SpecId::BERLIN) {
-        gas!(ecx, ecx.host.gas_params().warm_storage_read_cost());
         let account = berlin_load_account!(ecx, addr, true);
         *address = U256::from(account.code.as_ref().unwrap().len()).into();
     } else {
@@ -281,7 +278,6 @@ pub unsafe extern "C" fn __revmc_builtin_extcodecopy(
     }
 
     let code = if ecx.spec_id.is_enabled_in(SpecId::BERLIN) {
-        gas!(ecx, ecx.host.gas_params().warm_storage_read_cost());
         let account = berlin_load_account!(ecx, addr, true);
         account.code.as_ref().unwrap().original_bytes()
     } else {
@@ -324,7 +320,6 @@ pub unsafe extern "C" fn __revmc_builtin_extcodehash(
 ) -> InstructionResult {
     let addr = address.to_address();
     let account = if ecx.spec_id.is_enabled_in(SpecId::BERLIN) {
-        gas!(ecx, ecx.host.gas_params().warm_storage_read_cost());
         berlin_load_account!(ecx, addr, false)
     } else {
         try_host!(ecx.host.load_account_info_skip_cold_load(addr, false, false).ok())
@@ -445,7 +440,6 @@ pub unsafe extern "C" fn __revmc_builtin_sload(
     let address = ecx.input.target_address;
     let key = index.to_u256();
     if ecx.spec_id.is_enabled_in(SpecId::BERLIN) {
-        gas!(ecx, ecx.host.gas_params().warm_storage_read_cost());
         let additional_cold_cost = ecx.host.gas_params().cold_storage_additional_cost();
         let skip_cold = ecx.gas.remaining() < additional_cold_cost;
         match ecx.host.sload_skip_cold_load(address, key, skip_cold) {
@@ -459,8 +453,8 @@ pub unsafe extern "C" fn __revmc_builtin_sload(
             Err(LoadError::DBError) => return InstructionResult::FatalExternalError,
         }
     } else {
+        // Pre-Berlin SLOAD cost is purely static; already deducted by JIT.
         let storage = try_host!(ecx.host.sload(address, key));
-        gas!(ecx, gas::sload_cost(ecx.spec_id, storage.is_cold));
         *index = storage.data.into();
     }
 
@@ -685,11 +679,6 @@ pub unsafe extern "C" fn __revmc_builtin_call(
         usize::MAX // unrealistic value so we are sure it is not used
     };
 
-    // Charge the CALL base access cost up-front. In the interpreter this is charged as static
-    // opcode gas before entering call helpers; revmc marks CALL as dynamic, so the builtin must
-    // do it.
-    gas!(ecx, ecx.host.gas_params().warm_storage_read_cost());
-
     if transfers_value {
         gas!(ecx, ecx.host.gas_params().transfer_value_cost());
     }
@@ -784,7 +773,7 @@ pub unsafe extern "C" fn __revmc_builtin_selfdestruct(
     ensure_non_staticcall!(ecx);
 
     // EIP-150: SELFDESTRUCT static gas is 5000 in Tangerine+.
-    // revm charges this via the instruction table; revmc marks SELFDESTRUCT as DYNAMIC.
+    // Cannot use DYNAMIC_WITH_BASE_GAS because 5000 exceeds OpcodeInfo::MASK (4095).
     if ecx.spec_id.is_enabled_in(SpecId::TANGERINE) {
         gas!(ecx, 5000);
     }
