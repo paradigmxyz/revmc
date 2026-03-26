@@ -108,6 +108,8 @@ struct OrcJitState {
     staged_functions: FxHashMap<u32, FunctionValue<'static>>,
     /// Symbol names that have been registered via `absolute_symbols` in the ORC JIT.
     registered_symbols: FxHashSet<String>,
+    /// Absolute symbols collected during translation, flushed in bulk before commit.
+    pending_symbols: Vec<(CString, usize)>,
     /// Resource trackers for committed JIT modules, used for code removal.
     loaded_trackers: Vec<orc::ResourceTracker>,
     /// Maps committed function ID → index into `loaded_trackers`.
@@ -132,6 +134,7 @@ impl OrcJitState {
         Ok(Self {
             staged_functions: FxHashMap::default(),
             registered_symbols: FxHashSet::default(),
+            pending_symbols: Vec::new(),
             loaded_trackers: Vec::new(),
             committed_functions: FxHashMap::default(),
             jit: Self::new_jit()?,
@@ -142,6 +145,7 @@ impl OrcJitState {
     fn clear(&mut self) -> Result<()> {
         self.staged_functions.clear();
         self.registered_symbols.clear();
+        self.pending_symbols.clear();
         self.loaded_trackers.clear();
         self.committed_functions.clear();
         self.jit = Self::new_jit()?;
@@ -406,6 +410,28 @@ impl EvmLlvmBackend {
 
         let tscx = self._tscx.as_ref().expect("missing ThreadSafeContext");
         let orc = self.orc.as_mut().expect("missing ORC JIT state");
+
+        // Flush pending absolute symbols in a single batch.
+        let pending = std::mem::take(&mut orc.pending_symbols);
+        if !pending.is_empty() {
+            let syms: Vec<_> = pending
+                .iter()
+                .map(|(name, addr)| {
+                    orc::SymbolMapPair::new(
+                        orc.jit.mangle_and_intern(name),
+                        orc::EvaluatedSymbol::new(
+                            *addr as u64,
+                            orc::SymbolFlags::none().with_exported().callable(),
+                        ),
+                    )
+                })
+                .collect();
+            orc.jit
+                .get_main_jit_dylib()
+                .define(orc::MaterializationUnit::absolute_symbols(syms))
+                .map_err(|(e, _)| error_msg(e))?;
+        }
+
         let jd = orc.jit.get_main_jit_dylib();
         let tracker = jd.create_resource_tracker();
 
@@ -1497,21 +1523,7 @@ impl Builder for EvmLlvmBuilder<'_> {
             && let Some(orc) = &mut self.orc
             && !orc.registered_symbols.contains(name)
         {
-            let name_cstr = CString::new(name).unwrap();
-            let sym = orc::SymbolMapPair::new(
-                orc.jit.mangle_and_intern(&name_cstr),
-                orc::EvaluatedSymbol::new(
-                    address as u64,
-                    orc::SymbolFlags::none().with_exported().callable(),
-                ),
-            );
-            if let Err((e, _)) = orc
-                .jit
-                .get_main_jit_dylib()
-                .define(orc::MaterializationUnit::absolute_symbols(vec![sym]))
-            {
-                warn!("failed to define absolute symbol {name:?}: {e}");
-            }
+            orc.pending_symbols.push((CString::new(name).unwrap(), address));
             orc.registered_symbols.insert(name.to_string());
         }
         function
