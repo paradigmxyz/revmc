@@ -276,6 +276,7 @@ impl<B: Backend> EvmCompiler<B> {
         self.finalize()?;
         let addr = self.backend.jit_function(id)?;
         debug_assert!(addr != 0);
+        self.write_perf_map(id, addr);
         if let Some(dump_dir) = &self.dump_dir() {
             self.append_jit_remarks(dump_dir);
         }
@@ -578,6 +579,23 @@ total:      {total:>11.3?}
         w.flush()?;
         Ok(())
     }
+
+    /// Writes a JIT symbol entry to `/tmp/perf-<pid>.map` so profilers (perf, samply)
+    /// can resolve JIT-compiled function addresses to names.
+    #[cfg(target_os = "linux")]
+    fn write_perf_map(&self, id: B::FuncId, addr: usize) {
+        let Some(name) = self.backend.function_name(id) else { return };
+        let sizes = self.backend.function_sizes();
+        let size = sizes.iter().find(|(n, _)| n == name).map_or(0, |(_, s)| *s);
+        let path = PathBuf::from(format!("/tmp/perf-{}.map", std::process::id()));
+        let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(&path) else {
+            return;
+        };
+        let _ = writeln!(file, "{addr:x} {size:x} {name}");
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn write_perf_map(&self, _id: B::FuncId, _addr: usize) {}
 
     fn append_jit_remarks(&self, dump_dir: &Path) {
         let sizes = self.backend.function_sizes();

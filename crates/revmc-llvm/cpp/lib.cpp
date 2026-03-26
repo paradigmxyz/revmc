@@ -80,13 +80,13 @@ revmc_llvm_lljit_enable_perf_support(LLVMOrcLLJITRef J) {
                                         inconvertibleErrorCode()));
   auto &ES = Jit->getExecutionSession();
   auto &EPC = ES.getExecutorProcessControl();
+  // PerfSupportPlugin::Create looks up perf runtime symbols in the given
+  // JITDylib. Use the process symbols JITDylib if available, otherwise use
+  // the main JITDylib (which has a process symbol generator attached).
   auto ProcessJD = Jit->getProcessSymbolsJITDylib();
-  if (!ProcessJD)
-    return wrap(make_error<StringError>(
-        "PerfSupportPlugin requires process symbols JITDylib",
-        inconvertibleErrorCode()));
-  auto Plugin = orc::PerfSupportPlugin::Create(
-      EPC, *ProcessJD, /*EmitDebugInfo=*/true, /*EmitUnwindInfo=*/true);
+  auto &JD = ProcessJD ? *ProcessJD : Jit->getMainJITDylib();
+  auto Plugin = orc::PerfSupportPlugin::Create(EPC, JD, /*EmitDebugInfo=*/true,
+                                               /*EmitUnwindInfo=*/true);
   if (!Plugin)
     return wrap(Plugin.takeError());
   OLL->addPlugin(std::move(*Plugin));
