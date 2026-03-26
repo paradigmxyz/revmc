@@ -24,6 +24,16 @@ extern "C" LLVMErrorRef revmc_llvm_execution_session_remove_jit_dylib(
     return wrap(Session->removeJITDylib(*Dylib));
 }
 
+/// Enable concurrent compilation on an LLJIT builder so that multiple threads
+/// can compile modules through the same LLJIT instance safely.
+/// When enabled, LLJIT uses ConcurrentIRCompiler (a fresh TargetMachine per
+/// compilation) instead of SimpleCompiler (single shared TargetMachine).
+extern "C" void revmc_llvm_lljit_builder_set_support_concurrent_compilation(
+    LLVMOrcLLJITBuilderRef Builder) {
+    auto *B = reinterpret_cast<orc::LLJITBuilder *>(Builder);
+    B->setSupportConcurrentCompilation(true);
+}
+
 /// Synchronous symbol lookup in a specific JITDylib.
 /// `Name` is unmangled — LLJIT applies the data layout prefix internally.
 extern "C" LLVMErrorRef revmc_llvm_lljit_lookup_in(LLVMOrcLLJITRef J,

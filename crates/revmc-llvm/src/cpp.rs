@@ -22,6 +22,10 @@ unsafe extern "C" {
         upper: i64,
     ) -> LLVMAttributeRef;
 
+    pub(crate) fn revmc_llvm_lljit_builder_set_support_concurrent_compilation(
+        builder: inkwell::llvm_sys::orc2::lljit::LLVMOrcLLJITBuilderRef,
+    );
+
     pub(crate) fn revmc_llvm_execution_session_remove_jit_dylib(
         es: LLVMOrcExecutionSessionRef,
         jd: LLVMOrcJITDylibRef,

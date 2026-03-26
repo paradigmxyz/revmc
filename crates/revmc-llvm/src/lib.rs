@@ -115,7 +115,10 @@ impl GlobalOrcJit {
         static GLOBAL: OnceLock<std::result::Result<GlobalOrcJit, String>> = OnceLock::new();
         let result = GLOBAL.get_or_init(|| {
             init().map_err(|e| e.to_string())?;
-            let jit = orc::LLJIT::new().map_err(|e| e.to_string())?;
+            let jit = orc::LLJIT::builder()
+                .support_concurrent_compilation()
+                .build()
+                .map_err(|e| e.to_string())?;
             jit.get_execution_session().set_default_error_reporter();
             Ok(Self { jit, next_dylib_id: Default::default(), pool: Default::default() })
         });
