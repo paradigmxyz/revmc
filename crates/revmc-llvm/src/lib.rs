@@ -126,13 +126,11 @@ impl fmt::Debug for OrcJitState {
 
 impl OrcJitState {
     fn new() -> Result<Self> {
-        let jit = orc::LLJIT::builder().build().map_err(error_msg)?;
-        jit.get_execution_session().set_default_error_reporter();
         Ok(Self {
             staged_functions: FxHashMap::default(),
             registered_symbols: FxHashSet::default(),
             loaded_trackers: Vec::new(),
-            jit,
+            jit: Self::new_jit()?,
         })
     }
 
@@ -141,10 +139,14 @@ impl OrcJitState {
         self.staged_functions.clear();
         self.registered_symbols.clear();
         self.loaded_trackers.clear();
+        self.jit = Self::new_jit()?;
+        Ok(())
+    }
+
+    fn new_jit() -> Result<orc::LLJIT> {
         let jit = orc::LLJIT::builder().build().map_err(error_msg)?;
         jit.get_execution_session().set_default_error_reporter();
-        self.jit = jit;
-        Ok(())
+        Ok(jit)
     }
 }
 
