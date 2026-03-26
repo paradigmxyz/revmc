@@ -6,7 +6,6 @@
 - Check docs: `cargo +nightly docs`
 - Test all: `cargo nextest run --workspace`
 - Test single: `cargo nextest run -p revmc 'test_name'`
-- State tests: `cargo nextest run -p revmc --profile ethtests 'statetest::'`
 
 ## Architecture
 - `revmc` — main crate: EVM compiler, bytecode analysis, linker, and test infrastructure.

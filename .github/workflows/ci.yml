@@ -92,7 +92,7 @@ jobs:
       - uses: taiki-e/install-action@nextest
       - name: Run state tests
         run: |
-          cargo nextest run -p revmc --features llvm --cargo-profile ethtests \
+          cargo nextest run -p revmc --features llvm \
             --no-capture --no-fail-fast \
             -E 'test(statetest::${{ matrix.mode }})'
 
