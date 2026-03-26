@@ -125,12 +125,14 @@ impl fmt::Debug for OrcJitState {
 }
 
 impl OrcJitState {
-    fn new(target_info: &Cow<'_, TargetInfo>, opt_level: OptimizationLevel) -> Result<Self> {
+    fn new() -> Result<Self> {
+        let jit = orc::LLJIT::builder().build().map_err(error_msg)?;
+        jit.get_execution_session().set_default_error_reporter();
         Ok(Self {
             staged_functions: FxHashMap::default(),
             registered_symbols: FxHashSet::default(),
             loaded_trackers: Vec::new(),
-            jit: create_lljit(target_info, opt_level)?,
+            jit,
         })
     }
 }
@@ -230,7 +232,7 @@ impl EvmLlvmBackend {
             }
 
             let (cx, tscx, cx_handle) = create_orc_context();
-            let orc = OrcJitState::new(&target_info, opt_level)?;
+            let orc = OrcJitState::new()?;
             (cx, Some(tscx), Some(cx_handle), Some(orc))
         };
 
@@ -396,8 +398,7 @@ impl EvmLlvmBackend {
             // Drop the old ORC JIT state, then create a fresh one.
             // The context (`_tscx`) is kept alive — only the JIT engine is recreated.
             self.orc = None;
-            let target_info = TargetInfo::new(&revmc_backend::Target::Native)?;
-            self.orc = Some(OrcJitState::new(&target_info, self.opt_level)?);
+            self.orc = Some(OrcJitState::new()?);
         }
 
         self.module = Some(create_module(self.cx, &self.machine, self.aot)?);
@@ -1586,17 +1587,6 @@ fn commit_module_to_jit(backend: *mut EvmLlvmBackend) -> Result<()> {
     }
 
     Ok(())
-}
-
-fn create_lljit(
-    _target_info: &Cow<'_, TargetInfo>,
-    _opt_level: OptimizationLevel,
-) -> Result<orc::LLJIT> {
-    let jit = orc::LLJIT::builder().build().map_err(error_msg)?;
-
-    jit.get_execution_session().set_default_error_reporter();
-
-    Ok(jit)
 }
 
 fn convert_intcc(cond: IntCC) -> IntPredicate {
