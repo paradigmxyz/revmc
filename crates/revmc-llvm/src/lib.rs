@@ -109,11 +109,14 @@ pub struct EvmLlvmBackend {
 /// JD so compiled code can resolve them without duplicating definitions.
 struct GlobalOrcJit {
     jit: orc::LLJIT,
+
     /// Shared JITDylib containing absolute symbols for builtin functions.
     /// Added to each per-compiler JITDylib's link order.
     builtins_jd: orc::JITDylibRef,
+
     /// Symbols already defined in the builtins JD.
-    builtins_defined: std::sync::Mutex<FxHashSet<String>>,
+    builtins_defined: std::sync::Mutex<FxHashSet<CString>>,
+
     next_dylib_id: AtomicU64,
     /// Pool of cleared JITDylibs ready for reuse.
     pool: std::sync::Mutex<Vec<orc::JITDylibRef>>,
@@ -171,23 +174,19 @@ impl GlobalOrcJit {
             error!("failed to clear JITDylib for pool: {e}");
             return;
         }
-        // Re-add the builtins link since `clear` removes all trackers but not generators.
-        // However, link order IS preserved across clears — `clear` only removes
-        // MaterializationUnits and ResourceTrackers, not the search order. So we
-        // only need to set it up on fresh JITDylibs.
         self.pool.lock().unwrap().push(jd);
     }
 
     /// Defines absolute symbols in the shared builtins JITDylib, skipping any
-    /// that are already defined. Thread-safe.
+    /// that are already defined.
     fn define_builtins(&self, symbols: &[(CString, usize)]) {
+        if symbols.is_empty() {
+            return;
+        }
         let mut defined = self.builtins_defined.lock().unwrap();
         let new_syms: Vec<_> = symbols
             .iter()
-            .filter(|(name, _)| {
-                let name_str = name.to_str().unwrap_or("");
-                defined.insert(name_str.to_string())
-            })
+            .filter(|(name, _)| defined.insert(name.clone()))
             .map(|(name, addr)| {
                 orc::SymbolMapPair::new(
                     self.jit.mangle_and_intern(name),
@@ -198,6 +197,7 @@ impl GlobalOrcJit {
                 )
             })
             .collect();
+        drop(defined);
         if !new_syms.is_empty() {
             if let Err((e, _)) =
                 self.builtins_jd.define(orc::MaterializationUnit::absolute_symbols(new_syms))
@@ -228,16 +228,16 @@ struct OrcJitState {
     /// Maps committed function ID → index into `loaded_trackers`.
     committed_functions: FxHashMap<u32, usize>,
     /// Per-compiler JITDylib in the global LLJIT. Provides symbol namespace isolation.
-    jd: orc::JITDylibRef,
+    jd: Option<orc::JITDylibRef>,
 }
 
 impl fmt::Debug for OrcJitState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("OrcJitState")
-            .field("jd", &self.jd.as_inner())
             .field("staged_functions", &self.staged_functions.len())
-            .field("committed_functions", &self.committed_functions.len())
+            .field("pending_symbols", &self.pending_symbols.len())
             .field("loaded_trackers", &self.loaded_trackers.len())
+            .field("committed_functions", &self.committed_functions.len())
             .finish_non_exhaustive()
     }
 }
@@ -251,7 +251,7 @@ impl OrcJitState {
             pending_symbols: Vec::new(),
             loaded_trackers: Vec::new(),
             committed_functions: FxHashMap::default(),
-            jd: global.acquire_jit_dylib(),
+            jd: Some(global.acquire_jit_dylib()),
         })
     }
 
@@ -261,15 +261,18 @@ impl OrcJitState {
         self.pending_symbols.clear();
         self.loaded_trackers.clear();
         self.committed_functions.clear();
-        self.jd.clear().map_err(error_msg)?;
+        self.jd().clear().map_err(error_msg)?;
         Ok(())
+    }
+
+    fn jd(&self) -> &orc::JITDylibRef {
+        self.jd.as_ref().unwrap()
     }
 }
 
 impl Drop for OrcJitState {
     fn drop(&mut self) {
-        let jd = std::mem::replace(&mut self.jd, orc::JITDylibRef::dangling());
-        self.global.release_jit_dylib(jd);
+        self.global.release_jit_dylib(self.jd.take().unwrap());
     }
 }
 
@@ -528,7 +531,7 @@ impl EvmLlvmBackend {
             pending.clear();
         }
 
-        let tracker = orc.jd.create_resource_tracker();
+        let tracker = orc.jd().create_resource_tracker();
 
         let tsm = create_thread_safe_module(tscx, old_module);
         orc.global.jit.add_module_with_rt(tsm, &tracker).map_err(error_msg)?;
@@ -761,7 +764,7 @@ impl Backend for EvmLlvmBackend {
         let name_str = self.id_to_name(id);
         let name = CString::new(name_str).unwrap();
         let orc = self.orc();
-        let addr = orc.global.jit.lookup_in(&orc.jd, &name).map_err(error_msg)?;
+        let addr = orc.global.jit.lookup_in(orc.jd(), &name).map_err(error_msg)?;
         Ok(addr)
     }
 

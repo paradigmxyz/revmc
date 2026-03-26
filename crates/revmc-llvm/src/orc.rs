@@ -1296,7 +1296,9 @@ impl LLJITBuilder {
 
 impl Drop for LLJITBuilder {
     fn drop(&mut self) {
-        unsafe { LLVMOrcDisposeLLJITBuilder(self.builder) };
+        if !self.builder.is_null() {
+            unsafe { LLVMOrcDisposeLLJITBuilder(self.builder) };
+        }
     }
 }
 
