@@ -24,7 +24,6 @@ workspace = true
 revmc-backend.workspace = true
 revmc-builtins = { workspace = true, features = ["ir"] }
 revmc-context.workspace = true
-revmc-cranelift = { workspace = true, optional = true }
 revmc-llvm = { workspace = true, optional = true }
 
 alloy-primitives = { workspace = true, features = ["std"] }
@@ -60,7 +59,6 @@ default = ["llvm"]
 llvm = ["dep:revmc-llvm"]
 llvm-prefer-static = ["llvm", "revmc-llvm?/prefer-static"]
 llvm-prefer-dynamic = ["llvm", "revmc-llvm?/prefer-dynamic"]
-cranelift = ["dep:revmc-cranelift"]
 
 asm-keccak = ["alloy-primitives/asm-keccak"]
 
