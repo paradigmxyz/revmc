@@ -166,6 +166,14 @@ impl GlobalOrcJit {
             jit.get_execution_session().set_default_error_reporter();
             jit.get_obj_transform_layer().set_transform(obj_capture_transform);
 
+            // Register JIT debug info with debuggers and profilers.
+            if let Err(e) = jit.enable_debug_support() {
+                warn!("failed to enable JIT debug support: {e}");
+            }
+            if let Err(e) = jit.enable_perf_support() {
+                warn!("failed to enable JIT perf support: {e}");
+            }
+
             let builtins_jd = jit.get_execution_session().create_bare_jit_dylib(c"revmc.builtins");
 
             Ok(Self {
@@ -812,6 +820,10 @@ impl Backend for EvmLlvmBackend {
             orc.last_compiled_object = captured;
         }
         Ok(addr)
+    }
+
+    fn function_name(&self, id: Self::FuncId) -> Option<&str> {
+        self.function_names.get(&id).map(|s| s.as_str())
     }
 
     fn function_sizes(&self) -> Vec<(String, usize)> {

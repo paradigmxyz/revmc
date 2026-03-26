@@ -151,7 +151,6 @@ impl RunArgs {
         compiler.set_dump_to(out_dir);
         compiler.gas_metering(!self.no_gas);
         unsafe { compiler.stack_bound_checks(!self.no_len_checks) };
-        compiler.frame_pointers(true);
         compiler.debug_assertions(self.debug_assertions);
 
         compiler.set_module_name(name);

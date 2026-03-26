@@ -1443,14 +1443,28 @@ impl LLJIT {
         }
     }
 
-    // Experimental interface for `libLLVMOrcDebugging.a`.
-    /*
-    /// Install the plugin that submits debug objects to the executor.
-    /// Executors must expose the llvm_orc_registerJITLoaderGDBWrapper symbol.
+    /// Install `PerfSupportPlugin` on the LLJIT's `ObjectLinkingLayer`.
+    ///
+    /// Writes perf jitdump records so `perf record -k 1` / `perf inject --jit`
+    /// can resolve JIT-compiled symbols with full debug info and unwind info.
+    /// Requires `ObjectLinkingLayer` (JITLink), which is the LLJIT default.
+    pub fn enable_perf_support(&self) -> Result<(), LLVMString> {
+        cvt(unsafe { crate::cpp::revmc_llvm_lljit_enable_perf_support(self.as_inner()) })
+    }
+
+    /// Install the plugin that submits debug objects to the executor via the
+    /// GDB JIT Interface (`__jit_debug_register_code`).
+    ///
+    /// On ELF this installs `ELFDebugObjectPlugin`; on MachO,
+    /// `GDBJITDebugInfoRegistrationPlugin`. Requires `ObjectLinkingLayer`
+    /// (JITLink), which is the LLJIT default.
+    ///
+    /// Once enabled, compiled objects containing DWARF debug info are
+    /// automatically registered so that GDB, LLDB, `perf`, and other profilers
+    /// can resolve JIT-compiled function names and source locations.
     pub fn enable_debug_support(&self) -> Result<(), LLVMString> {
         cvt(unsafe { LLVMOrcLLJITEnableDebugSupport(self.as_inner()) })
     }
-    */
 }
 
 impl Drop for LLJIT {
