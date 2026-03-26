@@ -1268,11 +1268,13 @@ impl LLJITBuilder {
     }
     */
 
-    /// Enable concurrent compilation so that multiple threads can compile
-    /// modules through the same LLJIT instance safely.
+    /// Make the compilation pipeline safe for concurrent callers.
     ///
     /// Uses `ConcurrentIRCompiler` (fresh `TargetMachine` per compilation)
     /// instead of the default `SimpleCompiler` (shared `TargetMachine`).
+    /// Compilation still runs inline on the calling thread; this only makes
+    /// the compile functor reentrant so multiple threads can compile through
+    /// the same LLJIT without data races.
     pub fn support_concurrent_compilation(mut self) -> Self {
         unsafe {
             crate::cpp::revmc_llvm_lljit_builder_set_support_concurrent_compilation(
