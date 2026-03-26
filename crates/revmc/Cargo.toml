@@ -34,7 +34,7 @@ revm-context.workspace = true
 revm-context-interface.workspace = true
 revm-database-interface.workspace = true
 revm-handler.workspace = true
-revm-inspector = { workspace = true, optional = true }
+revm-inspector.workspace = true
 revm-interpreter.workspace = true
 revm-primitives.workspace = true
 revm-state.workspace = true
@@ -78,7 +78,7 @@ llvm-prefer-static = ["llvm", "revmc-llvm?/prefer-static"]
 llvm-prefer-dynamic = ["llvm", "revmc-llvm?/prefer-dynamic"]
 cranelift = ["dep:revmc-cranelift"]
 
-alloy-evm = ["dep:alloy-evm", "dep:revm-inspector"]
+alloy-evm = ["dep:alloy-evm"]
 
 asm-keccak = ["alloy-primitives/asm-keccak"]
 

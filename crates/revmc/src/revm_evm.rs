@@ -8,6 +8,7 @@
 //! used standalone.
 
 use crate::runtime::{JitBackend, LookupDecision, LookupRequest};
+use alloy_primitives::{Address, Bytes};
 use core::marker::PhantomData;
 use revm_context_interface::{
     Cfg, ContextSetters, ContextTr, Database,
@@ -18,7 +19,12 @@ use revm_context_interface::{
 use revm_database_interface::DatabaseCommit;
 use revm_handler::{
     EthFrame, EvmTr, EvmTrError, ExecuteCommitEvm, ExecuteEvm, FrameInitOrResult, FrameResult,
-    FrameTr, Handler, ItemOrResult, PrecompileProvider, evm::ContextDbError,
+    FrameTr, Handler, ItemOrResult, MainnetHandler, PrecompileProvider, SystemCallCommitEvm,
+    SystemCallEvm, SystemCallTx, evm::ContextDbError,
+};
+use revm_inspector::{
+    InspectCommitEvm, InspectEvm, InspectSystemCallEvm, Inspector, InspectorEvmTr,
+    InspectorHandler, JournalExt,
 };
 use revm_interpreter::{InterpreterResult, interpreter_action::FrameInit};
 use revm_primitives::{B256Map, hardfork::SpecId};
@@ -206,26 +212,26 @@ where
 
     #[inline]
     fn transact_one(&mut self, tx: Self::Tx) -> Result<Self::ExecutionResult, Self::Error> {
-        self.inner.ctx_mut().set_tx(tx);
+        self.ctx_mut().set_tx(tx);
         self.invalidate_cache();
-        JitHandler::new(&self.backend, &mut self.lookup_cache).run(&mut self.inner)
+        MainnetHandler::default().run(self)
     }
 
     #[inline]
     fn finalize(&mut self) -> Self::State {
-        self.inner.ctx_mut().journal_mut().finalize()
+        self.ctx_mut().journal_mut().finalize()
     }
 
     #[inline]
     fn set_block(&mut self, block: Self::Block) {
-        self.inner.ctx_mut().set_block(block);
+        self.ctx_mut().set_block(block);
     }
 
     #[inline]
     fn replay(&mut self) -> Result<ResultAndState<HaltReason>, Self::Error> {
         self.invalidate_cache();
-        JitHandler::new(&self.backend, &mut self.lookup_cache).run(&mut self.inner).map(|result| {
-            let state = self.inner.ctx_mut().journal_mut().finalize();
+        MainnetHandler::default().run(self).map(|result| {
+            let state = self.ctx_mut().journal_mut().finalize();
             ResultAndState::new(result, state)
         })
     }
@@ -238,7 +244,155 @@ where
 {
     #[inline]
     fn commit(&mut self, state: Self::State) {
-        self.inner.ctx_mut().db_mut().commit(state);
+        self.ctx_mut().db_mut().commit(state);
+    }
+}
+
+impl<EVM> SystemCallEvm for JitEvm<EVM>
+where
+    EVM: EvmTr<
+            Frame = EthFrame,
+            Context: ContextTr<
+                Journal: JournalTr<State = EvmState>,
+                Local: LocalContextTr,
+                Tx: SystemCallTx,
+            > + ContextSetters,
+            Precompiles: PrecompileProvider<EVM::Context, Output = InterpreterResult>,
+        >,
+    <EVM::Context as ContextTr>::Cfg: Cfg<Spec: Into<SpecId>>,
+{
+    #[inline]
+    fn system_call_one_with_caller(
+        &mut self,
+        caller: Address,
+        system_contract_address: Address,
+        data: Bytes,
+    ) -> Result<Self::ExecutionResult, Self::Error> {
+        self.ctx_mut().set_tx(
+            <<EVM::Context as ContextTr>::Tx as SystemCallTx>::new_system_tx_with_caller(
+                caller,
+                system_contract_address,
+                data,
+            ),
+        );
+        MainnetHandler::default().run_system_call(self)
+    }
+}
+
+impl<EVM> SystemCallCommitEvm for JitEvm<EVM>
+where
+    Self: SystemCallEvm<State = EvmState> + ExecuteCommitEvm,
+    EVM: EvmTr<Context: ContextTr<Db: DatabaseCommit>>,
+{
+    #[inline]
+    fn system_call_with_caller_commit(
+        &mut self,
+        caller: Address,
+        system_contract_address: Address,
+        data: Bytes,
+    ) -> Result<Self::ExecutionResult, Self::Error> {
+        self.system_call_with_caller(caller, system_contract_address, data).map(|output| {
+            self.ctx_mut().db_mut().commit(output.state);
+            output.result
+        })
+    }
+}
+
+impl<EVM> InspectorEvmTr for JitEvm<EVM>
+where
+    EVM: EvmTr<
+            Frame = EthFrame,
+            Context: ContextTr<Journal: JournalTr + JournalExt, Local: LocalContextTr>,
+            Precompiles: PrecompileProvider<EVM::Context, Output = InterpreterResult>,
+        > + InspectorEvmTr<Inspector: Inspector<EVM::Context>>,
+    <EVM::Context as ContextTr>::Cfg: Cfg<Spec: Into<SpecId>>,
+{
+    type Inspector = <EVM as InspectorEvmTr>::Inspector;
+
+    #[inline]
+    fn all_inspector(
+        &self,
+    ) -> (
+        &Self::Context,
+        &Self::Instructions,
+        &Self::Precompiles,
+        &revm_context_interface::FrameStack<Self::Frame>,
+        &Self::Inspector,
+    ) {
+        self.inner.all_inspector()
+    }
+
+    #[inline]
+    fn all_mut_inspector(
+        &mut self,
+    ) -> (
+        &mut Self::Context,
+        &mut Self::Instructions,
+        &mut Self::Precompiles,
+        &mut revm_context_interface::FrameStack<Self::Frame>,
+        &mut Self::Inspector,
+    ) {
+        self.inner.all_mut_inspector()
+    }
+}
+
+impl<EVM> InspectEvm for JitEvm<EVM>
+where
+    EVM: EvmTr<
+            Frame = EthFrame,
+            Context: ContextTr<
+                Journal: JournalTr<State = EvmState> + JournalExt,
+                Local: LocalContextTr,
+            > + ContextSetters,
+            Precompiles: PrecompileProvider<EVM::Context, Output = InterpreterResult>,
+        > + InspectorEvmTr<Inspector: Inspector<EVM::Context>>,
+    <EVM::Context as ContextTr>::Cfg: Cfg<Spec: Into<SpecId>>,
+{
+    type Inspector = <EVM as InspectorEvmTr>::Inspector;
+
+    #[inline]
+    fn set_inspector(&mut self, inspector: Self::Inspector) {
+        *self.inner.inspector() = inspector;
+    }
+
+    #[inline]
+    fn inspect_one_tx(&mut self, tx: Self::Tx) -> Result<Self::ExecutionResult, Self::Error> {
+        self.inner.ctx_mut().set_tx(tx);
+        self.invalidate_cache();
+        MainnetHandler::default().inspect_run(self)
+    }
+}
+
+impl<EVM> InspectCommitEvm for JitEvm<EVM> where Self: InspectEvm + ExecuteCommitEvm {}
+
+impl<EVM> InspectSystemCallEvm for JitEvm<EVM>
+where
+    EVM: EvmTr<
+            Frame = EthFrame,
+            Context: ContextTr<
+                Journal: JournalTr<State = EvmState> + JournalExt,
+                Local: LocalContextTr,
+                Tx: SystemCallTx,
+            > + ContextSetters,
+            Precompiles: PrecompileProvider<EVM::Context, Output = InterpreterResult>,
+        > + InspectorEvmTr<Inspector: Inspector<EVM::Context>>,
+    <EVM::Context as ContextTr>::Cfg: Cfg<Spec: Into<SpecId>>,
+{
+    #[inline]
+    fn inspect_one_system_call_with_caller(
+        &mut self,
+        caller: Address,
+        system_contract_address: Address,
+        data: Bytes,
+    ) -> Result<Self::ExecutionResult, Self::Error> {
+        self.inner.ctx_mut().set_tx(
+            <<EVM::Context as ContextTr>::Tx as SystemCallTx>::new_system_tx_with_caller(
+                caller,
+                system_contract_address,
+                data,
+            ),
+        );
+        MainnetHandler::default().inspect_run_system_call(self)
     }
 }
 
