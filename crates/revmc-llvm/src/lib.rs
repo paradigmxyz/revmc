@@ -135,6 +135,17 @@ impl OrcJitState {
             jit,
         })
     }
+
+    /// Resets the JIT state by dropping the old engine and creating a fresh one.
+    fn clear(&mut self) -> Result<()> {
+        self.staged_functions.clear();
+        self.registered_symbols.clear();
+        self.loaded_trackers.clear();
+        let jit = orc::LLJIT::builder().build().map_err(error_msg)?;
+        jit.get_execution_session().set_default_error_reporter();
+        self.jit = jit;
+        Ok(())
+    }
 }
 
 /// Wraps a module in a [`orc::ThreadSafeModule`] for transfer to LLJIT.
@@ -394,11 +405,8 @@ impl EvmLlvmBackend {
         self.di_state = None;
         self.module = None;
 
-        if !self.aot {
-            // Drop the old ORC JIT state, then create a fresh one.
-            // The context (`_tscx`) is kept alive — only the JIT engine is recreated.
-            self.orc = None;
-            self.orc = Some(OrcJitState::new()?);
+        if let Some(orc) = &mut self.orc {
+            orc.clear()?;
         }
 
         self.module = Some(create_module(self.cx, &self.machine, self.aot)?);
