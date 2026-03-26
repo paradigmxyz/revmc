@@ -29,7 +29,7 @@ impl Default for FcxConfig {
         Self {
             debug_assertions: cfg!(debug_assertions),
             comments: false,
-            frame_pointers: cfg!(debug_assertions),
+            frame_pointers: true,
             debug: false,
             inspect_stack_length: false,
             stack_bound_checks: true,
