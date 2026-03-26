@@ -63,7 +63,7 @@ matrix_tests!(
     }
 );
 
-/// Simple bytecode: PUSH1 <value>, STOP.
+/// Simple bytecode: `PUSH1 <value>, STOP`.
 fn push_stop(value: u8) -> [u8; 3] {
     [op::PUSH1, value, op::STOP]
 }
