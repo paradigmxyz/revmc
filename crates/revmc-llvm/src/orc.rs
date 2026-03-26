@@ -1657,7 +1657,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "ci fails idk"]
     fn e2e() {
         let tsm = ThreadSafeModule::create("test");
         let fn_name = "my_fn";
