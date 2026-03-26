@@ -103,8 +103,17 @@ pub struct EvmLlvmBackend {
 ///
 /// ORC/LLJIT is thread-safe and designed to be shared. Individual compilers get
 /// their own [`JITDylib`](orc::JITDylibRef) for symbol isolation, recycled via a pool.
+///
+/// Builtin function pointers (absolute symbols) are defined once in a shared
+/// `builtins` JITDylib. Each per-compiler JITDylib links against the builtins
+/// JD so compiled code can resolve them without duplicating definitions.
 struct GlobalOrcJit {
     jit: orc::LLJIT,
+    /// Shared JITDylib containing absolute symbols for builtin functions.
+    /// Added to each per-compiler JITDylib's link order.
+    builtins_jd: orc::JITDylibRef,
+    /// Symbols already defined in the builtins JD.
+    builtins_defined: std::sync::Mutex<FxHashSet<String>>,
     next_dylib_id: AtomicU64,
     /// Pool of cleared JITDylibs ready for reuse.
     pool: std::sync::Mutex<Vec<orc::JITDylibRef>>,
@@ -120,7 +129,16 @@ impl GlobalOrcJit {
                 .build()
                 .map_err(|e| e.to_string())?;
             jit.get_execution_session().set_default_error_reporter();
-            Ok(Self { jit, next_dylib_id: Default::default(), pool: Default::default() })
+
+            let builtins_jd = jit.get_execution_session().create_bare_jit_dylib(c"revmc.builtins");
+
+            Ok(Self {
+                jit,
+                builtins_jd,
+                builtins_defined: Default::default(),
+                next_dylib_id: Default::default(),
+                pool: Default::default(),
+            })
         });
         match result {
             Ok(g) => Ok(g),
@@ -136,6 +154,8 @@ impl GlobalOrcJit {
         let id = self.next_dylib_id.fetch_add(1, Ordering::Relaxed);
         let name = CString::new(format!("revmc.compiler.{id}")).unwrap();
         let jd = self.jit.get_execution_session().create_bare_jit_dylib(&name);
+        // Link against the builtins JD so compiled code can resolve builtin symbols.
+        jd.add_to_link_order(&self.builtins_jd);
         // Attach a process symbol generator so the JITDylib can resolve libc and other
         // process-level symbols (e.g. printf, memcpy) that JIT-compiled code may reference.
         let prefix = self.jit.get_global_prefix();
@@ -151,7 +171,40 @@ impl GlobalOrcJit {
             error!("failed to clear JITDylib for pool: {e}");
             return;
         }
+        // Re-add the builtins link since `clear` removes all trackers but not generators.
+        // However, link order IS preserved across clears — `clear` only removes
+        // MaterializationUnits and ResourceTrackers, not the search order. So we
+        // only need to set it up on fresh JITDylibs.
         self.pool.lock().unwrap().push(jd);
+    }
+
+    /// Defines absolute symbols in the shared builtins JITDylib, skipping any
+    /// that are already defined. Thread-safe.
+    fn define_builtins(&self, symbols: &[(CString, usize)]) {
+        let mut defined = self.builtins_defined.lock().unwrap();
+        let new_syms: Vec<_> = symbols
+            .iter()
+            .filter(|(name, _)| {
+                let name_str = name.to_str().unwrap_or("");
+                defined.insert(name_str.to_string())
+            })
+            .map(|(name, addr)| {
+                orc::SymbolMapPair::new(
+                    self.jit.mangle_and_intern(name),
+                    orc::EvaluatedSymbol::new(
+                        *addr as u64,
+                        orc::SymbolFlags::none().with_exported().callable(),
+                    ),
+                )
+            })
+            .collect();
+        if !new_syms.is_empty() {
+            if let Err((e, _)) =
+                self.builtins_jd.define(orc::MaterializationUnit::absolute_symbols(new_syms))
+            {
+                error!("failed to define builtins: {e}");
+            }
+        }
     }
 }
 
@@ -167,9 +220,8 @@ struct OrcJitState {
     global: &'static GlobalOrcJit,
     /// Functions in the current staging module (not yet committed to JIT).
     staged_functions: FxHashMap<u32, FunctionValue<'static>>,
-    /// Symbol names that have been registered via `absolute_symbols` in this compiler's JITDylib.
-    registered_symbols: FxHashSet<String>,
-    /// Absolute symbols collected during translation, flushed in bulk before commit.
+    /// Absolute symbols collected during translation, flushed to the global
+    /// builtins JITDylib before commit.
     pending_symbols: Vec<(CString, usize)>,
     /// Resource trackers for committed JIT modules, used for code removal.
     loaded_trackers: Vec<orc::ResourceTracker>,
@@ -185,7 +237,6 @@ impl fmt::Debug for OrcJitState {
             .field("jd", &self.jd.as_inner())
             .field("staged_functions", &self.staged_functions.len())
             .field("committed_functions", &self.committed_functions.len())
-            .field("registered_symbols", &self.registered_symbols.len())
             .field("loaded_trackers", &self.loaded_trackers.len())
             .finish_non_exhaustive()
     }
@@ -197,7 +248,6 @@ impl OrcJitState {
         Ok(Self {
             global,
             staged_functions: FxHashMap::default(),
-            registered_symbols: FxHashSet::default(),
             pending_symbols: Vec::new(),
             loaded_trackers: Vec::new(),
             committed_functions: FxHashMap::default(),
@@ -208,7 +258,6 @@ impl OrcJitState {
     /// Clears all code and symbols from this compiler's JITDylib.
     fn clear(&mut self) -> Result<()> {
         self.staged_functions.clear();
-        self.registered_symbols.clear();
         self.pending_symbols.clear();
         self.loaded_trackers.clear();
         self.committed_functions.clear();
@@ -472,24 +521,11 @@ impl EvmLlvmBackend {
         let tscx = self._tscx.as_ref().expect("missing ThreadSafeContext");
         let orc = self.orc.as_mut().expect("missing ORC JIT state");
 
-        // Flush pending absolute symbols in a single batch into this compiler's JITDylib.
-        let pending = std::mem::take(&mut orc.pending_symbols);
+        // Flush pending absolute symbols to the shared builtins JITDylib.
+        let pending = &mut orc.pending_symbols;
         if !pending.is_empty() {
-            let syms: Vec<_> = pending
-                .iter()
-                .map(|(name, addr)| {
-                    orc::SymbolMapPair::new(
-                        orc.global.jit.mangle_and_intern(name),
-                        orc::EvaluatedSymbol::new(
-                            *addr as u64,
-                            orc::SymbolFlags::none().with_exported().callable(),
-                        ),
-                    )
-                })
-                .collect();
-            orc.jd
-                .define(orc::MaterializationUnit::absolute_symbols(syms))
-                .map_err(|(e, _)| error_msg(e))?;
+            orc.global.define_builtins(&pending);
+            pending.clear();
         }
 
         let tracker = orc.jd.create_resource_tracker();
@@ -1581,10 +1617,8 @@ impl Builder for EvmLlvmBuilder<'_> {
         let function = self.module().add_function(name, func_ty, Some(convert_linkage(linkage)));
         if let Some(address) = address
             && let Some(orc) = &mut self.orc
-            && !orc.registered_symbols.contains(name)
         {
             orc.pending_symbols.push((CString::new(name).unwrap(), address));
-            orc.registered_symbols.insert(name.to_string());
         }
         function
     }

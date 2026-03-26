@@ -977,6 +977,15 @@ impl JITDylibRef {
             .map_err(|e| (e, mem::ManuallyDrop::into_inner(mu)))
     }
 
+    /// Add another JITDylib to this JITDylib's link order.
+    ///
+    /// Symbols not found in this JITDylib will be searched for in `other`.
+    pub fn add_to_link_order(&self, other: &JITDylibRef) {
+        unsafe {
+            crate::cpp::revmc_llvm_jit_dylib_add_to_link_order(self.as_inner(), other.as_inner())
+        };
+    }
+
     /// Calls remove on all trackers associated with this JITDylib.
     pub fn clear(&self) -> Result<(), LLVMString> {
         cvt(unsafe { LLVMOrcJITDylibClear(self.as_inner()) })
@@ -1448,29 +1457,6 @@ impl LLJIT {
     */
 }
 
-// SAFETY: ORC/LLJIT is designed for concurrent use from multiple threads.
-// All session operations are internally synchronized.
-unsafe impl Send for LLJIT {}
-unsafe impl Sync for LLJIT {}
-unsafe impl Send for ExecutionSessionRef<'_> {}
-unsafe impl Sync for ExecutionSessionRef<'_> {}
-unsafe impl Send for JITDylibRef {}
-unsafe impl Sync for JITDylibRef {}
-unsafe impl Send for ResourceTracker {}
-unsafe impl Sync for ResourceTracker {}
-unsafe impl Send for IRTransformLayerRef {}
-unsafe impl Sync for IRTransformLayerRef {}
-unsafe impl Send for SymbolStringPoolRef {}
-unsafe impl Sync for SymbolStringPoolRef {}
-unsafe impl Send for SymbolStringPoolEntry {}
-unsafe impl Sync for SymbolStringPoolEntry {}
-unsafe impl Send for ThreadSafeContext {}
-unsafe impl Send for ThreadSafeModule {}
-unsafe impl Send for MaterializationUnit {}
-unsafe impl Send for DefinitionGenerator {}
-unsafe impl Send for JITTargetMachineBuilder {}
-unsafe impl Send for LLJITBuilder {}
-
 impl Drop for LLJIT {
     fn drop(&mut self) {
         if let Err(e) = cvt(unsafe { LLVMOrcDisposeLLJIT(self.jit) }) {
@@ -1553,6 +1539,41 @@ impl IRTransformLayerRef {
         unsafe { LLVMOrcIRTransformLayerSetTransform(self.as_inner(), shim, ctx) };
     }
 }
+
+// SAFETY: ORC/LLJIT is designed for concurrent use from multiple threads.
+// All session operations are internally synchronized.
+unsafe impl Send for LLJIT {}
+unsafe impl Sync for LLJIT {}
+
+unsafe impl Send for ExecutionSessionRef<'_> {}
+unsafe impl Sync for ExecutionSessionRef<'_> {}
+
+unsafe impl Send for JITDylibRef {}
+unsafe impl Sync for JITDylibRef {}
+
+unsafe impl Send for ResourceTracker {}
+unsafe impl Sync for ResourceTracker {}
+
+unsafe impl Send for IRTransformLayerRef {}
+unsafe impl Sync for IRTransformLayerRef {}
+
+unsafe impl Send for SymbolStringPoolRef {}
+unsafe impl Sync for SymbolStringPoolRef {}
+
+unsafe impl Send for SymbolStringPoolEntry {}
+unsafe impl Sync for SymbolStringPoolEntry {}
+
+unsafe impl Send for ThreadSafeContext {}
+
+unsafe impl Send for ThreadSafeModule {}
+
+unsafe impl Send for MaterializationUnit {}
+
+unsafe impl Send for DefinitionGenerator {}
+
+unsafe impl Send for JITTargetMachineBuilder {}
+
+unsafe impl Send for LLJITBuilder {}
 
 /// Converts an `LLVMErrorRef` to a `Result`.
 pub(crate) fn cvt(ptr: LLVMErrorRef) -> Result<(), LLVMString> {

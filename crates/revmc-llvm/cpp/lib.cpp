@@ -24,6 +24,14 @@ extern "C" LLVMErrorRef revmc_llvm_execution_session_remove_jit_dylib(
     return wrap(Session->removeJITDylib(*Dylib));
 }
 
+/// Add a JITDylib to the link order of another JITDylib.
+extern "C" void revmc_llvm_jit_dylib_add_to_link_order(
+    LLVMOrcJITDylibRef JD, LLVMOrcJITDylibRef Other) {
+    auto *Dylib = reinterpret_cast<orc::JITDylib *>(JD);
+    auto *OtherDylib = reinterpret_cast<orc::JITDylib *>(Other);
+    Dylib->addToLinkOrder(*OtherDylib);
+}
+
 /// Enable concurrent compilation on an LLJIT builder so that multiple threads
 /// can compile modules through the same LLJIT instance safely.
 /// When enabled, LLJIT uses ConcurrentIRCompiler (a fresh TargetMachine per
