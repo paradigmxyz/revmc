@@ -504,7 +504,6 @@ impl Backend for EvmLlvmBackend {
         static PASSES_WITH_LICM: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
         let passes_override = PASSES_OVERRIDE.get_or_init(|| std::env::var("REVMC_PASSES").ok());
-
         let passes = passes_override.as_deref().unwrap_or_else(|| match self.opt_level {
             OptimizationLevel::None => "default<O0>",
             OptimizationLevel::Less
