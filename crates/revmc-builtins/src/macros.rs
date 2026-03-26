@@ -1,4 +1,5 @@
 #[allow(unused_macros)]
+#[collapse_debuginfo(yes)]
 macro_rules! tri {
     ($e:expr) => {
         match $e {
@@ -8,6 +9,7 @@ macro_rules! tri {
     };
 }
 
+#[collapse_debuginfo(yes)]
 macro_rules! try_host {
     ($e:expr) => {
         match $e {
@@ -17,6 +19,7 @@ macro_rules! try_host {
     };
 }
 
+#[collapse_debuginfo(yes)]
 macro_rules! try_ir {
     ($e:expr) => {
         match $e {
@@ -26,6 +29,7 @@ macro_rules! try_ir {
     };
 }
 
+#[collapse_debuginfo(yes)]
 macro_rules! gas {
     ($ecx:expr, $gas:expr) => {
         if !$ecx.gas.record_cost($gas) {
@@ -34,6 +38,7 @@ macro_rules! gas {
     };
 }
 
+#[collapse_debuginfo(yes)]
 macro_rules! gas_opt {
     ($ecx:expr, $gas:expr) => {
         match $gas {
@@ -48,6 +53,7 @@ macro_rules! gas_opt {
 /// is less than the cold cost, skip the DB load and return OOG immediately.
 /// Charges `cold_account_additional_cost` if cold. The base `warm_storage_read_cost`
 /// is deducted upfront by the JIT as static gas.
+#[collapse_debuginfo(yes)]
 macro_rules! berlin_load_account {
     ($ecx:expr, $address:expr, $load_code:expr) => {{
         use revm_context_interface::host::LoadError;
@@ -66,6 +72,7 @@ macro_rules! berlin_load_account {
     }};
 }
 
+#[collapse_debuginfo(yes)]
 macro_rules! ensure_non_staticcall {
     ($ecx:expr) => {
         if $ecx.is_static {
@@ -74,6 +81,7 @@ macro_rules! ensure_non_staticcall {
     };
 }
 
+#[collapse_debuginfo(yes)]
 macro_rules! ensure_memory {
     ($ecx:expr, $offset:expr, $len:expr) => {
         try_ir!(ensure_memory($ecx, $offset, $len))
@@ -81,12 +89,14 @@ macro_rules! ensure_memory {
 }
 
 /// Same as `read_words_rev`, but returns the arguments in the order they were passed.
+#[collapse_debuginfo(yes)]
 macro_rules! read_words {
     ($sp:expr, $($words:ident),+ $(,)?) => {
         let rev![$($words),+] = unsafe { read_words_rev($sp) };
     };
 }
 
+#[collapse_debuginfo(yes)]
 macro_rules! pop {
     ($sp:expr; $($x:ident),* $(,)?) => {
         $(
@@ -96,6 +106,7 @@ macro_rules! pop {
     };
 }
 
+#[collapse_debuginfo(yes)]
 macro_rules! try_into_usize {
     ($x:expr) => {
         match $x.to_u256().as_limbs() {
@@ -110,6 +121,7 @@ macro_rules! try_into_usize {
 }
 
 // Credits: <https://github.com/AuroransSolis/rustconf-2023/blob/665a645d751dfe0e483261e3abca25ab4bb9e13a/reverse-tokens/src/main.rs>
+#[collapse_debuginfo(yes)]
 macro_rules! rev {
 	(@rev [$first:tt$(, $rest:tt)*] [$($rev:tt),*]) => {
 		rev! {
@@ -126,6 +138,7 @@ macro_rules! rev {
 	};
 }
 
+#[collapse_debuginfo(yes)]
 macro_rules! debug_unreachable {
     ($($t:tt)*) => {
         if cfg!(debug_assertions) {
@@ -136,6 +149,7 @@ macro_rules! debug_unreachable {
     };
 }
 
+#[collapse_debuginfo(yes)]
 macro_rules! assume {
     ($e:expr $(,)?) => {
         if !$e {

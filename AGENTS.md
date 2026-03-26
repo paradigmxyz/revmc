@@ -6,11 +6,10 @@
 - Check docs: `cargo +nightly docs`
 - Test all: `cargo nextest run --workspace`
 - Test single: `cargo nextest run -p revmc 'test_name'`
-- State tests: `cargo nextest run -p revmc --profile ethtests 'statetest::'`
 
 ## Architecture
 - `revmc` — main crate: EVM compiler, bytecode analysis, linker, and test infrastructure.
-- `revmc-backend` — abstract compiler backend trait. `revmc-cranelift` and `revmc-llvm` are implementations.
+- `revmc-backend` — abstract compiler backend trait. `revmc-llvm` is the main implementation.
 - `revmc-builtins` — runtime builtins called by JIT-compiled code (host calls, gas accounting).
 - `revmc-context` — EVM execution context types bridging revm and compiled code.
 - `revmc-build` — build-script helpers for AOT compilation.

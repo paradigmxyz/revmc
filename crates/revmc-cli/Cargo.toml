@@ -55,7 +55,6 @@ default = ["llvm-prefer-dynamic", "revmc/asm-keccak"]
 llvm = ["revmc/llvm"]
 llvm-prefer-static = ["llvm", "revmc/llvm-prefer-static"]
 llvm-prefer-dynamic = ["llvm", "revmc/llvm-prefer-dynamic"]
-cranelift = ["revmc/cranelift"]
 
 tracy = ["dep:tracing-tracy"]
 

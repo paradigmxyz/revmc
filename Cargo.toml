@@ -11,8 +11,8 @@ rust-version = "1.94"
 license = "MIT OR Apache-2.0"
 categories = ["compilers", "cryptography::cryptocurrencies"]
 keywords = ["compile", "compiler", "jit", "evm", "ethereum"]
-homepage = "https://github.com/danipopes/cranelift-jit-evm"
-repository = "https://github.com/danipopes/cranelift-jit-evm"
+homepage = "https://github.com/paradigmxyz/revmc"
+repository = "https://github.com/paradigmxyz/revmc"
 exclude = [".github/", "benches/", "fuzz/", "tests/"]
 
 [workspace.lints.clippy]
@@ -41,7 +41,6 @@ revmc-backend = { version = "0.1.0", path = "crates/revmc-backend", default-feat
 revmc-build = { version = "0.1.0", path = "crates/revmc-build", default-features = false }
 revmc-builtins = { version = "0.1.0", path = "crates/revmc-builtins", default-features = false }
 revmc-context = { version = "0.1.0", path = "crates/revmc-context", default-features = false }
-revmc-cranelift = { version = "0.1.0", path = "crates/revmc-cranelift", default-features = false }
 revmc-llvm = { version = "0.1.0", path = "crates/revmc-llvm", default-features = false }
 
 alloy-primitives = { version = "1.5", default-features = false }
@@ -62,6 +61,9 @@ tracing-subscriber = "0.3"
 tracing-tracy = "0.11"
 paste = "1.0"
 
+[profile.dev]
+opt-level = 3
+
 [profile.release]
 opt-level = 3
 lto = "thin"
@@ -79,7 +81,3 @@ strip = false
 
 [profile.bench]
 inherits = "profiling"
-
-[profile.ethtests]
-inherits = "dev"
-opt-level = 3
