@@ -1436,7 +1436,12 @@ impl LLJIT {
         unsafe { IRTransformLayerRef::from_inner(LLVMOrcLLJITGetIRTransformLayer(self.as_inner())) }
     }
 
-    // get_*_layer...
+    /// Returns a non-owning reference to the LLJIT instance's object transform layer.
+    pub fn get_obj_transform_layer(&self) -> ObjectTransformLayerRef {
+        unsafe {
+            ObjectTransformLayerRef::from_inner(LLVMOrcLLJITGetObjTransformLayer(self.as_inner()))
+        }
+    }
 
     // Experimental interface for `libLLVMOrcDebugging.a`.
     /*
@@ -1456,7 +1461,7 @@ impl Drop for LLJIT {
     }
 }
 
-/*
+/// A reference to an object layer.
 pub struct ObjectLayerRef {
     ptr: LLVMOrcObjectLayerRef,
 }
@@ -1473,6 +1478,10 @@ impl ObjectLayerRef {
     }
 }
 
+/// A reference to an object transform layer.
+///
+/// The transform layer sits between the IR compiler and the object linking layer.
+/// A transform callback can inspect or modify the compiled object buffer before linking.
 pub struct ObjectTransformLayerRef {
     ptr: LLVMOrcObjectTransformLayerRef,
 }
@@ -1487,8 +1496,34 @@ impl ObjectTransformLayerRef {
     pub fn as_inner(&self) -> LLVMOrcObjectTransformLayerRef {
         self.ptr
     }
+
+    /// Set the transform function on this object transform layer.
+    pub fn set_transform(&self, f: fn(&mut LLVMMemoryBufferRef) -> Result<(), String>) {
+        extern "C" fn shim(ctx: *mut c_void, obj_in_out: *mut LLVMMemoryBufferRef) -> LLVMErrorRef {
+            let f: fn(&mut LLVMMemoryBufferRef) -> Result<(), String> =
+                unsafe { mem::transmute(ctx) };
+            let buf = unsafe { &mut *obj_in_out };
+            let res = std::panic::catch_unwind(AssertUnwindSafe(|| f(buf)));
+            cvt_cb_res(res)
+        }
+
+        let ctx = f as *mut c_void;
+        unsafe { LLVMOrcObjectTransformLayerSetTransform(self.as_inner(), shim, ctx) };
+    }
+
+    /// Set a raw transform function on this object transform layer.
+    ///
+    /// # Safety
+    ///
+    /// `ctx` must be valid for the lifetime of this layer and `f` must not unwind.
+    pub unsafe fn set_transform_raw(
+        &self,
+        f: extern "C" fn(ctx: *mut c_void, obj_in_out: *mut LLVMMemoryBufferRef) -> LLVMErrorRef,
+        ctx: *mut c_void,
+    ) {
+        LLVMOrcObjectTransformLayerSetTransform(self.as_inner(), f, ctx);
+    }
 }
-*/
 
 /// A reference to an IR transform layer.
 pub struct IRTransformLayerRef {
@@ -1514,15 +1549,22 @@ impl IRTransformLayerRef {
     }
 
     /// Set the transform function of this transform layer.
-    pub fn set_transform(&self, f: fn(&ThreadSafeModule) -> Result<(), String>) {
+    pub fn set_transform(
+        &self,
+        f: fn(&ThreadSafeModule, MaterializationResponsibilityRef<'_>) -> Result<(), String>,
+    ) {
         extern "C" fn shim(
             ctx: *mut c_void,
             m: *mut LLVMOrcThreadSafeModuleRef,
-            _mr: LLVMOrcMaterializationResponsibilityRef,
+            mr: LLVMOrcMaterializationResponsibilityRef,
         ) -> LLVMErrorRef {
-            let f = ctx as *mut fn(&ThreadSafeModule) -> Result<(), String>;
+            let f: fn(
+                &ThreadSafeModule,
+                MaterializationResponsibilityRef<'_>,
+            ) -> Result<(), String> = unsafe { mem::transmute(ctx) };
             let m = mem::ManuallyDrop::new(unsafe { ThreadSafeModule::from_inner(*m) });
-            let res = std::panic::catch_unwind(AssertUnwindSafe(|| unsafe { (*f)(&m) }));
+            let mr = unsafe { MaterializationResponsibilityRef::from_inner(mr) };
+            let res = std::panic::catch_unwind(AssertUnwindSafe(|| f(&m, mr)));
             cvt_cb_res(res)
         }
 
@@ -1544,6 +1586,9 @@ unsafe impl Sync for JITDylibRef {}
 
 unsafe impl Send for ResourceTracker {}
 unsafe impl Sync for ResourceTracker {}
+
+unsafe impl Send for ObjectTransformLayerRef {}
+unsafe impl Sync for ObjectTransformLayerRef {}
 
 unsafe impl Send for IRTransformLayerRef {}
 unsafe impl Sync for IRTransformLayerRef {}
@@ -1651,7 +1696,7 @@ mod tests {
 
     #[test]
     fn e2e_with_tsc() {
-        use std::mem::ManuallyDrop;
+        use mem::ManuallyDrop;
 
         Target::initialize_native(&Default::default()).unwrap();
         let triple = TargetMachine::get_default_triple();
@@ -1725,7 +1770,7 @@ mod tests {
         // Check the first few bytes at the address to see if it's valid code.
         let code = unsafe { std::slice::from_raw_parts(address as *const u8, 16) };
         eprintln!("code bytes: {code:02x?}");
-        let f = unsafe { std::mem::transmute::<usize, extern "C" fn() -> u64>(address) };
+        let f = unsafe { mem::transmute::<usize, extern "C" fn() -> u64>(address) };
         eprintln!("about to call...");
         let r = f();
         eprintln!("result: {r}");
@@ -1743,7 +1788,7 @@ mod tests {
 
     #[test]
     fn lookup_in_custom_jd() {
-        use std::mem::ManuallyDrop;
+        use mem::ManuallyDrop;
 
         Target::initialize_native(&Default::default()).unwrap();
         let triple = TargetMachine::get_default_triple();
@@ -1803,8 +1848,8 @@ mod tests {
         let addr_b = jit.lookup_in(&jd_b, c"test_fn").unwrap();
         assert_ne!(addr_a, addr_b);
 
-        let f_a = unsafe { std::mem::transmute::<usize, extern "C" fn() -> u64>(addr_a) };
-        let f_b = unsafe { std::mem::transmute::<usize, extern "C" fn() -> u64>(addr_b) };
+        let f_a = unsafe { mem::transmute::<usize, extern "C" fn() -> u64>(addr_a) };
+        let f_b = unsafe { mem::transmute::<usize, extern "C" fn() -> u64>(addr_b) };
         assert_eq!(f_a(), 111);
         assert_eq!(f_b(), 222);
 
@@ -1868,7 +1913,7 @@ mod tests {
         jit.add_module(tsm).unwrap();
         let address = jit.lookup(&CString::new(fn_name).unwrap()).unwrap();
         eprintln!("address: {address:#x}");
-        let f = unsafe { std::mem::transmute::<usize, extern "C" fn() -> u64>(address) };
+        let f = unsafe { mem::transmute::<usize, extern "C" fn() -> u64>(address) };
         let r = f();
         assert_eq!(r, 69);
     }
