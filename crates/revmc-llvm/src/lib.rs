@@ -110,6 +110,8 @@ struct OrcJitState {
     registered_symbols: FxHashSet<String>,
     /// Resource trackers for committed JIT modules, used for code removal.
     loaded_trackers: Vec<orc::ResourceTracker>,
+    /// Maps committed function ID → index into `loaded_trackers`.
+    committed_functions: FxHashMap<u32, usize>,
     /// OrcV2 JIT engine.
     jit: orc::LLJIT,
 }
@@ -118,6 +120,7 @@ impl fmt::Debug for OrcJitState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("OrcJitState")
             .field("staged_functions", &self.staged_functions.len())
+            .field("committed_functions", &self.committed_functions.len())
             .field("registered_symbols", &self.registered_symbols.len())
             .field("loaded_trackers", &self.loaded_trackers.len())
             .finish_non_exhaustive()
@@ -130,6 +133,7 @@ impl OrcJitState {
             staged_functions: FxHashMap::default(),
             registered_symbols: FxHashSet::default(),
             loaded_trackers: Vec::new(),
+            committed_functions: FxHashMap::default(),
             jit: Self::new_jit()?,
         })
     }
@@ -139,6 +143,7 @@ impl OrcJitState {
         self.staged_functions.clear();
         self.registered_symbols.clear();
         self.loaded_trackers.clear();
+        self.committed_functions.clear();
         self.jit = Self::new_jit()?;
         Ok(())
     }
@@ -394,7 +399,6 @@ impl EvmLlvmBackend {
             return Ok(());
         }
 
-        self.orc_mut().staged_functions.clear();
         self.di_state = None;
 
         let new_module = create_module(self.cx, &self.machine, self.aot)?;
@@ -408,7 +412,12 @@ impl EvmLlvmBackend {
         let tsm = create_thread_safe_module(tscx, old_module);
         orc.jit.add_module_with_rt(tsm, &tracker).map_err(error_msg)?;
 
+        let tracker_idx = orc.loaded_trackers.len();
+        for &id in orc.staged_functions.keys() {
+            orc.committed_functions.insert(id, tracker_idx);
+        }
         orc.loaded_trackers.push(tracker);
+        orc.staged_functions.clear();
         Ok(())
     }
 
@@ -665,10 +674,28 @@ impl Backend for EvmLlvmBackend {
     }
 
     unsafe fn free_function(&mut self, id: Self::FuncId) -> Result<()> {
-        if let Some(orc) = &mut self.orc
-            && let Some(function) = orc.staged_functions.remove(&id)
-        {
-            unsafe { function.delete() };
+        if let Some(orc) = &mut self.orc {
+            // Remove from staging if not yet committed.
+            if let Some(function) = orc.staged_functions.remove(&id) {
+                unsafe { function.delete() };
+            }
+
+            // Remove from committed trackers.
+            if let Some(tracker_idx) = orc.committed_functions.remove(&id) {
+                orc.loaded_trackers[tracker_idx].remove().map_err(error_msg)?;
+                // Also remove co-committed functions since removing the
+                // tracker frees all symbols in that module.
+                orc.committed_functions.retain(|co_id, idx| {
+                    if *idx == tracker_idx {
+                        self.function_names.remove(co_id);
+                        false
+                    } else {
+                        true
+                    }
+                });
+                // Note: the tracker slot becomes dead but indices of later
+                // trackers are unchanged, keeping the map consistent.
+            }
         }
         self.function_names.remove(&id);
         Ok(())

@@ -1,5 +1,6 @@
 use super::with_evm_context;
 use crate::{Backend, EvmCompiler, SpecId};
+use revm_bytecode::opcode as op;
 use revm_interpreter::InstructionResult;
 use revm_primitives::U256;
 
@@ -59,5 +60,101 @@ matrix_tests!(
             assert_eq!(*stack_len, 1);
             assert_eq!(stack.as_slice()[0].to_u256(), U256::from(3));
         });
+    }
+);
+
+/// Simple bytecode: PUSH1 <value>, STOP.
+fn push_stop(value: u8) -> [u8; 3] {
+    [op::PUSH1, value, op::STOP]
+}
+
+/// JIT-compile, call, and verify a PUSH1+STOP function returns the expected value.
+fn jit_and_verify<B: Backend>(
+    compiler: &mut EvmCompiler<B>,
+    name: &str,
+    code: &[u8],
+    expected: U256,
+) -> B::FuncId {
+    compiler.inspect_stack_length(true);
+    let id = compiler.translate(name, code, super::DEF_SPEC).unwrap();
+    let f = unsafe { compiler.jit_function(id) }.unwrap();
+
+    with_evm_context(code, super::DEF_SPEC, |ecx, stack, stack_len| {
+        let r = unsafe { f.call(Some(stack), Some(stack_len), ecx) };
+        assert_eq!(r, InstructionResult::Stop, "{name}: unexpected return");
+        assert_eq!(*stack_len, 1, "{name}: expected 1 stack element");
+        assert_eq!(stack.as_slice()[0].to_u256(), expected, "{name}: wrong value");
+    });
+    id
+}
+
+// Free a single committed function, then compile and run a new one.
+matrix_tests!(
+    free_single = |compiler| {
+        let code = push_stop(0x42);
+        let id = jit_and_verify(compiler, "f1", &code, U256::from(0x42));
+
+        unsafe { compiler.free_function(id) }.unwrap();
+
+        // Compile a new function after freeing — the module should still be usable.
+        compiler.clear_ir().unwrap();
+        let code2 = push_stop(0x69);
+        jit_and_verify(compiler, "f2", &code2, U256::from(0x69));
+    }
+);
+
+// Free all functions via `clear`, then compile new ones.
+matrix_tests!(
+    free_all = |compiler| {
+        let code = push_stop(0x10);
+        jit_and_verify(compiler, "g1", &code, U256::from(0x10));
+
+        unsafe { compiler.clear() }.unwrap();
+
+        let code2 = push_stop(0x20);
+        jit_and_verify(compiler, "g2", &code2, U256::from(0x20));
+    }
+);
+
+// Free one function, then free all remaining via `clear`.
+matrix_tests!(
+    free_single_then_clear = |compiler| {
+        let code_a = push_stop(0xAA);
+        let id_a = jit_and_verify(compiler, "h1", &code_a, U256::from(0xAA));
+
+        compiler.clear_ir().unwrap();
+        let code_b = push_stop(0xBB);
+        jit_and_verify(compiler, "h2", &code_b, U256::from(0xBB));
+
+        // Free only the first function.
+        unsafe { compiler.free_function(id_a) }.unwrap();
+
+        // Clear everything.
+        unsafe { compiler.clear() }.unwrap();
+
+        // Compile again.
+        let code_c = push_stop(0xCC);
+        jit_and_verify(compiler, "h3", &code_c, U256::from(0xCC));
+    }
+);
+
+// Compile multiple functions, free them individually.
+matrix_tests!(
+    free_multiple_individually = |compiler| {
+        let code_a = push_stop(0x11);
+        let id_a = jit_and_verify(compiler, "m1", &code_a, U256::from(0x11));
+
+        compiler.clear_ir().unwrap();
+        let code_b = push_stop(0x22);
+        let id_b = jit_and_verify(compiler, "m2", &code_b, U256::from(0x22));
+
+        // Free both.
+        unsafe { compiler.free_function(id_a) }.unwrap();
+        unsafe { compiler.free_function(id_b) }.unwrap();
+
+        // Compile again.
+        compiler.clear_ir().unwrap();
+        let code_c = push_stop(0x33);
+        jit_and_verify(compiler, "m3", &code_c, U256::from(0x33));
     }
 );
