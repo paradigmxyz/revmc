@@ -13,15 +13,14 @@ use revm_context_interface::{
     Cfg, ContextSetters, ContextTr, Database,
     journaled_state::JournalTr,
     local::LocalContextTr,
-    result::{EVMError, HaltReason, InvalidTransaction},
+    result::{EVMError, HaltReason, InvalidTransaction, ResultAndState},
 };
+use revm_database_interface::DatabaseCommit;
 use revm_handler::{
-    EthFrame, EvmTr, EvmTrError, ExecuteEvm, FrameInitOrResult, FrameResult, Handler, ItemOrResult,
-    PrecompileProvider, instructions::InstructionProvider,
+    EthFrame, EvmTr, EvmTrError, ExecuteCommitEvm, ExecuteEvm, FrameInitOrResult, FrameResult,
+    Handler, ItemOrResult, PrecompileProvider,
 };
-use revm_interpreter::{
-    InterpreterResult, interpreter::EthInterpreter, interpreter_action::FrameInit,
-};
+use revm_interpreter::{InterpreterResult, interpreter_action::FrameInit};
 use revm_primitives::{B256Map, hardfork::SpecId};
 use revm_state::EvmState;
 
@@ -73,51 +72,84 @@ where
     pub const fn backend(&self) -> &JitBackend {
         &self.backend
     }
-}
 
-impl<CTX, INSP, INST, PRECOMPILES> ExecuteEvm
-    for JitEvm<revm_context::Evm<CTX, INSP, INST, PRECOMPILES, EthFrame>>
-where
-    CTX: ContextTr<Journal: JournalTr<State = EvmState>, Local: LocalContextTr> + ContextSetters,
-    CTX::Cfg: Cfg<Spec: Into<SpecId>>,
-    INST: InstructionProvider<Context = CTX, InterpreterTypes = EthInterpreter>,
-    PRECOMPILES: PrecompileProvider<CTX, Output = InterpreterResult>,
-{
-    type ExecutionResult = revm_context_interface::result::ExecutionResult<HaltReason>;
-    type State = EvmState;
-    type Error = EVMError<<CTX::Db as Database>::Error, InvalidTransaction>;
-    type Tx = <CTX as ContextTr>::Tx;
-    type Block = <CTX as ContextTr>::Block;
-
-    #[inline]
-    fn transact_one(&mut self, tx: Self::Tx) -> Result<Self::ExecutionResult, Self::Error> {
-        self.inner.ctx.set_tx(tx);
+    /// Clears the lookup cache if the spec has changed since the last call.
+    fn invalidate_cache(&mut self) {
         let spec_id: SpecId = self.inner.ctx_ref().cfg().spec().into();
         if spec_id != self.lookup_cache_spec_id {
             self.lookup_cache.clear();
             self.lookup_cache_spec_id = spec_id;
         }
+    }
+}
+
+impl<EVM> core::ops::Deref for JitEvm<EVM> {
+    type Target = EVM;
+
+    #[inline]
+    fn deref(&self) -> &EVM {
+        &self.inner
+    }
+}
+
+impl<EVM> core::ops::DerefMut for JitEvm<EVM> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut EVM {
+        &mut self.inner
+    }
+}
+
+impl<EVM> ExecuteEvm for JitEvm<EVM>
+where
+    EVM: EvmTr<
+            Frame = EthFrame,
+            Context: ContextTr<Journal: JournalTr<State = EvmState>, Local: LocalContextTr>
+                         + ContextSetters,
+            Precompiles: PrecompileProvider<EVM::Context, Output = InterpreterResult>,
+        >,
+    <EVM::Context as ContextTr>::Cfg: Cfg<Spec: Into<SpecId>>,
+{
+    type ExecutionResult = revm_context_interface::result::ExecutionResult<HaltReason>;
+    type State = EvmState;
+    type Error = EVMError<<<EVM::Context as ContextTr>::Db as Database>::Error, InvalidTransaction>;
+    type Tx = <EVM::Context as ContextTr>::Tx;
+    type Block = <EVM::Context as ContextTr>::Block;
+
+    #[inline]
+    fn transact_one(&mut self, tx: Self::Tx) -> Result<Self::ExecutionResult, Self::Error> {
+        self.inner.ctx_mut().set_tx(tx);
+        self.invalidate_cache();
         JitHandler::new(&self.backend, &mut self.lookup_cache).run(&mut self.inner)
     }
 
     #[inline]
     fn finalize(&mut self) -> Self::State {
-        self.inner.journal_mut().finalize()
+        self.inner.ctx_mut().journal_mut().finalize()
     }
 
     #[inline]
     fn set_block(&mut self, block: Self::Block) {
-        self.inner.ctx.set_block(block);
+        self.inner.ctx_mut().set_block(block);
     }
 
     #[inline]
-    fn replay(
-        &mut self,
-    ) -> Result<revm_context_interface::result::ResultAndState<HaltReason>, Self::Error> {
+    fn replay(&mut self) -> Result<ResultAndState<HaltReason>, Self::Error> {
+        self.invalidate_cache();
         JitHandler::new(&self.backend, &mut self.lookup_cache).run(&mut self.inner).map(|result| {
-            let state = self.inner.journal_mut().finalize();
-            revm_context_interface::result::ResultAndState::new(result, state)
+            let state = self.inner.ctx_mut().journal_mut().finalize();
+            ResultAndState::new(result, state)
         })
+    }
+}
+
+impl<EVM> ExecuteCommitEvm for JitEvm<EVM>
+where
+    Self: ExecuteEvm<State = EvmState>,
+    EVM: EvmTr<Context: ContextTr<Db: DatabaseCommit>>,
+{
+    #[inline]
+    fn commit(&mut self, state: Self::State) {
+        self.inner.ctx_mut().db_mut().commit(state);
     }
 }
 
@@ -241,7 +273,6 @@ mod tests {
     use revm_context::TxEnv;
     use revm_context_interface::result::{ExecutionResult, Output};
     use revm_database::{CacheDB, EmptyDB};
-    use revm_database_interface::DatabaseCommit;
     use revm_handler::MainBuilder;
 
     fn blocking_backend() -> JitBackend {
@@ -287,9 +318,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = evm.transact_one(tx).unwrap();
-        let state = evm.finalize();
-        evm.inner_mut().db_mut().commit(state);
+        let result = evm.transact_commit(tx).unwrap();
         match result {
             ExecutionResult::Success { output, .. } => match output {
                 Output::Create(_, Some(addr)) => addr,
