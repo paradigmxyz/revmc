@@ -1,12 +1,12 @@
 # revmc - EVM JIT/AOT compiler
 
 ## Commands
-- Build: `cargo build --workspace`
+- Lint: `cargo +nightly cl`
+- Format: `cargo +nightly fmt --all`
+- Check docs: `cargo +nightly docs`
 - Test all: `cargo nextest run --workspace`
 - Test single: `cargo nextest run -p revmc 'test_name'`
 - State tests: `cargo nextest run -p revmc --profile ethtests 'statetest::'`
-- Lint: `cargo +nightly clippy --workspace --all-targets --features llvm,cranelift`
-- Format: `cargo +nightly fmt --all`
 
 ## Architecture
 - `revmc` — main crate: EVM compiler, bytecode analysis, linker, and test infrastructure.
