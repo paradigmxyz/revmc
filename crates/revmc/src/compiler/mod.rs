@@ -1,7 +1,6 @@
 //! EVM bytecode compiler implementation.
 
-use crate::{Backend, Builder, Bytecode, EvmCompilerFn, EvmContext, EvmStack, Result};
-use alloy_primitives::map::HashMap;
+use crate::{Backend, Builder, Bytecode, EvmCompilerFn, EvmContext, EvmStack, FxHashMap, Result};
 use revm_interpreter::{Gas, InputsImpl};
 use revm_primitives::{Bytes, hardfork::SpecId};
 use revmc_backend::{
@@ -640,7 +639,7 @@ total:      {total:>11.3?}
         let ir = fs::read_to_string(ir_path)?;
 
         // Parse `!N = !DILocation(line: L, ...)` metadata.
-        let mut di_locs = HashMap::default();
+        let mut di_locs = FxHashMap::default();
         for line in ir.lines() {
             let line = line.trim_start();
             if !line.starts_with('!') {
@@ -831,7 +830,7 @@ fn resolve_asm_source_line<'a>(line: &str, src_lines: &[&'a str]) -> Option<&'a 
 /// Resolves a `!dbg !N` reference in an IR line to the corresponding source line.
 fn resolve_dbg_line<'a>(
     ir_line: &str,
-    di_locs: &HashMap<u32, u32>,
+    di_locs: &FxHashMap<u32, u32>,
     src_lines: &[&'a str],
 ) -> Option<&'a str> {
     let pos = ir_line.find("!dbg !")?;

@@ -5,7 +5,9 @@
 #[macro_use]
 extern crate tracing;
 
-use alloy_primitives::map::{HashMap, HashSet};
+use alloy_primitives::map::{FxBuildHasher, HashSet};
+
+type FxHashMap<K, V> = alloy_primitives::map::HashMap<K, V, FxBuildHasher>;
 use inkwell::{
     AddressSpace, IntPredicate, OptimizationLevel,
     attributes::{Attribute, AttributeLoc},
@@ -97,7 +99,7 @@ pub struct EvmLlvmBackend {
     /// Separate from `function_names` to have always increasing IDs.
     function_counter: u32,
     /// Persistent mapping from function ID to symbol name.
-    function_names: HashMap<u32, String>,
+    function_names: FxHashMap<u32, String>,
 }
 
 // Thread-local slot for capturing compiled object buffers from the ObjectTransformLayer.
@@ -251,14 +253,14 @@ struct OrcJitState {
     /// Reference to the global LLJIT instance.
     global: &'static GlobalOrcJit,
     /// Functions in the current staging module (not yet committed to JIT).
-    staged_functions: HashMap<u32, FunctionValue<'static>>,
+    staged_functions: FxHashMap<u32, FunctionValue<'static>>,
     /// Absolute symbols collected during translation, flushed to the global
     /// builtins JITDylib before commit.
     pending_symbols: Vec<(CString, usize)>,
     /// Resource trackers for committed JIT modules, used for code removal.
     loaded_trackers: Vec<orc::ResourceTracker>,
     /// Maps committed function ID → index into `loaded_trackers`.
-    committed_functions: HashMap<u32, usize>,
+    committed_functions: FxHashMap<u32, usize>,
     /// Cached object buffer from the last `commit_staged_module`, captured via
     /// ObjectTransformLayer.
     last_compiled_object: Option<Vec<u8>>,
@@ -282,10 +284,10 @@ impl OrcJitState {
         let global = GlobalOrcJit::get()?;
         Ok(Self {
             global,
-            staged_functions: HashMap::default(),
+            staged_functions: FxHashMap::default(),
             pending_symbols: Vec::new(),
             loaded_trackers: Vec::new(),
-            committed_functions: HashMap::default(),
+            committed_functions: FxHashMap::default(),
             last_compiled_object: None,
             jd: Some(global.acquire_jit_dylib()),
         })
@@ -446,7 +448,7 @@ impl EvmLlvmBackend {
             is_dumping: false,
             opt_level,
             function_counter: 0,
-            function_names: HashMap::default(),
+            function_names: FxHashMap::default(),
             debug_file: None,
             di_state: None,
         })

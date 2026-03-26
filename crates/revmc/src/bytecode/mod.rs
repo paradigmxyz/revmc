@@ -1,6 +1,6 @@
 //! Internal EVM bytecode and opcode representation.
 
-use alloy_primitives::map::HashMap;
+use crate::FxHashMap;
 use bitvec::vec::BitVec;
 use revm_bytecode::opcode as op;
 use revm_primitives::hardfork::SpecId;
@@ -45,7 +45,7 @@ pub struct Bytecode<'a> {
     /// Whether the bytecode may suspend execution.
     may_suspend: bool,
     /// Mapping from program counter to instruction.
-    pc_to_inst: HashMap<u32, u32>,
+    pc_to_inst: FxHashMap<u32, u32>,
     /// Instruction index to 1-based line number in the formatted dump, built during formatting.
     inst_lines: RefCell<Vec<u32>>,
 }
@@ -55,7 +55,7 @@ impl<'a> Bytecode<'a> {
     pub(crate) fn new(code: &'a [u8], spec_id: SpecId) -> Self {
         let mut insts = Vec::with_capacity(code.len() + 8);
         let mut jumpdests = BitVec::repeat(false, code.len());
-        let mut pc_to_inst = HashMap::with_capacity_and_hasher(code.len(), Default::default());
+        let mut pc_to_inst = FxHashMap::with_capacity_and_hasher(code.len(), Default::default());
         let op_infos = op_info_map(spec_id);
         for (inst, (pc, Opcode { opcode, immediate: _ })) in
             OpcodesIter::new(code, spec_id).with_pc().enumerate()

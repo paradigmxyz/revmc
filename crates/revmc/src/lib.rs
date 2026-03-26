@@ -6,6 +6,8 @@
 #[macro_use]
 extern crate tracing;
 
+type FxHashMap<K, V> = alloy_primitives::map::HashMap<K, V, alloy_primitives::map::FxBuildHasher>;
+
 mod bytecode;
 pub use bytecode::*;
 
