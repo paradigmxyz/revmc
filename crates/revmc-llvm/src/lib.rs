@@ -313,10 +313,6 @@ impl EvmLlvmBackend {
         self.orc.as_ref().expect("requested ORC JIT state on AOT backend")
     }
 
-    fn orc_mut(&mut self) -> &mut OrcJitState {
-        self.orc.as_mut().expect("requested ORC JIT state on AOT backend")
-    }
-
     fn fn_type(
         &self,
         ret: Option<BasicTypeEnum<'static>>,
