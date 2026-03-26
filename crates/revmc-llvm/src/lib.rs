@@ -117,11 +117,7 @@ impl GlobalOrcJit {
             init().map_err(|e| e.to_string())?;
             let jit = orc::LLJIT::new().map_err(|e| e.to_string())?;
             jit.get_execution_session().set_default_error_reporter();
-            Ok(Self {
-                jit,
-                next_dylib_id: AtomicU64::new(0),
-                pool: std::sync::Mutex::new(Vec::new()),
-            })
+            Ok(Self { jit, next_dylib_id: Default::default(), pool: Default::default() })
         });
         match result {
             Ok(g) => Ok(g),
