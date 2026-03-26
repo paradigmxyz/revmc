@@ -1443,6 +1443,15 @@ impl LLJIT {
         }
     }
 
+    /// Install `PerfSupportPlugin` on the LLJIT's `ObjectLinkingLayer`.
+    ///
+    /// Writes perf jitdump records so `perf record -k 1` / `perf inject --jit`
+    /// can resolve JIT-compiled symbols with full debug info and unwind info.
+    /// Requires `ObjectLinkingLayer` (JITLink), which is the LLJIT default.
+    pub fn enable_perf_support(&self) -> Result<(), LLVMString> {
+        cvt(unsafe { crate::cpp::revmc_llvm_lljit_enable_perf_support(self.as_inner()) })
+    }
+
     /// Install the plugin that submits debug objects to the executor via the
     /// GDB JIT Interface (`__jit_debug_register_code`).
     ///

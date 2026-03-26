@@ -42,6 +42,8 @@ unsafe extern "C" {
         result: *mut LLVMOrcExecutorAddress,
         name: *const c_char,
     ) -> LLVMErrorRef;
+
+    pub(crate) fn revmc_llvm_lljit_enable_perf_support(jit: LLVMOrcLLJITRef) -> LLVMErrorRef;
 }
 
 pub(crate) fn create_initializes_attr(cx: &Context, lower: i64, upper: i64) -> Attribute {
