@@ -158,3 +158,19 @@ matrix_tests!(
         jit_and_verify(compiler, "m3", &code_c, U256::from(0x33));
     }
 );
+
+// Reuse the same symbol name after freeing. If ORC resources weren't actually
+// removed, re-defining the symbol would fail with a duplicate symbol error.
+matrix_tests!(
+    free_reuse_name = |compiler| {
+        let code_a = push_stop(0x42);
+        let id = jit_and_verify(compiler, "reuse", &code_a, U256::from(0x42));
+
+        unsafe { compiler.free_function(id) }.unwrap();
+        compiler.clear_ir().unwrap();
+
+        // Same name, different value.
+        let code_b = push_stop(0x69);
+        jit_and_verify(compiler, "reuse", &code_b, U256::from(0x69));
+    }
+);
