@@ -36,13 +36,6 @@ pub use llvm::EvmLlvmBackend;
 #[doc(inline)]
 pub use revmc_llvm as llvm;
 
-#[cfg(feature = "cranelift")]
-#[doc(no_inline)]
-pub use cranelift::EvmCraneliftBackend;
-#[cfg(feature = "cranelift")]
-#[doc(inline)]
-pub use revmc_cranelift as cranelift;
-
 #[doc(no_inline)]
 pub use revm_bytecode;
 #[doc(no_inline)]

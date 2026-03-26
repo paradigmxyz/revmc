@@ -9,7 +9,7 @@ env:
   CARGO_TERM_COLOR: always
   RUSTC_WRAPPER: sccache
   LLVM_VERSION: "22" # Must be just the major version
-  ALL_BACKENDS: "llvm,cranelift"
+  ALL_BACKENDS: "llvm"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
