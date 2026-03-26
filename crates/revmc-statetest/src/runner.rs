@@ -57,6 +57,8 @@ pub enum TestErrorKind {
     NoJsonFiles,
     #[error("compilation failed: {0}")]
     CompilationError(String),
+    #[error("gas used mismatch: compiled={compiled_gas}, interpreter={interpreter_gas}")]
+    GasUsedMismatch { compiled_gas: u64, interpreter_gas: u64 },
 }
 
 /// Check if a test should be skipped based on its filename.
@@ -259,7 +261,8 @@ pub(crate) fn check_evm_execution(
 }
 
 /// Execute a single test suite file containing multiple tests.
-pub fn execute_test_suite(
+#[allow(dead_code)]
+pub(crate) fn execute_test_suite(
     path: &Path,
     elapsed: &Arc<Mutex<Duration>>,
     trace: bool,
@@ -347,6 +350,27 @@ pub fn execute_test_suite(
         }
     }
     Ok(())
+}
+
+/// Run a test with the interpreter and return gas_used (or 0 on error/exception).
+pub(crate) fn interpreter_gas_used(
+    test: &Test,
+    cfg: &CfgEnv,
+    block: &BlockEnv,
+    tx: &TxEnv,
+    cache_state: &database::CacheState,
+) -> u64 {
+    let cache = cache_state.clone();
+    let mut state =
+        database::State::builder().with_cached_prestate(cache).with_bundle_update().build();
+    let evm_context =
+        Context::mainnet().with_block(block).with_tx(tx).with_cfg(cfg.clone()).with_db(&mut state);
+    let mut evm = evm_context.build_mainnet();
+    let exec_result = evm.transact_commit(tx);
+    match exec_result {
+        Ok(result) if test.expect_exception.is_none() => result.gas_used(),
+        _ => 0,
+    }
 }
 
 fn execute_single_test(ctx: TestExecutionContext) -> Result<(), TestErrorKind> {

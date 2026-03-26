@@ -1,7 +1,7 @@
 // revmc-specific code: compilation, handler integration, and test orchestration.
 
 use crate::runner::{
-    check_evm_execution, execute_test_suite, skip_test, TestError, TestErrorKind, TestRunnerState,
+    check_evm_execution, interpreter_gas_used, skip_test, TestError, TestErrorKind, TestRunnerState,
 };
 use dashmap::DashMap;
 use revm::{
@@ -33,10 +33,8 @@ use thread_local::ThreadLocal;
 /// How to compile and execute bytecodes in the test suite.
 #[derive(Clone, Copy, Debug, Default)]
 pub enum CompileMode {
-    /// Standard interpreter execution (no compilation).
-    #[default]
-    Interpreter,
     /// JIT-compile all bytecodes before execution.
+    #[default]
     Jit,
     /// AOT-compile all bytecodes to a shared library, then load and execute.
     Aot,
@@ -253,7 +251,6 @@ impl CompileCache {
         match self.mode {
             CompileMode::Jit => self.compile_jit_batch(&claimed, &mut compiled, spec_id)?,
             CompileMode::Aot => self.compile_aot_batch(&claimed, &mut compiled, spec_id)?,
-            CompileMode::Interpreter => unreachable!(),
         }
 
         // Wait for contracts claimed by other threads.
@@ -295,7 +292,6 @@ impl CompileCache {
                 match self.mode {
                     CompileMode::Jit => self.compile_jit_batch(&claimed, &mut compiled, spec_id)?,
                     CompileMode::Aot => self.compile_aot_batch(&claimed, &mut compiled, spec_id)?,
-                    CompileMode::Interpreter => unreachable!(),
                 }
 
                 Ok(compiled.get(&code_hash).unwrap())
@@ -387,7 +383,6 @@ impl CompileCache {
             let label = match self.mode {
                 CompileMode::Jit => "JIT",
                 CompileMode::Aot => "AOT",
-                CompileMode::Interpreter => unreachable!(),
             };
             let rate = hits as f64 / total as f64 * 100.0;
             let n_libs = self.libs.lock().unwrap().len();
@@ -464,7 +459,24 @@ pub fn execute_single_test_compiled(ctx: CompiledTestContext<'_>) -> Result<(), 
         db,
         *ctx.cfg.spec(),
         false,
-    )
+    )?;
+
+    // Compare gas_used with interpreter.
+    if let Ok(compiled_result) = &exec_result {
+        if ctx.test.expect_exception.is_none() {
+            let compiled_gas = compiled_result.gas_used();
+            let interp_gas =
+                interpreter_gas_used(ctx.test, ctx.cfg, ctx.block, ctx.tx, ctx.cache_state);
+            if interp_gas != 0 && compiled_gas != interp_gas {
+                return Err(TestErrorKind::GasUsedMismatch {
+                    compiled_gas,
+                    interpreter_gas: interp_gas,
+                });
+            }
+        }
+    }
+
+    Ok(())
 }
 
 // ── Suite-level execution (compiled) ─────────────────────────────────────────
@@ -558,8 +570,7 @@ fn execute_test_suite_compiled(
 fn run_test_worker(
     state: TestRunnerState,
     keep_going: bool,
-    mode: CompileMode,
-    cache: Option<&CompileCache>,
+    cache: &CompileCache,
 ) -> Result<(), TestError> {
     loop {
         if !keep_going && state.n_errors.load(Ordering::SeqCst) > 0 {
@@ -570,14 +581,7 @@ fn run_test_worker(
             return Ok(());
         };
 
-        let result = match mode {
-            CompileMode::Interpreter => {
-                execute_test_suite(&test_path, &state.elapsed, false, false)
-            }
-            CompileMode::Jit | CompileMode::Aot => {
-                execute_test_suite_compiled(&test_path, &state.elapsed, cache.unwrap())
-            }
-        };
+        let result = execute_test_suite_compiled(&test_path, &state.elapsed, cache);
 
         state.console_bar.inc(1);
 
@@ -601,11 +605,7 @@ pub fn run(
 
     let n_files = test_files.len();
     let state = TestRunnerState::new(test_files);
-
-    let cache = match mode {
-        CompileMode::Interpreter => None,
-        CompileMode::Jit | CompileMode::Aot => Some(Arc::new(CompileCache::new(mode))),
-    };
+    let cache = Arc::new(CompileCache::new(mode));
 
     let num_threads = if single_thread {
         1
@@ -627,7 +627,7 @@ pub fn run(
         let thread = std::thread::Builder::new()
             .name(format!("runner-{i}"))
             .spawn(move || {
-                let result = run_test_worker(state, keep_going, mode, cache.as_deref());
+                let result = run_test_worker(state, keep_going, &cache);
                 // Wait for all threads before exiting. Each thread holds a thread-local
                 // LLVM context that is destroyed on thread exit; concurrent context
                 // disposal crashes LLVM.
@@ -659,9 +659,7 @@ pub fn run(
         state.elapsed.lock().unwrap().as_secs_f64()
     );
 
-    if let Some(cache) = &cache {
-        cache.print_stats();
-    }
+    cache.print_stats();
 
     let n_errors = state.n_errors.load(Ordering::SeqCst);
     let n_thread_errors = thread_errors.len();

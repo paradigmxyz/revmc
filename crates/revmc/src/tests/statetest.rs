@@ -23,11 +23,6 @@ fn run_state_tests(mode: CompileMode) {
 }
 
 #[test]
-fn interpreter() {
-    run_state_tests(CompileMode::Interpreter);
-}
-
-#[test]
 fn jit() {
     run_state_tests(CompileMode::Jit);
 }
