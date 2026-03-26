@@ -21,7 +21,6 @@ pub use linker::Linker;
 #[cfg(feature = "alloy-evm")]
 pub mod alloy_evm;
 
-#[cfg(feature = "alloy-evm")]
 pub mod revm_evm;
 
 pub mod runtime;
@@ -58,6 +57,8 @@ pub use revmc_cranelift as cranelift;
 pub use revm_bytecode;
 #[doc(no_inline)]
 pub use revm_context_interface as context_interface;
+#[doc(no_inline)]
+pub use revm_handler as handler;
 #[doc(no_inline)]
 pub use revm_interpreter::{self as interpreter};
 #[doc(no_inline)]

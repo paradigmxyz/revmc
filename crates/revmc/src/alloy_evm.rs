@@ -3,7 +3,10 @@
 //! Provides [`JitEvm`] and [`JitEvmFactory`] which wrap the standard Ethereum EVM with
 //! JIT-compiled function dispatch via [`JitBackend`].
 
-use crate::runtime::{JitBackend, LookupDecision, LookupRequest};
+use crate::{
+    revm_evm::JitHandler,
+    runtime::{JitBackend, LookupDecision},
+};
 use alloy_evm::{
     Database,
     env::EvmEnv,
@@ -12,19 +15,14 @@ use alloy_evm::{
     precompiles::PrecompilesMap,
 };
 use alloy_primitives::{Address, Bytes};
-use core::marker::PhantomData;
-use revm::{
-    ExecuteEvm, InspectEvm, Inspector, SystemCallEvm,
-    context::{BlockEnv, ContextSetters, Evm as RevmEvm, TxEnv},
-    context_interface::result::{EVMError, HaltReason, ResultAndState},
-    handler::{
-        EthFrame, EvmTr, FrameInitOrResult, FrameResult, Handler, ItemOrResult, PrecompileProvider,
-        instructions::EthInstructions,
-    },
-    inspector::NoOpInspector,
-    interpreter::{InterpreterResult, interpreter::EthInterpreter, interpreter_action::FrameInit},
-    primitives::{B256Map, hardfork::SpecId},
+use revm_context::{BlockEnv, ContextSetters, Evm as RevmEvm, TxEnv};
+use revm_context_interface::result::{EVMError, HaltReason, ResultAndState};
+use revm_handler::{
+    EthFrame, ExecuteEvm, Handler, PrecompileProvider, SystemCallEvm, instructions::EthInstructions,
 };
+use revm_inspector::{InspectEvm, Inspector, NoOpInspector};
+use revm_interpreter::{InterpreterResult, interpreter::EthInterpreter};
+use revm_primitives::{B256Map, hardfork::SpecId};
 
 type InnerEvm<DB, I, P> =
     RevmEvm<EthEvmContext<DB>, I, EthInstructions<EthInterpreter, EthEvmContext<DB>>, P, EthFrame>;
@@ -134,7 +132,8 @@ where
     }
 
     fn finish(self) -> (Self::DB, EvmEnv<Self::Spec>) {
-        let revm::Context { block: block_env, cfg: cfg_env, journaled_state, .. } = self.inner.ctx;
+        let revm_context::Context { block: block_env, cfg: cfg_env, journaled_state, .. } =
+            self.inner.ctx;
         (journaled_state.database, EvmEnv { block_env, cfg_env })
     }
 
@@ -196,107 +195,162 @@ impl EvmFactory for JitEvmFactory {
     }
 }
 
-/// Custom handler that overrides only `run_exec_loop` with JIT dispatch.
-struct JitHandler<'a, DB: Database, I, P> {
-    backend: &'a JitBackend,
-    /// Lookup decision cache borrowed from [`JitEvm`], keyed by `code_hash` alone.
-    /// The `spec_id` is constant within an execution; the caller invalidates on change.
-    lookup_cache: &'a mut B256Map<LookupDecision>,
-    _pd: PhantomData<(DB, I, P)>,
-}
+#[cfg(test)]
+#[cfg(feature = "llvm")]
+mod tests {
+    use super::*;
+    use crate::runtime::{JitBackend, RuntimeConfig};
+    use alloy_evm::{env::EvmEnv, eth::EthEvmFactory};
+    use alloy_primitives::{Address, Bytes, TxKind, U256};
+    use revm_bytecode::opcode as op;
+    use revm_context::TxEnv;
+    use revm_context_interface::result::{ExecutionResult, Output};
+    use revm_database::{CacheDB, EmptyDB};
+    use revm_database_interface::DatabaseCommit;
 
-impl<'a, DB, I, P> JitHandler<'a, DB, I, P>
-where
-    DB: Database,
-    I: Inspector<EthEvmContext<DB>>,
-    P: PrecompileProvider<EthEvmContext<DB>, Output = InterpreterResult>,
-{
-    #[inline]
-    fn new(backend: &'a JitBackend, lookup_cache: &'a mut B256Map<LookupDecision>) -> Self {
-        Self { backend, lookup_cache, _pd: PhantomData }
+    fn blocking_backend() -> JitBackend {
+        JitBackend::start(RuntimeConfig { blocking: true, ..Default::default() }).unwrap()
     }
 
-    #[inline]
-    fn frame_run(
-        &mut self,
-        evm: &mut <Self as Handler>::Evm,
-    ) -> Result<FrameInitOrResult<<<Self as Handler>::Evm as EvmTr>::Frame>, <Self as Handler>::Error>
+    fn deploy_contract<
+        E: alloy_evm::Evm<DB = CacheDB<EmptyDB>, Tx = TxEnv, Error: std::fmt::Debug>,
+    >(
+        evm: &mut E,
+        bytecode: &[u8],
+    ) -> Address
+    where
+        E::HaltReason: std::fmt::Debug,
     {
-        let spec_id = evm.cfg.spec;
-        let frame = evm.frame_stack.get();
-        let code_hash = frame.interpreter.bytecode.get_or_calculate_hash();
+        let len = bytecode.len();
+        assert!(len <= 255);
+        let offset = 10u8;
+        let mut deploy_code = vec![
+            op::PUSH1,
+            len as u8,
+            op::PUSH1,
+            offset,
+            op::PUSH0,
+            op::CODECOPY,
+            op::PUSH1,
+            len as u8,
+            op::PUSH0,
+            op::RETURN,
+        ];
+        deploy_code.extend_from_slice(bytecode);
 
-        // let mut cache_hit = true;
-        let decision = self.lookup_cache.entry(code_hash).or_insert_with(|| {
-            // cache_hit = false;
-            let code = frame.interpreter.bytecode.original_bytes();
-            self.backend.lookup(LookupRequest { code_hash, code, spec_id })
-        });
+        let tx = TxEnv {
+            kind: TxKind::Create,
+            data: Bytes::copy_from_slice(&deploy_code),
+            gas_limit: 1_000_000,
+            ..Default::default()
+        };
 
-        // if cache_hit && matches!(decision, LookupDecision::Interpret(InterpretReason::NotReady))
-        // {     let code = frame.interpreter.bytecode.original_bytes();
-        //     *decision = self.backend.lookup(LookupRequest { code_hash, code, spec_id });
-        // }
-
-        Ok(match decision {
-            LookupDecision::Compiled(program) => {
-                let ctx = &mut evm.ctx;
-                let action =
-                    unsafe { program.func.call_with_interpreter(&mut frame.interpreter, ctx) };
-                frame.process_next_action::<_, <Self as Handler>::Error>(ctx, action).inspect(
-                    |i| {
-                        if i.is_result() {
-                            frame.set_finished(true);
-                        }
-                    },
-                )?
-            }
-            LookupDecision::Interpret(_) => evm.frame_run()?,
-        })
+        let result = evm.transact_raw(tx).unwrap();
+        evm.db_mut().commit(result.state);
+        match result.result {
+            ExecutionResult::Success { output, .. } => match output {
+                Output::Create(_, Some(addr)) => addr,
+                other => panic!("expected Create output, got: {other:?}"),
+            },
+            other => panic!("expected Success, got: {other:?}"),
+        }
     }
-}
 
-impl<DB, I, P> Handler for JitHandler<'_, DB, I, P>
-where
-    DB: Database,
-    I: Inspector<EthEvmContext<DB>>,
-    P: PrecompileProvider<EthEvmContext<DB>, Output = InterpreterResult>,
-{
-    type Evm = InnerEvm<DB, I, P>;
-    type Error = EVMError<DB::Error>;
-    type HaltReason = HaltReason;
+    #[test]
+    fn jit_evm_simple_return() {
+        let backend = blocking_backend();
 
-    #[inline]
-    fn run_exec_loop(
-        &mut self,
-        evm: &mut Self::Evm,
-        first_frame_input: FrameInit,
-    ) -> Result<FrameResult, Self::Error> {
-        let res = evm.frame_init(first_frame_input)?;
+        // PUSH1 0x42 PUSH0 MSTORE PUSH1 0x20 PUSH0 RETURN
+        let runtime_code: &[u8] = &[0x60, 0x42, 0x5f, 0x52, 0x60, 0x20, 0x5f, 0xf3];
 
-        if let ItemOrResult::Result(frame_result) = res {
-            return Ok(frame_result);
-        }
+        let factory = JitEvmFactory::new(backend.clone());
+        let mut evm = factory.create_evm(CacheDB::<EmptyDB>::default(), EvmEnv::default());
+        let contract_addr = deploy_contract(&mut evm, runtime_code);
 
-        loop {
-            let call_or_result = self.frame_run(evm)?;
+        let tx = TxEnv {
+            kind: TxKind::Call(contract_addr),
+            nonce: 1,
+            gas_limit: 1_000_000,
+            ..Default::default()
+        };
 
-            let result = match call_or_result {
-                ItemOrResult::Item(init) => {
-                    match evm.frame_init(init)? {
-                        ItemOrResult::Item(_) => {
-                            continue;
-                        }
-                        // Do not pop the frame since no new frame was created
-                        ItemOrResult::Result(result) => result,
-                    }
-                }
-                ItemOrResult::Result(result) => result,
-            };
-
-            if let Some(result) = evm.frame_return_result(result)? {
-                return Ok(result);
+        let result = evm.transact_raw(tx).unwrap();
+        match result.result {
+            ExecutionResult::Success { output, .. } => {
+                let data = match &output {
+                    Output::Call(bytes) => bytes,
+                    other => panic!("expected Call output, got: {other:?}"),
+                };
+                assert_eq!(U256::from_be_slice(data), U256::from(0x42));
             }
+            other => panic!("expected Success, got: {other:?}"),
         }
+
+        backend.shutdown().unwrap();
+    }
+
+    #[test]
+    fn jit_evm_vs_eth_evm() {
+        let backend = blocking_backend();
+
+        // PUSH1 1 PUSH1 2 ADD PUSH0 MSTORE PUSH1 0x20 PUSH0 RETURN
+        let runtime_code: &[u8] =
+            &[0x60, 0x01, 0x60, 0x02, 0x01, 0x5f, 0x52, 0x60, 0x20, 0x5f, 0xf3];
+
+        // Run via JitEvmFactory.
+        let jit_result = {
+            let factory = JitEvmFactory::new(backend.clone());
+            let mut evm = factory.create_evm(CacheDB::<EmptyDB>::default(), EvmEnv::default());
+            let addr = deploy_contract(&mut evm, runtime_code);
+            evm.transact_raw(TxEnv {
+                kind: TxKind::Call(addr),
+                nonce: 1,
+                gas_limit: 1_000_000,
+                ..Default::default()
+            })
+            .unwrap()
+        };
+
+        // Run via standard EthEvmFactory.
+        let eth_result = {
+            let factory = EthEvmFactory::default();
+            let mut evm = factory.create_evm(CacheDB::<EmptyDB>::default(), EvmEnv::default());
+            let addr = deploy_contract(&mut evm, runtime_code);
+            evm.transact_raw(TxEnv {
+                kind: TxKind::Call(addr),
+                nonce: 1,
+                gas_limit: 1_000_000,
+                ..Default::default()
+            })
+            .unwrap()
+        };
+
+        // Both should produce the same output.
+        assert_eq!(format!("{:?}", jit_result.result), format!("{:?}", eth_result.result),);
+
+        backend.shutdown().unwrap();
+    }
+
+    #[test]
+    fn jit_evm_factory_roundtrip() {
+        let backend = blocking_backend();
+        let factory = JitEvmFactory::new(backend.clone());
+
+        let mut evm = factory.create_evm(CacheDB::<EmptyDB>::default(), EvmEnv::default());
+        assert_eq!(evm.chain_id(), 1);
+
+        let tx = TxEnv {
+            kind: TxKind::Call(Address::with_last_byte(0xDD)),
+            gas_limit: 1_000_000,
+            ..Default::default()
+        };
+        let result = evm.transact_raw(tx).unwrap();
+        assert!(
+            matches!(result.result, ExecutionResult::Success { .. }),
+            "expected Success, got: {:?}",
+            result.result,
+        );
+
+        backend.shutdown().unwrap();
     }
 }
