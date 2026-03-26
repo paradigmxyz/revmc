@@ -937,6 +937,11 @@ pub struct JITDylibRef {
 }
 
 impl JITDylibRef {
+    /// Creates a dangling reference. Must not be used for any ORC operations.
+    pub(crate) fn dangling() -> Self {
+        Self { dylib: NonNull::dangling() }
+    }
+
     /// Wraps a raw pointer.
     pub unsafe fn from_inner(dylib: LLVMOrcJITDylibRef) -> Option<Self> {
         NonNull::new(dylib).map(|dylib| Self { dylib })
@@ -1437,6 +1442,9 @@ impl LLJIT {
 // All session operations are internally synchronized.
 unsafe impl Send for LLJIT {}
 unsafe impl Sync for LLJIT {}
+
+// SAFETY: JITDylibRef is a non-owning handle into a thread-safe ExecutionSession.
+unsafe impl Send for JITDylibRef {}
 
 impl Drop for LLJIT {
     fn drop(&mut self) {

@@ -102,10 +102,12 @@ pub struct EvmLlvmBackend {
 /// Process-global shared LLJIT instance.
 ///
 /// ORC/LLJIT is thread-safe and designed to be shared. Individual compilers get
-/// their own [`JITDylib`](orc::JITDylibRef) for symbol isolation.
+/// their own [`JITDylib`](orc::JITDylibRef) for symbol isolation, recycled via a pool.
 struct GlobalOrcJit {
     jit: orc::LLJIT,
     next_dylib_id: AtomicU64,
+    /// Pool of cleared JITDylibs ready for reuse.
+    pool: std::sync::Mutex<Vec<orc::JITDylibRef>>,
 }
 
 impl GlobalOrcJit {
@@ -115,12 +117,42 @@ impl GlobalOrcJit {
             init().map_err(|e| e.to_string())?;
             let jit = orc::LLJIT::new().map_err(|e| e.to_string())?;
             jit.get_execution_session().set_default_error_reporter();
-            Ok(Self { jit, next_dylib_id: AtomicU64::new(0) })
+            Ok(Self {
+                jit,
+                next_dylib_id: AtomicU64::new(0),
+                pool: std::sync::Mutex::new(Vec::new()),
+            })
         });
         match result {
             Ok(g) => Ok(g),
             Err(e) => Err(eyre::eyre!("{e}")),
         }
+    }
+
+    /// Acquires a JITDylib from the pool, or creates a new one.
+    fn acquire_jit_dylib(&self) -> orc::JITDylibRef {
+        if let Some(jd) = self.pool.lock().unwrap().pop() {
+            return jd;
+        }
+        let id = self.next_dylib_id.fetch_add(1, Ordering::Relaxed);
+        let name = CString::new(format!("revmc.compiler.{id}")).unwrap();
+        let jd = self.jit.get_execution_session().create_bare_jit_dylib(&name);
+        // Attach a process symbol generator so the JITDylib can resolve libc and other
+        // process-level symbols (e.g. printf, memcpy) that JIT-compiled code may reference.
+        let prefix = self.jit.get_global_prefix();
+        if let Ok(generator) = orc::DefinitionGenerator::for_current_process(prefix) {
+            jd.add_generator(generator);
+        }
+        jd
+    }
+
+    /// Returns a cleared JITDylib to the pool for reuse.
+    fn release_jit_dylib(&self, jd: orc::JITDylibRef) {
+        if let Err(e) = jd.clear() {
+            error!("failed to clear JITDylib for pool: {e}");
+            return;
+        }
+        self.pool.lock().unwrap().push(jd);
     }
 }
 
@@ -160,15 +192,7 @@ impl fmt::Debug for OrcJitState {
 impl OrcJitState {
     fn new() -> Result<Self> {
         let g = GlobalOrcJit::get()?;
-        let id = g.next_dylib_id.fetch_add(1, Ordering::Relaxed);
-        let name = CString::new(format!("revmc.compiler.{id}")).unwrap();
-        let jd = g.jit.get_execution_session().create_bare_jit_dylib(&name);
-        // Attach a process symbol generator so the JITDylib can resolve libc and other
-        // process-level symbols (e.g. printf, memcpy) that JIT-compiled code may reference.
-        let prefix = g.jit.get_global_prefix();
-        if let Ok(generator) = orc::DefinitionGenerator::for_current_process(prefix) {
-            jd.add_generator(generator);
-        }
+        let jd = g.acquire_jit_dylib();
         Ok(Self {
             staged_functions: FxHashMap::default(),
             registered_symbols: FxHashSet::default(),
@@ -193,10 +217,9 @@ impl OrcJitState {
 
 impl Drop for OrcJitState {
     fn drop(&mut self) {
-        if let Ok(g) = GlobalOrcJit::get()
-            && let Err(e) = g.jit.get_execution_session().remove_jit_dylib(&self.jd)
-        {
-            error!("failed to remove JITDylib on drop: {e}");
+        if let Ok(g) = GlobalOrcJit::get() {
+            let jd = std::mem::replace(&mut self.jd, orc::JITDylibRef::dangling());
+            g.release_jit_dylib(jd);
         }
     }
 }
