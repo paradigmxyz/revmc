@@ -1596,10 +1596,6 @@ fn create_lljit(
 
     jit.get_execution_session().set_default_error_reporter();
 
-    // let generator =
-    //     orc::DefinitionGenerator::for_current_process(jit.get_global_prefix()).
-    // map_err(error_msg)?; jit.get_main_jit_dylib().add_generator(generator);
-
     Ok(jit)
 }
 
