@@ -166,6 +166,13 @@ impl GlobalOrcJit {
             jit.get_execution_session().set_default_error_reporter();
             jit.get_obj_transform_layer().set_transform(obj_capture_transform);
 
+            // Register JIT debug info with GDB/perf via the GDB JIT Interface.
+            // This makes JIT-compiled function names and source locations visible in
+            // profilers and debuggers when debug info is emitted.
+            if let Err(e) = jit.enable_debug_support() {
+                warn!("failed to enable JIT debug support: {e}");
+            }
+
             let builtins_jd = jit.get_execution_session().create_bare_jit_dylib(c"revmc.builtins");
 
             Ok(Self {
