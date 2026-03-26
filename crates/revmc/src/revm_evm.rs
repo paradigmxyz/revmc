@@ -18,7 +18,7 @@ use revm_context_interface::{
 use revm_database_interface::DatabaseCommit;
 use revm_handler::{
     EthFrame, EvmTr, EvmTrError, ExecuteCommitEvm, ExecuteEvm, FrameInitOrResult, FrameResult,
-    Handler, ItemOrResult, PrecompileProvider,
+    FrameTr, Handler, ItemOrResult, PrecompileProvider, evm::ContextDbError,
 };
 use revm_interpreter::{InterpreterResult, interpreter_action::FrameInit};
 use revm_primitives::{B256Map, hardfork::SpecId};
@@ -96,6 +96,95 @@ impl<EVM> core::ops::DerefMut for JitEvm<EVM> {
     #[inline]
     fn deref_mut(&mut self) -> &mut EVM {
         &mut self.inner
+    }
+}
+
+impl<EVM> EvmTr for JitEvm<EVM>
+where
+    EVM: EvmTr<
+            Frame = EthFrame,
+            Context: ContextTr<Journal: JournalTr, Local: LocalContextTr>,
+            Precompiles: PrecompileProvider<EVM::Context, Output = InterpreterResult>,
+        >,
+    <EVM::Context as ContextTr>::Cfg: Cfg<Spec: Into<SpecId>>,
+{
+    type Context = EVM::Context;
+    type Instructions = EVM::Instructions;
+    type Precompiles = EVM::Precompiles;
+    type Frame = EVM::Frame;
+
+    #[inline]
+    fn all(
+        &self,
+    ) -> (
+        &Self::Context,
+        &Self::Instructions,
+        &Self::Precompiles,
+        &revm_context_interface::FrameStack<Self::Frame>,
+    ) {
+        self.inner.all()
+    }
+
+    #[inline]
+    fn all_mut(
+        &mut self,
+    ) -> (
+        &mut Self::Context,
+        &mut Self::Instructions,
+        &mut Self::Precompiles,
+        &mut revm_context_interface::FrameStack<Self::Frame>,
+    ) {
+        self.inner.all_mut()
+    }
+
+    #[inline]
+    fn frame_init(
+        &mut self,
+        frame_input: <Self::Frame as FrameTr>::FrameInit,
+    ) -> Result<
+        ItemOrResult<&mut Self::Frame, <Self::Frame as FrameTr>::FrameResult>,
+        ContextDbError<Self::Context>,
+    > {
+        self.inner.frame_init(frame_input)
+    }
+
+    #[inline]
+    fn frame_run(
+        &mut self,
+    ) -> Result<FrameInitOrResult<Self::Frame>, ContextDbError<Self::Context>> {
+        let spec_id: SpecId = self.inner.ctx_ref().cfg().spec().into();
+        let frame = self.inner.frame_stack().get();
+        let code_hash = frame.interpreter.bytecode.get_or_calculate_hash();
+
+        let decision = self.lookup_cache.entry(code_hash).or_insert_with(|| {
+            let code = frame.interpreter.bytecode.original_bytes();
+            self.backend.lookup(LookupRequest { code_hash, code, spec_id })
+        });
+
+        Ok(match decision {
+            LookupDecision::Compiled(program) => {
+                let (ctx, _, _, frame_stack) = self.inner.all_mut();
+                let frame = frame_stack.get();
+                let action =
+                    unsafe { program.func.call_with_interpreter(&mut frame.interpreter, ctx) };
+                frame.process_next_action::<_, ContextDbError<Self::Context>>(ctx, action).inspect(
+                    |i| {
+                        if i.is_result() {
+                            frame.set_finished(true);
+                        }
+                    },
+                )?
+            }
+            LookupDecision::Interpret(_) => self.inner.frame_run()?,
+        })
+    }
+
+    #[inline]
+    fn frame_return_result(
+        &mut self,
+        result: <Self::Frame as FrameTr>::FrameResult,
+    ) -> Result<Option<<Self::Frame as FrameTr>::FrameResult>, ContextDbError<Self::Context>> {
+        self.inner.frame_return_result(result)
     }
 }
 
