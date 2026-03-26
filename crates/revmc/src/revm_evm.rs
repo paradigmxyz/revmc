@@ -13,7 +13,6 @@ use core::marker::PhantomData;
 use revm_context_interface::{
     Cfg, ContextSetters, ContextTr, Database,
     journaled_state::JournalTr,
-    local::LocalContextTr,
     result::{EVMError, HaltReason, InvalidTransaction, ResultAndState},
 };
 use revm_database_interface::DatabaseCommit;
@@ -23,8 +22,8 @@ use revm_handler::{
     SystemCallEvm, SystemCallTx, evm::ContextDbError,
 };
 use revm_inspector::{
-    InspectCommitEvm, InspectEvm, InspectSystemCallEvm, Inspector, InspectorEvmTr,
-    InspectorHandler, JournalExt,
+    InspectCommitEvm, InspectEvm, InspectSystemCallEvm, InspectorEvmTr, InspectorHandler,
+    JournalExt,
 };
 use revm_interpreter::{InterpreterResult, interpreter_action::FrameInit};
 use revm_primitives::{B256Map, hardfork::SpecId};
@@ -51,7 +50,6 @@ pub struct JitEvm<EVM> {
 impl<EVM: EvmTr> JitEvm<EVM>
 where
     EVM::Context: ContextTr,
-    <EVM::Context as ContextTr>::Cfg: Cfg<Spec: Into<SpecId>>,
 {
     /// Creates a new JIT EVM from an inner EVM and backend.
     pub fn new(inner: EVM, backend: JitBackend) -> Self {
@@ -109,10 +107,8 @@ impl<EVM> EvmTr for JitEvm<EVM>
 where
     EVM: EvmTr<
             Frame = EthFrame,
-            Context: ContextTr<Journal: JournalTr, Local: LocalContextTr>,
             Precompiles: PrecompileProvider<EVM::Context, Output = InterpreterResult>,
         >,
-    <EVM::Context as ContextTr>::Cfg: Cfg<Spec: Into<SpecId>>,
 {
     type Context = EVM::Context;
     type Instructions = EVM::Instructions;
@@ -198,11 +194,9 @@ impl<EVM> ExecuteEvm for JitEvm<EVM>
 where
     EVM: EvmTr<
             Frame = EthFrame,
-            Context: ContextTr<Journal: JournalTr<State = EvmState>, Local: LocalContextTr>
-                         + ContextSetters,
+            Context: ContextTr<Journal: JournalTr<State = EvmState>> + ContextSetters,
             Precompiles: PrecompileProvider<EVM::Context, Output = InterpreterResult>,
         >,
-    <EVM::Context as ContextTr>::Cfg: Cfg<Spec: Into<SpecId>>,
 {
     type ExecutionResult = revm_context_interface::result::ExecutionResult<HaltReason>;
     type State = EvmState;
@@ -252,14 +246,10 @@ impl<EVM> SystemCallEvm for JitEvm<EVM>
 where
     EVM: EvmTr<
             Frame = EthFrame,
-            Context: ContextTr<
-                Journal: JournalTr<State = EvmState>,
-                Local: LocalContextTr,
-                Tx: SystemCallTx,
-            > + ContextSetters,
+            Context: ContextTr<Journal: JournalTr<State = EvmState>, Tx: SystemCallTx>
+                         + ContextSetters,
             Precompiles: PrecompileProvider<EVM::Context, Output = InterpreterResult>,
         >,
-    <EVM::Context as ContextTr>::Cfg: Cfg<Spec: Into<SpecId>>,
 {
     #[inline]
     fn system_call_one_with_caller(
@@ -302,10 +292,8 @@ impl<EVM> InspectorEvmTr for JitEvm<EVM>
 where
     EVM: EvmTr<
             Frame = EthFrame,
-            Context: ContextTr<Journal: JournalTr + JournalExt, Local: LocalContextTr>,
             Precompiles: PrecompileProvider<EVM::Context, Output = InterpreterResult>,
-        > + InspectorEvmTr<Inspector: Inspector<EVM::Context>>,
-    <EVM::Context as ContextTr>::Cfg: Cfg<Spec: Into<SpecId>>,
+        > + InspectorEvmTr,
 {
     type Inspector = <EVM as InspectorEvmTr>::Inspector;
 
@@ -340,13 +328,9 @@ impl<EVM> InspectEvm for JitEvm<EVM>
 where
     EVM: EvmTr<
             Frame = EthFrame,
-            Context: ContextTr<
-                Journal: JournalTr<State = EvmState> + JournalExt,
-                Local: LocalContextTr,
-            > + ContextSetters,
+            Context: ContextTr<Journal: JournalTr<State = EvmState> + JournalExt> + ContextSetters,
             Precompiles: PrecompileProvider<EVM::Context, Output = InterpreterResult>,
-        > + InspectorEvmTr<Inspector: Inspector<EVM::Context>>,
-    <EVM::Context as ContextTr>::Cfg: Cfg<Spec: Into<SpecId>>,
+        > + InspectorEvmTr,
 {
     type Inspector = <EVM as InspectorEvmTr>::Inspector;
 
@@ -369,14 +353,10 @@ impl<EVM> InspectSystemCallEvm for JitEvm<EVM>
 where
     EVM: EvmTr<
             Frame = EthFrame,
-            Context: ContextTr<
-                Journal: JournalTr<State = EvmState> + JournalExt,
-                Local: LocalContextTr,
-                Tx: SystemCallTx,
-            > + ContextSetters,
+            Context: ContextTr<Journal: JournalTr<State = EvmState> + JournalExt, Tx: SystemCallTx>
+                         + ContextSetters,
             Precompiles: PrecompileProvider<EVM::Context, Output = InterpreterResult>,
-        > + InspectorEvmTr<Inspector: Inspector<EVM::Context>>,
-    <EVM::Context as ContextTr>::Cfg: Cfg<Spec: Into<SpecId>>,
+        > + InspectorEvmTr,
 {
     #[inline]
     fn inspect_one_system_call_with_caller(
@@ -426,10 +406,8 @@ impl<EVM, ERROR> JitHandler<'_, EVM, ERROR>
 where
     EVM: EvmTr<
             Frame = EthFrame,
-            Context: ContextTr<Journal: JournalTr, Local: LocalContextTr>,
             Precompiles: PrecompileProvider<EVM::Context, Output = InterpreterResult>,
         >,
-    <EVM::Context as ContextTr>::Cfg: Cfg<Spec: Into<SpecId>>,
     ERROR: EvmTrError<EVM>,
 {
     #[inline]
@@ -464,10 +442,8 @@ impl<EVM, ERROR> Handler for JitHandler<'_, EVM, ERROR>
 where
     EVM: EvmTr<
             Frame = EthFrame,
-            Context: ContextTr<Journal: JournalTr, Local: LocalContextTr>,
             Precompiles: PrecompileProvider<EVM::Context, Output = InterpreterResult>,
         >,
-    <EVM::Context as ContextTr>::Cfg: Cfg<Spec: Into<SpecId>>,
     ERROR: EvmTrError<EVM>,
 {
     type Evm = EVM;
