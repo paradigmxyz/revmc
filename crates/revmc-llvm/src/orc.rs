@@ -15,7 +15,7 @@
 
 use crate::llvm_string;
 use inkwell::{
-    context::{Context, ContextRef},
+    context::Context,
     llvm_sys::{
         core::{LLVMContextCreate, LLVMModuleCreateWithNameInContext},
         error::*,
@@ -50,6 +50,12 @@ pub struct ThreadSafeContext {
     ctx: LLVMOrcThreadSafeContextRef,
 }
 
+impl fmt::Debug for ThreadSafeContext {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ThreadSafeContext").finish_non_exhaustive()
+    }
+}
+
 impl ThreadSafeContext {
     /// Creates a new thread-safe context.
     pub fn new() -> Self {
@@ -70,11 +76,6 @@ impl ThreadSafeContext {
     /// Unwraps the raw pointer.
     pub fn as_inner(&self) -> LLVMOrcThreadSafeContextRef {
         self.ctx
-    }
-
-    /// Returns the underlying LLVM context.
-    pub fn get_context(&self) -> ContextRef<'_> {
-        unsafe { ContextRef::new(LLVMOrcThreadSafeContextGetContext(self.ctx)) }
     }
 
     /// Create a ThreadSafeModule wrapper around the given LLVM module.
@@ -777,6 +778,12 @@ pub struct ResourceTracker {
     rt: LLVMOrcResourceTrackerRef,
 }
 
+impl fmt::Debug for ResourceTracker {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ResourceTracker").finish_non_exhaustive()
+    }
+}
+
 impl ResourceTracker {
     /// Wraps a raw pointer.
     pub unsafe fn from_inner(rt: LLVMOrcResourceTrackerRef) -> Self {
@@ -947,7 +954,9 @@ impl JITDylibRef {
         // If this operation succeeds then JITDylib JD will take ownership of MU.
         // If the operation fails then ownership remains with the caller who should call
         // LLVMOrcDisposeMaterializationUnit to destroy it.
-        cvt(unsafe { LLVMOrcJITDylibDefine(self.as_inner(), mu.as_inner()) }).map_err(|e| (e, mu))
+        let mu = mem::ManuallyDrop::new(mu);
+        cvt(unsafe { LLVMOrcJITDylibDefine(self.as_inner(), mu.as_inner()) })
+            .map_err(|e| (e, mem::ManuallyDrop::into_inner(mu)))
     }
 
     /// Calls remove on all trackers associated with this JITDylib.
@@ -1264,6 +1273,12 @@ pub struct LLJIT {
     jit: LLVMOrcLLJITRef,
 }
 
+impl fmt::Debug for LLJIT {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LLJIT").finish_non_exhaustive()
+    }
+}
+
 impl LLJIT {
     /// Creates a new LLJIT builder.
     pub fn builder() -> LLJITBuilder {
@@ -1327,11 +1342,11 @@ impl LLJIT {
     pub fn add_module_with_rt(
         &self,
         tsm: ThreadSafeModule,
-        jd: ResourceTracker,
+        rt: &ResourceTracker,
     ) -> Result<(), LLVMString> {
         let tsm = mem::ManuallyDrop::new(tsm);
         cvt(unsafe {
-            LLVMOrcLLJITAddLLVMIRModuleWithRT(self.as_inner(), jd.as_inner(), tsm.as_inner())
+            LLVMOrcLLJITAddLLVMIRModuleWithRT(self.as_inner(), rt.as_inner(), tsm.as_inner())
         })
     }
 
@@ -1554,6 +1569,109 @@ impl<T> Drop for ManuallyDropElements<T> {
 mod tests {
     use super::*;
     use inkwell::{passes::PassBuilderOptions, targets::Target};
+
+    #[test]
+    fn e2e_with_tsc() {
+        use std::mem::ManuallyDrop;
+
+        Target::initialize_native(&Default::default()).unwrap();
+        let triple = TargetMachine::get_default_triple();
+        let cpu = TargetMachine::get_host_cpu_name();
+        let features = TargetMachine::get_host_cpu_features();
+        let target = Target::from_triple(&triple).unwrap();
+
+        let cx = Context::create();
+        let raw = cx.raw();
+        let tscx = ThreadSafeContext::from_context(cx);
+        let cx_handle = Box::new(ManuallyDrop::new(unsafe { Context::new(raw) }));
+        let cx: &Context = unsafe { &*(&**cx_handle as *const Context) };
+
+        let machine = target
+            .create_target_machine(
+                &triple,
+                &cpu.to_string_lossy(),
+                &features.to_string_lossy(),
+                inkwell::OptimizationLevel::None,
+                inkwell::targets::RelocMode::Static,
+                inkwell::targets::CodeModel::JITDefault,
+            )
+            .unwrap();
+
+        let jit_tm = target
+            .create_target_machine(
+                &triple,
+                &cpu.to_string_lossy(),
+                &features.to_string_lossy(),
+                inkwell::OptimizationLevel::None,
+                inkwell::targets::RelocMode::Static,
+                inkwell::targets::CodeModel::JITDefault,
+            )
+            .unwrap();
+
+        let jit = LLJITBuilder::new().build().unwrap();
+
+        // Build module.
+        let m = cx.create_module("test");
+        m.set_data_layout(&machine.get_target_data().get_data_layout());
+        m.set_triple(&triple);
+
+        let fn_name = "my_fn";
+        let bcx = cx.create_builder();
+
+        // Add an unused external declaration and register absolute symbol.
+        extern "C" fn my_external(x: i64) -> i64 {
+            x + 100
+        }
+        let ext_ty = cx.i64_type().fn_type(&[cx.i64_type().into()], false);
+        let _ext_fn =
+            m.add_function("my_external", ext_ty, Some(inkwell::module::Linkage::External));
+        let ext_name = CString::new("my_external").unwrap();
+        let sym = crate::orc::SymbolMapPair::new(
+            jit.mangle_and_intern(&ext_name),
+            crate::orc::EvaluatedSymbol::new(
+                my_external as *const () as u64,
+                crate::orc::SymbolFlags::none().with_exported().callable(),
+            ),
+        );
+        jit.get_main_jit_dylib()
+            .define(crate::orc::MaterializationUnit::absolute_symbols(vec![sym]))
+            .map_err(|(e, _)| e)
+            .unwrap();
+
+        let ty = cx.i64_type().fn_type(&[], false);
+        let f = m.add_function(fn_name, ty, Some(inkwell::module::Linkage::External));
+        let bb = cx.append_basic_block(f, "entry");
+        bcx.position_at_end(bb);
+        bcx.build_return(Some(&cx.i64_type().const_int(142, false))).unwrap();
+
+        eprintln!("module:\n{}", m.print_to_string().to_string_lossy());
+        m.verify().unwrap();
+
+        // Wrap and add to JIT.
+        let tsm = tscx.create_module(m);
+        jit.add_module(tsm).unwrap();
+
+        // Lookup.
+        let address = jit.lookup(&CString::new(fn_name).unwrap()).unwrap();
+        eprintln!("address: {address:#x}");
+        // Check the first few bytes at the address to see if it's valid code.
+        let code = unsafe { std::slice::from_raw_parts(address as *const u8, 16) };
+        eprintln!("code bytes: {:02x?}", code);
+        let f = unsafe { std::mem::transmute::<usize, extern "C" fn() -> u64>(address) };
+        eprintln!("about to call...");
+        let r = f();
+        eprintln!("result: {r}");
+        assert_eq!(r, 142);
+        eprintln!("dropping jit...");
+        drop(jit);
+        eprintln!("dropping machine...");
+        drop(machine);
+        eprintln!("dropping cx_handle...");
+        drop(cx_handle);
+        eprintln!("dropping tscx...");
+        drop(tscx);
+        eprintln!("all dropped, test done");
+    }
 
     #[test]
     #[ignore = "ci fails idk"]
