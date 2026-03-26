@@ -571,11 +571,7 @@ impl EvmLlvmBackend {
         let tracker = orc.jd().create_resource_tracker();
 
         let tsm = create_thread_safe_module(tscx, old_module);
-        let mut captured = None;
-        let _guard = ScopedObjCapture::install(&mut captured);
         orc.global.jit.add_module_with_rt(tsm, &tracker).map_err(error_msg)?;
-        drop(_guard);
-        orc.last_compiled_object = captured;
 
         let tracker_idx = orc.loaded_trackers.len();
         for &id in orc.staged_functions.keys() {
@@ -804,8 +800,17 @@ impl Backend for EvmLlvmBackend {
         self.commit_staged_module()?;
         let name_str = self.id_to_name(id);
         let name = CString::new(name_str).unwrap();
-        let orc = self.orc();
+        let orc = self.orc.as_mut().expect("missing ORC JIT state");
+        // Capture the compiled object buffer during lookup. LLJIT compiles lazily:
+        // add_module_with_rt just registers the module, actual compilation happens
+        // in lookup_in when the symbol is first requested.
+        let mut captured = None;
+        let _guard = ScopedObjCapture::install(&mut captured);
         let addr = orc.global.jit.lookup_in(orc.jd(), &name).map_err(error_msg)?;
+        drop(_guard);
+        if captured.is_some() {
+            orc.last_compiled_object = captured;
+        }
         Ok(addr)
     }
 
