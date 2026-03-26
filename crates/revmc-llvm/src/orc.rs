@@ -933,11 +933,6 @@ pub struct JITDylibRef {
 }
 
 impl JITDylibRef {
-    /// Creates a dangling reference. Must not be used for any ORC operations.
-    pub(crate) fn dangling() -> Self {
-        Self { dylib: NonNull::dangling() }
-    }
-
     /// Wraps a raw pointer.
     pub unsafe fn from_inner(dylib: LLVMOrcJITDylibRef) -> Option<Self> {
         NonNull::new(dylib).map(|dylib| Self { dylib })
@@ -1326,13 +1321,8 @@ impl LLJIT {
         LLJITBuilder::new()
     }
 
-    /// Creates a new ORC JIT with a target machine for the host.
+    /// Creates a new ORC JIT, auto-detecting the host target.
     pub fn new() -> Result<Self, LLVMString> {
-        LLJITBuilder::new().set_target_machine_from_host()?.build()
-    }
-
-    /// Creates a new default ORC JIT.
-    pub fn new_empty() -> Result<Self, LLVMString> {
         LLJITBuilder::new().build()
     }
 
@@ -1873,7 +1863,7 @@ mod tests {
         })
         .unwrap();
 
-        let jit = LLJIT::new_empty().unwrap();
+        let jit = LLJIT::new().unwrap();
         jit.add_module(tsm).unwrap();
         let address = jit.lookup(&CString::new(fn_name).unwrap()).unwrap();
         eprintln!("address: {address:#x}");
