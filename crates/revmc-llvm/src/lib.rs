@@ -821,6 +821,10 @@ impl Backend for EvmLlvmBackend {
         Ok(addr)
     }
 
+    fn function_name(&self, id: Self::FuncId) -> Option<&str> {
+        self.function_names.get(&id).map(|s| s.as_str())
+    }
+
     fn function_sizes(&self) -> Vec<(String, usize)> {
         let Some(orc) = &self.orc else { return Vec::new() };
         let Some(data) = orc.last_compiled_object.as_deref() else { return Vec::new() };

@@ -265,6 +265,10 @@ impl Backend for EvmCraneliftBackend {
         self.module.get_finalized_function(id).map(|ptr| ptr as usize)
     }
 
+    fn function_name(&self, id: Self::FuncId) -> Option<&str> {
+        self.module.get().declarations().get_function_decl(id).name.as_deref()
+    }
+
     fn clear_ir(&mut self) -> Result<()> {
         self.module.get().clear_context(&mut self.ctx);
         self.comments.clear();
