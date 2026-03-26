@@ -500,25 +500,59 @@ impl Backend for EvmLlvmBackend {
             OptimizationLevel::None => "default<O0>",
             OptimizationLevel::Less
             | OptimizationLevel::Default
-            | OptimizationLevel::Aggressive => concat!(
-                "function(",
-                "simplifycfg,",
-                "sroa,",
-                "early-cse,",
-                "jump-threading,",
-                "correlated-propagation,",
-                "simplifycfg,",
-                "instcombine<no-verify-fixpoint>,",
-                "sroa,",
-                "early-cse,",
-                "sccp,",
-                "instcombine<no-verify-fixpoint>,",
-                "adce,",
-                "dse,",
-                "simplifycfg",
-                "),",
-                "globaldce",
-            ),
+            | OptimizationLevel::Aggressive => {
+                // LICM (Loop Invariant Code Motion) helps tight EVM loops by hoisting
+                // gas counter and stack slot loads/stores into registers. However, the
+                // loop analysis infrastructure (MemorySSA, LoopInfo) is quadratic on
+                // functions with thousands of basic blocks — e.g. +430ms on snailtracer
+                // (7770 BBs) vs +0ms on fibonacci (45 BBs). We skip it for large functions.
+                let max_bbs: u32 =
+                    self.module.get_functions().map(|f| f.count_basic_blocks()).sum();
+                if max_bbs > 4000 {
+                    concat!(
+                        "function(",
+                        "simplifycfg,",
+                        "sroa,",
+                        "early-cse,",
+                        "jump-threading,",
+                        "correlated-propagation,",
+                        "simplifycfg,",
+                        "instcombine<no-verify-fixpoint>,",
+                        "sroa,",
+                        "early-cse,",
+                        "sccp,",
+                        "instcombine<no-verify-fixpoint>,",
+                        "adce,",
+                        "dse,",
+                        "simplifycfg",
+                        "),",
+                        "globaldce",
+                    )
+                } else {
+                    concat!(
+                        "function(",
+                        "simplifycfg,",
+                        "sroa,",
+                        "early-cse,",
+                        "jump-threading,",
+                        "correlated-propagation,",
+                        "simplifycfg,",
+                        "instcombine<no-verify-fixpoint>,",
+                        "loop-mssa(licm,loop-rotate,licm),",
+                        "simplifycfg,",
+                        "instcombine<no-verify-fixpoint>,",
+                        "sroa,",
+                        "early-cse,",
+                        "sccp,",
+                        "instcombine<no-verify-fixpoint>,",
+                        "adce,",
+                        "dse,",
+                        "simplifycfg",
+                        "),",
+                        "globaldce",
+                    )
+                }
+            }
         });
         let opts = PassBuilderOptions::create();
         self.module.run_passes(passes, &self.machine, opts).map_err(error_msg)
