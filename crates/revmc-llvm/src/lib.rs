@@ -61,7 +61,7 @@ pub struct EvmLlvmBackend {
     cx: &'static Context,
     _dh: dh::DiagnosticHandlerGuard,
     bcx: inkwell::builder::Builder<'static>,
-    module: Option<Module<'static>>,
+    module: Module<'static>,
     machine: TargetMachine,
 
     /// ORC JIT state. `None` in AOT mode.
@@ -249,7 +249,7 @@ impl EvmLlvmBackend {
             (cx, Some(tscx), Some(cx_handle), Some(orc))
         };
 
-        let module = Some(create_module(cx, &machine, aot)?);
+        let module = create_module(cx, &machine, aot)?;
         let bcx = cx.create_builder();
 
         let ty_void = cx.void_type();
@@ -297,7 +297,7 @@ impl EvmLlvmBackend {
 
     #[inline]
     fn module(&self) -> &Module<'static> {
-        self.module.as_ref().unwrap()
+        &self.module
     }
 
     fn orc(&self) -> &OrcJitState {
@@ -405,13 +405,12 @@ impl EvmLlvmBackend {
     fn reset_jit(&mut self) -> Result<()> {
         self.function_names.clear();
         self.di_state = None;
-        self.module = None;
 
         if let Some(orc) = &mut self.orc {
             orc.clear()?;
         }
 
-        self.module = Some(create_module(self.cx, &self.machine, self.aot)?);
+        self.module = create_module(self.cx, &self.machine, self.aot)?;
 
         Ok(())
     }
@@ -646,7 +645,7 @@ impl Backend for EvmLlvmBackend {
 
     fn clear_ir(&mut self) -> Result<()> {
         self.di_state = None;
-        self.module = Some(create_module(self.cx, &self.machine, self.aot)?);
+        self.module = create_module(self.cx, &self.machine, self.aot)?;
         if let Some(orc) = &mut self.orc {
             orc.staged_functions.clear();
         }
@@ -1580,10 +1579,8 @@ fn commit_module_to_jit(backend: *mut EvmLlvmBackend) -> Result<()> {
     // (the context lives in the ThreadSafeContext). We go through a raw pointer to avoid
     // lifetime shortening.
     unsafe {
-        let old_module = (*backend).module.take().expect("missing staging module");
-
-        (*backend).module =
-            Some(create_module((*backend).cx, &(*backend).machine, (*backend).aot)?);
+        let new_module = create_module((*backend).cx, &(*backend).machine, (*backend).aot)?;
+        let old_module = std::mem::replace(&mut (*backend).module, new_module);
 
         let tscx = (*backend)._tscx.as_ref().expect("missing ThreadSafeContext");
         let orc = (*backend).orc.as_mut().expect("missing ORC JIT state");
