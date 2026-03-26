@@ -6,8 +6,6 @@
 extern crate tracing;
 
 use alloy_primitives::map::{FxBuildHasher, HashSet};
-
-type FxHashMap<K, V> = alloy_primitives::map::HashMap<K, V, FxBuildHasher>;
 use inkwell::{
     AddressSpace, IntPredicate, OptimizationLevel,
     attributes::{Attribute, AttributeLoc},
@@ -59,6 +57,8 @@ mod utils;
 pub(crate) use utils::*;
 
 const DEFAULT_WEIGHT: u32 = 20000;
+
+type FxHashMap<K, V> = alloy_primitives::map::HashMap<K, V, FxBuildHasher>;
 
 /// The LLVM-based EVM bytecode compiler backend.
 #[derive(Debug)]
