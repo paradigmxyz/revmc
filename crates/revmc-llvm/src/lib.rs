@@ -397,7 +397,19 @@ impl EvmLlvmBackend {
         self.orc_mut().staged_functions.clear();
         self.di_state = None;
 
-        commit_module_to_jit(self as *mut _)
+        let new_module = create_module(self.cx, &self.machine, self.aot)?;
+        let old_module = std::mem::replace(&mut self.module, new_module);
+
+        let tscx = self._tscx.as_ref().expect("missing ThreadSafeContext");
+        let orc = self.orc.as_mut().expect("missing ORC JIT state");
+        let jd = orc.jit.get_main_jit_dylib();
+        let tracker = jd.create_resource_tracker();
+
+        let tsm = create_thread_safe_module(tscx, old_module);
+        orc.jit.add_module_with_rt(tsm, &tracker).map_err(error_msg)?;
+
+        orc.loaded_trackers.push(tracker);
+        Ok(())
     }
 
     /// Drops and recreates the LLJIT, freeing all JIT-compiled code.
@@ -1567,33 +1579,6 @@ fn create_module<'ctx>(
         );
     }
     Ok(module)
-}
-
-/// Commits the staging module from an `EvmLlvmBackend` to LLJIT.
-///
-/// This function uses raw pointers internally because `Module<'ctx>` is invariant over `'ctx`.
-/// Even simple operations like `.take()` on an `Option<Module<'static>>` fail when accessed
-/// through a non-`'static` mutable borrow of the containing struct.
-fn commit_module_to_jit(backend: *mut EvmLlvmBackend) -> Result<()> {
-    // SAFETY: The caller guarantees the pointer is valid. The module is genuinely 'static
-    // (the context lives in the ThreadSafeContext). We go through a raw pointer to avoid
-    // lifetime shortening.
-    unsafe {
-        let new_module = create_module((*backend).cx, &(*backend).machine, (*backend).aot)?;
-        let old_module = std::mem::replace(&mut (*backend).module, new_module);
-
-        let tscx = (*backend)._tscx.as_ref().expect("missing ThreadSafeContext");
-        let orc = (*backend).orc.as_mut().expect("missing ORC JIT state");
-        let jd = orc.jit.get_main_jit_dylib();
-        let tracker = jd.create_resource_tracker();
-
-        let tsm = create_thread_safe_module(tscx, old_module);
-        orc.jit.add_module_with_rt(tsm, &tracker).map_err(error_msg)?;
-
-        orc.loaded_trackers.push(tracker);
-    }
-
-    Ok(())
 }
 
 fn convert_intcc(cond: IntCC) -> IntPredicate {
