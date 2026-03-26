@@ -166,9 +166,12 @@ impl GlobalOrcJit {
             jit.get_execution_session().set_default_error_reporter();
             jit.get_obj_transform_layer().set_transform(obj_capture_transform);
 
-            // Register JIT debug info with debuggers via the GDB JIT Interface.
+            // Register JIT debug info with debuggers and profilers.
             if let Err(e) = jit.enable_debug_support() {
                 warn!("failed to enable JIT debug support: {e}");
+            }
+            if let Err(e) = jit.enable_perf_support() {
+                warn!("failed to enable JIT perf support: {e}");
             }
 
             let builtins_jd = jit.get_execution_session().create_bare_jit_dylib(c"revmc.builtins");
