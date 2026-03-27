@@ -254,6 +254,23 @@ pub trait Backend: BackendTypes + TypeMethods {
         Vec::new()
     }
 
+    /// Requests assembly text capture for the next `jit_function` call.
+    ///
+    /// When requested, `jit_function` will additionally produce verbose assembly
+    /// (with backend comments like register allocation info) alongside the
+    /// object code. The captured text can be retrieved via
+    /// [`last_compiled_asm`](Self::last_compiled_asm). The request is
+    /// automatically cleared after one compilation.
+    ///
+    /// Not all backends support this; the default is a no-op.
+    fn request_capture_asm(&mut self) {}
+
+    /// Returns the assembly text captured during the last `jit_function` call,
+    /// if the backend supports assembly capture and it was requested.
+    fn last_compiled_asm(&self) -> Option<&str> {
+        None
+    }
+
     /// Clears the IR module, freeing memory used by IR representations.
     ///
     /// This does **not** free JIT-compiled machine code, so previously obtained function pointers

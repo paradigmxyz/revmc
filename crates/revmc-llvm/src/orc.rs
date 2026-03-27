@@ -1268,17 +1268,16 @@ impl LLJITBuilder {
     }
     */
 
-    /// Use a thread-safe compiler without spawning background threads.
+    /// Install a dual-output compiler (thread-safe, fresh TargetMachine per
+    /// compilation, optional assembly text capture) without spawning background
+    /// threads.
     ///
-    /// Installs `ConcurrentIRCompiler` (fresh `TargetMachine` per compilation)
-    /// so multiple caller threads can compile through the same LLJIT safely.
-    /// The default `InPlaceTaskDispatcher` is preserved, meaning compilation
-    /// runs inline on the thread that triggers it — no background threads.
-    pub fn concurrent_compiler(mut self) -> Self {
-        unsafe {
-            crate::cpp::revmc_llvm_lljit_builder_set_concurrent_compiler(self.as_inner_init())
-        };
-        self
+    /// Returns the shared assembly capture context. Arm it before a JIT lookup
+    /// to capture verbose assembly text alongside the object code.
+    pub(crate) fn dual_compiler(mut self) -> (Self, crate::cpp::AsmCaptureCtx) {
+        let ptr =
+            unsafe { crate::cpp::revmc_llvm_lljit_builder_set_dual_compiler(self.as_inner_init()) };
+        (self, crate::cpp::AsmCaptureCtx { ptr })
     }
 
     /// Builds the JIT.

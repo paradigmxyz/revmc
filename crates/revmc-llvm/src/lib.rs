@@ -96,6 +96,10 @@ pub struct EvmLlvmBackend {
     debug_assertions: bool,
     is_dumping: bool,
     opt_level: OptimizationLevel,
+    /// When true, the next codegen operation (JIT or AOT) captures verbose assembly.
+    capture_asm: bool,
+    /// Assembly text from the last codegen, if capture was requested.
+    last_compiled_asm: Option<String>,
     /// Separate from `function_names` to have always increasing IDs.
     function_counter: u32,
     /// Persistent mapping from function ID to symbol name.
@@ -146,6 +150,9 @@ fn obj_capture_transform(obj: &[u8]) -> Result<Option<Vec<u8>>, String> {
 struct GlobalOrcJit {
     jit: orc::LLJIT,
 
+    /// Shared assembly capture context passed to the DualOutputCompiler.
+    asm_capture: cpp::AsmCaptureCtx,
+
     /// Shared JITDylib containing absolute symbols for builtin functions.
     /// Added to each per-compiler JITDylib's link order.
     builtins_jd: orc::JITDylibRef,
@@ -163,8 +170,8 @@ impl GlobalOrcJit {
         static GLOBAL: OnceLock<std::result::Result<GlobalOrcJit, String>> = OnceLock::new();
         let result = GLOBAL.get_or_init(|| {
             init().map_err(|e| e.to_string())?;
-            let jit =
-                orc::LLJIT::builder().concurrent_compiler().build().map_err(|e| e.to_string())?;
+            let (builder, asm_capture) = orc::LLJIT::builder().dual_compiler();
+            let jit = builder.build().map_err(|e| e.to_string())?;
             jit.get_execution_session().set_default_error_reporter();
             jit.get_obj_transform_layer().set_transform(obj_capture_transform);
 
@@ -180,6 +187,7 @@ impl GlobalOrcJit {
 
             Ok(Self {
                 jit,
+                asm_capture,
                 builtins_jd,
                 builtins_defined: Default::default(),
                 next_dylib_id: Default::default(),
@@ -455,6 +463,8 @@ impl EvmLlvmBackend {
             debug_assertions: cfg!(debug_assertions),
             is_dumping: false,
             opt_level,
+            capture_asm: false,
+            last_compiled_asm: None,
             function_counter: 0,
             function_names: FxHashMap::default(),
             debug_file: None,
@@ -824,11 +834,20 @@ impl Backend for EvmLlvmBackend {
     }
 
     fn write_object<W: std::io::Write>(&mut self, mut w: W) -> Result<()> {
-        let buffer = self
-            .machine
-            .write_to_memory_buffer(self.module(), FileType::Object)
-            .map_err(error_msg)?;
-        w.write_all(buffer.as_slice())?;
+        let capture_asm = std::mem::take(&mut self.capture_asm);
+        let mut obj_buf = Vec::new();
+        let mut asm_buf = Vec::new();
+        cpp::emit_module(
+            &self.machine,
+            self.module(),
+            &mut obj_buf,
+            capture_asm.then_some(&mut asm_buf),
+        )
+        .map_err(|e| eyre::eyre!("{e}"))?;
+        if !asm_buf.is_empty() {
+            self.last_compiled_asm = Some(unsafe { String::from_utf8_unchecked(asm_buf) });
+        }
+        w.write_all(&obj_buf)?;
         Ok(())
     }
 
@@ -847,11 +866,26 @@ impl Backend for EvmLlvmBackend {
         if captured.is_some() {
             orc.last_compiled_object = captured;
         }
+        // Harvest assembly text captured by the DualOutputCompiler.
+        let asm = orc.global.asm_capture.get();
+        self.last_compiled_asm = if asm.is_empty() { None } else { Some(asm.to_string()) };
+        self.capture_asm = false;
         Ok(addr)
     }
 
     fn function_name(&self, id: Self::FuncId) -> Option<&str> {
         self.function_names.get(&id).map(|s| s.as_str())
+    }
+
+    fn request_capture_asm(&mut self) {
+        self.capture_asm = true;
+        if let Some(orc) = &self.orc {
+            orc.global.asm_capture.request();
+        }
+    }
+
+    fn last_compiled_asm(&self) -> Option<&str> {
+        self.last_compiled_asm.as_deref()
     }
 
     fn function_sizes(&self) -> Vec<(String, usize)> {
@@ -1791,7 +1825,7 @@ fn init_() -> Result<()> {
     }
 
     let config = InitializationConfig {
-        asm_parser: false,
+        asm_parser: true,
         asm_printer: true,
         base: true,
         disassembler: true,

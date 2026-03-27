@@ -277,9 +277,13 @@ impl<B: Backend> EvmCompiler<B> {
     pub unsafe fn jit_function(&mut self, id: B::FuncId) -> Result<EvmCompilerFn> {
         ensure!(self.is_jit(), "cannot JIT functions during AOT compilation");
         self.finalize()?;
+        if self.dump_assembly && self.dump_dir().is_some() {
+            self.backend.request_capture_asm();
+        }
         let addr = self.backend.jit_function(id)?;
         debug_assert!(addr != 0);
         if let Some(dump_dir) = &self.dump_dir() {
+            self.write_captured_asm(dump_dir)?;
             self.append_jit_remarks(dump_dir);
         }
         Ok(EvmCompilerFn::new(unsafe { std::mem::transmute::<usize, RawEvmCompilerFn>(addr) }))
@@ -298,7 +302,14 @@ impl<B: Backend> EvmCompiler<B> {
     pub fn write_object<W: io::Write>(&mut self, w: W) -> Result<()> {
         ensure!(self.is_aot(), "cannot write AOT object during JIT compilation");
         self.finalize()?;
-        self.backend.write_object(w)
+        if self.dump_assembly && self.dump_dir().is_some() {
+            self.backend.request_capture_asm();
+        }
+        self.backend.write_object(w)?;
+        if let Some(dump_dir) = &self.dump_dir() {
+            self.write_captured_asm(dump_dir)?;
+        }
+        Ok(())
     }
 
     /// (JIT) Frees the memory associated with a single function.
@@ -421,16 +432,9 @@ impl<B: Backend> EvmCompiler<B> {
             let path = dump_dir.join("opt").with_extension(self.backend.ir_extension());
             self.dump_ir(&path)?;
 
-            if self.dump_assembly {
-                let path = dump_dir.join("opt.s");
-                self.dump_disasm(&path)?;
-                if self.config.debug {
-                    let src_path = dump_dir.join("bytecode.txt");
-                    if src_path.exists() {
-                        Self::annotate_asm(&path, &src_path)?;
-                    }
-                }
-            }
+            // Assembly emission is deferred to the codegen step (jit_function or
+            // write_object) to piggyback on the same compilation and avoid a
+            // redundant codegen pass. See `write_captured_asm`.
         }
 
         let finalize_total = &self.remarks.finalize_total;
@@ -520,6 +524,23 @@ impl<B: Backend> EvmCompiler<B> {
     #[instrument(level = "debug", skip_all)]
     fn dump_disasm(&mut self, path: &Path) -> Result<()> {
         self.backend.dump_disasm(path)
+    }
+
+    /// Writes assembly captured during the last codegen step to `opt.s`.
+    fn write_captured_asm(&self, dump_dir: &Path) -> Result<()> {
+        if self.dump_assembly
+            && let Some(asm) = self.backend.last_compiled_asm()
+        {
+            let path = dump_dir.join("opt.s");
+            fs::write(&path, asm)?;
+            if self.config.debug {
+                let src_path = dump_dir.join("bytecode.txt");
+                if src_path.exists() {
+                    Self::annotate_asm(&path, &src_path)?;
+                }
+            }
+        }
+        Ok(())
     }
 
     #[instrument(level = "debug", skip_all)]
