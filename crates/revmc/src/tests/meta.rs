@@ -159,6 +159,41 @@ matrix_tests!(
     }
 );
 
+// Verify that jit_memory_usage() reflects live JIT code: non-zero after compilation,
+// decreasing after free_function, and back to baseline after freeing all.
+#[cfg(feature = "llvm")]
+#[test]
+fn jit_memory_usage_tracking() {
+    use super::with_jit_compiler;
+    use crate::llvm::jit_memory_usage;
+
+    with_jit_compiler(crate::OptimizationLevel::default(), |compiler| {
+        let baseline = jit_memory_usage().map(|u| u.total_bytes()).unwrap_or(0);
+
+        let code_a = push_stop(0x42);
+        let id_a = jit_and_verify(compiler, "mem_a", &code_a, U256::from(0x42));
+        let after_a = jit_memory_usage().unwrap().total_bytes();
+        assert!(after_a > baseline, "expected memory increase after first compile");
+
+        compiler.clear_ir().unwrap();
+        let code_b = push_stop(0x69);
+        let id_b = jit_and_verify(compiler, "mem_b", &code_b, U256::from(0x69));
+        let after_b = jit_memory_usage().unwrap().total_bytes();
+        assert!(after_b > after_a, "expected memory increase after second compile");
+
+        unsafe { compiler.free_function(id_a) }.unwrap();
+        let after_free_a = jit_memory_usage().unwrap().total_bytes();
+        assert!(after_free_a < after_b, "expected memory decrease after freeing first function");
+
+        unsafe { compiler.free_function(id_b) }.unwrap();
+        let after_free_b = jit_memory_usage().unwrap().total_bytes();
+        assert!(
+            after_free_b <= after_free_a,
+            "expected memory decrease after freeing second function"
+        );
+    });
+}
+
 // Reuse the same symbol name after freeing. If ORC resources weren't actually
 // removed, re-defining the symbol would fail with a duplicate symbol error.
 matrix_tests!(
