@@ -21,4 +21,10 @@ cc = "1.0"
 revmc-builtins = { workspace = true, default-features = false }
 revmc-context = { workspace = true, default-features = false }
 
-revm = { workspace = true, default-features = false, features = ["std"] }
+revm-bytecode = { workspace = true, features = ["std"] }
+revm-context = { workspace = true, features = ["std"] }
+revm-database = { workspace = true, features = ["std"] }
+revm-database-interface = { workspace = true, features = ["std"] }
+revm-handler = { workspace = true, features = ["std"] }
+revm-primitives = { workspace = true, features = ["std"] }
+revm-state = { workspace = true, features = ["std"] }

@@ -1,16 +1,15 @@
-use revm::{
-    ExecuteEvm, MainnetEvm,
-    bytecode::Bytecode,
-    context::{BlockEnv, CfgEnv, TxEnv},
-    context_interface::{
-        ContextSetters,
-        result::{EVMError, HaltReason, InvalidTransaction, ResultAndState},
-    },
-    database::{CacheDB, EmptyDB},
-    handler::{EvmTr, FrameResult, Handler, ItemOrResult, MainBuilder},
-    primitives::{Address, B256, Bytes, StorageKeyMap, StorageValue, TxKind, U256},
-    state::AccountInfo,
+use revm_bytecode::Bytecode;
+use revm_context::{BlockEnv, CfgEnv, Context, Journal, TxEnv};
+use revm_context_interface::{
+    ContextSetters,
+    result::{EVMError, HaltReason, InvalidTransaction, ResultAndState},
 };
+use revm_database::{CacheDB, EmptyDB};
+use revm_handler::{
+    EvmTr, ExecuteEvm, FrameResult, Handler, ItemOrResult, MainBuilder, MainnetEvm,
+};
+use revm_primitives::{Address, B256, Bytes, StorageKeyMap, StorageValue, TxKind, U256};
+use revm_state::AccountInfo;
 use revmc::{EvmCompiler, EvmCompilerFn, EvmLlvmBackend, OptimizationLevel, RawEvmCompilerFn};
 use serde::Deserialize;
 use std::{
@@ -22,7 +21,7 @@ use crate::Bench;
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
-type BenchEvm<'a> = MainnetEvm<revm::handler::MainnetContext<&'a mut CacheDB<EmptyDB>>>;
+type BenchEvm<'a> = MainnetEvm<revm_handler::MainnetContext<&'a mut CacheDB<EmptyDB>>>;
 type BenchError = EVMError<core::convert::Infallible, InvalidTransaction>;
 
 // ── JIT Handler ──────────────────────────────────────────────────────────────
@@ -39,7 +38,7 @@ impl Handler for JitHandler {
     fn run_exec_loop(
         &mut self,
         evm: &mut Self::Evm,
-        first_frame_input: revm::interpreter::interpreter_action::FrameInit,
+        first_frame_input: revm_interpreter::interpreter_action::FrameInit,
     ) -> Result<FrameResult, Self::Error> {
         let res = evm.frame_init(first_frame_input)?;
         if let ItemOrResult::Result(frame_result) = res {
@@ -202,7 +201,7 @@ impl PreparedFixtureBench {
         }
         block.set_blob_excess_gas_and_price(
             0,
-            revm::primitives::eip4844::BLOB_BASE_FEE_UPDATE_FRACTION_CANCUN,
+            revm_primitives::eip4844::BLOB_BASE_FEE_UPDATE_FRACTION_CANCUN,
         );
 
         // Build tx (use sender from fixture, or derive from secret key).
@@ -283,7 +282,8 @@ impl PreparedFixtureBench {
     /// Run via the plain interpreter.
     pub fn run_interpreter(&self) -> ResultAndState {
         let mut db = self.fresh_db();
-        let ctx = revm::context::Context::<BlockEnv, TxEnv, CfgEnv, _, revm::context::Journal<_>, ()>::new(&mut db, self.cfg.spec);
+        let ctx =
+            Context::<BlockEnv, TxEnv, CfgEnv, _, Journal<_>, ()>::new(&mut db, self.cfg.spec);
         let mut evm = ctx.build_mainnet();
         evm.ctx.block = self.block.clone();
         evm.ctx.cfg = self.cfg.clone();
@@ -297,7 +297,7 @@ impl PreparedFixtureBench {
         // associated types. The `Arc` keeps the DB alive for the duration of the call, and
         // the mutable reference is not aliased since we hold the only `Arc`.
         let db_ref = unsafe { &mut *(Arc::as_ptr(&db) as *mut CacheDB<EmptyDB>) };
-        let ctx = revm::context::Context::<BlockEnv, TxEnv, CfgEnv, _, revm::context::Journal<_>, ()>::new(db_ref, self.cfg.spec);
+        let ctx = Context::<BlockEnv, TxEnv, CfgEnv, _, Journal<_>, ()>::new(db_ref, self.cfg.spec);
         let mut evm = ctx.build_mainnet();
         evm.ctx.block = self.block.clone();
         evm.ctx.cfg = self.cfg.clone();

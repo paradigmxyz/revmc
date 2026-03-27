@@ -1,5 +1,5 @@
 use k256::ecdsa::SigningKey;
-use revm::primitives::Address;
+use revm_primitives::Address;
 
 /// Recover the address from a private key ([SigningKey]).
 pub fn recover_address(private_key: &[u8]) -> Option<Address> {
@@ -11,7 +11,7 @@ pub fn recover_address(private_key: &[u8]) -> Option<Address> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use revm::primitives::{address, hex};
+    use revm_primitives::{address, hex};
 
     #[test]
     fn sanity_test() {
