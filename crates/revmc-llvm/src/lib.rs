@@ -60,27 +60,48 @@ const DEFAULT_WEIGHT: u32 = 20000;
 
 /// Configuration for the process-global JIT instance.
 ///
-/// These settings are read once at JIT initialization time. Call
-/// [`set_global_jit_config`] before creating any [`EvmLlvmBackend`] to override
-/// the defaults (which are derived from environment variables).
+/// These settings are read once at JIT initialization time (on first
+/// [`EvmLlvmBackend`] creation). Use the setter methods to override the
+/// defaults, which are derived from environment variables.
 #[derive(Clone, Debug)]
 pub struct GlobalJitConfig {
-    /// Enable GDB/LLDB JIT debug support (`__jit_debug_register_code`).
-    ///
-    /// Defaults to `true` unless `REVMC_JIT_DEBUG=0` is set.
-    pub debug_support: bool,
-    /// Enable perf/samply JIT profiling support (jitdump).
-    ///
-    /// Defaults to `true` if `ENABLE_JITPROFILING` is set.
-    pub profiling_support: bool,
+    debug_support: bool,
+    profiling_support: bool,
 }
 
 impl Default for GlobalJitConfig {
     fn default() -> Self {
         Self {
-            debug_support: std::env::var_os("REVMC_JIT_DEBUG").map_or(true, |v| v != "0"),
+            debug_support: !matches!(std::env::var_os("REVMC_JIT_DEBUG"), Some(v) if v == "0"),
             profiling_support: std::env::var_os("ENABLE_JITPROFILING").is_some(),
         }
+    }
+}
+
+impl GlobalJitConfig {
+    /// Returns whether GDB/LLDB JIT debug support is enabled.
+    ///
+    /// Defaults to `true` unless `REVMC_JIT_DEBUG=0` is set.
+    pub fn debug_support(&self) -> bool {
+        self.debug_support
+    }
+
+    /// Sets whether to enable GDB/LLDB JIT debug support
+    /// (`__jit_debug_register_code`).
+    pub fn set_debug_support(&mut self, yes: bool) {
+        self.debug_support = yes;
+    }
+
+    /// Returns whether perf/samply JIT profiling support is enabled.
+    ///
+    /// Defaults to `true` if `ENABLE_JITPROFILING` is set.
+    pub fn profiling_support(&self) -> bool {
+        self.profiling_support
+    }
+
+    /// Sets whether to enable perf/samply JIT profiling support (jitdump).
+    pub fn set_profiling_support(&mut self, yes: bool) {
+        self.profiling_support = yes;
     }
 }
 
@@ -210,15 +231,15 @@ impl GlobalOrcJit {
 
             // Register JIT debug info with debuggers and profilers.
             let config = global_jit_config();
-            if config.debug_support {
-                if let Err(e) = jit.enable_debug_support() {
-                    warn!("failed to enable JIT debug support: {e}");
-                }
+            if config.debug_support
+                && let Err(e) = jit.enable_debug_support()
+            {
+                warn!("failed to enable JIT debug support: {e}");
             }
-            if config.profiling_support {
-                if let Err(e) = jit.enable_perf_support() {
-                    warn!("failed to enable JIT perf support: {e}");
-                }
+            if config.profiling_support
+                && let Err(e) = jit.enable_perf_support()
+            {
+                warn!("failed to enable JIT perf support: {e}");
             }
 
             let builtins_jd = jit.get_execution_session().create_bare_jit_dylib(c"revmc.builtins");
