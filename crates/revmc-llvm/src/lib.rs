@@ -564,7 +564,7 @@ impl EvmLlvmBackend {
 
     /// Commits the current staging module to the ORC JIT if there are pending functions.
     fn commit_staged_module(&mut self) -> Result<()> {
-        if self.aot || self.orc.as_ref().is_none_or(|o| o.staged_functions.is_empty()) {
+        if self.aot || self.orc().is_none_or(|o| o.staged_functions.is_empty()) {
             return Ok(());
         }
 
