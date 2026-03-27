@@ -826,20 +826,19 @@ impl Backend for EvmLlvmBackend {
     }
 
     fn write_object<W: std::io::Write>(&mut self, mut w: W) -> Result<()> {
-        let capture_asm = std::mem::take(&mut self.capture_asm);
-        let mut obj_buf = Vec::new();
-        let mut asm_buf = Vec::new();
-        cpp::emit_module(
-            &self.machine,
-            self.module(),
-            &mut obj_buf,
-            capture_asm.then_some(&mut asm_buf),
-        )
-        .map_err(|e| eyre::eyre!("{e}"))?;
-        if !asm_buf.is_empty() {
-            self.last_compiled_asm = Some(unsafe { String::from_utf8_unchecked(asm_buf) });
+        if self.capture_asm {
+            self.capture_asm = false;
+            let asm_buf = self
+                .machine
+                .write_to_memory_buffer(self.module(), FileType::Assembly)
+                .map_err(error_msg)?;
+            self.last_compiled_asm = Some(String::from_utf8_lossy(asm_buf.as_slice()).into_owned());
         }
-        w.write_all(&obj_buf)?;
+        let buffer = self
+            .machine
+            .write_to_memory_buffer(self.module(), FileType::Object)
+            .map_err(error_msg)?;
+        w.write_all(buffer.as_slice())?;
         Ok(())
     }
 
@@ -1818,7 +1817,7 @@ fn init_() -> Result<()> {
     }
 
     let config = InitializationConfig {
-        asm_parser: true,
+        asm_parser: false,
         asm_printer: true,
         base: true,
         disassembler: true,

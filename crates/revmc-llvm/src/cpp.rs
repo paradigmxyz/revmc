@@ -9,13 +9,10 @@ use inkwell::{
             LLVMOrcExecutionSessionRef, LLVMOrcExecutorAddress, LLVMOrcJITDylibRef,
             lljit::{LLVMOrcLLJITBuilderRef, LLVMOrcLLJITRef},
         },
-        prelude::{LLVMAttributeRef, LLVMContextRef, LLVMModuleRef},
+        prelude::{LLVMAttributeRef, LLVMContextRef},
     },
 };
 use std::ffi::{c_char, c_void};
-
-/// FFI write callback signature matching the C++ `RevmcWriteFn` typedef.
-pub(crate) type WriteFn = unsafe extern "C" fn(data: *const u8, len: usize, ctx: *mut c_void);
 
 #[link(name = "revmc_llvm_cpp", kind = "static")]
 unsafe extern "C" {
@@ -51,59 +48,12 @@ unsafe extern "C" {
     ) -> LLVMErrorRef;
 
     pub(crate) fn revmc_llvm_lljit_enable_perf_support(jit: LLVMOrcLLJITRef) -> LLVMErrorRef;
-
-    /// Emits object code (and optionally verbose assembly) from a module.
-    ///
-    /// Output is delivered through write callbacks invoked once with the
-    /// complete data. Pass `None` for `asm_write` to skip assembly emission.
-    ///
-    /// Returns null on success, or a `malloc`'d error string on failure.
-    pub(crate) fn revmc_llvm_emit_module(
-        tm: *mut c_void,
-        module: LLVMModuleRef,
-        obj_write: WriteFn,
-        obj_ctx: *mut c_void,
-        asm_write: Option<WriteFn>,
-        asm_ctx: *mut c_void,
-    ) -> *mut c_char;
 }
 
 pub(crate) fn create_initializes_attr(cx: &Context, lower: i64, upper: i64) -> Attribute {
     unsafe {
         let raw = revmc_llvm_create_initializes_attr(cx.raw(), lower, upper);
         Attribute::new(raw)
-    }
-}
-
-/// Emits object code from a module, optionally also emitting verbose assembly.
-///
-/// Object code bytes are written to `obj`. If `asm` is `Some`, verbose assembly
-/// (with register allocation comments) is written there.
-pub(crate) fn emit_module(
-    tm: &inkwell::targets::TargetMachine,
-    module: &inkwell::module::Module<'_>,
-    obj: &mut Vec<u8>,
-    asm: Option<&mut Vec<u8>>,
-) -> Result<(), String> {
-    unsafe extern "C" fn callback(data: *const u8, len: usize, ctx: *mut c_void) {
-        let vec = unsafe { &mut *ctx.cast::<Vec<u8>>() };
-        vec.extend_from_slice(unsafe { std::slice::from_raw_parts(data, len) });
-    }
-
-    let err = unsafe {
-        revmc_llvm_emit_module(
-            tm.as_mut_ptr().cast(),
-            module.as_mut_ptr(),
-            callback,
-            (obj as *mut Vec<u8>).cast(),
-            asm.is_some().then_some(callback as WriteFn),
-            asm.map_or(std::ptr::null_mut(), |v| (v as *mut Vec<u8>).cast()),
-        )
-    };
-    if err.is_null() {
-        Ok(())
-    } else {
-        Err(unsafe { std::ffi::CString::from_raw(err) }.to_string_lossy().into_owned())
     }
 }
 
