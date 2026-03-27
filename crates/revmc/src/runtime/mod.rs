@@ -10,9 +10,7 @@ use crate::{
     eyre::{self, WrapErr},
 };
 use api::LoadedLibrary;
-use backend::{
-    Command, CompileJitRequest, LookupObservedEvent, PrepareAotRequest, ResidentBytes, ResidentMap,
-};
+use backend::{Command, CompileJitRequest, LookupObservedEvent, PrepareAotRequest, ResidentMap};
 use crossbeam_channel as chan;
 use revm_primitives::{B256, hardfork::SpecId};
 use stats::RuntimeStats;
@@ -52,8 +50,6 @@ mod tests;
 struct BackendInner {
     /// Shared resident compiled map.
     resident: Arc<ResidentMap>,
-    /// Shared atomic counter for total resident bytes.
-    resident_bytes: Arc<ResidentBytes>,
     /// Global enable flag.
     enabled: AtomicBool,
     /// Blocking mode: every lookup synchronously compiles and never falls back.
@@ -103,10 +99,7 @@ impl JitBackend {
             "starting JIT backend",
         );
         let resident = Self::preload_aot(config.store.as_deref())?;
-        let preload_bytes: usize = resident.iter().map(|e| e.value().approx_size_bytes).sum();
         let resident = Arc::new(resident);
-        let resident_bytes = Arc::new(ResidentBytes::new());
-        resident_bytes.store(preload_bytes);
 
         let (tx, rx) = chan::bounded::<Command>(config.tuning.lookup_event_channel_capacity);
         let (done_tx, done_rx) = chan::bounded::<()>(1);
@@ -116,27 +109,17 @@ impl JitBackend {
         let dump_dir = config.dump_dir;
         let debug_assertions = config.debug_assertions;
         let resident_for_thread = Arc::clone(&resident);
-        let resident_bytes_for_thread = Arc::clone(&resident_bytes);
 
         let thread = std::thread::Builder::new()
             .name(config.thread_name)
             .spawn(move || {
-                backend::run(
-                    rx,
-                    resident_for_thread,
-                    resident_bytes_for_thread,
-                    store,
-                    tuning,
-                    dump_dir,
-                    debug_assertions,
-                );
+                backend::run(rx, resident_for_thread, store, tuning, dump_dir, debug_assertions);
                 let _ = done_tx.send(());
             })
             .wrap_err("failed to spawn backend thread")?;
 
         let inner = BackendInner {
             resident,
-            resident_bytes,
             enabled: AtomicBool::new(config.enabled),
             blocking: config.blocking,
             tx,
@@ -303,11 +286,7 @@ impl JitBackend {
 
     /// Returns a point-in-time snapshot of runtime statistics.
     pub fn stats(&self) -> RuntimeStatsSnapshot {
-        self.inner.stats.snapshot(
-            self.inner.resident.len() as u64,
-            self.inner.resident_bytes.load() as u64,
-            self.inner.tx.len() as u64,
-        )
+        self.inner.stats.snapshot(self.inner.resident.len() as u64, self.inner.tx.len() as u64)
     }
 
     /// Preloads AOT artifacts from the store into the resident map.
@@ -372,9 +351,8 @@ impl JitBackend {
             *sym
         };
 
-        let approx_size_bytes = stored.manifest.artifact_len;
         let library = Arc::new(LoadedLibrary::new(library));
-        Ok(CompiledProgram::new_aot(key.runtime.clone(), func, library, approx_size_bytes))
+        Ok(CompiledProgram::new_aot(key.runtime.clone(), func, library))
     }
 }
 

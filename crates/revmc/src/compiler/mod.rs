@@ -118,7 +118,7 @@ impl<B: Backend> EvmCompiler<B> {
         !self.is_aot()
     }
 
-    /// Returns a mutable reference to the underlying compiler backend.
+    /// Returns a reference to the underlying compiler backend.
     #[doc(hidden)]
     #[inline]
     pub fn backend(&self) -> &B {

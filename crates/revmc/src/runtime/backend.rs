@@ -15,10 +15,7 @@ use crossbeam_channel as chan;
 use dashmap::DashMap;
 use revmc_backend::Target;
 use std::{
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    },
+    sync::Arc,
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -29,32 +26,17 @@ pub(crate) type ResidentMap = DashMap<RuntimeCacheKey, Arc<CompiledProgram>>;
 struct ResidentMeta {
     /// When this entry was last hit by a lookup.
     last_hit_at: Instant,
-    /// Approximate size in bytes.
-    approx_size_bytes: usize,
 }
 
-/// Shared atomic counter for total resident bytes, readable from stats without the backend thread.
-pub(crate) struct ResidentBytes(AtomicUsize);
-
-impl ResidentBytes {
-    pub(crate) fn new() -> Self {
-        Self(AtomicUsize::new(0))
+/// Returns the total bytes of JIT-allocated memory via the memory plugin.
+fn jit_total_bytes() -> usize {
+    #[cfg(feature = "llvm")]
+    {
+        crate::llvm::jit_memory_usage().map(|u| u.total_bytes()).unwrap_or(0)
     }
-
-    pub(crate) fn load(&self) -> usize {
-        self.0.load(Ordering::Relaxed)
-    }
-
-    pub(crate) fn store(&self, val: usize) {
-        self.0.store(val, Ordering::Relaxed);
-    }
-
-    fn add(&self, bytes: usize) {
-        self.0.fetch_add(bytes, Ordering::Relaxed);
-    }
-
-    fn sub(&self, bytes: usize) {
-        self.0.fetch_sub(bytes, Ordering::Relaxed);
+    #[cfg(not(feature = "llvm"))]
+    {
+        0
     }
 }
 
@@ -133,8 +115,6 @@ struct BackendState {
     resident: Arc<ResidentMap>,
     /// Per-key metadata for eviction (backend-only).
     resident_meta: HashMap<RuntimeCacheKey, ResidentMeta>,
-    /// Shared atomic counter for total resident bytes.
-    resident_bytes: Arc<ResidentBytes>,
     /// Per-key tracking state (backend-only).
     entries: HashMap<RuntimeCacheKey, EntryState>,
     /// Worker pool for JIT compilation.
@@ -334,7 +314,6 @@ impl BackendState {
     fn handle_clear_resident(&mut self) {
         self.resident.clear();
         self.resident_meta.clear();
-        self.resident_bytes.store(0);
         // Notify any pending sync callers before clearing entries.
         for (_, entry) in self.entries.drain() {
             for n in entry.pending_notifiers {
@@ -362,21 +341,13 @@ impl BackendState {
     }
 
     fn insert_resident(&mut self, key: RuntimeCacheKey, program: Arc<CompiledProgram>) {
-        let size = program.approx_size_bytes;
-        self.resident_meta.insert(
-            key.clone(),
-            ResidentMeta { last_hit_at: Instant::now(), approx_size_bytes: size },
-        );
-        self.resident_bytes.add(size);
-        self.resident.insert(key, program);
+        self.resident.insert(key.clone(), program);
+        self.resident_meta.insert(key, ResidentMeta { last_hit_at: Instant::now() });
     }
 
     fn remove_resident(&mut self, key: &RuntimeCacheKey) {
-        if let Some((_, _program)) = self.resident.remove(key)
-            && let Some(meta) = self.resident_meta.remove(key)
-        {
-            self.resident_bytes.sub(meta.approx_size_bytes);
-        }
+        self.resident.remove(key);
+        self.resident_meta.remove(key);
     }
 
     fn handle_worker_result(&mut self, result: WorkerResult) {
@@ -410,7 +381,6 @@ impl BackendState {
                     result.key.clone(),
                     success.func,
                     success.backing,
-                    success.approx_size_bytes,
                 ));
 
                 self.insert_resident(result.key.clone(), program);
@@ -510,9 +480,8 @@ impl BackendState {
                                 })?;
                             *sym
                         };
-                        let approx_size_bytes = success.dylib_bytes.len();
                         let library = Arc::new(LoadedLibrary::new(library));
-                        Ok(CompiledProgram::new_aot(key.clone(), func, library, approx_size_bytes))
+                        Ok(CompiledProgram::new_aot(key.clone(), func, library))
                     })() {
                         Ok(program) => {
                             self.insert_resident(key.clone(), Arc::new(program));
@@ -604,17 +573,17 @@ impl BackendState {
         }
 
         // Phase 2: enforce memory budget by evicting LRU entries.
-        if budget > 0 && self.resident_bytes.load() > budget {
+        if budget > 0 && jit_total_bytes() > budget {
             // Collect entries sorted by last_hit_at ascending (oldest first).
-            let mut entries: Vec<(RuntimeCacheKey, Instant, usize)> = self
+            let mut entries: Vec<(RuntimeCacheKey, Instant)> = self
                 .resident_meta
                 .iter()
-                .map(|(key, meta)| (key.clone(), meta.last_hit_at, meta.approx_size_bytes))
+                .map(|(key, meta)| (key.clone(), meta.last_hit_at))
                 .collect();
-            entries.sort_by_key(|(_, t, _)| *t);
+            entries.sort_by_key(|(_, t)| *t);
 
-            for (key, _, _) in entries {
-                if self.resident_bytes.load() <= budget {
+            for (key, _) in entries {
+                if jit_total_bytes() <= budget {
                     break;
                 }
                 debug!(
@@ -633,7 +602,7 @@ impl BackendState {
     fn should_sweep(&self) -> bool {
         let has_idle = self.tuning.idle_evict_duration.is_some();
         let has_budget = self.tuning.resident_code_cache_bytes > 0
-            && self.resident_bytes.load() > self.tuning.resident_code_cache_bytes;
+            && jit_total_bytes() > self.tuning.resident_code_cache_bytes;
         (has_idle || has_budget) && self.last_sweep.elapsed() >= self.tuning.eviction_sweep_interval
     }
 }
@@ -642,7 +611,6 @@ impl BackendState {
 pub(crate) fn run(
     cmd_rx: chan::Receiver<Command>,
     resident: Arc<ResidentMap>,
-    resident_bytes: Arc<ResidentBytes>,
     store: Option<Arc<dyn ArtifactStore>>,
     tuning: RuntimeTuning,
     dump_dir: Option<std::path::PathBuf>,
@@ -666,21 +634,13 @@ pub(crate) fn run(
     // Seed resident metadata from startup-preloaded AOT entries.
     let now = Instant::now();
     let mut preload_meta = HashMap::default();
-    let mut preload_bytes: usize = 0;
     for entry in resident.iter() {
-        let size = entry.value().approx_size_bytes;
-        preload_meta.insert(
-            entry.key().clone(),
-            ResidentMeta { last_hit_at: now, approx_size_bytes: size },
-        );
-        preload_bytes += size;
+        preload_meta.insert(entry.key().clone(), ResidentMeta { last_hit_at: now });
     }
-    resident_bytes.store(preload_bytes);
 
     let mut state = BackendState {
         resident,
         resident_meta: preload_meta,
-        resident_bytes,
         entries: HashMap::default(),
         workers,
         result_rx,
@@ -742,7 +702,6 @@ pub(crate) fn run(
         jit_failures = state.jit_failures,
         evictions = state.evictions,
         resident_entries = state.resident.len(),
-        resident_bytes = state.resident_bytes.load(),
         "backend stats at shutdown",
     );
 

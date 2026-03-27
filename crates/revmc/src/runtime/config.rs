@@ -126,7 +126,7 @@ pub struct RuntimeTuning {
 
     /// Maximum total resident compiled code size in bytes.
     ///
-    /// When the total `approx_size_bytes` of all resident programs exceeds this limit,
+    /// When the total JIT memory usage (from the LLVM memory plugin) exceeds this limit,
     /// the backend evicts the least-recently-used entries until under budget.
     ///
     /// `0` means no limit.

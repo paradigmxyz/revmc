@@ -107,8 +107,6 @@ pub(crate) struct JitSuccess {
     /// Owns the JIT machine code via an ORCv2 `ResourceTracker`.
     /// Dropping this frees the compiled code.
     pub(crate) backing: Arc<JitCodeBacking>,
-    /// Size of the compiled object in bytes.
-    pub(crate) approx_size_bytes: usize,
 }
 
 /// Successful AOT compilation output.
@@ -297,13 +295,9 @@ fn worker_loop(
 
                 let outcome = match result {
                     Ok(func) => {
-                        let approx_size_bytes = jit_compiler
-                            .backend_mut()
-                            .last_compiled_object_size()
-                            .unwrap_or(job.bytecode.len());
                         let jd_guard = jit_compiler.backend_mut().jit_dylib_guard();
 
-                        debug!(approx_size_bytes, "JIT compilation succeeded");
+                        debug!("JIT compilation succeeded");
                         // The last loaded tracker owns this module's machine code.
                         // free_function would also work, but we need the tracker
                         // to outlive the backend so eviction can free code after
@@ -313,7 +307,7 @@ fn worker_loop(
                             .take_last_resource_tracker()
                             .expect("no ResourceTracker after JIT");
                         let backing = Arc::new(JitCodeBacking::new(tracker, jd_guard));
-                        Ok(WorkerSuccess::Jit(JitSuccess { func, backing, approx_size_bytes }))
+                        Ok(WorkerSuccess::Jit(JitSuccess { func, backing }))
                     }
                     Err(err) => {
                         warn!(%err, "JIT compilation failed");

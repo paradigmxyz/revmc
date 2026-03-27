@@ -447,7 +447,7 @@ fn clear_resident_discards_inflight_jit() {
 
 #[test]
 #[cfg(feature = "llvm")]
-fn resident_bytes_tracks_jit() {
+fn jit_memory_tracks_compilation() {
     let config = RuntimeConfig {
         enabled: true,
         tuning: RuntimeTuning { jit_hot_threshold: 1, jit_worker_count: 1, ..Default::default() },
@@ -455,7 +455,7 @@ fn resident_bytes_tracks_jit() {
     };
     let backend = JitBackend::start(config).unwrap();
 
-    assert_eq!(backend.stats().resident_bytes, 0);
+    let baseline = backend.stats().jit_code_bytes;
 
     let bytecode: &[u8] = &[0x60, 0x42, 0x5f, 0x52, 0x60, 0x20, 0x5f, 0xf3];
     let code_hash = alloy_primitives::keccak256(bytecode);
@@ -475,16 +475,8 @@ fn resident_bytes_tracks_jit() {
     });
 
     let stats = backend.stats();
-    assert!(stats.resident_bytes > 0, "resident_bytes should be non-zero after JIT");
+    assert!(stats.jit_code_bytes > baseline, "jit_code_bytes should increase after JIT");
     assert_eq!(stats.resident_entries, 1);
-
-    // Clear and verify bytes go back to zero.
-    backend.clear_resident();
-    // Give backend time to process the clear.
-    std::thread::sleep(std::time::Duration::from_millis(100));
-    let stats = backend.stats();
-    assert_eq!(stats.resident_bytes, 0);
-    assert_eq!(stats.resident_entries, 0);
 
     backend.shutdown().unwrap();
 }
@@ -533,7 +525,6 @@ fn idle_eviction() {
     });
 
     assert_eq!(backend.stats().resident_entries, 0);
-    assert_eq!(backend.stats().resident_bytes, 0);
 
     backend.shutdown().unwrap();
 }
@@ -648,14 +639,13 @@ fn memory_budget_eviction() {
     });
 
     assert_eq!(backend.stats().resident_entries, 0);
-    assert_eq!(backend.stats().resident_bytes, 0);
 
     backend.shutdown().unwrap();
 }
 
 #[test]
 #[cfg(feature = "llvm")]
-fn preload_aot_seeds_resident_bytes() {
+fn preload_aot_seeds_resident() {
     let store = Arc::new(TempDirStore::new());
 
     // First backend: compile and persist an AOT artifact.
@@ -690,14 +680,12 @@ fn preload_aot_seeds_resident_bytes() {
         backend.shutdown().unwrap();
     }
 
-    // Second backend: preloaded AOT should have resident_bytes > 0 immediately.
+    // Second backend: preloaded AOT should be available immediately.
     {
         let config = RuntimeConfig { enabled: true, store: Some(store), ..Default::default() };
         let backend = JitBackend::start(config).unwrap();
 
-        let stats = backend.stats();
-        assert_eq!(stats.resident_entries, 1);
-        assert!(stats.resident_bytes > 0, "preloaded AOT should seed resident_bytes");
+        assert_eq!(backend.stats().resident_entries, 1);
 
         backend.shutdown().unwrap();
     }

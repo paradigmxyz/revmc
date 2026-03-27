@@ -702,15 +702,6 @@ impl EvmLlvmBackend {
         Ok(())
     }
 
-    /// Returns the byte size of the last compiled object buffer, if available.
-    ///
-    /// This is captured during [`jit_function`](revmc_backend::Backend::jit_function) via
-    /// the ObjectTransformLayer and is a much better estimate of JIT code size than bytecode
-    /// length.
-    pub fn last_compiled_object_size(&self) -> Option<usize> {
-        Some(self.orc.as_ref()?.last_compiled_object.as_ref()?.len())
-    }
-
     /// Pops and returns the [`ResourceTracker`](orc::ResourceTracker) for the last committed
     /// JIT module.
     ///

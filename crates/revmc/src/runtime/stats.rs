@@ -28,8 +28,6 @@ pub struct RuntimeStatsSnapshot {
     pub events_dropped: u64,
     /// Number of entries in the resident compiled map.
     pub resident_entries: u64,
-    /// Approximate total bytes of compiled code in the resident map.
-    pub resident_bytes: u64,
     /// Number of commands pending in the backend command queue.
     pub jit_queue_len: u64,
     /// Bytes allocated for executable JIT code sections.
@@ -55,7 +53,6 @@ impl RuntimeStats {
     pub(crate) fn snapshot(
         &self,
         resident_entries: u64,
-        resident_bytes: u64,
         jit_queue_len: u64,
     ) -> RuntimeStatsSnapshot {
         #[cfg(feature = "llvm")]
@@ -71,7 +68,6 @@ impl RuntimeStats {
             events_sent: self.events_sent.load(Ordering::Relaxed),
             events_dropped: self.events_dropped.load(Ordering::Relaxed),
             resident_entries,
-            resident_bytes,
             jit_queue_len,
             jit_code_bytes,
             jit_data_bytes,
