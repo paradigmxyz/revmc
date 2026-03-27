@@ -51,7 +51,9 @@ fn main() {
 
 You can check out the [examples](/examples) directory for example usage.
 
-## Profiling
+## Debugging and Profiling
+
+GDB/LLDB JIT debug support is enabled by default. Set `REVMC_JIT_DEBUG=0` to disable.
 
 If the `ENABLE_JITPROFILING` environment variable is set, the compiler will create and register
 an event listener for JIT profiling. This allows profilers such as
@@ -67,6 +69,9 @@ ENABLE_JITPROFILING=1 perf record -k 1 ./your-binary
 perf inject --jit -i perf.data -o perf.jit.data
 perf report -i perf.jit.data
 ```
+
+These can also be configured programmatically via [`GlobalJitConfig`](https://docs.rs/revmc-llvm/latest/revmc_llvm/struct.GlobalJitConfig.html)
+before creating any compiler backends.
 
 ## Testing
 

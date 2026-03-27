@@ -58,6 +58,46 @@ pub(crate) use utils::*;
 
 const DEFAULT_WEIGHT: u32 = 20000;
 
+/// Configuration for the process-global JIT instance.
+///
+/// These settings are read once at JIT initialization time. Call
+/// [`set_global_jit_config`] before creating any [`EvmLlvmBackend`] to override
+/// the defaults (which are derived from environment variables).
+#[derive(Clone, Debug)]
+pub struct GlobalJitConfig {
+    /// Enable GDB/LLDB JIT debug support (`__jit_debug_register_code`).
+    ///
+    /// Defaults to `true` unless `REVMC_JIT_DEBUG=0` is set.
+    pub debug_support: bool,
+    /// Enable perf/samply JIT profiling support (jitdump).
+    ///
+    /// Defaults to `true` if `ENABLE_JITPROFILING` is set.
+    pub profiling_support: bool,
+}
+
+impl Default for GlobalJitConfig {
+    fn default() -> Self {
+        Self {
+            debug_support: std::env::var_os("REVMC_JIT_DEBUG").map_or(true, |v| v != "0"),
+            profiling_support: std::env::var_os("ENABLE_JITPROFILING").is_some(),
+        }
+    }
+}
+
+/// Override the global JIT configuration.
+///
+/// Must be called before any [`EvmLlvmBackend`] is created. Returns `Err` if
+/// the JIT has already been initialized.
+pub fn set_global_jit_config(config: GlobalJitConfig) -> std::result::Result<(), GlobalJitConfig> {
+    GLOBAL_JIT_CONFIG.set(config)
+}
+
+static GLOBAL_JIT_CONFIG: OnceLock<GlobalJitConfig> = OnceLock::new();
+
+fn global_jit_config() -> &'static GlobalJitConfig {
+    GLOBAL_JIT_CONFIG.get_or_init(GlobalJitConfig::default)
+}
+
 type FxHashMap<K, V> = alloy_primitives::map::HashMap<K, V, FxBuildHasher>;
 
 /// The LLVM-based EVM bytecode compiler backend.
@@ -169,13 +209,16 @@ impl GlobalOrcJit {
             jit.get_obj_transform_layer().set_transform(obj_capture_transform);
 
             // Register JIT debug info with debuggers and profilers.
-            if let Err(e) = jit.enable_debug_support() {
-                warn!("failed to enable JIT debug support: {e}");
+            let config = global_jit_config();
+            if config.debug_support {
+                if let Err(e) = jit.enable_debug_support() {
+                    warn!("failed to enable JIT debug support: {e}");
+                }
             }
-            if std::env::var_os("ENABLE_JITPROFILING").is_some()
-                && let Err(e) = jit.enable_perf_support()
-            {
-                warn!("failed to enable JIT perf support: {e}");
+            if config.profiling_support {
+                if let Err(e) = jit.enable_perf_support() {
+                    warn!("failed to enable JIT perf support: {e}");
+                }
             }
 
             let builtins_jd = jit.get_execution_session().create_bare_jit_dylib(c"revmc.builtins");
