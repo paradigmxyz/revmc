@@ -4,7 +4,7 @@ use crate::{Backend, Builder, Bytecode, EvmCompilerFn, EvmContext, EvmStack, FxH
 use revm_interpreter::{Gas, InputsImpl};
 use revm_primitives::{Bytes, hardfork::SpecId};
 use revmc_backend::{
-    Attribute, FunctionAttributeLocation, Linkage, OptimizationLevel, eyre::ensure,
+    Attribute, BackendConfig, FunctionAttributeLocation, Linkage, OptimizationLevel, eyre::ensure,
 };
 use revmc_builtins::Builtins;
 use revmc_context::RawEvmCompilerFn;
@@ -117,6 +117,13 @@ impl<B: Backend> EvmCompiler<B> {
         !self.is_aot()
     }
 
+    /// Clones the current backend config, applies `f`, and sends the updated snapshot.
+    fn update_backend_config(&mut self, f: impl FnOnce(&mut BackendConfig)) {
+        let mut config = self.backend.config().clone();
+        f(&mut config);
+        self.backend.apply_config(config);
+    }
+
     /// Returns the output directory.
     pub fn out_dir(&self) -> Option<&Path> {
         self.out_dir.as_deref()
@@ -126,7 +133,7 @@ impl<B: Backend> EvmCompiler<B> {
     ///
     /// Disables dumping if `output_dir` is `None`.
     pub fn set_dump_to(&mut self, output_dir: Option<PathBuf>) {
-        self.backend.set_is_dumping(output_dir.is_some());
+        self.update_backend_config(|c| c.is_dumping = output_dir.is_some());
         self.config.comments = output_dir.is_some();
         self.config.debug = output_dir.is_some();
         if output_dir.is_some() {
@@ -155,7 +162,7 @@ impl<B: Backend> EvmCompiler<B> {
 
     /// Returns the optimization level.
     pub fn opt_level(&self) -> OptimizationLevel {
-        self.backend.opt_level()
+        self.backend.config().opt_level
     }
 
     /// Sets the optimization level.
@@ -164,7 +171,7 @@ impl<B: Backend> EvmCompiler<B> {
     ///
     /// Defaults to the backend's initial optimization level.
     pub fn set_opt_level(&mut self, level: OptimizationLevel) {
-        self.backend.set_opt_level(level);
+        self.update_backend_config(|c| c.opt_level = level);
     }
 
     /// Sets whether to enable debug assertions.
@@ -174,8 +181,50 @@ impl<B: Backend> EvmCompiler<B> {
     ///
     /// Defaults to `cfg!(debug_assertions)`.
     pub fn debug_assertions(&mut self, yes: bool) {
-        self.backend.set_debug_assertions(yes);
+        self.update_backend_config(|c| c.debug_assertions = yes);
         self.config.debug_assertions = yes;
+    }
+
+    /// Returns whether JIT debug support is enabled.
+    ///
+    /// Registers JIT objects with debuggers via `__jit_debug_register_code`,
+    /// allowing GDB/LLDB to resolve JIT-compiled function names and set breakpoints.
+    ///
+    /// This setting is applied once per process on first JIT compilation.
+    /// Subsequent compilers inherit the value set by the first.
+    ///
+    /// Defaults to `true`.
+    pub fn debug_support(&self) -> bool {
+        self.backend.config().debug_support
+    }
+
+    /// Sets whether to enable JIT debug support.
+    ///
+    /// This setting is applied once per process on first JIT compilation.
+    /// Subsequent compilers inherit the value set by the first.
+    pub fn set_debug_support(&mut self, yes: bool) {
+        self.update_backend_config(|c| c.debug_support = yes);
+    }
+
+    /// Returns whether JIT profiling support is enabled.
+    ///
+    /// Installs the LLVM `PerfSupportPlugin` which writes jitdump records,
+    /// allowing profilers to resolve JIT-compiled symbols with debug and unwind info.
+    ///
+    /// This setting is applied once per process on first JIT compilation.
+    /// Subsequent compilers inherit the value set by the first.
+    ///
+    /// Defaults to `true`.
+    pub fn profiling_support(&self) -> bool {
+        self.backend.config().profiling_support
+    }
+
+    /// Sets whether to enable JIT profiling support.
+    ///
+    /// This setting is applied once per process on first JIT compilation.
+    /// Subsequent compilers inherit the value set by the first.
+    pub fn set_profiling_support(&mut self, yes: bool) {
+        self.update_backend_config(|c| c.profiling_support = yes);
     }
 
     /// Sets whether to enable frame pointers.
@@ -382,7 +431,10 @@ impl<B: Backend> EvmCompiler<B> {
         if self.config.debug
             && let Some(dump_dir) = &self.dump_dir()
         {
-            self.backend.set_debug_file(Some(dump_dir.join("bytecode.txt")));
+            let path = dump_dir.join("bytecode.txt");
+            let mut config = self.backend.config().clone();
+            config.debug_file = Some(path);
+            self.backend.apply_config(config);
         }
 
         let linkage = Linkage::Public;
