@@ -215,8 +215,8 @@ struct GlobalOrcJit {
 }
 
 impl GlobalOrcJit {
-    fn global() -> &'static OnceLock<std::result::Result<GlobalOrcJit, String>> {
-        static GLOBAL: OnceLock<std::result::Result<GlobalOrcJit, String>> = OnceLock::new();
+    fn global() -> &'static OnceLock<Result<Self, String>> {
+        static GLOBAL: OnceLock<Result<GlobalOrcJit, String>> = OnceLock::new();
         &GLOBAL
     }
 

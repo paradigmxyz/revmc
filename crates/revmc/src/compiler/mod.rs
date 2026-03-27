@@ -4,7 +4,8 @@ use crate::{Backend, Builder, Bytecode, EvmCompilerFn, EvmContext, EvmStack, FxH
 use revm_interpreter::{Gas, InputsImpl};
 use revm_primitives::{Bytes, hardfork::SpecId};
 use revmc_backend::{
-    Attribute, BackendConfig, FunctionAttributeLocation, Linkage, OptimizationLevel, eyre::ensure, format_bytes,
+    Attribute, BackendConfig, FunctionAttributeLocation, Linkage, OptimizationLevel, eyre::ensure,
+    format_bytes,
 };
 use revmc_builtins::Builtins;
 use revmc_context::RawEvmCompilerFn;
