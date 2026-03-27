@@ -6,6 +6,9 @@
 #include <llvm/ExecutionEngine/Orc/ObjectLinkingLayer.h>
 #include <llvm/IR/Attributes.h>
 
+#include <llvm/Support/Debug.h>
+#include <llvm/Support/circular_raw_ostream.h>
+
 using namespace llvm;
 
 extern "C" LLVMAttributeRef revmc_llvm_create_initializes_attr(LLVMContextRef C,
@@ -65,12 +68,27 @@ revmc_llvm_lljit_lookup_in(LLVMOrcLLJITRef J, LLVMOrcJITDylibRef JD,
   return LLVMErrorSuccess;
 }
 
+/// Silence the unconditional `dbgs() <<` in PerfSupportPlugin's
+/// writeUnwindRecord by redirecting the dbgs() stream to nulls().
+/// In debug builds dbgs() is a circular_raw_ostream wrapping errs(), so we
+/// swap its underlying stream. In release builds dbgs() IS errs() and we
+/// can't redirect it, but this is only used with assertions-enabled LLVM.
+// TODO: Remove once the upstream LLVM fix for the PerfSupportPlugin dbgs() log
+// lands in a release.
+static void suppress_dbgs() {
+#ifndef NDEBUG
+  static_cast<circular_raw_ostream &>(dbgs()).setStream(nulls());
+#endif
+}
+
 /// Install PerfSupportPlugin on the LLJIT's ObjectLinkingLayer.
 /// Writes perf jitdump records so `perf record -k 1` / `perf inject --jit`
 /// can resolve JIT-compiled symbols with full debug info and unwind info.
 /// Returns an error if the object layer is not JITLink-based.
 extern "C" LLVMErrorRef
 revmc_llvm_lljit_enable_perf_support(LLVMOrcLLJITRef J) {
+  suppress_dbgs();
+
   auto *Jit = reinterpret_cast<orc::LLJIT *>(J);
   auto *OLL = dyn_cast<orc::ObjectLinkingLayer>(&Jit->getObjLinkingLayer());
   if (!OLL)
