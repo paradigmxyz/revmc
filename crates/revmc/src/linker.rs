@@ -95,7 +95,7 @@ mod tests {
         let so = tmp.path().join("out.so");
 
         // Compile and build object file.
-        let opt_level = revmc_backend::OptimizationLevel::Aggressive;
+        let opt_level = revmc_backend::OptimizationLevel::default();
         let backend = crate::EvmLlvmBackend::new(true, opt_level).unwrap();
         let mut compiler = crate::EvmCompiler::new(backend);
         if let Err(e) = compiler.translate("link_test_basic", &[][..], SpecId::CANCUN) {

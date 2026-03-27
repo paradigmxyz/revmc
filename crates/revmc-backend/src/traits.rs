@@ -54,15 +54,19 @@ impl Target {
 }
 
 /// Optimization level.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum OptimizationLevel {
     /// No optimizations.
     None,
     /// Less optimizations.
     Less,
-    /// Default optimizations.
+    /// Default optimizations. Highly recommended.
+    #[default]
     Default,
     /// Aggressive optimizations.
+    ///
+    /// Not recommended, since it's generally a lot slower and doesn't really produce better code
+    /// than the default level.
     Aggressive,
 }
 
