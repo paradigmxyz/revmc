@@ -51,24 +51,6 @@ fn main() {
 
 You can check out the [examples](/examples) directory for example usage.
 
-## Debugging and Profiling
-
-GDB/LLDB JIT debug support and perf/samply JIT profiling support are enabled
-by default. This allows debuggers and profilers to resolve JIT-compiled function
-names out of the box. Use
-[`set_global_jit_config`](https://docs.rs/revmc-llvm/latest/revmc_llvm/fn.set_global_jit_config.html)
-before creating any compiler backends to disable them.
-
-```bash
-samply record ./your-binary
-```
-
-```bash
-perf record -k 1 ./your-binary
-perf inject --jit -i perf.data -o perf.jit.data
-perf report -i perf.jit.data
-```
-
 ## Testing
 
 The [Ethereum state tests](https://github.com/ethereum/tests) are included as a git submodule.
