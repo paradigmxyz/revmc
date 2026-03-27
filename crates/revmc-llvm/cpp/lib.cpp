@@ -6,7 +6,20 @@
 #include <llvm/ExecutionEngine/Orc/ObjectLinkingLayer.h>
 #include <llvm/IR/Attributes.h>
 #include <llvm/IR/LegacyPassManager.h>
+#include <llvm/MC/MCAsmBackend.h>
+#include <llvm/MC/MCAsmInfo.h>
+#include <llvm/MC/MCCodeEmitter.h>
+#include <llvm/MC/MCInstrInfo.h>
+#include <llvm/MC/MCObjectFileInfo.h>
+#include <llvm/MC/MCObjectWriter.h>
+#include <llvm/MC/MCRegisterInfo.h>
+#include <llvm/MC/MCParser/MCAsmParser.h>
+#include <llvm/MC/MCParser/MCTargetAsmParser.h>
+#include <llvm/MC/MCStreamer.h>
+#include <llvm/MC/MCSubtargetInfo.h>
+#include <llvm/MC/TargetRegistry.h>
 #include <llvm/Support/SmallVectorMemoryBuffer.h>
+#include <llvm/Support/SourceMgr.h>
 #include <llvm/Target/TargetMachine.h>
 
 using namespace llvm;
@@ -183,8 +196,135 @@ extern "C" void revmc_llvm_asm_capture_request(RevmcAsmCaptureCtx *Ctx) {
 }
 
 extern "C" const char *revmc_llvm_asm_capture_data(const RevmcAsmCaptureCtx *Ctx,
-                                                   size_t *Len) {
+                                                    size_t *Len) {
   *Len = Ctx->buffer.size();
   return Ctx->buffer.data();
+}
+
+/// Write callback used by `revmc_llvm_emit_module` to deliver output into
+/// caller-owned buffers (e.g. Rust `Vec<u8>`). Called once with the complete
+/// output after each pipeline run.
+using RevmcWriteFn = void (*)(const char *Data, size_t Len, void *Ctx);
+
+/// Assemble `.s` text into object code using LLVM's MC layer.
+/// Much cheaper than running the full backend (ISel/RA/scheduling) again.
+static Expected<SmallVector<char, 0>>
+assembleToObject(TargetMachine &TM, StringRef AsmText) {
+  const auto &T = TM.getTarget();
+  auto Triple = TM.getTargetTriple();
+
+  std::string FeatStr(TM.getTargetFeatureString());
+  std::unique_ptr<MCSubtargetInfo> STI(
+      T.createMCSubtargetInfo(Triple.str(), TM.getTargetCPU(), FeatStr));
+  if (!STI)
+    return make_error<StringError>("failed to create MCSubtargetInfo",
+                                   inconvertibleErrorCode());
+
+  std::unique_ptr<MCRegisterInfo> MRI(T.createMCRegInfo(Triple.str()));
+  MCTargetOptions MCOptions = TM.Options.MCOptions;
+  std::unique_ptr<MCAsmInfo> MAI(
+      T.createMCAsmInfo(*MRI, Triple.str(), MCOptions));
+  std::unique_ptr<MCInstrInfo> MCII(T.createMCInstrInfo());
+
+  // Set up source manager with the assembly text.
+  SourceMgr SrcMgr;
+  SrcMgr.AddNewSourceBuffer(MemoryBuffer::getMemBuffer(AsmText), SMLoc());
+
+  MCObjectFileInfo MOFI;
+  MCContext Ctx(Triple, MAI.get(), MRI.get(), STI.get(), &SrcMgr);
+  MOFI.initMCObjectFileInfo(Ctx, /*PIC=*/false);
+  Ctx.setObjectFileInfo(&MOFI);
+
+  // Create object streamer that writes to ObjBuf.
+  SmallVector<char, 0> ObjBuf;
+  raw_svector_ostream ObjOS(ObjBuf);
+
+  std::unique_ptr<MCCodeEmitter> CE(T.createMCCodeEmitter(*MCII, Ctx));
+  std::unique_ptr<MCAsmBackend> MAB(T.createMCAsmBackend(*STI, *MRI, MCOptions));
+  std::unique_ptr<MCObjectWriter> OW = MAB->createObjectWriter(ObjOS);
+  std::unique_ptr<MCStreamer> ObjStreamer(
+      T.createMCObjectStreamer(Triple, Ctx, std::move(MAB), std::move(OW),
+                               std::move(CE), *STI));
+
+  // Parse and assemble.
+  std::unique_ptr<MCAsmParser> Parser(
+      createMCAsmParser(SrcMgr, Ctx, *ObjStreamer, *MAI));
+  std::unique_ptr<MCTargetAsmParser> TAP(
+      T.createMCAsmParser(*STI, *Parser, *MCII, MCOptions));
+  if (!TAP)
+    return make_error<StringError>("failed to create target asm parser",
+                                   inconvertibleErrorCode());
+  Parser->setTargetParser(*TAP);
+
+  if (Parser->Run(/*NoInitialTextSection=*/false))
+    return make_error<StringError>("assembly parsing failed",
+                                   inconvertibleErrorCode());
+
+  // Finalize — flushes fixups and writes the object file.
+  ObjStreamer->finish();
+
+  return std::move(ObjBuf);
+}
+
+/// Emit object code from a module, optionally emitting verbose assembly text.
+///
+/// Output is delivered through caller-provided write callbacks, each invoked
+/// once with the complete output.
+///
+/// `ObjWrite`/`ObjCtx` receive the object code bytes.
+/// If `AsmWrite` is non-null, verbose assembly (with register allocation
+/// comments) is also emitted via `AsmWrite`/`AsmCtx`.
+///
+/// When both are requested, the expensive backend (ISel/RA/scheduling) runs
+/// only once to produce verbose `.s`, which is then assembled to `.o` via
+/// LLVM's MC layer — much cheaper than running the full backend twice.
+///
+/// Returns null on success, or an error message string (caller must free).
+extern "C" char *
+revmc_llvm_emit_module(TargetMachine *TM, LLVMModuleRef MRef,
+                       RevmcWriteFn ObjWrite, void *ObjCtx,
+                       RevmcWriteFn AsmWrite, void *AsmCtx) {
+  auto *M = unwrap(MRef);
+
+  // When both asm and object are requested, run the backend once (asm), then
+  // assemble the text to object code via the MC layer.
+  if (AsmWrite) {
+    TM->Options.MCOptions.AsmVerbose = true;
+
+    SmallString<0> AsmBuf;
+    raw_svector_ostream AsmOS(AsmBuf);
+    legacy::PassManager PM;
+
+    if (TM->addPassesToEmitFile(PM, AsmOS, nullptr,
+                                CodeGenFileType::AssemblyFile)) {
+      return strdup("target does not support assembly emission");
+    }
+    PM.run(*M);
+    AsmWrite(AsmBuf.data(), AsmBuf.size(), AsmCtx);
+
+    // Assemble .s → .o without rerunning the backend.
+    auto ObjBuf = assembleToObject(*TM, AsmBuf.str());
+    if (!ObjBuf) {
+      return strdup(toString(ObjBuf.takeError()).c_str());
+    }
+    ObjWrite(ObjBuf->data(), ObjBuf->size(), ObjCtx);
+    return nullptr;
+  }
+
+  // Object-only fast path: direct MC emission.
+  {
+    SmallVector<char, 0> ObjBuf;
+    raw_svector_ostream ObjOS(ObjBuf);
+    legacy::PassManager PM;
+    MCContext *Ctx = nullptr;
+
+    if (TM->addPassesToEmitMC(PM, Ctx, ObjOS)) {
+      return strdup("target does not support MC emission");
+    }
+    PM.run(*M);
+    ObjWrite(ObjBuf.data(), ObjBuf.size(), ObjCtx);
+  }
+
+  return nullptr;
 }
 

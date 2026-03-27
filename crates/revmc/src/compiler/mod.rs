@@ -351,7 +351,13 @@ impl<B: Backend> EvmCompiler<B> {
     pub fn write_object<W: io::Write>(&mut self, w: W) -> Result<()> {
         ensure!(self.is_aot(), "cannot write AOT object during JIT compilation");
         self.finalize()?;
+        if self.dump_assembly && self.dump_dir().is_some() {
+            self.backend.request_capture_asm();
+        }
         self.backend.write_object(w)?;
+        if let Some(dump_dir) = &self.dump_dir() {
+            self.write_captured_asm(dump_dir)?;
+        }
         Ok(())
     }
 
