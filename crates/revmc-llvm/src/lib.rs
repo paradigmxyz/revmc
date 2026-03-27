@@ -60,9 +60,10 @@ const DEFAULT_WEIGHT: u32 = 20000;
 
 /// Configuration for the process-global JIT instance.
 ///
-/// These settings are read once at JIT initialization time (on first
-/// [`EvmLlvmBackend`] creation). Use the setter methods to override the
-/// defaults, which are derived from environment variables.
+/// These settings can only be applied once per process — on first
+/// [`EvmLlvmBackend`] creation the config is read and locked in.
+/// Call [`set_global_jit_config`] before creating any backend to override
+/// the defaults derived from environment variables.
 #[derive(Clone, Debug)]
 pub struct GlobalJitConfig {
     debug_support: bool,
@@ -72,7 +73,7 @@ pub struct GlobalJitConfig {
 impl Default for GlobalJitConfig {
     fn default() -> Self {
         Self {
-            debug_support: !matches!(std::env::var_os("REVMC_JIT_DEBUG"), Some(v) if v == "0"),
+            debug_support: std::env::var_os("REVMC_JIT_DEBUG").is_some(),
             profiling_support: std::env::var_os("ENABLE_JITPROFILING").is_some(),
         }
     }
@@ -81,25 +82,32 @@ impl Default for GlobalJitConfig {
 impl GlobalJitConfig {
     /// Returns whether GDB/LLDB JIT debug support is enabled.
     ///
-    /// Defaults to `true` unless `REVMC_JIT_DEBUG=0` is set.
+    /// Registers JIT objects with debuggers via `__jit_debug_register_code`,
+    /// allowing GDB/LLDB to resolve JIT-compiled function names and set
+    /// breakpoints. Can only be set once per process.
+    ///
+    /// Defaults to `true` if `REVMC_JIT_DEBUG` is set.
     pub fn debug_support(&self) -> bool {
         self.debug_support
     }
 
-    /// Sets whether to enable GDB/LLDB JIT debug support
-    /// (`__jit_debug_register_code`).
+    /// Sets whether to enable GDB/LLDB JIT debug support.
     pub fn set_debug_support(&mut self, yes: bool) {
         self.debug_support = yes;
     }
 
     /// Returns whether perf/samply JIT profiling support is enabled.
     ///
+    /// Installs the LLVM `PerfSupportPlugin` which writes jitdump records,
+    /// allowing profilers to resolve JIT-compiled symbols with debug and
+    /// unwind info. Can only be set once per process.
+    ///
     /// Defaults to `true` if `ENABLE_JITPROFILING` is set.
     pub fn profiling_support(&self) -> bool {
         self.profiling_support
     }
 
-    /// Sets whether to enable perf/samply JIT profiling support (jitdump).
+    /// Sets whether to enable perf/samply JIT profiling support.
     pub fn set_profiling_support(&mut self, yes: bool) {
         self.profiling_support = yes;
     }

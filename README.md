@@ -53,12 +53,13 @@ You can check out the [examples](/examples) directory for example usage.
 
 ## Debugging and Profiling
 
-GDB/LLDB JIT debug support is enabled by default. Set `REVMC_JIT_DEBUG=0` to disable.
+JIT debugging and profiling are opt-in and can only be configured once per
+process — on first backend creation. Set environment variables or call
+[`set_global_jit_config`](https://docs.rs/revmc-llvm/latest/revmc_llvm/fn.set_global_jit_config.html)
+before creating any compiler backends.
 
-If the `ENABLE_JITPROFILING` environment variable is set, the compiler will create and register
-an event listener for JIT profiling. This allows profilers such as
-[samply](https://github.com/mstange/samply) and [perf](https://perf.wiki.kernel.org) to resolve
-JIT-compiled function names and source locations.
+- `REVMC_JIT_DEBUG` — enable GDB/LLDB JIT debug support.
+- `ENABLE_JITPROFILING` — enable perf/samply JIT profiling support.
 
 ```bash
 ENABLE_JITPROFILING=1 samply record ./your-binary
@@ -69,9 +70,6 @@ ENABLE_JITPROFILING=1 perf record -k 1 ./your-binary
 perf inject --jit -i perf.data -o perf.jit.data
 perf report -i perf.jit.data
 ```
-
-These can also be configured programmatically via [`GlobalJitConfig`](https://docs.rs/revmc-llvm/latest/revmc_llvm/struct.GlobalJitConfig.html)
-before creating any compiler backends.
 
 ## Testing
 
