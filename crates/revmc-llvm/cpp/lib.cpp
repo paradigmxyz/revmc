@@ -1,4 +1,3 @@
-#include <llvm-c/Core.h>
 #include <llvm-c/LLJIT.h>
 #include <llvm-c/Orc.h>
 #include <llvm/ExecutionEngine/Orc/CompileUtils.h>
@@ -6,7 +5,6 @@
 #include <llvm/ExecutionEngine/Orc/LLJIT.h>
 #include <llvm/ExecutionEngine/Orc/ObjectLinkingLayer.h>
 #include <llvm/IR/Attributes.h>
-#include <llvm/IR/ConstantRangeList.h>
 
 using namespace llvm;
 
