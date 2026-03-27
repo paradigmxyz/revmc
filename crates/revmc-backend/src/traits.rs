@@ -118,6 +118,7 @@ pub enum Attribute {
     NoRecurse,
     NoSync,
     NoUnwind,
+    UWTable,
     AllFramePointers,
     NativeTargetCpu,
     Cold,

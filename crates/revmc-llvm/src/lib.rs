@@ -1824,6 +1824,7 @@ fn convert_attribute(bcx: &EvmLlvmBuilder<'_>, attr: revmc_backend::Attribute) -
         OurAttr::NoRecurse => ("norecurse", AttrValue::Enum(0)),
         OurAttr::NoSync => ("nosync", AttrValue::Enum(0)),
         OurAttr::NoUnwind => ("nounwind", AttrValue::Enum(0)),
+        OurAttr::UWTable => ("uwtable", AttrValue::Enum(2)),
         OurAttr::AllFramePointers => ("frame-pointer", AttrValue::String("all")),
         OurAttr::NativeTargetCpu => (
             "target-cpu",
