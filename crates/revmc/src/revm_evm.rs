@@ -1,4 +1,4 @@
-//! Generic [`revm`] JIT EVM and handler override.
+//! Generic `revm` JIT EVM and handler override.
 //!
 //! Provides [`JitEvm`] which wraps any mainnet-shaped [`EvmTr`]-based EVM and overrides
 //! execution to look up compiled functions via [`JitBackend`] before falling
