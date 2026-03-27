@@ -172,8 +172,10 @@ impl GlobalOrcJit {
             if let Err(e) = jit.enable_debug_support() {
                 warn!("failed to enable JIT debug support: {e}");
             }
-            if let Err(e) = jit.enable_perf_support() {
-                warn!("failed to enable JIT perf support: {e}");
+            if std::env::var_os("ENABLE_JITPROFILING").is_some() {
+                if let Err(e) = jit.enable_perf_support() {
+                    warn!("failed to enable JIT perf support: {e}");
+                }
             }
 
             let builtins_jd = jit.get_execution_session().create_bare_jit_dylib(c"revmc.builtins");

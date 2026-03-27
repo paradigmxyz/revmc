@@ -51,6 +51,13 @@ fn main() {
 
 You can check out the [examples](/examples) directory for example usage.
 
+## Profiling
+
+If the `ENABLE_JITPROFILING` environment variable is set, the compiler will create and register
+an event listener for JIT profiling. This allows profilers such as
+[samply](https://github.com/mstange/samply) and [perf](https://perf.wiki.kernel.org) to resolve
+JIT-compiled function names and source locations.
+
 ## Testing
 
 The [Ethereum state tests](https://github.com/ethereum/tests) are included as a git submodule.
