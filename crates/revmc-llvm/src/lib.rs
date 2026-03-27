@@ -32,7 +32,7 @@ use inkwell::{
 use object::{Object, ObjectSymbol};
 use revmc_backend::{
     Backend, BackendConfig, BackendTypes, Builder, IntCC, OptimizationLevel, Result, TailCallKind,
-    TypeMethods, U256, eyre,
+    TypeMethods, U256, eyre, format_bytes,
 };
 use std::{
     borrow::Cow,
@@ -43,7 +43,7 @@ use std::{
     path::Path,
     sync::{
         Once, OnceLock,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
     },
 };
 
@@ -58,6 +58,62 @@ mod utils;
 pub(crate) use utils::*;
 
 const DEFAULT_WEIGHT: u32 = 20000;
+
+/// Current JIT memory usage counters.
+///
+/// Counters reflect live memory: bytes are added on compilation and
+/// subtracted when JIT code is freed.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct JitMemoryUsage {
+    /// Bytes allocated for executable (code) sections.
+    pub code_bytes: usize,
+    /// Bytes allocated for non-executable (data) sections.
+    pub data_bytes: usize,
+}
+
+impl JitMemoryUsage {
+    /// Total bytes (code + data).
+    pub fn total_bytes(&self) -> usize {
+        self.code_bytes + self.data_bytes
+    }
+}
+
+impl fmt::Display for JitMemoryUsage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "total: {}, code: {}, data: {}",
+            format_bytes(self.total_bytes()),
+            format_bytes(self.code_bytes),
+            format_bytes(self.data_bytes),
+        )
+    }
+}
+
+/// Atomic counters written by the C++ `MemoryUsagePlugin`.
+///
+/// Leaked into a `&'static` reference so the plugin (which lives as long as
+/// the process-global LLJIT) always has valid pointers.
+struct JitMemoryCounters {
+    code_bytes: AtomicUsize,
+    data_bytes: AtomicUsize,
+}
+
+impl JitMemoryCounters {
+    fn get(&self) -> JitMemoryUsage {
+        JitMemoryUsage {
+            code_bytes: self.code_bytes.load(Ordering::Relaxed),
+            data_bytes: self.data_bytes.load(Ordering::Relaxed),
+        }
+    }
+}
+
+/// Returns the current JIT memory usage.
+///
+/// Returns `None` if the JIT has not been initialized yet.
+pub fn jit_memory_usage() -> Option<JitMemoryUsage> {
+    GlobalOrcJit::try_get().map(|g| g.memory_counters.get())
+}
 
 type FxHashMap<K, V> = alloy_primitives::map::HashMap<K, V, FxBuildHasher>;
 
@@ -153,12 +209,23 @@ struct GlobalOrcJit {
     next_dylib_id: AtomicU64,
     /// Pool of cleared JITDylibs ready for reuse.
     pool: std::sync::Mutex<Vec<orc::JITDylibRef>>,
+
+    /// Live JIT memory counters, updated by the C++ MemoryUsagePlugin.
+    memory_counters: &'static JitMemoryCounters,
 }
 
 impl GlobalOrcJit {
+    fn global() -> &'static OnceLock<Result<Self, String>> {
+        static GLOBAL: OnceLock<Result<GlobalOrcJit, String>> = OnceLock::new();
+        &GLOBAL
+    }
+
+    fn try_get() -> Option<&'static Self> {
+        Self::global().get().and_then(|r| r.as_ref().ok())
+    }
+
     fn get(debug_support: bool, profiling_support: bool) -> Result<&'static Self> {
-        static GLOBAL: OnceLock<std::result::Result<GlobalOrcJit, String>> = OnceLock::new();
-        let result = GLOBAL.get_or_init(|| {
+        let result = Self::global().get_or_init(|| {
             init().map_err(|e| e.to_string())?;
             let jit =
                 orc::LLJIT::builder().concurrent_compiler().build().map_err(|e| e.to_string())?;
@@ -173,6 +240,21 @@ impl GlobalOrcJit {
                 warn!("failed to enable JIT perf support: {e}");
             }
 
+            // Track JIT memory usage.
+            let memory_counters: &'static JitMemoryCounters =
+                Box::leak(Box::new(JitMemoryCounters {
+                    code_bytes: AtomicUsize::new(0),
+                    data_bytes: AtomicUsize::new(0),
+                }));
+            orc::cvt(unsafe {
+                cpp::revmc_llvm_lljit_enable_memory_usage(
+                    jit.as_inner(),
+                    &memory_counters.code_bytes,
+                    &memory_counters.data_bytes,
+                )
+            })
+            .map_err(|e| e.to_string())?;
+
             let builtins_jd = jit.get_execution_session().create_bare_jit_dylib(c"revmc.builtins");
 
             Ok(Self {
@@ -181,6 +263,7 @@ impl GlobalOrcJit {
                 builtins_defined: Default::default(),
                 next_dylib_id: Default::default(),
                 pool: Default::default(),
+                memory_counters,
             })
         });
         match result {
