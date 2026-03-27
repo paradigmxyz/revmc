@@ -31,12 +31,8 @@ use inkwell::{
 };
 use object::{Object, ObjectSymbol};
 use revmc_backend::{
-    Backend, BackendTypes, Builder, IntCC, Result, TailCallKind, TypeMethods, U256, eyre,
-    format_bytes,
-};
-use revmc_backend::{
     Backend, BackendConfig, BackendTypes, Builder, IntCC, OptimizationLevel, Result, TailCallKind,
-    TypeMethods, U256, eyre,
+    TypeMethods, U256, eyre, format_bytes,
 };
 use std::{
     borrow::Cow,
