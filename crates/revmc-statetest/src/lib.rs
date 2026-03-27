@@ -1,3 +1,6 @@
+#![doc = include_str!("../README.md")]
+#![cfg_attr(not(test), warn(unused_extern_crates))]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 #![allow(clippy::incompatible_msrv)]
 
 pub mod compiled;

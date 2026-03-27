@@ -8,13 +8,10 @@ extern crate alloc;
 // but we don't use it directly, so silence the unused crate dependency warning.
 use revmc_builtins as _;
 
-use revm::{
-    MainnetEvm,
-    context::{BlockEnv, CfgEnv, Context, Journal, TxEnv},
-    database_interface::Database,
-    handler::MainBuilder,
-    primitives::{B256, hardfork::SpecId, hex},
-};
+use revm_context::{BlockEnv, CfgEnv, Context, Journal, TxEnv};
+use revm_database_interface::Database;
+use revm_handler::{MainBuilder, MainnetEvm};
+use revm_primitives::{B256, hardfork::SpecId, hex};
 use revmc_context::EvmCompilerFn;
 
 include!("./common.rs");

@@ -24,10 +24,16 @@ workspace = true
 revmc.workspace = true
 revmc-statetest = { path = "../revmc-statetest" }
 
-revm = { workspace = true, features = ["std", "test-types"] }
+revm-bytecode.workspace = true
+revm-context = { workspace = true, features = ["std"] }
+revm-context-interface = { workspace = true, features = ["std"] }
+revm-database = { workspace = true, features = ["std"] }
+revm-database-interface = { workspace = true, features = ["std"] }
+revm-handler = { workspace = true, features = ["std"] }
 revm-interpreter.workspace = true
 revm-primitives.workspace = true
-revm-bytecode.workspace = true
+revm-state = { workspace = true, features = ["std"] }
+revm-statetest-types.workspace = true
 
 clap = { version = "4", features = ["derive"] }
 color-eyre.workspace = true
@@ -44,7 +50,6 @@ tracing-tracy = { workspace = true, optional = true, features = ["demangle"] }
 [dev-dependencies]
 criterion.workspace = true
 revmc-cli-tests = { path = "../revmc-cli-tests/" }
-revm = { workspace = true, default-features = false, features = ["std"] }
 hex = "0.4"
 
 [build-dependencies]

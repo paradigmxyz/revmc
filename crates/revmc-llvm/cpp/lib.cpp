@@ -1,12 +1,13 @@
-#include <llvm-c/Core.h>
 #include <llvm-c/LLJIT.h>
 #include <llvm-c/Orc.h>
 #include <llvm/ExecutionEngine/Orc/CompileUtils.h>
 #include <llvm/ExecutionEngine/Orc/Debugging/PerfSupportPlugin.h>
 #include <llvm/ExecutionEngine/Orc/LLJIT.h>
 #include <llvm/ExecutionEngine/Orc/ObjectLinkingLayer.h>
+#include <llvm/ExecutionEngine/JITLink/JITLink.h>
 #include <llvm/IR/Attributes.h>
-#include <llvm/IR/ConstantRangeList.h>
+
+#include <atomic>
 
 using namespace llvm;
 
@@ -64,6 +65,93 @@ revmc_llvm_lljit_lookup_in(LLVMOrcLLJITRef J, LLVMOrcJITDylibRef JD,
   if (!Addr)
     return wrap(Addr.takeError());
   *Result = Addr->getValue();
+  return LLVMErrorSuccess;
+}
+
+/// JITLink plugin that tracks live code and data bytes.
+///
+/// Installs a post-allocation pass on each link graph that sums block sizes,
+/// split by executable (code) vs non-executable (data) sections. On resource
+/// removal the corresponding sizes are subtracted, so the counters reflect
+/// current live memory rather than cumulative allocations.
+class MemoryUsagePlugin : public orc::ObjectLinkingLayer::Plugin {
+  std::atomic<size_t> *CodeBytes, *DataBytes;
+  std::mutex Mutex;
+  DenseMap<orc::ResourceKey, std::pair<size_t, size_t>> Allocs;
+
+public:
+  MemoryUsagePlugin(std::atomic<size_t> *CodeBytes,
+                    std::atomic<size_t> *DataBytes)
+      : CodeBytes(CodeBytes), DataBytes(DataBytes) {}
+
+  void modifyPassConfig(orc::MaterializationResponsibility &MR,
+                        jitlink::LinkGraph &,
+                        jitlink::PassConfiguration &Config) override {
+    Config.PostAllocationPasses.push_back(
+        [this, &MR](jitlink::LinkGraph &G) -> Error {
+          size_t code = 0, data = 0;
+          for (auto &section : G.sections()) {
+            size_t sec_size = 0;
+            for (auto *block : section.blocks())
+              sec_size += block->getSize();
+            if ((section.getMemProt() & orc::MemProt::Exec) != orc::MemProt::None)
+              code += sec_size;
+            else
+              data += sec_size;
+          }
+          CodeBytes->fetch_add(code, std::memory_order_relaxed);
+          DataBytes->fetch_add(data, std::memory_order_relaxed);
+          return MR.withResourceKeyDo([&](orc::ResourceKey Key) {
+            std::lock_guard<std::mutex> Lock(Mutex);
+            auto &Entry = Allocs[Key];
+            Entry.first += code;
+            Entry.second += data;
+          });
+        });
+  }
+
+  Error notifyFailed(orc::MaterializationResponsibility &) override {
+    return Error::success();
+  }
+
+  Error notifyRemovingResources(orc::JITDylib &, orc::ResourceKey Key) override {
+    std::lock_guard<std::mutex> Lock(Mutex);
+    auto It = Allocs.find(Key);
+    if (It != Allocs.end()) {
+      CodeBytes->fetch_sub(It->second.first, std::memory_order_relaxed);
+      DataBytes->fetch_sub(It->second.second, std::memory_order_relaxed);
+      Allocs.erase(It);
+    }
+    return Error::success();
+  }
+
+  void notifyTransferringResources(orc::JITDylib &, orc::ResourceKey DstKey,
+                                   orc::ResourceKey SrcKey) override {
+    std::lock_guard<std::mutex> Lock(Mutex);
+    auto It = Allocs.find(SrcKey);
+    if (It != Allocs.end()) {
+      auto &Dst = Allocs[DstKey];
+      Dst.first += It->second.first;
+      Dst.second += It->second.second;
+      Allocs.erase(It);
+    }
+  }
+};
+
+/// Install MemoryUsagePlugin on the LLJIT's ObjectLinkingLayer.
+///
+/// `CodeBytes` and `DataBytes` must be valid for the lifetime of the LLJIT.
+/// Returns an error if the object layer is not JITLink-based.
+extern "C" LLVMErrorRef
+revmc_llvm_lljit_enable_memory_usage(LLVMOrcLLJITRef J,
+                                     std::atomic<size_t> *CodeBytes,
+                                     std::atomic<size_t> *DataBytes) {
+  auto *Jit = reinterpret_cast<orc::LLJIT *>(J);
+  auto *OLL = dyn_cast<orc::ObjectLinkingLayer>(&Jit->getObjLinkingLayer());
+  if (!OLL)
+    return wrap(make_error<StringError>("MemoryUsagePlugin requires JITLink",
+                                        inconvertibleErrorCode()));
+  OLL->addPlugin(std::make_unique<MemoryUsagePlugin>(CodeBytes, DataBytes));
   return LLVMErrorSuccess;
 }
 

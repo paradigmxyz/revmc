@@ -3,15 +3,13 @@
 
 use crate::merkle_trie::{compute_test_roots, TestValidationResult};
 use indicatif::{ProgressBar, ProgressDrawTarget};
-use revm::{
-    context::{block::BlockEnv, cfg::CfgEnv, tx::TxEnv},
-    context_interface::result::{EVMError, ExecutionResult, HaltReason, InvalidTransaction},
-    database::{self, bal::EvmDatabaseError},
-    database_interface::EmptyDB,
-    primitives::{hardfork::SpecId, Bytes, B256, U256},
-    statetest_types::{SpecName, Test, TestSuite, TestUnit},
-    Context, ExecuteCommitEvm, MainBuilder, MainContext,
-};
+use revm_context::{block::BlockEnv, cfg::CfgEnv, tx::TxEnv, Context};
+use revm_context_interface::result::{EVMError, ExecutionResult, HaltReason, InvalidTransaction};
+use revm_database::{self as database, bal::EvmDatabaseError};
+use revm_database_interface::EmptyDB;
+use revm_handler::{ExecuteCommitEvm, MainBuilder, MainContext};
+use revm_primitives::{hardfork::SpecId, Bytes, B256, U256};
+use revm_statetest_types::{SpecName, Test, TestSuite, TestUnit};
 use serde_json::json;
 use std::{
     convert::Infallible,
