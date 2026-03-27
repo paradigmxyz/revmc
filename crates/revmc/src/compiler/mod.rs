@@ -4,7 +4,7 @@ use crate::{Backend, Builder, Bytecode, EvmCompilerFn, EvmContext, EvmStack, FxH
 use revm_interpreter::{Gas, InputsImpl};
 use revm_primitives::{Bytes, hardfork::SpecId};
 use revmc_backend::{
-    Attribute, FunctionAttributeLocation, Linkage, OptimizationLevel, eyre::ensure,
+    Attribute, FunctionAttributeLocation, Linkage, OptimizationLevel, eyre::ensure, format_bytes,
 };
 use revmc_builtins::Builtins;
 use revmc_context::RawEvmCompilerFn;
@@ -574,7 +574,7 @@ total:      {total:>11.3?}
             for entry in &files {
                 let name = entry.file_name();
                 let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
-                writeln!(w, "{}: {}", name.to_string_lossy(), format_size(size))?;
+                writeln!(w, "{}: {}", name.to_string_lossy(), format_bytes(size as usize))?;
             }
         }
 
@@ -596,10 +596,10 @@ total:      {total:>11.3?}
         let _ = writeln!(file, "JIT code sizes (estimated)");
         let _ = writeln!(file, "==========================");
         for (name, size) in &sizes {
-            let _ = writeln!(file, "{name}: {}", format_size(*size as u64));
+            let _ = writeln!(file, "{name}: {}", format_bytes(*size));
         }
         if sizes.len() > 1 {
-            let _ = writeln!(file, "total: {}", format_size(total as u64));
+            let _ = writeln!(file, "total: {}", format_bytes(total));
         }
     }
 
@@ -806,18 +806,6 @@ mod default_attrs {
 
     pub(crate) fn size_align<T>() -> (usize, usize) {
         (std::mem::size_of::<T>(), std::mem::align_of::<T>())
-    }
-}
-
-fn format_size(bytes: u64) -> String {
-    const KIB: u64 = 1024;
-    const MIB: u64 = 1024 * KIB;
-    if bytes >= MIB {
-        format!("{:.1} MiB", bytes as f64 / MIB as f64)
-    } else if bytes >= KIB {
-        format!("{:.1} KiB", bytes as f64 / KIB as f64)
-    } else {
-        format!("{bytes} B")
     }
 }
 

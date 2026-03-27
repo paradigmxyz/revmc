@@ -32,6 +32,7 @@ use inkwell::{
 use object::{Object, ObjectSymbol};
 use revmc_backend::{
     Backend, BackendTypes, Builder, IntCC, Result, TailCallKind, TypeMethods, U256, eyre,
+    format_bytes,
 };
 use std::{
     borrow::Cow,
@@ -82,25 +83,10 @@ impl fmt::Display for JitMemoryUsage {
         write!(
             f,
             "total: {}, code: {}, data: {}",
-            HumanBytes(self.total_bytes()),
-            HumanBytes(self.code_bytes),
-            HumanBytes(self.data_bytes),
+            format_bytes(self.total_bytes()),
+            format_bytes(self.code_bytes),
+            format_bytes(self.data_bytes),
         )
-    }
-}
-
-struct HumanBytes(usize);
-
-impl fmt::Display for HumanBytes {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let bytes = self.0;
-        if bytes < 1024 {
-            write!(f, "{bytes}B")
-        } else if bytes < 1024 * 1024 {
-            write!(f, "{:.1}KiB", bytes as f64 / 1024.0)
-        } else {
-            write!(f, "{:.1}MiB", bytes as f64 / (1024.0 * 1024.0))
-        }
     }
 }
 
