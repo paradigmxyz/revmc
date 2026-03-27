@@ -64,8 +64,6 @@ pub enum BackendSelection {
     Auto,
     /// Use the LLVM backend.
     Llvm,
-    /// Use the Cranelift backend.
-    Cranelift,
 }
 
 /// Trait for loading and storing compiled artifacts.

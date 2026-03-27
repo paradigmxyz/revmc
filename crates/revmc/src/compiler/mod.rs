@@ -117,6 +117,20 @@ impl<B: Backend> EvmCompiler<B> {
         !self.is_aot()
     }
 
+    /// Returns a mutable reference to the underlying compiler backend.
+    #[doc(hidden)]
+    #[inline]
+    pub fn backend(&self) -> &B {
+        &self.backend
+    }
+
+    /// Returns a mutable reference to the underlying compiler backend.
+    #[doc(hidden)]
+    #[inline]
+    pub fn backend_mut(&mut self) -> &mut B {
+        &mut self.backend
+    }
+
     /// Returns the output directory.
     pub fn out_dir(&self) -> Option<&Path> {
         self.out_dir.as_deref()

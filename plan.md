@@ -279,7 +279,6 @@ pub struct RuntimeConfig {
 pub enum BackendSelection {
     Auto,
     Llvm,
-    Cranelift,
 }
 ```
 
@@ -287,7 +286,6 @@ Behavior:
 
 1. Prefer LLVM when available.
 1. Return `UnsupportedBackend` if requested backend is not built in.
-1. Keep Cranelift feature-gated/experimental.
 
 ### Storage
 
@@ -496,11 +494,12 @@ When evicting:
 1. ✅ Memory budget eviction (`resident_code_cache_bytes`).
 1. ✅ `jit_max_bytecode_len` to skip oversized contracts.
 1. ✅ `approx_size_bytes` on `CompiledProgram` and `resident_bytes` stat.
+1. ✅ Per-entry JIT code eviction via ORCv2 `ResourceTracker` + `JitDylibGuard`. Evicting a `CompiledProgram` calls `tracker.remove()` to free its machine code. The `JitDylibGuard` prevents JITDylib recycling while live programs exist. Workers no longer block on condvars — they exit freely.
+1. ✅ JIT code size estimation uses actual compiled object size from the `ObjectTransformLayer` capture instead of bytecode length.
 
 ### Deferred
 
 1. **Artifact versioning**: `ArtifactKey` lacks `abi_version`, `revmc_semver`, and `compiler_fingerprint`. Persisted AOT artifacts may be incompatible across revmc upgrades. Must be added before relying on persisted AOT in production.
-1. **JIT code size estimation**: `approx_size_bytes` for JIT uses bytecode length as a rough proxy. Machine code can be 10-50x larger. `resident_code_cache_bytes` should not be treated as a hard memory cap until this is improved.
 1. **Eviction hit freshness**: `last_hit_at` is updated via lossy async events. Under channel saturation, hot code may appear idle and be evicted spuriously. For accurate eviction, last-hit data should be updated on the hot path via atomics.
 1. **Failed entry retry**: `EntryPhase::Failed` is sticky forever. Add `negative_jit_ttl` / `next_retry_at` to allow re-promotion after transient failures.
 1. **`prepare_aot()` should probe storage**: currently skips if key is already resident (e.g. JIT-compiled). A JIT-resident program should still get persisted as AOT for faster startup.

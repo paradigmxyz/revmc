@@ -2,7 +2,7 @@
 
 use crate::{
     EvmCompilerFn,
-    runtime::{storage::RuntimeCacheKey, worker::WorkerBacking},
+    runtime::{storage::RuntimeCacheKey, worker::JitCodeBacking},
 };
 use alloy_primitives::{B256, Bytes};
 use revm_primitives::hardfork::SpecId;
@@ -86,11 +86,12 @@ impl CompiledProgram {
         }
     }
 
-    /// Creates a new compiled program backed by a JIT worker's compiler.
+    /// Creates a new compiled program backed by a JIT module's
+    /// [`ResourceTracker`](crate::llvm::orc::ResourceTracker).
     pub(crate) fn new_jit(
         key: RuntimeCacheKey,
         func: EvmCompilerFn,
-        backing: Arc<WorkerBacking>,
+        backing: Arc<JitCodeBacking>,
         approx_size_bytes: usize,
     ) -> Self {
         Self {
@@ -128,8 +129,9 @@ pub enum ProgramKind {
 enum ProgramBacking {
     /// A dynamically loaded shared library (AOT).
     LoadedLibrary(Arc<LoadedLibrary>),
-    /// A JIT worker's backing compiler (keeps JIT code alive).
-    JitModule(Arc<WorkerBacking>),
+    /// An ORCv2 ResourceTracker that owns JIT machine code.
+    /// Dropping the last reference calls `tracker.remove()`, freeing the code.
+    JitModule(Arc<JitCodeBacking>),
 }
 
 /// Owns a loaded shared library.

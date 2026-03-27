@@ -41,7 +41,7 @@ use std::{
     mem::ManuallyDrop,
     path::{Path, PathBuf},
     sync::{
-        Once, OnceLock,
+        Arc, Once, OnceLock,
         atomic::{AtomicU64, Ordering},
     },
 };
@@ -250,12 +250,29 @@ impl GlobalOrcJit {
     }
 }
 
+/// Shared guard that keeps a JITDylib alive.
+///
+/// The JITDylib will not be cleared or returned to the pool until the last
+/// `JitDylibGuard` is dropped. Runtime callers holding JIT function pointers
+/// must retain a clone of this guard to prevent the code from being freed.
+#[allow(missing_debug_implementations)]
+pub struct JitDylibGuard {
+    global: &'static GlobalOrcJit,
+    jd: orc::JITDylibRef,
+}
+
+impl Drop for JitDylibGuard {
+    fn drop(&mut self) {
+        self.global.release_jit_dylib(self.jd);
+    }
+}
+
 /// ORC JIT state for the LLVM backend (JIT mode only).
 ///
 /// The LLVM context is owned separately (via `tscx`) and persists across JIT resets.
 /// Each compiler gets its own JITDylib in the global LLJIT for symbol isolation.
 ///
-/// Drop order: `staged_functions` → `loaded_trackers` → `jd` (field declaration order).
+/// Drop order: `staged_functions` → `loaded_trackers` → `jd_guard` (field declaration order).
 /// The context (`tscx`) outlives all of these since it lives on `EvmLlvmBackend`.
 struct OrcJitState {
     /// Reference to the global LLJIT instance.
@@ -272,8 +289,9 @@ struct OrcJitState {
     /// Cached object buffer from the last `commit_staged_module`, captured via
     /// ObjectTransformLayer.
     last_compiled_object: Option<Vec<u8>>,
-    /// Per-compiler JITDylib in the global LLJIT. Provides symbol namespace isolation.
-    jd: Option<orc::JITDylibRef>,
+    /// Shared guard that owns the JITDylib. The JD is not recycled until all
+    /// `Arc<JitDylibGuard>` holders (including external callers) are dropped.
+    jd_guard: Arc<JitDylibGuard>,
 }
 
 impl fmt::Debug for OrcJitState {
@@ -290,6 +308,8 @@ impl fmt::Debug for OrcJitState {
 impl OrcJitState {
     fn new() -> Result<Self> {
         let global = GlobalOrcJit::get()?;
+        let jd = global.acquire_jit_dylib();
+        let jd_guard = Arc::new(JitDylibGuard { global, jd });
         Ok(Self {
             global,
             staged_functions: FxHashMap::default(),
@@ -297,7 +317,7 @@ impl OrcJitState {
             loaded_trackers: Vec::new(),
             committed_functions: FxHashMap::default(),
             last_compiled_object: None,
-            jd: Some(global.acquire_jit_dylib()),
+            jd_guard,
         })
     }
 
@@ -312,14 +332,8 @@ impl OrcJitState {
         Ok(())
     }
 
-    fn jd(&self) -> &orc::JITDylibRef {
-        self.jd.as_ref().unwrap()
-    }
-}
-
-impl Drop for OrcJitState {
-    fn drop(&mut self) {
-        self.global.release_jit_dylib(self.jd.take().unwrap());
+    fn jd(&self) -> orc::JITDylibRef {
+        self.jd_guard.jd
     }
 }
 
@@ -606,6 +620,43 @@ impl EvmLlvmBackend {
 
         Ok(())
     }
+
+    /// Returns the byte size of the last compiled object buffer, if available.
+    ///
+    /// This is captured during [`jit_function`](revmc_backend::Backend::jit_function) via
+    /// the ObjectTransformLayer and is a much better estimate of JIT code size than bytecode
+    /// length.
+    pub fn last_compiled_object_size(&self) -> Option<usize> {
+        Some(self.orc().last_compiled_object.as_ref()?.len())
+    }
+
+    /// Pops and returns the [`ResourceTracker`](orc::ResourceTracker) for the last committed
+    /// JIT module.
+    ///
+    /// Each call to [`jit_function`](revmc_backend::Backend::jit_function) commits a module
+    /// with its own tracker. The caller takes ownership and is responsible for calling
+    /// `tracker.remove()` to free the machine code when it is no longer needed.
+    ///
+    /// The caller must also hold a [`JitDylibGuard`] to prevent the owning JITDylib from
+    /// being recycled before the tracker is removed.
+    ///
+    /// Returns `None` in AOT mode or if no modules have been committed.
+    pub fn take_last_resource_tracker(&mut self) -> Option<orc::ResourceTracker> {
+        let orc = self.orc.as_mut()?;
+        let tracker = orc.loaded_trackers.pop()?;
+        let tracker_idx = orc.loaded_trackers.len();
+        orc.committed_functions.retain(|_, idx| *idx != tracker_idx);
+        Some(tracker)
+    }
+
+    /// Returns a shared handle that keeps this backend's JITDylib alive.
+    ///
+    /// The JITDylib will not be cleared or recycled until all `JitDylibGuard` handles
+    /// (and the backend itself) are dropped. Callers holding JIT function pointers must
+    /// retain a guard to prevent the backing code from being freed.
+    pub fn jit_dylib_guard(&self) -> Arc<JitDylibGuard> {
+        Arc::clone(&self.orc().jd_guard)
+    }
 }
 
 impl BackendTypes for EvmLlvmBackend {
@@ -816,7 +867,7 @@ impl Backend for EvmLlvmBackend {
         // in lookup_in when the symbol is first requested.
         let mut captured = None;
         let _guard = ScopedObjCapture::install(&mut captured);
-        let addr = orc.global.jit.lookup_in(orc.jd(), &name).map_err(error_msg)?;
+        let addr = orc.global.jit.lookup_in(&orc.jd(), &name).map_err(error_msg)?;
         drop(_guard);
         if captured.is_some() {
             orc.last_compiled_object = captured;

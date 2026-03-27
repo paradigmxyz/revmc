@@ -353,8 +353,10 @@ impl<EVM> InspectSystemCallEvm for JitEvm<EVM>
 where
     EVM: EvmTr<
             Frame = EthFrame,
-            Context: ContextTr<Journal: JournalTr<State = EvmState> + JournalExt, Tx: SystemCallTx>
-                         + ContextSetters,
+            Context: ContextTr<
+                Journal: JournalTr<State = EvmState> + JournalExt,
+                Tx: SystemCallTx,
+            > + ContextSetters,
             Precompiles: PrecompileProvider<EVM::Context, Output = InterpreterResult>,
         > + InspectorEvmTr,
 {

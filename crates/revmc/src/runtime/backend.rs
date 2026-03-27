@@ -406,15 +406,11 @@ impl BackendState {
 
         match result.outcome {
             Ok(WorkerSuccess::Jit(success)) => {
-                let backing = self.workers.backing(result.worker_id);
-                // Use the bytecode length as a rough proxy for JIT code size.
-                let approx_size =
-                    self.entries.get(&result.key).map(|e| e.bytecode.len()).unwrap_or(0);
                 let program = Arc::new(CompiledProgram::new_jit(
                     result.key.clone(),
                     success.func,
-                    backing,
-                    approx_size,
+                    success.backing,
+                    success.approx_size_bytes,
                 ));
 
                 self.insert_resident(result.key.clone(), program);

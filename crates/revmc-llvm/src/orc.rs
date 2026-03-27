@@ -928,6 +928,7 @@ impl ExecutionSessionRef<'_> {
 /// A JIT dynamic library reference.
 ///
 /// JITDylibs provide the symbol tables.
+#[derive(Clone, Copy)]
 pub struct JITDylibRef {
     dylib: NonNull<LLVMOrcOpaqueJITDylib>,
 }
