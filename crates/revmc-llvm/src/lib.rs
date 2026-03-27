@@ -93,8 +93,6 @@ pub struct EvmLlvmBackend {
 
     aot: bool,
     backend_config: BackendConfig,
-    /// Cached inkwell optimization level, kept in sync with `backend_config.opt_level`.
-    opt_level: OptimizationLevel,
     /// Separate from `function_names` to have always increasing IDs.
     function_counter: u32,
     /// Persistent mapping from function ID to symbol name.
@@ -385,7 +383,7 @@ impl EvmLlvmBackend {
     ) -> Result<Self> {
         init()?;
 
-        let opt_level = convert_opt_level(opt_level);
+        let inkwell_opt_level = convert_opt_level(opt_level);
 
         let target_info = TargetInfo::new(target)?;
         let target = &target_info.target;
@@ -394,7 +392,7 @@ impl EvmLlvmBackend {
                 &target_info.triple,
                 &target_info.cpu,
                 &target_info.features,
-                opt_level,
+                inkwell_opt_level,
                 if aot { RelocMode::PIC } else { RelocMode::Static },
                 if aot { CodeModel::Default } else { CodeModel::JITDefault },
             )
@@ -450,11 +448,7 @@ impl EvmLlvmBackend {
             ty_isize,
             ty_ptr,
             aot,
-            backend_config: BackendConfig {
-                opt_level: convert_opt_level_rev(opt_level),
-                ..BackendConfig::default()
-            },
-            opt_level,
+            backend_config: BackendConfig { opt_level, ..BackendConfig::default() },
             function_counter: 0,
             function_names: FxHashMap::default(),
             di_state: None,
@@ -530,9 +524,10 @@ impl EvmLlvmBackend {
             self.ty_i32.const_int(5, false),
         );
 
-        let is_optimized = self.opt_level != OptimizationLevel::None;
+        let inkwell_opt_level = convert_opt_level(self.backend_config.opt_level);
+        let is_optimized = inkwell_opt_level != OptimizationLevel::None;
         let mut flags = Vec::new();
-        flags.push(match self.opt_level {
+        flags.push(match inkwell_opt_level {
             OptimizationLevel::None => "-O0",
             OptimizationLevel::Less => "-O1",
             OptimizationLevel::Default => "-O2",
@@ -679,9 +674,6 @@ impl Backend for EvmLlvmBackend {
         if self.backend_config.is_dumping != config.is_dumping {
             self.machine.set_asm_verbosity(config.is_dumping);
         }
-        if self.backend_config.opt_level != config.opt_level {
-            self.opt_level = convert_opt_level(config.opt_level);
-        }
         self.backend_config = config;
     }
 
@@ -770,7 +762,7 @@ impl Backend for EvmLlvmBackend {
                 true,
                 0,
                 DIFlags::PUBLIC,
-                self.opt_level != OptimizationLevel::None,
+                self.backend_config.opt_level != revmc_backend::OptimizationLevel::None,
             );
             function.set_subprogram(subprogram);
             Some(subprogram)
@@ -810,7 +802,8 @@ impl Backend for EvmLlvmBackend {
         static PASSES_WITH_LICM: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
         let passes_override = PASSES_OVERRIDE.get_or_init(|| std::env::var("REVMC_PASSES").ok());
-        let passes = passes_override.as_deref().unwrap_or_else(|| match self.opt_level {
+        let inkwell_opt_level = convert_opt_level(self.backend_config.opt_level);
+        let passes = passes_override.as_deref().unwrap_or_else(|| match inkwell_opt_level {
             OptimizationLevel::None => "default<O0>",
             OptimizationLevel::Less | OptimizationLevel::Default => {
                 let total_bbs: u32 =
@@ -1859,15 +1852,6 @@ fn convert_opt_level(level: revmc_backend::OptimizationLevel) -> OptimizationLev
         revmc_backend::OptimizationLevel::Less => OptimizationLevel::Less,
         revmc_backend::OptimizationLevel::Default => OptimizationLevel::Default,
         revmc_backend::OptimizationLevel::Aggressive => OptimizationLevel::Aggressive,
-    }
-}
-
-fn convert_opt_level_rev(level: OptimizationLevel) -> revmc_backend::OptimizationLevel {
-    match level {
-        OptimizationLevel::None => revmc_backend::OptimizationLevel::None,
-        OptimizationLevel::Less => revmc_backend::OptimizationLevel::Less,
-        OptimizationLevel::Default => revmc_backend::OptimizationLevel::Default,
-        OptimizationLevel::Aggressive => revmc_backend::OptimizationLevel::Aggressive,
     }
 }
 
