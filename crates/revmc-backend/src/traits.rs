@@ -119,6 +119,7 @@ pub enum Attribute {
     NoSync,
     NoUnwind,
     NonLazyBind,
+    UWTable,
     AllFramePointers,
     NativeTargetCpu,
     Cold,
