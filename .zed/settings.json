@@ -1,0 +1,16 @@
+{
+  "lsp": {
+    "rust-analyzer": {
+      "initialization_options": {
+        "rustfmt": {
+          "extraArgs": ["+nightly"],
+        },
+        "cargo": {
+          "allTargets": true,
+          "features": ["llvm"],
+          "sysroot": "discover",
+        },
+      },
+    },
+  },
+}

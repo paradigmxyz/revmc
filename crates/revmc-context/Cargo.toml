@@ -24,4 +24,3 @@ ruint.workspace = true
 [features]
 default = ["std"]
 std = ["revm-interpreter/std", "revm-primitives/std"]
-host-ext-any = []

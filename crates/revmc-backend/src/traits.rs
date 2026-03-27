@@ -54,15 +54,19 @@ impl Target {
 }
 
 /// Optimization level.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum OptimizationLevel {
     /// No optimizations.
     None,
     /// Less optimizations.
     Less,
-    /// Default optimizations.
+    /// Default optimizations. Highly recommended.
+    #[default]
     Default,
     /// Aggressive optimizations.
+    ///
+    /// Not recommended, since it's generally a lot slower and doesn't really produce better code
+    /// than the default level.
     Aggressive,
 }
 
@@ -118,6 +122,8 @@ pub enum Attribute {
     NoRecurse,
     NoSync,
     NoUnwind,
+    NonLazyBind,
+    UWTable,
     AllFramePointers,
     NativeTargetCpu,
     Cold,
@@ -142,6 +148,8 @@ pub enum Attribute {
     Writable,
     /// `memory(argmem: readwrite)` — function only accesses memory through pointer arguments.
     ArgMemOnly,
+    /// `initializes((0, N))` — function initializes bytes `[0, N)` through this pointer.
+    Initializes(u64),
     // TODO: Range?
 }
 
@@ -237,6 +245,9 @@ pub trait Backend: BackendTypes + TypeMethods {
     fn optimize_module(&mut self) -> Result<()>;
     fn write_object<W: std::io::Write>(&mut self, w: W) -> Result<()>;
     fn jit_function(&mut self, id: Self::FuncId) -> Result<usize>;
+
+    /// Returns the name of a compiled function by its ID.
+    fn function_name(&self, id: Self::FuncId) -> Option<&str>;
 
     /// Returns the estimated sizes of compiled functions as `(name, size)` pairs.
     fn function_sizes(&self) -> Vec<(String, usize)> {

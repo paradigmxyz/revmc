@@ -1,10 +1,10 @@
 //! Internal EVM bytecode and opcode representation.
 
+use crate::FxHashMap;
 use bitvec::vec::BitVec;
 use revm_bytecode::opcode as op;
 use revm_primitives::hardfork::SpecId;
 use revmc_backend::Result;
-use rustc_hash::FxHashMap;
 use std::cell::RefCell;
 
 mod block_analysis;

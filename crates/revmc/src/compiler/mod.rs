@@ -1,6 +1,6 @@
 //! EVM bytecode compiler implementation.
 
-use crate::{Backend, Builder, Bytecode, EvmCompilerFn, EvmContext, EvmStack, Result};
+use crate::{Backend, Builder, Bytecode, EvmCompilerFn, EvmContext, EvmStack, FxHashMap, Result};
 use revm_interpreter::{Gas, InputsImpl};
 use revm_primitives::{Bytes, hardfork::SpecId};
 use revmc_backend::{
@@ -8,7 +8,6 @@ use revmc_backend::{
 };
 use revmc_builtins::Builtins;
 use revmc_context::RawEvmCompilerFn;
-use rustc_hash::FxHashMap;
 use std::{
     cell::Cell,
     fs,
@@ -130,6 +129,9 @@ impl<B: Backend> EvmCompiler<B> {
         self.backend.set_is_dumping(output_dir.is_some());
         self.config.comments = output_dir.is_some();
         self.config.debug = output_dir.is_some();
+        if output_dir.is_some() {
+            self.config.frame_pointers = true;
+        }
         self.out_dir = output_dir;
     }
 
@@ -180,7 +182,8 @@ impl<B: Backend> EvmCompiler<B> {
     ///
     /// This is useful for profiling and debugging, but it incurs a very slight performance penalty.
     ///
-    /// Defaults to `cfg!(debug_assertions)`.
+    /// Enabled by default in debug builds, when `-Cforce-frame-pointers` is set, or when
+    /// [`set_dump_to`](Self::set_dump_to) is called with a directory.
     pub fn frame_pointers(&mut self, yes: bool) {
         self.config.frame_pointers = yes;
     }
@@ -616,6 +619,8 @@ total:      {total:>11.3?}
             writer.flush()?;
         }
 
+        fs::write(dump_dir.join("bytecode.bin"), bytecode.code)?;
+
         {
             let file = fs::File::create(dump_dir.join("bytecode.dot"))?;
             let mut writer = io::BufWriter::new(file);
@@ -765,6 +770,8 @@ mod default_attrs {
             Attribute::NoSync,          // No thread synchronization.
             Attribute::NativeTargetCpu, // Optimization.
             Attribute::NoRecurse,       // Revm is not recursive.
+            Attribute::NonLazyBind,     // Skip PLT indirection.
+            Attribute::UWTable,         // Unwind tables for profilers/debuggers.
         ]
         .into_iter()
     }

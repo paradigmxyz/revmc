@@ -3,18 +3,15 @@
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use revm_bytecode::Bytecode;
 use revm_interpreter::{
-    InputsImpl, SharedMemory,
-    host::LoadError,
-    instruction_table,
+    InputsImpl, SharedMemory, instruction_table,
     interpreter::{EthInterpreter, ExtBytecode},
 };
-use revm_primitives::{Address, B256, Log, StorageKey, StorageValue, U256};
 use revmc::{
     EvmCompiler, EvmContext, EvmLlvmBackend, EvmStack, OptimizationLevel,
     primitives::hardfork::SpecId,
 };
-use revmc_cli::{Bench, BenchKind, PreparedFixtureBench};
-use std::{collections::HashMap, time::Duration};
+use revmc_cli::{BenchHost, PreparedFixtureBench};
+use std::time::Duration;
 
 const SPEC_ID: SpecId = SpecId::OSAKA;
 
@@ -38,15 +35,17 @@ fn bench(c: &mut Criterion) {
         if SKIP_ALL.contains(&bench.name) {
             continue;
         }
-        match &bench.kind {
-            BenchKind::Bytecode { .. } => run_bytecode_bench(c, bench),
-            BenchKind::TxFixture(def) => run_fixture_bench(c, bench.name, def),
+        if bench.is_fixture() {
+            run_fixture_bench(c, bench);
+        } else {
+            run_bytecode_bench(c, bench);
         }
     }
 }
 
-fn run_fixture_bench(c: &mut Criterion, name: &str, def: &revmc_cli::FixtureBenchDef) {
-    let prepared = PreparedFixtureBench::load(def);
+fn run_fixture_bench(c: &mut Criterion, bench: &revmc_cli::Bench) {
+    let name = bench.name;
+    let prepared = PreparedFixtureBench::load(bench);
 
     // Sanity check.
     assert!(prepared.run_interpreter().result.is_success(), "interpreter execution reverted");
@@ -68,9 +67,8 @@ fn run_fixture_bench(c: &mut Criterion, name: &str, def: &revmc_cli::FixtureBenc
     g.finish();
 }
 
-fn run_bytecode_bench(c: &mut Criterion, bench: &Bench) {
-    let (bytecode, calldata, stack_input, native) =
-        bench.as_bytecode().expect("expected bytecode bench");
+fn run_bytecode_bench(c: &mut Criterion, bench: &revmc_cli::Bench) {
+    let def = bench;
     let name = bench.name;
 
     let mut g = c.benchmark_group(name);
@@ -79,31 +77,31 @@ fn run_bytecode_bench(c: &mut Criterion, bench: &Bench) {
     g.measurement_time(Duration::from_secs(5));
 
     let gas_limit = u64::MAX / 2;
-    let calldata: revmc::primitives::Bytes = calldata.to_vec().into();
-    let bytecode_raw = Bytecode::new_raw(revmc::primitives::Bytes::copy_from_slice(bytecode));
+    let calldata: revmc::primitives::Bytes = def.calldata.clone().into();
+    let bytecode_raw = Bytecode::new_raw(revmc::primitives::Bytes::copy_from_slice(&def.bytecode));
 
     // ── Compile-time ────────────────────────────────────────────────────
 
     if !SKIP_COMPILE.contains(&name) {
         g.bench_function(format!("{name}/compile/translate"), |b| {
-            b.iter_batched(
+            b.iter_batched_ref(
                 || new_compiler(OptimizationLevel::None),
-                |mut compiler| {
-                    compiler.translate(name, bytecode, SPEC_ID).unwrap();
+                |compiler| {
+                    compiler.translate(name, &def.bytecode, SPEC_ID).unwrap();
                 },
                 BatchSize::PerIteration,
             )
         });
 
         g.bench_function(format!("{name}/compile/jit"), |b| {
-            b.iter_batched(
+            b.iter_batched_ref(
                 || {
-                    let mut compiler = new_compiler(OptimizationLevel::Aggressive);
-                    let id = compiler.translate(name, bytecode, SPEC_ID).expect("translate");
+                    let mut compiler = new_compiler(OptimizationLevel::default());
+                    let id = compiler.translate(name, &def.bytecode, SPEC_ID).expect("translate");
                     (compiler, id)
                 },
-                |(mut compiler, id)| unsafe {
-                    compiler.jit_function(id).unwrap();
+                |(compiler, id)| unsafe {
+                    compiler.jit_function(*id).unwrap();
                 },
                 BatchSize::PerIteration,
             )
@@ -113,15 +111,16 @@ fn run_bytecode_bench(c: &mut Criterion, bench: &Bench) {
     // ── Runtime ─────────────────────────────────────────────────────────
 
     let mut host = BenchHost::new(SPEC_ID);
+    host.apply_bench(def);
     let table = instruction_table::<EthInterpreter, BenchHost>();
 
-    let opt_level = revmc::OptimizationLevel::Aggressive;
+    let opt_level = revmc::OptimizationLevel::default();
     let backend = EvmLlvmBackend::new(false, opt_level).unwrap();
     let mut compiler = EvmCompiler::new(backend);
-    compiler.inspect_stack_length(!stack_input.is_empty());
+    compiler.inspect_stack_length(!def.stack_input.is_empty());
     compiler.gas_metering(true);
 
-    if let Some(native) = native {
+    if let Some(native) = def.native {
         g.bench_function(format!("{name}/rt/native"), |b| {
             b.iter_batched(|| (), |()| native(), BatchSize::SmallInput)
         });
@@ -155,13 +154,13 @@ fn run_bytecode_bench(c: &mut Criterion, bench: &Bench) {
             b.iter_batched_ref(
                 || {
                     let mut stack = EvmStack::new();
-                    for (i, input) in stack_input.iter().enumerate() {
+                    for (i, input) in def.stack_input.iter().enumerate() {
                         stack.as_mut_slice()[i] = (*input).into();
                     }
                     (new_interpreter(), stack)
                 },
                 |(interpreter, stack)| {
-                    let mut stack_len = stack_input.len();
+                    let mut stack_len = def.stack_input.len();
                     let mut ecx = EvmContext::from_interpreter(interpreter, &mut host);
                     unsafe { jit.call(Some(stack), Some(&mut stack_len), &mut ecx) }
                 },
@@ -174,7 +173,7 @@ fn run_bytecode_bench(c: &mut Criterion, bench: &Bench) {
         b.iter_batched_ref(
             || {
                 let mut interpreter = new_interpreter();
-                interpreter.stack.data_mut().extend_from_slice(stack_input);
+                interpreter.stack.data_mut().extend_from_slice(&def.stack_input);
                 interpreter
             },
             |interpreter| interpreter.run_plain(&table, &mut host),
@@ -188,129 +187,6 @@ fn run_bytecode_bench(c: &mut Criterion, bench: &Bench) {
 fn new_compiler(opt_level: OptimizationLevel) -> EvmCompiler<EvmLlvmBackend> {
     let backend = EvmLlvmBackend::new(false, opt_level).unwrap();
     EvmCompiler::new(backend)
-}
-
-// ── Minimal Host with storage support ───────────────────────────────────────
-
-use revm_context_interface::cfg::GasParams;
-use revm_interpreter::{Host, SStoreResult, SelfDestructResult, StateLoad};
-
-struct BenchHost {
-    gas_params: GasParams,
-    storage: HashMap<(Address, StorageKey), StorageValue>,
-}
-
-impl BenchHost {
-    fn new(spec_id: SpecId) -> Self {
-        Self { gas_params: GasParams::new_spec(spec_id), storage: HashMap::new() }
-    }
-}
-
-impl Host for BenchHost {
-    fn basefee(&self) -> U256 {
-        U256::ZERO
-    }
-    fn blob_gasprice(&self) -> U256 {
-        U256::ZERO
-    }
-    fn gas_limit(&self) -> U256 {
-        U256::MAX
-    }
-    fn difficulty(&self) -> U256 {
-        U256::ZERO
-    }
-    fn prevrandao(&self) -> Option<U256> {
-        None
-    }
-    fn block_number(&self) -> U256 {
-        U256::ZERO
-    }
-    fn timestamp(&self) -> U256 {
-        U256::ZERO
-    }
-    fn beneficiary(&self) -> Address {
-        Address::ZERO
-    }
-    fn slot_num(&self) -> U256 {
-        U256::ZERO
-    }
-    fn chain_id(&self) -> U256 {
-        U256::from(1)
-    }
-    fn effective_gas_price(&self) -> U256 {
-        U256::ZERO
-    }
-    fn caller(&self) -> Address {
-        Address::ZERO
-    }
-    fn blob_hash(&self, _number: usize) -> Option<U256> {
-        None
-    }
-    fn max_initcode_size(&self) -> usize {
-        usize::MAX
-    }
-    fn gas_params(&self) -> &GasParams {
-        &self.gas_params
-    }
-    fn block_hash(&mut self, _number: u64) -> Option<B256> {
-        Some(B256::ZERO)
-    }
-    fn log(&mut self, _log: Log) {}
-    fn tstore(&mut self, _address: Address, _key: StorageKey, _value: StorageValue) {}
-    fn tload(&mut self, _address: Address, _key: StorageKey) -> StorageValue {
-        StorageValue::ZERO
-    }
-
-    fn selfdestruct(
-        &mut self,
-        _address: Address,
-        _target: Address,
-        _skip_cold_load: bool,
-    ) -> Result<StateLoad<SelfDestructResult>, LoadError> {
-        Ok(StateLoad::new(Default::default(), false))
-    }
-
-    fn load_account_info_skip_cold_load(
-        &mut self,
-        _address: Address,
-        _load_code: bool,
-        _skip_cold_load: bool,
-    ) -> Result<revm_context_interface::journaled_state::AccountInfoLoad<'_>, LoadError> {
-        use revm::state::AccountInfo;
-        use revm_context_interface::journaled_state::AccountInfoLoad;
-        static ACCOUNT: AccountInfo = AccountInfo {
-            balance: U256::ZERO,
-            nonce: 0,
-            code_hash: B256::ZERO,
-            code: None,
-            account_id: None,
-        };
-        Ok(AccountInfoLoad::new(&ACCOUNT, false, false))
-    }
-
-    fn sload_skip_cold_load(
-        &mut self,
-        address: Address,
-        key: StorageKey,
-        _skip_cold_load: bool,
-    ) -> Result<StateLoad<StorageValue>, LoadError> {
-        let value = self.storage.get(&(address, key)).copied().unwrap_or(StorageValue::ZERO);
-        Ok(StateLoad::new(value, false))
-    }
-
-    fn sstore_skip_cold_load(
-        &mut self,
-        address: Address,
-        key: StorageKey,
-        value: StorageValue,
-        _skip_cold_load: bool,
-    ) -> Result<StateLoad<SStoreResult>, LoadError> {
-        let old = self.storage.insert((address, key), value).unwrap_or(StorageValue::ZERO);
-        Ok(StateLoad::new(
-            SStoreResult { original_value: old, present_value: old, new_value: value },
-            false,
-        ))
-    }
 }
 
 criterion_group!(benches, bench);

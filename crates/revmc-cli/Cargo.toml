@@ -45,7 +45,6 @@ tracing-tracy = { workspace = true, optional = true, features = ["demangle"] }
 criterion.workspace = true
 revmc-cli-tests = { path = "../revmc-cli-tests/" }
 revm = { workspace = true, default-features = false, features = ["std"] }
-revm-context-interface.workspace = true
 hex = "0.4"
 
 [build-dependencies]
@@ -56,7 +55,6 @@ default = ["llvm-prefer-dynamic", "revmc/asm-keccak"]
 llvm = ["revmc/llvm"]
 llvm-prefer-static = ["llvm", "revmc/llvm-prefer-static"]
 llvm-prefer-dynamic = ["llvm", "revmc/llvm-prefer-dynamic"]
-cranelift = ["revmc/cranelift"]
 
 tracy = ["dep:tracing-tracy"]
 

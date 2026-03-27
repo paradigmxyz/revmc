@@ -214,7 +214,10 @@ builtins! {
         sp.push(Attribute::Dereferenceable(size_of_word as u64 * n_stack_words as u64));
         match (inputs, outputs) {
             (0, 0) => sp.push(Attribute::ReadNone),
-            (0, 1..) => sp.push(Attribute::WriteOnly),
+            (0, 1..) => {
+                sp.push(Attribute::WriteOnly);
+                sp.push(Attribute::Initializes(size_of_word as u64 * outputs as u64));
+            }
             (1.., 0) => sp.push(Attribute::ReadOnly),
             (1.., 1..) => {}
         }

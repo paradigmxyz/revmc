@@ -11,35 +11,32 @@ macro_rules! include_code_str {
     };
 }
 
-#[derive(Clone, Debug)]
+/// Benchmark definition. Bytecode benchmarks use the `bytecode` / `calldata` /
+/// `stack_input` fields; transaction-fixture benchmarks use `fixture_json` /
+/// `spec_id` instead.
+#[derive(Clone, Debug, Default)]
 pub struct Bench {
     pub name: &'static str,
-    pub kind: BenchKind,
-}
-
-#[derive(Clone, Debug)]
-pub enum BenchKind {
-    Bytecode { bytecode: Vec<u8>, calldata: Vec<u8>, stack_input: Vec<U256>, native: Option<fn()> },
-    TxFixture(FixtureBenchDef),
-}
-
-/// Definition for a full-EVM transaction fixture benchmark.
-#[derive(Clone, Debug)]
-pub struct FixtureBenchDef {
-    pub spec_id: revmc::primitives::hardfork::SpecId,
-    pub fixture_json: &'static str,
+    pub bytecode: Vec<u8>,
+    pub calldata: Vec<u8>,
+    pub stack_input: Vec<U256>,
+    pub native: Option<fn()>,
+    /// Pre-seeded storage entries `(key, value)` inserted at `Address::ZERO`.
+    pub storage: Vec<(U256, U256)>,
+    /// Override for `Host::block_number()`.
+    pub block_number: Option<U256>,
+    /// Override for `Host::timestamp()`.
+    pub timestamp: Option<U256>,
+    /// Transaction fixture JSON (full-EVM benchmark).
+    pub fixture_json: Option<&'static str>,
+    /// Spec ID for transaction fixture benchmarks.
+    pub spec_id: Option<revmc::primitives::hardfork::SpecId>,
 }
 
 impl Bench {
-    /// Returns the bytecode fields, if this is a bytecode bench.
-    #[allow(clippy::type_complexity)]
-    pub fn as_bytecode(&self) -> Option<(&[u8], &[u8], &[U256], Option<fn()>)> {
-        match &self.kind {
-            BenchKind::Bytecode { bytecode, calldata, stack_input, native } => {
-                Some((bytecode, calldata, stack_input, *native))
-            }
-            BenchKind::TxFixture(_) => None,
-        }
+    /// Whether this is a transaction-fixture benchmark.
+    pub fn is_fixture(&self) -> bool {
+        self.fixture_json.is_some()
     }
 }
 
@@ -51,178 +48,159 @@ pub fn get_benches() -> Vec<Bench> {
     vec![
         Bench {
             name: "fibonacci",
-            kind: BenchKind::Bytecode {
-                bytecode: FIBONACCI.to_vec(),
-                stack_input: vec![U256::from(69)],
-                native: Some(|| {
-                    black_box(fibonacci_rust(black_box(U256::from(70))));
-                }),
-                calldata: Vec::new(),
-            },
+            bytecode: FIBONACCI.to_vec(),
+            stack_input: vec![U256::from(69)],
+            native: Some(|| {
+                black_box(fibonacci_rust(black_box(U256::from(70))));
+            }),
+            ..Default::default()
         },
         // https://github.com/lambdaclass/evm_mlir/blob/b766d0bbc2093bbfa4feb3aa25baf82b512aee74/bench/revm_comparison/src/lib.rs#L12-L15
         // https://blog.lambdaclass.com/evm-performance-boosts-with-mlir/
         // > We chose 1000 as N
         Bench {
             name: "fibonacci-calldata",
-            kind: BenchKind::Bytecode {
-                bytecode: hex!(
-                    "5f355f60015b8215601a578181019150909160019003916005565b9150505f5260205ff3"
-                )
-                .to_vec(),
-                calldata: U256::from(1000).to_be_bytes_vec(),
-                stack_input: Vec::new(),
-                native: None,
-            },
+            bytecode: hex!(
+                "5f355f60015b8215601a578181019150909160019003916005565b9150505f5260205ff3"
+            )
+            .to_vec(),
+            calldata: U256::from(1000).to_be_bytes_vec(),
+            ..Default::default()
         },
         Bench {
             name: "factorial",
-            kind: BenchKind::Bytecode {
-                bytecode: hex!(
-                    "5f355f60015b8215601b57906001018091029160019003916005565b9150505f5260205ff3"
-                )
-                .to_vec(),
-                calldata: U256::from(1000).to_be_bytes_vec(),
-                stack_input: Vec::new(),
-                native: None,
-            },
+            bytecode: hex!(
+                "5f355f60015b8215601b57906001018091029160019003916005565b9150505f5260205ff3"
+            )
+            .to_vec(),
+            calldata: U256::from(1000).to_be_bytes_vec(),
+            ..Default::default()
         },
         Bench {
             name: "counter",
-            kind: BenchKind::Bytecode {
-                bytecode: include_code_str!("../../../data/counter.rt.hex").unwrap(),
-                // `increment()`
-                calldata: hex!("d09de08a").to_vec(),
-                stack_input: Vec::new(),
-                native: None,
-            },
+            bytecode: include_code_str!("../../../data/counter.rt.hex").unwrap(),
+            // `increment()`
+            calldata: hex!("d09de08a").to_vec(),
+            ..Default::default()
         },
         Bench {
             name: "snailtracer",
-            kind: BenchKind::Bytecode {
-                bytecode: include_code_str!("../../../data/snailtracer.rt.hex").unwrap(),
-                // `Benchmark()`
-                calldata: hex!("30627b7c").to_vec(),
-                stack_input: Vec::new(),
-                native: None,
-            },
+            bytecode: include_code_str!("../../../data/snailtracer.rt.hex").unwrap(),
+            // `Benchmark()`
+            calldata: hex!("30627b7c").to_vec(),
+            ..Default::default()
         },
         Bench {
             name: "weth",
-            kind: BenchKind::Bytecode {
-                bytecode: include_code_str!("../../../data/weth.rt.hex").unwrap(),
-                calldata: Vec::new(),
-                stack_input: Vec::new(),
-                native: None,
-            },
+            bytecode: include_code_str!("../../../data/weth.rt.hex").unwrap(),
+            ..Default::default()
         },
         Bench {
             name: "hash_10k",
-            kind: BenchKind::Bytecode {
-                bytecode: include_code_str!("../../../data/hash_10k.rt.hex").unwrap(),
-                // `Benchmark()`
-                calldata: hex!("30627b7c").to_vec(),
-                stack_input: Vec::new(),
-                native: None,
-            },
+            bytecode: include_code_str!("../../../data/hash_10k.rt.hex").unwrap(),
+            // `Benchmark()`
+            calldata: hex!("30627b7c").to_vec(),
+            ..Default::default()
         },
         Bench {
             name: "erc20_transfer",
-            kind: BenchKind::Bytecode {
-                bytecode: include_code_str!("../../../data/erc20_transfer.rt.hex").unwrap(),
-                // `Benchmark()`
-                calldata: hex!("30627b7c").to_vec(),
-                stack_input: Vec::new(),
-                native: None,
-            },
+            bytecode: include_code_str!("../../../data/erc20_transfer.rt.hex").unwrap(),
+            // `Benchmark()`
+            calldata: hex!("30627b7c").to_vec(),
+            ..Default::default()
         },
         Bench {
             name: "push0_proxy",
-            kind: BenchKind::Bytecode {
-                bytecode: include_code_str!("../../../data/push0_proxy.rt.hex").unwrap(),
-                calldata: Vec::new(),
-                stack_input: Vec::new(),
-                native: None,
-            },
+            bytecode: include_code_str!("../../../data/push0_proxy.rt.hex").unwrap(),
+            ..Default::default()
         },
         Bench {
             name: "usdc_proxy",
-            kind: BenchKind::Bytecode {
-                bytecode: include_code_str!("../../../data/usdc_proxy.rt.hex").unwrap(),
-                calldata: Vec::new(),
-                stack_input: Vec::new(),
-                native: None,
-            },
+            bytecode: include_code_str!("../../../data/usdc_proxy.rt.hex").unwrap(),
+            ..Default::default()
         },
         Bench {
             name: "fiat_token",
-            kind: BenchKind::Bytecode {
-                bytecode: include_code_str!("../../../data/fiat_token.rt.hex").unwrap(),
-                calldata: Vec::new(),
-                stack_input: Vec::new(),
-                native: None,
-            },
+            bytecode: include_code_str!("../../../data/fiat_token.rt.hex").unwrap(),
+            ..Default::default()
         },
         Bench {
             name: "uniswap_v2_pair",
-            kind: BenchKind::Bytecode {
-                bytecode: include_code_str!("../../../data/uniswap_v2_pair.rt.hex").unwrap(),
-                calldata: Vec::new(),
-                stack_input: Vec::new(),
-                native: None,
-            },
+            bytecode: include_code_str!("../../../data/uniswap_v2_pair.rt.hex").unwrap(),
+            ..Default::default()
         },
         Bench {
             name: "seaport",
-            kind: BenchKind::Bytecode {
-                bytecode: include_code_str!("../../../data/seaport.rt.hex").unwrap(),
-                calldata: Vec::new(),
-                stack_input: Vec::new(),
-                native: None,
-            },
+            bytecode: include_code_str!("../../../data/seaport.rt.hex").unwrap(),
+            ..Default::default()
         },
         Bench {
             name: "airdrop",
-            kind: BenchKind::Bytecode {
-                bytecode: include_code_str!("../../../data/airdrop.rt.hex").unwrap(),
-                // `paused()`
-                calldata: hex!("5c975abb").to_vec(),
-                stack_input: Vec::new(),
-                native: None,
-            },
+            bytecode: include_code_str!("../../../data/airdrop.rt.hex").unwrap(),
+            // `paused()`
+            calldata: hex!("5c975abb").to_vec(),
+            ..Default::default()
         },
         Bench {
             name: "bswap64",
-            kind: BenchKind::Bytecode {
-                bytecode: include_code_str!("../../../data/bswap64.rt.hex").unwrap(),
-                // `to_little_endian_64(uint64 = 0x0102)` returns (bytes)
-                calldata: hex!(
-                    "ff2f79f10000000000000000000000000000000000000000000000000000000000000102"
-                )
-                .to_vec(),
-                stack_input: Vec::new(),
-                native: None,
-            },
+            bytecode: include_code_str!("../../../data/bswap64.rt.hex").unwrap(),
+            // `to_little_endian_64(uint64 = 0x0102)` returns (bytes)
+            calldata: hex!(
+                "ff2f79f10000000000000000000000000000000000000000000000000000000000000102"
+            )
+            .to_vec(),
+            ..Default::default()
         },
         Bench {
             name: "bswap64_opt",
-            kind: BenchKind::Bytecode {
-                bytecode: include_code_str!("../../../data/bswap64_opt.rt.hex").unwrap(),
-                // `to_little_endian_64(uint64 = 0x0102)` returns (bytes)
-                calldata: hex!(
-                    "ff2f79f10000000000000000000000000000000000000000000000000000000000000102"
-                )
-                .to_vec(),
-                stack_input: Vec::new(),
-                native: None,
-            },
+            bytecode: include_code_str!("../../../data/bswap64_opt.rt.hex").unwrap(),
+            // `to_little_endian_64(uint64 = 0x0102)` returns (bytes)
+            calldata: hex!(
+                "ff2f79f10000000000000000000000000000000000000000000000000000000000000102"
+            )
+            .to_vec(),
+            ..Default::default()
+        },
+        // EIP-4788 beacon block root contract.
+        // https://eips.ethereum.org/EIPS/eip-4788
+        Bench {
+            name: "eip4788",
+            bytecode: hex!(
+                "3373fffffffffffffffffffffffffffffffffffffffe14604d57602036146024575f5ffd5b5f35801560495762001fff810690815414603c575f5ffd5b62001fff01545f5260205ff35b5f5ffd5b62001fff42064281555f359062001fff015500"
+            )
+            .to_vec(),
+            // `get` path: 32-byte timestamp query.
+            calldata: U256::from(1774396307).to_be_bytes_vec(),
+            // ring_index = 1774396307 % 8191 = 4550
+            // slot 4550: stored timestamp must equal query.
+            // slot 4550 + 8191 = 12741: the beacon block root to return.
+            storage: vec![
+                (U256::from(4550), U256::from(1774396307)),
+                (U256::from(12741), U256::from(0xbeacu64)),
+            ],
+            ..Default::default()
+        },
+        // EIP-2935 historical block hashes contract.
+        // https://eips.ethereum.org/EIPS/eip-2935
+        Bench {
+            name: "eip2935",
+            bytecode: hex!(
+                "3373fffffffffffffffffffffffffffffffffffffffe14604657602036036042575f35600143038111604257611fff81430311604257611fff9006545f5260205ff35b5f5ffd5b5f35611fff60014303065500"
+            )
+            .to_vec(),
+            // `get` path: 32-byte block number query.
+            calldata: U256::from(1).to_be_bytes_vec(),
+            // Needs NUMBER > query (1) and NUMBER - query <= 8191.
+            // ring_index = 1 % 8191 = 1; slot 1 holds the block hash.
+            storage: vec![(U256::from(1), U256::from(0xb10c_ba5eu64))],
+            block_number: Some(U256::from(100)),
+            ..Default::default()
         },
         Bench {
             name: "curve_stableswap",
-            kind: BenchKind::TxFixture(FixtureBenchDef {
-                spec_id: revmc::primitives::hardfork::SpecId::CANCUN,
-                fixture_json: include_str!("../../../data/curve-stableswap-2pool.json"),
-            }),
+            spec_id: Some(revmc::primitives::hardfork::SpecId::CANCUN),
+            fixture_json: Some(include_str!("../../../data/curve-stableswap-2pool.json")),
+            ..Default::default()
         },
     ]
 }

@@ -18,7 +18,7 @@ use std::{
     sync::Arc,
 };
 
-use crate::FixtureBenchDef;
+use crate::Bench;
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -161,12 +161,13 @@ pub struct PreparedFixtureBench {
 
 impl PreparedFixtureBench {
     /// Load and JIT-compile a fixture benchmark.
-    pub fn load(def: &FixtureBenchDef) -> Self {
+    pub fn load(bench: &Bench) -> Self {
+        let fixture_json = bench.fixture_json.expect("fixture_json required for fixture bench");
+        let spec_id = bench.spec_id.expect("spec_id required for fixture bench");
         let file: FixtureFile =
-            serde_json::from_str(def.fixture_json).expect("failed to parse fixture JSON");
+            serde_json::from_str(fixture_json).expect("failed to parse fixture JSON");
         let case = file.cases.into_values().next().expect("no cases in fixture");
         let first_tx = case.transaction.into_iter().next().expect("no transactions");
-        let spec_id = def.spec_id;
 
         // Parse accounts.
         let mut accounts = Vec::new();
@@ -235,7 +236,7 @@ impl PreparedFixtureBench {
 
         // JIT compile all contract bytecodes.
         let backend =
-            EvmLlvmBackend::new(false, OptimizationLevel::Aggressive).expect("LLVM backend");
+            EvmLlvmBackend::new(false, OptimizationLevel::default()).expect("LLVM backend");
         let mut compiler = Box::new(EvmCompiler::new(backend));
         let mut seen = HashSet::new();
         let mut pending = Vec::new();
