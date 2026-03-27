@@ -465,50 +465,6 @@ impl EvmLlvmBackend {
         })
     }
 
-    /// Returns whether GDB/LLDB JIT debug support is enabled.
-    ///
-    /// Registers JIT objects with debuggers via `__jit_debug_register_code`,
-    /// allowing GDB/LLDB to resolve JIT-compiled function names and set
-    /// breakpoints.
-    ///
-    /// This setting is applied once per process on first backend creation.
-    /// Subsequent backends inherit the value set by the first.
-    ///
-    /// Defaults to `true`.
-    pub fn debug_support(&self) -> bool {
-        self.debug_support
-    }
-
-    /// Sets whether to enable GDB/LLDB JIT debug support.
-    ///
-    /// This setting is applied once per process on first backend creation.
-    /// Subsequent backends inherit the value set by the first.
-    pub fn set_debug_support(&mut self, yes: bool) {
-        self.debug_support = yes;
-    }
-
-    /// Returns whether perf/samply JIT profiling support is enabled.
-    ///
-    /// Installs the LLVM `PerfSupportPlugin` which writes jitdump records,
-    /// allowing profilers to resolve JIT-compiled symbols with debug and
-    /// unwind info.
-    ///
-    /// This setting is applied once per process on first backend creation.
-    /// Subsequent backends inherit the value set by the first.
-    ///
-    /// Defaults to `true`.
-    pub fn profiling_support(&self) -> bool {
-        self.profiling_support
-    }
-
-    /// Sets whether to enable perf/samply JIT profiling support.
-    ///
-    /// This setting is applied once per process on first backend creation.
-    /// Subsequent backends inherit the value set by the first.
-    pub fn set_profiling_support(&mut self, yes: bool) {
-        self.profiling_support = yes;
-    }
-
     /// Returns the LLVM context.
     #[inline]
     pub fn cx(&self) -> &Context {
@@ -723,6 +679,22 @@ impl Backend for EvmLlvmBackend {
 
     fn set_debug_assertions(&mut self, yes: bool) {
         self.debug_assertions = yes;
+    }
+
+    fn debug_support(&self) -> bool {
+        self.debug_support
+    }
+
+    fn set_debug_support(&mut self, yes: bool) {
+        self.debug_support = yes;
+    }
+
+    fn profiling_support(&self) -> bool {
+        self.profiling_support
+    }
+
+    fn set_profiling_support(&mut self, yes: bool) {
+        self.profiling_support = yes;
     }
 
     fn set_debug_file(&mut self, path: Option<PathBuf>) {

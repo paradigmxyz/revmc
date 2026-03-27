@@ -178,6 +178,48 @@ impl<B: Backend> EvmCompiler<B> {
         self.config.debug_assertions = yes;
     }
 
+    /// Returns whether JIT debug support is enabled.
+    ///
+    /// Registers JIT objects with debuggers via `__jit_debug_register_code`,
+    /// allowing GDB/LLDB to resolve JIT-compiled function names and set breakpoints.
+    ///
+    /// This setting is applied once per process on first JIT compilation.
+    /// Subsequent compilers inherit the value set by the first.
+    ///
+    /// Defaults to `true`.
+    pub fn debug_support(&self) -> bool {
+        self.backend.debug_support()
+    }
+
+    /// Sets whether to enable JIT debug support.
+    ///
+    /// This setting is applied once per process on first JIT compilation.
+    /// Subsequent compilers inherit the value set by the first.
+    pub fn set_debug_support(&mut self, yes: bool) {
+        self.backend.set_debug_support(yes);
+    }
+
+    /// Returns whether JIT profiling support is enabled.
+    ///
+    /// Installs the LLVM `PerfSupportPlugin` which writes jitdump records,
+    /// allowing profilers to resolve JIT-compiled symbols with debug and unwind info.
+    ///
+    /// This setting is applied once per process on first JIT compilation.
+    /// Subsequent compilers inherit the value set by the first.
+    ///
+    /// Defaults to `true`.
+    pub fn profiling_support(&self) -> bool {
+        self.backend.profiling_support()
+    }
+
+    /// Sets whether to enable JIT profiling support.
+    ///
+    /// This setting is applied once per process on first JIT compilation.
+    /// Subsequent compilers inherit the value set by the first.
+    pub fn set_profiling_support(&mut self, yes: bool) {
+        self.backend.set_profiling_support(yes);
+    }
+
     /// Sets whether to enable frame pointers.
     ///
     /// This is useful for profiling and debugging, but it incurs a very slight performance penalty.

@@ -213,6 +213,20 @@ pub trait Backend: BackendTypes + TypeMethods {
     fn set_is_dumping(&mut self, yes: bool);
     fn set_debug_assertions(&mut self, yes: bool);
 
+    /// Returns whether JIT debug support is enabled.
+    fn debug_support(&self) -> bool {
+        true
+    }
+    /// Sets whether to enable JIT debug support.
+    fn set_debug_support(&mut self, _yes: bool) {}
+
+    /// Returns whether JIT profiling support is enabled.
+    fn profiling_support(&self) -> bool {
+        true
+    }
+    /// Sets whether to enable JIT profiling support.
+    fn set_profiling_support(&mut self, _yes: bool) {}
+
     /// Sets the debug info source file path for generated code.
     ///
     /// Passing `Some(path)` enables debug info emission; `None` disables it.
