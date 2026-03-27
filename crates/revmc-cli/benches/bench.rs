@@ -96,7 +96,7 @@ fn run_bytecode_bench(c: &mut Criterion, bench: &revmc_cli::Bench) {
         g.bench_function(format!("{name}/compile/jit"), |b| {
             b.iter_batched_ref(
                 || {
-                    let mut compiler = new_compiler(OptimizationLevel::Aggressive);
+                    let mut compiler = new_compiler(OptimizationLevel::default());
                     let id = compiler.translate(name, &def.bytecode, SPEC_ID).expect("translate");
                     (compiler, id)
                 },
@@ -114,7 +114,7 @@ fn run_bytecode_bench(c: &mut Criterion, bench: &revmc_cli::Bench) {
     host.apply_bench(def);
     let table = instruction_table::<EthInterpreter, BenchHost>();
 
-    let opt_level = revmc::OptimizationLevel::Aggressive;
+    let opt_level = revmc::OptimizationLevel::default();
     let backend = EvmLlvmBackend::new(false, opt_level).unwrap();
     let mut compiler = EvmCompiler::new(backend);
     compiler.inspect_stack_length(!def.stack_input.is_empty());

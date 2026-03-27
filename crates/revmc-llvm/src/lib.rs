@@ -837,13 +837,39 @@ impl Backend for EvmLlvmBackend {
     }
 
     fn optimize_module(&mut self) -> Result<()> {
+        // We use a custom pipeline instead of `default<O3>` because GVN is extremely slow on
+        // the huge single-function modules that EVM compilation produces. Replacing GVN with
+        // `early-cse` + `sccp` achieves equivalent or better code size and runtime performance
+        // at ~5x faster compile time.
+        //
+        // The standard `default<O1>` is also slow (~730ms on snailtracer) because the loop
+        // analysis infrastructure (LoopInfo, DominatorTree, MemorySSA, LCSSA) is expensive to
+        // compute on functions with thousands of basic blocks, even though the loop passes
+        // themselves do nothing useful — EVM has no natural loops to optimize.
+        //
+        // LICM (Loop Invariant Code Motion) helps tight EVM loops by hoisting gas counter and
+        // stack slot loads/stores into registers. However, the loop analysis infrastructure is
+        // quadratic on large functions — e.g. +430ms on snailtracer (7770 BBs) vs +0ms on
+        // fibonacci (45 BBs). We skip it for functions with >4000 basic blocks.
+        //
+        // Can be overridden with `REVMC_PASSES` env var for experimentation.
         // From `opt --help`, `-passes`.
-        let passes = match self.opt_level {
+
+        static PASSES_OVERRIDE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+        static PASSES: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        static PASSES_WITH_LICM: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+        let passes_override = PASSES_OVERRIDE.get_or_init(|| std::env::var("REVMC_PASSES").ok());
+        let passes = passes_override.as_deref().unwrap_or_else(|| match self.opt_level {
             OptimizationLevel::None => "default<O0>",
-            OptimizationLevel::Less => "default<O1>",
-            OptimizationLevel::Default => "default<O2>",
+            OptimizationLevel::Less | OptimizationLevel::Default => {
+                let total_bbs: u32 =
+                    self.module.get_functions().map(|f| f.count_basic_blocks()).sum();
+                let passes = if total_bbs > 4000 { &PASSES } else { &PASSES_WITH_LICM };
+                passes.get_or_init(|| build_pass_pipeline(total_bbs <= 4000))
+            }
             OptimizationLevel::Aggressive => "default<O3>",
-        };
+        });
         let opts = PassBuilderOptions::create();
         self.module().run_passes(passes, &self.machine, opts).map_err(error_msg)
     }
@@ -1747,6 +1773,42 @@ impl Builder for EvmLlvmBuilder<'_> {
     }
 }
 
+/// Builds the LLVM pass pipeline string. See [`EvmLlvmBackend::optimize_module`].
+fn build_pass_pipeline(with_licm: bool) -> String {
+    let mut passes = String::from("function(");
+    let function_passes: &[&str] = &[
+        "simplifycfg",
+        "sroa",
+        "early-cse",
+        "jump-threading",
+        "correlated-propagation",
+        "simplifycfg",
+        "instcombine<no-verify-fixpoint>",
+    ];
+    let licm_passes: &[&str] =
+        &["loop-mssa(licm,loop-rotate,licm)", "simplifycfg", "instcombine<no-verify-fixpoint>"];
+    let post_passes: &[&str] = &[
+        "sroa",
+        "early-cse",
+        "sccp",
+        "instcombine<no-verify-fixpoint>",
+        "adce",
+        "dse",
+        "simplifycfg",
+    ];
+
+    let iter =
+        function_passes.iter().chain(if with_licm { licm_passes } else { &[] }).chain(post_passes);
+    for (i, pass) in iter.enumerate() {
+        if i > 0 {
+            passes.push(',');
+        }
+        passes.push_str(pass);
+    }
+    passes.push_str("),globaldce");
+    passes
+}
+
 fn init() -> Result<()> {
     let mut init_result = Ok(());
     static INIT: Once = Once::new();
@@ -1875,6 +1937,8 @@ fn convert_attribute(bcx: &EvmLlvmBuilder<'_>, attr: revmc_backend::Attribute) -
         OurAttr::NoRecurse => ("norecurse", AttrValue::Enum(0)),
         OurAttr::NoSync => ("nosync", AttrValue::Enum(0)),
         OurAttr::NoUnwind => ("nounwind", AttrValue::Enum(0)),
+        OurAttr::NonLazyBind => ("nonlazybind", AttrValue::Enum(0)),
+        OurAttr::UWTable => ("uwtable", AttrValue::Enum(2)),
         OurAttr::AllFramePointers => ("frame-pointer", AttrValue::String("all")),
         OurAttr::NativeTargetCpu => (
             "target-cpu",

@@ -410,7 +410,7 @@ impl CompileCache {
 }
 
 fn make_compiler(aot: bool) -> RefCell<EvmCompiler<EvmLlvmBackend>> {
-    RefCell::new(EvmCompiler::new(EvmLlvmBackend::new(aot, OptimizationLevel::Aggressive).unwrap()))
+    RefCell::new(EvmCompiler::new(EvmLlvmBackend::new(aot, OptimizationLevel::default()).unwrap()))
 }
 
 // ── Compiled test execution ─────────────────────────────────────────────────

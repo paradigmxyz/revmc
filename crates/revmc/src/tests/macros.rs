@@ -18,7 +18,7 @@ macro_rules! matrix_tests {
 
             #[test]
             fn opt() {
-                crate::tests::with_jit_compiler(crate::OptimizationLevel::Aggressive, run_llvm);
+                crate::tests::with_jit_compiler(crate::OptimizationLevel::default(), run_llvm);
             }
         }
     };

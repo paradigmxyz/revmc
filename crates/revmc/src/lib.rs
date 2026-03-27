@@ -62,7 +62,7 @@ type FxHashMap<K, V> = alloy_primitives::map::HashMap<K, V, alloy_primitives::ma
 #[cfg(any())]
 pub fn generate_all_assembly() -> EvmCompiler<EvmLlvmBackend> {
     let mut compiler =
-        EvmCompiler::new(EvmLlvmBackend::new(false, OptimizationLevel::Aggressive).unwrap());
+        EvmCompiler::new(EvmLlvmBackend::new(false, OptimizationLevel::default()).unwrap());
     let _ = compiler.jit(None, &[], primitives::SpecId::ARROW_GLACIER).unwrap();
     unsafe { compiler.clear().unwrap() };
     compiler

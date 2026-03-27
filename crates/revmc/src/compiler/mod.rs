@@ -784,6 +784,8 @@ mod default_attrs {
             Attribute::NoSync,          // No thread synchronization.
             Attribute::NativeTargetCpu, // Optimization.
             Attribute::NoRecurse,       // Revm is not recursive.
+            Attribute::NonLazyBind,     // Skip PLT indirection.
+            Attribute::UWTable,         // Unwind tables for profilers/debuggers.
         ]
         .into_iter()
     }
