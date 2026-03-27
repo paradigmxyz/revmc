@@ -618,7 +618,6 @@ impl EvmLlvmBackend {
         let new_module = create_module(self.cx, &self.machine, self.aot)?;
         let old_module = std::mem::replace(&mut self.module, new_module);
 
-        self.ensure_orc()?;
         let tscx = self._tscx.as_ref().expect("missing ThreadSafeContext");
         let orc = self.orc.as_mut().unwrap();
 
@@ -887,10 +886,11 @@ impl Backend for EvmLlvmBackend {
     }
 
     fn jit_function(&mut self, id: Self::FuncId) -> Result<usize> {
+        self.ensure_orc()?;
         self.commit_staged_module()?;
         let name_str = self.id_to_name(id);
         let name = CString::new(name_str).unwrap();
-        let orc = self.ensure_orc()?;
+        let orc = self.orc.as_mut().unwrap();
         // Capture the compiled object buffer during lookup. LLJIT compiles lazily:
         // add_module_with_rt just registers the module, actual compilation happens
         // in lookup_in when the symbol is first requested.
