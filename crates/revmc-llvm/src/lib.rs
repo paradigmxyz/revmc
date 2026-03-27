@@ -72,15 +72,12 @@ pub struct GlobalJitConfig {
 
 impl Default for GlobalJitConfig {
     fn default() -> Self {
-        Self {
-            debug_support: std::env::var_os("REVMC_JIT_DEBUG").is_some(),
-            profiling_support: std::env::var_os("ENABLE_JITPROFILING").is_some(),
-        }
+        Self { debug_support: true, profiling_support: true }
     }
 }
 
 impl GlobalJitConfig {
-    /// Creates a new configuration with defaults derived from environment variables.
+    /// Creates a new configuration with both debug and profiling support enabled.
     pub fn new() -> Self {
         Self::default()
     }
@@ -91,7 +88,7 @@ impl GlobalJitConfig {
     /// allowing GDB/LLDB to resolve JIT-compiled function names and set
     /// breakpoints. Can only be set once per process.
     ///
-    /// Defaults to `true` if `REVMC_JIT_DEBUG` is set.
+    /// Defaults to `true`.
     pub fn debug_support(&self) -> bool {
         self.debug_support
     }
@@ -107,7 +104,7 @@ impl GlobalJitConfig {
     /// allowing profilers to resolve JIT-compiled symbols with debug and
     /// unwind info. Can only be set once per process.
     ///
-    /// Defaults to `true` if `ENABLE_JITPROFILING` is set.
+    /// Defaults to `true`.
     pub fn profiling_support(&self) -> bool {
         self.profiling_support
     }
