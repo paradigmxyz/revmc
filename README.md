@@ -58,6 +58,16 @@ an event listener for JIT profiling. This allows profilers such as
 [samply](https://github.com/mstange/samply) and [perf](https://perf.wiki.kernel.org) to resolve
 JIT-compiled function names and source locations.
 
+```bash
+ENABLE_JITPROFILING=1 samply record ./your-binary
+```
+
+```bash
+ENABLE_JITPROFILING=1 perf record -k 1 ./your-binary
+perf inject --jit -i perf.data -o perf.jit.data
+perf report -i perf.jit.data
+```
+
 ## Testing
 
 The [Ethereum state tests](https://github.com/ethereum/tests) are included as a git submodule.
