@@ -12,7 +12,7 @@ use inkwell::{
         prelude::{LLVMAttributeRef, LLVMContextRef},
     },
 };
-use std::ffi::c_char;
+use std::{ffi::c_char, sync::atomic::AtomicUsize};
 
 #[link(name = "revmc_llvm_cpp", kind = "static")]
 unsafe extern "C" {
@@ -45,8 +45,8 @@ unsafe extern "C" {
 
     pub(crate) fn revmc_llvm_lljit_enable_memory_usage(
         jit: LLVMOrcLLJITRef,
-        code_bytes: *const std::sync::atomic::AtomicUsize,
-        data_bytes: *const std::sync::atomic::AtomicUsize,
+        code_bytes: *const AtomicUsize,
+        data_bytes: *const AtomicUsize,
     ) -> LLVMErrorRef;
 }
 
