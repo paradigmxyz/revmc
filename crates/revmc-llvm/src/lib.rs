@@ -506,14 +506,13 @@ impl Backend for EvmLlvmBackend {
         let passes_override = PASSES_OVERRIDE.get_or_init(|| std::env::var("REVMC_PASSES").ok());
         let passes = passes_override.as_deref().unwrap_or_else(|| match self.opt_level {
             OptimizationLevel::None => "default<O0>",
-            OptimizationLevel::Less
-            | OptimizationLevel::Default
-            | OptimizationLevel::Aggressive => {
+            OptimizationLevel::Less | OptimizationLevel::Default => {
                 let total_bbs: u32 =
                     self.module.get_functions().map(|f| f.count_basic_blocks()).sum();
                 let passes = if total_bbs > 4000 { &PASSES } else { &PASSES_WITH_LICM };
                 passes.get_or_init(|| build_pass_pipeline(total_bbs <= 4000))
             }
+            OptimizationLevel::Aggressive => "default<O3>",
         });
         let opts = PassBuilderOptions::create();
         self.module.run_passes(passes, &self.machine, opts).map_err(error_msg)

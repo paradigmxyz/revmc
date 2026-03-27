@@ -58,7 +58,7 @@ pub use revm_primitives::hardfork::SpecId;
 #[cfg(any())]
 pub fn generate_all_assembly() -> EvmCompiler<EvmLlvmBackend> {
     let mut compiler =
-        EvmCompiler::new(EvmLlvmBackend::new(false, OptimizationLevel::Aggressive).unwrap());
+        EvmCompiler::new(EvmLlvmBackend::new(false, OptimizationLevel::default()).unwrap());
     let _ = compiler.jit(None, &[], primitives::SpecId::ARROW_GLACIER).unwrap();
     unsafe { compiler.clear().unwrap() };
     compiler

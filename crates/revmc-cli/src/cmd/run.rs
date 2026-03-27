@@ -79,7 +79,7 @@ pub(crate) struct RunArgs {
 
     #[arg(short = 'o', long)]
     out_dir: Option<PathBuf>,
-    #[arg(short = 'O', long, default_value = "3")]
+    #[arg(short = 'O', long, default_value = "2")]
     opt_level: OptimizationLevel,
     #[arg(long, value_enum, default_value = "osaka")]
     spec_id: SpecIdValueEnum,
