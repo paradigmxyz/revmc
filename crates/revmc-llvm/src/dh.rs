@@ -6,7 +6,7 @@ use std::{ffi::c_void, fmt, ptr};
 
 /// LLVM diagnostic handler guard.
 pub(crate) struct DiagnosticHandlerGuard {
-    cx: &'static Context,
+    cx: LLVMContextRef,
     prev_dh: LLVMDiagnosticHandler,
     prev_dhc: *mut c_void,
 }
@@ -18,13 +18,13 @@ impl fmt::Debug for DiagnosticHandlerGuard {
 }
 
 impl DiagnosticHandlerGuard {
-    pub(crate) fn new(cx: &'static Context) -> Self {
+    pub(crate) fn new(cx: &Context) -> Self {
         unsafe {
             let c = cx.as_ctx_ref();
             let prev_dh = LLVMContextGetDiagnosticHandler(c);
             let prev_dhc = LLVMContextGetDiagnosticContext(c);
             LLVMContextSetDiagnosticHandler(c, Some(Self::diagnostic_handler), ptr::null_mut());
-            Self { cx, prev_dh, prev_dhc }
+            Self { cx: c, prev_dh, prev_dhc }
         }
     }
 
@@ -46,7 +46,7 @@ impl DiagnosticHandlerGuard {
 impl Drop for DiagnosticHandlerGuard {
     fn drop(&mut self) {
         unsafe {
-            LLVMContextSetDiagnosticHandler(self.cx.as_ctx_ref(), self.prev_dh, self.prev_dhc);
+            LLVMContextSetDiagnosticHandler(self.cx, self.prev_dh, self.prev_dhc);
         }
     }
 }

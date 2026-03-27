@@ -6,17 +6,14 @@ The compiler implementation is abstracted over an intermediate representation ba
 
 ![image](https://github.com/paradigmxyz/revmc/assets/17802178/96adf64b-8513-469d-925d-4f8d902e4e0a)
 
-This repository hosts two backend implementations:
-- [LLVM] ([`revmc-llvm`]): main backend with full test coverage;
-- [Cranelift] ([`revmc-cranelift`]); currently not functional due to missing `i256` support in Cranelift. This will likely require a custom fork of Cranelift.
+The compiler backend is abstracted behind a trait ([`revmc-backend`]), with an [LLVM] implementation ([`revmc-llvm`]) providing full test coverage.
 
 [JIT]: https://en.wikipedia.org/wiki/Just-in-time_compilation
 [AOT]: https://en.wikipedia.org/wiki/Ahead-of-time_compilation
 [EVM]: https://ethereum.org/en/developers/docs/evm/
 [LLVM]: https://llvm.org/
+[`revmc-backend`]: /crates/revmc-backend
 [`revmc-llvm`]: /crates/revmc-llvm
-[Cranelift]: https://cranelift.dev/
-[`revmc-cranelift`]: /crates/revmc-cranelift
 
 ## Requirements
 

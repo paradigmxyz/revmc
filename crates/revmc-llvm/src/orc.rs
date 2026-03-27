@@ -15,7 +15,7 @@
 
 use crate::llvm_string;
 use inkwell::{
-    context::{Context, ContextRef},
+    context::Context,
     llvm_sys::{
         core::{LLVMContextCreate, LLVMModuleCreateWithNameInContext},
         error::*,
@@ -50,6 +50,12 @@ pub struct ThreadSafeContext {
     ctx: LLVMOrcThreadSafeContextRef,
 }
 
+impl fmt::Debug for ThreadSafeContext {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ThreadSafeContext").finish_non_exhaustive()
+    }
+}
+
 impl ThreadSafeContext {
     /// Creates a new thread-safe context.
     pub fn new() -> Self {
@@ -72,18 +78,11 @@ impl ThreadSafeContext {
         self.ctx
     }
 
-    /// Returns the underlying LLVM context.
-    pub fn get_context(&self) -> ContextRef<'_> {
-        unsafe { ContextRef::new(LLVMOrcThreadSafeContextGetContext(self.ctx)) }
-    }
-
     /// Create a ThreadSafeModule wrapper around the given LLVM module.
     pub fn create_module<'ctx>(&'ctx self, module: Module<'ctx>) -> ThreadSafeModule {
         ThreadSafeModule::create_in_context(module, self)
     }
 }
-
-unsafe impl Send for ThreadSafeContext {}
 
 impl Drop for ThreadSafeContext {
     fn drop(&mut self) {
@@ -154,8 +153,6 @@ impl ThreadSafeModule {
         cvt(unsafe { LLVMOrcThreadSafeModuleWithModuleDo(self.as_inner(), shim, ctx) })
     }
 }
-
-unsafe impl Send for ThreadSafeModule {}
 
 impl Drop for ThreadSafeModule {
     fn drop(&mut self) {
@@ -447,6 +444,12 @@ impl Drop for SymbolFlagsMapPairs<'_> {
 /// A materialization unit.
 pub struct MaterializationUnit {
     mu: LLVMOrcMaterializationUnitRef,
+}
+
+impl fmt::Debug for MaterializationUnit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MaterializationUnit").finish_non_exhaustive()
+    }
 }
 
 impl MaterializationUnit {
@@ -777,6 +780,12 @@ pub struct ResourceTracker {
     rt: LLVMOrcResourceTrackerRef,
 }
 
+impl fmt::Debug for ResourceTracker {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ResourceTracker").finish_non_exhaustive()
+    }
+}
+
 impl ResourceTracker {
     /// Wraps a raw pointer.
     pub unsafe fn from_inner(rt: LLVMOrcResourceTrackerRef) -> Self {
@@ -882,6 +891,17 @@ impl ExecutionSessionRef<'_> {
         Ok(unsafe { JITDylibRef::from_inner_unchecked(res.assume_init()) })
     }
 
+    /// Remove a JITDylib from the ExecutionSession, freeing all its resources once the last handle
+    /// is dropped.
+    pub fn remove_jit_dylib(&self, jd: &JITDylibRef) -> Result<(), LLVMString> {
+        cvt(unsafe {
+            crate::cpp::revmc_llvm_execution_session_remove_jit_dylib(
+                self.as_inner(),
+                jd.as_inner(),
+            )
+        })
+    }
+
     /// Sets the default error reporter to the ExecutionSession.
     ///
     /// Uses [`tracing::error!`] to log the error message.
@@ -892,9 +912,9 @@ impl ExecutionSessionRef<'_> {
     /// Attach a custom error reporter function to the ExecutionSession.
     pub fn set_error_reporter(&self, f: fn(&CStr)) {
         extern "C" fn shim(ctx: *mut c_void, err: LLVMErrorRef) {
-            let f = ctx as *mut fn(&CStr);
+            let f: fn(&CStr) = unsafe { mem::transmute(ctx) };
             let Err(e) = cvt(err) else { return };
-            let res = std::panic::catch_unwind(AssertUnwindSafe(|| unsafe { (*f)(&e) }));
+            let res = std::panic::catch_unwind(AssertUnwindSafe(|| f(&e)));
             if let Err(e) = res {
                 error!(msg=?panic_payload(&e), "error reporter closure panicked");
             }
@@ -947,7 +967,18 @@ impl JITDylibRef {
         // If this operation succeeds then JITDylib JD will take ownership of MU.
         // If the operation fails then ownership remains with the caller who should call
         // LLVMOrcDisposeMaterializationUnit to destroy it.
-        cvt(unsafe { LLVMOrcJITDylibDefine(self.as_inner(), mu.as_inner()) }).map_err(|e| (e, mu))
+        let mu = mem::ManuallyDrop::new(mu);
+        cvt(unsafe { LLVMOrcJITDylibDefine(self.as_inner(), mu.as_inner()) })
+            .map_err(|e| (e, mem::ManuallyDrop::into_inner(mu)))
+    }
+
+    /// Add another JITDylib to this JITDylib's link order.
+    ///
+    /// Symbols not found in this JITDylib will be searched for in `other`.
+    pub fn add_to_link_order(&self, other: &Self) {
+        unsafe {
+            crate::cpp::revmc_llvm_jit_dylib_add_to_link_order(self.as_inner(), other.as_inner())
+        };
     }
 
     /// Calls remove on all trackers associated with this JITDylib.
@@ -1237,6 +1268,19 @@ impl LLJITBuilder {
     }
     */
 
+    /// Use a thread-safe compiler without spawning background threads.
+    ///
+    /// Installs `ConcurrentIRCompiler` (fresh `TargetMachine` per compilation)
+    /// so multiple caller threads can compile through the same LLJIT safely.
+    /// The default `InPlaceTaskDispatcher` is preserved, meaning compilation
+    /// runs inline on the thread that triggers it — no background threads.
+    pub fn concurrent_compiler(mut self) -> Self {
+        unsafe {
+            crate::cpp::revmc_llvm_lljit_builder_set_concurrent_compiler(self.as_inner_init())
+        };
+        self
+    }
+
     /// Builds the JIT.
     pub fn build(self) -> Result<LLJIT, LLVMString> {
         // This operation takes ownership of the Builder argument: clients should not
@@ -1251,7 +1295,9 @@ impl LLJITBuilder {
 
 impl Drop for LLJITBuilder {
     fn drop(&mut self) {
-        unsafe { LLVMOrcDisposeLLJITBuilder(self.builder) };
+        if !self.builder.is_null() {
+            unsafe { LLVMOrcDisposeLLJITBuilder(self.builder) };
+        }
     }
 }
 
@@ -1264,19 +1310,20 @@ pub struct LLJIT {
     jit: LLVMOrcLLJITRef,
 }
 
+impl fmt::Debug for LLJIT {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LLJIT").finish_non_exhaustive()
+    }
+}
+
 impl LLJIT {
     /// Creates a new LLJIT builder.
     pub fn builder() -> LLJITBuilder {
         LLJITBuilder::new()
     }
 
-    /// Creates a new ORC JIT with a target machine for the host.
+    /// Creates a new ORC JIT, auto-detecting the host target.
     pub fn new() -> Result<Self, LLVMString> {
-        LLJITBuilder::new().set_target_machine_from_host()?.build()
-    }
-
-    /// Creates a new default ORC JIT.
-    pub fn new_empty() -> Result<Self, LLVMString> {
         LLJITBuilder::new().build()
     }
 
@@ -1327,11 +1374,11 @@ impl LLJIT {
     pub fn add_module_with_rt(
         &self,
         tsm: ThreadSafeModule,
-        jd: ResourceTracker,
+        rt: &ResourceTracker,
     ) -> Result<(), LLVMString> {
         let tsm = mem::ManuallyDrop::new(tsm);
         cvt(unsafe {
-            LLVMOrcLLJITAddLLVMIRModuleWithRT(self.as_inner(), jd.as_inner(), tsm.as_inner())
+            LLVMOrcLLJITAddLLVMIRModuleWithRT(self.as_inner(), rt.as_inner(), tsm.as_inner())
         })
     }
 
@@ -1357,17 +1404,29 @@ impl LLJIT {
     }
 
     /// Look up the given symbol in the main JITDylib of the given LLJIT instance.
+    ///
+    /// The name is **unmangled** — `LLVMOrcLLJITLookup` applies the data layout
+    /// prefix (e.g. `_` on macOS) internally.
     pub fn lookup(&self, name: &CStr) -> Result<usize, LLVMString> {
-        self.lookup_unmangled(&self.mangle_and_intern(name))
+        let mut res = MaybeUninit::uninit();
+        cvt(unsafe { LLVMOrcLLJITLookup(self.as_inner(), res.as_mut_ptr(), name.as_ptr()) })?;
+        Ok(unsafe { res.assume_init() }.try_into().unwrap())
     }
 
-    /// Look up the given symbol in the main JITDylib of the given LLJIT instance.
+    /// Look up a symbol in a specific JITDylib.
     ///
-    /// The name should be mangled.
-    pub fn lookup_unmangled(&self, unmangled_name: &CStr) -> Result<usize, LLVMString> {
+    /// Unlike [`lookup`](Self::lookup), which only searches the main JITDylib,
+    /// this searches the given `jd`. The name is **unmangled** — the LLJIT
+    /// applies the data layout prefix (e.g. `_` on macOS) internally.
+    pub fn lookup_in(&self, jd: &JITDylibRef, name: &CStr) -> Result<usize, LLVMString> {
         let mut res = MaybeUninit::uninit();
         cvt(unsafe {
-            LLVMOrcLLJITLookup(self.as_inner(), res.as_mut_ptr(), unmangled_name.as_ptr())
+            crate::cpp::revmc_llvm_lljit_lookup_in(
+                self.as_inner(),
+                jd.as_inner(),
+                res.as_mut_ptr(),
+                name.as_ptr(),
+            )
         })?;
         Ok(unsafe { res.assume_init() }.try_into().unwrap())
     }
@@ -1377,16 +1436,35 @@ impl LLJIT {
         unsafe { IRTransformLayerRef::from_inner(LLVMOrcLLJITGetIRTransformLayer(self.as_inner())) }
     }
 
-    // get_*_layer...
+    /// Returns a non-owning reference to the LLJIT instance's object transform layer.
+    pub fn get_obj_transform_layer(&self) -> ObjectTransformLayerRef {
+        unsafe {
+            ObjectTransformLayerRef::from_inner(LLVMOrcLLJITGetObjTransformLayer(self.as_inner()))
+        }
+    }
 
-    // Experimental interface for `libLLVMOrcDebugging.a`.
-    /*
-    /// Install the plugin that submits debug objects to the executor.
-    /// Executors must expose the llvm_orc_registerJITLoaderGDBWrapper symbol.
+    /// Install `PerfSupportPlugin` on the LLJIT's `ObjectLinkingLayer`.
+    ///
+    /// Writes perf jitdump records so `perf record -k 1` / `perf inject --jit`
+    /// can resolve JIT-compiled symbols with full debug info and unwind info.
+    /// Requires `ObjectLinkingLayer` (JITLink), which is the LLJIT default.
+    pub fn enable_perf_support(&self) -> Result<(), LLVMString> {
+        cvt(unsafe { crate::cpp::revmc_llvm_lljit_enable_perf_support(self.as_inner()) })
+    }
+
+    /// Install the plugin that submits debug objects to the executor via the
+    /// GDB JIT Interface (`__jit_debug_register_code`).
+    ///
+    /// On ELF this installs `ELFDebugObjectPlugin`; on MachO,
+    /// `GDBJITDebugInfoRegistrationPlugin`. Requires `ObjectLinkingLayer`
+    /// (JITLink), which is the LLJIT default.
+    ///
+    /// Once enabled, compiled objects containing DWARF debug info are
+    /// automatically registered so that GDB, LLDB, `perf`, and other profilers
+    /// can resolve JIT-compiled function names and source locations.
     pub fn enable_debug_support(&self) -> Result<(), LLVMString> {
         cvt(unsafe { LLVMOrcLLJITEnableDebugSupport(self.as_inner()) })
     }
-    */
 }
 
 impl Drop for LLJIT {
@@ -1397,7 +1475,7 @@ impl Drop for LLJIT {
     }
 }
 
-/*
+/// A reference to an object layer.
 pub struct ObjectLayerRef {
     ptr: LLVMOrcObjectLayerRef,
 }
@@ -1414,6 +1492,13 @@ impl ObjectLayerRef {
     }
 }
 
+/// Callback for [`ObjectTransformLayerRef::set_transform`].
+type ObjTransformFn = fn(&[u8]) -> Result<Option<Vec<u8>>, String>;
+
+/// A reference to an object transform layer.
+///
+/// The transform layer sits between the IR compiler and the object linking layer.
+/// A transform callback can inspect or modify the compiled object buffer before linking.
 pub struct ObjectTransformLayerRef {
     ptr: LLVMOrcObjectTransformLayerRef,
 }
@@ -1428,8 +1513,58 @@ impl ObjectTransformLayerRef {
     pub fn as_inner(&self) -> LLVMOrcObjectTransformLayerRef {
         self.ptr
     }
+
+    // TODO: avoid copying, better api for mutation
+    /// Set the transform function on this object transform layer.
+    ///
+    /// The callback receives the compiled object buffer as `&[u8]`. Returning `Ok(None)`
+    /// passes the buffer through unchanged; returning `Ok(Some(new_bytes))` replaces it.
+    /// Returning `Err` aborts materialization.
+    pub fn set_transform(&self, f: ObjTransformFn) {
+        extern "C" fn shim(ctx: *mut c_void, obj_in_out: *mut LLVMMemoryBufferRef) -> LLVMErrorRef {
+            use inkwell::llvm_sys::core::{
+                LLVMCreateMemoryBufferWithMemoryRangeCopy, LLVMDisposeMemoryBuffer,
+                LLVMGetBufferSize, LLVMGetBufferStart,
+            };
+            let f: ObjTransformFn = unsafe { mem::transmute(ctx) };
+            let buf = unsafe { *obj_in_out };
+            let data = unsafe {
+                let start = LLVMGetBufferStart(buf);
+                let size = LLVMGetBufferSize(buf);
+                std::slice::from_raw_parts(start.cast::<u8>(), size)
+            };
+            let res = std::panic::catch_unwind(AssertUnwindSafe(|| f(data)));
+            cvt_cb_res_t(res, |new_bytes| {
+                if let Some(new_bytes) = new_bytes {
+                    unsafe {
+                        LLVMDisposeMemoryBuffer(buf);
+                        *obj_in_out = LLVMCreateMemoryBufferWithMemoryRangeCopy(
+                            new_bytes.as_ptr().cast(),
+                            new_bytes.len(),
+                            c"".as_ptr(),
+                        );
+                    }
+                }
+            })
+        }
+
+        let ctx = f as *mut c_void;
+        unsafe { self.set_transform_raw(shim, ctx) }
+    }
+
+    /// Set a raw transform function on this object transform layer.
+    ///
+    /// # Safety
+    ///
+    /// `ctx` must be valid for the lifetime of this layer and `f` must not unwind.
+    pub unsafe fn set_transform_raw(
+        &self,
+        f: extern "C" fn(ctx: *mut c_void, obj_in_out: *mut LLVMMemoryBufferRef) -> LLVMErrorRef,
+        ctx: *mut c_void,
+    ) {
+        LLVMOrcObjectTransformLayerSetTransform(self.as_inner(), f, ctx);
+    }
 }
-*/
 
 /// A reference to an IR transform layer.
 pub struct IRTransformLayerRef {
@@ -1455,15 +1590,22 @@ impl IRTransformLayerRef {
     }
 
     /// Set the transform function of this transform layer.
-    pub fn set_transform(&self, f: fn(&ThreadSafeModule) -> Result<(), String>) {
+    pub fn set_transform(
+        &self,
+        f: fn(&ThreadSafeModule, MaterializationResponsibilityRef<'_>) -> Result<(), String>,
+    ) {
         extern "C" fn shim(
             ctx: *mut c_void,
             m: *mut LLVMOrcThreadSafeModuleRef,
-            _mr: LLVMOrcMaterializationResponsibilityRef,
+            mr: LLVMOrcMaterializationResponsibilityRef,
         ) -> LLVMErrorRef {
-            let f = ctx as *mut fn(&ThreadSafeModule) -> Result<(), String>;
+            let f: fn(
+                &ThreadSafeModule,
+                MaterializationResponsibilityRef<'_>,
+            ) -> Result<(), String> = unsafe { mem::transmute(ctx) };
             let m = mem::ManuallyDrop::new(unsafe { ThreadSafeModule::from_inner(*m) });
-            let res = std::panic::catch_unwind(AssertUnwindSafe(|| unsafe { (*f)(&m) }));
+            let mr = unsafe { MaterializationResponsibilityRef::from_inner(mr) };
+            let res = std::panic::catch_unwind(AssertUnwindSafe(|| f(&m, mr)));
             cvt_cb_res(res)
         }
 
@@ -1472,14 +1614,62 @@ impl IRTransformLayerRef {
     }
 }
 
+// SAFETY: ORC/LLJIT is designed for concurrent use from multiple threads.
+// All session operations are internally synchronized.
+unsafe impl Send for LLJIT {}
+unsafe impl Sync for LLJIT {}
+
+unsafe impl Send for ExecutionSessionRef<'_> {}
+unsafe impl Sync for ExecutionSessionRef<'_> {}
+
+unsafe impl Send for JITDylibRef {}
+unsafe impl Sync for JITDylibRef {}
+
+unsafe impl Send for ResourceTracker {}
+unsafe impl Sync for ResourceTracker {}
+
+unsafe impl Send for ObjectTransformLayerRef {}
+unsafe impl Sync for ObjectTransformLayerRef {}
+
+unsafe impl Send for IRTransformLayerRef {}
+unsafe impl Sync for IRTransformLayerRef {}
+
+unsafe impl Send for SymbolStringPoolRef {}
+unsafe impl Sync for SymbolStringPoolRef {}
+
+unsafe impl Send for SymbolStringPoolEntry {}
+unsafe impl Sync for SymbolStringPoolEntry {}
+
+unsafe impl Send for ThreadSafeContext {}
+
+unsafe impl Send for ThreadSafeModule {}
+
+unsafe impl Send for MaterializationUnit {}
+
+unsafe impl Send for DefinitionGenerator {}
+
+unsafe impl Send for JITTargetMachineBuilder {}
+
+unsafe impl Send for LLJITBuilder {}
+
 /// Converts an `LLVMErrorRef` to a `Result`.
 pub(crate) fn cvt(ptr: LLVMErrorRef) -> Result<(), LLVMString> {
     if ptr.is_null() { Ok(()) } else { Err(unsafe { llvm_string(LLVMGetErrorMessage(ptr)) }) }
 }
 
 fn cvt_cb_res(res: Result<Result<(), String>, Box<dyn std::any::Any + Send>>) -> LLVMErrorRef {
+    cvt_cb_res_t(res, drop)
+}
+
+fn cvt_cb_res_t<T>(
+    res: Result<Result<T, String>, Box<dyn std::any::Any + Send>>,
+    f: impl FnOnce(T),
+) -> LLVMErrorRef {
     let msg = match res {
-        Ok(Ok(())) => return ptr::null_mut(), // LLVMErrorSuccess
+        Ok(Ok(x)) => {
+            f(x);
+            return ptr::null_mut(); // LLVMErrorSuccess
+        }
         Ok(Err(e)) => e,
         Err(e) => format!("callback panicked, payload: {:?}", panic_payload(&e)),
     };
@@ -1556,7 +1746,170 @@ mod tests {
     use inkwell::{passes::PassBuilderOptions, targets::Target};
 
     #[test]
-    #[ignore = "ci fails idk"]
+    fn e2e_with_tsc() {
+        use mem::ManuallyDrop;
+
+        Target::initialize_native(&Default::default()).unwrap();
+        let triple = TargetMachine::get_default_triple();
+        let cpu = TargetMachine::get_host_cpu_name();
+        let features = TargetMachine::get_host_cpu_features();
+        let target = Target::from_triple(&triple).unwrap();
+
+        let cx = Context::create();
+        let raw = cx.raw();
+        let tscx = ThreadSafeContext::from_context(cx);
+        let cx_handle = Box::new(ManuallyDrop::new(unsafe { Context::new(raw) }));
+        let cx: &Context = unsafe { &*(&**cx_handle as *const Context) };
+
+        let machine = target
+            .create_target_machine(
+                &triple,
+                &cpu.to_string_lossy(),
+                &features.to_string_lossy(),
+                inkwell::OptimizationLevel::None,
+                inkwell::targets::RelocMode::Static,
+                inkwell::targets::CodeModel::JITDefault,
+            )
+            .unwrap();
+
+        let jit = LLJITBuilder::new().build().unwrap();
+
+        // Build module.
+        let m = cx.create_module("test");
+        m.set_data_layout(&machine.get_target_data().get_data_layout());
+        m.set_triple(&triple);
+
+        let fn_name = "my_fn";
+        let bcx = cx.create_builder();
+
+        // Add an unused external declaration and register absolute symbol.
+        extern "C" fn my_external(x: i64) -> i64 {
+            x + 100
+        }
+        let ext_ty = cx.i64_type().fn_type(&[cx.i64_type().into()], false);
+        let _ext_fn =
+            m.add_function("my_external", ext_ty, Some(inkwell::module::Linkage::External));
+        let ext_name = CString::new("my_external").unwrap();
+        let sym = crate::orc::SymbolMapPair::new(
+            jit.mangle_and_intern(&ext_name),
+            crate::orc::EvaluatedSymbol::new(
+                my_external as *const () as u64,
+                crate::orc::SymbolFlags::none().with_exported().callable(),
+            ),
+        );
+        jit.get_main_jit_dylib()
+            .define(crate::orc::MaterializationUnit::absolute_symbols(vec![sym]))
+            .map_err(|(e, _)| e)
+            .unwrap();
+
+        let ty = cx.i64_type().fn_type(&[], false);
+        let f = m.add_function(fn_name, ty, Some(inkwell::module::Linkage::External));
+        let bb = cx.append_basic_block(f, "entry");
+        bcx.position_at_end(bb);
+        bcx.build_return(Some(&cx.i64_type().const_int(142, false))).unwrap();
+
+        eprintln!("module:\n{}", m.print_to_string().to_string_lossy());
+        m.verify().unwrap();
+
+        // Wrap and add to JIT.
+        let tsm = tscx.create_module(m);
+        jit.add_module(tsm).unwrap();
+
+        // Lookup.
+        let address = jit.lookup(&CString::new(fn_name).unwrap()).unwrap();
+        eprintln!("address: {address:#x}");
+        // Check the first few bytes at the address to see if it's valid code.
+        let code = unsafe { std::slice::from_raw_parts(address as *const u8, 16) };
+        eprintln!("code bytes: {code:02x?}");
+        let f = unsafe { mem::transmute::<usize, extern "C" fn() -> u64>(address) };
+        eprintln!("about to call...");
+        let r = f();
+        eprintln!("result: {r}");
+        assert_eq!(r, 142);
+        eprintln!("dropping jit...");
+        drop(jit);
+        eprintln!("dropping machine...");
+        drop(machine);
+        eprintln!("dropping cx_handle...");
+        drop(cx_handle);
+        eprintln!("dropping tscx...");
+        drop(tscx);
+        eprintln!("all dropped, test done");
+    }
+
+    #[test]
+    fn lookup_in_custom_jd() {
+        use mem::ManuallyDrop;
+
+        Target::initialize_native(&Default::default()).unwrap();
+        let triple = TargetMachine::get_default_triple();
+        let cpu = TargetMachine::get_host_cpu_name();
+        let features = TargetMachine::get_host_cpu_features();
+        let target = Target::from_triple(&triple).unwrap();
+
+        let cx = Context::create();
+        let raw = cx.raw();
+        let tscx = ThreadSafeContext::from_context(cx);
+        let cx_handle = Box::new(ManuallyDrop::new(unsafe { Context::new(raw) }));
+        let cx: &Context = unsafe { &*(&**cx_handle as *const Context) };
+
+        let machine = target
+            .create_target_machine(
+                &triple,
+                &cpu.to_string_lossy(),
+                &features.to_string_lossy(),
+                inkwell::OptimizationLevel::None,
+                inkwell::targets::RelocMode::Static,
+                inkwell::targets::CodeModel::JITDefault,
+            )
+            .unwrap();
+
+        let jit = LLJITBuilder::new().build().unwrap();
+
+        // Create two custom JITDylibs with functions returning different values.
+        let jd_a = jit.get_execution_session().create_bare_jit_dylib(c"test_a");
+        let jd_b = jit.get_execution_session().create_bare_jit_dylib(c"test_b");
+
+        for (jd, value) in [(&jd_a, 111u64), (&jd_b, 222u64)] {
+            let m = cx.create_module("test");
+            m.set_data_layout(&machine.get_target_data().get_data_layout());
+            m.set_triple(&triple);
+
+            let fn_name = "test_fn";
+            let bcx = cx.create_builder();
+            let ty = cx.i64_type().fn_type(&[], false);
+            let f = m.add_function(fn_name, ty, Some(inkwell::module::Linkage::External));
+            let bb = cx.append_basic_block(f, "entry");
+            bcx.position_at_end(bb);
+            bcx.build_return(Some(&cx.i64_type().const_int(value, false))).unwrap();
+            m.verify().unwrap();
+
+            let module = ManuallyDrop::new(m);
+            let tsm = unsafe {
+                ThreadSafeModule::create_in_context(Module::new(module.as_mut_ptr()), &tscx)
+            };
+            jit.add_module_with_dylib(tsm, unsafe {
+                JITDylibRef::from_inner_unchecked(jd.as_inner())
+            })
+            .unwrap();
+        }
+
+        // Lookup in each JD should return the correct function.
+        let addr_a = jit.lookup_in(&jd_a, c"test_fn").unwrap();
+        let addr_b = jit.lookup_in(&jd_b, c"test_fn").unwrap();
+        assert_ne!(addr_a, addr_b);
+
+        let f_a = unsafe { mem::transmute::<usize, extern "C" fn() -> u64>(addr_a) };
+        let f_b = unsafe { mem::transmute::<usize, extern "C" fn() -> u64>(addr_b) };
+        assert_eq!(f_a(), 111);
+        assert_eq!(f_b(), 222);
+
+        // Clearing one JD should not affect the other.
+        jd_a.clear().unwrap();
+        assert_eq!(f_b(), 222);
+    }
+
+    #[test]
     fn e2e() {
         let tsm = ThreadSafeModule::create("test");
         let fn_name = "my_fn";
@@ -1607,12 +1960,11 @@ mod tests {
         })
         .unwrap();
 
-        let jit = LLJIT::new_empty().unwrap();
+        let jit = LLJIT::new().unwrap();
         jit.add_module(tsm).unwrap();
-        let address =
-            jit.lookup_unmangled(&jit.mangle_and_intern(&CString::new(fn_name).unwrap())).unwrap();
+        let address = jit.lookup(&CString::new(fn_name).unwrap()).unwrap();
         eprintln!("address: {address:#x}");
-        let f = unsafe { std::mem::transmute::<usize, extern "C" fn() -> u64>(address) };
+        let f = unsafe { mem::transmute::<usize, extern "C" fn() -> u64>(address) };
         let r = f();
         assert_eq!(r, 69);
     }
