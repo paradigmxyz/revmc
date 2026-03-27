@@ -7,7 +7,7 @@ extern crate tracing;
 
 use alloy_primitives::map::{FxBuildHasher, HashSet};
 use inkwell::{
-    AddressSpace, IntPredicate, OptimizationLevel,
+    AddressSpace, IntPredicate,
     attributes::{Attribute, AttributeLoc},
     basic_block::BasicBlock,
     debug_info::{
@@ -31,8 +31,8 @@ use inkwell::{
 };
 use object::{Object, ObjectSymbol};
 use revmc_backend::{
-    Backend, BackendConfig, BackendTypes, Builder, IntCC, Result, TailCallKind, TypeMethods, U256,
-    eyre,
+    Backend, BackendConfig, BackendTypes, Builder, IntCC, OptimizationLevel, Result, TailCallKind,
+    TypeMethods, U256, eyre,
 };
 use std::{
     borrow::Cow,
@@ -370,7 +370,7 @@ impl EvmLlvmBackend {
     /// Creates a new LLVM backend for the host machine.
     ///
     /// Use [`new_for_target`](Self::new_for_target) to create a backend for a specific target.
-    pub fn new(aot: bool, opt_level: revmc_backend::OptimizationLevel) -> Result<Self> {
+    pub fn new(aot: bool, opt_level: OptimizationLevel) -> Result<Self> {
         Self::new_for_target(aot, opt_level, &revmc_backend::Target::Native)
     }
 
@@ -378,12 +378,10 @@ impl EvmLlvmBackend {
     #[instrument(name = "new_llvm_backend", level = "debug", skip_all)]
     pub fn new_for_target(
         aot: bool,
-        opt_level: revmc_backend::OptimizationLevel,
+        opt_level: OptimizationLevel,
         target: &revmc_backend::Target,
     ) -> Result<Self> {
         init()?;
-
-        let inkwell_opt_level = convert_opt_level(opt_level);
 
         let target_info = TargetInfo::new(target)?;
         let target = &target_info.target;
@@ -392,7 +390,7 @@ impl EvmLlvmBackend {
                 &target_info.triple,
                 &target_info.cpu,
                 &target_info.features,
-                inkwell_opt_level,
+                convert_opt_level(opt_level),
                 if aot { RelocMode::PIC } else { RelocMode::Static },
                 if aot { CodeModel::Default } else { CodeModel::JITDefault },
             )
@@ -525,13 +523,13 @@ impl EvmLlvmBackend {
         );
 
         let opt_level = self.backend_config.opt_level;
-        let is_optimized = opt_level != revmc_backend::OptimizationLevel::None;
+        let is_optimized = opt_level != OptimizationLevel::None;
         let mut flags = Vec::new();
         flags.push(match opt_level {
-            revmc_backend::OptimizationLevel::None => "-O0",
-            revmc_backend::OptimizationLevel::Less => "-O1",
-            revmc_backend::OptimizationLevel::Default => "-O2",
-            revmc_backend::OptimizationLevel::Aggressive => "-O3",
+            OptimizationLevel::None => "-O0",
+            OptimizationLevel::Less => "-O1",
+            OptimizationLevel::Default => "-O2",
+            OptimizationLevel::Aggressive => "-O3",
         });
         flags.push(if self.aot { "--aot" } else { "--jit" });
         let flags = flags.join(" ");
@@ -762,7 +760,7 @@ impl Backend for EvmLlvmBackend {
                 true,
                 0,
                 DIFlags::PUBLIC,
-                self.backend_config.opt_level != revmc_backend::OptimizationLevel::None,
+                self.backend_config.opt_level != OptimizationLevel::None,
             );
             function.set_subprogram(subprogram);
             Some(subprogram)
@@ -801,19 +799,17 @@ impl Backend for EvmLlvmBackend {
         static PASSES: std::sync::OnceLock<String> = std::sync::OnceLock::new();
         static PASSES_WITH_LICM: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
-        let passes_override = PASSES_OVERRIDE.get_or_init(|| std::env::var("REVMC_PASSES").ok());
-        let passes =
-            passes_override.as_deref().unwrap_or_else(|| match self.backend_config.opt_level {
-                revmc_backend::OptimizationLevel::None => "default<O0>",
-                revmc_backend::OptimizationLevel::Less
-                | revmc_backend::OptimizationLevel::Default => {
-                    let total_bbs: u32 =
-                        self.module.get_functions().map(|f| f.count_basic_blocks()).sum();
-                    let passes = if total_bbs > 4000 { &PASSES } else { &PASSES_WITH_LICM };
-                    passes.get_or_init(|| build_pass_pipeline(total_bbs <= 4000))
-                }
-                revmc_backend::OptimizationLevel::Aggressive => "default<O3>",
-            });
+        let passes = PASSES_OVERRIDE.get_or_init(|| std::env::var("REVMC_PASSES").ok());
+        let passes = passes.as_deref().unwrap_or_else(|| match self.backend_config.opt_level {
+            OptimizationLevel::None => "default<O0>",
+            OptimizationLevel::Less | OptimizationLevel::Default => {
+                let total_bbs: u32 =
+                    self.module.get_functions().map(|f| f.count_basic_blocks()).sum();
+                let passes = if total_bbs > 4000 { &PASSES } else { &PASSES_WITH_LICM };
+                passes.get_or_init(|| build_pass_pipeline(total_bbs <= 4000))
+            }
+            OptimizationLevel::Aggressive => "default<O3>",
+        });
         let opts = PassBuilderOptions::create();
         self.module().run_passes(passes, &self.machine, opts).map_err(error_msg)
     }
@@ -1847,12 +1843,12 @@ fn convert_intcc(cond: IntCC) -> IntPredicate {
     }
 }
 
-fn convert_opt_level(level: revmc_backend::OptimizationLevel) -> OptimizationLevel {
+fn convert_opt_level(level: OptimizationLevel) -> inkwell::OptimizationLevel {
     match level {
-        revmc_backend::OptimizationLevel::None => OptimizationLevel::None,
-        revmc_backend::OptimizationLevel::Less => OptimizationLevel::Less,
-        revmc_backend::OptimizationLevel::Default => OptimizationLevel::Default,
-        revmc_backend::OptimizationLevel::Aggressive => OptimizationLevel::Aggressive,
+        OptimizationLevel::None => inkwell::OptimizationLevel::None,
+        OptimizationLevel::Less => inkwell::OptimizationLevel::Less,
+        OptimizationLevel::Default => inkwell::OptimizationLevel::Default,
+        OptimizationLevel::Aggressive => inkwell::OptimizationLevel::Aggressive,
     }
 }
 
