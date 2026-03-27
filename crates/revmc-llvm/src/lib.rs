@@ -351,9 +351,6 @@ impl Drop for JitDylibGuard {
 ///
 /// The LLVM context is owned separately (via `tscx`) and persists across JIT resets.
 /// Each compiler gets its own JITDylib in the global LLJIT for symbol isolation.
-///
-/// Drop order: `staged_functions` → `loaded_trackers` → `jd_guard` (field declaration order).
-/// The context (`tscx`) outlives all of these since it lives on `EvmLlvmBackend`.
 struct OrcJitState {
     /// Reference to the global LLJIT instance.
     global: &'static GlobalOrcJit,

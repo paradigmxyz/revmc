@@ -11,7 +11,7 @@ use revm_database_interface::{DatabaseCommit, EmptyDB};
 use revm_handler::{
     EvmTr, FrameResult, Handler, ItemOrResult, MainBuilder, MainContext, MainnetEvm,
 };
-use revm_primitives::{hardfork::SpecId, keccak256, Bytes, B256, U256};
+use revm_primitives::{hardfork::SpecId, keccak256, B256, U256};
 use revm_statetest_types::{SpecName, TestSuite, TestUnit};
 use revmc::{EvmCompiler, EvmCompilerFn, EvmLlvmBackend, Linker, OptimizationLevel};
 use std::{
@@ -557,75 +557,12 @@ fn execute_test_suite_compiled(
 
 // ── Runtime backend mode ─────────────────────────────────────────────────────
 
-use revmc::runtime::{JitBackend, LookupRequest, RuntimeConfig, RuntimeTuning};
+use revmc::{
+    revm_evm::JitEvm,
+    runtime::{JitBackend, LookupRequest, RuntimeConfig, RuntimeTuning},
+};
 
-/// Custom handler that looks up compiled functions via the runtime backend.
-/// On miss, enqueues JIT compilation and spin-waits for the result.
-struct RuntimeHandler {
-    backend: JitBackend,
-    spec_id: SpecId,
-}
-
-impl Handler for RuntimeHandler {
-    type Evm = StateTestEvm<'static>;
-    type Error = StateTestError;
-    type HaltReason = HaltReason;
-
-    fn run_exec_loop(
-        &mut self,
-        evm: &mut Self::Evm,
-        first_frame_input: revm_interpreter::interpreter_action::FrameInit,
-    ) -> Result<FrameResult, Self::Error> {
-        let res = evm.frame_init(first_frame_input)?;
-        if let ItemOrResult::Result(frame_result) = res {
-            return Ok(frame_result);
-        }
-        loop {
-            let call_or_result = {
-                let frame = evm.frame_stack.get();
-                let bytecode_hash = frame.interpreter.bytecode.get_or_calculate_hash();
-                let code = frame.interpreter.bytecode.original_byte_slice();
-
-                if let Some(f) = wait_for_compiled(&self.backend, bytecode_hash, code, self.spec_id)
-                {
-                    let ctx = &mut evm.ctx;
-                    let action = unsafe { f.call_with_interpreter(&mut frame.interpreter, ctx) };
-                    frame.process_next_action::<_, StateTestError>(ctx, action).inspect(|i| {
-                        if i.is_result() {
-                            frame.set_finished(true);
-                        }
-                    })?
-                } else {
-                    // Empty bytecode — fall back to interpreter.
-                    evm.frame_run()?
-                }
-            };
-            let result = match call_or_result {
-                ItemOrResult::Item(init) => match evm.frame_init(init)? {
-                    ItemOrResult::Item(_) => continue,
-                    ItemOrResult::Result(result) => result,
-                },
-                ItemOrResult::Result(result) => result,
-            };
-            if let Some(result) = evm.frame_return_result(result)? {
-                return Ok(result);
-            }
-        }
-    }
-}
-
-/// Looks up a compiled function, blocking until compilation completes if needed.
-fn wait_for_compiled(
-    backend: &JitBackend,
-    code_hash: B256,
-    code: &[u8],
-    spec_id: SpecId,
-) -> Option<EvmCompilerFn> {
-    let req = LookupRequest { code_hash, code: Bytes::copy_from_slice(code), spec_id };
-    backend.lookup_blocking(req).map(|p| p.func)
-}
-
-/// Execute a single test using the runtime backend handler.
+/// Execute a single test using the runtime backend via [`JitEvm`].
 fn execute_single_test_runtime(
     backend: &JitBackend,
     ctx: RuntimeTestContext<'_>,
@@ -642,8 +579,9 @@ fn execute_single_test_runtime(
             .with_tx(ctx.tx.clone())
             .with_cfg(ctx.cfg.clone())
             .with_db(db_ref);
-        let mut handler = RuntimeHandler { backend: backend.clone(), spec_id: ctx.spec_id };
-        let mut evm = evm_context.build_mainnet();
+        let inner = evm_context.build_mainnet();
+        let mut evm = JitEvm::new(inner, backend.clone());
+        let mut handler = revm_handler::MainnetHandler::default();
         let result = handler.run(&mut evm);
         if result.is_ok() {
             let s = evm.ctx.journaled_state.finalize();
@@ -666,7 +604,6 @@ fn execute_single_test_runtime(
 }
 
 struct RuntimeTestContext<'a> {
-    spec_id: SpecId,
     test: &'a revm_statetest_types::Test,
     unit: &'a TestUnit,
     name: &'a str,
@@ -747,7 +684,6 @@ fn execute_test_suite_runtime(
                 let result = execute_single_test_runtime(
                     backend,
                     RuntimeTestContext {
-                        spec_id,
                         test,
                         unit: &unit,
                         name: &name,
