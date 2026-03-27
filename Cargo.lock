@@ -2871,7 +2871,6 @@ dependencies = [
  "revmc-context",
  "revmc-llvm",
  "revmc-statetest",
- "rustc-hash",
  "similar-asserts",
  "snapbox",
  "tempfile",
@@ -2984,11 +2983,11 @@ dependencies = [
 name = "revmc-llvm"
 version = "0.1.0"
 dependencies = [
+ "alloy-primitives",
  "cc",
  "inkwell",
  "object",
  "revmc-backend",
- "rustc-hash",
  "tracing",
 ]
 

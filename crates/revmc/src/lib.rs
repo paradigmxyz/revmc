@@ -6,9 +6,6 @@
 #[macro_use]
 extern crate tracing;
 
-// For features.
-use alloy_primitives as _;
-
 mod bytecode;
 pub use bytecode::*;
 
@@ -46,6 +43,8 @@ pub use revm_interpreter::{self as interpreter};
 pub use revm_primitives as primitives;
 #[doc(no_inline)]
 pub use revm_primitives::hardfork::SpecId;
+
+type FxHashMap<K, V> = alloy_primitives::map::HashMap<K, V, alloy_primitives::map::FxBuildHasher>;
 
 /// Enable for `cargo asm -p revmc --lib`.
 #[cfg(any())]

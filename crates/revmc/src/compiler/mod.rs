@@ -1,6 +1,6 @@
 //! EVM bytecode compiler implementation.
 
-use crate::{Backend, Builder, Bytecode, EvmCompilerFn, EvmContext, EvmStack, Result};
+use crate::{Backend, Builder, Bytecode, EvmCompilerFn, EvmContext, EvmStack, FxHashMap, Result};
 use revm_interpreter::{Gas, InputsImpl};
 use revm_primitives::{Bytes, hardfork::SpecId};
 use revmc_backend::{
@@ -8,7 +8,6 @@ use revmc_backend::{
 };
 use revmc_builtins::Builtins;
 use revmc_context::RawEvmCompilerFn;
-use rustc_hash::FxHashMap;
 use std::{
     cell::Cell,
     fs,

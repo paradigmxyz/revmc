@@ -5,6 +5,7 @@
 #[macro_use]
 extern crate tracing;
 
+use alloy_primitives::map::{FxBuildHasher, HashSet};
 use inkwell::{
     AddressSpace, IntPredicate, OptimizationLevel,
     attributes::{Attribute, AttributeLoc},
@@ -32,7 +33,6 @@ use object::{Object, ObjectSymbol};
 use revmc_backend::{
     Backend, BackendTypes, Builder, IntCC, Result, TailCallKind, TypeMethods, U256, eyre,
 };
-use rustc_hash::{FxHashMap, FxHashSet};
 use std::{
     borrow::Cow,
     cell::Cell,
@@ -57,6 +57,8 @@ mod utils;
 pub(crate) use utils::*;
 
 const DEFAULT_WEIGHT: u32 = 20000;
+
+type FxHashMap<K, V> = alloy_primitives::map::HashMap<K, V, FxBuildHasher>;
 
 /// The LLVM-based EVM bytecode compiler backend.
 #[derive(Debug)]
@@ -149,7 +151,7 @@ struct GlobalOrcJit {
     builtins_jd: orc::JITDylibRef,
 
     /// Symbols already defined in the builtins JD.
-    builtins_defined: std::sync::Mutex<FxHashSet<CString>>,
+    builtins_defined: std::sync::Mutex<HashSet<CString>>,
 
     next_dylib_id: AtomicU64,
     /// Pool of cleared JITDylibs ready for reuse.
