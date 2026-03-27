@@ -118,6 +118,8 @@ pub enum Attribute {
     NoRecurse,
     NoSync,
     NoUnwind,
+    /// Skip PLT for external calls; resolve at load time instead.
+    NonLazyBind,
     AllFramePointers,
     NativeTargetCpu,
     Cold,
