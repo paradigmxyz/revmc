@@ -1,7 +1,7 @@
 use super::{Bytecode, InstData, InstFlags, bitvec_as_bytes};
+use crate::FxHashMap;
 use revm_bytecode::opcode as op;
 use revm_primitives::hex;
-use rustc_hash::FxHashMap;
 use std::{borrow::Cow, fmt, fmt::Write};
 
 /// Basic block info collected from bytecode analysis.

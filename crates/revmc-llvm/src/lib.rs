@@ -5,7 +5,7 @@
 #[macro_use]
 extern crate tracing;
 
-use eyre::eyre;
+use alloy_primitives::map::{FxBuildHasher, HashSet};
 use inkwell::{
     AddressSpace, IntPredicate, OptimizationLevel,
     attributes::{Attribute, AttributeLoc},
@@ -14,7 +14,6 @@ use inkwell::{
         AsDIScope, DICompileUnit, DIFlags, DIFlagsConstants, DISubprogram, DWARFEmissionKind,
         DWARFSourceLanguage, DebugInfoBuilder,
     },
-    execution_engine::ExecutionEngine,
     module::{FlagBehavior, Module},
     passes::PassBuilderOptions,
     support::error_handling::install_fatal_error_handler,
@@ -34,15 +33,22 @@ use object::{Object, ObjectSymbol};
 use revmc_backend::{
     Backend, BackendTypes, Builder, IntCC, Result, TailCallKind, TypeMethods, U256, eyre,
 };
-use rustc_hash::{FxHashMap, FxHashSet};
 use std::{
     borrow::Cow,
-    iter,
+    cell::Cell,
+    ffi::CString,
+    fmt, iter,
+    mem::ManuallyDrop,
     path::{Path, PathBuf},
-    sync::{Once, OnceLock},
+    sync::{
+        Once, OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 pub use inkwell::{self, context::Context};
+
+mod cpp;
 
 mod dh;
 pub mod orc;
@@ -52,6 +58,8 @@ pub(crate) use utils::*;
 
 const DEFAULT_WEIGHT: u32 = 20000;
 
+type FxHashMap<K, V> = alloy_primitives::map::HashMap<K, V, FxBuildHasher>;
+
 /// The LLVM-based EVM bytecode compiler backend.
 #[derive(Debug)]
 #[must_use]
@@ -60,8 +68,20 @@ pub struct EvmLlvmBackend {
     _dh: dh::DiagnosticHandlerGuard,
     bcx: inkwell::builder::Builder<'static>,
     module: Module<'static>,
-    exec_engine: Option<ExecutionEngine<'static>>,
     machine: TargetMachine,
+
+    /// ORC JIT state. `None` in AOT mode.
+    /// Dropped before `_tscx` so the JIT engine is disposed before the context.
+    orc: Option<OrcJitState>,
+    /// ORC thread-safe context that owns the LLVM context (JIT mode only).
+    _tscx: Option<orc::ThreadSafeContext>,
+    /// Non-owning context handle for JIT mode. See [`create_orc_context`].
+    _cx_handle: Option<Box<ManuallyDrop<Context>>>,
+
+    /// Debug info source file path set by the compiler.
+    debug_file: Option<PathBuf>,
+    /// LLVM debug info builder and compile unit, created lazily when `debug_file` is set.
+    di_state: Option<DiState>,
 
     ty_void: VoidType<'static>,
     ty_ptr: PointerType<'static>,
@@ -76,17 +96,262 @@ pub struct EvmLlvmBackend {
     debug_assertions: bool,
     is_dumping: bool,
     opt_level: OptimizationLevel,
-    /// Separate from `functions` to have always increasing IDs.
+    /// Separate from `function_names` to have always increasing IDs.
     function_counter: u32,
-    functions: FxHashMap<u32, (String, FunctionValue<'static>)>,
-    /// Symbol names that have been registered via `add_global_mapping` in the MCJIT engine.
-    /// Used to avoid re-registering builtins when a new module is created after `clear_ir`.
-    mapped_symbols: FxHashSet<String>,
+    /// Persistent mapping from function ID to symbol name.
+    function_names: FxHashMap<u32, String>,
+}
 
-    /// Debug info source file path set by the compiler.
-    debug_file: Option<PathBuf>,
-    /// LLVM debug info builder and compile unit, created lazily when `debug_file` is set.
-    di_state: Option<DiState>,
+// Thread-local slot for capturing compiled object buffers from the ObjectTransformLayer.
+// Safe because LLJIT uses InPlaceTaskDispatcher — compilation runs inline on the calling thread.
+thread_local! {
+    static OBJ_CAPTURE: Cell<*mut Option<Vec<u8>>> = const { Cell::new(std::ptr::null_mut()) };
+}
+
+/// RAII guard that arms the thread-local object capture for the duration of a JIT commit.
+struct ScopedObjCapture {
+    prev: *mut Option<Vec<u8>>,
+}
+
+impl ScopedObjCapture {
+    fn install(slot: &mut Option<Vec<u8>>) -> Self {
+        Self { prev: OBJ_CAPTURE.replace(slot as *mut _) }
+    }
+}
+
+impl Drop for ScopedObjCapture {
+    fn drop(&mut self) {
+        OBJ_CAPTURE.set(self.prev);
+    }
+}
+
+fn obj_capture_transform(obj: &[u8]) -> Result<Option<Vec<u8>>, String> {
+    OBJ_CAPTURE.with(|tls| {
+        let ptr = tls.get();
+        if !ptr.is_null() {
+            unsafe { *ptr = Some(obj.to_vec()) };
+        }
+    });
+    Ok(None)
+}
+
+/// Process-global shared LLJIT instance.
+///
+/// ORC/LLJIT is thread-safe and designed to be shared. Individual compilers get
+/// their own [`JITDylib`](orc::JITDylibRef) for symbol isolation, recycled via a pool.
+///
+/// Builtin function pointers (absolute symbols) are defined once in a shared
+/// `builtins` JITDylib. Each per-compiler JITDylib links against the builtins
+/// JD so compiled code can resolve them without duplicating definitions.
+struct GlobalOrcJit {
+    jit: orc::LLJIT,
+
+    /// Shared JITDylib containing absolute symbols for builtin functions.
+    /// Added to each per-compiler JITDylib's link order.
+    builtins_jd: orc::JITDylibRef,
+
+    /// Symbols already defined in the builtins JD.
+    builtins_defined: std::sync::Mutex<HashSet<CString>>,
+
+    next_dylib_id: AtomicU64,
+    /// Pool of cleared JITDylibs ready for reuse.
+    pool: std::sync::Mutex<Vec<orc::JITDylibRef>>,
+}
+
+impl GlobalOrcJit {
+    fn get() -> Result<&'static Self> {
+        static GLOBAL: OnceLock<std::result::Result<GlobalOrcJit, String>> = OnceLock::new();
+        let result = GLOBAL.get_or_init(|| {
+            init().map_err(|e| e.to_string())?;
+            let jit =
+                orc::LLJIT::builder().concurrent_compiler().build().map_err(|e| e.to_string())?;
+            jit.get_execution_session().set_default_error_reporter();
+            jit.get_obj_transform_layer().set_transform(obj_capture_transform);
+
+            // Register JIT debug info with debuggers and profilers.
+            if let Err(e) = jit.enable_debug_support() {
+                warn!("failed to enable JIT debug support: {e}");
+            }
+            if let Err(e) = jit.enable_perf_support() {
+                warn!("failed to enable JIT perf support: {e}");
+            }
+
+            let builtins_jd = jit.get_execution_session().create_bare_jit_dylib(c"revmc.builtins");
+
+            Ok(Self {
+                jit,
+                builtins_jd,
+                builtins_defined: Default::default(),
+                next_dylib_id: Default::default(),
+                pool: Default::default(),
+            })
+        });
+        match result {
+            Ok(g) => Ok(g),
+            Err(e) => Err(eyre::eyre!("{e}")),
+        }
+    }
+
+    /// Acquires a JITDylib from the pool, or creates a new one.
+    fn acquire_jit_dylib(&self) -> orc::JITDylibRef {
+        if let Some(jd) = self.pool.lock().unwrap().pop() {
+            return jd;
+        }
+        let id = self.next_dylib_id.fetch_add(1, Ordering::Relaxed);
+        let name = CString::new(format!("revmc.compiler.{id}")).unwrap();
+        let jd = self.jit.get_execution_session().create_bare_jit_dylib(&name);
+        // Link against the builtins JD so compiled code can resolve builtin symbols.
+        jd.add_to_link_order(&self.builtins_jd);
+        // Attach a process symbol generator so the JITDylib can resolve libc and other
+        // process-level symbols (e.g. printf, memcpy) that JIT-compiled code may reference.
+        let prefix = self.jit.get_global_prefix();
+        if let Ok(generator) = orc::DefinitionGenerator::for_current_process(prefix) {
+            jd.add_generator(generator);
+        }
+        jd
+    }
+
+    /// Returns a cleared JITDylib to the pool for reuse.
+    fn release_jit_dylib(&self, jd: orc::JITDylibRef) {
+        if let Err(e) = jd.clear() {
+            error!("failed to clear JITDylib for pool: {e}");
+            return;
+        }
+        self.pool.lock().unwrap().push(jd);
+    }
+
+    /// Defines absolute symbols in the shared builtins JITDylib, skipping any
+    /// that are already defined.
+    fn define_builtins(&self, symbols: &[(CString, usize)]) {
+        if symbols.is_empty() {
+            return;
+        }
+        let mut defined = self.builtins_defined.lock().unwrap();
+        let new_syms: Vec<_> = symbols
+            .iter()
+            .filter(|(name, _)| defined.insert(name.clone()))
+            .map(|(name, addr)| {
+                orc::SymbolMapPair::new(
+                    self.jit.mangle_and_intern(name),
+                    orc::EvaluatedSymbol::new(
+                        *addr as u64,
+                        orc::SymbolFlags::none().with_exported().callable(),
+                    ),
+                )
+            })
+            .collect();
+        drop(defined);
+        if !new_syms.is_empty()
+            && let Err((e, _)) =
+                self.builtins_jd.define(orc::MaterializationUnit::absolute_symbols(new_syms))
+        {
+            error!("failed to define builtins: {e}");
+        }
+    }
+}
+
+/// ORC JIT state for the LLVM backend (JIT mode only).
+///
+/// The LLVM context is owned separately (via `tscx`) and persists across JIT resets.
+/// Each compiler gets its own JITDylib in the global LLJIT for symbol isolation.
+///
+/// Drop order: `staged_functions` → `loaded_trackers` → `jd` (field declaration order).
+/// The context (`tscx`) outlives all of these since it lives on `EvmLlvmBackend`.
+struct OrcJitState {
+    /// Reference to the global LLJIT instance.
+    global: &'static GlobalOrcJit,
+    /// Functions in the current staging module (not yet committed to JIT).
+    staged_functions: FxHashMap<u32, FunctionValue<'static>>,
+    /// Absolute symbols collected during translation, flushed to the global
+    /// builtins JITDylib before commit.
+    pending_symbols: Vec<(CString, usize)>,
+    /// Resource trackers for committed JIT modules, used for code removal.
+    loaded_trackers: Vec<orc::ResourceTracker>,
+    /// Maps committed function ID → index into `loaded_trackers`.
+    committed_functions: FxHashMap<u32, usize>,
+    /// Cached object buffer from the last `commit_staged_module`, captured via
+    /// ObjectTransformLayer.
+    last_compiled_object: Option<Vec<u8>>,
+    /// Per-compiler JITDylib in the global LLJIT. Provides symbol namespace isolation.
+    jd: Option<orc::JITDylibRef>,
+}
+
+impl fmt::Debug for OrcJitState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OrcJitState")
+            .field("staged_functions", &self.staged_functions.len())
+            .field("pending_symbols", &self.pending_symbols.len())
+            .field("loaded_trackers", &self.loaded_trackers.len())
+            .field("committed_functions", &self.committed_functions.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl OrcJitState {
+    fn new() -> Result<Self> {
+        let global = GlobalOrcJit::get()?;
+        Ok(Self {
+            global,
+            staged_functions: FxHashMap::default(),
+            pending_symbols: Vec::new(),
+            loaded_trackers: Vec::new(),
+            committed_functions: FxHashMap::default(),
+            last_compiled_object: None,
+            jd: Some(global.acquire_jit_dylib()),
+        })
+    }
+
+    /// Clears all code and symbols from this compiler's JITDylib.
+    fn clear(&mut self) -> Result<()> {
+        self.staged_functions.clear();
+        self.pending_symbols.clear();
+        self.loaded_trackers.clear();
+        self.committed_functions.clear();
+        self.last_compiled_object = None;
+        self.jd().clear().map_err(error_msg)?;
+        Ok(())
+    }
+
+    fn jd(&self) -> &orc::JITDylibRef {
+        self.jd.as_ref().unwrap()
+    }
+}
+
+impl Drop for OrcJitState {
+    fn drop(&mut self) {
+        self.global.release_jit_dylib(self.jd.take().unwrap());
+    }
+}
+
+/// Wraps a module in a [`orc::ThreadSafeModule`] for transfer to LLJIT.
+///
+/// Uses a raw pointer cast to work around `Module<'ctx>` invariance — the module's
+/// context is genuinely owned by `tscx`.
+fn create_thread_safe_module(
+    tscx: &orc::ThreadSafeContext,
+    module: Module<'static>,
+) -> orc::ThreadSafeModule {
+    let module = std::mem::ManuallyDrop::new(module);
+    // SAFETY: The module was created in the context owned by `tscx`.
+    unsafe { orc::ThreadSafeModule::create_in_context(Module::new(module.as_mut_ptr()), tscx) }
+}
+
+/// Creates an ORC-owned LLVM context, returning a `&'static` reference to it.
+///
+/// In JIT mode, ORC owns the context via a [`orc::ThreadSafeContext`] so that modules can be
+/// safely transferred to the JIT. A non-owning handle ([`ManuallyDrop<Context>`]) is
+/// heap-allocated to provide a stable address for the `&'static` reference.
+fn create_orc_context() -> (&'static Context, orc::ThreadSafeContext, Box<ManuallyDrop<Context>>) {
+    let cx = Context::create();
+    let raw = cx.raw();
+    let tscx = orc::ThreadSafeContext::from_context(cx);
+    // SAFETY: The TSC now owns the context. `from_context` uses `ManuallyDrop` internally,
+    // so the LLVM context is still valid — ownership was just transferred to the TSC.
+    let cx_handle = Box::new(ManuallyDrop::new(unsafe { Context::new(raw) }));
+    // SAFETY: The Box provides a stable heap address. The context is valid as long as
+    // the TSC lives.
+    let cx: &'static Context = unsafe { &*(&**cx_handle as *const Context) };
+    (cx, tscx, cx_handle)
 }
 
 /// LLVM debug info state for a module.
@@ -96,8 +361,8 @@ struct DiState {
     finalized: bool,
 }
 
-impl std::fmt::Debug for DiState {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for DiState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("DiState").field("finalized", &self.finalized).finish()
     }
 }
@@ -121,8 +386,6 @@ impl EvmLlvmBackend {
     ) -> Result<Self> {
         init()?;
 
-        let cx = get_context();
-
         let opt_level = convert_opt_level(opt_level);
 
         let target_info = TargetInfo::new(target)?;
@@ -138,10 +401,11 @@ impl EvmLlvmBackend {
             )
             .ok_or_else(|| eyre::eyre!("failed to create target machine"))?;
 
-        let module = create_module(cx, &machine, aot)?;
-
-        let exec_engine = if aot {
-            None
+        // In JIT mode, ORC owns the context via a ThreadSafeContext so that modules can be
+        // safely transferred to the JIT without double-ownership issues with the TLS context.
+        // In AOT mode, we use the thread-local context directly.
+        let (cx, tscx, cx_handle, orc) = if aot {
+            (get_context(), None, None, None)
         } else {
             if !target.has_jit() {
                 return Err(eyre::eyre!("target {:?} does not support JIT", target.get_name()));
@@ -152,9 +416,13 @@ impl EvmLlvmBackend {
                     target.get_name()
                 ));
             }
-            Some(module.create_jit_execution_engine(opt_level).map_err(error_msg)?)
+
+            let (cx, tscx, cx_handle) = create_orc_context();
+            let orc = OrcJitState::new()?;
+            (cx, Some(tscx), Some(cx_handle), Some(orc))
         };
 
+        let module = create_module(cx, &machine, aot)?;
         let bcx = cx.create_builder();
 
         let ty_void = cx.void_type();
@@ -171,8 +439,10 @@ impl EvmLlvmBackend {
             _dh: dh::DiagnosticHandlerGuard::new(cx),
             bcx,
             module,
-            exec_engine,
             machine,
+            orc,
+            _tscx: tscx,
+            _cx_handle: cx_handle,
             ty_void,
             ty_i1,
             ty_i8,
@@ -186,8 +456,7 @@ impl EvmLlvmBackend {
             is_dumping: false,
             opt_level,
             function_counter: 0,
-            functions: FxHashMap::default(),
-            mapped_symbols: FxHashSet::default(),
+            function_names: FxHashMap::default(),
             debug_file: None,
             di_state: None,
         })
@@ -199,9 +468,13 @@ impl EvmLlvmBackend {
         self.cx
     }
 
-    fn exec_engine(&self) -> &ExecutionEngine<'static> {
-        assert!(!self.aot, "requested JIT execution engine on AOT");
-        self.exec_engine.as_ref().expect("missing JIT execution engine")
+    #[inline]
+    fn module(&self) -> &Module<'static> {
+        &self.module
+    }
+
+    fn orc(&self) -> &OrcJitState {
+        self.orc.as_ref().expect("requested ORC JIT state on AOT backend")
     }
 
     fn fn_type(
@@ -225,7 +498,7 @@ impl EvmLlvmBackend {
     }
 
     fn id_to_name(&self, id: u32) -> &str {
-        &self.functions[&id].0
+        &self.function_names[&id]
     }
 
     /// Lazily initializes the debug info builder and compile unit for the module.
@@ -241,12 +514,12 @@ impl EvmLlvmBackend {
             debug_file.parent().map(|p| p.to_string_lossy()).unwrap_or_default().into_owned();
 
         // Add required module flags for debug info.
-        self.module.add_basic_value_flag(
+        self.module().add_basic_value_flag(
             "Debug Info Version",
             FlagBehavior::Warning,
             self.ty_i32.const_int(inkwell::debug_info::debug_metadata_version() as u64, false),
         );
-        self.module.add_basic_value_flag(
+        self.module().add_basic_value_flag(
             "Dwarf Version",
             FlagBehavior::Warning,
             self.ty_i32.const_int(5, false),
@@ -263,7 +536,7 @@ impl EvmLlvmBackend {
         flags.push(if self.aot { "--aot" } else { "--jit" });
         let flags = flags.join(" ");
 
-        let (dibuilder, compile_unit) = self.module.create_debug_info_builder(
+        let (dibuilder, compile_unit) = self.module().create_debug_info_builder(
             true,
             DWARFSourceLanguage::C,
             &filename,
@@ -284,26 +557,52 @@ impl EvmLlvmBackend {
         self.di_state = Some(DiState { dibuilder, compile_unit, finalized: false });
     }
 
-    // Delete IR and free JIT-compiled machine code.
-    //
-    // With MCJIT, machine code pages are owned by `RuntimeDyld` inside the `ExecutionEngine` and
-    // are only freed when the engine is dropped. `free_fn_machine_code` is a no-op in modern LLVM.
-    // So we drop the old engine entirely and create a fresh one.
-    fn clear_module(&mut self) -> Result<()> {
-        self.functions.clear();
-        self.mapped_symbols.clear();
+    /// Commits the current staging module to the ORC JIT if there are pending functions.
+    fn commit_staged_module(&mut self) -> Result<()> {
+        if self.aot || self.orc().staged_functions.is_empty() {
+            return Ok(());
+        }
 
-        // Drop the old DI state before replacing the module, since DIBuilder references the module.
         self.di_state = None;
 
-        // Drop the old execution engine to free machine code memory, then create a fresh module
-        // and a new engine.
-        self.exec_engine = None;
-        self.module = create_module(self.cx, &self.machine, self.aot)?;
-        if !self.aot {
-            self.exec_engine =
-                Some(self.module.create_jit_execution_engine(self.opt_level).map_err(error_msg)?);
+        let new_module = create_module(self.cx, &self.machine, self.aot)?;
+        let old_module = std::mem::replace(&mut self.module, new_module);
+
+        let tscx = self._tscx.as_ref().expect("missing ThreadSafeContext");
+        let orc = self.orc.as_mut().expect("missing ORC JIT state");
+
+        // Flush pending absolute symbols to the shared builtins JITDylib.
+        let pending = &mut orc.pending_symbols;
+        if !pending.is_empty() {
+            orc.global.define_builtins(pending);
+            pending.clear();
         }
+
+        let tracker = orc.jd().create_resource_tracker();
+
+        let tsm = create_thread_safe_module(tscx, old_module);
+        orc.global.jit.add_module_with_rt(tsm, &tracker).map_err(error_msg)?;
+
+        let tracker_idx = orc.loaded_trackers.len();
+        for &id in orc.staged_functions.keys() {
+            orc.committed_functions.insert(id, tracker_idx);
+        }
+        orc.loaded_trackers.push(tracker);
+        orc.staged_functions.clear();
+        Ok(())
+    }
+
+    /// Clears all code from this compiler's JITDylib, freeing JIT-compiled code.
+    /// The LLVM context and global LLJIT are reused across resets.
+    fn reset_jit(&mut self) -> Result<()> {
+        self.function_names.clear();
+        self.di_state = None;
+
+        if let Some(orc) = &mut self.orc {
+            orc.clear()?;
+        }
+
+        self.module = create_module(self.cx, &self.machine, self.aot)?;
 
         Ok(())
     }
@@ -364,7 +663,7 @@ impl Backend for EvmLlvmBackend {
     }
 
     fn set_module_name(&mut self, name: &str) {
-        self.module.set_name(name);
+        self.module().set_name(name);
     }
 
     fn set_is_dumping(&mut self, yes: bool) {
@@ -403,15 +702,15 @@ impl Backend for EvmLlvmBackend {
     }
 
     fn function_name_is_unique(&self, name: &str) -> bool {
-        self.module.get_function(name).is_none()
+        self.module().get_function(name).is_none()
     }
 
     fn dump_ir(&mut self, path: &Path) -> Result<()> {
-        self.module.print_to_file(path).map_err(error_msg)
+        self.module().print_to_file(path).map_err(error_msg)
     }
 
     fn dump_disasm(&mut self, path: &Path) -> Result<()> {
-        self.machine.write_to_file(&self.module, FileType::Assembly, path).map_err(error_msg)
+        self.machine.write_to_file(self.module(), FileType::Assembly, path).map_err(error_msg)
     }
 
     fn build_function(
@@ -422,16 +721,19 @@ impl Backend for EvmLlvmBackend {
         param_names: &[&str],
         linkage: revmc_backend::Linkage,
     ) -> Result<(Self::Builder<'_>, Self::FuncId)> {
-        let (id, function) = if let Some((&id, &(_, function))) =
-            self.functions.iter().find(|(_k, (fname, _f))| fname == name)
-            && let Some(function2) = self.module.get_function(name)
+        let (id, function) = if let Some((&id, _fname)) =
+            self.function_names.iter().find(|(_k, fname)| fname.as_str() == name)
+            && let Some(orc) = &self.orc
+            && let Some(function) = orc.staged_functions.get(&id).copied()
+            && let Some(function2) = self.module().get_function(name)
             && function == function2
         {
             self.bcx.position_at_end(function.get_first_basic_block().unwrap());
             (id, function)
         } else {
             let fn_type = self.fn_type(ret, params);
-            let function = self.module.add_function(name, fn_type, Some(convert_linkage(linkage)));
+            let function =
+                self.module().add_function(name, fn_type, Some(convert_linkage(linkage)));
             if self.is_dumping {
                 for (i, &name) in param_names.iter().enumerate() {
                     function.get_nth_param(i as u32).expect(name).set_name(self.name(name));
@@ -443,7 +745,10 @@ impl Backend for EvmLlvmBackend {
 
             let id = self.function_counter;
             self.function_counter += 1;
-            self.functions.insert(id, (name.to_string(), function));
+            self.function_names.insert(id, name.to_string());
+            if let Some(orc) = &mut self.orc {
+                orc.staged_functions.insert(id, function);
+            }
             (id, function)
         };
 
@@ -477,7 +782,7 @@ impl Backend for EvmLlvmBackend {
     }
 
     fn verify_module(&mut self) -> Result<()> {
-        self.module.verify().map_err(error_msg)
+        self.module().verify().map_err(error_msg)
     }
 
     fn optimize_module(&mut self) -> Result<()> {
@@ -515,30 +820,43 @@ impl Backend for EvmLlvmBackend {
             OptimizationLevel::Aggressive => "default<O3>",
         });
         let opts = PassBuilderOptions::create();
-        self.module.run_passes(passes, &self.machine, opts).map_err(error_msg)
+        self.module().run_passes(passes, &self.machine, opts).map_err(error_msg)
     }
 
     fn write_object<W: std::io::Write>(&mut self, mut w: W) -> Result<()> {
         let buffer = self
             .machine
-            .write_to_memory_buffer(&self.module, FileType::Object)
+            .write_to_memory_buffer(self.module(), FileType::Object)
             .map_err(error_msg)?;
         w.write_all(buffer.as_slice())?;
         Ok(())
     }
 
     fn jit_function(&mut self, id: Self::FuncId) -> Result<usize> {
-        let name = self.id_to_name(id);
-        let addr = self.exec_engine().get_function_address(name)?;
+        self.commit_staged_module()?;
+        let name_str = self.id_to_name(id);
+        let name = CString::new(name_str).unwrap();
+        let orc = self.orc.as_mut().expect("missing ORC JIT state");
+        // Capture the compiled object buffer during lookup. LLJIT compiles lazily:
+        // add_module_with_rt just registers the module, actual compilation happens
+        // in lookup_in when the symbol is first requested.
+        let mut captured = None;
+        let _guard = ScopedObjCapture::install(&mut captured);
+        let addr = orc.global.jit.lookup_in(orc.jd(), &name).map_err(error_msg)?;
+        drop(_guard);
+        if captured.is_some() {
+            orc.last_compiled_object = captured;
+        }
         Ok(addr)
     }
 
+    fn function_name(&self, id: Self::FuncId) -> Option<&str> {
+        self.function_names.get(&id).map(|s| s.as_str())
+    }
+
     fn function_sizes(&self) -> Vec<(String, usize)> {
-        let buffer = match self.machine.write_to_memory_buffer(&self.module, FileType::Object) {
-            Ok(buf) => buf,
-            Err(_) => return Vec::new(),
-        };
-        let data = buffer.as_slice();
+        let Some(orc) = &self.orc else { return Vec::new() };
+        let Some(data) = orc.last_compiled_object.as_deref() else { return Vec::new() };
         let Ok(obj) = object::File::parse(data) else { return Vec::new() };
 
         let mut result: Vec<_> = obj
@@ -546,7 +864,7 @@ impl Backend for EvmLlvmBackend {
             .filter(|sym| sym.is_definition())
             .filter_map(|sym| {
                 let name = sym.name().ok()?;
-                self.functions.values().any(|(n, _)| n == name).then_some(())?;
+                self.function_names.values().any(|n| n == name).then_some(())?;
                 Some((name.to_string(), sym.size() as usize))
             })
             .collect();
@@ -555,36 +873,44 @@ impl Backend for EvmLlvmBackend {
     }
 
     fn clear_ir(&mut self) -> Result<()> {
-        // Drop the old DI state before replacing the module, since DIBuilder references the module.
         self.di_state = None;
-
-        // Remove the old module from the execution engine before replacing it.
-        // Without this, each clear_ir() cycle leaks a module in the engine.
-        if let Some(exec_engine) = &self.exec_engine {
-            exec_engine
-                .remove_module(&self.module)
-                .map_err(|e| eyre!("failed to remove module: {e}"))?;
-        }
-
         self.module = create_module(self.cx, &self.machine, self.aot)?;
-        if let Some(exec_engine) = &self.exec_engine {
-            exec_engine.add_module(&self.module).map_err(|()| eyre!("failed to add module"))?;
+        if let Some(orc) = &mut self.orc {
+            orc.staged_functions.clear();
         }
-
         Ok(())
     }
 
     unsafe fn free_function(&mut self, id: Self::FuncId) -> Result<()> {
-        let (_, function) = self.functions.remove(&id).unwrap();
-        if let Some(exec_engine) = &self.exec_engine {
-            exec_engine.free_fn_machine_code(function);
+        if let Some(orc) = &mut self.orc {
+            // Remove from staging if not yet committed.
+            if let Some(function) = orc.staged_functions.remove(&id) {
+                unsafe { function.delete() };
+            }
+
+            // Remove from committed trackers.
+            if let Some(tracker_idx) = orc.committed_functions.remove(&id) {
+                orc.loaded_trackers[tracker_idx].remove().map_err(error_msg)?;
+                // Also remove co-committed functions since removing the
+                // tracker frees all symbols in that module.
+                orc.committed_functions.retain(|co_id, idx| {
+                    if *idx == tracker_idx {
+                        self.function_names.remove(co_id);
+                        false
+                    } else {
+                        true
+                    }
+                });
+                // Note: the tracker slot becomes dead but indices of later
+                // trackers are unchanged, keeping the map consistent.
+            }
         }
-        unsafe { function.delete() };
+        self.function_names.remove(&id);
         Ok(())
     }
 
     unsafe fn free_all_functions(&mut self) -> Result<()> {
-        self.clear_module()
+        self.reset_jit()
     }
 }
 
@@ -742,11 +1068,11 @@ impl EvmLlvmBuilder<'_> {
         name: &str,
         mk_ty: impl FnOnce(&mut Self) -> FunctionType<'static>,
     ) -> FunctionValue<'static> {
-        match self.module.get_function(name) {
+        match self.module().get_function(name) {
             Some(function) => function,
             None => {
                 let ty = mk_ty(self);
-                self.module.add_function(name, ty, None)
+                self.module().add_function(name, ty, None)
             }
         }
     }
@@ -1329,14 +1655,14 @@ impl Builder for EvmLlvmBuilder<'_> {
         linkage: revmc_backend::Linkage,
         build: impl FnOnce(&mut Self),
     ) -> Self::Function {
-        if let Some(function) = self.module.get_function(name) {
+        if let Some(function) = self.module().get_function(name) {
             return function;
         }
 
         let before = self.current_block();
 
         let func_ty = self.fn_type(ret, params);
-        let function = self.module.add_function(name, func_ty, Some(convert_linkage(linkage)));
+        let function = self.module().add_function(name, func_ty, Some(convert_linkage(linkage)));
         let prev_function = std::mem::replace(&mut self.function, function);
 
         let entry = self.cx.append_basic_block(function, self.name("entry"));
@@ -1352,17 +1678,17 @@ impl Builder for EvmLlvmBuilder<'_> {
     }
 
     fn get_function(&mut self, name: &str) -> Option<Self::Function> {
-        self.module.get_function(name)
+        self.module().get_function(name)
     }
 
     fn get_printf_function(&mut self) -> Self::Function {
         let name = "printf";
-        if let Some(function) = self.module.get_function(name) {
+        if let Some(function) = self.module().get_function(name) {
             return function;
         }
 
         let ty = self.cx.void_type().fn_type(&[self.ty_ptr.into()], true);
-        self.module.add_function(name, ty, Some(inkwell::module::Linkage::External))
+        self.module().add_function(name, ty, Some(inkwell::module::Linkage::External))
     }
 
     fn add_function(
@@ -1374,13 +1700,11 @@ impl Builder for EvmLlvmBuilder<'_> {
         linkage: revmc_backend::Linkage,
     ) -> Self::Function {
         let func_ty = self.fn_type(ret, params);
-        let function = self.module.add_function(name, func_ty, Some(convert_linkage(linkage)));
+        let function = self.module().add_function(name, func_ty, Some(convert_linkage(linkage)));
         if let Some(address) = address
-            && let Some(exec_engine) = &self.exec_engine
-            && !self.mapped_symbols.contains(name)
+            && let Some(orc) = &mut self.orc
         {
-            exec_engine.add_global_mapping(&function, address);
-            self.mapped_symbols.insert(name.to_string());
+            orc.pending_symbols.push((CString::new(name).unwrap(), address));
         }
         function
     }
@@ -1391,9 +1715,10 @@ impl Builder for EvmLlvmBuilder<'_> {
         attribute: revmc_backend::Attribute,
         loc: revmc_backend::FunctionAttributeLocation,
     ) {
+        let func = function.unwrap_or(self.function);
         let loc = convert_attribute_loc(loc);
         let attr = convert_attribute(self, attribute);
-        function.unwrap_or(self.function).add_attribute(loc, attr);
+        func.add_attribute(loc, attr);
     }
 }
 
@@ -1474,12 +1799,6 @@ fn init_() -> Result<()> {
         machine_code: true,
     };
     Target::initialize_all(&config);
-
-    // Ensure MCJIT is linked in. Without this, LTO may strip the MCJIT
-    // registration code, causing `create_jit_execution_engine` to fail with
-    // "JIT has not been linked in" followed by a SIGSEGV in destructors.
-    // See: https://github.com/TheDan64/inkwell/issues/320
-    inkwell::execution_engine::ExecutionEngine::link_in_mc_jit();
 
     Ok(())
 }
@@ -1597,6 +1916,10 @@ fn convert_attribute(bcx: &EvmLlvmBuilder<'_>, attr: revmc_backend::Attribute) -
         OurAttr::Writable => ("writable", AttrValue::Enum(0)),
         // memory(argmem: readwrite) = ModRef(3) << ArgMem(0) = 3.
         OurAttr::ArgMemOnly => ("memory", AttrValue::Enum(3)),
+
+        OurAttr::Initializes(size) => {
+            return cpp::create_initializes_attr(bcx.cx, 0, size as i64);
+        }
 
         attr => unimplemented!("llvm attribute conversion: {attr:?}"),
     };

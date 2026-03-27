@@ -1,0 +1,54 @@
+//! Custom bindings to LLVM.
+
+use inkwell::{
+    attributes::Attribute,
+    context::Context,
+    llvm_sys::{
+        error::LLVMErrorRef,
+        orc2::{
+            LLVMOrcExecutionSessionRef, LLVMOrcExecutorAddress, LLVMOrcJITDylibRef,
+            lljit::LLVMOrcLLJITRef,
+        },
+        prelude::{LLVMAttributeRef, LLVMContextRef},
+    },
+};
+use std::ffi::c_char;
+
+#[link(name = "revmc_llvm_cpp", kind = "static")]
+unsafe extern "C" {
+    fn revmc_llvm_create_initializes_attr(
+        ctx: LLVMContextRef,
+        lower: i64,
+        upper: i64,
+    ) -> LLVMAttributeRef;
+
+    pub(crate) fn revmc_llvm_jit_dylib_add_to_link_order(
+        jd: LLVMOrcJITDylibRef,
+        other: LLVMOrcJITDylibRef,
+    );
+
+    pub(crate) fn revmc_llvm_lljit_builder_set_concurrent_compiler(
+        builder: inkwell::llvm_sys::orc2::lljit::LLVMOrcLLJITBuilderRef,
+    );
+
+    pub(crate) fn revmc_llvm_execution_session_remove_jit_dylib(
+        es: LLVMOrcExecutionSessionRef,
+        jd: LLVMOrcJITDylibRef,
+    ) -> LLVMErrorRef;
+
+    pub(crate) fn revmc_llvm_lljit_lookup_in(
+        jit: LLVMOrcLLJITRef,
+        jd: LLVMOrcJITDylibRef,
+        result: *mut LLVMOrcExecutorAddress,
+        name: *const c_char,
+    ) -> LLVMErrorRef;
+
+    pub(crate) fn revmc_llvm_lljit_enable_perf_support(jit: LLVMOrcLLJITRef) -> LLVMErrorRef;
+}
+
+pub(crate) fn create_initializes_attr(cx: &Context, lower: i64, upper: i64) -> Attribute {
+    unsafe {
+        let raw = revmc_llvm_create_initializes_attr(cx.raw(), lower, upper);
+        Attribute::new(raw)
+    }
+}
