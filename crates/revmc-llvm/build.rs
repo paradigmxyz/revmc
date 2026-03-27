@@ -10,6 +10,7 @@ fn main() {
     cc::Build::new()
         .cpp(true)
         .flags(cxxflags.split_whitespace())
+        .flag("-w")
         .file("cpp/lib.cpp")
         .compile("revmc_llvm_cpp");
 }
