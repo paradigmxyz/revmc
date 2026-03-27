@@ -58,77 +58,6 @@ pub(crate) use utils::*;
 
 const DEFAULT_WEIGHT: u32 = 20000;
 
-/// Configuration for the process-global JIT instance.
-///
-/// These settings can only be applied once per process — on first
-/// [`EvmLlvmBackend`] creation the config is read and locked in.
-/// Call [`set_global_jit_config`] before creating any backend to override
-/// the defaults derived from environment variables.
-#[derive(Clone, Debug)]
-pub struct GlobalJitConfig {
-    debug_support: bool,
-    profiling_support: bool,
-}
-
-impl Default for GlobalJitConfig {
-    fn default() -> Self {
-        Self { debug_support: true, profiling_support: true }
-    }
-}
-
-impl GlobalJitConfig {
-    /// Creates a new configuration with both debug and profiling support enabled.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Returns whether GDB/LLDB JIT debug support is enabled.
-    ///
-    /// Registers JIT objects with debuggers via `__jit_debug_register_code`,
-    /// allowing GDB/LLDB to resolve JIT-compiled function names and set
-    /// breakpoints. Can only be set once per process.
-    ///
-    /// Defaults to `true`.
-    pub fn debug_support(&self) -> bool {
-        self.debug_support
-    }
-
-    /// Sets whether to enable GDB/LLDB JIT debug support.
-    pub fn set_debug_support(&mut self, yes: bool) {
-        self.debug_support = yes;
-    }
-
-    /// Returns whether perf/samply JIT profiling support is enabled.
-    ///
-    /// Installs the LLVM `PerfSupportPlugin` which writes jitdump records,
-    /// allowing profilers to resolve JIT-compiled symbols with debug and
-    /// unwind info. Can only be set once per process.
-    ///
-    /// Defaults to `true`.
-    pub fn profiling_support(&self) -> bool {
-        self.profiling_support
-    }
-
-    /// Sets whether to enable perf/samply JIT profiling support.
-    pub fn set_profiling_support(&mut self, yes: bool) {
-        self.profiling_support = yes;
-    }
-}
-
-/// Override the global JIT configuration.
-///
-/// Must be called before any [`EvmLlvmBackend`] is created. Returns `Err` if
-/// the JIT has already been initialized.
-pub fn set_global_jit_config(config: GlobalJitConfig) -> std::result::Result<(), GlobalJitConfig> {
-    GLOBAL_JIT_CONFIG.set(config)
-}
-
-static GLOBAL_JIT_CONFIG: OnceLock<GlobalJitConfig> = OnceLock::new();
-
-fn global_jit_config() -> &'static GlobalJitConfig {
-    GLOBAL_JIT_CONFIG.get_or_init(GlobalJitConfig::default)
-}
-
 type FxHashMap<K, V> = alloy_primitives::map::HashMap<K, V, FxBuildHasher>;
 
 /// The LLVM-based EVM bytecode compiler backend.
@@ -165,6 +94,8 @@ pub struct EvmLlvmBackend {
 
     aot: bool,
     debug_assertions: bool,
+    debug_support: bool,
+    profiling_support: bool,
     is_dumping: bool,
     opt_level: OptimizationLevel,
     /// Separate from `function_names` to have always increasing IDs.
@@ -230,7 +161,7 @@ struct GlobalOrcJit {
 }
 
 impl GlobalOrcJit {
-    fn get() -> Result<&'static Self> {
+    fn get(debug_support: bool, profiling_support: bool) -> Result<&'static Self> {
         static GLOBAL: OnceLock<std::result::Result<GlobalOrcJit, String>> = OnceLock::new();
         let result = GLOBAL.get_or_init(|| {
             init().map_err(|e| e.to_string())?;
@@ -240,15 +171,10 @@ impl GlobalOrcJit {
             jit.get_obj_transform_layer().set_transform(obj_capture_transform);
 
             // Register JIT debug info with debuggers and profilers.
-            let config = global_jit_config();
-            if config.debug_support
-                && let Err(e) = jit.enable_debug_support()
-            {
+            if debug_support && let Err(e) = jit.enable_debug_support() {
                 warn!("failed to enable JIT debug support: {e}");
             }
-            if config.profiling_support
-                && let Err(e) = jit.enable_perf_support()
-            {
+            if profiling_support && let Err(e) = jit.enable_perf_support() {
                 warn!("failed to enable JIT perf support: {e}");
             }
 
@@ -364,8 +290,8 @@ impl fmt::Debug for OrcJitState {
 }
 
 impl OrcJitState {
-    fn new() -> Result<Self> {
-        let global = GlobalOrcJit::get()?;
+    fn new(debug_support: bool, profiling_support: bool) -> Result<Self> {
+        let global = GlobalOrcJit::get(debug_support, profiling_support)?;
         Ok(Self {
             global,
             staged_functions: FxHashMap::default(),
@@ -494,7 +420,7 @@ impl EvmLlvmBackend {
             }
 
             let (cx, tscx, cx_handle) = create_orc_context();
-            let orc = OrcJitState::new()?;
+            let orc = OrcJitState::new(true, true)?;
             (cx, Some(tscx), Some(cx_handle), Some(orc))
         };
 
@@ -529,6 +455,8 @@ impl EvmLlvmBackend {
             ty_ptr,
             aot,
             debug_assertions: cfg!(debug_assertions),
+            debug_support: true,
+            profiling_support: true,
             is_dumping: false,
             opt_level,
             function_counter: 0,
@@ -536,6 +464,50 @@ impl EvmLlvmBackend {
             debug_file: None,
             di_state: None,
         })
+    }
+
+    /// Returns whether GDB/LLDB JIT debug support is enabled.
+    ///
+    /// Registers JIT objects with debuggers via `__jit_debug_register_code`,
+    /// allowing GDB/LLDB to resolve JIT-compiled function names and set
+    /// breakpoints.
+    ///
+    /// This setting is applied once per process on first backend creation.
+    /// Subsequent backends inherit the value set by the first.
+    ///
+    /// Defaults to `true`.
+    pub fn debug_support(&self) -> bool {
+        self.debug_support
+    }
+
+    /// Sets whether to enable GDB/LLDB JIT debug support.
+    ///
+    /// This setting is applied once per process on first backend creation.
+    /// Subsequent backends inherit the value set by the first.
+    pub fn set_debug_support(&mut self, yes: bool) {
+        self.debug_support = yes;
+    }
+
+    /// Returns whether perf/samply JIT profiling support is enabled.
+    ///
+    /// Installs the LLVM `PerfSupportPlugin` which writes jitdump records,
+    /// allowing profilers to resolve JIT-compiled symbols with debug and
+    /// unwind info.
+    ///
+    /// This setting is applied once per process on first backend creation.
+    /// Subsequent backends inherit the value set by the first.
+    ///
+    /// Defaults to `true`.
+    pub fn profiling_support(&self) -> bool {
+        self.profiling_support
+    }
+
+    /// Sets whether to enable perf/samply JIT profiling support.
+    ///
+    /// This setting is applied once per process on first backend creation.
+    /// Subsequent backends inherit the value set by the first.
+    pub fn set_profiling_support(&mut self, yes: bool) {
+        self.profiling_support = yes;
     }
 
     /// Returns the LLVM context.
