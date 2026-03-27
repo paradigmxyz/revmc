@@ -805,8 +805,9 @@ impl Backend for EvmLlvmBackend {
             OptimizationLevel::Less | OptimizationLevel::Default => {
                 let total_bbs: u32 =
                     self.module.get_functions().map(|f| f.count_basic_blocks()).sum();
-                let passes = if total_bbs > 4000 { &PASSES } else { &PASSES_WITH_LICM };
-                passes.get_or_init(|| build_pass_pipeline(total_bbs <= 4000))
+                let with_licm = total_bbs <= 4000;
+                let passes = if with_licm { &PASSES_WITH_LICM } else { &PASSES };
+                passes.get_or_init(|| build_pass_pipeline(with_licm))
             }
             OptimizationLevel::Aggressive => "default<O3>",
         });
