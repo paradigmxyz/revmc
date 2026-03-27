@@ -406,8 +406,8 @@ impl EvmLlvmBackend {
         // In JIT mode, ORC owns the context via a ThreadSafeContext so that modules can be
         // safely transferred to the JIT without double-ownership issues with the TLS context.
         // In AOT mode, we use the thread-local context directly.
-        let (cx, tscx, cx_handle, orc) = if aot {
-            (get_context(), None, None, None)
+        let (cx, tscx, cx_handle) = if aot {
+            (get_context(), None, None)
         } else {
             if !target.has_jit() {
                 return Err(eyre::eyre!("target {:?} does not support JIT", target.get_name()));
@@ -420,8 +420,7 @@ impl EvmLlvmBackend {
             }
 
             let (cx, tscx, cx_handle) = create_orc_context();
-            let orc = OrcJitState::new(true, true)?;
-            (cx, Some(tscx), Some(cx_handle), Some(orc))
+            (cx, Some(tscx), Some(cx_handle))
         };
 
         let module = create_module(cx, &machine, aot)?;
@@ -442,7 +441,7 @@ impl EvmLlvmBackend {
             bcx,
             module,
             machine,
-            orc,
+            orc: None,
             _tscx: tscx,
             _cx_handle: cx_handle,
             ty_void,
@@ -521,8 +520,11 @@ impl EvmLlvmBackend {
         &self.module
     }
 
-    fn orc(&self) -> &OrcJitState {
-        self.orc.as_ref().expect("requested ORC JIT state on AOT backend")
+    fn ensure_orc(&mut self) -> Result<&mut OrcJitState> {
+        if self.orc.is_none() {
+            self.orc = Some(OrcJitState::new(self.debug_support, self.profiling_support)?);
+        }
+        Ok(self.orc.as_mut().unwrap())
     }
 
     fn fn_type(
@@ -607,7 +609,7 @@ impl EvmLlvmBackend {
 
     /// Commits the current staging module to the ORC JIT if there are pending functions.
     fn commit_staged_module(&mut self) -> Result<()> {
-        if self.aot || self.orc().staged_functions.is_empty() {
+        if self.aot || self.orc.as_ref().is_none_or(|o| o.staged_functions.is_empty()) {
             return Ok(());
         }
 
@@ -616,8 +618,9 @@ impl EvmLlvmBackend {
         let new_module = create_module(self.cx, &self.machine, self.aot)?;
         let old_module = std::mem::replace(&mut self.module, new_module);
 
+        self.ensure_orc()?;
         let tscx = self._tscx.as_ref().expect("missing ThreadSafeContext");
-        let orc = self.orc.as_mut().expect("missing ORC JIT state");
+        let orc = self.orc.as_mut().unwrap();
 
         // Flush pending absolute symbols to the shared builtins JITDylib.
         let pending = &mut orc.pending_symbols;
@@ -769,6 +772,9 @@ impl Backend for EvmLlvmBackend {
         param_names: &[&str],
         linkage: revmc_backend::Linkage,
     ) -> Result<(Self::Builder<'_>, Self::FuncId)> {
+        if !self.aot {
+            self.ensure_orc()?;
+        }
         let (id, function) = if let Some((&id, _fname)) =
             self.function_names.iter().find(|(_k, fname)| fname.as_str() == name)
             && let Some(orc) = &self.orc
@@ -884,7 +890,7 @@ impl Backend for EvmLlvmBackend {
         self.commit_staged_module()?;
         let name_str = self.id_to_name(id);
         let name = CString::new(name_str).unwrap();
-        let orc = self.orc.as_mut().expect("missing ORC JIT state");
+        let orc = self.ensure_orc()?;
         // Capture the compiled object buffer during lookup. LLJIT compiles lazily:
         // add_module_with_rt just registers the module, actual compilation happens
         // in lookup_in when the symbol is first requested.
