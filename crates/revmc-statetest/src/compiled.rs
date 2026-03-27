@@ -574,7 +574,7 @@ impl Handler for RuntimeHandler {
     fn run_exec_loop(
         &mut self,
         evm: &mut Self::Evm,
-        first_frame_input: revm::interpreter::interpreter_action::FrameInit,
+        first_frame_input: revm_interpreter::interpreter_action::FrameInit,
     ) -> Result<FrameResult, Self::Error> {
         let res = evm.frame_init(first_frame_input)?;
         if let ItemOrResult::Result(frame_result) = res {
@@ -667,7 +667,7 @@ fn execute_single_test_runtime(
 
 struct RuntimeTestContext<'a> {
     spec_id: SpecId,
-    test: &'a revm::statetest_types::Test,
+    test: &'a revm_statetest_types::Test,
     unit: &'a TestUnit,
     name: &'a str,
     cfg: &'a CfgEnv,

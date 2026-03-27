@@ -57,7 +57,6 @@ revmc-build.workspace = true
 revmc-context.workspace = true
 revmc-statetest = { path = "../revmc-statetest" }
 
-revm.workspace = true
 revm-context.workspace = true
 revm-database.workspace = true
 revm-database-interface.workspace = true

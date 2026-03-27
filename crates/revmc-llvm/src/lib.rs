@@ -708,7 +708,7 @@ impl EvmLlvmBackend {
     /// the ObjectTransformLayer and is a much better estimate of JIT code size than bytecode
     /// length.
     pub fn last_compiled_object_size(&self) -> Option<usize> {
-        Some(self.orc().last_compiled_object.as_ref()?.len())
+        Some(self.orc.as_ref()?.last_compiled_object.as_ref()?.len())
     }
 
     /// Pops and returns the [`ResourceTracker`](orc::ResourceTracker) for the last committed
@@ -736,7 +736,7 @@ impl EvmLlvmBackend {
     /// (and the backend itself) are dropped. Callers holding JIT function pointers must
     /// retain a guard to prevent the backing code from being freed.
     pub fn jit_dylib_guard(&self) -> Arc<JitDylibGuard> {
-        Arc::clone(&self.orc().jd_guard)
+        Arc::clone(&self.orc.as_ref().expect("jit_dylib_guard called in AOT mode").jd_guard)
     }
 }
 

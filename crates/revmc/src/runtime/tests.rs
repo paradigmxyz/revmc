@@ -538,6 +538,73 @@ fn idle_eviction() {
     backend.shutdown().unwrap();
 }
 
+/// Verifies that ORC eviction actually frees physical JIT memory.
+///
+/// After idle eviction removes a compiled program from the resident map,
+/// dropping the `CompiledProgram` drops the `JitCodeBacking` which calls
+/// `ResourceTracker::remove()`, freeing the machine code. The JIT memory
+/// plugin counters should reflect this decrease.
+#[test]
+#[cfg(feature = "llvm")]
+fn eviction_frees_jit_memory() {
+    let config = RuntimeConfig {
+        enabled: true,
+        tuning: RuntimeTuning {
+            jit_hot_threshold: 1,
+            jit_worker_count: 1,
+            idle_evict_duration: Some(std::time::Duration::from_millis(100)),
+            eviction_sweep_interval: std::time::Duration::from_millis(50),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let backend = JitBackend::start(config).unwrap();
+
+    let bytecode: &[u8] = &[0x60, 0x42, 0x5f, 0x52, 0x60, 0x20, 0x5f, 0xf3];
+    let code_hash = alloy_primitives::keccak256(bytecode);
+    let req = || LookupRequest {
+        code_hash,
+        code: Bytes::copy_from_slice(bytecode),
+        spec_id: SpecId::CANCUN,
+    };
+
+    let baseline = backend.stats().jit_code_bytes;
+
+    // Trigger JIT and wait for compilation.
+    for _ in 0..5 {
+        let _ = backend.lookup(req());
+    }
+    let compiled = poll_until(std::time::Duration::from_secs(30), || match backend.lookup(req()) {
+        LookupDecision::Compiled(p) => Some(p),
+        _ => None,
+    });
+
+    let after_compile = backend.stats().jit_code_bytes;
+    assert!(
+        after_compile > baseline,
+        "jit_code_bytes should increase after compilation: baseline={baseline}, after={after_compile}",
+    );
+
+    // Drop our reference to the compiled program so eviction can free it.
+    drop(compiled);
+
+    // Wait for idle eviction.
+    poll_until(std::time::Duration::from_secs(5), || {
+        if backend.stats().resident_entries == 0 { Some(()) } else { None }
+    });
+
+    // Give the Arc<CompiledProgram> time to be fully dropped.
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    let after_eviction = backend.stats().jit_code_bytes;
+    assert!(
+        after_eviction < after_compile,
+        "jit_code_bytes should decrease after eviction: before={after_compile}, after={after_eviction}",
+    );
+
+    backend.shutdown().unwrap();
+}
+
 #[test]
 #[cfg(feature = "llvm")]
 fn memory_budget_eviction() {

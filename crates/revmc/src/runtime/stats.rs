@@ -32,6 +32,23 @@ pub struct RuntimeStatsSnapshot {
     pub resident_bytes: u64,
     /// Number of commands pending in the backend command queue.
     pub jit_queue_len: u64,
+    /// Bytes allocated for executable JIT code sections.
+    ///
+    /// Sourced from the LLVM JIT memory usage plugin. Reflects live memory:
+    /// bytes are added on compilation and subtracted when JIT code is freed.
+    /// `0` if the LLVM backend is not initialized.
+    pub jit_code_bytes: u64,
+    /// Bytes allocated for non-executable JIT data sections.
+    ///
+    /// Sourced from the LLVM JIT memory usage plugin. `0` if not initialized.
+    pub jit_data_bytes: u64,
+}
+
+impl RuntimeStatsSnapshot {
+    /// Total bytes allocated by the JIT engine (code + data).
+    pub fn jit_total_bytes(&self) -> u64 {
+        self.jit_code_bytes + self.jit_data_bytes
+    }
 }
 
 impl RuntimeStats {
@@ -41,6 +58,13 @@ impl RuntimeStats {
         resident_bytes: u64,
         jit_queue_len: u64,
     ) -> RuntimeStatsSnapshot {
+        #[cfg(feature = "llvm")]
+        let (jit_code_bytes, jit_data_bytes) = crate::llvm::jit_memory_usage()
+            .map(|u| (u.code_bytes as u64, u.data_bytes as u64))
+            .unwrap_or((0, 0));
+        #[cfg(not(feature = "llvm"))]
+        let (jit_code_bytes, jit_data_bytes) = (0, 0);
+
         RuntimeStatsSnapshot {
             lookup_hits: self.lookup_hits.load(Ordering::Relaxed),
             lookup_misses: self.lookup_misses.load(Ordering::Relaxed),
@@ -49,6 +73,8 @@ impl RuntimeStats {
             resident_entries,
             resident_bytes,
             jit_queue_len,
+            jit_code_bytes,
+            jit_data_bytes,
         }
     }
 }
