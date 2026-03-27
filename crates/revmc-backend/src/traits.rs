@@ -5,6 +5,44 @@ use std::{
     path::{Path, PathBuf},
 };
 
+/// Backend configuration.
+///
+/// Collects all tuneable settings that [`EvmCompiler`](crate::Backend) forwards to the backend.
+/// Backends receive a full snapshot via [`Backend::apply_config`] whenever the compiler
+/// changes a setting, so they can apply side-effects (e.g. toggling ASM verbosity) in one place.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BackendConfig {
+    /// Optimization level.
+    pub opt_level: OptimizationLevel,
+    /// Whether IR output is being dumped (enables verbose names, asm comments, etc.).
+    pub is_dumping: bool,
+    /// Whether to enable debug assertions in generated code.
+    pub debug_assertions: bool,
+    /// Whether to enable JIT debug support (GDB/LLDB registration).
+    ///
+    /// Applied once per process on first JIT compilation.
+    pub debug_support: bool,
+    /// Whether to enable JIT profiling support (perf jitdump).
+    ///
+    /// Applied once per process on first JIT compilation.
+    pub profiling_support: bool,
+    /// Debug info source file path. `Some` enables debug info emission.
+    pub debug_file: Option<PathBuf>,
+}
+
+impl Default for BackendConfig {
+    fn default() -> Self {
+        Self {
+            opt_level: OptimizationLevel::Default,
+            is_dumping: false,
+            debug_assertions: cfg!(debug_assertions),
+            debug_support: true,
+            profiling_support: true,
+            debug_file: None,
+        }
+    }
+}
+
 /// Target machine.
 #[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Target {
@@ -210,27 +248,13 @@ pub trait Backend: BackendTypes + TypeMethods {
 
     fn set_module_name(&mut self, name: &str);
 
-    fn set_is_dumping(&mut self, yes: bool);
-    fn set_debug_assertions(&mut self, yes: bool);
+    /// Returns the current backend configuration.
+    fn config(&self) -> &BackendConfig;
 
-    /// Returns whether JIT debug support is enabled.
-    fn debug_support(&self) -> bool {
-        true
-    }
-    /// Sets whether to enable JIT debug support.
-    fn set_debug_support(&mut self, _yes: bool) {}
-
-    /// Returns whether JIT profiling support is enabled.
-    fn profiling_support(&self) -> bool {
-        true
-    }
-    /// Sets whether to enable JIT profiling support.
-    fn set_profiling_support(&mut self, _yes: bool) {}
-
-    /// Sets the debug info source file path for generated code.
+    /// Applies the given configuration snapshot.
     ///
-    /// Passing `Some(path)` enables debug info emission; `None` disables it.
-    fn set_debug_file(&mut self, _path: Option<PathBuf>) {}
+    /// Backends should apply any side-effects (e.g. toggling ASM verbosity) here.
+    fn apply_config(&mut self, config: BackendConfig);
 
     /// Finalizes any pending debug info metadata.
     ///
@@ -238,8 +262,6 @@ pub trait Backend: BackendTypes + TypeMethods {
     fn finalize_debug_info(&mut self) -> Result<()> {
         Ok(())
     }
-    fn opt_level(&self) -> OptimizationLevel;
-    fn set_opt_level(&mut self, level: OptimizationLevel);
     fn dump_ir(&mut self, path: &Path) -> Result<()>;
     fn dump_disasm(&mut self, path: &Path) -> Result<()>;
 

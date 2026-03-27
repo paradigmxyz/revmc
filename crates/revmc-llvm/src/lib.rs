@@ -31,7 +31,8 @@ use inkwell::{
 };
 use object::{Object, ObjectSymbol};
 use revmc_backend::{
-    Backend, BackendTypes, Builder, IntCC, Result, TailCallKind, TypeMethods, U256, eyre,
+    Backend, BackendConfig, BackendTypes, Builder, IntCC, Result, TailCallKind, TypeMethods, U256,
+    eyre,
 };
 use std::{
     borrow::Cow,
@@ -39,7 +40,7 @@ use std::{
     ffi::CString,
     fmt, iter,
     mem::ManuallyDrop,
-    path::{Path, PathBuf},
+    path::Path,
     sync::{
         Once, OnceLock,
         atomic::{AtomicU64, Ordering},
@@ -78,8 +79,6 @@ pub struct EvmLlvmBackend {
     /// Non-owning context handle for JIT mode. See [`create_orc_context`].
     _cx_handle: Option<Box<ManuallyDrop<Context>>>,
 
-    /// Debug info source file path set by the compiler.
-    debug_file: Option<PathBuf>,
     /// LLVM debug info builder and compile unit, created lazily when `debug_file` is set.
     di_state: Option<DiState>,
 
@@ -93,10 +92,8 @@ pub struct EvmLlvmBackend {
     ty_isize: IntType<'static>,
 
     aot: bool,
-    debug_assertions: bool,
-    debug_support: bool,
-    profiling_support: bool,
-    is_dumping: bool,
+    backend_config: BackendConfig,
+    /// Cached inkwell optimization level, kept in sync with `backend_config.opt_level`.
     opt_level: OptimizationLevel,
     /// Separate from `function_names` to have always increasing IDs.
     function_counter: u32,
@@ -453,14 +450,13 @@ impl EvmLlvmBackend {
             ty_isize,
             ty_ptr,
             aot,
-            debug_assertions: cfg!(debug_assertions),
-            debug_support: true,
-            profiling_support: true,
-            is_dumping: false,
+            backend_config: BackendConfig {
+                opt_level: convert_opt_level_rev(opt_level),
+                ..BackendConfig::default()
+            },
             opt_level,
             function_counter: 0,
             function_names: FxHashMap::default(),
-            debug_file: None,
             di_state: None,
         })
     }
@@ -478,7 +474,10 @@ impl EvmLlvmBackend {
 
     fn ensure_orc(&mut self) -> Result<&mut OrcJitState> {
         if self.orc.is_none() {
-            self.orc = Some(OrcJitState::new(self.debug_support, self.profiling_support)?);
+            self.orc = Some(OrcJitState::new(
+                self.backend_config.debug_support,
+                self.backend_config.profiling_support,
+            )?);
         }
         Ok(self.orc.as_mut().unwrap())
     }
@@ -500,7 +499,7 @@ impl EvmLlvmBackend {
     /// are not needed for readability.
     #[inline]
     fn name<'a>(&self, name: &'a str) -> &'a str {
-        if self.is_dumping { name } else { "" }
+        if self.backend_config.is_dumping { name } else { "" }
     }
 
     fn id_to_name(&self, id: u32) -> &str {
@@ -512,7 +511,7 @@ impl EvmLlvmBackend {
         if self.di_state.is_some() {
             return;
         }
-        let Some(debug_file) = &self.debug_file else { return };
+        let Some(debug_file) = &self.backend_config.debug_file else { return };
 
         let filename =
             debug_file.file_name().map(|f| f.to_string_lossy()).unwrap_or_default().into_owned();
@@ -672,33 +671,18 @@ impl Backend for EvmLlvmBackend {
         self.module().set_name(name);
     }
 
-    fn set_is_dumping(&mut self, yes: bool) {
-        self.is_dumping = yes;
-        self.machine.set_asm_verbosity(yes);
+    fn config(&self) -> &BackendConfig {
+        &self.backend_config
     }
 
-    fn set_debug_assertions(&mut self, yes: bool) {
-        self.debug_assertions = yes;
-    }
-
-    fn debug_support(&self) -> bool {
-        self.debug_support
-    }
-
-    fn set_debug_support(&mut self, yes: bool) {
-        self.debug_support = yes;
-    }
-
-    fn profiling_support(&self) -> bool {
-        self.profiling_support
-    }
-
-    fn set_profiling_support(&mut self, yes: bool) {
-        self.profiling_support = yes;
-    }
-
-    fn set_debug_file(&mut self, path: Option<PathBuf>) {
-        self.debug_file = path;
+    fn apply_config(&mut self, config: BackendConfig) {
+        if self.backend_config.is_dumping != config.is_dumping {
+            self.machine.set_asm_verbosity(config.is_dumping);
+        }
+        if self.backend_config.opt_level != config.opt_level {
+            self.opt_level = convert_opt_level(config.opt_level);
+        }
+        self.backend_config = config;
     }
 
     fn finalize_debug_info(&mut self) -> Result<()> {
@@ -709,14 +693,6 @@ impl Backend for EvmLlvmBackend {
             di.finalized = true;
         }
         Ok(())
-    }
-
-    fn opt_level(&self) -> revmc_backend::OptimizationLevel {
-        convert_opt_level_rev(self.opt_level)
-    }
-
-    fn set_opt_level(&mut self, level: revmc_backend::OptimizationLevel) {
-        self.opt_level = convert_opt_level(level);
     }
 
     fn is_aot(&self) -> bool {
@@ -759,7 +735,7 @@ impl Backend for EvmLlvmBackend {
             let fn_type = self.fn_type(ret, params);
             let function =
                 self.module().add_function(name, fn_type, Some(convert_linkage(linkage)));
-            if self.is_dumping {
+            if self.backend_config.is_dumping {
                 for (i, &name) in param_names.iter().enumerate() {
                     function.get_nth_param(i as u32).expect(name).set_name(self.name(name));
                 }
