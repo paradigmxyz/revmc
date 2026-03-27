@@ -80,6 +80,11 @@ impl Default for GlobalJitConfig {
 }
 
 impl GlobalJitConfig {
+    /// Creates a new configuration with defaults derived from environment variables.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
     /// Returns whether GDB/LLDB JIT debug support is enabled.
     ///
     /// Registers JIT objects with debuggers via `__jit_debug_register_code`,
