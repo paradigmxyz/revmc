@@ -25,8 +25,10 @@ revmc-backend.workspace = true
 revmc-builtins = { workspace = true, features = ["ir"] }
 revmc-context.workspace = true
 revmc-llvm = { workspace = true, optional = true }
+
 alloy-primitives = { workspace = true, features = ["std", "map-fxhash"] }
 alloy-evm = { workspace = true, optional = true }
+
 revm-bytecode.workspace = true
 revm-context.workspace = true
 revm-context-interface.workspace = true
@@ -36,6 +38,7 @@ revm-inspector.workspace = true
 revm-interpreter.workspace = true
 revm-primitives.workspace = true
 revm-state.workspace = true
+
 bitflags = "2.5"
 crossbeam-channel.workspace = true
 dashmap = "6"
