@@ -524,14 +524,14 @@ impl EvmLlvmBackend {
             self.ty_i32.const_int(5, false),
         );
 
-        let inkwell_opt_level = convert_opt_level(self.backend_config.opt_level);
-        let is_optimized = inkwell_opt_level != OptimizationLevel::None;
+        let opt_level = self.backend_config.opt_level;
+        let is_optimized = opt_level != revmc_backend::OptimizationLevel::None;
         let mut flags = Vec::new();
-        flags.push(match inkwell_opt_level {
-            OptimizationLevel::None => "-O0",
-            OptimizationLevel::Less => "-O1",
-            OptimizationLevel::Default => "-O2",
-            OptimizationLevel::Aggressive => "-O3",
+        flags.push(match opt_level {
+            revmc_backend::OptimizationLevel::None => "-O0",
+            revmc_backend::OptimizationLevel::Less => "-O1",
+            revmc_backend::OptimizationLevel::Default => "-O2",
+            revmc_backend::OptimizationLevel::Aggressive => "-O3",
         });
         flags.push(if self.aot { "--aot" } else { "--jit" });
         let flags = flags.join(" ");
@@ -802,17 +802,18 @@ impl Backend for EvmLlvmBackend {
         static PASSES_WITH_LICM: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
         let passes_override = PASSES_OVERRIDE.get_or_init(|| std::env::var("REVMC_PASSES").ok());
-        let inkwell_opt_level = convert_opt_level(self.backend_config.opt_level);
-        let passes = passes_override.as_deref().unwrap_or_else(|| match inkwell_opt_level {
-            OptimizationLevel::None => "default<O0>",
-            OptimizationLevel::Less | OptimizationLevel::Default => {
-                let total_bbs: u32 =
-                    self.module.get_functions().map(|f| f.count_basic_blocks()).sum();
-                let passes = if total_bbs > 4000 { &PASSES } else { &PASSES_WITH_LICM };
-                passes.get_or_init(|| build_pass_pipeline(total_bbs <= 4000))
-            }
-            OptimizationLevel::Aggressive => "default<O3>",
-        });
+        let passes =
+            passes_override.as_deref().unwrap_or_else(|| match self.backend_config.opt_level {
+                revmc_backend::OptimizationLevel::None => "default<O0>",
+                revmc_backend::OptimizationLevel::Less
+                | revmc_backend::OptimizationLevel::Default => {
+                    let total_bbs: u32 =
+                        self.module.get_functions().map(|f| f.count_basic_blocks()).sum();
+                    let passes = if total_bbs > 4000 { &PASSES } else { &PASSES_WITH_LICM };
+                    passes.get_or_init(|| build_pass_pipeline(total_bbs <= 4000))
+                }
+                revmc_backend::OptimizationLevel::Aggressive => "default<O3>",
+            });
         let opts = PassBuilderOptions::create();
         self.module().run_passes(passes, &self.machine, opts).map_err(error_msg)
     }
