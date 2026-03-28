@@ -929,6 +929,32 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                             self.len_offset -= 1;
                         }
                         self.return_block.unwrap()
+                    } else if data.flags.contains(InstFlags::MULTI_JUMP) {
+                        let target_value = self.pop();
+                        let targets = self.bytecode.multi_jump_targets(inst).unwrap();
+
+                        if opcode == op::JUMPI {
+                            let cond_word = self.pop();
+                            let cond = self.bcx.icmp_imm(IntCC::NotEqual, cond_word, 0);
+                            let next = self.inst_entries[inst + 1usize];
+                            let switch_block = self.bcx.create_block("multi_jump");
+                            self.bcx.brif(cond, switch_block, next);
+                            self.bcx.switch_to_block(switch_block);
+                        }
+
+                        let switch_targets: Vec<_> = targets
+                            .iter()
+                            .map(|&t| {
+                                let pc = self.bytecode.inst(t).pc as u64;
+                                (pc, self.inst_entries[t])
+                            })
+                            .collect();
+                        self.add_invalid_jump();
+                        let return_block = self.return_block.unwrap();
+                        self.bcx.switch(target_value, return_block, &switch_targets, true);
+
+                        self.inst_entries[inst] = self.bcx.current_block().unwrap();
+                        goto_return!(no_branch);
                     } else if data.flags.contains(InstFlags::STATIC_JUMP) {
                         // Block-resolved jumps still have the target on the stack; pop and discard.
                         if data.flags.contains(InstFlags::BLOCK_RESOLVED_JUMP) {

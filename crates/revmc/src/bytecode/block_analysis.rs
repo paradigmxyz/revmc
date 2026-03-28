@@ -21,11 +21,20 @@ use revm_primitives::U256;
 use smallvec::SmallVec;
 use std::{collections::VecDeque, ops::Range};
 
+/// Maximum number of constants tracked in a single abstract value.
+const MAX_CONST_SET: usize = 4;
+
 /// Abstract value on the stack.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AbsValue {
     Top,
     Const(U256Idx),
+    /// Multiple known constant values (2..=MAX_CONST_SET).
+    /// The first `len` entries in `vals` are valid, sorted and deduplicated.
+    ConstSet {
+        vals: [U256Idx; MAX_CONST_SET],
+        len: u8,
+    },
 }
 
 /// The abstract stack state at a particular instruction, before it executes.
@@ -52,18 +61,75 @@ impl StackSnapshot {
 }
 
 impl AbsValue {
+    /// Returns the single constant if this is `Const`, or `None` otherwise.
     fn as_const(self) -> Option<U256Idx> {
         match self {
-            Self::Top => None,
             Self::Const(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    /// Returns the set of known constants, or `None` if `Top`.
+    fn as_const_set(&self) -> Option<&[U256Idx]> {
+        match self {
+            Self::Top => None,
+            Self::Const(v) => Some(std::slice::from_ref(v)),
+            Self::ConstSet { vals, len } => Some(&vals[..*len as usize]),
+        }
+    }
+
+    /// Creates a `ConstSet` or `Const` from a sorted, deduplicated slice.
+    fn from_set(set: &[U256Idx]) -> Self {
+        match set.len() {
+            0 => unreachable!("empty const set"),
+            1 => Self::Const(set[0]),
+            n if n <= MAX_CONST_SET => {
+                let mut vals = [U256Idx::from_usize(0); MAX_CONST_SET];
+                vals[..n].copy_from_slice(set);
+                Self::ConstSet { vals, len: n as u8 }
+            }
+            _ => Self::Top,
         }
     }
 
     /// Lattice join: two values merge to their least upper bound.
     fn join(self, other: Self) -> Self {
         match (self, other) {
-            (Self::Const(a), Self::Const(b)) if a == b => Self::Const(a),
-            _ => Self::Top,
+            (Self::Top, _) | (_, Self::Top) => Self::Top,
+            _ => {
+                let a = self.as_const_set().unwrap();
+                let b = other.as_const_set().unwrap();
+                // Sorted merge with dedup.
+                let mut merged = SmallVec::<[U256Idx; MAX_CONST_SET]>::new();
+                let (mut i, mut j) = (0, 0);
+                while i < a.len() && j < b.len() {
+                    use std::cmp::Ordering;
+                    match a[i].index().cmp(&b[j].index()) {
+                        Ordering::Less => {
+                            merged.push(a[i]);
+                            i += 1;
+                        }
+                        Ordering::Greater => {
+                            merged.push(b[j]);
+                            j += 1;
+                        }
+                        Ordering::Equal => {
+                            merged.push(a[i]);
+                            i += 1;
+                            j += 1;
+                        }
+                    }
+                    if merged.len() > MAX_CONST_SET {
+                        return Self::Top;
+                    }
+                }
+                merged.extend_from_slice(&a[i..]);
+                merged.extend_from_slice(&b[j..]);
+                if merged.len() > MAX_CONST_SET {
+                    return Self::Top;
+                }
+                Self::from_set(&merged)
+            }
         }
     }
 }
@@ -167,9 +233,11 @@ enum JumpTarget {
     Bottom,
     /// Known constant target instruction index.
     Const(Inst),
+    /// Multiple known constant target instruction indices.
+    Multi(SmallVec<[Inst; MAX_CONST_SET]>),
     /// Known constant but invalid target.
     Invalid,
-    /// Multiple different targets or unknown.
+    /// Unknown target.
     Top,
 }
 
@@ -227,6 +295,26 @@ impl Bytecode<'_> {
                         jump_inst = jump_inst.index(),
                         target_inst = target_inst.index(),
                         "resolved jump"
+                    );
+                }
+                JumpTarget::Multi(ref targets) => {
+                    for &target_inst in targets {
+                        debug_assert_eq!(
+                            self.insts[target_inst].opcode,
+                            op::JUMPDEST,
+                            "block_analysis multi-resolved to non-JUMPDEST"
+                        );
+                        self.insts[target_inst].data = 1;
+                    }
+                    self.insts[jump_inst].flags |= InstFlags::STATIC_JUMP
+                        | InstFlags::BLOCK_RESOLVED_JUMP
+                        | InstFlags::MULTI_JUMP;
+                    self.multi_jump_targets.insert(jump_inst, targets.clone());
+                    newly_resolved += 1;
+                    trace!(
+                        jump_inst = jump_inst.index(),
+                        n_targets = targets.len(),
+                        "resolved multi-target jump"
                     );
                 }
                 JumpTarget::Invalid => {
@@ -413,6 +501,29 @@ impl Bytecode<'_> {
                                 _ => JumpTarget::Invalid,
                             }
                         }
+                        Some(abs) if abs.as_const_set().is_some() => {
+                            let consts = abs.as_const_set().unwrap();
+                            let interner = self.u256_interner.borrow();
+                            let mut targets = SmallVec::new();
+                            let mut all_valid = true;
+                            for &idx in consts {
+                                let val = *interner.get(idx);
+                                match usize::try_from(val) {
+                                    Ok(pc) if self.is_valid_jump(pc) => {
+                                        targets.push(self.pc_to_inst(pc));
+                                    }
+                                    _ => {
+                                        all_valid = false;
+                                        break;
+                                    }
+                                }
+                            }
+                            if all_valid && !targets.is_empty() {
+                                JumpTarget::Multi(targets)
+                            } else {
+                                JumpTarget::Invalid
+                            }
+                        }
                         _ => JumpTarget::Top,
                     },
                 },
@@ -482,7 +593,10 @@ impl Bytecode<'_> {
             }
 
             for (inst, target) in jump_targets.iter_mut() {
-                if !matches!(target, JumpTarget::Const(_) | JumpTarget::Invalid) {
+                if !matches!(
+                    target,
+                    JumpTarget::Const(_) | JumpTarget::Multi(_) | JumpTarget::Invalid
+                ) {
                     continue;
                 }
                 if let Some(bid) = cfg.inst_to_block[*inst]
@@ -495,7 +609,9 @@ impl Bytecode<'_> {
 
         let count = jump_targets
             .iter()
-            .filter(|(_, t)| matches!(t, JumpTarget::Const(_) | JumpTarget::Invalid))
+            .filter(|(_, t)| {
+                matches!(t, JumpTarget::Const(_) | JumpTarget::Multi(_) | JumpTarget::Invalid)
+            })
             .count();
 
         (jump_targets, count)
@@ -560,15 +676,23 @@ impl Bytecode<'_> {
             let term = &self.insts.raw[block.insts.end - 1];
             if term.is_legacy_jump()
                 && !term.flags.contains(InstFlags::STATIC_JUMP)
-                && let Some(AbsValue::Const(idx)) = self.jump_operand(block, &input)
-                && let Ok(target_pc) = usize::try_from(*self.u256_interner.borrow().get(idx))
-                && self.is_valid_jump(target_pc)
+                && let Some(operand) = self.jump_operand(block, &input)
+                && let Some(consts) = operand.as_const_set()
             {
-                let ti = self.pc_to_inst(target_pc);
-                if let Some(tb) = cfg.inst_to_block[ti]
-                    && !discovered_jump_edges[bid].contains(&tb)
-                {
-                    discovered_jump_edges[bid].push(tb);
+                let interner = self.u256_interner.borrow();
+                for &idx in consts {
+                    let Ok(target_pc) = usize::try_from(*interner.get(idx)) else {
+                        continue;
+                    };
+                    if !self.is_valid_jump(target_pc) {
+                        continue;
+                    }
+                    let ti = self.pc_to_inst(target_pc);
+                    if let Some(tb) = cfg.inst_to_block[ti]
+                        && !discovered_jump_edges[bid].contains(&tb)
+                    {
+                        discovered_jump_edges[bid].push(tb);
+                    }
                 }
             }
 

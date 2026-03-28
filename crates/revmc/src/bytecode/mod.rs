@@ -6,6 +6,7 @@ use oxc_index::IndexVec;
 use revm_bytecode::opcode as op;
 use revm_primitives::{U256, hardfork::SpecId};
 use revmc_backend::Result;
+use smallvec::SmallVec;
 use std::cell::RefCell;
 
 mod block_analysis;
@@ -64,6 +65,9 @@ pub struct Bytecode<'a> {
     stack_snapshots: IndexVec<Inst, StackSnapshot>,
     /// Deduplicated constant pool for U256 values.
     u256_interner: RefCell<Interner<U256Idx, U256, FxBuildHasher>>,
+    /// Multi-target jump table: maps a JUMP/JUMPI instruction to its set of known targets.
+    /// Only populated for jumps resolved to multiple targets by block analysis.
+    multi_jump_targets: FxHashMap<Inst, SmallVec<[Inst; 4]>>,
     /// Mapping from program counter to instruction.
     pc_to_inst: FxHashMap<u32, u32>,
     /// Instruction index to 1-based line number in the formatted dump, built during formatting.
@@ -111,6 +115,7 @@ impl<'a> Bytecode<'a> {
             may_suspend: false,
             stack_snapshots: IndexVec::new(),
             u256_interner: RefCell::new(Interner::new()),
+            multi_jump_targets: FxHashMap::default(),
             pc_to_inst,
             inst_lines: RefCell::new(IndexVec::new()),
         };
@@ -387,6 +392,11 @@ impl<'a> Bytecode<'a> {
         self.u256_interner.borrow_mut().intern(value)
     }
 
+    /// Returns the multi-target jump table entry for the given instruction, if any.
+    pub(crate) fn multi_jump_targets(&self, inst: Inst) -> Option<&[Inst]> {
+        self.multi_jump_targets.get(&inst).map(|v| v.as_slice())
+    }
+
     /// Returns the known constant value of a stack operand at the given instruction.
     ///
     /// `depth` 0 is TOS (first popped by this instruction), 1 is second, etc.
@@ -586,6 +596,9 @@ bitflags::bitflags! {
         /// The jump target is known to be invalid.
         /// Always returns [`InstructionResult::InvalidJump`] at runtime.
         const INVALID_JUMP = 1 << 1;
+        /// The jump has multiple known targets (see `Bytecode::multi_jump_targets`).
+        /// The target value is still on the stack and must be popped and switched on at runtime.
+        const MULTI_JUMP = 1 << 2;
 
         /// The instruction is disabled in this EVM version.
         /// Always returns [`InstructionResult::NotActivated`] at runtime.

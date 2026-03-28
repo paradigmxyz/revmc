@@ -95,6 +95,16 @@ impl Bytecode<'_> {
                 write!(text, "{opcode}").unwrap();
                 if data.flags.contains(InstFlags::INVALID_JUMP) {
                     text.push_str(" -> INVALID");
+                } else if data.flags.contains(InstFlags::MULTI_JUMP) {
+                    if let Some(targets) = self.multi_jump_targets(inst) {
+                        text.push_str(" ->");
+                        for &t in targets {
+                            match info.inst_to_block.get(&t) {
+                                Some(b) => write!(text, " bb{b}").unwrap(),
+                                None => write!(text, " inst {}", t.index()).unwrap(),
+                            }
+                        }
+                    }
                 } else if data.is_legacy_static_jump() {
                     let target = Inst::from_usize(data.data as usize);
                     match info.inst_to_block.get(&target) {
@@ -123,6 +133,9 @@ impl Bytecode<'_> {
                 }
                 if flags.contains(InstFlags::BLOCK_RESOLVED_JUMP) {
                     comment.push_str(", block_resolved");
+                }
+                if flags.contains(InstFlags::MULTI_JUMP) {
+                    comment.push_str(", multi_jump");
                 }
                 if data.may_suspend() {
                     comment.push_str(", suspends");
@@ -255,7 +268,21 @@ impl<'a> Bytecode<'a> {
             let last = self.inst(last_inst);
 
             // Jump edge.
-            if last.is_legacy_static_jump() && !last.flags.contains(InstFlags::INVALID_JUMP) {
+            if last.flags.contains(InstFlags::MULTI_JUMP) {
+                if let Some(targets) = self.multi_jump_targets(last_inst) {
+                    for &t in targets {
+                        if let Some(&target_block) = info.inst_to_block.get(&t) {
+                            let color = "#53a8b6";
+                            writeln!(
+                                w,
+                                "  bb{block_idx} -> bb{target_block} \
+                                 [label=\"\" color=\"{color}\" fontcolor=\"{color}\"];"
+                            )?;
+                        }
+                    }
+                }
+            } else if last.is_legacy_static_jump() && !last.flags.contains(InstFlags::INVALID_JUMP)
+            {
                 let target = Inst::from_usize(last.data as usize);
                 if let Some(&target_block) = info.inst_to_block.get(&target) {
                     let (label, color) = if last.opcode == op::JUMPI {
