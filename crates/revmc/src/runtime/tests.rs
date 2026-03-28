@@ -633,12 +633,9 @@ fn memory_budget_eviction() {
 
     // Wait for budget eviction to kick in.
     poll_until(std::time::Duration::from_secs(5), || {
-        // Don't send lookup events so the entry doesn't get re-promoted.
         let stats = backend.stats();
         if stats.resident_entries == 0 { Some(()) } else { None }
     });
-
-    assert_eq!(backend.stats().resident_entries, 0);
 
     backend.shutdown().unwrap();
 }

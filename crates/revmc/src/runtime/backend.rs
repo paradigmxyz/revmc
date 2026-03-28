@@ -13,10 +13,11 @@ use crate::runtime::{
 use alloy_primitives::{Bytes, keccak256, map::HashMap};
 use crossbeam_channel as chan;
 use dashmap::DashMap;
+use quanta::Instant;
 use revmc_backend::Target;
 use std::{
     sync::Arc,
-    time::{Instant, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 /// The resident map type: code_hash+spec_id → compiled program.
@@ -360,6 +361,13 @@ impl BackendState {
             .map(|e| std::mem::take(&mut e.pending_notifiers))
             .unwrap_or_default();
 
+        let notify = || {
+            result.sync_notifier.notify();
+            for n in pending_notifiers {
+                n.notify();
+            }
+        };
+
         // Discard stale results from a previous generation (e.g. after clear).
         if result.generation != self.generation {
             debug!(
@@ -368,10 +376,7 @@ impl BackendState {
                 current_gen = self.generation,
                 "discarding stale worker result",
             );
-            result.sync_notifier.notify();
-            for n in pending_notifiers {
-                n.notify();
-            }
+            notify();
             return;
         }
 
@@ -410,11 +415,7 @@ impl BackendState {
             }
         }
 
-        // Notify synchronous callers after the result has been fully processed.
-        result.sync_notifier.notify();
-        for n in pending_notifiers {
-            n.notify();
-        }
+        notify();
     }
 
     fn handle_aot_success(
@@ -545,6 +546,10 @@ impl BackendState {
 
     /// Runs an eviction sweep: removes idle entries and enforces the memory budget.
     fn run_eviction_sweep(&mut self) {
+        if !self.should_sweep() {
+            return;
+        }
+
         let now = Instant::now();
         self.last_sweep = now;
 
@@ -600,10 +605,13 @@ impl BackendState {
 
     /// Returns whether eviction is configured and a sweep is due.
     fn should_sweep(&self) -> bool {
-        let has_idle = self.tuning.idle_evict_duration.is_some();
-        let has_budget = self.tuning.resident_code_cache_bytes > 0
-            && jit_total_bytes() > self.tuning.resident_code_cache_bytes;
-        (has_idle || has_budget) && self.last_sweep.elapsed() >= self.tuning.eviction_sweep_interval
+        // Over budget — sweep immediately regardless of interval.
+        let maxrss = self.tuning.resident_code_cache_bytes;
+        if maxrss > 0 && jit_total_bytes() > maxrss {
+            return true;
+        }
+        self.tuning.idle_evict_duration.is_some()
+            && self.last_sweep.elapsed() >= self.tuning.eviction_sweep_interval
     }
 }
 
@@ -677,17 +685,19 @@ pub(crate) fn run(
                         break;
                     }
                 }
+
+                // Sweep after commands, not after worker results — newly inserted
+                // entries should be visible to lookups before being evicted.
+                state.run_eviction_sweep();
             }
             recv(state.result_rx) -> msg => {
                 if let Ok(result) = msg {
                     state.handle_worker_result(result);
                 }
             }
-            default(sweep_interval) => {}
-        }
-
-        if state.should_sweep() {
-            state.run_eviction_sweep();
+            default(sweep_interval) => {
+                state.run_eviction_sweep();
+            }
         }
     }
 
