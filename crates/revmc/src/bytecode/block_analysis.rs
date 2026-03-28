@@ -1,63 +1,59 @@
 //! Abstract stack interpretation for resolving dynamic jump targets and constant propagation.
 //!
-//! This pass builds a basic-block CFG and performs constant propagation over an abstract stack
-//! to resolve jump targets that the simple `static_jump_analysis` (which only looks at adjacent
-//! `PUSH + JUMP/JUMPI`) cannot handle.
+//! This pass builds a basic-block CFG and runs worklist-based abstract interpretation to a
+//! fixpoint, propagating abstract stack states across blocks. It resolves jump targets that the
+//! simple `static_jump_analysis` (which only looks at adjacent `PUSH + JUMP/JUMPI`) cannot
+//! handle — including internal function return patterns where multiple callers push different
+//! return addresses.
 //!
-//! After the fixpoint converges, the abstract stack state at each instruction is persisted so
-//! that later passes (e.g. code generation) can query the known-constant value of stack operands.
+//! After the fixpoint converges, the abstract stack state at each instruction is persisted via
+//! a [`SnapshotInterner`] so that later passes (e.g. code generation) can query the
+//! known-constant value of stack operands.
 //!
-//! The abstract domain is:
-//! - `Const(U256)` — a known constant value.
+//! ## Abstract domain
+//!
+//! Per-value lattice (ascending order):
+//! - `Const(U256Idx)` — a single known constant.
+//! - `ConstSet(ConstSetIdx)` — multiple known constants (interned, sorted, deduplicated).
 //! - `Top` — reachable but unknown.
 //!
-//! Block input states use `Bottom` (unreachable) at the block level.
+//! Per-block lattice:
+//! - `Bottom` — block not yet reached.
+//! - `Known(Vec<AbsValue>)` — reached with a known stack state.
+//! - `Conflict` — predecessors have incompatible stack heights; analysis gives up on this block.
+//!
+//! ## Soundness
+//!
+//! When unresolved `Top` jumps remain after the fixpoint, a transitive predecessor analysis
+//! invalidates suspect resolutions that may be reachable from those unresolved jumps, ensuring
+//! that only sound jump targets are reported as resolved.
 
-use super::{Bytecode, Inst, InstFlags, U256Idx};
+use super::{Bytecode, Inst, InstFlags, Interner, U256Idx};
 use bitvec::vec::BitVec;
 use oxc_index::IndexVec;
 use revm_bytecode::opcode as op;
 use revm_primitives::U256;
 use smallvec::SmallVec;
-use std::{collections::VecDeque, ops::Range};
+use std::{cmp::Ordering, collections::VecDeque, ops::Range};
 
-/// Maximum number of constants tracked in a single abstract value.
-const MAX_CONST_SET: usize = 4;
+oxc_index::define_index_type! {
+    /// Index into the interned constant-set pool.
+    struct ConstSetIdx = u32;
+}
+
+oxc_index::define_index_type! {
+    /// Index into the interned stack-snapshot pool.
+    pub(crate) struct SnapshotIdx = u32;
+}
 
 /// Abstract value on the stack.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AbsValue {
-    Top,
     Const(U256Idx),
-    /// Multiple known constant values (2..=MAX_CONST_SET).
-    /// The first `len` entries in `vals` are valid, sorted and deduplicated.
-    ConstSet {
-        vals: [U256Idx; MAX_CONST_SET],
-        len: u8,
-    },
-}
-
-/// The abstract stack state at a particular instruction, before it executes.
-///
-/// Stored per-instruction after block analysis so that codegen can query operand constants.
-#[derive(Clone, Debug)]
-pub(crate) enum StackSnapshot {
-    /// The instruction is unreachable or the analysis gave up on this block.
-    Unknown,
-    /// The instruction's abstract stack is known.
-    Known(SmallVec<[Option<U256Idx>; 2]>),
-}
-
-impl StackSnapshot {
-    /// Returns the interned index of the operand at `depth` from the top of the stack.
-    ///
-    /// `depth` 0 is TOS (first popped), 1 is second, etc.
-    pub(crate) fn operand(&self, depth: usize) -> Option<U256Idx> {
-        match self {
-            Self::Unknown => None,
-            Self::Known(stack) => stack[stack.len().checked_sub(1 + depth)?],
-        }
-    }
+    /// Multiple known constant values (interned, sorted, deduplicated).
+    ConstSet(ConstSetIdx),
+    /// Top value (unknown concrete value).
+    Top,
 }
 
 impl AbsValue {
@@ -68,42 +64,53 @@ impl AbsValue {
             _ => None,
         }
     }
+}
 
-    /// Returns the set of known constants, or `None` if `Top`.
-    fn as_const_set(&self) -> Option<&[U256Idx]> {
-        match self {
-            Self::Top => None,
-            Self::Const(v) => Some(std::slice::from_ref(v)),
-            Self::ConstSet { vals, len } => Some(&vals[..*len as usize]),
+/// Constant-set interner used by the abstract interpreter.
+struct ConstSetInterner {
+    interner: Interner<ConstSetIdx, Box<[U256Idx]>>,
+}
+
+impl ConstSetInterner {
+    fn new() -> Self {
+        Self { interner: Interner::new() }
+    }
+
+    /// Returns the constants in the given set.
+    fn get(&self, idx: ConstSetIdx) -> &[U256Idx] {
+        self.interner.get(idx)
+    }
+
+    /// Returns the set of known constants for an abstract value, or `None` if `Top`.
+    fn abs_const_set<'a>(&'a self, val: &'a AbsValue) -> Option<&'a [U256Idx]> {
+        match val {
+            AbsValue::Top => None,
+            AbsValue::Const(v) => Some(std::slice::from_ref(v)),
+            AbsValue::ConstSet(idx) => Some(self.get(*idx)),
         }
     }
 
-    /// Creates a `ConstSet` or `Const` from a sorted, deduplicated slice.
-    fn from_set(set: &[U256Idx]) -> Self {
+    /// Interns a sorted, deduplicated set and returns the corresponding `AbsValue`.
+    fn intern_set(&mut self, set: &[U256Idx]) -> AbsValue {
         match set.len() {
             0 => unreachable!("empty const set"),
-            1 => Self::Const(set[0]),
-            n if n <= MAX_CONST_SET => {
-                let mut vals = [U256Idx::from_usize(0); MAX_CONST_SET];
-                vals[..n].copy_from_slice(set);
-                Self::ConstSet { vals, len: n as u8 }
-            }
-            _ => Self::Top,
+            1 => AbsValue::Const(set[0]),
+            _ => AbsValue::ConstSet(self.interner.intern(set.into())),
         }
     }
 
     /// Lattice join: two values merge to their least upper bound.
-    fn join(self, other: Self) -> Self {
-        match (self, other) {
-            (Self::Top, _) | (_, Self::Top) => Self::Top,
+    fn join(&mut self, a: AbsValue, b: AbsValue) -> AbsValue {
+        match (a, b) {
+            (AbsValue::Top, _) | (_, AbsValue::Top) => AbsValue::Top,
+            (AbsValue::Const(x), AbsValue::Const(y)) if x == y => AbsValue::Const(x),
             _ => {
-                let a = self.as_const_set().unwrap();
-                let b = other.as_const_set().unwrap();
+                let a = self.abs_const_set(&a).unwrap();
+                let b = self.abs_const_set(&b).unwrap();
                 // Sorted merge with dedup.
-                let mut merged = SmallVec::<[U256Idx; MAX_CONST_SET]>::new();
+                let mut merged = SmallVec::<[U256Idx; 8]>::new();
                 let (mut i, mut j) = (0, 0);
                 while i < a.len() && j < b.len() {
-                    use std::cmp::Ordering;
                     match a[i].index().cmp(&b[j].index()) {
                         Ordering::Less => {
                             merged.push(a[i]);
@@ -119,18 +126,33 @@ impl AbsValue {
                             j += 1;
                         }
                     }
-                    if merged.len() > MAX_CONST_SET {
-                        return Self::Top;
-                    }
                 }
                 merged.extend_from_slice(&a[i..]);
                 merged.extend_from_slice(&b[j..]);
-                if merged.len() > MAX_CONST_SET {
-                    return Self::Top;
-                }
-                Self::from_set(&merged)
+                self.intern_set(&merged)
             }
         }
+    }
+}
+
+/// Stack-snapshot interner: deduplicates per-instruction abstract stack states.
+#[derive(Default)]
+pub(crate) struct SnapshotInterner {
+    interner: Interner<SnapshotIdx, Box<[Option<U256Idx>]>>,
+}
+
+impl SnapshotInterner {
+    /// Interns a snapshot and returns its index.
+    fn intern(&mut self, snapshot: &[Option<U256Idx>]) -> SnapshotIdx {
+        self.interner.intern(snapshot.into())
+    }
+
+    /// Returns the interned index of the operand at `depth` from the top of the stack.
+    ///
+    /// `depth` 0 is TOS (first popped), 1 is second, etc.
+    pub(crate) fn operand(&self, idx: SnapshotIdx, depth: usize) -> Option<U256Idx> {
+        let stack = self.interner.get(idx);
+        stack[stack.len().checked_sub(1 + depth)?]
     }
 }
 
@@ -157,7 +179,7 @@ impl BlockState {
     }
 
     /// Join another incoming state into this one. Returns `true` if the state changed.
-    fn join(&mut self, incoming: &[AbsValue]) -> bool {
+    fn join(&mut self, incoming: &[AbsValue], sets: &mut ConstSetInterner) -> bool {
         match self {
             Self::Bottom => {
                 *self = Self::Known(incoming.to_vec());
@@ -170,7 +192,7 @@ impl BlockState {
                 }
                 let mut changed = false;
                 for (slot, inc) in existing.iter_mut().zip(incoming) {
-                    let joined = slot.join(*inc);
+                    let joined = sets.join(*slot, *inc);
                     if joined != *slot {
                         *slot = joined;
                         changed = true;
@@ -234,7 +256,7 @@ enum JumpTarget {
     /// Known constant target instruction index.
     Const(Inst),
     /// Multiple known constant target instruction indices.
-    Multi(SmallVec<[Inst; MAX_CONST_SET]>),
+    Multi(SmallVec<[Inst; 4]>),
     /// Known constant but invalid target.
     Invalid,
     /// Unknown target.
@@ -259,9 +281,12 @@ impl Bytecode<'_> {
             return;
         }
 
-        let mut snapshots = vec![StackSnapshot::Unknown; self.insts.len()];
-        let (resolved, count) = self.run_abstract_interp(&cfg, &mut snapshots);
+        let mut snapshot_interner = SnapshotInterner::default();
+        let mut snapshots = vec![None; self.insts.len()];
+        let (resolved, count) =
+            self.run_abstract_interp(&cfg, &mut snapshots, &mut snapshot_interner);
         self.stack_snapshots = IndexVec::from_vec(snapshots);
+        self.snapshot_interner = snapshot_interner;
 
         if count == 0 {
             return;
@@ -380,25 +405,21 @@ impl Bytecode<'_> {
         let mut inst_to_block: IndexVec<Inst, Option<Block>> = IndexVec::from_vec(vec![None; n]);
         let mut current_start = None;
 
-        let finish_block =
-            |start: usize,
-             end: usize,
-             blocks: &mut IndexVec<Block, BlockData>,
-             inst_to_block: &mut IndexVec<Inst, Option<Block>>| {
-                let range = start..end;
-                let dead = range.clone().all(|j| self.insts.raw[j].is_dead_code());
-                let bid = blocks.push(BlockData {
-                    insts: range.clone(),
-                    preds: SmallVec::new(),
-                    succs: SmallVec::new(),
-                    dead,
-                });
-                for j in range {
-                    if !self.insts.raw[j].is_dead_code() {
-                        inst_to_block.raw[j] = Some(bid);
-                    }
+        let mut finish_block = |start: usize, end: usize| {
+            let range = start..end;
+            let dead = range.clone().all(|j| self.insts.raw[j].is_dead_code());
+            let bid = blocks.push(BlockData {
+                insts: range.clone(),
+                preds: SmallVec::new(),
+                succs: SmallVec::new(),
+                dead,
+            });
+            for j in range {
+                if !self.insts.raw[j].is_dead_code() {
+                    inst_to_block.raw[j] = Some(bid);
                 }
-            };
+            }
+        };
 
         for i in 0..n {
             if self.insts.raw[i].is_dead_code() {
@@ -407,7 +428,7 @@ impl Bytecode<'_> {
 
             if is_leader[i] || current_start.is_none() {
                 if let Some(start) = current_start {
-                    finish_block(start, i, &mut blocks, &mut inst_to_block);
+                    finish_block(start, i);
                 }
                 current_start = Some(i);
             }
@@ -415,7 +436,7 @@ impl Bytecode<'_> {
 
         // Close the last block.
         if let Some(start) = current_start {
-            finish_block(start, n, &mut blocks, &mut inst_to_block);
+            finish_block(start, n);
         }
 
         // Build edges based on known control flow.
@@ -456,7 +477,8 @@ impl Bytecode<'_> {
     fn run_abstract_interp(
         &self,
         cfg: &Cfg,
-        snapshots: &mut [StackSnapshot],
+        snapshots: &mut [Option<SnapshotIdx>],
+        snapshot_interner: &mut SnapshotInterner,
     ) -> (Vec<(Inst, JumpTarget)>, usize) {
         let num_blocks = cfg.blocks.len();
 
@@ -475,7 +497,14 @@ impl Bytecode<'_> {
 
         // Always run the fixpoint to propagate stack states through the CFG.
         // Snapshots are recorded during interpretation — last write wins (= converged state).
-        let discovered_edges = self.run_fixpoint(cfg, &mut block_states, snapshots);
+        let mut const_sets = ConstSetInterner::new();
+        let discovered_edges = self.run_fixpoint(
+            cfg,
+            &mut block_states,
+            snapshots,
+            snapshot_interner,
+            &mut const_sets,
+        );
 
         if jump_insts.is_empty() {
             return (Vec::new(), 0);
@@ -501,8 +530,8 @@ impl Bytecode<'_> {
                                 _ => JumpTarget::Invalid,
                             }
                         }
-                        Some(abs) if abs.as_const_set().is_some() => {
-                            let consts = abs.as_const_set().unwrap();
+                        Some(AbsValue::ConstSet(set_idx)) => {
+                            let consts = const_sets.get(set_idx);
                             let interner = self.u256_interner.borrow();
                             let mut targets = SmallVec::new();
                             let mut all_valid = true;
@@ -625,7 +654,9 @@ impl Bytecode<'_> {
         &self,
         cfg: &Cfg,
         block_states: &mut IndexVec<Block, BlockState>,
-        snapshots: &mut [StackSnapshot],
+        snapshots: &mut [Option<SnapshotIdx>],
+        snapshot_interner: &mut SnapshotInterner,
+        const_sets: &mut ConstSetInterner,
     ) -> IndexVec<Block, SmallVec<[Block; 2]>> {
         let num_blocks = cfg.blocks.len();
         let mut worklist = Worklist::new(num_blocks);
@@ -667,8 +698,11 @@ impl Bytecode<'_> {
                 continue;
             }
 
-            let Some(output) = self.interpret_block(block.insts.clone(), &input, Some(snapshots))
-            else {
+            let Some(output) = self.interpret_block(
+                block.insts.clone(),
+                &input,
+                Some((snapshots, snapshot_interner)),
+            ) else {
                 continue;
             };
 
@@ -677,13 +711,23 @@ impl Bytecode<'_> {
             if term.is_legacy_jump()
                 && !term.flags.contains(InstFlags::STATIC_JUMP)
                 && let Some(operand) = self.jump_operand(block, &input)
-                && let Some(consts) = operand.as_const_set()
             {
-                let interner = self.u256_interner.borrow();
-                for &idx in consts {
-                    let Ok(target_pc) = usize::try_from(*interner.get(idx)) else {
-                        continue;
-                    };
+                let target_pcs: SmallVec<[usize; 4]> = match operand {
+                    AbsValue::Const(idx) => {
+                        let val = *self.u256_interner.borrow().get(idx);
+                        usize::try_from(val).ok().into_iter().collect()
+                    }
+                    AbsValue::ConstSet(set_idx) => {
+                        let interner = self.u256_interner.borrow();
+                        const_sets
+                            .get(set_idx)
+                            .iter()
+                            .filter_map(|&idx| usize::try_from(*interner.get(idx)).ok())
+                            .collect()
+                    }
+                    AbsValue::Top => SmallVec::new(),
+                };
+                for target_pc in target_pcs {
                     if !self.is_valid_jump(target_pc) {
                         continue;
                     }
@@ -698,7 +742,7 @@ impl Bytecode<'_> {
 
             // Propagate to static CFG successors and discovered dynamic-jump targets.
             for &succ in block.succs.iter().chain(&discovered_jump_edges[bid]) {
-                if block_states[succ].join(&output) {
+                if block_states[succ].join(&output, const_sets) {
                     worklist.push(succ);
                 }
             }
@@ -716,7 +760,7 @@ impl Bytecode<'_> {
         &self,
         range: Range<usize>,
         input: &[AbsValue],
-        mut snapshots: Option<&mut [StackSnapshot]>,
+        mut snapshots: Option<(&mut [Option<SnapshotIdx>], &mut SnapshotInterner)>,
     ) -> Option<Vec<AbsValue>> {
         let mut stack = input.to_vec();
 
@@ -727,8 +771,10 @@ impl Bytecode<'_> {
             }
 
             // Record pre-instruction snapshot if requested.
-            if let Some(snapshots) = &mut snapshots {
-                snapshots[i] = StackSnapshot::Known(stack.iter().map(|v| v.as_const()).collect());
+            if let Some((ref mut snap, ref mut interner)) = snapshots {
+                let snapshot: SmallVec<[Option<U256Idx>; 2]> =
+                    stack.iter().map(|v| v.as_const()).collect();
+                snap[i] = Some(interner.intern(&snapshot));
             }
 
             // Instructions marked SKIP_LOGIC (the PUSH in a PUSH+JUMP pair) are no-ops
