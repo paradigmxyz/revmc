@@ -15,6 +15,7 @@
 
 use super::{Bytecode, InstFlags};
 use bitvec::vec::BitVec;
+use oxc_index::{Idx, IndexVec};
 use revm_bytecode::opcode as op;
 use revm_primitives::U256;
 use smallvec::SmallVec;
@@ -131,21 +132,30 @@ impl std::fmt::Debug for Block {
 }
 
 impl Block {
-    /// Creates a new block index from a `usize`.
     #[inline]
     fn new(index: usize) -> Self {
         Self(NonZeroU32::new(index as u32 + 1).expect("block index overflow"))
     }
 
-    /// Returns the index as a `usize`.
     #[inline]
     fn index(self) -> usize {
         (self.0.get() - 1) as usize
     }
 }
 
-/// Sentinel value for instructions not mapped to any block.
-const NO_BLOCK: Option<Block> = None;
+impl Idx for Block {
+    const MAX: usize = u32::MAX as usize - 1;
+
+    #[inline]
+    unsafe fn from_usize_unchecked(idx: usize) -> Self {
+        Self(unsafe { NonZeroU32::new_unchecked(idx as u32 + 1) })
+    }
+
+    #[inline]
+    fn index(self) -> usize {
+        self.index()
+    }
+}
 
 /// FIFO worklist with deduplication.
 struct Worklist {
@@ -174,7 +184,7 @@ impl Worklist {
 }
 
 /// A basic block in the CFG.
-struct BasicBlock {
+struct BlockData {
     /// Instruction index range (exclusive end). The terminator is at `insts.end - 1`.
     insts: Range<usize>,
     /// Predecessor block IDs.
@@ -200,7 +210,7 @@ enum JumpTarget {
 
 /// CFG for abstract interpretation.
 struct Cfg {
-    blocks: Vec<BasicBlock>,
+    blocks: IndexVec<Block, BlockData>,
     /// Maps instruction index to block ID. `None` for dead-code instructions.
     inst_to_block: Vec<Option<Block>>,
 }
@@ -288,7 +298,7 @@ impl Bytecode<'_> {
     fn build_cfg(&self) -> Cfg {
         let n = self.insts.len();
         if n == 0 {
-            return Cfg { blocks: Vec::new(), inst_to_block: Vec::new() };
+            return Cfg { blocks: IndexVec::new(), inst_to_block: Vec::new() };
         }
 
         // Identify block leaders.
@@ -303,7 +313,6 @@ impl Bytecode<'_> {
                 is_leader.set(i, true);
             }
             if inst.is_branching() || inst.is_diverging() {
-                // Next instruction is a leader (if it exists).
                 if i + 1 < n {
                     is_leader.set(i + 1, true);
                 }
@@ -311,28 +320,27 @@ impl Bytecode<'_> {
         }
 
         // Build blocks.
-        let mut blocks = Vec::new();
-        let mut inst_to_block = vec![NO_BLOCK; n];
+        let mut blocks: IndexVec<Block, BlockData> = IndexVec::new();
+        let mut inst_to_block = vec![None::<Block>; n];
         let mut current_start = None;
 
         let finish_block = |start: usize,
                             end: usize,
-                            blocks: &mut Vec<BasicBlock>,
+                            blocks: &mut IndexVec<Block, BlockData>,
                             inst_to_block: &mut [Option<Block>]| {
-            let block_id = Block::new(blocks.len());
             let range = start..end;
             let dead = range.clone().all(|j| self.insts[j].is_dead_code());
-            for j in range.clone() {
-                if !self.insts[j].is_dead_code() {
-                    inst_to_block[j] = Some(block_id);
-                }
-            }
-            blocks.push(BasicBlock {
-                insts: range,
+            let bid = blocks.push(BlockData {
+                insts: range.clone(),
                 preds: SmallVec::new(),
                 succs: SmallVec::new(),
                 dead,
             });
+            for j in range {
+                if !self.insts[j].is_dead_code() {
+                    inst_to_block[j] = Some(bid);
+                }
+            }
         };
 
         for i in 0..n {
@@ -354,22 +362,19 @@ impl Bytecode<'_> {
         }
 
         // Build edges based on known control flow.
-        let num_blocks = blocks.len();
-        for bid_idx in 0..num_blocks {
-            let bid = Block::new(bid_idx);
-            let block = &blocks[bid_idx];
-            if block.dead {
+        for bid in blocks.indices() {
+            if blocks[bid].dead {
                 continue;
             }
-            let term_idx = block.insts.end - 1;
+            let term_idx = blocks[bid].insts.end - 1;
             let term = &self.insts[term_idx];
 
             // Fallthrough edge: if the terminator doesn't unconditionally branch/diverge.
             let has_fallthrough = !term.is_diverging() && (term.opcode != op::JUMP);
-            if has_fallthrough && block.insts.end < n {
-                if let Some(next_block) = inst_to_block[block.insts.end] {
-                    blocks[next_block.index()].preds.push(bid);
-                    blocks[bid_idx].succs.push(next_block);
+            if has_fallthrough && blocks[bid].insts.end < n {
+                if let Some(next_block) = inst_to_block[blocks[bid].insts.end] {
+                    blocks[next_block].preds.push(bid);
+                    blocks[bid].succs.push(next_block);
                 }
             }
 
@@ -377,8 +382,8 @@ impl Bytecode<'_> {
             if term.is_legacy_static_jump() && !term.flags.contains(InstFlags::INVALID_JUMP) {
                 let target_inst = term.data as usize;
                 if let Some(target_block) = inst_to_block[target_inst] {
-                    blocks[target_block.index()].preds.push(bid);
-                    blocks[bid_idx].succs.push(target_block);
+                    blocks[target_block].preds.push(bid);
+                    blocks[bid].succs.push(target_block);
                 }
             }
         }
@@ -398,8 +403,9 @@ impl Bytecode<'_> {
         let num_blocks = cfg.blocks.len();
 
         // Initialize block states. Entry block starts with an empty stack.
-        let mut block_states: Vec<BlockState> = vec![BlockState::Bottom; num_blocks];
-        block_states[0] = BlockState::Known(Vec::new());
+        let mut block_states: IndexVec<Block, BlockState> =
+            IndexVec::from_vec(vec![BlockState::Bottom; num_blocks]);
+        block_states[Block::new(0)] = BlockState::Known(Vec::new());
 
         // Collect unresolved jumps.
         let mut jump_insts: Vec<usize> = Vec::new();
@@ -424,24 +430,19 @@ impl Bytecode<'_> {
         for &jump_inst in &jump_insts {
             let target = match cfg.inst_to_block[jump_inst] {
                 None => JumpTarget::Bottom,
-                Some(bid) => {
-                    let bi = bid.index();
-                    match &block_states[bi] {
-                        BlockState::Bottom => JumpTarget::Bottom,
-                        BlockState::Conflict => JumpTarget::Top,
-                        BlockState::Known(input) => {
-                            match self.jump_operand(&cfg.blocks[bi], input) {
-                                Some(AbsValue::Const(val)) => match usize::try_from(val) {
-                                    Ok(target_pc) if self.is_valid_jump(target_pc) => {
-                                        JumpTarget::Const(self.pc_to_inst(target_pc))
-                                    }
-                                    _ => JumpTarget::Invalid,
-                                },
-                                _ => JumpTarget::Top,
+                Some(bid) => match &block_states[bid] {
+                    BlockState::Bottom => JumpTarget::Bottom,
+                    BlockState::Conflict => JumpTarget::Top,
+                    BlockState::Known(input) => match self.jump_operand(&cfg.blocks[bid], input) {
+                        Some(AbsValue::Const(val)) => match usize::try_from(val) {
+                            Ok(target_pc) if self.is_valid_jump(target_pc) => {
+                                JumpTarget::Const(self.pc_to_inst(target_pc))
                             }
-                        }
-                    }
-                }
+                            _ => JumpTarget::Invalid,
+                        },
+                        _ => JumpTarget::Top,
+                    },
+                },
             };
             if matches!(target, JumpTarget::Top) {
                 has_top_jump = true;
@@ -465,41 +466,40 @@ impl Bytecode<'_> {
         if has_top_jump {
             // Build reverse discovered-edge map: for each target block, which source blocks have
             // discovered edges pointing to it.
-            let mut disc_preds: Vec<SmallVec<[Block; 2]>> = vec![SmallVec::new(); num_blocks];
-            for (src_idx, targets) in discovered_edges.iter().enumerate() {
-                let src = Block::new(src_idx);
+            let mut disc_preds: IndexVec<Block, SmallVec<[Block; 2]>> =
+                IndexVec::from_vec(vec![SmallVec::new(); num_blocks]);
+            for (src, targets) in discovered_edges.iter_enumerated() {
                 for &tgt in targets {
-                    disc_preds[tgt.index()].push(src);
+                    disc_preds[tgt].push(src);
                 }
             }
 
             // Precompute: for each block, whether it has a suspect (Bottom + JUMPDEST) predecessor.
             let mut suspect: BitVec = BitVec::repeat(false, num_blocks);
-            for bid in 0..num_blocks {
+            for bid in cfg.blocks.indices() {
+                let bi = bid.index();
                 let has_suspect =
                     cfg.blocks[bid].preds.iter().chain(disc_preds[bid].iter()).any(|&pred| {
-                        let pi = pred.index();
-                        if !matches!(block_states[pi], BlockState::Bottom) {
+                        if !matches!(block_states[pred], BlockState::Bottom) {
                             return false;
                         }
-                        self.insts[cfg.blocks[pi].insts.start].is_jumpdest()
+                        self.insts[cfg.blocks[pred].insts.start].is_jumpdest()
                     });
                 if has_suspect {
-                    suspect.set(bid, true);
+                    suspect.set(bi, true);
                 }
             }
 
             // Propagate suspect flag forward through the CFG: if a block is suspect,
             // all its successors (static + discovered) are also suspect.
             let mut propagate = Worklist::new(num_blocks);
-            for bid in 0..num_blocks {
-                if suspect[bid] {
-                    propagate.push(Block::new(bid));
+            for bid in cfg.blocks.indices() {
+                if suspect[bid.index()] {
+                    propagate.push(bid);
                 }
             }
             while let Some(bid) = propagate.pop() {
-                let bi = bid.index();
-                for &succ in cfg.blocks[bi].succs.iter().chain(discovered_edges[bi].iter()) {
+                for &succ in cfg.blocks[bid].succs.iter().chain(discovered_edges[bid].iter()) {
                     let si = succ.index();
                     if !suspect[si] {
                         suspect.set(si, true);
@@ -535,9 +535,9 @@ impl Bytecode<'_> {
     fn run_fixpoint(
         &self,
         cfg: &Cfg,
-        block_states: &mut [BlockState],
+        block_states: &mut IndexVec<Block, BlockState>,
         snapshots: &mut [StackSnapshot],
-    ) -> Vec<SmallVec<[Block; 2]>> {
+    ) -> IndexVec<Block, SmallVec<[Block; 2]>> {
         let num_blocks = cfg.blocks.len();
         let mut worklist = Worklist::new(num_blocks);
         worklist.push(Block::new(0));
@@ -545,8 +545,8 @@ impl Bytecode<'_> {
         // Persistent set of discovered dynamic-jump target edges per block.
         // Once a dynamic jump in block `bid` resolves to a target block, that
         // edge is kept for all subsequent visits so updated states propagate.
-        let mut discovered_jump_edges: Vec<SmallVec<[Block; 2]>> =
-            vec![SmallVec::new(); num_blocks];
+        let mut discovered_jump_edges: IndexVec<Block, SmallVec<[Block; 2]>> =
+            IndexVec::from_vec(vec![SmallVec::new(); num_blocks]);
 
         let max_iterations = num_blocks * 8;
         let mut iterations = 0;
@@ -558,15 +558,14 @@ impl Bytecode<'_> {
                 break;
             }
 
-            let bi = bid.index();
-            let input = match &block_states[bi] {
+            let input = match &block_states[bid] {
                 BlockState::Known(s) => s.clone(),
                 BlockState::Bottom => continue,
                 BlockState::Conflict => {
                     // Propagate Conflict to all successors so they know their
                     // state may be incomplete.
-                    for &succ in cfg.blocks[bi].succs.iter().chain(&discovered_jump_edges[bi]) {
-                        if block_states[succ.index()].conflict() {
+                    for &succ in cfg.blocks[bid].succs.iter().chain(&discovered_jump_edges[bid]) {
+                        if block_states[succ].conflict() {
                             worklist.push(succ);
                         }
                     }
@@ -574,7 +573,7 @@ impl Bytecode<'_> {
                 }
             };
 
-            let block = &cfg.blocks[bi];
+            let block = &cfg.blocks[bid];
             if block.dead {
                 continue;
             }
@@ -593,16 +592,16 @@ impl Bytecode<'_> {
                 {
                     let ti = self.pc_to_inst(target_pc);
                     if let Some(tb) = cfg.inst_to_block[ti] {
-                        if !discovered_jump_edges[bi].contains(&tb) {
-                            discovered_jump_edges[bi].push(tb);
+                        if !discovered_jump_edges[bid].contains(&tb) {
+                            discovered_jump_edges[bid].push(tb);
                         }
                     }
                 }
             }
 
             // Propagate to static CFG successors and discovered dynamic-jump targets.
-            for &succ in block.succs.iter().chain(&discovered_jump_edges[bi]) {
-                if block_states[succ.index()].join(&output) {
+            for &succ in block.succs.iter().chain(&discovered_jump_edges[bid]) {
+                if block_states[succ].join(&output) {
                     worklist.push(succ);
                 }
             }
@@ -705,7 +704,7 @@ impl Bytecode<'_> {
     }
 
     /// Returns the abstract value of the jump operand (TOS before the terminator) for a block.
-    fn jump_operand(&self, block: &BasicBlock, input: &[AbsValue]) -> Option<AbsValue> {
+    fn jump_operand(&self, block: &BlockData, input: &[AbsValue]) -> Option<AbsValue> {
         if block.insts.len() == 1 {
             input.last().copied()
         } else {
