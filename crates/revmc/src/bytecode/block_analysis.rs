@@ -1,8 +1,11 @@
-//! Abstract stack interpretation for resolving dynamic jump targets.
+//! Abstract stack interpretation for resolving dynamic jump targets and constant propagation.
 //!
 //! This pass builds a basic-block CFG and performs constant propagation over an abstract stack
 //! to resolve jump targets that the simple `static_jump_analysis` (which only looks at adjacent
 //! `PUSH + JUMP/JUMPI`) cannot handle.
+//!
+//! After the fixpoint converges, the abstract stack state at each instruction is persisted so
+//! that later passes (e.g. code generation) can query the known-constant value of stack operands.
 //!
 //! The abstract domain is:
 //! - `Const(U256)` — a known constant value.
@@ -13,6 +16,7 @@
 use super::{Bytecode, InstFlags};
 use revm_bytecode::opcode as op;
 use revm_primitives::U256;
+use smallvec::SmallVec;
 use std::collections::VecDeque;
 
 /// Abstract value on the stack.
@@ -20,6 +24,32 @@ use std::collections::VecDeque;
 enum AbsValue {
     Const(U256),
     Top,
+}
+
+/// The abstract stack state at a particular instruction, before it executes.
+///
+/// Stored per-instruction after block analysis so that codegen can query operand constants.
+#[derive(Clone, Debug)]
+pub(crate) enum StackSnapshot {
+    /// The instruction's abstract stack is known.
+    Known(SmallVec<[Option<U256>; 2]>),
+    /// The instruction is unreachable or the analysis gave up on this block.
+    Unknown,
+}
+
+impl StackSnapshot {
+    /// Returns the constant value of the operand at `depth` from the top of the stack.
+    ///
+    /// `depth` 0 is TOS (first popped), 1 is second, etc.
+    pub(crate) fn operand(&self, depth: usize) -> Option<U256> {
+        match self {
+            Self::Known(stack) => {
+                let idx = stack.len().checked_sub(1 + depth)?;
+                stack[idx]
+            }
+            Self::Unknown => None,
+        }
+    }
 }
 
 impl AbsValue {
@@ -83,6 +113,37 @@ impl BlockState {
 
 type BlockId = usize;
 
+/// FIFO worklist with deduplication.
+struct Worklist {
+    queue: VecDeque<BlockId>,
+    in_queue: Vec<bool>,
+}
+
+impl Worklist {
+    fn new(size: usize) -> Self {
+        Self { queue: VecDeque::new(), in_queue: vec![false; size] }
+    }
+
+    fn with(size: usize, initial: BlockId) -> Self {
+        let mut w = Self::new(size);
+        w.push(initial);
+        w
+    }
+
+    fn pop(&mut self) -> Option<BlockId> {
+        let id = self.queue.pop_front()?;
+        self.in_queue[id] = false;
+        Some(id)
+    }
+
+    fn push(&mut self, id: BlockId) {
+        if !self.in_queue[id] {
+            self.in_queue[id] = true;
+            self.queue.push_back(id);
+        }
+    }
+}
+
 /// A basic block in the CFG.
 struct BasicBlock {
     /// First instruction index (inclusive).
@@ -117,19 +178,19 @@ struct Cfg {
 
 impl Bytecode<'_> {
     /// Runs abstract stack interpretation to resolve additional jump targets.
+    ///
+    /// Also computes and stores per-instruction stack snapshots for constant propagation.
     #[instrument(name = "block_analysis", level = "debug", skip_all)]
     pub(crate) fn block_analysis(&mut self) {
-        // Only run if there are dynamic jumps remaining.
-        if !self.has_dynamic_jumps {
-            return;
-        }
-
         let cfg = self.build_cfg();
         if cfg.blocks.is_empty() {
             return;
         }
 
-        let (resolved, count) = self.run_abstract_interp(&cfg);
+        let mut snapshots = vec![StackSnapshot::Unknown; self.insts.len()];
+        let (resolved, count) = self.run_abstract_interp(&cfg, &mut snapshots);
+        self.stack_snapshots = snapshots;
+
         if count == 0 {
             return;
         }
@@ -292,8 +353,17 @@ impl Bytecode<'_> {
     /// Run worklist-based abstract interpretation over the CFG.
     ///
     /// Returns a list of (jump_inst, resolved_target) pairs and the count of resolvable jumps.
-    fn run_abstract_interp(&self, cfg: &Cfg) -> (Vec<(usize, JumpTarget)>, usize) {
+    /// Stack snapshots are recorded into `snapshots` during the fixpoint.
+    fn run_abstract_interp(
+        &self,
+        cfg: &Cfg,
+        snapshots: &mut [StackSnapshot],
+    ) -> (Vec<(usize, JumpTarget)>, usize) {
         let num_blocks = cfg.blocks.len();
+
+        // Initialize block states. Entry block starts with an empty stack.
+        let mut block_states: Vec<BlockState> = vec![BlockState::Bottom; num_blocks];
+        block_states[0] = BlockState::Known(Vec::new());
 
         // Collect unresolved jumps.
         let mut jump_insts: Vec<usize> = Vec::new();
@@ -303,14 +373,14 @@ impl Bytecode<'_> {
             }
         }
 
+        // Always run the fixpoint to propagate stack states through the CFG.
+        // Snapshots are recorded during interpretation — last write wins (= converged state).
+        let discovered_edges =
+            self.run_fixpoint(cfg, &mut block_states, &vec![false; num_blocks], snapshots);
+
         if jump_insts.is_empty() {
             return (Vec::new(), 0);
         }
-
-        // Run fixpoint to compute converged block states.
-        let mut block_states: Vec<BlockState> = vec![BlockState::Bottom; num_blocks];
-        block_states[0] = BlockState::Known(Vec::new());
-        let discovered_edges = self.run_fixpoint(cfg, &mut block_states, &vec![false; num_blocks]);
 
         // Build reverse discovered-edge map: for each target block, which source blocks have
         // discovered edges pointing to it.
@@ -340,7 +410,7 @@ impl Bytecode<'_> {
                         let pre_jump_stack = if block.start == block.end {
                             input.clone()
                         } else {
-                            self.interpret_block(block.start, block.end - 1, input)
+                            self.interpret_block(block.start, block.end - 1, input, None)
                                 .unwrap_or_default()
                         };
                         let target_val = pre_jump_stack.last().cloned();
@@ -396,13 +466,17 @@ impl Bytecode<'_> {
 
             // Propagate suspect flag forward through the CFG: if a block is suspect,
             // all its successors (static + discovered) are also suspect.
-            let mut propagate_worklist: VecDeque<BlockId> =
-                suspect.iter().enumerate().filter(|&(_, s)| *s).map(|(i, _)| i).collect();
-            while let Some(bid) = propagate_worklist.pop_front() {
+            let mut propagate = Worklist::new(num_blocks);
+            for (bid, is_suspect) in suspect.iter().enumerate() {
+                if *is_suspect {
+                    propagate.push(bid);
+                }
+            }
+            while let Some(bid) = propagate.pop() {
                 for &succ in cfg.blocks[bid].succs.iter().chain(discovered_edges[bid].iter()) {
                     if !suspect[succ] {
                         suspect[succ] = true;
-                        propagate_worklist.push_back(succ);
+                        propagate.push(succ);
                     }
                 }
             }
@@ -432,17 +506,16 @@ impl Bytecode<'_> {
     /// Run a worklist-based fixpoint to compute abstract block states.
     ///
     /// Returns the discovered dynamic-jump target edges per block.
+    /// Stack snapshots are recorded into `snapshots` during each block interpretation.
     fn run_fixpoint(
         &self,
         cfg: &Cfg,
         block_states: &mut [BlockState],
         widen: &[bool],
+        snapshots: &mut [StackSnapshot],
     ) -> Vec<Vec<BlockId>> {
         let num_blocks = cfg.blocks.len();
-        let mut worklist = VecDeque::new();
-        worklist.push_back(0usize);
-        let mut in_worklist = vec![false; num_blocks];
-        in_worklist[0] = true;
+        let mut worklist = Worklist::with(num_blocks, 0);
 
         // Persistent set of discovered dynamic-jump target edges per block.
         // Once a dynamic jump in block `bid` resolves to a target block, that
@@ -452,8 +525,7 @@ impl Bytecode<'_> {
         let max_iterations = num_blocks * 8;
         let mut iterations = 0;
 
-        while let Some(bid) = worklist.pop_front() {
-            in_worklist[bid] = false;
+        while let Some(bid) = worklist.pop() {
             iterations += 1;
             if iterations > max_iterations {
                 debug!("block_analysis: iteration limit reached");
@@ -468,15 +540,13 @@ impl Bytecode<'_> {
                     // state may be incomplete.
                     let block = &cfg.blocks[bid];
                     for &succ in &block.succs {
-                        if block_states[succ].conflict() && !in_worklist[succ] {
-                            worklist.push_back(succ);
-                            in_worklist[succ] = true;
+                        if block_states[succ].conflict() {
+                            worklist.push(succ);
                         }
                     }
                     for &succ in &discovered_jump_edges[bid] {
-                        if block_states[succ].conflict() && !in_worklist[succ] {
-                            worklist.push_back(succ);
-                            in_worklist[succ] = true;
+                        if block_states[succ].conflict() {
+                            worklist.push(succ);
                         }
                     }
                     continue;
@@ -491,7 +561,7 @@ impl Bytecode<'_> {
             let input =
                 if widen[bid] { input.iter().map(|_| AbsValue::Top).collect() } else { input };
 
-            let output = self.interpret_block(block.start, block.end, &input);
+            let output = self.interpret_block(block.start, block.end, &input, Some(snapshots));
             let output = match output {
                 Some(s) => s,
                 None => continue,
@@ -501,9 +571,11 @@ impl Bytecode<'_> {
             let term = &self.insts[block.end];
             if term.is_legacy_jump() && !term.flags.contains(InstFlags::STATIC_JUMP) {
                 let pre_jump_stack = if block.start == block.end {
-                    input.clone()
+                    &input
                 } else {
-                    self.interpret_block(block.start, block.end - 1, &input).unwrap_or_default()
+                    &self
+                        .interpret_block(block.start, block.end - 1, &input, None)
+                        .unwrap_or_default()
                 };
 
                 if let Some(AbsValue::Const(val)) = pre_jump_stack.last()
@@ -521,19 +593,10 @@ impl Bytecode<'_> {
                 }
             }
 
-            // Propagate to static CFG successors.
-            for &succ in &block.succs {
-                if block_states[succ].join(&output) && !in_worklist[succ] {
-                    worklist.push_back(succ);
-                    in_worklist[succ] = true;
-                }
-            }
-
-            // Propagate to all discovered dynamic-jump target blocks.
-            for &succ in &discovered_jump_edges[bid] {
-                if block_states[succ].join(&output) && !in_worklist[succ] {
-                    worklist.push_back(succ);
-                    in_worklist[succ] = true;
+            // Propagate to static CFG successors and discovered dynamic-jump targets.
+            for &succ in block.succs.iter().chain(&discovered_jump_edges[bid]) {
+                if block_states[succ].join(&output) {
+                    worklist.push(succ);
                 }
             }
         }
@@ -543,11 +606,15 @@ impl Bytecode<'_> {
 
     /// Interpret a sequence of instructions on the abstract stack.
     /// Returns the abstract stack state after the last instruction, or `None` on conflict.
+    ///
+    /// If `snapshots` is provided, records the abstract stack state *before* each instruction
+    /// into `snapshots[inst_index]`.
     fn interpret_block(
         &self,
         start: usize,
         end: usize,
         input: &[AbsValue],
+        mut snapshots: Option<&mut [StackSnapshot]>,
     ) -> Option<Vec<AbsValue>> {
         let mut stack = input.to_vec();
 
@@ -555,6 +622,19 @@ impl Bytecode<'_> {
             let inst = &self.insts[i];
             if inst.is_dead_code() {
                 continue;
+            }
+
+            // Record pre-instruction snapshot if requested.
+            if let Some(ref mut snapshots) = snapshots {
+                snapshots[i] = StackSnapshot::Known(
+                    stack
+                        .iter()
+                        .map(|v| match v {
+                            AbsValue::Const(c) => Some(*c),
+                            AbsValue::Top => None,
+                        })
+                        .collect(),
+                );
             }
 
             // Instructions marked SKIP_LOGIC (the PUSH in a PUSH+JUMP pair) are no-ops
@@ -737,7 +817,7 @@ impl Bytecode<'_> {
 #[cfg(test)]
 mod tests {
     use crate::bytecode::Bytecode;
-    use revm_primitives::hardfork::SpecId;
+    use revm_primitives::{U256, hardfork::SpecId};
 
     fn analyze_bytecode(hex: &str) -> Bytecode<'static> {
         let code = revm_primitives::hex::decode(hex.trim()).unwrap();
@@ -801,6 +881,35 @@ mod tests {
             let bytecode = analyze_bytecode(hex);
             eprintln!("{bytecode}");
         }
+    }
+
+    #[test]
+    fn const_operand_basic() {
+        // PUSH1 0x42  PUSH1 0x01  ADD  PUSH1 0x00  MSTORE  STOP
+        // inst 0: PUSH1 0x42 -> stack: [0x42]
+        // inst 1: PUSH1 0x01 -> stack: [0x42, 0x01]
+        // inst 2: ADD         -> stack: [0x43]  (const-folded)
+        // inst 3: PUSH1 0x00 -> stack: [0x43, 0x00]
+        // inst 4: MSTORE     -> pops 2
+        // inst 5: STOP
+        let bytecode = analyze_bytecode("60426001016000525b00");
+        // At inst 2 (ADD), operand 0 (TOS) = 0x01, operand 1 = 0x42.
+        assert_eq!(bytecode.const_operand(2, 0), Some(U256::from(0x01)));
+        assert_eq!(bytecode.const_operand(2, 1), Some(U256::from(0x42)));
+        // At inst 4 (MSTORE), operand 0 (TOS) = 0x00, operand 1 = 0x43 (folded ADD result).
+        assert_eq!(bytecode.const_operand(4, 0), Some(U256::from(0x00)));
+        assert_eq!(bytecode.const_operand(4, 1), Some(U256::from(0x43)));
+    }
+
+    #[test]
+    fn const_operand_dynamic() {
+        // CALLDATALOAD pushes an unknown value -> const_operand should return None.
+        // PUSH1 0x00  CALLDATALOAD  PUSH1 0x00  MSTORE  STOP
+        let bytecode = analyze_bytecode("5f355f5200");
+        // At inst 2 (PUSH1 0x00 second), operand 0 doesn't exist yet (it's a push).
+        // At inst 3 (MSTORE), operand 0 (TOS) = 0x00, operand 1 = unknown (CALLDATALOAD result).
+        assert_eq!(bytecode.const_operand(3, 0), Some(U256::ZERO));
+        assert_eq!(bytecode.const_operand(3, 1), None);
     }
 
     #[test]

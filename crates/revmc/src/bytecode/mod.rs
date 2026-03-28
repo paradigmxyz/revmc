@@ -3,11 +3,13 @@
 use crate::FxHashMap;
 use bitvec::vec::BitVec;
 use revm_bytecode::opcode as op;
-use revm_primitives::hardfork::SpecId;
+use revm_primitives::{U256, hardfork::SpecId};
 use revmc_backend::Result;
 use std::cell::RefCell;
 
 mod block_analysis;
+pub(crate) use block_analysis::StackSnapshot;
+
 mod fmt;
 mod sections;
 use sections::{Section, SectionAnalysis};
@@ -45,6 +47,9 @@ pub struct Bytecode<'a> {
     has_dynamic_jumps: bool,
     /// Whether the bytecode may suspend execution.
     may_suspend: bool,
+    /// Per-instruction abstract stack snapshots computed by block analysis.
+    /// Each entry is the abstract stack state *before* the instruction executes.
+    stack_snapshots: Vec<StackSnapshot>,
     /// Mapping from program counter to instruction.
     pc_to_inst: FxHashMap<u32, u32>,
     /// Instruction index to 1-based line number in the formatted dump, built during formatting.
@@ -91,6 +96,7 @@ impl<'a> Bytecode<'a> {
             spec_id,
             has_dynamic_jumps: false,
             may_suspend: false,
+            stack_snapshots: Vec::new(),
             pc_to_inst,
             inst_lines: RefCell::new(Vec::new()),
         };
@@ -359,6 +365,14 @@ impl<'a> Bytecode<'a> {
             Some(&inst) => inst as usize,
             None => panic!("pc out of bounds: {pc}"),
         }
+    }
+
+    /// Returns the known constant value of a stack operand at the given instruction.
+    ///
+    /// `depth` 0 is TOS (first popped by this instruction), 1 is second, etc.
+    /// Returns `None` if the value is unknown or the analysis didn't cover this instruction.
+    pub(crate) fn const_operand(&self, inst: Inst, depth: usize) -> Option<U256> {
+        self.stack_snapshots.get(inst)?.operand(depth)
     }
 
     /// Returns the name for a basic block.

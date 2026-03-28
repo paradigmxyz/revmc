@@ -2872,6 +2872,7 @@ dependencies = [
  "revmc-llvm",
  "revmc-statetest",
  "similar-asserts",
+ "smallvec",
  "snapbox",
  "tempfile",
  "tracing",
