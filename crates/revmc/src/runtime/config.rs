@@ -1,6 +1,8 @@
 //! Runtime configuration.
 
 use crate::runtime::storage::ArtifactStore;
+use alloy_primitives::B256;
+use revm_primitives::hardfork::SpecId;
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
 /// Runtime configuration.
@@ -53,6 +55,35 @@ pub struct RuntimeConfig {
     ///
     /// Defaults to `false`.
     pub blocking: bool,
+
+    /// Callback invoked after each compilation completes (success or failure).
+    ///
+    /// Defaults to `None`.
+    pub on_compilation: Option<Arc<dyn Fn(CompilationEvent) + Send + Sync>>,
+}
+
+/// Event emitted after a compilation attempt completes.
+#[derive(Clone, Debug)]
+pub struct CompilationEvent {
+    /// The code hash of the compiled bytecode.
+    pub code_hash: B256,
+    /// The hardfork spec the bytecode was compiled for.
+    pub spec_id: SpecId,
+    /// Wall-clock time spent compiling.
+    pub duration: Duration,
+    /// Whether this was a JIT or AOT compilation.
+    pub kind: CompilationKind,
+    /// Whether compilation succeeded.
+    pub success: bool,
+}
+
+/// The kind of compilation that was performed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CompilationKind {
+    /// JIT compilation (in-memory function pointer).
+    Jit,
+    /// AOT compilation (shared library artifact).
+    Aot,
 }
 
 impl Default for RuntimeConfig {
@@ -65,6 +96,7 @@ impl Default for RuntimeConfig {
             dump_dir: None,
             debug_assertions: false,
             blocking: false,
+            on_compilation: None,
         }
     }
 }

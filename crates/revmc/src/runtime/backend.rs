@@ -6,7 +6,7 @@
 
 use crate::runtime::{
     api::{CompiledProgram, LoadedLibrary},
-    config::RuntimeTuning,
+    config::{CompilationEvent, CompilationKind, RuntimeTuning},
     stats::RuntimeStats,
     storage::{ArtifactKey, ArtifactManifest, ArtifactStore, BackendSelection, RuntimeCacheKey},
     worker::{AotJob, JitJob, SyncNotifier, WorkerJob, WorkerPool, WorkerResult, WorkerSuccess},
@@ -135,6 +135,8 @@ struct BackendState {
     last_sweep: Instant,
     /// Shared stats counters (also read by the snapshot API).
     stats: Arc<RuntimeStats>,
+    /// Optional user callback for compilation events.
+    on_compilation: Option<Arc<dyn Fn(CompilationEvent) + Send + Sync>>,
 }
 
 impl BackendState {
@@ -378,6 +380,22 @@ impl BackendState {
             return;
         }
 
+        let (kind, success) = match &result.outcome {
+            Ok(WorkerSuccess::Jit(_)) => (CompilationKind::Jit, true),
+            Ok(WorkerSuccess::Aot(_)) => (CompilationKind::Aot, true),
+            Err(_) => (CompilationKind::Jit, false),
+        };
+
+        if let Some(cb) = &self.on_compilation {
+            cb(CompilationEvent {
+                code_hash: result.key.code_hash,
+                spec_id: result.key.spec_id,
+                duration: result.compile_duration,
+                kind,
+                success,
+            });
+        }
+
         match result.outcome {
             Ok(WorkerSuccess::Jit(success)) => {
                 let program = Arc::new(CompiledProgram::new_jit(
@@ -393,6 +411,7 @@ impl BackendState {
                 debug!(
                     code_hash = %result.key.code_hash,
                     spec_id = ?result.key.spec_id,
+                    compile_time = ?result.compile_duration,
                     "JIT program published to resident map",
                 );
             }
@@ -408,6 +427,7 @@ impl BackendState {
                 warn!(
                     code_hash = %result.key.code_hash,
                     error = %err,
+                    compile_time = ?result.compile_duration,
                     "compilation failed",
                 );
             }
@@ -622,6 +642,7 @@ pub(crate) fn run(
     dump_dir: Option<std::path::PathBuf>,
     debug_assertions: bool,
     stats: Arc<RuntimeStats>,
+    on_compilation: Option<Arc<dyn Fn(CompilationEvent) + Send + Sync>>,
 ) {
     debug!("backend thread started");
 
@@ -657,6 +678,7 @@ pub(crate) fn run(
         generation: 0,
         last_sweep: now,
         stats,
+        on_compilation,
     };
 
     loop {

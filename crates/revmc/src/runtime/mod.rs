@@ -29,7 +29,7 @@ pub use api::{
 };
 
 mod config;
-pub use config::{RuntimeConfig, RuntimeTuning};
+pub use config::{CompilationEvent, CompilationKind, RuntimeConfig, RuntimeTuning};
 
 mod backend;
 
@@ -108,6 +108,7 @@ impl JitBackend {
         let store = config.store.clone();
         let dump_dir = config.dump_dir;
         let debug_assertions = config.debug_assertions;
+        let on_compilation = config.on_compilation;
         let resident_for_thread = Arc::clone(&resident);
         let stats = Arc::new(RuntimeStats::default());
         let stats_for_thread = Arc::clone(&stats);
@@ -123,6 +124,7 @@ impl JitBackend {
                     dump_dir,
                     debug_assertions,
                     stats_for_thread,
+                    on_compilation,
                 );
                 let _ = done_tx.send(());
             })

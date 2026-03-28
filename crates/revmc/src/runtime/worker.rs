@@ -15,6 +15,7 @@ use crossbeam_channel as chan;
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
+    time::Duration,
 };
 
 /// Notifier for synchronous compilation requests.
@@ -90,6 +91,8 @@ pub(crate) struct WorkerResult {
     pub(crate) sync_notifier: SyncNotifier,
     /// Generation at the time the job was dispatched.
     pub(crate) generation: u64,
+    /// Wall-clock time spent compiling.
+    pub(crate) compile_duration: Duration,
 }
 
 /// Successful compilation output.
@@ -276,6 +279,7 @@ fn worker_loop(
 
     while let Ok(job) = job_rx.recv() {
         debug!(?job, "received job");
+        let t0 = std::time::Instant::now();
         let (key, outcome, sync_notifier, generation) = match job {
             WorkerJob::Jit(job) => {
                 let _span =
@@ -332,8 +336,15 @@ fn worker_loop(
                 (job.key, outcome, SyncNotifier::none(), generation)
             }
         };
+        let compile_duration = t0.elapsed();
 
-        let _ = result_tx.send(WorkerResult { key, outcome, sync_notifier, generation });
+        let _ = result_tx.send(WorkerResult {
+            key,
+            outcome,
+            sync_notifier,
+            generation,
+            compile_duration,
+        });
     }
 
     debug!("compile worker shutting down");
@@ -406,6 +417,7 @@ fn worker_loop(
             outcome: Err("LLVM backend not available".into()),
             sync_notifier,
             generation,
+            compile_duration: Duration::ZERO,
         });
     }
 }
