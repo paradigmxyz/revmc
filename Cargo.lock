@@ -2865,6 +2865,7 @@ dependencies = [
  "bitflags",
  "bitvec",
  "either",
+ "indexmap 2.13.0",
  "oxc_index",
  "paste",
  "revm-bytecode",

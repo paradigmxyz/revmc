@@ -12,6 +12,9 @@ mod block_analysis;
 pub(crate) use block_analysis::StackSnapshot;
 
 mod fmt;
+mod interner;
+pub(crate) use interner::Interner;
+
 mod sections;
 use sections::{Section, SectionAnalysis};
 
@@ -32,6 +35,14 @@ oxc_index::define_index_type! {
     pub(crate) struct Inst = u32;
 }
 
+oxc_index::define_index_type! {
+    /// Index into the deduplicated U256 constant pool.
+    pub(crate) struct U256Idx = u32;
+}
+
+/// Hasher used by the U256 interner.
+type FxBuildHasher = alloy_primitives::map::FxBuildHasher;
+
 /// EVM bytecode.
 #[doc(hidden)] // Not public API.
 pub struct Bytecode<'a> {
@@ -50,6 +61,8 @@ pub struct Bytecode<'a> {
     /// Per-instruction abstract stack snapshots computed by block analysis.
     /// Each entry is the abstract stack state *before* the instruction executes.
     stack_snapshots: IndexVec<Inst, StackSnapshot>,
+    /// Deduplicated constant pool for U256 values.
+    u256_interner: Interner<U256Idx, U256, FxBuildHasher>,
     /// Mapping from program counter to instruction.
     pc_to_inst: FxHashMap<u32, u32>,
     /// Instruction index to 1-based line number in the formatted dump, built during formatting.
@@ -96,6 +109,7 @@ impl<'a> Bytecode<'a> {
             has_dynamic_jumps: false,
             may_suspend: false,
             stack_snapshots: IndexVec::new(),
+            u256_interner: Interner::new(),
             pc_to_inst,
             inst_lines: RefCell::new(IndexVec::new()),
         };
@@ -364,6 +378,17 @@ impl<'a> Bytecode<'a> {
             Some(&inst) => Inst::from_usize(inst as usize),
             None => panic!("pc out of bounds: {pc}"),
         }
+    }
+
+    /// Interns a U256 constant, returning its deduplicated index.
+    pub(crate) fn intern_u256(&mut self, value: U256) -> U256Idx {
+        self.u256_interner.intern(value)
+    }
+
+    /// Returns the U256 value at the given interned index.
+    #[inline]
+    pub(crate) fn get_u256(&self, idx: U256Idx) -> &U256 {
+        &self.u256_interner[idx]
     }
 
     /// Returns the known constant value of a stack operand at the given instruction.
