@@ -13,7 +13,7 @@
 //!
 //! Block input states use `Bottom` (unreachable) at the block level.
 
-use super::{Bytecode, InstFlags};
+use super::{Bytecode, InstFlags, U256Idx};
 use bitvec::vec::BitVec;
 use oxc_index::{Idx, IndexVec};
 use revm_bytecode::opcode as op;
@@ -24,7 +24,7 @@ use std::{collections::VecDeque, num::NonZeroU32, ops::Range};
 /// Abstract value on the stack.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AbsValue {
-    Const(U256),
+    Const(U256Idx),
     Top,
 }
 
@@ -34,16 +34,16 @@ enum AbsValue {
 #[derive(Clone, Debug)]
 pub(crate) enum StackSnapshot {
     /// The instruction's abstract stack is known.
-    Known(SmallVec<[Option<U256>; 2]>),
+    Known(SmallVec<[Option<U256Idx>; 2]>),
     /// The instruction is unreachable or the analysis gave up on this block.
     Unknown,
 }
 
 impl StackSnapshot {
-    /// Returns the constant value of the operand at `depth` from the top of the stack.
+    /// Returns the interned index of the operand at `depth` from the top of the stack.
     ///
     /// `depth` 0 is TOS (first popped), 1 is second, etc.
-    pub(crate) fn operand(&self, depth: usize) -> Option<U256> {
+    pub(crate) fn operand(&self, depth: usize) -> Option<U256Idx> {
         match self {
             Self::Known(stack) => {
                 let idx = stack.len().checked_sub(1 + depth)?;
@@ -55,7 +55,7 @@ impl StackSnapshot {
 }
 
 impl AbsValue {
-    fn as_const(self) -> Option<U256> {
+    fn as_const(self) -> Option<U256Idx> {
         match self {
             Self::Const(v) => Some(v),
             Self::Top => None,
@@ -313,10 +313,8 @@ impl Bytecode<'_> {
             if inst.is_reachable_jumpdest(self.has_dynamic_jumps) {
                 is_leader.set(i, true);
             }
-            if inst.is_branching() || inst.is_diverging() {
-                if i + 1 < n {
-                    is_leader.set(i + 1, true);
-                }
+            if (inst.is_branching() || inst.is_diverging()) && i + 1 < n {
+                is_leader.set(i + 1, true);
             }
         }
 
@@ -372,11 +370,12 @@ impl Bytecode<'_> {
 
             // Fallthrough edge: if the terminator doesn't unconditionally branch/diverge.
             let has_fallthrough = !term.is_diverging() && (term.opcode != op::JUMP);
-            if has_fallthrough && blocks[bid].insts.end < n {
-                if let Some(next_block) = inst_to_block[blocks[bid].insts.end] {
-                    blocks[next_block].preds.push(bid);
-                    blocks[bid].succs.push(next_block);
-                }
+            if has_fallthrough
+                && blocks[bid].insts.end < n
+                && let Some(next_block) = inst_to_block[blocks[bid].insts.end]
+            {
+                blocks[next_block].preds.push(bid);
+                blocks[bid].succs.push(next_block);
             }
 
             // Static jump edges.
@@ -435,12 +434,15 @@ impl Bytecode<'_> {
                     BlockState::Bottom => JumpTarget::Bottom,
                     BlockState::Conflict => JumpTarget::Top,
                     BlockState::Known(input) => match self.jump_operand(&cfg.blocks[bid], input) {
-                        Some(AbsValue::Const(val)) => match usize::try_from(val) {
-                            Ok(target_pc) if self.is_valid_jump(target_pc) => {
-                                JumpTarget::Const(self.pc_to_inst(target_pc).index())
+                        Some(AbsValue::Const(idx)) => {
+                            let val = *self.u256_interner.borrow().get(idx);
+                            match usize::try_from(val) {
+                                Ok(target_pc) if self.is_valid_jump(target_pc) => {
+                                    JumpTarget::Const(self.pc_to_inst(target_pc).index())
+                                }
+                                _ => JumpTarget::Invalid,
                             }
-                            _ => JumpTarget::Invalid,
-                        },
+                        }
                         _ => JumpTarget::Top,
                     },
                 },
@@ -513,10 +515,10 @@ impl Bytecode<'_> {
                 if !matches!(target, JumpTarget::Const(_) | JumpTarget::Invalid) {
                     continue;
                 }
-                if let Some(bid) = cfg.inst_to_block[*inst] {
-                    if suspect[bid.index()] {
-                        *target = JumpTarget::Top;
-                    }
+                if let Some(bid) = cfg.inst_to_block[*inst]
+                    && suspect[bid.index()]
+                {
+                    *target = JumpTarget::Top;
                 }
             }
         }
@@ -586,17 +588,17 @@ impl Bytecode<'_> {
 
             // For dynamic jumps, discover target edges to propagate state through.
             let term = &self.insts.raw[block.insts.end - 1];
-            if term.is_legacy_jump() && !term.flags.contains(InstFlags::STATIC_JUMP) {
-                if let Some(AbsValue::Const(val)) = self.jump_operand(block, &input)
-                    && let Ok(target_pc) = usize::try_from(val)
-                    && self.is_valid_jump(target_pc)
+            if term.is_legacy_jump()
+                && !term.flags.contains(InstFlags::STATIC_JUMP)
+                && let Some(AbsValue::Const(idx)) = self.jump_operand(block, &input)
+                && let Ok(target_pc) = usize::try_from(*self.u256_interner.borrow().get(idx))
+                && self.is_valid_jump(target_pc)
+            {
+                let ti = self.pc_to_inst(target_pc).index();
+                if let Some(tb) = cfg.inst_to_block[ti]
+                    && !discovered_jump_edges[bid].contains(&tb)
                 {
-                    let ti = self.pc_to_inst(target_pc).index();
-                    if let Some(tb) = cfg.inst_to_block[ti] {
-                        if !discovered_jump_edges[bid].contains(&tb) {
-                            discovered_jump_edges[bid].push(tb);
-                        }
-                    }
+                    discovered_jump_edges[bid].push(tb);
                 }
             }
 
@@ -643,12 +645,12 @@ impl Bytecode<'_> {
 
             match inst.opcode {
                 op::PUSH0 => {
-                    stack.push(AbsValue::Const(U256::ZERO));
+                    stack.push(AbsValue::Const(self.intern_u256(U256::ZERO)));
                 }
                 op::PUSH1..=op::PUSH32 => {
-                    let val = self
-                        .get_imm(inst)
-                        .map_or(AbsValue::Top, |imm| AbsValue::Const(U256::from_be_slice(imm)));
+                    let val = self.get_imm(inst).map_or(AbsValue::Top, |imm| {
+                        AbsValue::Const(self.intern_u256(U256::from_be_slice(imm)))
+                    });
                     stack.push(val);
                 }
                 op::POP => {
@@ -717,18 +719,19 @@ impl Bytecode<'_> {
 
     /// Try to constant-fold a binary/unary operation.
     fn try_const_fold(&self, opcode: u8, inputs: &[AbsValue]) -> Option<AbsValue> {
-        match opcode {
+        let interner = self.u256_interner.borrow();
+        let result = match opcode {
             // 1 -> 1
             op::NOT | op::ISZERO => {
-                let &[AbsValue::Const(a)] = inputs else {
+                let &[AbsValue::Const(ai)] = inputs else {
                     return None;
                 };
-                let result = match opcode {
+                let a = *interner.get(ai);
+                match opcode {
                     op::NOT => !a,
                     op::ISZERO => U256::from(a.is_zero()),
                     _ => unreachable!(),
-                };
-                Some(AbsValue::Const(result))
+                }
             }
 
             // 2 -> 1
@@ -744,10 +747,12 @@ impl Bytecode<'_> {
             | op::LT
             | op::GT => {
                 // b = second popped, a = TOS (first popped).
-                let &[AbsValue::Const(b), AbsValue::Const(a)] = inputs else {
+                let &[AbsValue::Const(bi), AbsValue::Const(ai)] = inputs else {
                     return None;
                 };
-                let result = match opcode {
+                let a = *interner.get(ai);
+                let b = *interner.get(bi);
+                match opcode {
                     op::ADD => a.wrapping_add(b),
                     op::SUB => a.wrapping_sub(b),
                     op::MUL => a.wrapping_mul(b),
@@ -772,11 +777,12 @@ impl Bytecode<'_> {
                         }
                     }
                     _ => unreachable!(),
-                };
-                Some(AbsValue::Const(result))
+                }
             }
-            _ => None,
-        }
+            _ => return None,
+        };
+        drop(interner);
+        Some(AbsValue::Const(self.intern_u256(result)))
     }
 }
 

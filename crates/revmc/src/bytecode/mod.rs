@@ -62,7 +62,7 @@ pub struct Bytecode<'a> {
     /// Each entry is the abstract stack state *before* the instruction executes.
     stack_snapshots: IndexVec<Inst, StackSnapshot>,
     /// Deduplicated constant pool for U256 values.
-    u256_interner: Interner<U256Idx, U256, FxBuildHasher>,
+    u256_interner: RefCell<Interner<U256Idx, U256, FxBuildHasher>>,
     /// Mapping from program counter to instruction.
     pc_to_inst: FxHashMap<u32, u32>,
     /// Instruction index to 1-based line number in the formatted dump, built during formatting.
@@ -109,7 +109,7 @@ impl<'a> Bytecode<'a> {
             has_dynamic_jumps: false,
             may_suspend: false,
             stack_snapshots: IndexVec::new(),
-            u256_interner: Interner::new(),
+            u256_interner: RefCell::new(Interner::new()),
             pc_to_inst,
             inst_lines: RefCell::new(IndexVec::new()),
         };
@@ -381,14 +381,8 @@ impl<'a> Bytecode<'a> {
     }
 
     /// Interns a U256 constant, returning its deduplicated index.
-    pub(crate) fn intern_u256(&mut self, value: U256) -> U256Idx {
-        self.u256_interner.intern(value)
-    }
-
-    /// Returns the U256 value at the given interned index.
-    #[inline]
-    pub(crate) fn get_u256(&self, idx: U256Idx) -> &U256 {
-        &self.u256_interner[idx]
+    pub(crate) fn intern_u256(&self, value: U256) -> U256Idx {
+        self.u256_interner.borrow_mut().intern(value)
     }
 
     /// Returns the known constant value of a stack operand at the given instruction.
@@ -396,7 +390,8 @@ impl<'a> Bytecode<'a> {
     /// `depth` 0 is TOS (first popped by this instruction), 1 is second, etc.
     /// Returns `None` if the value is unknown or the analysis didn't cover this instruction.
     pub(crate) fn const_operand(&self, inst: Inst, depth: usize) -> Option<U256> {
-        self.stack_snapshots.get(inst)?.operand(depth)
+        let idx = self.stack_snapshots.get(inst)?.operand(depth)?;
+        Some(*self.u256_interner.borrow().get(idx))
     }
 
     /// Returns the name for a basic block.
