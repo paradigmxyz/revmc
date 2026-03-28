@@ -13,19 +13,19 @@
 //!
 //! Block input states use `Bottom` (unreachable) at the block level.
 
-use super::{Bytecode, InstFlags, U256Idx};
+use super::{Bytecode, Inst, InstFlags, U256Idx};
 use bitvec::vec::BitVec;
-use oxc_index::{Idx, IndexVec};
+use oxc_index::IndexVec;
 use revm_bytecode::opcode as op;
 use revm_primitives::U256;
 use smallvec::SmallVec;
-use std::{collections::VecDeque, num::NonZeroU32, ops::Range};
+use std::{collections::VecDeque, ops::Range};
 
 /// Abstract value on the stack.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AbsValue {
-    Const(U256Idx),
     Top,
+    Const(U256Idx),
 }
 
 /// The abstract stack state at a particular instruction, before it executes.
@@ -33,10 +33,10 @@ enum AbsValue {
 /// Stored per-instruction after block analysis so that codegen can query operand constants.
 #[derive(Clone, Debug)]
 pub(crate) enum StackSnapshot {
-    /// The instruction's abstract stack is known.
-    Known(SmallVec<[Option<U256Idx>; 2]>),
     /// The instruction is unreachable or the analysis gave up on this block.
     Unknown,
+    /// The instruction's abstract stack is known.
+    Known(SmallVec<[Option<U256Idx>; 2]>),
 }
 
 impl StackSnapshot {
@@ -45,11 +45,8 @@ impl StackSnapshot {
     /// `depth` 0 is TOS (first popped), 1 is second, etc.
     pub(crate) fn operand(&self, depth: usize) -> Option<U256Idx> {
         match self {
-            Self::Known(stack) => {
-                let idx = stack.len().checked_sub(1 + depth)?;
-                stack[idx]
-            }
             Self::Unknown => None,
+            Self::Known(stack) => stack[stack.len().checked_sub(1 + depth)?],
         }
     }
 }
@@ -57,8 +54,8 @@ impl StackSnapshot {
 impl AbsValue {
     fn as_const(self) -> Option<U256Idx> {
         match self {
-            Self::Const(v) => Some(v),
             Self::Top => None,
+            Self::Const(v) => Some(v),
         }
     }
 
@@ -120,41 +117,9 @@ impl BlockState {
     }
 }
 
-/// A block index in the CFG, backed by `NonZeroU32` with +1 encoding.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[repr(transparent)]
-struct Block(NonZeroU32);
-
-impl std::fmt::Debug for Block {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Block({})", self.index())
-    }
-}
-
-impl Block {
-    #[inline]
-    fn new(index: usize) -> Self {
-        Self(NonZeroU32::new(index as u32 + 1).expect("block index overflow"))
-    }
-
-    #[inline]
-    fn index(self) -> usize {
-        (self.0.get() - 1) as usize
-    }
-}
-
-impl Idx for Block {
-    const MAX: usize = u32::MAX as usize - 1;
-
-    #[inline]
-    unsafe fn from_usize_unchecked(idx: usize) -> Self {
-        Self(unsafe { NonZeroU32::new_unchecked(idx as u32 + 1) })
-    }
-
-    #[inline]
-    fn index(self) -> usize {
-        self.index()
-    }
+oxc_index::define_index_type! {
+    /// A block index in the CFG.
+    struct Block = u32;
 }
 
 /// FIFO worklist with deduplication.
@@ -212,7 +177,7 @@ enum JumpTarget {
 struct Cfg {
     blocks: IndexVec<Block, BlockData>,
     /// Maps instruction index to block ID. `None` for dead-code instructions.
-    inst_to_block: Vec<Option<Block>>,
+    inst_to_block: IndexVec<Inst, Option<Block>>,
 }
 
 impl Bytecode<'_> {
@@ -299,7 +264,7 @@ impl Bytecode<'_> {
     fn build_cfg(&self) -> Cfg {
         let n = self.insts.len();
         if n == 0 {
-            return Cfg { blocks: IndexVec::new(), inst_to_block: Vec::new() };
+            return Cfg { blocks: IndexVec::new(), inst_to_block: IndexVec::new() };
         }
 
         // Identify block leaders.
@@ -320,27 +285,28 @@ impl Bytecode<'_> {
 
         // Build blocks.
         let mut blocks: IndexVec<Block, BlockData> = IndexVec::new();
-        let mut inst_to_block = vec![None::<Block>; n];
+        let mut inst_to_block: IndexVec<Inst, Option<Block>> = IndexVec::from_vec(vec![None; n]);
         let mut current_start = None;
 
-        let finish_block = |start: usize,
-                            end: usize,
-                            blocks: &mut IndexVec<Block, BlockData>,
-                            inst_to_block: &mut [Option<Block>]| {
-            let range = start..end;
-            let dead = range.clone().all(|j| self.insts.raw[j].is_dead_code());
-            let bid = blocks.push(BlockData {
-                insts: range.clone(),
-                preds: SmallVec::new(),
-                succs: SmallVec::new(),
-                dead,
-            });
-            for j in range {
-                if !self.insts.raw[j].is_dead_code() {
-                    inst_to_block[j] = Some(bid);
+        let finish_block =
+            |start: usize,
+             end: usize,
+             blocks: &mut IndexVec<Block, BlockData>,
+             inst_to_block: &mut IndexVec<Inst, Option<Block>>| {
+                let range = start..end;
+                let dead = range.clone().all(|j| self.insts.raw[j].is_dead_code());
+                let bid = blocks.push(BlockData {
+                    insts: range.clone(),
+                    preds: SmallVec::new(),
+                    succs: SmallVec::new(),
+                    dead,
+                });
+                for j in range {
+                    if !self.insts.raw[j].is_dead_code() {
+                        inst_to_block.raw[j] = Some(bid);
+                    }
                 }
-            }
-        };
+            };
 
         for i in 0..n {
             if self.insts.raw[i].is_dead_code() {
@@ -372,7 +338,7 @@ impl Bytecode<'_> {
             let has_fallthrough = !term.is_diverging() && (term.opcode != op::JUMP);
             if has_fallthrough
                 && blocks[bid].insts.end < n
-                && let Some(next_block) = inst_to_block[blocks[bid].insts.end]
+                && let Some(next_block) = inst_to_block.raw[blocks[bid].insts.end]
             {
                 blocks[next_block].preds.push(bid);
                 blocks[bid].succs.push(next_block);
@@ -381,7 +347,7 @@ impl Bytecode<'_> {
             // Static jump edges.
             if term.is_legacy_static_jump() && !term.flags.contains(InstFlags::INVALID_JUMP) {
                 let target_inst = term.data as usize;
-                if let Some(target_block) = inst_to_block[target_inst] {
+                if let Some(target_block) = inst_to_block.raw[target_inst] {
                     blocks[target_block].preds.push(bid);
                     blocks[bid].succs.push(target_block);
                 }
@@ -405,7 +371,7 @@ impl Bytecode<'_> {
         // Initialize block states. Entry block starts with an empty stack.
         let mut block_states: IndexVec<Block, BlockState> =
             IndexVec::from_vec(vec![BlockState::Bottom; num_blocks]);
-        block_states[Block::new(0)] = BlockState::Known(Vec::new());
+        block_states[Block::from_usize(0)] = BlockState::Known(Vec::new());
 
         // Collect unresolved jumps.
         let mut jump_insts: Vec<usize> = Vec::new();
@@ -428,7 +394,7 @@ impl Bytecode<'_> {
         let mut jump_targets: Vec<(usize, JumpTarget)> = Vec::new();
         let mut has_top_jump = false;
         for &jump_inst in &jump_insts {
-            let target = match cfg.inst_to_block[jump_inst] {
+            let target = match cfg.inst_to_block.raw[jump_inst] {
                 None => JumpTarget::Bottom,
                 Some(bid) => match &block_states[bid] {
                     BlockState::Bottom => JumpTarget::Bottom,
@@ -515,7 +481,7 @@ impl Bytecode<'_> {
                 if !matches!(target, JumpTarget::Const(_) | JumpTarget::Invalid) {
                     continue;
                 }
-                if let Some(bid) = cfg.inst_to_block[*inst]
+                if let Some(bid) = cfg.inst_to_block.raw[*inst]
                     && suspect[bid.index()]
                 {
                     *target = JumpTarget::Top;
@@ -543,7 +509,7 @@ impl Bytecode<'_> {
     ) -> IndexVec<Block, SmallVec<[Block; 2]>> {
         let num_blocks = cfg.blocks.len();
         let mut worklist = Worklist::new(num_blocks);
-        worklist.push(Block::new(0));
+        worklist.push(Block::from_usize(0));
 
         // Persistent set of discovered dynamic-jump target edges per block.
         // Once a dynamic jump in block `bid` resolves to a target block, that
@@ -595,7 +561,7 @@ impl Bytecode<'_> {
                 && self.is_valid_jump(target_pc)
             {
                 let ti = self.pc_to_inst(target_pc).index();
-                if let Some(tb) = cfg.inst_to_block[ti]
+                if let Some(tb) = cfg.inst_to_block.raw[ti]
                     && !discovered_jump_edges[bid].contains(&tb)
                 {
                     discovered_jump_edges[bid].push(tb);

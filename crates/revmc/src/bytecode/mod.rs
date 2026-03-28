@@ -12,6 +12,7 @@ mod block_analysis;
 pub(crate) use block_analysis::StackSnapshot;
 
 mod fmt;
+
 mod interner;
 pub(crate) use interner::Interner;
 

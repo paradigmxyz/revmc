@@ -43,7 +43,7 @@ impl Bytecode<'_> {
     fn collect_lines(&self) -> Vec<(String, String)> {
         let info = self.collect_blocks();
         let mut lines: Vec<(String, String)> = Vec::new();
-        let mut inst_lines: IndexVec<Inst, u32> = IndexVec::from_vec(vec![0u32; self.insts.len()]);
+        let mut inst_lines = IndexVec::<Inst, u32>::from_vec(vec![0u32; self.insts.len()]);
 
         lines.push((
             String::new(),
