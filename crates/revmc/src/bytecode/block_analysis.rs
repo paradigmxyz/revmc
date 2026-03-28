@@ -166,7 +166,7 @@ enum JumpTarget {
     /// Not yet observed.
     Bottom,
     /// Known constant target instruction index.
-    Const(usize),
+    Const(Inst),
     /// Known constant but invalid target.
     Invalid,
     /// Multiple different targets or unknown.
@@ -205,47 +205,51 @@ impl Bytecode<'_> {
         // Commit resolved targets.
         let mut newly_resolved = 0u32;
         for &(jump_inst, ref target) in &resolved {
-            let jump = &self.insts.raw[jump_inst];
             // Skip if already resolved by static_jump_analysis.
-            if jump.flags.contains(InstFlags::STATIC_JUMP) {
+            if self.insts[jump_inst].flags.contains(InstFlags::STATIC_JUMP) {
                 continue;
             }
 
-            match target {
+            match *target {
                 JumpTarget::Const(target_inst) => {
-                    let target_inst = *target_inst;
                     debug_assert_eq!(
-                        self.insts.raw[target_inst].opcode,
+                        self.insts[target_inst].opcode,
                         op::JUMPDEST,
                         "block_analysis resolved to non-JUMPDEST"
                     );
-                    self.insts.raw[jump_inst].flags |=
+                    self.insts[jump_inst].flags |=
                         InstFlags::STATIC_JUMP | InstFlags::BLOCK_RESOLVED_JUMP;
-                    self.insts.raw[jump_inst].data = target_inst as u32;
+                    self.insts[jump_inst].data = target_inst.index() as u32;
                     // Mark JUMPDEST as reachable.
-                    self.insts.raw[target_inst].data = 1;
+                    self.insts[target_inst].data = 1;
                     newly_resolved += 1;
-                    trace!(jump_inst, target_inst, "resolved jump");
+                    trace!(
+                        jump_inst = jump_inst.index(),
+                        target_inst = target_inst.index(),
+                        "resolved jump"
+                    );
                 }
                 JumpTarget::Invalid => {
-                    self.insts.raw[jump_inst].flags |= InstFlags::STATIC_JUMP
+                    self.insts[jump_inst].flags |= InstFlags::STATIC_JUMP
                         | InstFlags::INVALID_JUMP
                         | InstFlags::BLOCK_RESOLVED_JUMP;
                     newly_resolved += 1;
-                    trace!(jump_inst, "resolved invalid jump");
+                    trace!(jump_inst = jump_inst.index(), "resolved invalid jump");
                 }
                 JumpTarget::Bottom if !has_top_jump => {
                     // Truly unreachable: no unresolved jumps remain, so this
                     // code cannot be reached at runtime. Mark as invalid.
-                    self.insts.raw[jump_inst].flags |=
-                        InstFlags::STATIC_JUMP | InstFlags::INVALID_JUMP;
-                    trace!(jump_inst, "unreachable jump");
+                    self.insts[jump_inst].flags |= InstFlags::STATIC_JUMP | InstFlags::INVALID_JUMP;
+                    trace!(jump_inst = jump_inst.index(), "unreachable jump");
                 }
                 JumpTarget::Bottom => {
                     // Unreachable according to the analysis, but there are
                     // unresolved (Top) jumps that might reach this code at
                     // runtime. Leave as-is.
-                    trace!(jump_inst, "unreachable jump (not marking, has_top_jump)");
+                    trace!(
+                        jump_inst = jump_inst.index(),
+                        "unreachable jump (not marking, has_top_jump)"
+                    );
                 }
                 JumpTarget::Top => {}
             }
@@ -365,7 +369,7 @@ impl Bytecode<'_> {
         &self,
         cfg: &Cfg,
         snapshots: &mut [StackSnapshot],
-    ) -> (Vec<(usize, JumpTarget)>, usize) {
+    ) -> (Vec<(Inst, JumpTarget)>, usize) {
         let num_blocks = cfg.blocks.len();
 
         // Initialize block states. Entry block starts with an empty stack.
@@ -374,8 +378,8 @@ impl Bytecode<'_> {
         block_states[Block::from_usize(0)] = BlockState::Known(Vec::new());
 
         // Collect unresolved jumps.
-        let mut jump_insts: Vec<usize> = Vec::new();
-        for (i, inst) in self.insts.iter().enumerate() {
+        let mut jump_insts: Vec<Inst> = Vec::new();
+        for (i, inst) in self.insts.iter_enumerated() {
             if inst.is_legacy_jump() && !inst.flags.contains(InstFlags::STATIC_JUMP) {
                 jump_insts.push(i);
             }
@@ -391,10 +395,10 @@ impl Bytecode<'_> {
 
         // After convergence, resolve each dynamic jump using the final block states.
         // This avoids the problem of the fixpoint accumulating stale partial results.
-        let mut jump_targets: Vec<(usize, JumpTarget)> = Vec::new();
+        let mut jump_targets: Vec<(Inst, JumpTarget)> = Vec::new();
         let mut has_top_jump = false;
         for &jump_inst in &jump_insts {
-            let target = match cfg.inst_to_block.raw[jump_inst] {
+            let target = match cfg.inst_to_block[jump_inst] {
                 None => JumpTarget::Bottom,
                 Some(bid) => match &block_states[bid] {
                     BlockState::Bottom => JumpTarget::Bottom,
@@ -404,7 +408,7 @@ impl Bytecode<'_> {
                             let val = *self.u256_interner.borrow().get(idx);
                             match usize::try_from(val) {
                                 Ok(target_pc) if self.is_valid_jump(target_pc) => {
-                                    JumpTarget::Const(self.pc_to_inst(target_pc).index())
+                                    JumpTarget::Const(self.pc_to_inst(target_pc))
                                 }
                                 _ => JumpTarget::Invalid,
                             }
@@ -481,7 +485,7 @@ impl Bytecode<'_> {
                 if !matches!(target, JumpTarget::Const(_) | JumpTarget::Invalid) {
                     continue;
                 }
-                if let Some(bid) = cfg.inst_to_block.raw[*inst]
+                if let Some(bid) = cfg.inst_to_block[*inst]
                     && suspect[bid.index()]
                 {
                     *target = JumpTarget::Top;
@@ -560,8 +564,8 @@ impl Bytecode<'_> {
                 && let Ok(target_pc) = usize::try_from(*self.u256_interner.borrow().get(idx))
                 && self.is_valid_jump(target_pc)
             {
-                let ti = self.pc_to_inst(target_pc).index();
-                if let Some(tb) = cfg.inst_to_block.raw[ti]
+                let ti = self.pc_to_inst(target_pc);
+                if let Some(tb) = cfg.inst_to_block[ti]
                     && !discovered_jump_edges[bid].contains(&tb)
                 {
                     discovered_jump_edges[bid].push(tb);
