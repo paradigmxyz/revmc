@@ -197,9 +197,10 @@ impl<'a> Bytecode<'a> {
     #[instrument(level = "debug", skip_all)]
     pub(crate) fn analyze(&mut self) -> Result<()> {
         self.static_jump_analysis();
+        self.mark_dead_code();
         self.block_analysis();
-        // NOTE: `mark_dead_code` must run after jump analysis as it can mark
-        // unreachable `JUMPDEST`s as dead code.
+        // Run again: block_analysis may mark additional jumps as invalid/diverging,
+        // enabling more dead code elimination.
         self.mark_dead_code();
 
         self.calc_may_suspend();
