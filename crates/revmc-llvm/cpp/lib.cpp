@@ -1,9 +1,12 @@
 #include <llvm-c/LLJIT.h>
 #include <llvm-c/Orc.h>
+#include <llvm/ExecutionEngine/Orc/AbsoluteSymbols.h>
 #include <llvm/ExecutionEngine/Orc/CompileUtils.h>
+#include <llvm/ExecutionEngine/Orc/Debugging/DebugInfoSupport.h>
 #include <llvm/ExecutionEngine/Orc/Debugging/PerfSupportPlugin.h>
 #include <llvm/ExecutionEngine/Orc/LLJIT.h>
 #include <llvm/ExecutionEngine/Orc/ObjectLinkingLayer.h>
+#include <llvm/ExecutionEngine/Orc/TargetProcess/JITLoaderPerf.h>
 #include <llvm/ExecutionEngine/JITLink/JITLink.h>
 #include <llvm/IR/Attributes.h>
 
@@ -158,7 +161,15 @@ revmc_llvm_lljit_enable_memory_usage(LLVMOrcLLJITRef J,
 /// Install PerfSupportPlugin on the LLJIT's ObjectLinkingLayer.
 /// Writes perf jitdump records so `perf record -k 1` / `perf inject --jit`
 /// can resolve JIT-compiled symbols with full debug info and unwind info.
-/// Returns an error if the object layer is not JITLink-based.
+///
+/// Instead of using `PerfSupportPlugin::Create()` which dynamically looks up
+/// JITLoaderPerf symbols (and can crash in certain linker configurations), we
+/// manually register the three function addresses as absolute symbols and
+/// construct PerfSupportPlugin directly. This matches the approach used by
+/// Julia and jank JITs.
+///
+/// Returns an error if the object layer is not JITLink-based or the target is
+/// not ELF.
 extern "C" LLVMErrorRef
 revmc_llvm_lljit_enable_perf_support(LLVMOrcLLJITRef J) {
   auto *Jit = reinterpret_cast<orc::LLJIT *>(J);
@@ -168,15 +179,32 @@ revmc_llvm_lljit_enable_perf_support(LLVMOrcLLJITRef J) {
                                         inconvertibleErrorCode()));
   auto &ES = Jit->getExecutionSession();
   auto &EPC = ES.getExecutorProcessControl();
-  auto ProcessJD = Jit->getProcessSymbolsJITDylib();
-  if (!ProcessJD)
+
+  if (!EPC.getTargetTriple().isOSBinFormatELF())
     return wrap(make_error<StringError>(
-        "PerfSupportPlugin requires process symbols JITDylib",
-        inconvertibleErrorCode()));
-  auto Plugin = orc::PerfSupportPlugin::Create(
-      EPC, *ProcessJD, /*EmitDebugInfo=*/true, /*EmitUnwindInfo=*/true);
-  if (!Plugin)
-    return wrap(Plugin.takeError());
-  OLL->addPlugin(std::move(*Plugin));
+        "PerfSupportPlugin requires ELF target", inconvertibleErrorCode()));
+
+  // Register JITLoaderPerf function addresses as absolute symbols in the main
+  // JITDylib to avoid dynamic symbol lookup crashes.
+  auto Flags = JITSymbolFlags::Exported | JITSymbolFlags::Callable;
+  orc::SymbolMap PerfFns;
+  auto StartAddr = orc::ExecutorAddr::fromPtr(&llvm_orc_registerJITLoaderPerfStart);
+  auto EndAddr = orc::ExecutorAddr::fromPtr(&llvm_orc_registerJITLoaderPerfEnd);
+  auto ImplAddr = orc::ExecutorAddr::fromPtr(&llvm_orc_registerJITLoaderPerfImpl);
+  PerfFns[ES.intern("llvm_orc_registerJITLoaderPerfStart")] = {StartAddr, Flags};
+  PerfFns[ES.intern("llvm_orc_registerJITLoaderPerfEnd")] = {EndAddr, Flags};
+  PerfFns[ES.intern("llvm_orc_registerJITLoaderPerfImpl")] = {ImplAddr, Flags};
+  if (auto Err = Jit->getMainJITDylib().define(orc::absoluteSymbols(PerfFns)))
+    return wrap(std::move(Err));
+
+  // Preserve DWARF debug info sections through linking for source mapping.
+  auto DebugPlugin = orc::DebugInfoPreservationPlugin::Create();
+  if (!DebugPlugin)
+    return wrap(DebugPlugin.takeError());
+  OLL->addPlugin(std::move(*DebugPlugin));
+
+  OLL->addPlugin(std::make_unique<orc::PerfSupportPlugin>(
+      EPC, StartAddr, EndAddr, ImplAddr,
+      /*EmitDebugInfo=*/true, /*EmitUnwindInfo=*/true));
   return LLVMErrorSuccess;
 }
