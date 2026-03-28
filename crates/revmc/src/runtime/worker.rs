@@ -9,7 +9,7 @@
 //! Workers no longer need to stay alive for code lifetime — they exit as soon
 //! as the job channel closes.
 
-use crate::{EvmCompilerFn, runtime::storage::RuntimeCacheKey};
+use crate::{CompileTimings, EvmCompilerFn, runtime::storage::RuntimeCacheKey};
 use alloy_primitives::Bytes;
 use crossbeam_channel as chan;
 use std::{
@@ -93,6 +93,8 @@ pub(crate) struct WorkerResult {
     pub(crate) generation: u64,
     /// Wall-clock time spent compiling.
     pub(crate) compile_duration: Duration,
+    /// Per-phase timing breakdown from the compiler.
+    pub(crate) timings: CompileTimings,
 }
 
 /// Successful compilation output.
@@ -280,7 +282,7 @@ fn worker_loop(
     while let Ok(job) = job_rx.recv() {
         debug!(?job, "received job");
         let t0 = std::time::Instant::now();
-        let (key, outcome, sync_notifier, generation) = match job {
+        let (key, outcome, sync_notifier, generation, timings) = match job {
             WorkerJob::Jit(job) => {
                 let _span =
                     debug_span!("jit_compile", hash=%job.key.code_hash, spec_id=?job.key.spec_id)
@@ -296,6 +298,8 @@ fn worker_loop(
                 let result = unsafe {
                     jit_compiler.jit(&job.symbol_name, &job.bytecode[..], job.key.spec_id)
                 };
+
+                let timings = jit_compiler.take_timings();
 
                 let outcome = match result {
                     Ok(func) => {
@@ -324,7 +328,7 @@ fn worker_loop(
                     warn!(%err, "clear_ir failed");
                 }
 
-                (job.key, outcome, job.sync_notifier, job.generation)
+                (job.key, outcome, job.sync_notifier, job.generation, timings)
             }
             WorkerJob::Aot(job) => {
                 let _span =
@@ -333,7 +337,7 @@ fn worker_loop(
 
                 let generation = job.generation;
                 let outcome = compile_aot_artifact(&job);
-                (job.key, outcome, SyncNotifier::none(), generation)
+                (job.key, outcome, SyncNotifier::none(), generation, CompileTimings::default())
             }
         };
         let compile_duration = t0.elapsed();
@@ -344,6 +348,7 @@ fn worker_loop(
             sync_notifier,
             generation,
             compile_duration,
+            timings,
         });
     }
 
@@ -418,6 +423,7 @@ fn worker_loop(
             sync_notifier,
             generation,
             compile_duration: Duration::ZERO,
+            timings: CompileTimings::default(),
         });
     }
 }

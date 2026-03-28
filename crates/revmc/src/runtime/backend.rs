@@ -393,6 +393,7 @@ impl BackendState {
                 duration: result.compile_duration,
                 kind,
                 success,
+                timings: result.timings,
             });
         }
 

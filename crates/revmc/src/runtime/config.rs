@@ -1,6 +1,6 @@
 //! Runtime configuration.
 
-use crate::runtime::storage::ArtifactStore;
+use crate::{CompileTimings, runtime::storage::ArtifactStore};
 use alloy_primitives::B256;
 use revm_primitives::hardfork::SpecId;
 use std::{path::PathBuf, sync::Arc, time::Duration};
@@ -75,6 +75,8 @@ pub struct CompilationEvent {
     pub kind: CompilationKind,
     /// Whether compilation succeeded.
     pub success: bool,
+    /// Per-phase timing breakdown (translate, optimize, codegen).
+    pub timings: CompileTimings,
 }
 
 /// The kind of compilation that was performed.
