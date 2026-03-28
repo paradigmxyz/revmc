@@ -1,5 +1,6 @@
-use super::{Bytecode, InstData, InstFlags, bitvec_as_bytes};
+use super::{Bytecode, Inst, InstData, InstFlags, bitvec_as_bytes};
 use crate::FxHashMap;
+use oxc_index::IndexVec;
 use revm_bytecode::opcode as op;
 use revm_primitives::hex;
 use std::{borrow::Cow, fmt, fmt::Write};
@@ -7,9 +8,9 @@ use std::{borrow::Cow, fmt, fmt::Write};
 /// Basic block info collected from bytecode analysis.
 struct BlockInfo {
     /// `(block_idx, first_inst, last_inst)` for each block.
-    blocks: Vec<(usize, usize, usize)>,
+    blocks: Vec<(usize, Inst, Inst)>,
     /// Maps instruction index to block index.
-    inst_to_block: FxHashMap<usize, usize>,
+    inst_to_block: FxHashMap<Inst, usize>,
 }
 
 impl Bytecode<'_> {
@@ -42,7 +43,7 @@ impl Bytecode<'_> {
     fn collect_lines(&self) -> Vec<(String, String)> {
         let info = self.collect_blocks();
         let mut lines: Vec<(String, String)> = Vec::new();
-        let mut inst_lines = vec![0u32; self.insts.len()];
+        let mut inst_lines: IndexVec<Inst, u32> = IndexVec::from_vec(vec![0u32; self.insts.len()]);
 
         lines.push((
             String::new(),
@@ -55,7 +56,7 @@ impl Bytecode<'_> {
 
         for &(block_idx, first_inst, last_inst) in &info.blocks {
             // Blank line between blocks.
-            if first_inst > 0 {
+            if first_inst.index() > 0 {
                 lines.push((String::new(), String::new()));
             }
 
@@ -78,8 +79,8 @@ impl Bytecode<'_> {
             lines.push((header, comment));
 
             // Instructions.
-            #[allow(clippy::needless_range_loop)]
-            for inst in first_inst..=last_inst {
+            for i in first_inst.index()..=last_inst.index() {
+                let inst = Inst::from_usize(i);
                 let data = self.inst(inst);
                 if data.is_dead_code() {
                     continue;
@@ -95,10 +96,10 @@ impl Bytecode<'_> {
                 if data.flags.contains(InstFlags::INVALID_JUMP) {
                     text.push_str(" -> INVALID");
                 } else if data.is_legacy_static_jump() {
-                    let target = data.data as usize;
+                    let target = Inst::from_usize(data.data as usize);
                     match info.inst_to_block.get(&target) {
                         Some(b) => write!(text, " bb{b}").unwrap(),
-                        None => write!(text, " inst {target}").unwrap(),
+                        None => write!(text, " inst {}", target.index()).unwrap(),
                     }
                 }
 
@@ -236,8 +237,8 @@ impl<'a> Bytecode<'a> {
             }
 
             write!(w, " |")?;
-            for inst in first_inst..=last_inst {
-                let data = self.inst(inst);
+            for i in first_inst.index()..=last_inst.index() {
+                let data = self.inst(Inst::from_usize(i));
                 if data.is_dead_code() {
                     continue;
                 }
@@ -255,7 +256,7 @@ impl<'a> Bytecode<'a> {
 
             // Jump edge.
             if last.is_legacy_static_jump() && !last.flags.contains(InstFlags::INVALID_JUMP) {
-                let target = last.data as usize;
+                let target = Inst::from_usize(last.data as usize);
                 if let Some(&target_block) = info.inst_to_block.get(&target) {
                     let (label, color) = if last.opcode == op::JUMPI {
                         ("true", "#5cdb95")

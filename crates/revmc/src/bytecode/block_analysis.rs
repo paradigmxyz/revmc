@@ -228,7 +228,7 @@ impl Bytecode<'_> {
 
         let mut snapshots = vec![StackSnapshot::Unknown; self.insts.len()];
         let (resolved, count) = self.run_abstract_interp(&cfg, &mut snapshots);
-        self.stack_snapshots = snapshots;
+        self.stack_snapshots = IndexVec::from_vec(snapshots);
 
         if count == 0 {
             return;
@@ -240,7 +240,7 @@ impl Bytecode<'_> {
         // Commit resolved targets.
         let mut newly_resolved = 0u32;
         for &(jump_inst, ref target) in &resolved {
-            let jump = &self.insts[jump_inst];
+            let jump = &self.insts.raw[jump_inst];
             // Skip if already resolved by static_jump_analysis.
             if jump.flags.contains(InstFlags::STATIC_JUMP) {
                 continue;
@@ -250,20 +250,20 @@ impl Bytecode<'_> {
                 JumpTarget::Const(target_inst) => {
                     let target_inst = *target_inst;
                     debug_assert_eq!(
-                        self.insts[target_inst].opcode,
+                        self.insts.raw[target_inst].opcode,
                         op::JUMPDEST,
                         "block_analysis resolved to non-JUMPDEST"
                     );
-                    self.insts[jump_inst].flags |=
+                    self.insts.raw[jump_inst].flags |=
                         InstFlags::STATIC_JUMP | InstFlags::BLOCK_RESOLVED_JUMP;
-                    self.insts[jump_inst].data = target_inst as u32;
+                    self.insts.raw[jump_inst].data = target_inst as u32;
                     // Mark JUMPDEST as reachable.
-                    self.insts[target_inst].data = 1;
+                    self.insts.raw[target_inst].data = 1;
                     newly_resolved += 1;
                     trace!(jump_inst, target_inst, "resolved jump");
                 }
                 JumpTarget::Invalid => {
-                    self.insts[jump_inst].flags |= InstFlags::STATIC_JUMP
+                    self.insts.raw[jump_inst].flags |= InstFlags::STATIC_JUMP
                         | InstFlags::INVALID_JUMP
                         | InstFlags::BLOCK_RESOLVED_JUMP;
                     newly_resolved += 1;
@@ -272,7 +272,8 @@ impl Bytecode<'_> {
                 JumpTarget::Bottom if !has_top_jump => {
                     // Truly unreachable: no unresolved jumps remain, so this
                     // code cannot be reached at runtime. Mark as invalid.
-                    self.insts[jump_inst].flags |= InstFlags::STATIC_JUMP | InstFlags::INVALID_JUMP;
+                    self.insts.raw[jump_inst].flags |=
+                        InstFlags::STATIC_JUMP | InstFlags::INVALID_JUMP;
                     trace!(jump_inst, "unreachable jump");
                 }
                 JumpTarget::Bottom => {
@@ -305,7 +306,7 @@ impl Bytecode<'_> {
         let mut is_leader: BitVec = BitVec::repeat(false, n);
         is_leader.set(0, true);
 
-        for (i, inst) in self.insts.iter().enumerate() {
+        for (i, inst) in self.insts.raw.iter().enumerate() {
             if inst.is_dead_code() {
                 continue;
             }
@@ -329,7 +330,7 @@ impl Bytecode<'_> {
                             blocks: &mut IndexVec<Block, BlockData>,
                             inst_to_block: &mut [Option<Block>]| {
             let range = start..end;
-            let dead = range.clone().all(|j| self.insts[j].is_dead_code());
+            let dead = range.clone().all(|j| self.insts.raw[j].is_dead_code());
             let bid = blocks.push(BlockData {
                 insts: range.clone(),
                 preds: SmallVec::new(),
@@ -337,14 +338,14 @@ impl Bytecode<'_> {
                 dead,
             });
             for j in range {
-                if !self.insts[j].is_dead_code() {
+                if !self.insts.raw[j].is_dead_code() {
                     inst_to_block[j] = Some(bid);
                 }
             }
         };
 
         for i in 0..n {
-            if self.insts[i].is_dead_code() {
+            if self.insts.raw[i].is_dead_code() {
                 continue;
             }
 
@@ -367,7 +368,7 @@ impl Bytecode<'_> {
                 continue;
             }
             let term_idx = blocks[bid].insts.end - 1;
-            let term = &self.insts[term_idx];
+            let term = &self.insts.raw[term_idx];
 
             // Fallthrough edge: if the terminator doesn't unconditionally branch/diverge.
             let has_fallthrough = !term.is_diverging() && (term.opcode != op::JUMP);
@@ -436,7 +437,7 @@ impl Bytecode<'_> {
                     BlockState::Known(input) => match self.jump_operand(&cfg.blocks[bid], input) {
                         Some(AbsValue::Const(val)) => match usize::try_from(val) {
                             Ok(target_pc) if self.is_valid_jump(target_pc) => {
-                                JumpTarget::Const(self.pc_to_inst(target_pc))
+                                JumpTarget::Const(self.pc_to_inst(target_pc).index())
                             }
                             _ => JumpTarget::Invalid,
                         },
@@ -483,7 +484,7 @@ impl Bytecode<'_> {
                         if !matches!(block_states[pred], BlockState::Bottom) {
                             return false;
                         }
-                        self.insts[cfg.blocks[pred].insts.start].is_jumpdest()
+                        self.insts.raw[cfg.blocks[pred].insts.start].is_jumpdest()
                     });
                 if has_suspect {
                     suspect.set(bi, true);
@@ -584,13 +585,13 @@ impl Bytecode<'_> {
             };
 
             // For dynamic jumps, discover target edges to propagate state through.
-            let term = &self.insts[block.insts.end - 1];
+            let term = &self.insts.raw[block.insts.end - 1];
             if term.is_legacy_jump() && !term.flags.contains(InstFlags::STATIC_JUMP) {
                 if let Some(AbsValue::Const(val)) = self.jump_operand(block, &input)
                     && let Ok(target_pc) = usize::try_from(val)
                     && self.is_valid_jump(target_pc)
                 {
-                    let ti = self.pc_to_inst(target_pc);
+                    let ti = self.pc_to_inst(target_pc).index();
                     if let Some(tb) = cfg.inst_to_block[ti] {
                         if !discovered_jump_edges[bid].contains(&tb) {
                             discovered_jump_edges[bid].push(tb);
@@ -624,7 +625,7 @@ impl Bytecode<'_> {
         let mut stack = input.to_vec();
 
         for i in range {
-            let inst = &self.insts[i];
+            let inst = &self.insts.raw[i];
             if inst.is_dead_code() {
                 continue;
             }
@@ -781,7 +782,7 @@ impl Bytecode<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{super::Inst, *};
     use revm_primitives::hardfork::SpecId;
 
     fn analyze_bytecode(hex: &str) -> Bytecode<'static> {
@@ -859,11 +860,11 @@ mod tests {
         // inst 5: STOP
         let bytecode = analyze_bytecode("60426001016000525b00");
         // At inst 2 (ADD), operand 0 (TOS) = 0x01, operand 1 = 0x42.
-        assert_eq!(bytecode.const_operand(2, 0), Some(U256::from(0x01)));
-        assert_eq!(bytecode.const_operand(2, 1), Some(U256::from(0x42)));
+        assert_eq!(bytecode.const_operand(Inst::from_usize(2), 0), Some(U256::from(0x01)));
+        assert_eq!(bytecode.const_operand(Inst::from_usize(2), 1), Some(U256::from(0x42)));
         // At inst 4 (MSTORE), operand 0 (TOS) = 0x00, operand 1 = 0x43 (folded ADD result).
-        assert_eq!(bytecode.const_operand(4, 0), Some(U256::from(0x00)));
-        assert_eq!(bytecode.const_operand(4, 1), Some(U256::from(0x43)));
+        assert_eq!(bytecode.const_operand(Inst::from_usize(4), 0), Some(U256::from(0x00)));
+        assert_eq!(bytecode.const_operand(Inst::from_usize(4), 1), Some(U256::from(0x43)));
     }
 
     #[test]
@@ -873,8 +874,8 @@ mod tests {
         let bytecode = analyze_bytecode("5f355f5200");
         // At inst 2 (PUSH1 0x00 second), operand 0 doesn't exist yet (it's a push).
         // At inst 3 (MSTORE), operand 0 (TOS) = 0x00, operand 1 = unknown (CALLDATALOAD result).
-        assert_eq!(bytecode.const_operand(3, 0), Some(U256::ZERO));
-        assert_eq!(bytecode.const_operand(3, 1), None);
+        assert_eq!(bytecode.const_operand(Inst::from_usize(3), 0), Some(U256::ZERO));
+        assert_eq!(bytecode.const_operand(Inst::from_usize(3), 1), None);
     }
 
     #[test]

@@ -2,6 +2,7 @@
 
 use crate::FxHashMap;
 use bitvec::vec::BitVec;
+use oxc_index::IndexVec;
 use revm_bytecode::opcode as op;
 use revm_primitives::{U256, hardfork::SpecId};
 use revmc_backend::Result;
@@ -24,13 +25,12 @@ pub use opcode::*;
 #[cfg(any(feature = "__fuzzing", test))]
 pub(crate) const TEST_SUSPEND: u8 = 0x25;
 
-// TODO: Use `indexvec`.
-/// An EVM instruction is a high level internal representation of an EVM opcode.
-///
-/// This is an index into [`Bytecode`] instructions.
-///
-/// Also known as `ic`, or instruction counter; not to be confused with SSA `inst`s.
-pub(crate) type Inst = usize;
+oxc_index::define_index_type! {
+    /// An EVM instruction index into [`Bytecode`] instructions.
+    ///
+    /// Also known as `ic`, or instruction counter; not to be confused with SSA `inst`s.
+    pub(crate) struct Inst = u32;
+}
 
 /// EVM bytecode.
 #[doc(hidden)] // Not public API.
@@ -38,7 +38,7 @@ pub struct Bytecode<'a> {
     /// The original bytecode slice.
     pub(crate) code: &'a [u8],
     /// The instructions.
-    insts: Vec<InstData>,
+    insts: IndexVec<Inst, InstData>,
     /// `JUMPDEST` opcode map. `jumpdests[pc]` is `true` if `code[pc] == op::JUMPDEST`.
     jumpdests: BitVec,
     /// The [`SpecId`].
@@ -49,24 +49,23 @@ pub struct Bytecode<'a> {
     may_suspend: bool,
     /// Per-instruction abstract stack snapshots computed by block analysis.
     /// Each entry is the abstract stack state *before* the instruction executes.
-    stack_snapshots: Vec<StackSnapshot>,
+    stack_snapshots: IndexVec<Inst, StackSnapshot>,
     /// Mapping from program counter to instruction.
     pc_to_inst: FxHashMap<u32, u32>,
     /// Instruction index to 1-based line number in the formatted dump, built during formatting.
-    inst_lines: RefCell<Vec<u32>>,
+    inst_lines: RefCell<IndexVec<Inst, u32>>,
 }
 
 impl<'a> Bytecode<'a> {
     #[instrument(name = "new_bytecode", level = "debug", skip_all)]
     pub(crate) fn new(code: &'a [u8], spec_id: SpecId) -> Self {
-        let mut insts = Vec::with_capacity(code.len() + 8);
+        let mut insts = IndexVec::with_capacity(code.len() + 8);
         let mut jumpdests = BitVec::repeat(false, code.len());
         let mut pc_to_inst = FxHashMap::with_capacity_and_hasher(code.len(), Default::default());
         let op_infos = op_info_map(spec_id);
-        for (inst, (pc, Opcode { opcode, immediate: _ })) in
-            OpcodesIter::new(code, spec_id).with_pc().enumerate()
-        {
-            pc_to_inst.insert(pc as u32, inst as u32);
+        for (pc, Opcode { opcode, immediate: _ }) in OpcodesIter::new(code, spec_id).with_pc() {
+            let inst: Inst = insts.next_idx();
+            pc_to_inst.insert(pc as u32, inst.index() as u32);
 
             if opcode == op::JUMPDEST {
                 jumpdests.set(pc, true)
@@ -96,9 +95,9 @@ impl<'a> Bytecode<'a> {
             spec_id,
             has_dynamic_jumps: false,
             may_suspend: false,
-            stack_snapshots: Vec::new(),
+            stack_snapshots: IndexVec::new(),
             pc_to_inst,
-            inst_lines: RefCell::new(Vec::new()),
+            inst_lines: RefCell::new(IndexVec::new()),
         };
 
         // Pad code to ensure there is at least one diverging instruction.
@@ -112,7 +111,7 @@ impl<'a> Bytecode<'a> {
     /// Takes the instruction-to-line map built during formatting.
     ///
     /// Returns an empty `Vec` if the bytecode has not been formatted yet.
-    pub(crate) fn take_inst_lines(&self) -> Vec<u32> {
+    pub(crate) fn take_inst_lines(&self) -> IndexVec<Inst, u32> {
         self.inst_lines.take()
     }
 
@@ -149,7 +148,7 @@ impl<'a> Bytecode<'a> {
     #[inline]
     pub(crate) fn iter_insts(
         &self,
-    ) -> impl DoubleEndedIterator<Item = (usize, &InstData)> + Clone + '_ {
+    ) -> impl DoubleEndedIterator<Item = (Inst, &InstData)> + Clone + '_ {
         self.iter_all_insts().filter(|(_, data)| !data.is_dead_code())
     }
 
@@ -158,7 +157,7 @@ impl<'a> Bytecode<'a> {
     #[allow(dead_code)]
     pub(crate) fn iter_mut_insts(
         &mut self,
-    ) -> impl DoubleEndedIterator<Item = (usize, &mut InstData)> + '_ {
+    ) -> impl DoubleEndedIterator<Item = (Inst, &mut InstData)> + '_ {
         self.iter_mut_all_insts().filter(|(_, data)| !data.is_dead_code())
     }
 
@@ -166,8 +165,8 @@ impl<'a> Bytecode<'a> {
     #[inline]
     pub(crate) fn iter_all_insts(
         &self,
-    ) -> impl DoubleEndedIterator<Item = (usize, &InstData)> + ExactSizeIterator + Clone + '_ {
-        self.insts.iter().enumerate()
+    ) -> impl DoubleEndedIterator<Item = (Inst, &InstData)> + ExactSizeIterator + Clone + '_ {
+        self.insts.iter_enumerated()
     }
 
     /// Returns an iterator over all the instructions, including dead code.
@@ -175,8 +174,8 @@ impl<'a> Bytecode<'a> {
     #[allow(dead_code)]
     pub(crate) fn iter_mut_all_insts(
         &mut self,
-    ) -> impl DoubleEndedIterator<Item = (usize, &mut InstData)> + ExactSizeIterator + '_ {
-        self.insts.iter_mut().enumerate()
+    ) -> impl DoubleEndedIterator<Item = (Inst, &mut InstData)> + ExactSizeIterator + '_ {
+        self.insts.iter_mut_enumerated()
     }
 
     /// Runs a list of analysis passes on the instructions.
@@ -198,11 +197,11 @@ impl<'a> Bytecode<'a> {
     /// Mark `PUSH<N>` followed by `JUMP[I]` as `STATIC_JUMP` and resolve the target.
     #[instrument(name = "sj", level = "debug", skip_all)]
     fn static_jump_analysis(&mut self) {
-        for jump_inst in 0..self.insts.len() {
+        for jump_inst in self.insts.indices() {
             let jump = &self.insts[jump_inst];
-            let Some(push_inst) = jump_inst.checked_sub(1) else {
+            let Some(push_inst) = jump_inst.index().checked_sub(1).map(Inst::from_usize) else {
                 if jump.is_legacy_jump() {
-                    trace!(jump_inst, target=?None::<()>, "found jump");
+                    trace!(jump_inst = jump_inst.index(), target=?None::<()>, "found jump");
                     self.has_dynamic_jumps = true;
                 }
                 continue;
@@ -211,7 +210,7 @@ impl<'a> Bytecode<'a> {
             let push = &self.insts[push_inst];
             if !(push.is_push() && jump.is_legacy_jump()) {
                 if jump.is_legacy_jump() {
-                    trace!(jump_inst, target=?None::<()>, "found jump");
+                    trace!(jump_inst = jump_inst.index(), target=?None::<()>, "found jump");
                     self.has_dynamic_jumps = true;
                 }
                 continue;
@@ -226,7 +225,7 @@ impl<'a> Bytecode<'a> {
 
             const USIZE_SIZE: usize = std::mem::size_of::<usize>();
             if imm.len() > USIZE_SIZE {
-                trace!(jump_inst, "jump target too large");
+                trace!(jump_inst = jump_inst.index(), "jump target too large");
                 self.insts[jump_inst].flags |= InstFlags::INVALID_JUMP;
                 continue;
             }
@@ -235,7 +234,7 @@ impl<'a> Bytecode<'a> {
             padded[USIZE_SIZE - imm.len()..].copy_from_slice(imm);
             let target_pc = usize::from_be_bytes(padded);
             if !self.is_valid_jump(target_pc) {
-                trace!(jump_inst, target_pc, "invalid jump target");
+                trace!(jump_inst = jump_inst.index(), target_pc, "invalid jump target");
                 self.insts[jump_inst].flags |= InstFlags::INVALID_JUMP;
                 continue;
             }
@@ -248,13 +247,13 @@ impl<'a> Bytecode<'a> {
                 self.insts[target],
                 op::JUMPDEST,
                 "is_valid_jump returned true for non-JUMPDEST: \
-                 jump_inst={jump_inst} target_pc={target_pc} target={target}",
+                 jump_inst={jump_inst:?} target_pc={target_pc} target={target:?}",
             );
             self.insts[target].data = 1;
 
             // Set the target on the `JUMP` instruction.
-            trace!(jump_inst, target, "found jump");
-            self.insts[jump_inst].data = target as u32;
+            trace!(jump_inst = jump_inst.index(), target = target.index(), "found jump");
+            self.insts[jump_inst].data = target.index() as u32;
         }
     }
 
@@ -268,7 +267,7 @@ impl<'a> Bytecode<'a> {
     /// `JUMPDEST`s.
     #[instrument(name = "dce", level = "debug", skip_all)]
     fn mark_dead_code(&mut self) {
-        let mut iter = self.insts.iter_mut().enumerate();
+        let mut iter = self.insts.iter_mut_enumerated();
         while let Some((i, data)) = iter.next() {
             if data.is_diverging() {
                 let mut end = i;
@@ -281,7 +280,7 @@ impl<'a> Bytecode<'a> {
                 }
                 let start = i + 1;
                 if end > start {
-                    debug!("found dead code: {start}..{end}");
+                    debug!("found dead code: {start:?}..{end:?}");
                 }
             }
         }
@@ -300,7 +299,7 @@ impl<'a> Bytecode<'a> {
     #[instrument(name = "sections", level = "debug", skip_all)]
     fn construct_sections(&mut self) {
         let mut analysis = SectionAnalysis::default();
-        for inst in 0..self.insts.len() {
+        for inst in self.insts.indices() {
             if !self.inst(inst).is_dead_code() {
                 analysis.process(self, inst);
             }
@@ -360,9 +359,9 @@ impl<'a> Bytecode<'a> {
 
     /// Converts a program counter (`self.code[pc]`) to an instruction (`self.inst(inst)`).
     #[inline]
-    pub(crate) fn pc_to_inst(&self, pc: usize) -> usize {
+    pub(crate) fn pc_to_inst(&self, pc: usize) -> Inst {
         match self.pc_to_inst.get(&(pc as u32)) {
-            Some(&inst) => inst as usize,
+            Some(&inst) => Inst::from_usize(inst as usize),
             None => panic!("pc out of bounds: {pc}"),
         }
     }
@@ -376,16 +375,16 @@ impl<'a> Bytecode<'a> {
     }
 
     /// Returns the name for a basic block.
-    pub(crate) fn op_block_name(&self, inst: usize, name: &str) -> String {
+    pub(crate) fn op_block_name(&self, inst: Option<Inst>, name: &str) -> String {
         use std::fmt::Write;
 
-        if inst == usize::MAX {
+        let Some(inst) = inst else {
             return format!("entry.{name}");
-        }
+        };
         let data = self.inst(inst);
 
         let mut s = String::new();
-        let _ = write!(s, "OP{inst}.{}", data.to_op());
+        let _ = write!(s, "OP{}.{}", inst.index(), data.to_op());
         if !name.is_empty() {
             let _ = write!(s, ".{name}");
         }
