@@ -200,8 +200,8 @@ impl Default for RuntimeTuning {
             jit_worker_queue_capacity: 64,
             jit_opt_level: crate::OptimizationLevel::default(),
             aot_opt_level: crate::OptimizationLevel::default(),
-            resident_code_cache_bytes: 0,
-            idle_evict_duration: None,
+            resident_code_cache_bytes: 1024 * 1024 * 1024,
+            idle_evict_duration: Some(Duration::from_secs(600)),
             eviction_sweep_interval: Duration::from_secs(60),
         }
     }
