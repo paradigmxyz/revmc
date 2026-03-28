@@ -121,7 +121,7 @@ pub struct RuntimeTuning {
 
     /// Optimization level for AOT compilation.
     ///
-    /// Defaults to [`OptimizationLevel::Aggressive`](crate::OptimizationLevel::Aggressive).
+    /// Defaults to [`OptimizationLevel::Default`](crate::OptimizationLevel::Default).
     pub aot_opt_level: crate::OptimizationLevel,
 
     /// Maximum total resident compiled code size in bytes.
@@ -164,8 +164,8 @@ impl Default for RuntimeTuning {
             max_pending_jit_jobs: 2048,
             jit_worker_count: worker_count,
             jit_worker_queue_capacity: 64,
-            jit_opt_level: crate::OptimizationLevel::Default,
-            aot_opt_level: crate::OptimizationLevel::Aggressive,
+            jit_opt_level: crate::OptimizationLevel::default(),
+            aot_opt_level: crate::OptimizationLevel::default(),
             resident_code_cache_bytes: 0,
             idle_evict_duration: None,
             eviction_sweep_interval: Duration::from_secs(60),
