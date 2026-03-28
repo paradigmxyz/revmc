@@ -979,6 +979,57 @@ mod tests {
     }
 
     #[test]
+    fn multi_target_jump() {
+        // Internal function called from two sites with different return addresses.
+        //
+        // Layout:
+        //   0: PUSH1 ret1   ; push return address for call site 1
+        //   2: PUSH1 func   ; push function entry
+        //   4: JUMP          ; call function (static: PUSH+JUMP)
+        //   5: JUMPDEST      ; ret1: return point for call site 1
+        //   6: POP           ; consume function result
+        //   7: PUSH1 ret2   ; push return address for call site 2
+        //   9: PUSH1 func   ; push function entry
+        //  11: JUMP          ; call function (static: PUSH+JUMP)
+        //  12: JUMPDEST      ; ret2: return point for call site 2
+        //  13: POP           ; consume function result
+        //  14: STOP
+        //  15: JUMPDEST      ; func: function entry
+        //  16: PUSH1 0x42    ; push a result
+        //  17: SWAP1         ; swap result and return address
+        //  18: JUMP          ; return (dynamic: target is on stack from caller)
+        //
+        // The return JUMP at offset 18 should resolve to Multi([ret1, ret2]).
+        let bytecode = analyze_bytecode(
+            "6005600f56\
+             5b50\
+             600c600f56\
+             5b50\
+             00\
+             5b\
+             6042\
+             90\
+             56",
+        );
+        eprintln!("{bytecode}");
+
+        // The return JUMP (last inst before STOP's block) should be multi-target.
+        let return_jump = bytecode
+            .iter_insts()
+            .find(|(_, d)| d.is_legacy_jump() && d.flags.contains(InstFlags::MULTI_JUMP));
+        assert!(return_jump.is_some(), "expected a multi-target jump");
+        let (rj_inst, _) = return_jump.unwrap();
+        let targets = bytecode.multi_jump_targets(rj_inst).unwrap();
+        assert_eq!(targets.len(), 2, "expected 2 targets, got {}", targets.len());
+        // Verify both targets are JUMPDESTs.
+        for &t in targets {
+            assert_eq!(bytecode.inst(t).opcode, op::JUMPDEST);
+        }
+        // No dynamic jumps should remain.
+        assert!(!bytecode.has_dynamic_jumps, "expected no dynamic jumps");
+    }
+
+    #[test]
     fn hash_10k() {
         let code =
             revm_primitives::hex::decode(include_str!("../../../../data/hash_10k.rt.hex").trim())
