@@ -17,7 +17,7 @@ use super::{Bytecode, InstFlags};
 use revm_bytecode::opcode as op;
 use revm_primitives::U256;
 use smallvec::SmallVec;
-use std::collections::VecDeque;
+use std::{collections::VecDeque, ops::Range};
 
 /// Abstract value on the stack.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -115,7 +115,7 @@ type BlockId = usize;
 
 /// FIFO worklist with deduplication.
 struct Worklist {
-    queue: VecDeque<BlockId>,
+    queue: VecDeque<usize>,
     in_queue: Vec<bool>,
 }
 
@@ -124,32 +124,24 @@ impl Worklist {
         Self { queue: VecDeque::new(), in_queue: vec![false; size] }
     }
 
-    fn with(size: usize, initial: BlockId) -> Self {
-        let mut w = Self::new(size);
-        w.push(initial);
-        w
-    }
-
-    fn pop(&mut self) -> Option<BlockId> {
-        let id = self.queue.pop_front()?;
-        self.in_queue[id] = false;
-        Some(id)
-    }
-
-    fn push(&mut self, id: BlockId) {
+    fn push(&mut self, id: usize) {
         if !self.in_queue[id] {
             self.in_queue[id] = true;
             self.queue.push_back(id);
         }
     }
+
+    fn pop(&mut self) -> Option<usize> {
+        let id = self.queue.pop_front()?;
+        self.in_queue[id] = false;
+        Some(id)
+    }
 }
 
 /// A basic block in the CFG.
 struct BasicBlock {
-    /// First instruction index (inclusive).
-    start: usize,
-    /// Last instruction index (inclusive, the terminator).
-    end: usize,
+    /// Instruction index range (exclusive end). The terminator is at `insts.end - 1`.
+    insts: Range<usize>,
     /// Predecessor block IDs.
     preds: Vec<BlockId>,
     /// Successor block IDs.
@@ -294,15 +286,17 @@ impl Bytecode<'_> {
 
             if is_leader[i] || current_start.is_none() {
                 if let Some(start) = current_start {
-                    // End the previous block at i-1.
-                    let end = i - 1;
                     let block_id = blocks.len();
-                    for (j, ib) in inst_to_block.iter_mut().enumerate().take(end + 1).skip(start) {
+                    for (j, ib) in inst_to_block.iter_mut().enumerate().take(i).skip(start) {
                         if !self.insts[j].is_dead_code() {
                             *ib = block_id;
                         }
                     }
-                    blocks.push(BasicBlock { start, end, preds: Vec::new(), succs: Vec::new() });
+                    blocks.push(BasicBlock {
+                        insts: start..i,
+                        preds: Vec::new(),
+                        succs: Vec::new(),
+                    });
                 }
                 current_start = Some(i);
             }
@@ -310,26 +304,25 @@ impl Bytecode<'_> {
 
         // Close the last block.
         if let Some(start) = current_start {
-            let end = n - 1;
             let block_id = blocks.len();
-            for (j, ib) in inst_to_block.iter_mut().enumerate().take(end + 1).skip(start) {
+            for (j, ib) in inst_to_block.iter_mut().enumerate().take(n).skip(start) {
                 if !self.insts[j].is_dead_code() {
                     *ib = block_id;
                 }
             }
-            blocks.push(BasicBlock { start, end, preds: Vec::new(), succs: Vec::new() });
+            blocks.push(BasicBlock { insts: start..n, preds: Vec::new(), succs: Vec::new() });
         }
 
         // Build edges based on known control flow.
         let num_blocks = blocks.len();
         for bid in 0..num_blocks {
-            let end = blocks[bid].end;
-            let term = &self.insts[end];
+            let term_idx = blocks[bid].insts.end - 1;
+            let term = &self.insts[term_idx];
 
             // Fallthrough edge: if the terminator doesn't unconditionally branch/diverge.
             let has_fallthrough = !term.is_diverging() && (term.opcode != op::JUMP);
-            if has_fallthrough && end + 1 < n {
-                let next_block = inst_to_block[end + 1];
+            if has_fallthrough && blocks[bid].insts.end < n {
+                let next_block = inst_to_block[blocks[bid].insts.end];
                 if next_block != usize::MAX && next_block < num_blocks {
                     blocks[bid].succs.push(next_block);
                     blocks[next_block].preds.push(bid);
@@ -407,11 +400,15 @@ impl Bytecode<'_> {
                         let block = &cfg.blocks[bid];
                         // Interpret up to (but not including) the terminator to get the
                         // pre-jump stack state.
-                        let pre_jump_stack = if block.start == block.end {
+                        let pre_jump_stack = if block.insts.len() == 1 {
                             input.clone()
                         } else {
-                            self.interpret_block(block.start, block.end - 1, input, None)
-                                .unwrap_or_default()
+                            self.interpret_block(
+                                block.insts.start..block.insts.end - 1,
+                                input,
+                                None,
+                            )
+                            .unwrap_or_default()
                         };
                         let target_val = pre_jump_stack.last().cloned();
                         match target_val {
@@ -456,8 +453,7 @@ impl Bytecode<'_> {
                         if !matches!(block_states[pred], BlockState::Bottom) {
                             return false;
                         }
-                        let pred_start = cfg.blocks[pred].start;
-                        self.insts[pred_start].is_jumpdest()
+                        self.insts[cfg.blocks[pred].insts.start].is_jumpdest()
                     });
                 if has_suspect {
                     suspect[bid] = true;
@@ -515,7 +511,8 @@ impl Bytecode<'_> {
         snapshots: &mut [StackSnapshot],
     ) -> Vec<Vec<BlockId>> {
         let num_blocks = cfg.blocks.len();
-        let mut worklist = Worklist::with(num_blocks, 0);
+        let mut worklist = Worklist::new(num_blocks);
+        worklist.push(0);
 
         // Persistent set of discovered dynamic-jump target edges per block.
         // Once a dynamic jump in block `bid` resolves to a target block, that
@@ -561,20 +558,19 @@ impl Bytecode<'_> {
             let input =
                 if widen[bid] { input.iter().map(|_| AbsValue::Top).collect() } else { input };
 
-            let output = self.interpret_block(block.start, block.end, &input, Some(snapshots));
-            let output = match output {
-                Some(s) => s,
-                None => continue,
+            let Some(output) = self.interpret_block(block.insts.clone(), &input, Some(snapshots))
+            else {
+                continue;
             };
 
             // For dynamic jumps, discover target edges to propagate state through.
-            let term = &self.insts[block.end];
+            let term = &self.insts[block.insts.end - 1];
             if term.is_legacy_jump() && !term.flags.contains(InstFlags::STATIC_JUMP) {
-                let pre_jump_stack = if block.start == block.end {
+                let pre_jump_stack = if block.insts.len() == 1 {
                     &input
                 } else {
                     &self
-                        .interpret_block(block.start, block.end - 1, &input, None)
+                        .interpret_block(block.insts.start..block.insts.end - 1, &input, None)
                         .unwrap_or_default()
                 };
 
@@ -611,21 +607,20 @@ impl Bytecode<'_> {
     /// into `snapshots[inst_index]`.
     fn interpret_block(
         &self,
-        start: usize,
-        end: usize,
+        range: Range<usize>,
         input: &[AbsValue],
         mut snapshots: Option<&mut [StackSnapshot]>,
     ) -> Option<Vec<AbsValue>> {
         let mut stack = input.to_vec();
 
-        for i in start..=end {
+        for i in range {
             let inst = &self.insts[i];
             if inst.is_dead_code() {
                 continue;
             }
 
             // Record pre-instruction snapshot if requested.
-            if let Some(ref mut snapshots) = snapshots {
+            if let Some(snapshots) = &mut snapshots {
                 snapshots[i] = StackSnapshot::Known(
                     stack
                         .iter()
@@ -643,25 +638,21 @@ impl Bytecode<'_> {
                 continue;
             }
 
-            let opcode = inst.opcode;
-
-            match opcode {
+            match inst.opcode {
                 op::PUSH0 => {
                     stack.push(AbsValue::Const(U256::ZERO));
                 }
                 op::PUSH1..=op::PUSH32 => {
-                    let val = self.get_imm(inst).map_or(AbsValue::Top, |imm| {
-                        let mut buf = [0u8; 32];
-                        buf[32 - imm.len()..].copy_from_slice(imm);
-                        AbsValue::Const(U256::from_be_bytes(buf))
-                    });
+                    let val = self
+                        .get_imm(inst)
+                        .map_or(AbsValue::Top, |imm| AbsValue::Const(U256::from_be_slice(imm)));
                     stack.push(val);
                 }
                 op::POP => {
                     stack.pop()?;
                 }
                 op::DUP1..=op::DUP16 => {
-                    let depth = (opcode - op::DUP1 + 1) as usize;
+                    let depth = (inst.opcode - op::DUP1 + 1) as usize;
                     if stack.len() < depth {
                         return None;
                     }
@@ -669,7 +660,7 @@ impl Bytecode<'_> {
                     stack.push(val);
                 }
                 op::SWAP1..=op::SWAP16 => {
-                    let depth = (opcode - op::SWAP1 + 1) as usize;
+                    let depth = (inst.opcode - op::SWAP1 + 1) as usize;
                     let len = stack.len();
                     if len < depth + 1 {
                         return None;
@@ -692,7 +683,7 @@ impl Bytecode<'_> {
                     }
 
                     // Try constant folding for common arithmetic.
-                    let result = self.try_const_fold(opcode, &stack[stack.len() - inp..]);
+                    let result = self.try_const_fold(inst.opcode, &stack[stack.len() - inp..]);
 
                     // Pop inputs.
                     stack.truncate(stack.len() - inp);
