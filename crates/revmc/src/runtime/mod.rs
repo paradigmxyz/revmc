@@ -57,7 +57,7 @@ struct BackendInner {
     /// Channel for sending commands to the backend thread.
     tx: chan::Sender<Command>,
     /// Shared stats counters.
-    stats: RuntimeStats,
+    stats: Arc<RuntimeStats>,
     /// Backend thread + done signal. `None` after shutdown.
     thread: std::sync::Mutex<Option<BackendThread>>,
     /// Shutdown timeout.
@@ -109,11 +109,21 @@ impl JitBackend {
         let dump_dir = config.dump_dir;
         let debug_assertions = config.debug_assertions;
         let resident_for_thread = Arc::clone(&resident);
+        let stats = Arc::new(RuntimeStats::default());
+        let stats_for_thread = Arc::clone(&stats);
 
         let thread = std::thread::Builder::new()
             .name(config.thread_name)
             .spawn(move || {
-                backend::run(rx, resident_for_thread, store, tuning, dump_dir, debug_assertions);
+                backend::run(
+                    rx,
+                    resident_for_thread,
+                    store,
+                    tuning,
+                    dump_dir,
+                    debug_assertions,
+                    stats_for_thread,
+                );
                 let _ = done_tx.send(());
             })
             .wrap_err("failed to spawn backend thread")?;
@@ -123,7 +133,7 @@ impl JitBackend {
             enabled: AtomicBool::new(config.enabled),
             blocking: config.blocking,
             tx,
-            stats: RuntimeStats::default(),
+            stats,
             thread: std::sync::Mutex::new(Some(BackendThread { handle: thread, done_rx })),
             shutdown_timeout: config.tuning.shutdown_timeout,
         };

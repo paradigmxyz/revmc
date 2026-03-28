@@ -7,6 +7,7 @@
 use crate::runtime::{
     api::{CompiledProgram, LoadedLibrary},
     config::RuntimeTuning,
+    stats::RuntimeStats,
     storage::{ArtifactKey, ArtifactManifest, ArtifactStore, BackendSelection, RuntimeCacheKey},
     worker::{AotJob, JitJob, SyncNotifier, WorkerJob, WorkerPool, WorkerResult, WorkerSuccess},
 };
@@ -16,7 +17,7 @@ use dashmap::DashMap;
 use quanta::Instant;
 use revmc_backend::Target;
 use std::{
-    sync::Arc,
+    sync::{Arc, atomic::Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -132,11 +133,8 @@ struct BackendState {
     generation: u64,
     /// Last time an eviction sweep was run.
     last_sweep: Instant,
-    /// JIT stats.
-    jit_promotions: u64,
-    jit_successes: u64,
-    jit_failures: u64,
-    evictions: u64,
+    /// Shared stats counters (also read by the snapshot API).
+    stats: Arc<RuntimeStats>,
 }
 
 impl BackendState {
@@ -205,7 +203,7 @@ impl BackendState {
             if self.workers.try_send(job) {
                 entry.phase = EntryPhase::Working;
                 self.pending_jobs += 1;
-                self.jit_promotions += 1;
+                self.stats.jit_promotions.fetch_add(1, Ordering::Relaxed);
             }
         }
     }
@@ -265,7 +263,7 @@ impl BackendState {
             );
             entry.phase = EntryPhase::Working;
             self.pending_jobs += 1;
-            self.jit_promotions += 1;
+            self.stats.jit_promotions.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -307,7 +305,7 @@ impl BackendState {
             if self.workers.try_send(job) {
                 entry.phase = EntryPhase::Working;
                 self.pending_jobs += 1;
-                self.jit_promotions += 1;
+                self.stats.jit_promotions.fetch_add(1, Ordering::Relaxed);
             }
         }
     }
@@ -390,7 +388,7 @@ impl BackendState {
 
                 self.insert_resident(result.key.clone(), program);
                 self.entries.remove(&result.key);
-                self.jit_successes += 1;
+                self.stats.jit_successes.fetch_add(1, Ordering::Relaxed);
 
                 debug!(
                     code_hash = %result.key.code_hash,
@@ -405,7 +403,7 @@ impl BackendState {
                 if let Some(entry) = self.entries.get_mut(&result.key) {
                     entry.phase = EntryPhase::Failed;
                 }
-                self.jit_failures += 1;
+                self.stats.jit_failures.fetch_add(1, Ordering::Relaxed);
 
                 warn!(
                     code_hash = %result.key.code_hash,
@@ -455,7 +453,7 @@ impl BackendState {
                 if let Some(entry) = self.entries.get_mut(&key) {
                     entry.phase = EntryPhase::Failed;
                 }
-                self.jit_failures += 1;
+                self.stats.jit_failures.fetch_add(1, Ordering::Relaxed);
                 return;
             }
 
@@ -487,7 +485,7 @@ impl BackendState {
                         Ok(program) => {
                             self.insert_resident(key.clone(), Arc::new(program));
                             self.entries.remove(&key);
-                            self.jit_successes += 1;
+                            self.stats.jit_successes.fetch_add(1, Ordering::Relaxed);
 
                             debug!(
                                 code_hash = %key.code_hash,
@@ -505,7 +503,7 @@ impl BackendState {
                             if let Some(entry) = self.entries.get_mut(&key) {
                                 entry.phase = EntryPhase::Failed;
                             }
-                            self.jit_failures += 1;
+                            self.stats.jit_failures.fetch_add(1, Ordering::Relaxed);
                         }
                     }
                 }
@@ -517,7 +515,7 @@ impl BackendState {
                     if let Some(entry) = self.entries.get_mut(&key) {
                         entry.phase = EntryPhase::Failed;
                     }
-                    self.jit_failures += 1;
+                    self.stats.jit_failures.fetch_add(1, Ordering::Relaxed);
                 }
                 Err(e) => {
                     warn!(
@@ -528,7 +526,7 @@ impl BackendState {
                     if let Some(entry) = self.entries.get_mut(&key) {
                         entry.phase = EntryPhase::Failed;
                     }
-                    self.jit_failures += 1;
+                    self.stats.jit_failures.fetch_add(1, Ordering::Relaxed);
                 }
             }
         } else {
@@ -540,7 +538,7 @@ impl BackendState {
             if let Some(entry) = self.entries.get_mut(&key) {
                 entry.phase = EntryPhase::Failed;
             }
-            self.jit_failures += 1;
+            self.stats.jit_failures.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -573,7 +571,7 @@ impl BackendState {
                 );
                 self.remove_resident(key);
                 self.entries.remove(key);
-                self.evictions += 1;
+                self.stats.evictions.fetch_add(1, Ordering::Relaxed);
             }
         }
 
@@ -598,7 +596,7 @@ impl BackendState {
                 );
                 self.remove_resident(&key);
                 self.entries.remove(&key);
-                self.evictions += 1;
+                self.stats.evictions.fetch_add(1, Ordering::Relaxed);
             }
         }
     }
@@ -623,6 +621,7 @@ pub(crate) fn run(
     tuning: RuntimeTuning,
     dump_dir: Option<std::path::PathBuf>,
     debug_assertions: bool,
+    stats: Arc<RuntimeStats>,
 ) {
     debug!("backend thread started");
 
@@ -657,10 +656,7 @@ pub(crate) fn run(
         pending_jobs: 0,
         generation: 0,
         last_sweep: now,
-        jit_promotions: 0,
-        jit_successes: 0,
-        jit_failures: 0,
-        evictions: 0,
+        stats,
     };
 
     loop {
@@ -707,10 +703,10 @@ pub(crate) fn run(
     }
 
     info!(
-        jit_promotions = state.jit_promotions,
-        jit_successes = state.jit_successes,
-        jit_failures = state.jit_failures,
-        evictions = state.evictions,
+        jit_promotions = state.stats.jit_promotions.load(Ordering::Relaxed),
+        jit_successes = state.stats.jit_successes.load(Ordering::Relaxed),
+        jit_failures = state.stats.jit_failures.load(Ordering::Relaxed),
+        evictions = state.stats.evictions.load(Ordering::Relaxed),
         resident_entries = state.resident.len(),
         "backend stats at shutdown",
     );

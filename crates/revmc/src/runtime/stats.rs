@@ -13,6 +13,14 @@ pub(crate) struct RuntimeStats {
     pub(crate) events_sent: AtomicU64,
     /// Lookup-observed events dropped (channel full).
     pub(crate) events_dropped: AtomicU64,
+    /// Total number of entries evicted (idle + budget).
+    pub(crate) evictions: AtomicU64,
+    /// Total number of JIT promotions (hot threshold reached).
+    pub(crate) jit_promotions: AtomicU64,
+    /// Total number of successful JIT compilations.
+    pub(crate) jit_successes: AtomicU64,
+    /// Total number of failed JIT compilations.
+    pub(crate) jit_failures: AtomicU64,
 }
 
 /// A point-in-time snapshot of runtime stats.
@@ -40,6 +48,14 @@ pub struct RuntimeStatsSnapshot {
     ///
     /// Sourced from the LLVM JIT memory usage plugin. `0` if not initialized.
     pub jit_data_bytes: u64,
+    /// Total number of entries evicted (idle + budget).
+    pub evictions: u64,
+    /// Total number of JIT promotions (hot threshold reached).
+    pub jit_promotions: u64,
+    /// Total number of successful JIT compilations.
+    pub jit_successes: u64,
+    /// Total number of failed JIT compilations.
+    pub jit_failures: u64,
 }
 
 impl RuntimeStatsSnapshot {
@@ -71,6 +87,10 @@ impl RuntimeStats {
             jit_queue_len,
             jit_code_bytes,
             jit_data_bytes,
+            evictions: self.evictions.load(Ordering::Relaxed),
+            jit_promotions: self.jit_promotions.load(Ordering::Relaxed),
+            jit_successes: self.jit_successes.load(Ordering::Relaxed),
+            jit_failures: self.jit_failures.load(Ordering::Relaxed),
         }
     }
 }
