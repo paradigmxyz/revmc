@@ -186,25 +186,45 @@ impl fmt::Debug for InstData {
     }
 }
 
+// DOT graph colors.
+mod dot_colors {
+    // Graph background.
+    pub(super) const BG: &str = "#1a1a2e";
+    // Text.
+    pub(super) const TEXT: &str = "#e0e0e0";
+    // Default node (dark blue).
+    pub(super) const NODE_FILL: &str = "#16213e";
+    pub(super) const NODE_BORDER: &str = "#0f3460";
+    // Exit/diverging blocks (red).
+    pub(super) const EXIT_FILL: &str = "#2d1b2e";
+    pub(super) const EXIT_BORDER: &str = "#e94560";
+    // Branching blocks (teal).
+    pub(super) const BRANCH_FILL: &str = "#1a2340";
+    pub(super) const BRANCH_BORDER: &str = "#53a8b6";
+    // Edge colors.
+    pub(super) const EDGE: &str = "#555577";
+    pub(super) const EDGE_JUMP: &str = "#53a8b6";
+    pub(super) const EDGE_COND_JUMP: &str = "#5cdb95";
+    pub(super) const EDGE_FALSE: &str = "#e94560";
+}
+
 impl<'a> Bytecode<'a> {
     /// Writes the bytecode as a DOT graph to the given writer.
     #[doc(hidden)]
     pub fn write_dot<W: fmt::Write>(&self, w: &mut W) -> fmt::Result {
+        use dot_colors::*;
+
         let info = self.collect_blocks();
 
         writeln!(w, "digraph bytecode {{")?;
-        writeln!(w, "  graph [bgcolor=\"#1a1a2e\" rankdir=TB];")?;
+        writeln!(w, "  graph [bgcolor=\"{BG}\" rankdir=TB];")?;
         writeln!(
             w,
             "  node [shape=Mrecord fontname=\"Courier\" fontsize=10 \
-             style=filled fillcolor=\"#16213e\" fontcolor=\"#e0e0e0\" \
-             color=\"#0f3460\" penwidth=1.5];"
+             style=filled fillcolor=\"{NODE_FILL}\" fontcolor=\"{TEXT}\" \
+             color=\"{NODE_BORDER}\" penwidth=1.5];"
         )?;
-        writeln!(
-            w,
-            "  edge [fontname=\"Courier\" fontsize=9 color=\"#555577\" \
-             fontcolor=\"#8888aa\"];"
-        )?;
+        writeln!(w, "  edge [fontname=\"Courier\" fontsize=9 color=\"{EDGE}\"];")?;
 
         // Emit nodes.
         for &(block_idx, first_inst, last_inst) in &info.blocks {
@@ -213,11 +233,11 @@ impl<'a> Bytecode<'a> {
 
             // Color based on block terminator.
             let (fill, border) = if last.is_diverging() && !last.is_legacy_jump() {
-                ("#2d1b2e", "#e94560") // exit blocks: dark red
+                (EXIT_FILL, EXIT_BORDER)
             } else if last.is_legacy_jump() {
-                ("#1a2340", "#53a8b6") // branching blocks: teal
+                (BRANCH_FILL, BRANCH_BORDER)
             } else {
-                ("#16213e", "#0f3460") // default: dark blue
+                (NODE_FILL, NODE_BORDER)
             };
 
             write!(
@@ -259,7 +279,7 @@ impl<'a> Bytecode<'a> {
             if last.is_legacy_static_jump() && !last.flags.contains(InstFlags::INVALID_JUMP) {
                 let target = last.data as usize;
                 if let Some(&target_block) = info.inst_to_block.get(&target) {
-                    let color = if last.opcode == op::JUMPI { "#5cdb95" } else { "#53a8b6" };
+                    let color = if last.opcode == op::JUMPI { EDGE_COND_JUMP } else { EDGE_JUMP };
                     let extra = if block_idx == target_block {
                         " tailport=s headport=e constraint=false"
                     } else if target_block <= block_idx {
@@ -270,13 +290,13 @@ impl<'a> Bytecode<'a> {
                     writeln!(w, "  bb{block_idx} -> bb{target_block} [color=\"{color}\"{extra}];")?;
                 }
             } else if last.is_legacy_jump() && !last.is_legacy_static_jump() {
-                writeln!(w, "  bb{block_idx} -> dynamic [color=\"#e94560\" style=dashed];")?;
+                writeln!(w, "  bb{block_idx} -> dynamic [color=\"{EDGE_FALSE}\" style=dashed];")?;
             }
 
             // Fallthrough edge.
             let has_fallthrough = last.can_fall_through();
             if has_fallthrough && let Some(&(next_block, _, _)) = info.blocks.get(i + 1) {
-                let color = if last.opcode == op::JUMPI { "#e94560" } else { "#555577" };
+                let color = if last.opcode == op::JUMPI { EDGE_FALSE } else { EDGE };
                 writeln!(w, "  bb{block_idx} -> bb{next_block} [color=\"{color}\"];")?;
             }
         }
@@ -285,8 +305,8 @@ impl<'a> Bytecode<'a> {
         if self.has_dynamic_jumps {
             writeln!(
                 w,
-                "  dynamic [shape=diamond style=filled fillcolor=\"#2d1b2e\" \
-                 color=\"#e94560\" fontcolor=\"#e0e0e0\" \
+                "  dynamic [shape=diamond style=filled fillcolor=\"{EXIT_FILL}\" \
+                 color=\"{EXIT_BORDER}\" fontcolor=\"{TEXT}\" \
                  label=\"dynamic\\njump table\"];"
             )?;
             for &(block_idx, first_inst, _) in &info.blocks {
@@ -294,8 +314,7 @@ impl<'a> Bytecode<'a> {
                 if first.is_reachable_jumpdest(self.has_dynamic_jumps) {
                     writeln!(
                         w,
-                        "  dynamic -> bb{block_idx} \
-                         [color=\"#e94560\" style=dashed];"
+                        "  dynamic -> bb{block_idx} [color=\"{EDGE_FALSE}\" style=dashed];"
                     )?;
                 }
             }
