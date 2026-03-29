@@ -106,7 +106,7 @@ impl StatetestDiffArgs {
                     if cfg.spec().is_enabled_in(SI::OSAKA) {
                         cfg.set_max_blobs_per_tx(6);
                     } else if cfg.spec().is_enabled_in(SI::PRAGUE) {
-                        cfg.set_max_blobs_per_tx(9);
+                        cfg.set_max_blobs_per_tx(6);
                     } else {
                         cfg.set_max_blobs_per_tx(6);
                     }

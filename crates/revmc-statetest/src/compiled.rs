@@ -503,7 +503,7 @@ fn execute_test_suite_compiled(
             if cfg.spec().is_enabled_in(SpecId::OSAKA) {
                 cfg.set_max_blobs_per_tx(6);
             } else if cfg.spec().is_enabled_in(SpecId::PRAGUE) {
-                cfg.set_max_blobs_per_tx(9);
+                cfg.set_max_blobs_per_tx(6);
             } else {
                 cfg.set_max_blobs_per_tx(6);
             }
