@@ -11,6 +11,8 @@
 #include <llvm/IR/Attributes.h>
 
 #include <atomic>
+#include <fstream>
+#include <unistd.h>
 
 using namespace llvm;
 
@@ -155,6 +157,76 @@ revmc_llvm_lljit_enable_memory_usage(LLVMOrcLLJITRef J,
     return wrap(make_error<StringError>("MemoryUsagePlugin requires JITLink",
                                         inconvertibleErrorCode()));
   OLL->addPlugin(std::make_unique<MemoryUsagePlugin>(CodeBytes, DataBytes));
+  return LLVMErrorSuccess;
+}
+
+/// JITLink plugin that writes `/tmp/jit-<pid>.map` in the perf map format.
+///
+/// For each finalized link graph the plugin emits one line per named, executable
+/// symbol:
+///
+///     <hex_addr> <hex_size> <name>\n
+///
+/// This is the format expected by `perf report --jit` and `samply` to resolve
+/// JIT-compiled symbols without the heavyweight jitdump machinery.
+class SimplePerfPlugin : public orc::ObjectLinkingLayer::Plugin {
+  std::mutex Mutex;
+  std::ofstream MapFile;
+
+public:
+  SimplePerfPlugin()
+      : MapFile("/tmp/jit-" + std::to_string(getpid()) + ".map",
+                std::ios::app) {}
+
+  void modifyPassConfig(orc::MaterializationResponsibility &,
+                        jitlink::LinkGraph &,
+                        jitlink::PassConfiguration &Config) override {
+    Config.PostFixupPasses.push_back(
+        [this](jitlink::LinkGraph &G) -> Error {
+          if (!MapFile)
+            return Error::success();
+          std::lock_guard<std::mutex> Lock(Mutex);
+          for (auto *Sym : G.defined_symbols()) {
+            if (!Sym->hasName())
+              continue;
+            auto &Section = Sym->getBlock().getSection();
+            if ((Section.getMemProt() & orc::MemProt::Exec) == orc::MemProt::None)
+              continue;
+            auto Addr = Sym->getAddress().getValue();
+            auto Size = Sym->getSize();
+            MapFile << std::hex << Addr << ' ' << Size << ' '
+                    << (*Sym->getName()).str() << '\n';
+          }
+          MapFile.flush();
+          return Error::success();
+        });
+  }
+
+  Error notifyFailed(orc::MaterializationResponsibility &) override {
+    return Error::success();
+  }
+
+  Error notifyRemovingResources(orc::JITDylib &, orc::ResourceKey) override {
+    return Error::success();
+  }
+
+  void notifyTransferringResources(orc::JITDylib &, orc::ResourceKey,
+                                   orc::ResourceKey) override {}
+};
+
+/// Install SimplePerfPlugin on the LLJIT's ObjectLinkingLayer.
+///
+/// Writes `/tmp/jit-<pid>.map` in the perf map format so that profilers like
+/// `perf` and `samply` can resolve JIT-compiled symbols without jitdump.
+/// Returns an error if the object layer is not JITLink-based.
+extern "C" LLVMErrorRef
+revmc_llvm_lljit_enable_simple_perf(LLVMOrcLLJITRef J) {
+  auto *Jit = reinterpret_cast<orc::LLJIT *>(J);
+  auto *OLL = dyn_cast<orc::ObjectLinkingLayer>(&Jit->getObjLinkingLayer());
+  if (!OLL)
+    return wrap(make_error<StringError>("SimplePerfPlugin requires JITLink",
+                                        inconvertibleErrorCode()));
+  OLL->addPlugin(std::make_unique<SimplePerfPlugin>());
   return LLVMErrorSuccess;
 }
 

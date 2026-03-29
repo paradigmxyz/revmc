@@ -1452,6 +1452,16 @@ impl LLJIT {
         cvt(unsafe { crate::cpp::revmc_llvm_lljit_enable_perf_support(self.as_inner()) })
     }
 
+    /// Install `SimplePerfPlugin` on the LLJIT's `ObjectLinkingLayer`.
+    ///
+    /// Writes `/tmp/jit-<pid>.map` in the perf map format so that profilers
+    /// like `perf` and `samply` can resolve JIT-compiled symbols without
+    /// the heavyweight jitdump machinery.
+    /// Requires `ObjectLinkingLayer` (JITLink), which is the LLJIT default.
+    pub fn enable_simple_perf(&self) -> Result<(), LLVMString> {
+        cvt(unsafe { crate::cpp::revmc_llvm_lljit_enable_simple_perf(self.as_inner()) })
+    }
+
     /// Install the plugin that submits debug objects to the executor via the
     /// GDB JIT Interface (`__jit_debug_register_code`).
     ///

@@ -26,6 +26,13 @@ pub struct BackendConfig {
     ///
     /// Applied once per process on first JIT compilation.
     pub profiling_support: bool,
+    /// Whether to enable the simple perf map plugin.
+    ///
+    /// Writes `/tmp/jit-<pid>.map` in the perf map format so that profilers
+    /// can resolve JIT-compiled symbols without the jitdump machinery.
+    ///
+    /// Applied once per process on first JIT compilation.
+    pub simple_perf: bool,
     /// Debug info source file path. `Some` enables debug info emission.
     pub debug_file: Option<PathBuf>,
 }
@@ -37,7 +44,8 @@ impl Default for BackendConfig {
             is_dumping: false,
             debug_assertions: cfg!(debug_assertions),
             debug_support: true,
-            profiling_support: true,
+            profiling_support: false,
+            simple_perf: true,
             debug_file: None,
         }
     }
