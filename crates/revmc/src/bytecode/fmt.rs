@@ -216,8 +216,6 @@ impl<'a> Bytecode<'a> {
                 ("#2d1b2e", "#e94560") // exit blocks: dark red
             } else if last.is_legacy_jump() {
                 ("#1a2340", "#53a8b6") // branching blocks: teal
-            } else if first.is_reachable_jumpdest(self.has_dynamic_jumps) {
-                ("#1a2e1a", "#5cdb95") // jump targets: green
             } else {
                 ("#16213e", "#0f3460") // default: dark blue
             };
