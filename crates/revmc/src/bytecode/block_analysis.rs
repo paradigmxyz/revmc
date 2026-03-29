@@ -19,8 +19,9 @@
 //!
 //! Per-block lattice:
 //! - `Bottom` — block not yet reached.
-//! - `Known(Vec<AbsValue>)` — reached with a known stack state.
-//! - `Conflict` — predecessors have incompatible stack heights; analysis gives up on this block.
+//! - `Known(Vec<AbsValue>)` — reached with a known stack state (top-aligned; when predecessors have
+//!   different stack heights, the shorter stack is bottom-padded with `Top`).
+//! - `Conflict` — reserved for future use; currently never produced.
 //!
 //! ## Soundness
 //!
@@ -144,9 +145,9 @@ impl ConstSetInterner {
 enum BlockState {
     /// Block has not been reached yet.
     Bottom,
-    /// Block has been reached with a known stack state.
+    /// Block has been reached with a known stack state (top-aligned).
     Known(Vec<AbsValue>),
-    /// Predecessors have incompatible stack heights; give up on this block.
+    /// Reserved: analysis gives up on this block. Currently never produced by `join`.
     Conflict,
 }
 
@@ -162,6 +163,11 @@ impl BlockState {
     }
 
     /// Join another incoming state into this one. Returns `true` if the state changed.
+    ///
+    /// When stack heights differ, the stacks are top-aligned and the shorter one is
+    /// bottom-padded with `Top`. This handles the common Solidity dispatch pattern where
+    /// the "no selector match" fallthrough leaves an extra item on the stack that the
+    /// fallback ignores.
     fn join(&mut self, incoming: &[AbsValue], sets: &mut ConstSetInterner) -> bool {
         match self {
             Self::Bottom => {
@@ -169,18 +175,30 @@ impl BlockState {
                 true
             }
             Self::Known(existing) => {
-                if existing.len() != incoming.len() {
-                    *self = Self::Conflict;
-                    return true;
-                }
+                let new_len = existing.len().max(incoming.len());
                 let mut changed = false;
-                for (slot, inc) in existing.iter_mut().zip(incoming) {
-                    let joined = sets.join(*slot, *inc);
-                    if joined != *slot {
-                        *slot = joined;
+
+                // Pad existing stack at the bottom with Top if incoming is deeper.
+                if existing.len() < new_len {
+                    let pad = new_len - existing.len();
+                    let mut widened = vec![AbsValue::Top; pad];
+                    widened.extend(existing.iter().copied());
+                    *existing = widened;
+                    changed = true;
+                }
+
+                // Join element-wise, top-aligned.
+                let incoming_pad = new_len - incoming.len();
+                for i in 0..new_len {
+                    let inc =
+                        if i < incoming_pad { AbsValue::Top } else { incoming[i - incoming_pad] };
+                    let joined = sets.join(existing[i], inc);
+                    if joined != existing[i] {
+                        existing[i] = joined;
                         changed = true;
                     }
                 }
+
                 changed
             }
             Self::Conflict => false,
@@ -335,7 +353,9 @@ impl Bytecode<'_> {
                     // runtime. Leave as-is.
                     trace!(%jump_inst, "unreachable jump (not marking, has_top_jump)");
                 }
-                JumpTarget::Top => {}
+                JumpTarget::Top => {
+                    trace!(%jump_inst, "unresolved jump (Top)");
+                }
             }
         }
 
@@ -483,8 +503,14 @@ impl Bytecode<'_> {
             let target = match cfg.inst_to_block[jump_inst] {
                 None => JumpTarget::Bottom,
                 Some(bid) => match &block_states[bid] {
-                    BlockState::Bottom => JumpTarget::Bottom,
-                    BlockState::Conflict => JumpTarget::Top,
+                    BlockState::Bottom => {
+                        trace!(%jump_inst, pc = self.insts[jump_inst].pc, "jump in unreached block");
+                        JumpTarget::Bottom
+                    }
+                    BlockState::Conflict => {
+                        trace!(%jump_inst, pc = self.insts[jump_inst].pc, "jump in conflict block");
+                        JumpTarget::Top
+                    }
                     BlockState::Known(input) => match self.jump_operand(&cfg.blocks[bid], input) {
                         Some(AbsValue::Const(idx)) => {
                             let val = *self.u256_interner.borrow().get(idx);
@@ -518,7 +544,15 @@ impl Bytecode<'_> {
                                 JumpTarget::Invalid
                             }
                         }
-                        _ => JumpTarget::Top,
+                        out => {
+                            trace!(
+                                inst = %jump_inst,
+                                in=?input,
+                                ?out,
+                                "unresolved jump",
+                            );
+                            JumpTarget::Top
+                        }
                     },
                 },
             };
@@ -638,7 +672,7 @@ impl Bytecode<'_> {
         while let Some(bid) = worklist.pop() {
             iterations += 1;
             if iterations > max_iterations {
-                debug!("block_analysis: iteration limit reached");
+                debug!("iteration limit reached");
                 break;
             }
 
@@ -650,6 +684,11 @@ impl Bytecode<'_> {
                     // state may be incomplete.
                     for &succ in cfg.blocks[bid].succs.iter().chain(&discovered_jump_edges[bid]) {
                         if block_states[succ].conflict() {
+                            trace!(
+                                from = %bid, to = %succ,
+                                to_pc = self.insts.raw[cfg.blocks[succ].insts.start].pc,
+                                "propagating conflict",
+                            );
                             worklist.push(succ);
                         }
                     }
@@ -1121,6 +1160,84 @@ mod tests {
         }
         // No dynamic jumps should remain.
         assert!(!bytecode.has_dynamic_jumps, "expected no dynamic jumps");
+    }
+
+    #[test]
+    fn nested_call_return() {
+        // Two-level call chain: outer calls wrapper, wrapper calls inner function.
+        // Direct caller also calls the inner function directly.
+        //
+        //   call site 1 (direct):   PUSH ret1, PUSH inner, JUMP
+        //   call site 2 (wrapper):  PUSH ret2, PUSH wrapper, JUMP
+        //     wrapper:              PUSH ret_w, PUSH inner, JUMP
+        //     ret_w:                SWAP1 POP JUMP  (returns to ret2)
+        //
+        // The inner function is called with different stack depths from the two
+        // sites. Its return JUMP resolves to Multi([ret1, ret_w]). But the
+        // wrapper's final JUMP (at ret_w) must recover the outer return address
+        // from deep in the stack — which the analysis currently cannot resolve
+        // because the top-aligned join pads it to Top.
+        let ret1: u8 = 5; // return from direct call
+        let ret2: u8 = 14; // return from wrapper call
+        let wrapper: u8 = 19; // wrapper entry
+        let ret_w: u8 = 27; // inner returns here (inside wrapper)
+        let inner: u8 = 32; // inner function entry
+        #[rustfmt::skip]
+        let bytecode = analyze_code(vec![
+            // Call site 1: direct call to inner.
+            op::PUSH1, ret1,        // pc=0
+            op::PUSH1, inner,       // pc=2
+            op::JUMP,               // pc=4: -> inner
+            op::JUMPDEST,           // pc=5: ret1
+            op::POP,                // pc=6: drop result
+            // Call site 2: call through wrapper.
+            op::PUSH1, ret2,        // pc=7
+            op::PUSH1, 0x42,        // pc=9: an argument
+            op::PUSH1, wrapper,     // pc=11
+            op::JUMP,               // pc=13: -> wrapper
+            op::JUMPDEST,           // pc=14: ret2
+            op::POP,                // pc=15: drop result
+            op::POP,                // pc=16: drop arg
+            op::STOP,               // pc=17
+            op::INVALID,            // pc=18
+            // Wrapper function: calls inner, then returns to caller.
+            // Entry stack: [outer_ret, arg]
+            op::JUMPDEST,           // pc=19: wrapper entry
+            op::PUSH1, ret_w,       // pc=20: push return addr for inner
+            op::PUSH1, inner,       // pc=22: push inner entry
+            op::JUMP,               // pc=24: -> inner
+            op::INVALID,            // pc=25
+            op::INVALID,            // pc=26
+            op::JUMPDEST,           // pc=27: ret_w — inner returned here
+            // Stack: [outer_ret, arg, inner_result]
+            op::POP,                // pc=28: drop inner_result
+            op::POP,                // pc=29: drop arg
+            op::JUMP,               // pc=30: return to caller via outer_ret (dynamic)
+            op::INVALID,            // pc=31
+            // Inner function: pushes a result and returns.
+            // Entry stack: [..., ret_addr]
+            op::JUMPDEST,           // pc=32: inner entry
+            op::PUSH1, 0x42,        // pc=33: push result
+            op::SWAP1,              // pc=35: [result, ret_addr] -> [ret_addr, result] -- wait
+            // Actually: swap so ret_addr is on top: [..., result, ret_addr]
+            // No — SWAP1 swaps TOS and TOS-1.
+            // Before SWAP1: [..., ret_addr, 0x42]  (ret_addr is TOS-1, 0x42 is TOS)
+            // After SWAP1:  [..., 0x42, ret_addr]
+            op::JUMP,               // pc=36: jump to ret_addr, leaves [..., 0x42] = result
+        ]);
+        eprintln!("{bytecode}");
+
+        // The inner return JUMP should resolve to Multi([ret1, ret_w]).
+        let inner_return = bytecode
+            .iter_insts()
+            .find(|(_, d)| d.is_legacy_jump() && d.flags.contains(InstFlags::MULTI_JUMP));
+        assert!(inner_return.is_some(), "expected inner return to be multi-target");
+
+        // The wrapper return JUMP (pc=30) is the hard case: the outer return
+        // address (ret2=14) was buried below the inner function's frame and
+        // lost to Top during the top-aligned join at inner's entry.
+        // TODO: with interprocedural / summary-based analysis, this should resolve.
+        assert!(bytecode.has_dynamic_jumps, "expected the wrapper return jump to remain dynamic");
     }
 
     #[test]
