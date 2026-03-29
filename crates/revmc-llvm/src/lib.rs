@@ -224,7 +224,11 @@ impl GlobalOrcJit {
         Self::global().get().and_then(|r| r.as_ref().ok())
     }
 
-    fn get(debug_support: bool, profiling_support: bool) -> Result<&'static Self> {
+    fn get(
+        debug_support: bool,
+        profiling_support: bool,
+        simple_perf: bool,
+    ) -> Result<&'static Self> {
         let result = Self::global().get_or_init(|| {
             init().map_err(|e| e.to_string())?;
             let jit =
@@ -238,6 +242,9 @@ impl GlobalOrcJit {
             }
             if profiling_support && let Err(e) = jit.enable_perf_support() {
                 warn!("failed to enable JIT perf support: {e}");
+            }
+            if simple_perf && let Err(e) = jit.enable_simple_perf() {
+                warn!("failed to enable simple perf map support: {e}");
             }
 
             // Track JIT memory usage.
@@ -368,8 +375,8 @@ impl fmt::Debug for OrcJitState {
 }
 
 impl OrcJitState {
-    fn new(debug_support: bool, profiling_support: bool) -> Result<Self> {
-        let global = GlobalOrcJit::get(debug_support, profiling_support)?;
+    fn new(debug_support: bool, profiling_support: bool, simple_perf: bool) -> Result<Self> {
+        let global = GlobalOrcJit::get(debug_support, profiling_support, simple_perf)?;
         Ok(Self {
             global,
             staged_functions: FxHashMap::default(),
@@ -552,6 +559,7 @@ impl EvmLlvmBackend {
             self.orc = Some(OrcJitState::new(
                 self.backend_config.debug_support,
                 self.backend_config.profiling_support,
+                self.backend_config.simple_perf,
             )?);
         }
         Ok(self.orc.as_mut().unwrap())
