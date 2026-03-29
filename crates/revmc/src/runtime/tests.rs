@@ -1029,3 +1029,80 @@ fn preload_aot_seeds_resident() {
         assert_eq!(tb.stats().resident_entries, 1);
     }
 }
+
+/// `prepare_aot()` on a key that is already persisted in the store but not resident
+/// (e.g. after a `clear_resident`) re-compiles because the backend does not probe
+/// storage before compiling.
+#[test]
+#[cfg(feature = "llvm")]
+fn prepare_aot_already_persisted_not_resident() {
+    let store = Arc::new(TempDirStore::new());
+    let code_hash = alloy_primitives::keccak256(BYTECODE_RET42);
+
+    let tb = TestBackend::new(RuntimeConfig {
+        enabled: true,
+        store: Some(store.clone()),
+        tuning: RuntimeTuning { jit_worker_count: 1, ..Default::default() },
+        ..Default::default()
+    });
+
+    // Compile and persist an AOT artifact.
+    tb.prepare_aot(AotRequest {
+        code_hash,
+        code: Bytes::copy_from_slice(BYTECODE_RET42),
+        spec_id: SpecId::CANCUN,
+    });
+    tb.wait_compiled(BYTECODE_RET42, SpecId::CANCUN);
+    assert_eq!(store.stored_count(), 1);
+
+    // Clear resident — artifact is still persisted in the store but not in memory.
+    tb.clear_resident();
+    tb.wait_resident_count(0);
+
+    // Requesting prepare_aot again should re-compile and reload into resident.
+    tb.prepare_aot(AotRequest {
+        code_hash,
+        code: Bytes::copy_from_slice(BYTECODE_RET42),
+        spec_id: SpecId::CANCUN,
+    });
+
+    let p = tb.wait_compiled(BYTECODE_RET42, SpecId::CANCUN);
+    assert_eq!(p.kind, ProgramKind::Aot);
+}
+
+/// `prepare_aot()` on a key that is already resident as JIT should be skipped.
+/// This documents the current behavior (todo: JIT-resident code should still persist).
+#[test]
+#[cfg(feature = "llvm")]
+fn prepare_aot_skips_jit_resident() {
+    let store = Arc::new(TempDirStore::new());
+    let code_hash = alloy_primitives::keccak256(BYTECODE_RET42);
+
+    let tb = TestBackend::new(RuntimeConfig {
+        enabled: true,
+        store: Some(store.clone()),
+        tuning: RuntimeTuning { jit_hot_threshold: 1, jit_worker_count: 1, ..Default::default() },
+        ..Default::default()
+    });
+
+    // JIT-compile first.
+    let p = tb.trigger_jit_cancun(BYTECODE_RET42);
+    assert_eq!(p.kind, ProgramKind::Jit);
+    assert_eq!(tb.stats().resident_entries, 1);
+
+    // Now request AOT — should be skipped because key is already resident.
+    tb.prepare_aot(AotRequest {
+        code_hash,
+        code: Bytes::copy_from_slice(BYTECODE_RET42),
+        spec_id: SpecId::CANCUN,
+    });
+
+    // Give backend time to process.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    // Nothing was persisted — AOT was skipped because the key was already resident as JIT.
+    assert_eq!(store.stored_count(), 0, "prepare_aot should skip JIT-resident keys");
+    // Still JIT, not replaced.
+    let p = tb.get_compiled(code_hash, SpecId::CANCUN).unwrap();
+    assert_eq!(p.kind, ProgramKind::Jit);
+}

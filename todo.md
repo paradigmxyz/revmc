@@ -51,10 +51,10 @@ is exposed; cleanup is purely drop-based.
 - [x] Channel saturation behavior (full command channel).
 - [x] Single JIT admission per key under contention.
 - [x] Multiple `SpecId`s in same backend.
-- [ ] `prepare_aot()` with already-persisted-but-not-resident artifact.
-- [ ] Resident JIT + `prepare_aot()` should still persist.
+- [x] `prepare_aot()` with already-persisted-but-not-resident artifact.
+- [x] Resident JIT + `prepare_aot()` should still persist.
 - [x] Clear / shutdown during active compilation work.
-- [ ] CREATE2 / repeated factory deployments.
+- [x] CREATE2 / repeated factory deployments.
 - [x] Nested `CALL*` / `CREATE*` suspend-resume (revm_evm integration).
 - [x] Integration tests in non-blocking mode.
 - [x] `set_enabled` toggle while compilations are in-flight.

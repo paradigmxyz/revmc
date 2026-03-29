@@ -663,6 +663,127 @@ mod tests {
         }
     }
 
+    /// CREATE2 factory: deploy the same runtime code multiple times with different salts.
+    /// All deployments share the same code hash and should hit the JIT cache.
+    #[test]
+    fn jit_evm_create2_factory() {
+        let backend = blocking_backend();
+        let mut evm = test_jit_evm(backend.clone());
+
+        // Runtime code: PUSH1 0xAB PUSH0 MSTORE PUSH1 0x20 PUSH0 RETURN
+        let runtime_code: &[u8] = &[0x60, 0xAB, 0x5f, 0x52, 0x60, 0x20, 0x5f, 0xf3];
+
+        // Build init code that deploys `runtime_code` (same pattern as deploy_contract_with_nonce).
+        let rt_len = runtime_code.len();
+        let init_offset = 10u8;
+        let mut init_code = vec![
+            op::PUSH1,
+            rt_len as u8,
+            op::PUSH1,
+            init_offset,
+            op::PUSH0,
+            op::CODECOPY,
+            op::PUSH1,
+            rt_len as u8,
+            op::PUSH0,
+            op::RETURN,
+        ];
+        init_code.extend_from_slice(runtime_code);
+        let init_len = init_code.len();
+
+        // Factory contract: copies embedded init_code to memory, reads salt from
+        // calldata, then CREATE2. Returns the deployed address.
+        let mut factory_code = vec![
+            op::PUSH1,
+            0, // placeholder for init_len
+            op::PUSH1,
+            0, // placeholder for code_offset
+            op::PUSH0,
+            op::CODECOPY, // mem[0..init_len] = init_code
+            op::PUSH0,
+            op::CALLDATALOAD, // salt from calldata[0..32]
+            op::PUSH1,
+            0,         // placeholder for init_len
+            op::PUSH0, // offset
+            op::PUSH0, // value
+            op::CREATE2,
+            op::PUSH0,
+            op::MSTORE,
+            op::PUSH1,
+            0x20,
+            op::PUSH0,
+            op::RETURN,
+        ];
+        let code_offset = factory_code.len() as u8;
+        factory_code[1] = init_len as u8;
+        factory_code[3] = code_offset;
+        factory_code[9] = init_len as u8;
+        factory_code.extend_from_slice(&init_code);
+
+        let factory_addr = deploy_contract(&mut evm, &factory_code);
+
+        // Deploy 3 instances via the factory with different salts.
+        let mut deployed_addrs = Vec::new();
+        for (i, salt) in (1u64..=3).enumerate() {
+            let mut calldata = [0u8; 32];
+            calldata[24..].copy_from_slice(&salt.to_be_bytes());
+
+            let tx = TxEnv {
+                kind: TxKind::Call(factory_addr),
+                nonce: 1 + i as u64,
+                data: Bytes::copy_from_slice(&calldata),
+                gas_limit: 1_000_000,
+                ..Default::default()
+            };
+            let result = evm.transact_commit(tx).unwrap();
+            match result {
+                ExecutionResult::Success { output, .. } => {
+                    let data = match &output {
+                        Output::Call(bytes) => bytes,
+                        other => panic!("expected Call output, got: {other:?}"),
+                    };
+                    let addr = Address::from_slice(&data[12..32]);
+                    assert_ne!(addr, Address::ZERO, "CREATE2 should return a non-zero address");
+                    deployed_addrs.push(addr);
+                }
+                other => panic!("expected Success, got: {other:?}"),
+            }
+        }
+
+        // All deployed addresses should be different (different salts).
+        deployed_addrs.sort();
+        deployed_addrs.dedup();
+        assert_eq!(
+            deployed_addrs.len(),
+            3,
+            "CREATE2 with different salts should yield different addresses"
+        );
+
+        // Call each deployed contract — all should return 0xAB.
+        for (i, &addr) in deployed_addrs.iter().enumerate() {
+            let tx = TxEnv {
+                kind: TxKind::Call(addr),
+                nonce: 4 + i as u64,
+                gas_limit: 1_000_000,
+                ..Default::default()
+            };
+            let result = evm.transact_commit(tx).unwrap();
+            match result {
+                ExecutionResult::Success { output, .. } => {
+                    let data = match &output {
+                        Output::Call(bytes) => bytes,
+                        other => panic!("expected Call output, got: {other:?}"),
+                    };
+                    assert_eq!(U256::from_be_slice(data), U256::from(0xABu64));
+                }
+                other => panic!("expected Success, got: {other:?}"),
+            }
+        }
+
+        let stats = backend.stats();
+        assert!(stats.jit_successes > 0, "expected JIT compilations, got: {stats:?}");
+    }
+
     /// CREATE deploys a contract whose runtime code gets JIT-compiled and called.
     #[test]
     fn jit_evm_create_and_call() {
