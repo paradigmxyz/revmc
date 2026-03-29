@@ -302,8 +302,8 @@ impl<'a> Bytecode<'a> {
                         ""
                     };
                     writeln!(
-                    w,
-                    "  bb{block_idx} -> bb{target_block} \
+                        w,
+                        "  bb{block_idx} -> bb{target_block} \
                      [label=\"{label}\" color=\"{color}\" fontcolor=\"{color}\"{extra}];"
                     )?;
                 }
