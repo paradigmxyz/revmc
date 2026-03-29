@@ -1454,7 +1454,7 @@ impl LLJIT {
 
     /// Install `SimplePerfSupportPlugin` on the LLJIT's `ObjectLinkingLayer`.
     ///
-    /// Writes `/tmp/jit-<pid>.map` in the perf map format so that profilers
+    /// Writes `/tmp/perf-<pid>.map` in the perf map format so that profilers
     /// like `perf` and `samply` can resolve JIT-compiled symbols without
     /// the heavyweight jitdump machinery.
     /// Requires `ObjectLinkingLayer` (JITLink), which is the LLJIT default.

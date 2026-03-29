@@ -28,7 +28,7 @@ pub struct BackendConfig {
     pub profiling_support: bool,
     /// Whether to enable the simple perf map plugin.
     ///
-    /// Writes `/tmp/jit-<pid>.map` in the perf map format so that profilers
+    /// Writes `/tmp/perf-<pid>.map` in the perf map format so that profilers
     /// can resolve JIT-compiled symbols without the jitdump machinery.
     ///
     /// Not suitable for long-running programs. The map file is append-only

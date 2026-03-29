@@ -160,7 +160,7 @@ revmc_llvm_lljit_enable_memory_usage(LLVMOrcLLJITRef J,
   return LLVMErrorSuccess;
 }
 
-/// JITLink plugin that writes `/tmp/jit-<pid>.map` in the perf map format.
+/// JITLink plugin that writes `/tmp/perf-<pid>.map` in the perf map format.
 ///
 /// For each finalized link graph the plugin emits one line per named, executable
 /// symbol:
@@ -179,7 +179,7 @@ class SimplePerfSupportPlugin : public orc::ObjectLinkingLayer::Plugin {
 
 public:
   SimplePerfSupportPlugin()
-      : MapFile("/tmp/jit-" + std::to_string(getpid()) + ".map",
+      : MapFile("/tmp/perf-" + std::to_string(getpid()) + ".map",
                 std::ios::app) {}
 
   void modifyPassConfig(orc::MaterializationResponsibility &,
@@ -220,7 +220,7 @@ public:
 
 /// Install `SimplePerfSupportPlugin` on the LLJIT's `ObjectLinkingLayer`.
 ///
-/// Writes `/tmp/jit-<pid>.map` in the perf map format so that profilers like
+/// Writes `/tmp/perf-<pid>.map` in the perf map format so that profilers like
 /// `perf` and `samply` can resolve JIT-compiled symbols without jitdump.
 ///
 /// Not suitable for long-running programs; see `SimplePerfSupportPlugin`.

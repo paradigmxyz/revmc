@@ -230,7 +230,7 @@ impl<B: Backend> EvmCompiler<B> {
 
     /// Returns whether the simple perf map plugin is enabled.
     ///
-    /// Writes `/tmp/jit-<pid>.map` in the perf map format so that profilers
+    /// Writes `/tmp/perf-<pid>.map` in the perf map format so that profilers
     /// can resolve JIT-compiled symbols without the jitdump machinery.
     ///
     /// Not suitable for long-running programs. The map file is append-only
