@@ -1,0 +1,61 @@
+# revmc Runtime TODO
+
+Tracked issues and remaining work for the `runtime` module, separate from `plan.md`.
+
+## API / Lifecycle
+
+- [ ] Make `shutdown()` public (currently `#[cfg(test)]` only).
+- [ ] Control APIs (`clear_*`, `prepare_aot`, `compile_jit`) use `try_send()` — silently drop on full channel. Add error feedback or use blocking send for control commands.
+- [ ] Add `reconfigure(RuntimeConfigUpdate)` API.
+- [ ] Add `RuntimeError` / `error.rs` instead of using `eyre` throughout public API.
+- [ ] `InterpretReason::{QueueSaturated, UnsupportedBackend, Invalidated}` are defined but never emitted in normal lookup flow.
+
+## Eviction / Accounting
+
+- [ ] Add `approx_size_bytes` to `CompiledProgram` (plan marks it ✅ but it's absent).
+- [ ] Budget eviction uses global LLVM JIT memory (`jit_total_bytes()`), not per-program resident accounting. Can evict AOT entries that don't reduce JIT bytes, and can overshoot.
+- [ ] Document or fix: eviction is a global JIT memory pressure heuristic, not the plan's per-entry resident budget.
+
+## AOT Prepare
+
+- [ ] `prepare_aot()` does not probe storage before compiling — recompiles even if already persisted.
+- [ ] `prepare_aot()` skips if key is already resident (even as JIT) — JIT-resident code never gets persisted as AOT for faster startup.
+
+## Correctness / State Machine
+
+- [ ] `on_compilation` callback classifies all failures as `CompilationKind::Jit`, including AOT failures.
+- [ ] Stats counters `jit_promotions` / `jit_successes` / `jit_failures` are incremented for AOT work too — metric names are misleading.
+- [ ] Failed entry retry: `EntryPhase::Failed` is sticky forever. Add `negative_jit_ttl` / `next_retry_at`.
+- [ ] `set_enabled()` mutates `AtomicBool` directly, bypassing coordinator (plan wanted coordinator-owned).
+- [ ] Tx-local lookup cache in integration layers means repeated calls within one tx don't emit tracking events — affects hotness accuracy.
+
+## Artifact Versioning
+
+- [ ] `ArtifactKey` lacks `abi_version`, `revmc_semver`, `compiler_fingerprint`. Persisted AOT artifacts may be incompatible across revmc upgrades.
+
+## Integration Layers
+
+- [ ] `alloy_evm.rs` bypasses JIT when `inspect == true` (asymmetric with `revm_evm.rs`).
+- [ ] `alloy_evm.rs` system calls go directly to inner, bypassing JIT.
+
+## Shutdown Safety
+
+- [ ] Callers holding `Arc<CompiledProgram>` past `shutdown()` may reference freed JIT code. Not tested.
+
+## Test Coverage
+
+- [x] Concurrent multi-thread lookup on same key.
+- [x] Channel saturation behavior (full command channel).
+- [x] Single JIT admission per key under contention.
+- [x] Multiple `SpecId`s in same backend.
+- [ ] `prepare_aot()` with already-persisted-but-not-resident artifact.
+- [ ] Resident JIT + `prepare_aot()` should still persist.
+- [x] Clear / shutdown during active compilation work.
+- [ ] CREATE2 / repeated factory deployments.
+- [x] Nested `CALL*` / `CREATE*` suspend-resume (revm_evm integration).
+- [x] Integration tests in non-blocking mode.
+- [x] `set_enabled` toggle while compilations are in-flight.
+- [x] Stats accuracy under concurrent load.
+- [x] `compile_jit_sync` blocks and deduplicates.
+- [x] `on_compilation` callback correctness.
+- [x] CREATE + CALL integration (revm_evm).

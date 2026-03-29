@@ -514,7 +514,11 @@ mod tests {
         JitEvm::new(inner, backend)
     }
 
-    fn deploy_contract(evm: &mut JitEvm<TestInnerEvm>, bytecode: &[u8]) -> Address {
+    fn deploy_contract_with_nonce(
+        evm: &mut JitEvm<TestInnerEvm>,
+        bytecode: &[u8],
+        nonce: u64,
+    ) -> Address {
         let len = bytecode.len();
         assert!(len <= 255);
         let offset = 10u8;
@@ -534,6 +538,7 @@ mod tests {
 
         let tx = TxEnv {
             kind: TxKind::Create,
+            nonce,
             data: Bytes::copy_from_slice(&deploy_code),
             gas_limit: 1_000_000,
             ..Default::default()
@@ -547,6 +552,10 @@ mod tests {
             },
             other => panic!("expected Success, got: {other:?}"),
         }
+    }
+
+    fn deploy_contract(evm: &mut JitEvm<TestInnerEvm>, bytecode: &[u8]) -> Address {
+        deploy_contract_with_nonce(evm, bytecode, 0)
     }
 
     #[test]
@@ -631,6 +640,164 @@ mod tests {
             "expected Success for empty-code call, got: {:?}",
             result.result,
         );
+
+        backend.shutdown().unwrap();
+    }
+
+    /// Non-blocking mode: JIT compiles in background and results eventually appear.
+    #[test]
+    fn jit_evm_non_blocking() {
+        use crate::runtime::RuntimeTuning;
+
+        let config = RuntimeConfig {
+            enabled: true,
+            tuning: RuntimeTuning {
+                jit_hot_threshold: 1,
+                jit_worker_count: 1,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let backend = JitBackend::start(config).unwrap();
+
+        let runtime_code: &[u8] = &[0x60, 0x42, 0x5f, 0x52, 0x60, 0x20, 0x5f, 0xf3];
+
+        let mut evm = test_jit_evm(backend.clone());
+        let contract_addr = deploy_contract(&mut evm, runtime_code);
+
+        // First call: should succeed (interpreter fallback or JIT).
+        let tx = TxEnv {
+            kind: TxKind::Call(contract_addr),
+            nonce: 1,
+            gas_limit: 1_000_000,
+            ..Default::default()
+        };
+        let result = evm.transact(tx).unwrap();
+        assert!(matches!(result.result, ExecutionResult::Success { .. }));
+
+        // Wait for JIT to compile in background.
+        let code_hash = alloy_primitives::keccak256(runtime_code);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            if backend.get_compiled(code_hash, SpecId::CANCUN).is_some() {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "timed out waiting for JIT");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+
+        // Second call: should use JIT-compiled function.
+        let mut evm = test_jit_evm(backend.clone());
+        let contract_addr = deploy_contract(&mut evm, runtime_code);
+
+        let tx = TxEnv {
+            kind: TxKind::Call(contract_addr),
+            nonce: 1,
+            gas_limit: 1_000_000,
+            ..Default::default()
+        };
+        let result = evm.transact(tx).unwrap();
+        match result.result {
+            ExecutionResult::Success { output, .. } => {
+                let data = match &output {
+                    Output::Call(bytes) => bytes,
+                    other => panic!("expected Call output, got: {other:?}"),
+                };
+                assert_eq!(U256::from_be_slice(data), U256::from(0x42));
+            }
+            other => panic!("expected Success, got: {other:?}"),
+        }
+
+        backend.shutdown().unwrap();
+    }
+
+    /// CALL into another contract: JIT handles the nested call frame.
+    #[test]
+    fn jit_evm_nested_call() {
+        let backend = blocking_backend();
+        let mut evm = test_jit_evm(backend.clone());
+
+        // Inner contract: PUSH1 0x42 PUSH0 MSTORE PUSH1 0x20 PUSH0 RETURN
+        let inner_code: &[u8] = &[0x60, 0x42, 0x5f, 0x52, 0x60, 0x20, 0x5f, 0xf3];
+        let inner_addr = deploy_contract_with_nonce(&mut evm, inner_code, 0);
+
+        // Outer contract: CALL inner, then copy return data and return it.
+        let mut outer_code = vec![
+            op::PUSH0, // retLen
+            op::PUSH0, // retOff
+            op::PUSH0, // argsLen
+            op::PUSH0, // argsOff
+            op::PUSH0, // value
+        ];
+        // PUSH20 <inner_addr>
+        outer_code.push(op::PUSH20);
+        outer_code.extend_from_slice(inner_addr.as_slice());
+        outer_code.extend_from_slice(&[
+            op::PUSH2,
+            0xFF,
+            0xFF, // gas
+            op::CALL,
+            op::RETURNDATASIZE,
+            op::PUSH0,
+            op::PUSH0,
+            op::RETURNDATACOPY,
+            op::RETURNDATASIZE,
+            op::PUSH0,
+            op::RETURN,
+        ]);
+        let outer_addr = deploy_contract_with_nonce(&mut evm, &outer_code, 1);
+
+        let tx = TxEnv {
+            kind: TxKind::Call(outer_addr),
+            nonce: 2,
+            gas_limit: 1_000_000,
+            ..Default::default()
+        };
+        let result = evm.transact(tx).unwrap();
+        match result.result {
+            ExecutionResult::Success { output, .. } => {
+                let data = match &output {
+                    Output::Call(bytes) => bytes,
+                    other => panic!("expected Call output, got: {other:?}"),
+                };
+                assert_eq!(U256::from_be_slice(data), U256::from(0x42));
+            }
+            other => panic!("expected Success, got: {other:?}"),
+        }
+
+        backend.shutdown().unwrap();
+    }
+
+    /// CREATE deploys a contract whose runtime code gets JIT-compiled and called.
+    #[test]
+    fn jit_evm_create_and_call() {
+        let backend = blocking_backend();
+        let mut evm = test_jit_evm(backend.clone());
+
+        // Runtime code: PUSH1 0x99 PUSH0 MSTORE PUSH1 0x20 PUSH0 RETURN
+        let runtime_code: &[u8] = &[0x60, 0x99, 0x5f, 0x52, 0x60, 0x20, 0x5f, 0xf3];
+
+        // Deploy via helper (uses CREATE internally).
+        let contract_addr = deploy_contract(&mut evm, runtime_code);
+
+        // Call the deployed contract.
+        let tx = TxEnv {
+            kind: TxKind::Call(contract_addr),
+            nonce: 1,
+            gas_limit: 1_000_000,
+            ..Default::default()
+        };
+        let result = evm.transact(tx).unwrap();
+        match result.result {
+            ExecutionResult::Success { output, .. } => {
+                let data = match &output {
+                    Output::Call(bytes) => bytes,
+                    other => panic!("expected Call output, got: {other:?}"),
+                };
+                assert_eq!(U256::from_be_slice(data), U256::from(0x99u64));
+            }
+            other => panic!("expected Success, got: {other:?}"),
+        }
 
         backend.shutdown().unwrap();
     }
