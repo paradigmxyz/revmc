@@ -921,9 +921,18 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                     let target = if is_invalid {
                         debug_assert_eq!(*data, op::JUMPI);
                         // The jump target is invalid, but we still need to account for the stack.
-                        self.len_offset -= 1;
+                        if data.flags.contains(InstFlags::BLOCK_RESOLVED_JUMP) {
+                            // Block-resolved: target is on the stack, pop and discard.
+                            let _ = self.pop();
+                        } else {
+                            self.len_offset -= 1;
+                        }
                         self.return_block.unwrap()
                     } else if data.flags.contains(InstFlags::STATIC_JUMP) {
+                        // Block-resolved jumps still have the target on the stack; pop and discard.
+                        if data.flags.contains(InstFlags::BLOCK_RESOLVED_JUMP) {
+                            let _ = self.pop();
+                        }
                         let target_inst = data.data as usize;
                         debug_assert_eq!(
                             *self.bytecode.inst(target_inst),
