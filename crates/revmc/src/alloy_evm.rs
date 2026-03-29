@@ -62,6 +62,15 @@ impl<DB: Database, I, P> JitEvm<DB, I, P> {
     pub const fn backend(&self) -> &JitBackend {
         &self.backend
     }
+
+    /// Clears the lookup cache if the spec has changed since the last call.
+    fn invalidate_cache(&mut self) {
+        let spec_id = self.inner.cfg.spec;
+        if spec_id != self.lookup_cache_spec_id {
+            self.lookup_cache.clear();
+            self.lookup_cache_spec_id = spec_id;
+        }
+    }
 }
 
 impl<DB: Database, I, P> core::ops::Deref for JitEvm<DB, I, P> {
@@ -111,11 +120,7 @@ where
             self.inner.inspect_tx(tx)
         } else {
             self.inner.ctx.set_tx(tx);
-            let spec_id = self.inner.ctx.cfg.spec;
-            if spec_id != self.lookup_cache_spec_id {
-                self.lookup_cache.clear();
-                self.lookup_cache_spec_id = spec_id;
-            }
+            self.invalidate_cache();
             JitHandler::new(&self.backend, &mut self.lookup_cache).run(&mut self.inner).map(|r| {
                 let state = self.inner.finalize();
                 ResultAndState::new(r, state)
@@ -130,11 +135,7 @@ where
         data: Bytes,
     ) -> Result<ResultAndState<Self::HaltReason>, Self::Error> {
         self.inner.ctx.set_tx(TxEnv::new_system_tx_with_caller(caller, contract, data));
-        let spec_id = self.inner.ctx.cfg.spec;
-        if spec_id != self.lookup_cache_spec_id {
-            self.lookup_cache.clear();
-            self.lookup_cache_spec_id = spec_id;
-        }
+        self.invalidate_cache();
         JitHandler::new(&self.backend, &mut self.lookup_cache).run_system_call(&mut self.inner).map(
             |r| {
                 let state = self.inner.finalize();
