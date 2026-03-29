@@ -293,10 +293,18 @@ impl<'a> Bytecode<'a> {
                     } else {
                         ("", "#53a8b6")
                     };
+                    let back_edge = target_block <= block_idx;
+                    let extra = if block_idx == target_block {
+                        " tailport=s headport=e constraint=false"
+                    } else if back_edge {
+                        " constraint=false"
+                    } else {
+                        ""
+                    };
                     writeln!(
                         w,
                         "  bb{block_idx} -> bb{target_block} \
-                         [label=\"{label}\" color=\"{color}\" fontcolor=\"{color}\"];"
+                         [label=\"{label}\" color=\"{color}\" fontcolor=\"{color}\"{extra}];"
                     )?;
                 }
             } else if last.is_legacy_jump() && !last.is_legacy_static_jump() {
