@@ -254,6 +254,18 @@ impl<B: Backend> EvmCompiler<B> {
         self.update_backend_config(|c| c.simple_perf = yes);
     }
 
+    /// Sets whether to disable JITDylib pooling.
+    ///
+    /// When enabled, JITDylibs are removed from the execution session on drop
+    /// instead of being cleared and returned to a pool. This prevents JIT code
+    /// address reuse, avoiding stale/duplicate entries in the perf map file.
+    ///
+    /// This setting is applied once per process on first JIT compilation.
+    /// Subsequent compilers inherit the value set by the first.
+    pub fn set_disable_jit_dylib_pool(&mut self, yes: bool) {
+        self.update_backend_config(|c| c.disable_jit_dylib_pool = yes);
+    }
+
     /// Sets whether to enable frame pointers.
     ///
     /// This is useful for profiling and debugging, but it incurs a very slight performance penalty.

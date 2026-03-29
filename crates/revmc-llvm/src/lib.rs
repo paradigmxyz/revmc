@@ -210,6 +210,9 @@ struct GlobalOrcJit {
     /// Pool of cleared JITDylibs ready for reuse.
     pool: std::sync::Mutex<Vec<orc::JITDylibRef>>,
 
+    /// When true, JITDylibs are removed instead of pooled on drop.
+    disable_pool: bool,
+
     /// Live JIT memory counters, updated by the C++ MemoryUsagePlugin.
     memory_counters: &'static JitMemoryCounters,
 }
@@ -228,6 +231,7 @@ impl GlobalOrcJit {
         debug_support: bool,
         profiling_support: bool,
         simple_perf: bool,
+        disable_pool: bool,
     ) -> Result<&'static Self> {
         let result = Self::global().get_or_init(|| {
             init().map_err(|e| e.to_string())?;
@@ -270,6 +274,7 @@ impl GlobalOrcJit {
                 builtins_defined: Default::default(),
                 next_dylib_id: Default::default(),
                 pool: Default::default(),
+                disable_pool,
                 memory_counters,
             })
         });
@@ -298,8 +303,15 @@ impl GlobalOrcJit {
         jd
     }
 
-    /// Returns a cleared JITDylib to the pool for reuse.
+    /// Returns a cleared JITDylib to the pool for reuse, or removes it from
+    /// the execution session if pooling is disabled.
     fn release_jit_dylib(&self, jd: orc::JITDylibRef) {
+        if self.disable_pool {
+            if let Err(e) = self.jit.get_execution_session().remove_jit_dylib(&jd) {
+                error!("failed to remove JITDylib: {e}");
+            }
+            return;
+        }
         if let Err(e) = jd.clear() {
             error!("failed to clear JITDylib for pool: {e}");
             return;
@@ -375,8 +387,14 @@ impl fmt::Debug for OrcJitState {
 }
 
 impl OrcJitState {
-    fn new(debug_support: bool, profiling_support: bool, simple_perf: bool) -> Result<Self> {
-        let global = GlobalOrcJit::get(debug_support, profiling_support, simple_perf)?;
+    fn new(
+        debug_support: bool,
+        profiling_support: bool,
+        simple_perf: bool,
+        disable_pool: bool,
+    ) -> Result<Self> {
+        let global =
+            GlobalOrcJit::get(debug_support, profiling_support, simple_perf, disable_pool)?;
         Ok(Self {
             global,
             staged_functions: FxHashMap::default(),
@@ -560,6 +578,7 @@ impl EvmLlvmBackend {
                 self.backend_config.debug_support,
                 self.backend_config.profiling_support,
                 self.backend_config.simple_perf,
+                self.backend_config.disable_jit_dylib_pool,
             )?);
         }
         Ok(self.orc.as_mut().unwrap())

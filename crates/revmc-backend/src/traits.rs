@@ -38,6 +38,15 @@ pub struct BackendConfig {
     ///
     /// Applied once per process on first JIT compilation.
     pub simple_perf: bool,
+    /// Whether to disable JITDylib pooling.
+    ///
+    /// When enabled, JITDylibs are removed from the execution session on drop
+    /// instead of being cleared and returned to a pool for reuse. This prevents
+    /// JIT code address reuse, which avoids stale/duplicate entries in the perf
+    /// map file.
+    ///
+    /// Applied once per process on first JIT compilation.
+    pub disable_jit_dylib_pool: bool,
     /// Debug info source file path. `Some` enables debug info emission.
     pub debug_file: Option<PathBuf>,
 }
@@ -51,6 +60,7 @@ impl Default for BackendConfig {
             debug_support: true,
             profiling_support: false,
             simple_perf: true,
+            disable_jit_dylib_pool: false,
             debug_file: None,
         }
     }
