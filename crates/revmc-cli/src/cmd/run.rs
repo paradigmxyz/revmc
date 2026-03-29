@@ -368,16 +368,50 @@ impl RunArgs {
 fn open_dot(dot_path: &Path, fmt: DotFormat, open: bool) -> Result<()> {
     let ext = fmt.extension();
     let out_path = dot_path.with_extension(ext);
-    let status = std::process::Command::new("dot")
+    match std::process::Command::new("dot")
         .arg(format!("-T{ext}"))
         .arg("-o")
         .arg(&out_path)
         .arg(dot_path)
-        .status()?;
-    ensure!(status.success(), "dot command failed with {status}");
-    eprintln!("DOT graph: {}", out_path.display());
+        .status()
+    {
+        Ok(status) if status.success() => {
+            eprintln!("DOT graph: {}", out_path.display());
+            if open {
+                let _ = open::that(out_path.as_os_str());
+            }
+            return Ok(());
+        }
+        Ok(status) => eprintln!("warning: dot command failed with {status}, falling back to HTML"),
+        Err(e) => eprintln!("warning: dot command not found ({e}), falling back to HTML"),
+    }
+
+    // Fallback: write an HTML file that renders the DOT graph client-side.
+    let dot_source = std::fs::read_to_string(dot_path)?;
+    let dot_escaped = dot_source.replace('\\', "\\\\").replace('`', "\\`").replace("${", "\\${");
+    let html_path = dot_path.with_extension("html");
+    std::fs::write(
+        &html_path,
+        format!(
+            r#"<!DOCTYPE html>
+<html><head>
+<meta charset="utf-8">
+<title>revmc CFG</title>
+<style>html,body{{margin:0;height:100%;background:#1a1a2e}}
+svg{{width:100%;height:100%}}</style>
+</head><body>
+<script type="module">
+import {{ instance }} from "https://cdn.jsdelivr.net/npm/@viz-js/viz@3/+esm";
+const viz = await instance();
+const svg = viz.renderSVGElement(`{dot_escaped}`);
+document.body.appendChild(svg);
+</script>
+</body></html>"#
+        ),
+    )?;
+    eprintln!("DOT graph: {}", html_path.display());
     if open {
-        let _ = open::that(out_path.as_os_str());
+        let _ = open::that(html_path.as_os_str());
     }
     Ok(())
 }
