@@ -365,6 +365,8 @@ struct OrcJitState {
     /// Shared guard that owns the JITDylib. The JD is not recycled until all
     /// `Arc<JitDylibGuard>` holders (including external callers) are dropped.
     jd_guard: Arc<JitDylibGuard>,
+    /// Counter for throttling `SymbolStringPool::clearDeadEntries()` calls.
+    clear_pool_counter: u32,
 }
 
 impl fmt::Debug for OrcJitState {
@@ -391,6 +393,7 @@ impl OrcJitState {
             committed_functions: FxHashMap::default(),
             last_compiled_object: None,
             jd_guard,
+            clear_pool_counter: 0,
         })
     }
 
@@ -403,6 +406,17 @@ impl OrcJitState {
         self.last_compiled_object = None;
         self.jd().clear().map_err(error_msg)?;
         Ok(())
+    }
+
+    /// Periodically clears dead entries from the global SymbolStringPool.
+    ///
+    /// `clearDeadEntries` is O(pool_size), so we throttle it to avoid
+    /// O(N²) total cost over many compilations.
+    fn maybe_clear_dead_pool_entries(&mut self) {
+        self.clear_pool_counter += 1;
+        if self.clear_pool_counter % 256 == 0 {
+            self.global.jit.get_execution_session().get_symbol_string_pool().clear_dead_entries();
+        }
     }
 
     fn jd(&self) -> orc::JITDylibRef {
@@ -988,7 +1002,7 @@ impl Backend for EvmLlvmBackend {
         self.module = create_module(self.cx, &self.machine, self.aot)?;
         if let Some(orc) = &mut self.orc {
             orc.staged_functions.clear();
-            orc.global.jit.get_execution_session().get_symbol_string_pool().clear_dead_entries();
+            orc.maybe_clear_dead_pool_entries();
         }
         Ok(())
     }
