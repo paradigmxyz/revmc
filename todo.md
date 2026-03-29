@@ -34,8 +34,8 @@ Tracked issues and remaining work for the `runtime` module, separate from `plan.
 
 ## Integration Layers
 
-- [ ] `alloy_evm.rs` bypasses JIT when `inspect == true` (asymmetric with `revm_evm.rs`).
-- [ ] `alloy_evm.rs` system calls go directly to inner, bypassing JIT.
+- `alloy_evm.rs` bypasses JIT when `inspect == true` — intentional, inspect is not jittable.
+- [x] `alloy_evm.rs` system calls now go through `JitHandler`, matching `revm_evm.rs` behavior.
 
 ## Shutdown Safety
 

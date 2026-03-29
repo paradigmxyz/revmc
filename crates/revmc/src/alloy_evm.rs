@@ -18,7 +18,8 @@ use alloy_primitives::{Address, Bytes};
 use revm_context::{BlockEnv, ContextSetters, Evm as RevmEvm, TxEnv};
 use revm_context_interface::result::{EVMError, HaltReason, ResultAndState};
 use revm_handler::{
-    EthFrame, ExecuteEvm, Handler, PrecompileProvider, SystemCallEvm, instructions::EthInstructions,
+    EthFrame, ExecuteEvm, Handler, PrecompileProvider, SystemCallEvm, SystemCallTx,
+    instructions::EthInstructions,
 };
 use revm_inspector::{InspectEvm, Inspector, NoOpInspector};
 use revm_interpreter::{InterpreterResult, interpreter::EthInterpreter};
@@ -128,7 +129,18 @@ where
         contract: Address,
         data: Bytes,
     ) -> Result<ResultAndState<Self::HaltReason>, Self::Error> {
-        self.inner.system_call_with_caller(caller, contract, data)
+        self.inner.ctx.set_tx(TxEnv::new_system_tx_with_caller(caller, contract, data));
+        let spec_id = self.inner.ctx.cfg.spec;
+        if spec_id != self.lookup_cache_spec_id {
+            self.lookup_cache.clear();
+            self.lookup_cache_spec_id = spec_id;
+        }
+        JitHandler::new(&self.backend, &mut self.lookup_cache).run_system_call(&mut self.inner).map(
+            |r| {
+                let state = self.inner.finalize();
+                ResultAndState::new(r, state)
+            },
+        )
     }
 
     fn finish(self) -> (Self::DB, EvmEnv<Self::Spec>) {
