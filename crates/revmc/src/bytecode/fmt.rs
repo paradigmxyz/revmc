@@ -259,10 +259,9 @@ impl<'a> Bytecode<'a> {
                     } else {
                         ("", "#53a8b6")
                     };
-                    let back_edge = target_block <= block_idx;
                     let extra = if block_idx == target_block {
                         " tailport=s headport=e constraint=false"
-                    } else if back_edge {
+                    } else if target_block <= block_idx {
                         " constraint=false"
                     } else {
                         ""
