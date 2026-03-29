@@ -302,9 +302,9 @@ impl<'a> Bytecode<'a> {
                         ""
                     };
                     writeln!(
-                        w,
-                        "  bb{block_idx} -> bb{target_block} \
-                         [label=\"{label}\" color=\"{color}\" fontcolor=\"{color}\"{extra}];"
+                    w,
+                    "  bb{block_idx} -> bb{target_block} \
+                     [label=\"{label}\" color=\"{color}\" fontcolor=\"{color}\"{extra}];"
                     )?;
                 }
             } else if last.is_legacy_jump() && !last.is_legacy_static_jump() {

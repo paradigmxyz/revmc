@@ -2646,26 +2646,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 
 [[package]]
-name = "revm"
-version = "36.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b0abc15d09cd211e9e73410ada10134069c794d4bcdb787dfc16a1bf0939849c"
-dependencies = [
- "revm-bytecode",
- "revm-context",
- "revm-context-interface",
- "revm-database",
- "revm-database-interface",
- "revm-handler",
- "revm-inspector",
- "revm-interpreter",
- "revm-precompile",
- "revm-primitives",
- "revm-state",
- "revm-statetest-types",
-]
-
-[[package]]
 name = "revm-bytecode"
 version = "9.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2924,10 +2904,16 @@ dependencies = [
  "libloading",
  "lz-str",
  "open",
- "revm",
  "revm-bytecode",
+ "revm-context",
+ "revm-context-interface",
+ "revm-database",
+ "revm-database-interface",
+ "revm-handler",
  "revm-interpreter",
  "revm-primitives",
+ "revm-state",
+ "revm-statetest-types",
  "revmc",
  "revmc-build",
  "revmc-cli-tests",
@@ -2971,7 +2957,13 @@ name = "revmc-examples-runner"
 version = "0.1.0"
 dependencies = [
  "cc",
- "revm",
+ "revm-bytecode",
+ "revm-context",
+ "revm-database",
+ "revm-database-interface",
+ "revm-handler",
+ "revm-primitives",
+ "revm-state",
  "revmc",
  "revmc-build",
  "revmc-builtins",
@@ -3011,7 +3003,15 @@ dependencies = [
  "indicatif",
  "k256",
  "libloading",
- "revm",
+ "revm-context",
+ "revm-context-interface",
+ "revm-database",
+ "revm-database-interface",
+ "revm-handler",
+ "revm-inspector",
+ "revm-interpreter",
+ "revm-primitives",
+ "revm-statetest-types",
  "revmc",
  "serde_json",
  "tempfile",

@@ -237,7 +237,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 if data.is_dead_code() {
                     unreachable_block
                 } else {
-                    bcx.create_block(&bytecode.op_block_name(Some(i), ""))
+                    let name = if config.debug { &bytecode.op_block_name(Some(i), "") } else { "" };
+                    bcx.create_block(name)
                 }
             })
             .collect();

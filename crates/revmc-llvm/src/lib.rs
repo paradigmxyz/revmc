@@ -7,7 +7,7 @@ extern crate tracing;
 
 use alloy_primitives::map::{FxBuildHasher, HashSet};
 use inkwell::{
-    AddressSpace, IntPredicate, OptimizationLevel,
+    AddressSpace, IntPredicate,
     attributes::{Attribute, AttributeLoc},
     basic_block::BasicBlock,
     debug_info::{
@@ -31,7 +31,8 @@ use inkwell::{
 };
 use object::{Object, ObjectSymbol};
 use revmc_backend::{
-    Backend, BackendTypes, Builder, IntCC, Result, TailCallKind, TypeMethods, U256, eyre,
+    Backend, BackendConfig, BackendTypes, Builder, IntCC, OptimizationLevel, Result, TailCallKind,
+    TypeMethods, U256, eyre, format_bytes,
 };
 use std::{
     borrow::Cow,
@@ -39,10 +40,10 @@ use std::{
     ffi::CString,
     fmt, iter,
     mem::ManuallyDrop,
-    path::{Path, PathBuf},
+    path::Path,
     sync::{
         Once, OnceLock,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
     },
 };
 
@@ -57,6 +58,62 @@ mod utils;
 pub(crate) use utils::*;
 
 const DEFAULT_WEIGHT: u32 = 20000;
+
+/// Current JIT memory usage counters.
+///
+/// Counters reflect live memory: bytes are added on compilation and
+/// subtracted when JIT code is freed.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct JitMemoryUsage {
+    /// Bytes allocated for executable (code) sections.
+    pub code_bytes: usize,
+    /// Bytes allocated for non-executable (data) sections.
+    pub data_bytes: usize,
+}
+
+impl JitMemoryUsage {
+    /// Total bytes (code + data).
+    pub fn total_bytes(&self) -> usize {
+        self.code_bytes + self.data_bytes
+    }
+}
+
+impl fmt::Display for JitMemoryUsage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "total: {}, code: {}, data: {}",
+            format_bytes(self.total_bytes()),
+            format_bytes(self.code_bytes),
+            format_bytes(self.data_bytes),
+        )
+    }
+}
+
+/// Atomic counters written by the C++ `MemoryUsagePlugin`.
+///
+/// Leaked into a `&'static` reference so the plugin (which lives as long as
+/// the process-global LLJIT) always has valid pointers.
+struct JitMemoryCounters {
+    code_bytes: AtomicUsize,
+    data_bytes: AtomicUsize,
+}
+
+impl JitMemoryCounters {
+    fn get(&self) -> JitMemoryUsage {
+        JitMemoryUsage {
+            code_bytes: self.code_bytes.load(Ordering::Relaxed),
+            data_bytes: self.data_bytes.load(Ordering::Relaxed),
+        }
+    }
+}
+
+/// Returns the current JIT memory usage.
+///
+/// Returns `None` if the JIT has not been initialized yet.
+pub fn jit_memory_usage() -> Option<JitMemoryUsage> {
+    GlobalOrcJit::try_get().map(|g| g.memory_counters.get())
+}
 
 type FxHashMap<K, V> = alloy_primitives::map::HashMap<K, V, FxBuildHasher>;
 
@@ -78,8 +135,6 @@ pub struct EvmLlvmBackend {
     /// Non-owning context handle for JIT mode. See [`create_orc_context`].
     _cx_handle: Option<Box<ManuallyDrop<Context>>>,
 
-    /// Debug info source file path set by the compiler.
-    debug_file: Option<PathBuf>,
     /// LLVM debug info builder and compile unit, created lazily when `debug_file` is set.
     di_state: Option<DiState>,
 
@@ -93,9 +148,7 @@ pub struct EvmLlvmBackend {
     ty_isize: IntType<'static>,
 
     aot: bool,
-    debug_assertions: bool,
-    is_dumping: bool,
-    opt_level: OptimizationLevel,
+    backend_config: BackendConfig,
     /// Separate from `function_names` to have always increasing IDs.
     function_counter: u32,
     /// Persistent mapping from function ID to symbol name.
@@ -156,12 +209,23 @@ struct GlobalOrcJit {
     next_dylib_id: AtomicU64,
     /// Pool of cleared JITDylibs ready for reuse.
     pool: std::sync::Mutex<Vec<orc::JITDylibRef>>,
+
+    /// Live JIT memory counters, updated by the C++ MemoryUsagePlugin.
+    memory_counters: &'static JitMemoryCounters,
 }
 
 impl GlobalOrcJit {
-    fn get() -> Result<&'static Self> {
-        static GLOBAL: OnceLock<std::result::Result<GlobalOrcJit, String>> = OnceLock::new();
-        let result = GLOBAL.get_or_init(|| {
+    fn global() -> &'static OnceLock<Result<Self, String>> {
+        static GLOBAL: OnceLock<Result<GlobalOrcJit, String>> = OnceLock::new();
+        &GLOBAL
+    }
+
+    fn try_get() -> Option<&'static Self> {
+        Self::global().get().and_then(|r| r.as_ref().ok())
+    }
+
+    fn get(debug_support: bool, profiling_support: bool) -> Result<&'static Self> {
+        let result = Self::global().get_or_init(|| {
             init().map_err(|e| e.to_string())?;
             let jit =
                 orc::LLJIT::builder().concurrent_compiler().build().map_err(|e| e.to_string())?;
@@ -169,12 +233,27 @@ impl GlobalOrcJit {
             jit.get_obj_transform_layer().set_transform(obj_capture_transform);
 
             // Register JIT debug info with debuggers and profilers.
-            if let Err(e) = jit.enable_debug_support() {
+            if debug_support && let Err(e) = jit.enable_debug_support() {
                 warn!("failed to enable JIT debug support: {e}");
             }
-            if let Err(e) = jit.enable_perf_support() {
+            if profiling_support && let Err(e) = jit.enable_perf_support() {
                 warn!("failed to enable JIT perf support: {e}");
             }
+
+            // Track JIT memory usage.
+            let memory_counters: &'static JitMemoryCounters =
+                Box::leak(Box::new(JitMemoryCounters {
+                    code_bytes: AtomicUsize::new(0),
+                    data_bytes: AtomicUsize::new(0),
+                }));
+            orc::cvt(unsafe {
+                cpp::revmc_llvm_lljit_enable_memory_usage(
+                    jit.as_inner(),
+                    &memory_counters.code_bytes,
+                    &memory_counters.data_bytes,
+                )
+            })
+            .map_err(|e| e.to_string())?;
 
             let builtins_jd = jit.get_execution_session().create_bare_jit_dylib(c"revmc.builtins");
 
@@ -184,6 +263,7 @@ impl GlobalOrcJit {
                 builtins_defined: Default::default(),
                 next_dylib_id: Default::default(),
                 pool: Default::default(),
+                memory_counters,
             })
         });
         match result {
@@ -288,8 +368,8 @@ impl fmt::Debug for OrcJitState {
 }
 
 impl OrcJitState {
-    fn new() -> Result<Self> {
-        let global = GlobalOrcJit::get()?;
+    fn new(debug_support: bool, profiling_support: bool) -> Result<Self> {
+        let global = GlobalOrcJit::get(debug_support, profiling_support)?;
         Ok(Self {
             global,
             staged_functions: FxHashMap::default(),
@@ -373,7 +453,7 @@ impl EvmLlvmBackend {
     /// Creates a new LLVM backend for the host machine.
     ///
     /// Use [`new_for_target`](Self::new_for_target) to create a backend for a specific target.
-    pub fn new(aot: bool, opt_level: revmc_backend::OptimizationLevel) -> Result<Self> {
+    pub fn new(aot: bool, opt_level: OptimizationLevel) -> Result<Self> {
         Self::new_for_target(aot, opt_level, &revmc_backend::Target::Native)
     }
 
@@ -381,12 +461,10 @@ impl EvmLlvmBackend {
     #[instrument(name = "new_llvm_backend", level = "debug", skip_all)]
     pub fn new_for_target(
         aot: bool,
-        opt_level: revmc_backend::OptimizationLevel,
+        opt_level: OptimizationLevel,
         target: &revmc_backend::Target,
     ) -> Result<Self> {
         init()?;
-
-        let opt_level = convert_opt_level(opt_level);
 
         let target_info = TargetInfo::new(target)?;
         let target = &target_info.target;
@@ -395,7 +473,7 @@ impl EvmLlvmBackend {
                 &target_info.triple,
                 &target_info.cpu,
                 &target_info.features,
-                opt_level,
+                convert_opt_level(opt_level),
                 if aot { RelocMode::PIC } else { RelocMode::Static },
                 if aot { CodeModel::Default } else { CodeModel::JITDefault },
             )
@@ -404,8 +482,8 @@ impl EvmLlvmBackend {
         // In JIT mode, ORC owns the context via a ThreadSafeContext so that modules can be
         // safely transferred to the JIT without double-ownership issues with the TLS context.
         // In AOT mode, we use the thread-local context directly.
-        let (cx, tscx, cx_handle, orc) = if aot {
-            (get_context(), None, None, None)
+        let (cx, tscx, cx_handle) = if aot {
+            (get_context(), None, None)
         } else {
             if !target.has_jit() {
                 return Err(eyre::eyre!("target {:?} does not support JIT", target.get_name()));
@@ -418,8 +496,7 @@ impl EvmLlvmBackend {
             }
 
             let (cx, tscx, cx_handle) = create_orc_context();
-            let orc = OrcJitState::new()?;
-            (cx, Some(tscx), Some(cx_handle), Some(orc))
+            (cx, Some(tscx), Some(cx_handle))
         };
 
         let module = create_module(cx, &machine, aot)?;
@@ -440,7 +517,7 @@ impl EvmLlvmBackend {
             bcx,
             module,
             machine,
-            orc,
+            orc: None,
             _tscx: tscx,
             _cx_handle: cx_handle,
             ty_void,
@@ -452,12 +529,9 @@ impl EvmLlvmBackend {
             ty_isize,
             ty_ptr,
             aot,
-            debug_assertions: cfg!(debug_assertions),
-            is_dumping: false,
-            opt_level,
+            backend_config: BackendConfig { opt_level, ..BackendConfig::default() },
             function_counter: 0,
             function_names: FxHashMap::default(),
-            debug_file: None,
             di_state: None,
         })
     }
@@ -473,8 +547,14 @@ impl EvmLlvmBackend {
         &self.module
     }
 
-    fn orc(&self) -> &OrcJitState {
-        self.orc.as_ref().expect("requested ORC JIT state on AOT backend")
+    fn ensure_orc(&mut self) -> Result<&mut OrcJitState> {
+        if self.orc.is_none() {
+            self.orc = Some(OrcJitState::new(
+                self.backend_config.debug_support,
+                self.backend_config.profiling_support,
+            )?);
+        }
+        Ok(self.orc.as_mut().unwrap())
     }
 
     fn fn_type(
@@ -494,7 +574,7 @@ impl EvmLlvmBackend {
     /// are not needed for readability.
     #[inline]
     fn name<'a>(&self, name: &'a str) -> &'a str {
-        if self.is_dumping { name } else { "" }
+        if self.backend_config.is_dumping { name } else { "" }
     }
 
     fn id_to_name(&self, id: u32) -> &str {
@@ -506,7 +586,7 @@ impl EvmLlvmBackend {
         if self.di_state.is_some() {
             return;
         }
-        let Some(debug_file) = &self.debug_file else { return };
+        let Some(debug_file) = &self.backend_config.debug_file else { return };
 
         let filename =
             debug_file.file_name().map(|f| f.to_string_lossy()).unwrap_or_default().into_owned();
@@ -525,9 +605,10 @@ impl EvmLlvmBackend {
             self.ty_i32.const_int(5, false),
         );
 
-        let is_optimized = self.opt_level != OptimizationLevel::None;
+        let opt_level = self.backend_config.opt_level;
+        let is_optimized = opt_level != OptimizationLevel::None;
         let mut flags = Vec::new();
-        flags.push(match self.opt_level {
+        flags.push(match opt_level {
             OptimizationLevel::None => "-O0",
             OptimizationLevel::Less => "-O1",
             OptimizationLevel::Default => "-O2",
@@ -559,7 +640,7 @@ impl EvmLlvmBackend {
 
     /// Commits the current staging module to the ORC JIT if there are pending functions.
     fn commit_staged_module(&mut self) -> Result<()> {
-        if self.aot || self.orc().staged_functions.is_empty() {
+        if self.aot || self.orc.as_ref().is_none_or(|o| o.staged_functions.is_empty()) {
             return Ok(());
         }
 
@@ -569,7 +650,7 @@ impl EvmLlvmBackend {
         let old_module = std::mem::replace(&mut self.module, new_module);
 
         let tscx = self._tscx.as_ref().expect("missing ThreadSafeContext");
-        let orc = self.orc.as_mut().expect("missing ORC JIT state");
+        let orc = self.orc.as_mut().unwrap();
 
         // Flush pending absolute symbols to the shared builtins JITDylib.
         let pending = &mut orc.pending_symbols;
@@ -666,17 +747,15 @@ impl Backend for EvmLlvmBackend {
         self.module().set_name(name);
     }
 
-    fn set_is_dumping(&mut self, yes: bool) {
-        self.is_dumping = yes;
-        self.machine.set_asm_verbosity(yes);
+    fn config(&self) -> &BackendConfig {
+        &self.backend_config
     }
 
-    fn set_debug_assertions(&mut self, yes: bool) {
-        self.debug_assertions = yes;
-    }
-
-    fn set_debug_file(&mut self, path: Option<PathBuf>) {
-        self.debug_file = path;
+    fn apply_config(&mut self, config: BackendConfig) {
+        if self.backend_config.is_dumping != config.is_dumping {
+            self.machine.set_asm_verbosity(config.is_dumping);
+        }
+        self.backend_config = config;
     }
 
     fn finalize_debug_info(&mut self) -> Result<()> {
@@ -687,14 +766,6 @@ impl Backend for EvmLlvmBackend {
             di.finalized = true;
         }
         Ok(())
-    }
-
-    fn opt_level(&self) -> revmc_backend::OptimizationLevel {
-        convert_opt_level_rev(self.opt_level)
-    }
-
-    fn set_opt_level(&mut self, level: revmc_backend::OptimizationLevel) {
-        self.opt_level = convert_opt_level(level);
     }
 
     fn is_aot(&self) -> bool {
@@ -721,6 +792,9 @@ impl Backend for EvmLlvmBackend {
         param_names: &[&str],
         linkage: revmc_backend::Linkage,
     ) -> Result<(Self::Builder<'_>, Self::FuncId)> {
+        if !self.aot {
+            self.ensure_orc()?;
+        }
         let (id, function) = if let Some((&id, _fname)) =
             self.function_names.iter().find(|(_k, fname)| fname.as_str() == name)
             && let Some(orc) = &self.orc
@@ -734,7 +808,7 @@ impl Backend for EvmLlvmBackend {
             let fn_type = self.fn_type(ret, params);
             let function =
                 self.module().add_function(name, fn_type, Some(convert_linkage(linkage)));
-            if self.is_dumping {
+            if self.backend_config.is_dumping {
                 for (i, &name) in param_names.iter().enumerate() {
                     function.get_nth_param(i as u32).expect(name).set_name(self.name(name));
                 }
@@ -769,7 +843,7 @@ impl Backend for EvmLlvmBackend {
                 true,
                 0,
                 DIFlags::PUBLIC,
-                self.opt_level != OptimizationLevel::None,
+                self.backend_config.opt_level != OptimizationLevel::None,
             );
             function.set_subprogram(subprogram);
             Some(subprogram)
@@ -808,14 +882,15 @@ impl Backend for EvmLlvmBackend {
         static PASSES: std::sync::OnceLock<String> = std::sync::OnceLock::new();
         static PASSES_WITH_LICM: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
-        let passes_override = PASSES_OVERRIDE.get_or_init(|| std::env::var("REVMC_PASSES").ok());
-        let passes = passes_override.as_deref().unwrap_or_else(|| match self.opt_level {
+        let passes = PASSES_OVERRIDE.get_or_init(|| std::env::var("REVMC_PASSES").ok());
+        let passes = passes.as_deref().unwrap_or_else(|| match self.backend_config.opt_level {
             OptimizationLevel::None => "default<O0>",
             OptimizationLevel::Less | OptimizationLevel::Default => {
                 let total_bbs: u32 =
                     self.module.get_functions().map(|f| f.count_basic_blocks()).sum();
-                let passes = if total_bbs > 4000 { &PASSES } else { &PASSES_WITH_LICM };
-                passes.get_or_init(|| build_pass_pipeline(total_bbs <= 4000))
+                let with_licm = total_bbs <= 4000;
+                let passes = if with_licm { &PASSES_WITH_LICM } else { &PASSES };
+                passes.get_or_init(|| build_pass_pipeline(with_licm))
             }
             OptimizationLevel::Aggressive => "default<O3>",
         });
@@ -833,10 +908,11 @@ impl Backend for EvmLlvmBackend {
     }
 
     fn jit_function(&mut self, id: Self::FuncId) -> Result<usize> {
+        self.ensure_orc()?;
         self.commit_staged_module()?;
         let name_str = self.id_to_name(id);
         let name = CString::new(name_str).unwrap();
-        let orc = self.orc.as_mut().expect("missing ORC JIT state");
+        let orc = self.orc.as_mut().unwrap();
         // Capture the compiled object buffer during lookup. LLJIT compiles lazily:
         // add_module_with_rt just registers the module, actual compilation happens
         // in lookup_in when the symbol is first requested.
@@ -1496,7 +1572,7 @@ impl Builder for EvmLlvmBuilder<'_> {
 
     fn umax(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
         let ty = lhs.get_type();
-        let name = format!("llvm.umin.{}", fmt_ty(ty));
+        let name = format!("llvm.umax.{}", fmt_ty(ty));
         let max = self.get_or_add_function(&name, |this| this.fn_type(Some(ty), &[ty, ty]));
         self.call(max, &[lhs, rhs]).unwrap()
     }
@@ -1504,8 +1580,8 @@ impl Builder for EvmLlvmBuilder<'_> {
     fn umin(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
         let ty = lhs.get_type();
         let name = format!("llvm.umin.{}", fmt_ty(ty));
-        let max = self.get_or_add_function(&name, |this| this.fn_type(Some(ty), &[ty, ty]));
-        self.call(max, &[lhs, rhs]).unwrap()
+        let min = self.get_or_add_function(&name, |this| this.fn_type(Some(ty), &[ty, ty]));
+        self.call(min, &[lhs, rhs]).unwrap()
     }
 
     fn bswap(&mut self, value: Self::Value) -> Self::Value {
@@ -1851,21 +1927,12 @@ fn convert_intcc(cond: IntCC) -> IntPredicate {
     }
 }
 
-fn convert_opt_level(level: revmc_backend::OptimizationLevel) -> OptimizationLevel {
+fn convert_opt_level(level: OptimizationLevel) -> inkwell::OptimizationLevel {
     match level {
-        revmc_backend::OptimizationLevel::None => OptimizationLevel::None,
-        revmc_backend::OptimizationLevel::Less => OptimizationLevel::Less,
-        revmc_backend::OptimizationLevel::Default => OptimizationLevel::Default,
-        revmc_backend::OptimizationLevel::Aggressive => OptimizationLevel::Aggressive,
-    }
-}
-
-fn convert_opt_level_rev(level: OptimizationLevel) -> revmc_backend::OptimizationLevel {
-    match level {
-        OptimizationLevel::None => revmc_backend::OptimizationLevel::None,
-        OptimizationLevel::Less => revmc_backend::OptimizationLevel::Less,
-        OptimizationLevel::Default => revmc_backend::OptimizationLevel::Default,
-        OptimizationLevel::Aggressive => revmc_backend::OptimizationLevel::Aggressive,
+        OptimizationLevel::None => inkwell::OptimizationLevel::None,
+        OptimizationLevel::Less => inkwell::OptimizationLevel::Less,
+        OptimizationLevel::Default => inkwell::OptimizationLevel::Default,
+        OptimizationLevel::Aggressive => inkwell::OptimizationLevel::Aggressive,
     }
 }
 

@@ -1,10 +1,8 @@
 use clap::Parser;
 use color_eyre::{Result, eyre::eyre};
-use revm::{
-    context::cfg::CfgEnv,
-    primitives::{U256, hardfork::SpecId as SI},
-    statetest_types::{SpecName, TestSuite},
-};
+use revm_context::cfg::CfgEnv;
+use revm_primitives::{U256, hardfork::SpecId as SI};
+use revm_statetest_types::{SpecName, TestSuite};
 use revmc_statetest::{
     compiled::{CompileCache, CompileMode},
     diagnostic,

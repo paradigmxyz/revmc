@@ -1,6 +1,6 @@
-use revm::state::AccountInfo;
 use revm_interpreter::{Host, SStoreResult, SelfDestructResult, StateLoad, host::LoadError};
 use revm_primitives::{Address, B256, Log, StorageKey, StorageValue, U256};
+use revm_state::AccountInfo;
 use revmc::{
     context_interface::{cfg::GasParams, journaled_state::AccountInfoLoad},
     primitives::hardfork::SpecId,
