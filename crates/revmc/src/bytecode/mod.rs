@@ -401,6 +401,7 @@ impl<'a> Bytecode<'a> {
     ///
     /// `depth` 0 is TOS (first popped by this instruction), 1 is second, etc.
     /// Returns `None` if the value is unknown or the analysis didn't cover this instruction.
+    #[allow(dead_code)]
     pub(crate) fn const_operand(&self, inst: Inst, depth: usize) -> Option<U256> {
         let idx = (*self.stack_snapshots.get(inst)?.get(depth)?)?;
         Some(*self.u256_interner.borrow().get(idx))
