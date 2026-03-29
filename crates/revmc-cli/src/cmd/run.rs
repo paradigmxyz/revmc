@@ -43,9 +43,9 @@ pub(crate) struct RunArgs {
     #[arg(long)]
     display: bool,
 
-    /// Parse the bytecode and render the CFG as a DOT graph, then open in the browser.
-    #[arg(long)]
-    dot: bool,
+    /// Parse the bytecode and render the CFG as a DOT graph.
+    #[arg(long, default_missing_value = "svg")]
+    dot: Option<DotFormat>,
 
     /// Don't open URLs in the browser.
     #[arg(long)]
@@ -143,7 +143,7 @@ impl RunArgs {
         let mut compiler = EvmCompiler::new(backend);
         let out_dir = if self.out_dir.is_some() {
             self.out_dir
-        } else if self.dot || self.display || self.parse_only {
+        } else if self.dot.is_some() || self.display || self.parse_only {
             Some(std::env::temp_dir().join("revmc-cli"))
         } else {
             None
@@ -179,9 +179,9 @@ impl RunArgs {
         if self.display || self.parse_only {
             println!("{name}()\n{bytecode}");
         }
-        if self.dot {
+        if let Some(fmt) = self.dot {
             let dump_dir = compiler.dump_dir().expect("dump_dir should be set when --dot is used");
-            open_dot(&dump_dir.join("bytecode.dot"), !self.no_open)?;
+            open_dot(&dump_dir.join("bytecode.dot"), fmt, !self.no_open)?;
         }
         if self.parse_only {
             return Ok(());
@@ -365,19 +365,36 @@ impl RunArgs {
     }
 }
 
-fn open_dot(dot_path: &Path, open: bool) -> Result<()> {
-    let svg_path = dot_path.with_extension("svg");
+fn open_dot(dot_path: &Path, fmt: DotFormat, open: bool) -> Result<()> {
+    let ext = fmt.extension();
+    let out_path = dot_path.with_extension(ext);
     let status = std::process::Command::new("dot")
-        .args(["-Tsvg", "-o"])
-        .arg(&svg_path)
+        .arg(format!("-T{ext}"))
+        .arg("-o")
+        .arg(&out_path)
         .arg(dot_path)
         .status()?;
     ensure!(status.success(), "dot command failed with {status}");
-    eprintln!("DOT graph: {}", svg_path.display());
+    eprintln!("DOT graph: {}", out_path.display());
     if open {
-        let _ = open::that(svg_path.as_os_str());
+        let _ = open::that(out_path.as_os_str());
     }
     Ok(())
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum DotFormat {
+    Svg,
+    Png,
+}
+
+impl DotFormat {
+    fn extension(self) -> &'static str {
+        match self {
+            Self::Svg => "svg",
+            Self::Png => "png",
+        }
+    }
 }
 
 fn bench<T>(n_iters: u64, name: &str, mut f: impl FnMut() -> T) {
