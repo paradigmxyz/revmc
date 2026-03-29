@@ -527,7 +527,7 @@ mod tests {
     #[test]
     fn jit_evm_fallback_empty_code() {
         let backend = blocking_backend();
-        let mut evm = test_jit_evm(backend.clone());
+        let mut evm = test_jit_evm(backend);
 
         let tx = TxEnv {
             kind: TxKind::Call(Address::with_last_byte(0xEE)),
@@ -586,7 +586,7 @@ mod tests {
         }
 
         // Second call: should use JIT-compiled function.
-        let mut evm = test_jit_evm(backend.clone());
+        let mut evm = test_jit_evm(backend);
         let contract_addr = deploy_contract(&mut evm, runtime_code);
 
         let tx = TxEnv {
@@ -612,7 +612,7 @@ mod tests {
     #[test]
     fn jit_evm_nested_call() {
         let backend = blocking_backend();
-        let mut evm = test_jit_evm(backend.clone());
+        let mut evm = test_jit_evm(backend);
 
         // Inner contract: PUSH1 0x42 PUSH0 MSTORE PUSH1 0x20 PUSH0 RETURN
         let inner_code: &[u8] = &[0x60, 0x42, 0x5f, 0x52, 0x60, 0x20, 0x5f, 0xf3];
@@ -788,7 +788,7 @@ mod tests {
     #[test]
     fn jit_evm_create_and_call() {
         let backend = blocking_backend();
-        let mut evm = test_jit_evm(backend.clone());
+        let mut evm = test_jit_evm(backend);
 
         // Runtime code: PUSH1 0x99 PUSH0 MSTORE PUSH1 0x20 PUSH0 RETURN
         let runtime_code: &[u8] = &[0x60, 0x99, 0x5f, 0x52, 0x60, 0x20, 0x5f, 0xf3];

@@ -43,9 +43,9 @@ pub(crate) struct RunArgs {
     #[arg(long)]
     display: bool,
 
-    /// Parse the bytecode and render the CFG as a DOT graph, then open in the browser.
-    #[arg(long)]
-    dot: bool,
+    /// Parse the bytecode and render the CFG as a DOT graph.
+    #[arg(long, default_missing_value = "svg", num_args = 0..=1)]
+    dot: Option<DotFormat>,
 
     /// Don't open URLs in the browser.
     #[arg(long)]
@@ -143,7 +143,7 @@ impl RunArgs {
         let mut compiler = EvmCompiler::new(backend);
         let out_dir = if self.out_dir.is_some() {
             self.out_dir
-        } else if self.dot || self.display || self.parse_only {
+        } else if self.dot.is_some() || self.display || self.parse_only {
             Some(std::env::temp_dir().join("revmc-cli"))
         } else {
             None
@@ -179,9 +179,9 @@ impl RunArgs {
         if self.display || self.parse_only {
             println!("{name}()\n{bytecode}");
         }
-        if self.dot {
+        if let Some(fmt) = self.dot {
             let dump_dir = compiler.dump_dir().expect("dump_dir should be set when --dot is used");
-            open_dot(&dump_dir.join("bytecode.dot"), !self.no_open)?;
+            open_dot(&dump_dir.join("bytecode.dot"), fmt, !self.no_open)?;
         }
         if self.parse_only {
             return Ok(());
@@ -365,17 +365,70 @@ impl RunArgs {
     }
 }
 
-fn open_dot(dot_path: &Path, open: bool) -> Result<()> {
+fn open_dot(dot_path: &Path, fmt: DotFormat, open: bool) -> Result<()> {
+    let ext = fmt.extension();
+    let out_path = dot_path.with_extension(ext);
+    match std::process::Command::new("dot")
+        .arg(format!("-T{ext}"))
+        .arg("-o")
+        .arg(&out_path)
+        .arg(dot_path)
+        .status()
+    {
+        Ok(status) if status.success() => {
+            eprintln!("DOT graph: {}", out_path.display());
+            if open {
+                let _ = open::that(out_path.as_os_str());
+            }
+            return Ok(());
+        }
+        Ok(status) => eprintln!("warning: dot command failed with {status}, falling back to HTML"),
+        Err(e) => eprintln!("warning: dot command not found ({e}), falling back to HTML"),
+    }
+
+    // Fallback: write an HTML file that renders the DOT graph client-side.
     let dot_source = std::fs::read_to_string(dot_path)?;
-    let compressed = lz_str::compress_to_encoded_uri_component(&dot_source);
-    let compressed = urlencoding::encode(&compressed);
-    let url =
-        format!("https://dreampuf.github.io/GraphvizOnline/?engine=dot&compressed={compressed}");
-    eprintln!("DOT graph: {url}");
+    let dot_escaped = dot_source.replace('\\', "\\\\").replace('`', "\\`").replace("${", "\\${");
+    let html_path = dot_path.with_extension("html");
+    std::fs::write(
+        &html_path,
+        format!(
+            r#"<!DOCTYPE html>
+<html><head>
+<meta charset="utf-8">
+<title>revmc CFG</title>
+<style>html,body{{margin:0;height:100%;background:#1a1a2e}}
+svg{{width:100%;height:100%}}</style>
+</head><body>
+<script type="module">
+import {{ instance }} from "https://cdn.jsdelivr.net/npm/@viz-js/viz@3/+esm";
+const viz = await instance();
+const svg = viz.renderSVGElement(`{dot_escaped}`);
+document.body.appendChild(svg);
+</script>
+</body></html>"#
+        ),
+    )?;
+    eprintln!("DOT graph: {}", html_path.display());
     if open {
-        let _ = open::that(&url);
+        let _ = open::that(html_path.as_os_str());
     }
     Ok(())
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum DotFormat {
+    Svg,
+    Png,
+}
+
+impl DotFormat {
+    fn extension(self) -> &'static str {
+        match self {
+            Self::Svg => "svg",
+            Self::Png => "png",
+        }
+    }
 }
 
 fn bench<T>(n_iters: u64, name: &str, mut f: impl FnMut() -> T) {

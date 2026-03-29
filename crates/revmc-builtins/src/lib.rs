@@ -170,13 +170,13 @@ pub unsafe extern "C" fn __revmc_builtin_balance(
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn __revmc_builtin_origin(ecx: &mut EvmContext<'_>, slot: &mut EvmWord) {
+pub unsafe extern "C" fn __revmc_builtin_origin(ecx: &EvmContext<'_>, slot: &mut EvmWord) {
     *slot = EvmWord::from_be_bytes(ecx.host.caller().into_word());
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __revmc_builtin_calldataload(
-    ecx: &mut EvmContext<'_>,
+    ecx: &EvmContext<'_>,
     offset_ptr: &mut EvmWord,
 ) {
     let mut word = B256::ZERO;
@@ -201,7 +201,7 @@ pub unsafe extern "C" fn __revmc_builtin_calldataload(
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn __revmc_builtin_calldatasize(ecx: &mut EvmContext<'_>) -> usize {
+pub unsafe extern "C" fn __revmc_builtin_calldatasize(ecx: &EvmContext<'_>) -> usize {
     match ecx.input.input() {
         CallInput::Bytes(bytes) => bytes.len(),
         CallInput::SharedBuffer(range) => range.len(),
@@ -242,7 +242,7 @@ pub unsafe extern "C" fn __revmc_builtin_codecopy(
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn __revmc_builtin_gas_price(ecx: &mut EvmContext<'_>, slot: &mut EvmWord) {
+pub unsafe extern "C" fn __revmc_builtin_gas_price(ecx: &EvmContext<'_>, slot: &mut EvmWord) {
     *slot = ecx.host.effective_gas_price().into();
 }
 
@@ -366,37 +366,37 @@ pub unsafe extern "C" fn __revmc_builtin_blockhash(
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn __revmc_builtin_coinbase(ecx: &mut EvmContext<'_>, slot: &mut EvmWord) {
+pub unsafe extern "C" fn __revmc_builtin_coinbase(ecx: &EvmContext<'_>, slot: &mut EvmWord) {
     *slot = EvmWord::from_be_bytes(ecx.host.beneficiary().into_word());
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn __revmc_builtin_timestamp(ecx: &mut EvmContext<'_>, slot: &mut EvmWord) {
+pub unsafe extern "C" fn __revmc_builtin_timestamp(ecx: &EvmContext<'_>, slot: &mut EvmWord) {
     *slot = ecx.host.timestamp().into();
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn __revmc_builtin_number(ecx: &mut EvmContext<'_>, slot: &mut EvmWord) {
+pub unsafe extern "C" fn __revmc_builtin_number(ecx: &EvmContext<'_>, slot: &mut EvmWord) {
     *slot = ecx.host.block_number().into();
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn __revmc_builtin_gaslimit(ecx: &mut EvmContext<'_>, slot: &mut EvmWord) {
+pub unsafe extern "C" fn __revmc_builtin_gaslimit(ecx: &EvmContext<'_>, slot: &mut EvmWord) {
     *slot = ecx.host.gas_limit().into();
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn __revmc_builtin_chainid(ecx: &mut EvmContext<'_>, slot: &mut EvmWord) {
+pub unsafe extern "C" fn __revmc_builtin_chainid(ecx: &EvmContext<'_>, slot: &mut EvmWord) {
     *slot = ecx.host.chain_id().into();
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn __revmc_builtin_basefee(ecx: &mut EvmContext<'_>, slot: &mut EvmWord) {
+pub unsafe extern "C" fn __revmc_builtin_basefee(ecx: &EvmContext<'_>, slot: &mut EvmWord) {
     *slot = ecx.host.basefee().into();
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn __revmc_builtin_difficulty(ecx: &mut EvmContext<'_>, slot: &mut EvmWord) {
+pub unsafe extern "C" fn __revmc_builtin_difficulty(ecx: &EvmContext<'_>, slot: &mut EvmWord) {
     *slot = if ecx.spec_id.is_enabled_in(SpecId::MERGE) {
         ecx.host.prevrandao().unwrap_or_default().into()
     } else {
@@ -415,20 +415,14 @@ pub unsafe extern "C" fn __revmc_builtin_self_balance(
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn __revmc_builtin_blob_hash(
-    ecx: &mut EvmContext<'_>,
-    index_ptr: &mut EvmWord,
-) {
+pub unsafe extern "C" fn __revmc_builtin_blob_hash(ecx: &EvmContext<'_>, index_ptr: &mut EvmWord) {
     let index = index_ptr.to_u256();
     let index_usize = as_usize_saturated!(index);
     *index_ptr = ecx.host.blob_hash(index_usize).unwrap_or_default().into();
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn __revmc_builtin_blob_base_fee(
-    ecx: &mut EvmContext<'_>,
-    slot: &mut EvmWord,
-) {
+pub unsafe extern "C" fn __revmc_builtin_blob_base_fee(ecx: &EvmContext<'_>, slot: &mut EvmWord) {
     *slot = ecx.host.blob_gasprice().into();
 }
 
@@ -496,7 +490,7 @@ pub unsafe extern "C" fn __revmc_builtin_sstore(
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn __revmc_builtin_msize(ecx: &mut EvmContext<'_>) -> usize {
+pub unsafe extern "C" fn __revmc_builtin_msize(ecx: &EvmContext<'_>) -> usize {
     ecx.memory.len()
 }
 

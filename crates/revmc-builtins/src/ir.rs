@@ -181,11 +181,11 @@ builtins! {
 
     @param_attrs |op| {
         fn size_and_align<T>() -> Vec<Attribute> {
-            size_and_align2(Some(core::mem::size_of::<T>()), core::mem::align_of::<T>())
+            size_and_align_with(Some(core::mem::size_of::<T>()), core::mem::align_of::<T>())
         }
 
-        fn size_and_align2(size: Option<usize>, align: usize) -> Vec<Attribute> {
-            let mut vec = Vec::with_capacity(5);
+        fn size_and_align_with(size: Option<usize>, align: usize) -> Vec<Attribute> {
+            let mut vec = Vec::with_capacity(8);
             vec.push(Attribute::NoAlias);
             vec.push(Attribute::NoCapture);
             vec.push(Attribute::NoUndef);
@@ -204,8 +204,10 @@ builtins! {
         };
 
         let ecx = size_and_align::<revmc_context::EvmContext<'static>>();
+        let mut ecx_ro = ecx.clone();
+        ecx_ro.push(Attribute::ReadOnly);
 
-        let sp_dyn = size_and_align2(None, core::mem::align_of::<revmc_context::EvmWord>());
+        let sp_dyn = size_and_align_with(None, core::mem::align_of::<revmc_context::EvmWord>());
 
         let mut sp = sp_dyn.clone();
         // `sp` is at `top - inputs`, we have access to `max(inputs, outputs)` words.
@@ -235,30 +237,30 @@ builtins! {
     Exp            = __revmc_builtin_exp(@[ecx] ptr, @[sp] ptr) Some(u8),
     Keccak256      = __revmc_builtin_keccak256(@[ecx] ptr, @[sp] ptr) Some(u8),
     Balance        = __revmc_builtin_balance(@[ecx] ptr, @[sp] ptr) Some(u8),
-    Origin         = __revmc_builtin_origin(@[ecx] ptr, @[sp] ptr) None,
-    CallDataLoad   = __revmc_builtin_calldataload(@[ecx] ptr, @[sp] ptr) None,
-    CallDataSize   = __revmc_builtin_calldatasize(@[ecx] ptr) Some(usize),
+    Origin         = __revmc_builtin_origin(@[ecx_ro] ptr, @[sp] ptr) None,
+    CallDataLoad   = __revmc_builtin_calldataload(@[ecx_ro] ptr, @[sp] ptr) None,
+    CallDataSize   = __revmc_builtin_calldatasize(@[ecx_ro] ptr) Some(usize),
     CallDataCopy   = __revmc_builtin_calldatacopy(@[ecx] ptr, @[sp] ptr) Some(u8),
     CodeCopy       = __revmc_builtin_codecopy(@[ecx] ptr, @[sp] ptr) Some(u8),
-    GasPrice       = __revmc_builtin_gas_price(@[ecx] ptr, @[sp] ptr) None,
+    GasPrice       = __revmc_builtin_gas_price(@[ecx_ro] ptr, @[sp] ptr) None,
     ExtCodeSize    = __revmc_builtin_extcodesize(@[ecx] ptr, @[sp] ptr) Some(u8),
     ExtCodeCopy    = __revmc_builtin_extcodecopy(@[ecx] ptr, @[sp] ptr) Some(u8),
     ReturnDataCopy = __revmc_builtin_returndatacopy(@[ecx] ptr, @[sp] ptr) Some(u8),
     ExtCodeHash    = __revmc_builtin_extcodehash(@[ecx] ptr, @[sp] ptr) Some(u8),
     BlockHash      = __revmc_builtin_blockhash(@[ecx] ptr, @[sp] ptr) Some(u8),
-    Coinbase       = __revmc_builtin_coinbase(@[ecx] ptr, @[sp] ptr) None,
-    Timestamp      = __revmc_builtin_timestamp(@[ecx] ptr, @[sp] ptr) None,
-    Number         = __revmc_builtin_number(@[ecx] ptr, @[sp] ptr) None,
-    Difficulty     = __revmc_builtin_difficulty(@[ecx] ptr, @[sp] ptr) None,
-    GasLimit       = __revmc_builtin_gaslimit(@[ecx] ptr, @[sp] ptr) None,
-    ChainId        = __revmc_builtin_chainid(@[ecx] ptr, @[sp] ptr) None,
+    Coinbase       = __revmc_builtin_coinbase(@[ecx_ro] ptr, @[sp] ptr) None,
+    Timestamp      = __revmc_builtin_timestamp(@[ecx_ro] ptr, @[sp] ptr) None,
+    Number         = __revmc_builtin_number(@[ecx_ro] ptr, @[sp] ptr) None,
+    Difficulty     = __revmc_builtin_difficulty(@[ecx_ro] ptr, @[sp] ptr) None,
+    GasLimit       = __revmc_builtin_gaslimit(@[ecx_ro] ptr, @[sp] ptr) None,
+    ChainId        = __revmc_builtin_chainid(@[ecx_ro] ptr, @[sp] ptr) None,
     SelfBalance    = __revmc_builtin_self_balance(@[ecx] ptr, @[sp] ptr) Some(u8),
-    Basefee        = __revmc_builtin_basefee(@[ecx] ptr, @[sp] ptr) None,
-    BlobHash       = __revmc_builtin_blob_hash(@[ecx] ptr, @[sp] ptr) None,
-    BlobBaseFee    = __revmc_builtin_blob_base_fee(@[ecx] ptr, @[sp] ptr) None,
+    Basefee        = __revmc_builtin_basefee(@[ecx_ro] ptr, @[sp] ptr) None,
+    BlobHash       = __revmc_builtin_blob_hash(@[ecx_ro] ptr, @[sp] ptr) None,
+    BlobBaseFee    = __revmc_builtin_blob_base_fee(@[ecx_ro] ptr, @[sp] ptr) None,
     Sload          = __revmc_builtin_sload(@[ecx] ptr, @[sp] ptr) Some(u8),
     Sstore         = __revmc_builtin_sstore(@[ecx] ptr, @[sp] ptr) Some(u8),
-    Msize          = __revmc_builtin_msize(@[ecx] ptr) Some(usize),
+    Msize          = __revmc_builtin_msize(@[ecx_ro] ptr) Some(usize),
     Tstore         = __revmc_builtin_tstore(@[ecx] ptr, @[sp] ptr) Some(u8),
     Tload          = __revmc_builtin_tload(@[ecx] ptr, @[sp] ptr) None,
     Mcopy          = __revmc_builtin_mcopy(@[ecx] ptr, @[sp] ptr) Some(u8),

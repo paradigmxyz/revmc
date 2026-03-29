@@ -259,7 +259,7 @@ impl<B: Backend> EvmCompiler<B> {
     /// This setting is applied once per process on first JIT compilation.
     /// Subsequent compilers inherit the value set by the first.
     ///
-    /// Defaults to `true`.
+    /// Defaults to `false`.
     pub fn profiling_support(&self) -> bool {
         self.backend.config().profiling_support
     }
@@ -270,6 +270,32 @@ impl<B: Backend> EvmCompiler<B> {
     /// Subsequent compilers inherit the value set by the first.
     pub fn set_profiling_support(&mut self, yes: bool) {
         self.update_backend_config(|c| c.profiling_support = yes);
+    }
+
+    /// Returns whether the simple perf map plugin is enabled.
+    ///
+    /// Writes `/tmp/perf-<pid>.map` in the perf map format so that profilers
+    /// can resolve JIT-compiled symbols without the jitdump machinery.
+    ///
+    /// Not suitable for long-running programs. The map file is append-only
+    /// and never cleaned up, so entries for freed JIT code accumulate
+    /// indefinitely. Prefer [`set_profiling_support`](Self::set_profiling_support)
+    /// (jitdump) for long-lived processes.
+    ///
+    /// This setting is applied once per process on first JIT compilation.
+    /// Subsequent compilers inherit the value set by the first.
+    ///
+    /// Defaults to `true`.
+    pub fn simple_perf(&self) -> bool {
+        self.backend.config().simple_perf
+    }
+
+    /// Sets whether to enable the simple perf map plugin.
+    ///
+    /// This setting is applied once per process on first JIT compilation.
+    /// Subsequent compilers inherit the value set by the first.
+    pub fn set_simple_perf(&mut self, yes: bool) {
+        self.update_backend_config(|c| c.simple_perf = yes);
     }
 
     /// Sets whether to enable frame pointers.
