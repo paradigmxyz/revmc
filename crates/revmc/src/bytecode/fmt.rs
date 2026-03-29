@@ -386,28 +386,6 @@ mod tests {
 
     /// Test bytecode with SSTORE (splits gas but not stack), a loop (back-edge), and CALL
     /// (suspending instruction that splits both gas and stack sections).
-    ///
-    /// ```text
-    /// PUSH1 0x03  ; pc=0, skip
-    /// JUMP        ; pc=2, -> bb1
-    /// JUMPDEST    ; pc=3, loop header
-    /// PUSH1 0x01  ; pc=4
-    /// PUSH1 0x00  ; pc=6
-    /// SSTORE      ; pc=8, splits gas section only
-    /// PUSH1 0x01  ; pc=9
-    /// PUSH1 0x03  ; pc=11, skip
-    /// JUMPI       ; pc=13, -> bb1 (loop)
-    /// PUSH1 0x00  ; pc=14, retLength
-    /// PUSH1 0x00  ; pc=16, retOffset
-    /// PUSH1 0x00  ; pc=18, argsLength
-    /// PUSH1 0x00  ; pc=20, argsOffset
-    /// PUSH1 0x00  ; pc=22, value
-    /// PUSH1 0x42  ; pc=24, addr
-    /// PUSH2 0xffff; pc=26, gas
-    /// CALL        ; pc=29, suspends
-    /// POP         ; pc=30, discard return value
-    /// STOP        ; pc=31
-    /// ```
     fn test_bytecode() -> Bytecode<'static> {
         #[rustfmt::skip]
         let code: &[u8] = &[
