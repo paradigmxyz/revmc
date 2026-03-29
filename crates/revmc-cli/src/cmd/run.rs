@@ -366,14 +366,16 @@ impl RunArgs {
 }
 
 fn open_dot(dot_path: &Path, open: bool) -> Result<()> {
-    let dot_source = std::fs::read_to_string(dot_path)?;
-    let compressed = lz_str::compress_to_encoded_uri_component(&dot_source);
-    let compressed = urlencoding::encode(&compressed);
-    let url =
-        format!("https://dreampuf.github.io/GraphvizOnline/?engine=dot&compressed={compressed}");
-    eprintln!("DOT graph: {url}");
+    let svg_path = dot_path.with_extension("svg");
+    let status = std::process::Command::new("dot")
+        .args(["-Tsvg", "-o"])
+        .arg(&svg_path)
+        .arg(dot_path)
+        .status()?;
+    ensure!(status.success(), "dot command failed with {status}");
+    eprintln!("DOT graph: {}", svg_path.display());
     if open {
-        let _ = open::that(&url);
+        let _ = open::that(svg_path.as_os_str());
     }
     Ok(())
 }
