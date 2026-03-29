@@ -233,6 +233,11 @@ impl<B: Backend> EvmCompiler<B> {
     /// Writes `/tmp/jit-<pid>.map` in the perf map format so that profilers
     /// can resolve JIT-compiled symbols without the jitdump machinery.
     ///
+    /// Not suitable for long-running programs. The map file is append-only
+    /// and never cleaned up, so entries for freed JIT code accumulate
+    /// indefinitely. Prefer [`set_profiling_support`](Self::set_profiling_support)
+    /// (jitdump) for long-lived processes.
+    ///
     /// This setting is applied once per process on first JIT compilation.
     /// Subsequent compilers inherit the value set by the first.
     ///

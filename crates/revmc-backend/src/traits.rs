@@ -31,6 +31,11 @@ pub struct BackendConfig {
     /// Writes `/tmp/jit-<pid>.map` in the perf map format so that profilers
     /// can resolve JIT-compiled symbols without the jitdump machinery.
     ///
+    /// Not suitable for long-running programs. The map file is append-only
+    /// and never cleaned up, so entries for freed JIT code accumulate
+    /// indefinitely. Prefer [`profiling_support`](Self::profiling_support)
+    /// (jitdump) for long-lived processes.
+    ///
     /// Applied once per process on first JIT compilation.
     pub simple_perf: bool,
     /// Debug info source file path. `Some` enables debug info emission.

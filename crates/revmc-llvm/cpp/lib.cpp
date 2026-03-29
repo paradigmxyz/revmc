@@ -169,12 +169,16 @@ revmc_llvm_lljit_enable_memory_usage(LLVMOrcLLJITRef J,
 ///
 /// This is the format expected by `perf report --jit` and `samply` to resolve
 /// JIT-compiled symbols without the heavyweight jitdump machinery.
-class SimplePerfPlugin : public orc::ObjectLinkingLayer::Plugin {
+///
+/// NOTE: Not suitable for long-running programs. The map file is append-only
+/// and never cleaned up, so entries for freed JIT code accumulate indefinitely.
+/// Prefer `PerfSupportPlugin` (jitdump) for long-lived processes.
+class SimplePerfSupportPlugin : public orc::ObjectLinkingLayer::Plugin {
   std::mutex Mutex;
   std::ofstream MapFile;
 
 public:
-  SimplePerfPlugin()
+  SimplePerfSupportPlugin()
       : MapFile("/tmp/jit-" + std::to_string(getpid()) + ".map",
                 std::ios::app) {}
 
@@ -214,19 +218,22 @@ public:
                                    orc::ResourceKey) override {}
 };
 
-/// Install SimplePerfPlugin on the LLJIT's ObjectLinkingLayer.
+/// Install `SimplePerfSupportPlugin` on the LLJIT's `ObjectLinkingLayer`.
 ///
 /// Writes `/tmp/jit-<pid>.map` in the perf map format so that profilers like
 /// `perf` and `samply` can resolve JIT-compiled symbols without jitdump.
+///
+/// Not suitable for long-running programs; see `SimplePerfSupportPlugin`.
+///
 /// Returns an error if the object layer is not JITLink-based.
 extern "C" LLVMErrorRef
 revmc_llvm_lljit_enable_simple_perf(LLVMOrcLLJITRef J) {
   auto *Jit = reinterpret_cast<orc::LLJIT *>(J);
   auto *OLL = dyn_cast<orc::ObjectLinkingLayer>(&Jit->getObjLinkingLayer());
   if (!OLL)
-    return wrap(make_error<StringError>("SimplePerfPlugin requires JITLink",
-                                        inconvertibleErrorCode()));
-  OLL->addPlugin(std::make_unique<SimplePerfPlugin>());
+    return wrap(make_error<StringError>(
+        "SimplePerfSupportPlugin requires JITLink", inconvertibleErrorCode()));
+  OLL->addPlugin(std::make_unique<SimplePerfSupportPlugin>());
   return LLVMErrorSuccess;
 }
 
