@@ -1,4 +1,4 @@
-use super::Bytecode;
+use super::{Bytecode, InstFlags};
 use core::fmt;
 
 /// A gas section tracks the total base gas cost of a sequence of instructions.
@@ -164,11 +164,16 @@ impl SectionsAnalysis {
         }
 
         let data = bytecode.inst(inst);
-        let (inp, out) = data.stack_io();
-        let stack_diff = out as i32 - inp as i32;
-        self.stack.inputs = self.stack.inputs.max(inp as i32 - self.stack.diff);
-        self.stack.diff += stack_diff;
-        self.stack.max_growth = self.stack.max_growth.max(self.stack.diff);
+
+        // SKIP_LOGIC instructions (e.g. the push before a static jump) don't execute at runtime,
+        // so their stack effects must not be counted in the section analysis.
+        if !data.flags.contains(InstFlags::SKIP_LOGIC) {
+            let (inp, out) = data.stack_io();
+            let stack_diff = out as i32 - inp as i32;
+            self.stack.inputs = self.stack.inputs.max(inp as i32 - self.stack.diff);
+            self.stack.diff += stack_diff;
+            self.stack.max_growth = self.stack.max_growth.max(self.stack.diff);
+        }
 
         self.gas.gas_cost += data.base_gas as u64;
 
