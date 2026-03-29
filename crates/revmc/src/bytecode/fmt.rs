@@ -275,11 +275,11 @@ impl<'a> Bytecode<'a> {
                 if let Some(targets) = self.multi_jump_targets(last_inst) {
                     for &t in targets {
                         if let Some(&target_block) = info.inst_to_block.get(&t) {
-                            let color = "#53a8b6";
+                            let color = "#e2a93b";
                             writeln!(
                                 w,
                                 "  bb{block_idx} -> bb{target_block} \
-                                 [label=\"\" color=\"{color}\" fontcolor=\"{color}\"];"
+                                 [label=\"multi\" color=\"{color}\" fontcolor=\"{color}\"];"
                             )?;
                         }
                     }

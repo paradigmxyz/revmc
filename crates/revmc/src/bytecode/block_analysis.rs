@@ -892,15 +892,16 @@ impl Bytecode<'_> {
 #[cfg(test)]
 mod tests {
     use super::{super::Inst, *};
-    use revm_primitives::hardfork::SpecId;
+    use revm_primitives::{hardfork::SpecId, hex};
 
     fn analyze_hex(hex: &str) -> Bytecode<'static> {
-        let code = revm_primitives::hex::decode(hex.trim()).unwrap();
+        let code = hex::decode(hex.trim()).unwrap();
         analyze_code(code)
     }
 
     fn analyze_code(code: Vec<u8>) -> Bytecode<'static> {
-        let code = Box::leak(code.into_boxed_slice());
+        let code = &*Box::leak(code.into_boxed_slice());
+        eprintln!("{}", hex::encode(code));
         let mut bytecode = Bytecode::new(code, SpecId::CANCUN);
         bytecode.analyze().unwrap();
         bytecode
