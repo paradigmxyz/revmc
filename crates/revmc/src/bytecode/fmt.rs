@@ -276,10 +276,17 @@ impl<'a> Bytecode<'a> {
                     for &t in targets {
                         if let Some(&target_block) = info.inst_to_block.get(&t) {
                             let color = "#e2a93b";
+                            let extra = if block_idx == target_block {
+                                " tailport=s headport=e constraint=false"
+                            } else if target_block <= block_idx {
+                                " constraint=false"
+                            } else {
+                                ""
+                            };
                             writeln!(
                                 w,
                                 "  bb{block_idx} -> bb{target_block} \
-                                 [label=\"multi\" color=\"{color}\" fontcolor=\"{color}\"];"
+                                 [label=\"multi\" color=\"{color}\" fontcolor=\"{color}\"{extra}];"
                             )?;
                         }
                     }
@@ -293,10 +300,9 @@ impl<'a> Bytecode<'a> {
                     } else {
                         ("", "#53a8b6")
                     };
-                    let back_edge = target_block <= block_idx;
                     let extra = if block_idx == target_block {
                         " tailport=s headport=e constraint=false"
-                    } else if back_edge {
+                    } else if target_block <= block_idx {
                         " constraint=false"
                     } else {
                         ""
