@@ -189,9 +189,7 @@ fn run_bytecode_bench(c: &mut Criterion, bench: &revmc_cli::Bench) {
 
 fn new_compiler(opt_level: OptimizationLevel) -> EvmCompiler<EvmLlvmBackend> {
     let backend = EvmLlvmBackend::new(false, opt_level).unwrap();
-    let mut compiler = EvmCompiler::new(backend);
-    compiler.set_disable_jit_dylib_pool(true);
-    compiler
+    EvmCompiler::new(backend)
 }
 
 criterion_group!(benches, bench);
