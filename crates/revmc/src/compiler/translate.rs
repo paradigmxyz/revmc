@@ -565,7 +565,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         }
 
         // Pay static gas for the current section.
-        self.gas_cost_imm(data.section.gas_cost as u64);
+        self.gas_cost_imm(data.gas_section.gas_cost as u64);
 
         if data.flags.contains(InstFlags::SKIP_LOGIC) {
             goto_return!("skipped");
@@ -577,8 +577,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
         // Check stack length for the current section.
         if self.config.stack_bound_checks {
-            let inp = data.section.inputs;
-            let diff = data.section.max_growth as i64;
+            let inp = data.stack_section.inputs;
+            let diff = data.stack_section.max_growth as i64;
 
             if diff > revmc_context::EvmStack::CAPACITY as i64 {
                 goto_return!(fail InstructionResult::StackOverflow);
