@@ -144,9 +144,10 @@ fn run_bytecode_bench(c: &mut Criterion, bench: &revmc_cli::Bench) {
         .map(|&(kind, (gas, stack))| {
             compiler.gas_metering(gas);
             unsafe { compiler.stack_bound_checks(stack) };
+            let sym = format!("{name}/{kind}");
             (
                 kind,
-                compiler.translate(kind, bytecode_raw.original_byte_slice(), SPEC_ID).expect(kind),
+                compiler.translate(&sym, bytecode_raw.original_byte_slice(), SPEC_ID).expect(kind),
             )
         })
         .collect();
