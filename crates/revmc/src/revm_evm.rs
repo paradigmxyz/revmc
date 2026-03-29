@@ -586,8 +586,6 @@ mod tests {
             }
             other => panic!("expected Success, got: {other:?}"),
         }
-
-        backend.shutdown().unwrap();
     }
 
     #[test]
@@ -619,8 +617,6 @@ mod tests {
             }
             other => panic!("expected Success, got: {other:?}"),
         }
-
-        backend.shutdown().unwrap();
     }
 
     #[test]
@@ -640,8 +636,6 @@ mod tests {
             "expected Success for empty-code call, got: {:?}",
             result.result,
         );
-
-        backend.shutdown().unwrap();
     }
 
     /// Non-blocking mode: JIT compiles in background and results eventually appear.
@@ -707,8 +701,6 @@ mod tests {
             }
             other => panic!("expected Success, got: {other:?}"),
         }
-
-        backend.shutdown().unwrap();
     }
 
     /// CALL into another contract: JIT handles the nested call frame.
@@ -764,8 +756,6 @@ mod tests {
             }
             other => panic!("expected Success, got: {other:?}"),
         }
-
-        backend.shutdown().unwrap();
     }
 
     /// CREATE deploys a contract whose runtime code gets JIT-compiled and called.
@@ -798,7 +788,5 @@ mod tests {
             }
             other => panic!("expected Success, got: {other:?}"),
         }
-
-        backend.shutdown().unwrap();
     }
 }

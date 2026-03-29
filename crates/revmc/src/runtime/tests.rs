@@ -122,11 +122,7 @@ impl std::ops::Deref for TestBackend {
     }
 }
 
-impl Drop for TestBackend {
-    fn drop(&mut self) {
-        self.backend.shutdown().unwrap();
-    }
-}
+// `JitBackend` shuts down automatically when the last `Arc<BackendInner>` drops.
 
 // ---------------------------------------------------------------------------
 // Artifact stores for testing.

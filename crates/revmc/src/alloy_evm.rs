@@ -285,8 +285,6 @@ mod tests {
             }
             other => panic!("expected Success, got: {other:?}"),
         }
-
-        backend.shutdown().unwrap();
     }
 
     #[test]
@@ -327,8 +325,6 @@ mod tests {
 
         // Both should produce the same output.
         assert_eq!(format!("{:?}", jit_result.result), format!("{:?}", eth_result.result),);
-
-        backend.shutdown().unwrap();
     }
 
     #[test]
@@ -350,7 +346,5 @@ mod tests {
             "expected Success, got: {:?}",
             result.result,
         );
-
-        backend.shutdown().unwrap();
     }
 }

@@ -143,12 +143,6 @@ impl JitBackend {
         Ok(Self { inner: Arc::new(inner) })
     }
 
-    /// Shuts down the backend thread and waits for it to finish.
-    #[cfg(test)]
-    pub(crate) fn shutdown(&self) -> eyre::Result<()> {
-        self.inner.shutdown()
-    }
-
     /// Looks up a compiled function for the given request.
     ///
     /// In normal mode this never blocks. In [`blocking`](RuntimeConfig::blocking) mode,

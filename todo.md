@@ -4,7 +4,6 @@ Tracked issues and remaining work for the `runtime` module, separate from `plan.
 
 ## API / Lifecycle
 
-- [ ] Make `shutdown()` public (currently `#[cfg(test)]` only).
 - [ ] Control APIs (`clear_*`, `prepare_aot`, `compile_jit`) use `try_send()` — silently drop on full channel. Add error feedback or use blocking send for control commands.
 - [ ] Add `reconfigure(RuntimeConfigUpdate)` API.
 - [ ] Add `RuntimeError` / `error.rs` instead of using `eyre` throughout public API.
@@ -40,7 +39,11 @@ Tracked issues and remaining work for the `runtime` module, separate from `plan.
 
 ## Shutdown Safety
 
-- [ ] Callers holding `Arc<CompiledProgram>` past `shutdown()` may reference freed JIT code. Not tested.
+Not an issue. JIT code lifetime is managed by `Arc<JitCodeBacking>` (holds ORCv2
+`ResourceTracker` + `JitDylibGuard`). The `GlobalOrcJit` is `'static`. Dropping the
+last `JitBackend` clone stops the backend thread and workers but does not free any
+code — outstanding `Arc<CompiledProgram>` holders remain valid. No public `shutdown()`
+is exposed; cleanup is purely drop-based.
 
 ## Test Coverage
 
