@@ -35,11 +35,13 @@ oxc_index::define_index_type! {
     ///
     /// Also known as `ic`, or instruction counter; not to be confused with SSA `inst`s.
     pub(crate) struct Inst = u32;
+    DISPLAY_FORMAT = "{}";
 }
 
 oxc_index::define_index_type! {
     /// Index into the deduplicated U256 constant pool.
     pub(crate) struct U256Idx = u32;
+    DISPLAY_FORMAT = "{}";
 }
 
 /// Hasher used by the U256 interner.
@@ -71,7 +73,7 @@ pub struct Bytecode<'a> {
     /// Only populated for jumps resolved to multiple targets by block analysis.
     multi_jump_targets: FxHashMap<Inst, SmallVec<[Inst; 4]>>,
     /// Mapping from program counter to instruction.
-    pc_to_inst: FxHashMap<u32, u32>,
+    pc_to_inst: FxHashMap<u32, Inst>,
     /// Instruction index to 1-based line number in the formatted dump, built during formatting.
     inst_lines: RefCell<IndexVec<Inst, u32>>,
 }
@@ -85,7 +87,7 @@ impl<'a> Bytecode<'a> {
         let op_infos = op_info_map(spec_id);
         for (pc, Opcode { opcode, immediate: _ }) in OpcodesIter::new(code, spec_id).with_pc() {
             let inst: Inst = insts.next_idx();
-            pc_to_inst.insert(pc as u32, inst.index() as u32);
+            pc_to_inst.insert(pc as u32, inst);
 
             if opcode == op::JUMPDEST {
                 jumpdests.set(pc, true)
@@ -225,7 +227,7 @@ impl<'a> Bytecode<'a> {
             let jump = &self.insts[jump_inst];
             let Some(push_inst) = jump_inst.index().checked_sub(1).map(Inst::from_usize) else {
                 if jump.is_legacy_jump() {
-                    trace!(jump_inst = jump_inst.index(), target=?None::<()>, "found jump");
+                    trace!(%jump_inst, target=?None::<()>, "found jump");
                     self.has_dynamic_jumps = true;
                 }
                 continue;
@@ -234,7 +236,7 @@ impl<'a> Bytecode<'a> {
             let push = &self.insts[push_inst];
             if !(push.is_push() && jump.is_legacy_jump()) {
                 if jump.is_legacy_jump() {
-                    trace!(jump_inst = jump_inst.index(), target=?None::<()>, "found jump");
+                    trace!(%jump_inst, target=?None::<()>, "found jump");
                     self.has_dynamic_jumps = true;
                 }
                 continue;
@@ -249,7 +251,7 @@ impl<'a> Bytecode<'a> {
 
             const USIZE_SIZE: usize = std::mem::size_of::<usize>();
             if imm.len() > USIZE_SIZE {
-                trace!(jump_inst = jump_inst.index(), "jump target too large");
+                trace!(%jump_inst, "jump target too large");
                 self.insts[jump_inst].flags |= InstFlags::INVALID_JUMP;
                 continue;
             }
@@ -258,7 +260,7 @@ impl<'a> Bytecode<'a> {
             padded[USIZE_SIZE - imm.len()..].copy_from_slice(imm);
             let target_pc = usize::from_be_bytes(padded);
             if !self.is_valid_jump(target_pc) {
-                trace!(jump_inst = jump_inst.index(), target_pc, "invalid jump target");
+                trace!(%jump_inst, target_pc, "invalid jump target");
                 self.insts[jump_inst].flags |= InstFlags::INVALID_JUMP;
                 continue;
             }
@@ -276,7 +278,7 @@ impl<'a> Bytecode<'a> {
             self.insts[target].data = 1;
 
             // Set the target on the `JUMP` instruction.
-            trace!(jump_inst = jump_inst.index(), target = target.index(), "found jump");
+            trace!(%jump_inst, %target, "found jump");
             self.insts[jump_inst].data = target.index() as u32;
         }
     }
@@ -385,7 +387,7 @@ impl<'a> Bytecode<'a> {
     #[inline]
     pub(crate) fn pc_to_inst(&self, pc: usize) -> Inst {
         match self.pc_to_inst.get(&(pc as u32)) {
-            Some(&inst) => Inst::from_usize(inst as usize),
+            Some(&inst) => inst,
             None => panic!("pc out of bounds: {pc}"),
         }
     }
@@ -420,7 +422,7 @@ impl<'a> Bytecode<'a> {
         let data = self.inst(inst);
 
         let mut s = String::new();
-        let _ = write!(s, "OP{}.{}", inst.index(), data.to_op());
+        let _ = write!(s, "OP{inst}.{}", data.to_op());
         if !name.is_empty() {
             let _ = write!(s, ".{name}");
         }

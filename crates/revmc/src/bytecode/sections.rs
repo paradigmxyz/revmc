@@ -113,7 +113,7 @@ impl SectionAnalysis {
         let section = self.section();
         if !section.is_empty() {
             trace!(
-                inst = self.start_inst.index(),
+                inst = %self.start_inst,
                 len = next_section_inst.index() - self.start_inst.index(),
                 ?section,
                 "saving"

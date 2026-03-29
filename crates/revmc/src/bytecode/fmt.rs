@@ -94,14 +94,17 @@ impl Bytecode<'_> {
                 let opcode = data.to_op_in(self);
                 write!(text, "{opcode}").unwrap();
                 if data.flags.contains(InstFlags::INVALID_JUMP) {
-                    text.push_str(" -> INVALID");
+                    text.push_str(" INVALID");
                 } else if data.flags.contains(InstFlags::MULTI_JUMP) {
                     if let Some(targets) = self.multi_jump_targets(inst) {
-                        text.push_str(" ->");
-                        for &t in targets {
+                        text.push(' ');
+                        for (i, &t) in targets.iter().enumerate() {
+                            if i > 0 {
+                                text.push_str(", ");
+                            }
                             match info.inst_to_block.get(&t) {
                                 Some(b) => write!(text, " bb{b}").unwrap(),
-                                None => write!(text, " inst {}", t.index()).unwrap(),
+                                None => write!(text, " inst {t}").unwrap(),
                             }
                         }
                     }
@@ -109,7 +112,7 @@ impl Bytecode<'_> {
                     let target = Inst::from_usize(data.data as usize);
                     match info.inst_to_block.get(&target) {
                         Some(b) => write!(text, " bb{b}").unwrap(),
-                        None => write!(text, " inst {}", target.index()).unwrap(),
+                        None => write!(text, " inst {target}").unwrap(),
                     }
                 }
 

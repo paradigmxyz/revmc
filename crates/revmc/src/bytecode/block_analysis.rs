@@ -39,11 +39,13 @@ use std::{cmp::Ordering, collections::VecDeque, ops::Range};
 oxc_index::define_index_type! {
     /// Index into the interned constant-set pool.
     struct ConstSetIdx = u32;
+    DISPLAY_FORMAT = "{}";
 }
 
 oxc_index::define_index_type! {
     /// Index into the interned stack-snapshot pool.
     pub(crate) struct SnapshotIdx = u32;
+    DISPLAY_FORMAT = "{}";
 }
 
 /// Abstract value on the stack.
@@ -208,6 +210,7 @@ impl BlockState {
 oxc_index::define_index_type! {
     /// A block index in the CFG.
     struct Block = u32;
+    DISPLAY_FORMAT = "{}";
 }
 
 /// FIFO worklist with deduplication.
@@ -316,11 +319,7 @@ impl Bytecode<'_> {
                     // Mark JUMPDEST as reachable.
                     self.insts[target_inst].data = 1;
                     newly_resolved += 1;
-                    trace!(
-                        jump_inst = jump_inst.index(),
-                        target_inst = target_inst.index(),
-                        "resolved jump"
-                    );
+                    trace!(%jump_inst, %target_inst, "resolved jump");
                 }
                 JumpTarget::Multi(ref targets) => {
                     for &target_inst in targets {
@@ -336,33 +335,26 @@ impl Bytecode<'_> {
                         | InstFlags::MULTI_JUMP;
                     self.multi_jump_targets.insert(jump_inst, targets.clone());
                     newly_resolved += 1;
-                    trace!(
-                        jump_inst = jump_inst.index(),
-                        n_targets = targets.len(),
-                        "resolved multi-target jump"
-                    );
+                    trace!(%jump_inst, n_targets = targets.len(), "resolved multi-target jump");
                 }
                 JumpTarget::Invalid => {
                     self.insts[jump_inst].flags |= InstFlags::STATIC_JUMP
                         | InstFlags::INVALID_JUMP
                         | InstFlags::BLOCK_RESOLVED_JUMP;
                     newly_resolved += 1;
-                    trace!(jump_inst = jump_inst.index(), "resolved invalid jump");
+                    trace!(%jump_inst, "resolved invalid jump");
                 }
                 JumpTarget::Bottom if !has_top_jump => {
                     // Truly unreachable: no unresolved jumps remain, so this
                     // code cannot be reached at runtime. Mark as invalid.
                     self.insts[jump_inst].flags |= InstFlags::STATIC_JUMP | InstFlags::INVALID_JUMP;
-                    trace!(jump_inst = jump_inst.index(), "unreachable jump");
+                    trace!(%jump_inst, "unreachable jump");
                 }
                 JumpTarget::Bottom => {
                     // Unreachable according to the analysis, but there are
                     // unresolved (Top) jumps that might reach this code at
                     // runtime. Leave as-is.
-                    trace!(
-                        jump_inst = jump_inst.index(),
-                        "unreachable jump (not marking, has_top_jump)"
-                    );
+                    trace!(%jump_inst, "unreachable jump (not marking, has_top_jump)");
                 }
                 JumpTarget::Top => {}
             }
@@ -771,7 +763,7 @@ impl Bytecode<'_> {
             }
 
             // Record pre-instruction snapshot if requested.
-            if let Some((ref mut snap, ref mut interner)) = snapshots {
+            if let Some((snap, interner)) = &mut snapshots {
                 let snapshot: SmallVec<[Option<U256Idx>; 2]> =
                     stack.iter().map(|v| v.as_const()).collect();
                 snap[i] = Some(interner.intern(&snapshot));
@@ -931,8 +923,12 @@ mod tests {
     use super::{super::Inst, *};
     use revm_primitives::hardfork::SpecId;
 
-    fn analyze_bytecode(hex: &str) -> Bytecode<'static> {
+    fn analyze_hex(hex: &str) -> Bytecode<'static> {
         let code = revm_primitives::hex::decode(hex.trim()).unwrap();
+        analyze_code(code)
+    }
+
+    fn analyze_code(code: Vec<u8>) -> Bytecode<'static> {
         let code = Box::leak(code.into_boxed_slice());
         let mut bytecode = Bytecode::new(code, SpecId::CANCUN);
         bytecode.analyze().unwrap();
@@ -941,7 +937,7 @@ mod tests {
 
     #[test]
     fn revert_sub_call_storage_oog() {
-        let bytecode = analyze_bytecode(
+        let bytecode = analyze_hex(
             "60606040526000357c01000000000000000000000000000000000000000000000000000000009004\
              63ffffffff168063b28175c4146046578063c0406226146052575b6000565b34600057605060765\
              65b005b34600057605c6081565b604051808215151515815260200191505060405180910390f35b\
@@ -954,7 +950,7 @@ mod tests {
 
     #[test]
     fn revert_remote_sub_call_storage_oog() {
-        let bytecode = analyze_bytecode(
+        let bytecode = analyze_hex(
             "608060405234801561001057600080fd5b506004361061002b5760003560e01c806373027f6d14\
              610030575b600080fd5b61004a600480360381019061004591906101a9565b61004c565b005b60\
              00808273ffffffffffffffffffffffffffffffffffffffff1660405160240160405160208183030\
@@ -990,21 +986,30 @@ mod tests {
             "60065f601d565b5f5560106001601d565b6001555f80808080335af1005b5c9056",
         ];
         for hex in &contracts {
-            let bytecode = analyze_bytecode(hex);
+            let bytecode = analyze_hex(hex);
             eprintln!("{bytecode}");
         }
     }
 
     #[test]
     fn const_operand_basic() {
-        // PUSH1 0x42  PUSH1 0x01  ADD  PUSH1 0x00  MSTORE  STOP
         // inst 0: PUSH1 0x42 -> stack: [0x42]
         // inst 1: PUSH1 0x01 -> stack: [0x42, 0x01]
         // inst 2: ADD        -> stack: [0x43]  (const-folded)
         // inst 3: PUSH1 0x00 -> stack: [0x43, 0x00]
         // inst 4: MSTORE     -> pops 2
-        // inst 5: STOP
-        let bytecode = analyze_bytecode("60426001016000525b00");
+        // inst 5: JUMPDEST
+        // inst 6: STOP
+        #[rustfmt::skip]
+        let bytecode = analyze_code(vec![
+            op::PUSH1, 0x42,
+            op::PUSH1, 0x01,
+            op::ADD,
+            op::PUSH1, 0x00,
+            op::MSTORE,
+            op::JUMPDEST,
+            op::STOP,
+        ]);
         // At inst 2 (ADD), operand 0 (TOS) = 0x01, operand 1 = 0x42.
         assert_eq!(bytecode.const_operand(Inst::from_usize(2), 0), Some(U256::from(0x01)));
         assert_eq!(bytecode.const_operand(Inst::from_usize(2), 1), Some(U256::from(0x42)));
@@ -1016,9 +1021,14 @@ mod tests {
     #[test]
     fn const_operand_dynamic() {
         // CALLDATALOAD pushes an unknown value -> const_operand should return None.
-        // PUSH1 0x00  CALLDATALOAD  PUSH1 0x00  MSTORE  STOP
-        let bytecode = analyze_bytecode("5f355f5200");
-        // At inst 2 (PUSH1 0x00 second), operand 0 doesn't exist yet (it's a push).
+        #[rustfmt::skip]
+        let bytecode = analyze_code(vec![
+            op::PUSH0,
+            op::CALLDATALOAD,
+            op::PUSH0,
+            op::MSTORE,
+            op::STOP,
+        ]);
         // At inst 3 (MSTORE), operand 0 (TOS) = 0x00, operand 1 = unknown (CALLDATALOAD result).
         assert_eq!(bytecode.const_operand(Inst::from_usize(3), 0), Some(U256::ZERO));
         assert_eq!(bytecode.const_operand(Inst::from_usize(3), 1), None);
@@ -1027,36 +1037,31 @@ mod tests {
     #[test]
     fn multi_target_jump() {
         // Internal function called from two sites with different return addresses.
-        //
-        // Layout:
-        //   0: PUSH1 ret1   ; push return address for call site 1
-        //   2: PUSH1 func   ; push function entry
-        //   4: JUMP          ; call function (static: PUSH+JUMP)
-        //   5: JUMPDEST      ; ret1: return point for call site 1
-        //   6: POP           ; consume function result
-        //   7: PUSH1 ret2   ; push return address for call site 2
-        //   9: PUSH1 func   ; push function entry
-        //  11: JUMP          ; call function (static: PUSH+JUMP)
-        //  12: JUMPDEST      ; ret2: return point for call site 2
-        //  13: POP           ; consume function result
-        //  14: STOP
-        //  15: JUMPDEST      ; func: function entry
-        //  16: PUSH1 0x42    ; push a result
-        //  17: SWAP1         ; swap result and return address
-        //  18: JUMP          ; return (dynamic: target is on stack from caller)
-        //
-        // The return JUMP at offset 18 should resolve to Multi([ret1, ret2]).
-        let bytecode = analyze_bytecode(
-            "6005600f56\
-             5b50\
-             600c600f56\
-             5b50\
-             00\
-             5b\
-             6042\
-             90\
-             56",
-        );
+        // The return JUMP at the end should resolve to Multi([ret1, ret2]).
+        let ret1: u8 = 5;
+        let ret2: u8 = 12;
+        let func: u8 = 15;
+        #[rustfmt::skip]
+        let bytecode = analyze_code(vec![
+            // Call site 1.
+            op::PUSH1, ret1,    // 0: push return address
+            op::PUSH1, func,    // 2: push function entry
+            op::JUMP,           // 4: call function (static: PUSH+JUMP)
+            op::JUMPDEST,       // 5: ret1
+            op::POP,            // 6: consume function result
+            // Call site 2.
+            op::PUSH1, ret2,    // 7: push return address
+            op::PUSH1, func,    // 9: push function entry
+            op::JUMP,           // 11: call function (static: PUSH+JUMP)
+            op::JUMPDEST,       // 12: ret2
+            op::POP,            // 13: consume function result
+            op::STOP,           // 14
+            // Internal function.
+            op::JUMPDEST,       // 15: func entry
+            op::PUSH1, 0x42,    // 16: push a result
+            op::SWAP1,          // 18: swap result and return address
+            op::JUMP,           // 19: return (dynamic)
+        ]);
         eprintln!("{bytecode}");
 
         // The return JUMP (last inst before STOP's block) should be multi-target.
