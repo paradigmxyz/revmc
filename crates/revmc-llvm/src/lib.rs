@@ -1580,8 +1580,8 @@ impl Builder for EvmLlvmBuilder<'_> {
     fn umin(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
         let ty = lhs.get_type();
         let name = format!("llvm.umin.{}", fmt_ty(ty));
-        let max = self.get_or_add_function(&name, |this| this.fn_type(Some(ty), &[ty, ty]));
-        self.call(max, &[lhs, rhs]).unwrap()
+        let min = self.get_or_add_function(&name, |this| this.fn_type(Some(ty), &[ty, ty]));
+        self.call(min, &[lhs, rhs]).unwrap()
     }
 
     fn bswap(&mut self, value: Self::Value) -> Self::Value {
