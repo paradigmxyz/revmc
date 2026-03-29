@@ -281,11 +281,7 @@ impl<'a> Bytecode<'a> {
             }
 
             // Fallthrough edge.
-            let has_fallthrough = if last.opcode == op::JUMPI {
-                true
-            } else {
-                !last.is_diverging() && last.opcode != op::JUMP
-            };
+            let has_fallthrough = last.can_fall_through();
             if has_fallthrough && let Some(&(next_block, _, _)) = info.blocks.get(i + 1) {
                 let (label, color) =
                     if last.opcode == op::JUMPI { ("false", "#e94560") } else { ("", "#555577") };
