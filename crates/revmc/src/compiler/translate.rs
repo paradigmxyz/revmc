@@ -964,7 +964,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                         debug_assert_eq!(
                             *self.bytecode.inst(target_inst),
                             op::JUMPDEST,
-                            "jumping to non-JUMPDEST; target_inst={target_inst:?}",
+                            "jumping to non-JUMPDEST; target_inst={target_inst}",
                         );
                         self.inst_entries[target_inst]
                     } else {

@@ -6,8 +6,8 @@
 //! handle — including internal function return patterns where multiple callers push different
 //! return addresses.
 //!
-//! After the fixpoint converges, the abstract stack state at each instruction is persisted via
-//! a [`SnapshotInterner`] so that later passes (e.g. code generation) can query the
+//! After the fixpoint converges, the known-constant operands at each instruction are persisted
+//! as [`OperandSnapshot`]s so that later passes (e.g. code generation) can query the
 //! known-constant value of stack operands.
 //!
 //! ## Abstract domain
@@ -34,7 +34,7 @@ use oxc_index::IndexVec;
 use revm_bytecode::opcode as op;
 use revm_primitives::U256;
 use smallvec::SmallVec;
-use std::{cmp::Ordering, collections::VecDeque, ops::Range};
+use std::{borrow::Cow, cmp::Ordering, collections::VecDeque, ops::Range};
 
 oxc_index::define_index_type! {
     /// Index into the interned constant-set pool.
@@ -42,11 +42,11 @@ oxc_index::define_index_type! {
     DISPLAY_FORMAT = "{}";
 }
 
-oxc_index::define_index_type! {
-    /// Index into the interned stack-snapshot pool.
-    pub(crate) struct SnapshotIdx = u32;
-    DISPLAY_FORMAT = "{}";
-}
+/// Per-instruction snapshot of known-constant operands.
+///
+/// Index 0 is TOS (first popped / depth 0), index 1 is second from top, etc.
+/// Only the instruction's inputs are stored, not the entire stack.
+pub(crate) type OperandSnapshot = SmallVec<[Option<U256Idx>; 2]>;
 
 /// Abstract value on the stack.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -134,27 +134,6 @@ impl ConstSetInterner {
                 self.intern_set(&merged)
             }
         }
-    }
-}
-
-/// Stack-snapshot interner: deduplicates per-instruction abstract stack states.
-#[derive(Default)]
-pub(crate) struct SnapshotInterner {
-    interner: Interner<SnapshotIdx, Box<[Option<U256Idx>]>>,
-}
-
-impl SnapshotInterner {
-    /// Interns a snapshot and returns its index.
-    fn intern(&mut self, snapshot: &[Option<U256Idx>]) -> SnapshotIdx {
-        self.interner.intern(snapshot.into())
-    }
-
-    /// Returns the interned index of the operand at `depth` from the top of the stack.
-    ///
-    /// `depth` 0 is TOS (first popped), 1 is second, etc.
-    pub(crate) fn operand(&self, idx: SnapshotIdx, depth: usize) -> Option<U256Idx> {
-        let stack = self.interner.get(idx);
-        stack[stack.len().checked_sub(1 + depth)?]
     }
 }
 
@@ -277,19 +256,17 @@ impl Bytecode<'_> {
     /// Runs abstract stack interpretation to resolve additional jump targets.
     ///
     /// Also computes and stores per-instruction stack snapshots for constant propagation.
-    #[instrument(name = "block_analysis", level = "debug", skip_all)]
+    #[instrument(name = "ba", level = "debug", skip_all)]
     pub(crate) fn block_analysis(&mut self) {
         let cfg = self.build_cfg();
         if cfg.blocks.is_empty() {
             return;
         }
 
-        let mut snapshot_interner = SnapshotInterner::default();
-        let mut snapshots = vec![None; self.insts.len()];
-        let (resolved, count) =
-            self.run_abstract_interp(&cfg, &mut snapshots, &mut snapshot_interner);
-        self.stack_snapshots = IndexVec::from_vec(snapshots);
-        self.snapshot_interner = snapshot_interner;
+        let mut snapshots: IndexVec<Inst, OperandSnapshot> =
+            IndexVec::from_vec(vec![SmallVec::new(); self.insts.len()]);
+        let (resolved, count) = self.run_abstract_interp(&cfg, &mut snapshots);
+        self.stack_snapshots = snapshots;
 
         if count == 0 {
             return;
@@ -469,8 +446,7 @@ impl Bytecode<'_> {
     fn run_abstract_interp(
         &self,
         cfg: &Cfg,
-        snapshots: &mut [Option<SnapshotIdx>],
-        snapshot_interner: &mut SnapshotInterner,
+        snapshots: &mut IndexVec<Inst, OperandSnapshot>,
     ) -> (Vec<(Inst, JumpTarget)>, usize) {
         let num_blocks = cfg.blocks.len();
 
@@ -490,13 +466,8 @@ impl Bytecode<'_> {
         // Always run the fixpoint to propagate stack states through the CFG.
         // Snapshots are recorded during interpretation — last write wins (= converged state).
         let mut const_sets = ConstSetInterner::new();
-        let discovered_edges = self.run_fixpoint(
-            cfg,
-            &mut block_states,
-            snapshots,
-            snapshot_interner,
-            &mut const_sets,
-        );
+        let discovered_edges =
+            self.run_fixpoint(cfg, &mut block_states, snapshots, &mut const_sets);
 
         if jump_insts.is_empty() {
             return (Vec::new(), 0);
@@ -646,8 +617,7 @@ impl Bytecode<'_> {
         &self,
         cfg: &Cfg,
         block_states: &mut IndexVec<Block, BlockState>,
-        snapshots: &mut [Option<SnapshotIdx>],
-        snapshot_interner: &mut SnapshotInterner,
+        snapshots: &mut IndexVec<Inst, OperandSnapshot>,
         const_sets: &mut ConstSetInterner,
     ) -> IndexVec<Block, SmallVec<[Block; 2]>> {
         let num_blocks = cfg.blocks.len();
@@ -690,11 +660,8 @@ impl Bytecode<'_> {
                 continue;
             }
 
-            let Some(output) = self.interpret_block(
-                block.insts.clone(),
-                &input,
-                Some((snapshots, snapshot_interner)),
-            ) else {
+            let Some(output) = self.interpret_block(block.insts.clone(), &input, Some(snapshots))
+            else {
                 continue;
             };
 
@@ -748,13 +715,13 @@ impl Bytecode<'_> {
     ///
     /// If `snapshots` is provided, records the abstract stack state *before* each instruction
     /// into `snapshots[inst_index]`.
-    fn interpret_block(
+    fn interpret_block<'a>(
         &self,
         range: Range<usize>,
-        input: &[AbsValue],
-        mut snapshots: Option<(&mut [Option<SnapshotIdx>], &mut SnapshotInterner)>,
-    ) -> Option<Vec<AbsValue>> {
-        let mut stack = input.to_vec();
+        input: &'a [AbsValue],
+        mut snapshots: Option<&mut IndexVec<Inst, OperandSnapshot>>,
+    ) -> Option<Cow<'a, [AbsValue]>> {
+        let mut stack = Cow::Borrowed(input);
 
         for i in range {
             let inst = &self.insts.raw[i];
@@ -762,17 +729,21 @@ impl Bytecode<'_> {
                 continue;
             }
 
-            // Record pre-instruction snapshot if requested.
-            if let Some((snap, interner)) = &mut snapshots {
-                let snapshot: SmallVec<[Option<U256Idx>; 2]> =
-                    stack.iter().map(|v| v.as_const()).collect();
-                snap[i] = Some(interner.intern(&snapshot));
-            }
-
             // Instructions marked SKIP_LOGIC (the PUSH in a PUSH+JUMP pair) are no-ops
             // for abstract interpretation — the value is consumed by the already-resolved jump.
             if inst.flags.contains(InstFlags::SKIP_LOGIC) {
                 continue;
+            }
+
+            let stack = stack.to_mut();
+
+            // Record pre-instruction operand snapshot: only the top `inp` values.
+            if let Some(snaps) = &mut snapshots {
+                let (inp, _) = inst.stack_io();
+                let inp = inp as usize;
+                let len = stack.len();
+                let start = len.saturating_sub(inp);
+                snaps.raw[i] = stack[start..].iter().rev().map(|v| v.as_const()).collect();
             }
 
             match inst.opcode {

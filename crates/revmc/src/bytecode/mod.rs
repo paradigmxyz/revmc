@@ -10,7 +10,7 @@ use smallvec::SmallVec;
 use std::cell::RefCell;
 
 mod block_analysis;
-use block_analysis::{SnapshotIdx, SnapshotInterner};
+use block_analysis::OperandSnapshot;
 
 mod fmt;
 
@@ -44,9 +44,6 @@ oxc_index::define_index_type! {
     DISPLAY_FORMAT = "{}";
 }
 
-/// Hasher used by the U256 interner.
-type FxBuildHasher = alloy_primitives::map::FxBuildHasher;
-
 /// EVM bytecode.
 #[doc(hidden)] // Not public API.
 pub struct Bytecode<'a> {
@@ -62,13 +59,12 @@ pub struct Bytecode<'a> {
     has_dynamic_jumps: bool,
     /// Whether the bytecode may suspend execution.
     may_suspend: bool,
-    /// Per-instruction abstract stack snapshot indices computed by block analysis.
-    /// Each entry is the abstract stack state *before* the instruction executes.
-    stack_snapshots: IndexVec<Inst, Option<SnapshotIdx>>,
-    /// Interner for stack snapshots, deduplicating identical abstract stack states.
-    snapshot_interner: SnapshotInterner,
+    /// Per-instruction operand snapshots computed by block analysis.
+    /// Each entry contains the known-constant status of the instruction's input operands,
+    /// with index 0 = TOS (depth 0).
+    stack_snapshots: IndexVec<Inst, OperandSnapshot>,
     /// Deduplicated constant pool for U256 values.
-    u256_interner: RefCell<Interner<U256Idx, U256, FxBuildHasher>>,
+    u256_interner: RefCell<Interner<U256Idx, U256, alloy_primitives::map::FbBuildHasher<32>>>,
     /// Multi-target jump table: maps a JUMP/JUMPI instruction to its set of known targets.
     /// Only populated for jumps resolved to multiple targets by block analysis.
     multi_jump_targets: FxHashMap<Inst, SmallVec<[Inst; 4]>>,
@@ -118,7 +114,6 @@ impl<'a> Bytecode<'a> {
             has_dynamic_jumps: false,
             may_suspend: false,
             stack_snapshots: IndexVec::new(),
-            snapshot_interner: SnapshotInterner::default(),
             u256_interner: RefCell::new(Interner::new()),
             multi_jump_targets: FxHashMap::default(),
             pc_to_inst,
@@ -407,8 +402,7 @@ impl<'a> Bytecode<'a> {
     /// `depth` 0 is TOS (first popped by this instruction), 1 is second, etc.
     /// Returns `None` if the value is unknown or the analysis didn't cover this instruction.
     pub(crate) fn const_operand(&self, inst: Inst, depth: usize) -> Option<U256> {
-        let snap_idx = (*self.stack_snapshots.get(inst)?)?;
-        let idx = self.snapshot_interner.operand(snap_idx, depth)?;
+        let idx = (*self.stack_snapshots.get(inst)?.get(depth)?)?;
         Some(*self.u256_interner.borrow().get(idx))
     }
 
