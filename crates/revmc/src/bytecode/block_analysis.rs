@@ -1217,13 +1217,9 @@ mod tests {
             // Inner function: pushes a result and returns.
             // Entry stack: [..., ret_addr]
             op::JUMPDEST,           // pc=32: inner entry
-            op::PUSH1, 0x42,        // pc=33: push result
-            op::SWAP1,              // pc=35: [result, ret_addr] -> [ret_addr, result] -- wait
-            // Actually: swap so ret_addr is on top: [..., result, ret_addr]
-            // No — SWAP1 swaps TOS and TOS-1.
-            // Before SWAP1: [..., ret_addr, 0x42]  (ret_addr is TOS-1, 0x42 is TOS)
-            // After SWAP1:  [..., 0x42, ret_addr]
-            op::JUMP,               // pc=36: jump to ret_addr, leaves [..., 0x42] = result
+            op::PUSH1, 0x42,        // pc=33: push result → [..., ret_addr, 0x42]
+            op::SWAP1,              // pc=35: → [..., 0x42, ret_addr]
+            op::JUMP,               // pc=36: jump to ret_addr, leaves [..., 0x42]
         ]);
         eprintln!("{bytecode}");
 
