@@ -15,12 +15,12 @@ pub(crate) struct RuntimeStats {
     pub(crate) events_dropped: AtomicU64,
     /// Total number of entries evicted (idle + budget).
     pub(crate) evictions: AtomicU64,
-    /// Total number of JIT promotions (hot threshold reached).
-    pub(crate) jit_promotions: AtomicU64,
-    /// Total number of successful JIT compilations.
-    pub(crate) jit_successes: AtomicU64,
-    /// Total number of failed JIT compilations.
-    pub(crate) jit_failures: AtomicU64,
+    /// Total number of compilations dispatched (JIT promotions + AOT requests).
+    pub(crate) compilations_dispatched: AtomicU64,
+    /// Total number of successful compilations (JIT + AOT).
+    pub(crate) compilations_succeeded: AtomicU64,
+    /// Total number of failed compilations (JIT + AOT).
+    pub(crate) compilations_failed: AtomicU64,
 }
 
 /// A point-in-time snapshot of runtime stats.
@@ -50,12 +50,12 @@ pub struct RuntimeStatsSnapshot {
     pub jit_data_bytes: u64,
     /// Total number of entries evicted (idle + budget).
     pub evictions: u64,
-    /// Total number of JIT promotions (hot threshold reached).
-    pub jit_promotions: u64,
-    /// Total number of successful JIT compilations.
-    pub jit_successes: u64,
-    /// Total number of failed JIT compilations.
-    pub jit_failures: u64,
+    /// Total number of compilations dispatched (JIT promotions + AOT requests).
+    pub compilations_dispatched: u64,
+    /// Total number of successful compilations (JIT + AOT).
+    pub compilations_succeeded: u64,
+    /// Total number of failed compilations (JIT + AOT).
+    pub compilations_failed: u64,
 }
 
 impl RuntimeStatsSnapshot {
@@ -88,9 +88,9 @@ impl RuntimeStats {
             jit_code_bytes,
             jit_data_bytes,
             evictions: self.evictions.load(Ordering::Relaxed),
-            jit_promotions: self.jit_promotions.load(Ordering::Relaxed),
-            jit_successes: self.jit_successes.load(Ordering::Relaxed),
-            jit_failures: self.jit_failures.load(Ordering::Relaxed),
+            compilations_dispatched: self.compilations_dispatched.load(Ordering::Relaxed),
+            compilations_succeeded: self.compilations_succeeded.load(Ordering::Relaxed),
+            compilations_failed: self.compilations_failed.load(Ordering::Relaxed),
         }
     }
 }

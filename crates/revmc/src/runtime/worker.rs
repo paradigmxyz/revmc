@@ -87,6 +87,8 @@ pub(crate) struct WorkerResult {
     pub(crate) key: RuntimeCacheKey,
     /// The compilation outcome.
     pub(crate) outcome: Result<WorkerSuccess, String>,
+    /// Whether this was a JIT or AOT compilation job.
+    pub(crate) kind: crate::runtime::config::CompilationKind,
     /// Optional notifier for synchronous callers, passed through from the job.
     pub(crate) sync_notifier: SyncNotifier,
     /// Generation at the time the job was dispatched.
@@ -279,10 +281,12 @@ fn worker_loop(
     let mut jit_compiler = EvmCompiler::new(backend);
     jit_compiler.debug_assertions(debug_assertions);
 
+    use crate::runtime::config::CompilationKind;
+
     while let Ok(job) = job_rx.recv() {
         debug!(?job, "received job");
         let t0 = std::time::Instant::now();
-        let (key, outcome, sync_notifier, generation, timings) = match job {
+        let (key, outcome, kind, sync_notifier, generation, timings) = match job {
             WorkerJob::Jit(job) => {
                 let _span =
                     debug_span!("jit_compile", hash=%job.key.code_hash, spec_id=?job.key.spec_id)
@@ -328,7 +332,7 @@ fn worker_loop(
                     warn!(%err, "clear_ir failed");
                 }
 
-                (job.key, outcome, job.sync_notifier, job.generation, timings)
+                (job.key, outcome, CompilationKind::Jit, job.sync_notifier, job.generation, timings)
             }
             WorkerJob::Aot(job) => {
                 let _span =
@@ -337,7 +341,14 @@ fn worker_loop(
 
                 let generation = job.generation;
                 let outcome = compile_aot_artifact(&job);
-                (job.key, outcome, SyncNotifier::none(), generation, CompileTimings::default())
+                (
+                    job.key,
+                    outcome,
+                    CompilationKind::Aot,
+                    SyncNotifier::none(),
+                    generation,
+                    CompileTimings::default(),
+                )
             }
         };
         let compile_duration = t0.elapsed();
@@ -345,6 +356,7 @@ fn worker_loop(
         let _ = result_tx.send(WorkerResult {
             key,
             outcome,
+            kind,
             sync_notifier,
             generation,
             compile_duration,
@@ -410,16 +422,19 @@ fn worker_loop(
     _dump_dir: Option<&Path>,
     _debug_assertions: bool,
 ) {
+    use crate::runtime::config::CompilationKind;
+
     debug!(worker_id, "compile worker started (no LLVM, all jobs will fail)");
 
     while let Ok(job) = job_rx.recv() {
-        let (key, sync_notifier, generation) = match job {
-            WorkerJob::Jit(j) => (j.key, j.sync_notifier, j.generation),
-            WorkerJob::Aot(j) => (j.key, SyncNotifier::none(), j.generation),
+        let (key, kind, sync_notifier, generation) = match job {
+            WorkerJob::Jit(j) => (j.key, CompilationKind::Jit, j.sync_notifier, j.generation),
+            WorkerJob::Aot(j) => (j.key, CompilationKind::Aot, SyncNotifier::none(), j.generation),
         };
         let _ = result_tx.send(WorkerResult {
             key,
             outcome: Err("LLVM backend not available".into()),
+            kind,
             sync_notifier,
             generation,
             compile_duration: Duration::ZERO,

@@ -261,7 +261,7 @@ mod tests {
         }
 
         let stats = backend.stats();
-        assert!(stats.jit_successes > 0, "expected JIT compilations, got: {stats:?}");
+        assert!(stats.compilations_succeeded > 0, "expected compilations, got: {stats:?}");
         assert!(stats.resident_entries > 0, "expected resident entries, got: {stats:?}");
     }
 

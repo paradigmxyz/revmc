@@ -1031,8 +1031,7 @@ fn preload_aot_seeds_resident() {
 }
 
 /// `prepare_aot()` on a key that is already persisted in the store but not resident
-/// (e.g. after a `clear_resident`) re-compiles because the backend does not probe
-/// storage before compiling.
+/// (e.g. after a `clear_resident`) loads from the store without recompiling.
 #[test]
 #[cfg(feature = "llvm")]
 fn prepare_aot_already_persisted_not_resident() {
@@ -1055,11 +1054,13 @@ fn prepare_aot_already_persisted_not_resident() {
     tb.wait_compiled(BYTECODE_RET42, SpecId::CANCUN);
     assert_eq!(store.stored_count(), 1);
 
+    let dispatched_before = tb.stats().compilations_dispatched;
+
     // Clear resident — artifact is still persisted in the store but not in memory.
     tb.clear_resident();
     tb.wait_resident_count(0);
 
-    // Requesting prepare_aot again should re-compile and reload into resident.
+    // Requesting prepare_aot again should load from store without recompiling.
     tb.prepare_aot(AotRequest {
         code_hash,
         code: Bytes::copy_from_slice(BYTECODE_RET42),
@@ -1068,6 +1069,13 @@ fn prepare_aot_already_persisted_not_resident() {
 
     let p = tb.wait_compiled(BYTECODE_RET42, SpecId::CANCUN);
     assert_eq!(p.kind, ProgramKind::Aot);
+
+    // No new compilation should have been dispatched — loaded from store.
+    assert_eq!(
+        tb.stats().compilations_dispatched,
+        dispatched_before,
+        "should not recompile when artifact is already persisted",
+    );
 }
 
 /// `prepare_aot()` on a key that is already resident as JIT should be skipped.

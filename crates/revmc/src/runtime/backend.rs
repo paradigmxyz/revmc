@@ -6,7 +6,7 @@
 
 use crate::runtime::{
     api::{CompiledProgram, LoadedLibrary},
-    config::{CompilationEvent, CompilationKind, RuntimeTuning},
+    config::{CompilationEvent, RuntimeTuning},
     stats::RuntimeStats,
     storage::{ArtifactKey, ArtifactManifest, ArtifactStore, BackendSelection, RuntimeCacheKey},
     worker::{AotJob, JitJob, SyncNotifier, WorkerJob, WorkerPool, WorkerResult, WorkerSuccess},
@@ -205,7 +205,7 @@ impl BackendState {
             if self.workers.try_send(job) {
                 entry.phase = EntryPhase::Working;
                 self.pending_jobs += 1;
-                self.stats.jit_promotions.fetch_add(1, Ordering::Relaxed);
+                self.stats.compilations_dispatched.fetch_add(1, Ordering::Relaxed);
             }
         }
     }
@@ -265,7 +265,7 @@ impl BackendState {
             );
             entry.phase = EntryPhase::Working;
             self.pending_jobs += 1;
-            self.stats.jit_promotions.fetch_add(1, Ordering::Relaxed);
+            self.stats.compilations_dispatched.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -288,6 +288,11 @@ impl BackendState {
                 continue;
             }
 
+            // Probe the store: if already persisted, load directly without recompiling.
+            if self.try_load_persisted_aot(&req.key) {
+                continue;
+            }
+
             let symbol = format!("aot_{:x}_{:?}", req.key.code_hash, req.key.spec_id);
             let job = WorkerJob::Aot(AotJob {
                 key: req.key.clone(),
@@ -307,7 +312,68 @@ impl BackendState {
             if self.workers.try_send(job) {
                 entry.phase = EntryPhase::Working;
                 self.pending_jobs += 1;
-                self.stats.jit_promotions.fetch_add(1, Ordering::Relaxed);
+                self.stats.compilations_dispatched.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// Tries to load an already-persisted AOT artifact from the store into the resident map.
+    /// Returns `true` if the artifact was loaded successfully.
+    fn try_load_persisted_aot(&mut self, key: &RuntimeCacheKey) -> bool {
+        let store = match &self.store {
+            Some(s) => s,
+            None => return false,
+        };
+
+        let artifact_key = ArtifactKey {
+            runtime: key.clone(),
+            backend: BackendSelection::Llvm,
+            target: Target::Native,
+            opt_level: self.tuning.aot_opt_level,
+        };
+
+        match store.load(&artifact_key) {
+            Ok(Some(stored)) => {
+                match (|| -> crate::eyre::Result<CompiledProgram> {
+                    let library = unsafe { libloading::Library::new(&stored.dylib_path) }
+                        .map_err(|e| crate::eyre::eyre!("dlopen {:?}: {e}", stored.dylib_path))?;
+                    let func: crate::EvmCompilerFn = unsafe {
+                        let sym: libloading::Symbol<'_, crate::EvmCompilerFn> =
+                            library.get(stored.manifest.symbol_name.as_bytes()).map_err(|e| {
+                                crate::eyre::eyre!("symbol '{}': {e}", stored.manifest.symbol_name)
+                            })?;
+                        *sym
+                    };
+                    let library = Arc::new(LoadedLibrary::new(library));
+                    Ok(CompiledProgram::new_aot(key.clone(), func, library))
+                })() {
+                    Ok(program) => {
+                        debug!(
+                            code_hash = %key.code_hash,
+                            spec_id = ?key.spec_id,
+                            "loaded existing AOT artifact from store, skipping recompilation",
+                        );
+                        self.insert_resident(key.clone(), Arc::new(program));
+                        true
+                    }
+                    Err(e) => {
+                        warn!(
+                            code_hash = %key.code_hash,
+                            error = %e,
+                            "failed to load persisted AOT artifact, will recompile",
+                        );
+                        false
+                    }
+                }
+            }
+            Ok(None) => false,
+            Err(e) => {
+                warn!(
+                    code_hash = %key.code_hash,
+                    error = %e,
+                    "failed to probe artifact store",
+                );
+                false
             }
         }
     }
@@ -380,11 +446,8 @@ impl BackendState {
             return;
         }
 
-        let (kind, success) = match &result.outcome {
-            Ok(WorkerSuccess::Jit(_)) => (CompilationKind::Jit, true),
-            Ok(WorkerSuccess::Aot(_)) => (CompilationKind::Aot, true),
-            Err(_) => (CompilationKind::Jit, false),
-        };
+        let kind = result.kind;
+        let success = result.outcome.is_ok();
 
         if let Some(cb) = &self.on_compilation {
             cb(CompilationEvent {
@@ -407,7 +470,7 @@ impl BackendState {
 
                 self.insert_resident(result.key.clone(), program);
                 self.entries.remove(&result.key);
-                self.stats.jit_successes.fetch_add(1, Ordering::Relaxed);
+                self.stats.compilations_succeeded.fetch_add(1, Ordering::Relaxed);
 
                 debug!(
                     code_hash = %result.key.code_hash,
@@ -423,7 +486,7 @@ impl BackendState {
                 if let Some(entry) = self.entries.get_mut(&result.key) {
                     entry.phase = EntryPhase::Failed;
                 }
-                self.stats.jit_failures.fetch_add(1, Ordering::Relaxed);
+                self.stats.compilations_failed.fetch_add(1, Ordering::Relaxed);
 
                 warn!(
                     code_hash = %result.key.code_hash,
@@ -474,7 +537,7 @@ impl BackendState {
                 if let Some(entry) = self.entries.get_mut(&key) {
                     entry.phase = EntryPhase::Failed;
                 }
-                self.stats.jit_failures.fetch_add(1, Ordering::Relaxed);
+                self.stats.compilations_failed.fetch_add(1, Ordering::Relaxed);
                 return;
             }
 
@@ -506,7 +569,7 @@ impl BackendState {
                         Ok(program) => {
                             self.insert_resident(key.clone(), Arc::new(program));
                             self.entries.remove(&key);
-                            self.stats.jit_successes.fetch_add(1, Ordering::Relaxed);
+                            self.stats.compilations_succeeded.fetch_add(1, Ordering::Relaxed);
 
                             debug!(
                                 code_hash = %key.code_hash,
@@ -524,7 +587,7 @@ impl BackendState {
                             if let Some(entry) = self.entries.get_mut(&key) {
                                 entry.phase = EntryPhase::Failed;
                             }
-                            self.stats.jit_failures.fetch_add(1, Ordering::Relaxed);
+                            self.stats.compilations_failed.fetch_add(1, Ordering::Relaxed);
                         }
                     }
                 }
@@ -536,7 +599,7 @@ impl BackendState {
                     if let Some(entry) = self.entries.get_mut(&key) {
                         entry.phase = EntryPhase::Failed;
                     }
-                    self.stats.jit_failures.fetch_add(1, Ordering::Relaxed);
+                    self.stats.compilations_failed.fetch_add(1, Ordering::Relaxed);
                 }
                 Err(e) => {
                     warn!(
@@ -547,7 +610,7 @@ impl BackendState {
                     if let Some(entry) = self.entries.get_mut(&key) {
                         entry.phase = EntryPhase::Failed;
                     }
-                    self.stats.jit_failures.fetch_add(1, Ordering::Relaxed);
+                    self.stats.compilations_failed.fetch_add(1, Ordering::Relaxed);
                 }
             }
         } else {
@@ -559,7 +622,7 @@ impl BackendState {
             if let Some(entry) = self.entries.get_mut(&key) {
                 entry.phase = EntryPhase::Failed;
             }
-            self.stats.jit_failures.fetch_add(1, Ordering::Relaxed);
+            self.stats.compilations_failed.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -727,9 +790,9 @@ pub(crate) fn run(
     }
 
     info!(
-        jit_promotions = state.stats.jit_promotions.load(Ordering::Relaxed),
-        jit_successes = state.stats.jit_successes.load(Ordering::Relaxed),
-        jit_failures = state.stats.jit_failures.load(Ordering::Relaxed),
+        compilations_dispatched = state.stats.compilations_dispatched.load(Ordering::Relaxed),
+        compilations_succeeded = state.stats.compilations_succeeded.load(Ordering::Relaxed),
+        compilations_failed = state.stats.compilations_failed.load(Ordering::Relaxed),
         evictions = state.stats.evictions.load(Ordering::Relaxed),
         resident_entries = state.resident.len(),
         "backend stats at shutdown",

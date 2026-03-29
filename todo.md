@@ -17,16 +17,16 @@ Tracked issues and remaining work for the `runtime` module, separate from `plan.
 
 ## AOT Prepare
 
-- [ ] `prepare_aot()` does not probe storage before compiling — recompiles even if already persisted.
+- [x] `prepare_aot()` does not probe storage before compiling — recompiles even if already persisted.
 - [ ] `prepare_aot()` skips if key is already resident (even as JIT) — JIT-resident code never gets persisted as AOT for faster startup.
 
 ## Correctness / State Machine
 
-- [ ] `on_compilation` callback classifies all failures as `CompilationKind::Jit`, including AOT failures.
-- [ ] Stats counters `jit_promotions` / `jit_successes` / `jit_failures` are incremented for AOT work too — metric names are misleading.
+- [x] `on_compilation` callback classifies all failures as `CompilationKind::Jit`, including AOT failures.
+- [x] Stats counters `jit_promotions` / `jit_successes` / `jit_failures` are incremented for AOT work too — metric names are misleading. Renamed to `compilations_dispatched` / `compilations_succeeded` / `compilations_failed`.
 - [ ] Failed entry retry: `EntryPhase::Failed` is sticky forever. Add `negative_jit_ttl` / `next_retry_at`.
-- [ ] `set_enabled()` mutates `AtomicBool` directly, bypassing coordinator (plan wanted coordinator-owned).
-- [ ] Tx-local lookup cache in integration layers means repeated calls within one tx don't emit tracking events — affects hotness accuracy.
+- [x] `set_enabled()` mutates `AtomicBool` directly, bypassing coordinator. Accepted: atomic toggle is sufficient; coordinator routing adds complexity without benefit since the flag is only checked on the lookup hot path.
+- [x] Tx-local lookup cache in integration layers means repeated calls within one tx don't emit tracking events. Accepted: this is a deliberate performance tradeoff — caching avoids redundant backend calls on the hot path. Hotness accuracy is "good enough" since distinct txs still emit events.
 
 ## Artifact Versioning
 
