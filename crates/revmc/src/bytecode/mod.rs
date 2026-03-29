@@ -9,7 +9,7 @@ use std::cell::RefCell;
 
 mod fmt;
 mod sections;
-use sections::{Section, SectionAnalysis};
+use sections::{GasSection, SectionsAnalysis, StackSection};
 
 mod info;
 pub use info::*;
@@ -78,9 +78,18 @@ impl<'a> Bytecode<'a> {
             }
             let base_gas = info.base_gas();
 
-            let section = Section::default();
+            let gas_section = GasSection::default();
+            let stack_section = StackSection::default();
 
-            insts.push(InstData { opcode, flags, base_gas, data, pc: pc as u32, section });
+            insts.push(InstData {
+                opcode,
+                flags,
+                base_gas,
+                data,
+                pc: pc as u32,
+                gas_section,
+                stack_section,
+            });
         }
 
         let mut bytecode = Self {
@@ -291,25 +300,13 @@ impl<'a> Bytecode<'a> {
     /// Constructs the sections in the bytecode.
     #[instrument(name = "sections", level = "debug", skip_all)]
     fn construct_sections(&mut self) {
-        let mut analysis = SectionAnalysis::default();
+        let mut analysis = SectionsAnalysis::default();
         for inst in 0..self.insts.len() {
             if !self.inst(inst).is_dead_code() {
                 analysis.process(self, inst);
             }
         }
         analysis.finish(self);
-    }
-
-    /// Constructs the sections in the bytecode.
-    #[instrument(name = "sections", level = "debug", skip_all)]
-    #[cfg(any())]
-    fn construct_sections_default(&mut self) {
-        for inst in &mut self.insts {
-            let (inp, out) = inst.stack_io();
-            let stack_diff = out as i16 - inp as i16;
-            inst.section =
-                Section { gas_cost: inst.base_gas as _, inputs: inp as _, max_growth: stack_diff }
-        }
     }
 
     /// Returns the immediate value of the given instruction data, if any.
@@ -396,8 +393,10 @@ pub(crate) struct InstData {
     pub(crate) data: u32,
     /// The program counter, meaning `code[pc]` is this instruction's opcode.
     pub(crate) pc: u32,
-    /// The section this instruction belongs to.
-    pub(crate) section: Section,
+    /// The gas section this instruction belongs to.
+    pub(crate) gas_section: GasSection,
+    /// The stack section this instruction belongs to.
+    pub(crate) stack_section: StackSection,
 }
 
 impl PartialEq<u8> for InstData {

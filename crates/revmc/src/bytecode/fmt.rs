@@ -22,7 +22,7 @@ impl Bytecode<'_> {
             if data.is_dead_code() {
                 continue;
             }
-            if !data.section.is_empty() || need_header {
+            if !data.stack_section.is_empty() || need_header {
                 inst_to_block.insert(inst, block_idx);
                 blocks.push((block_idx, inst, inst));
                 block_idx += 1;
@@ -63,11 +63,11 @@ impl Bytecode<'_> {
             let first = self.inst(first_inst);
             let mut header = format!("bb{block_idx}:");
             let mut comment = String::new();
-            if !first.section.is_empty() {
+            if !first.stack_section.is_empty() {
                 write!(
                     comment,
-                    "gas={}, stack_in={}, max_growth={}",
-                    first.section.gas_cost, first.section.inputs, first.section.max_growth,
+                    "stack_in={}, max_growth={}",
+                    first.stack_section.inputs, first.stack_section.max_growth,
                 )
                 .unwrap();
             }
@@ -104,6 +104,9 @@ impl Bytecode<'_> {
 
                 // Comment with pc and flags/behavior.
                 let mut comment = format!("pc={}", data.pc);
+                if !data.gas_section.is_empty() {
+                    write!(comment, ", gas={}", data.gas_section.gas_cost).unwrap();
+                }
                 let flags = data.flags;
                 if flags.contains(InstFlags::SKIP_LOGIC) {
                     comment.push_str(", skip");
@@ -177,7 +180,8 @@ impl fmt::Debug for InstData {
             .field("flags", &format_args!("{:?}", self.flags))
             .field("data", &self.data)
             .field("pc", &self.pc)
-            .field("section", &self.section)
+            .field("gas_section", &self.gas_section)
+            .field("stack_section", &self.stack_section)
             .finish()
     }
 }
@@ -224,11 +228,11 @@ impl<'a> Bytecode<'a> {
                  label=\"{{bb{block_idx}",
             )?;
 
-            if !first.section.is_empty() {
+            if !first.stack_section.is_empty() {
                 write!(
                     w,
-                    " | gas={} in={} growth={}",
-                    first.section.gas_cost, first.section.inputs, first.section.max_growth,
+                    " | in={} growth={}",
+                    first.stack_section.inputs, first.stack_section.max_growth
                 )?;
             }
 
@@ -239,8 +243,11 @@ impl<'a> Bytecode<'a> {
                     continue;
                 }
                 let opcode = data.to_op_in(self);
-                let op_str =
+                let mut op_str =
                     abbreviate_hex(&opcode.to_string()).replace('>', "\\>").replace('<', "\\<");
+                if !data.gas_section.is_empty() {
+                    write!(op_str, " [g={}]", data.gas_section.gas_cost).unwrap();
+                }
                 write!(w, "{op_str}\\l")?;
             }
             writeln!(w, "}}\"];")?;
@@ -355,18 +362,32 @@ mod tests {
     use revm_bytecode::opcode as op;
     use revm_primitives::hardfork::SpecId;
 
+    /// Test bytecode with SSTORE (splits gas but not stack) and a loop (back-edge).
+    ///
+    /// ```text
+    /// PUSH1 0x03  ; pc=0, skip
+    /// JUMP        ; pc=2, -> bb1
+    /// JUMPDEST    ; pc=3, loop header
+    /// PUSH1 0x01  ; pc=4
+    /// PUSH1 0x00  ; pc=6
+    /// SSTORE      ; pc=8, splits gas section only
+    /// PUSH1 0x01  ; pc=9
+    /// PUSH1 0x03  ; pc=11, skip
+    /// JUMPI       ; pc=13, -> bb1 (loop)
+    /// STOP        ; pc=14
+    /// ```
     fn test_bytecode() -> Bytecode<'static> {
+        #[rustfmt::skip]
         let code: &[u8] = &[
-            op::PUSH1,
-            0x01,
-            op::PUSH1,
-            0x07,
-            op::JUMPI,
-            op::STOP,
-            op::ADD,
+            op::PUSH1, 0x03,
+            op::JUMP,
             op::JUMPDEST,
-            op::PUSH1,
-            0x02,
+            op::PUSH1, 0x01,
+            op::PUSH1, 0x00,
+            op::SSTORE,
+            op::PUSH1, 0x01,
+            op::PUSH1, 0x03,
+            op::JUMPI,
             op::STOP,
         ];
         let mut bytecode = Bytecode::new(code, SpecId::OSAKA);
@@ -383,18 +404,21 @@ mod tests {
             snapbox::str![[r#"
              ; spec_id=Osaka, has_dynamic_jumps=false, may_suspend=false
 
-bb0:         ; gas=16, stack_in=0, max_growth=2
-  PUSH1 0x01 ; pc=0
-  PUSH1 0x07 ; pc=2, skip
-  JUMPI bb2  ; pc=4
+bb0:         ; stack_in=0, max_growth=1
+  PUSH1 0x03 ; pc=0, gas=11, skip
+  JUMP bb1   ; pc=2
 
-bb1:
-  STOP       ; pc=5
+bb1:         ; stack_in=0, max_growth=2
+  JUMPDEST   ; pc=3, gas=7, reachable
+  PUSH1 0x01 ; pc=4
+  PUSH1 0x00 ; pc=6
+  SSTORE     ; pc=8
+  PUSH1 0x01 ; pc=9, gas=16
+  PUSH1 0x03 ; pc=11, skip
+  JUMPI bb1  ; pc=13
 
-bb2:         ; gas=4, stack_in=0, max_growth=1
-  JUMPDEST   ; pc=7, reachable
-  PUSH1 0x02 ; pc=8
-  STOP       ; pc=10
+bb2:
+  STOP       ; pc=14
 
 "#]]
         );
@@ -408,12 +432,18 @@ bb2:         ; gas=4, stack_in=0, max_growth=1
         assert!(dot.contains("bb0"));
         assert!(dot.contains("bb1"));
         assert!(dot.contains("bb2"));
-        assert!(dot.contains("PUSH1 0x01"));
-        assert!(dot.contains("JUMPI"));
-        assert!(dot.contains("JUMPDEST"));
-        assert!(dot.contains("bb0 -> bb2"), "missing true edge");
-        assert!(dot.contains("bb0 -> bb1"), "missing false edge");
+        // SSTORE present in bb1.
+        assert!(dot.contains("SSTORE"), "missing SSTORE");
+        // SSTORE splits gas sections: two [g=] annotations in bb1.
+        assert!(dot.contains("[g=7]"), "missing first gas section");
+        assert!(dot.contains("[g=16]"), "missing second gas section");
+        // bb0 -> bb1 (unconditional jump).
+        assert!(dot.contains("bb0 -> bb1"), "missing jump edge");
+        // bb1 -> bb1 (loop back-edge).
+        assert!(dot.contains("bb1 -> bb1"), "missing loop back-edge");
         assert!(dot.contains("\"true\""), "missing true label");
+        // bb1 -> bb2 (fallthrough on false).
+        assert!(dot.contains("bb1 -> bb2"), "missing false edge");
         assert!(dot.contains("\"false\""), "missing false label");
         assert!(!dot.contains("dynamic"), "unexpected dynamic jump table");
     }
