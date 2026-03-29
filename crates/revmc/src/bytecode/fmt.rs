@@ -188,22 +188,37 @@ impl fmt::Debug for InstData {
 
 // DOT graph colors.
 mod dot_colors {
-    pub(super) const BG: &str = "#1a1a2e"; // dark navy
-    pub(super) const TEXT: &str = "#e0e0e0"; // light gray
+    const DARK_NAVY: &str = "#1a1a2e";
+    const DARK_BLUE: &str = "#16213e";
+    const BLUE: &str = "#0f3460";
+    const DARK_TEAL: &str = "#1a2340";
+    const TEAL: &str = "#53a8b6";
+    const GREEN: &str = "#5cdb95";
+    const DARK_GREEN: &str = "#1a2e1a";
+    const DARK_RED: &str = "#2d1b2e";
+    const RED: &str = "#e94560";
+    const GRAY: &str = "#555577";
+    const LIGHT_GRAY: &str = "#e0e0e0";
+
+    pub(super) const BG: &str = DARK_NAVY;
+    pub(super) const TEXT: &str = LIGHT_GRAY;
     // Default node.
-    pub(super) const NODE_FILL: &str = "#16213e"; // dark blue
-    pub(super) const NODE_BORDER: &str = "#0f3460"; // blue
-    // Exit/diverging blocks.
-    pub(super) const EXIT_FILL: &str = "#2d1b2e"; // dark red
-    pub(super) const EXIT_BORDER: &str = "#e94560"; // red
+    pub(super) const NODE_FILL: &str = DARK_BLUE;
+    pub(super) const NODE_BORDER: &str = BLUE;
+    // Reverting/error blocks.
+    pub(super) const REVERT_FILL: &str = DARK_RED;
+    pub(super) const REVERT_BORDER: &str = RED;
+    // Non-reverting exit blocks (STOP, RETURN).
+    pub(super) const EXIT_FILL: &str = DARK_GREEN;
+    pub(super) const EXIT_BORDER: &str = GREEN;
     // Branching blocks.
-    pub(super) const BRANCH_FILL: &str = "#1a2340"; // dark teal
-    pub(super) const BRANCH_BORDER: &str = "#53a8b6"; // teal
+    pub(super) const BRANCH_FILL: &str = DARK_TEAL;
+    pub(super) const BRANCH_BORDER: &str = TEAL;
     // Edges.
-    pub(super) const EDGE: &str = "#555577"; // gray
-    pub(super) const EDGE_JUMP: &str = "#53a8b6"; // teal
-    pub(super) const EDGE_COND_JUMP: &str = "#5cdb95"; // green
-    pub(super) const EDGE_FALSE: &str = "#e94560"; // red
+    pub(super) const EDGE: &str = GRAY;
+    pub(super) const EDGE_JUMP: &str = TEAL;
+    pub(super) const EDGE_COND_JUMP: &str = GREEN;
+    pub(super) const EDGE_FALSE: &str = RED;
 }
 
 impl<'a> Bytecode<'a> {
@@ -230,7 +245,12 @@ impl<'a> Bytecode<'a> {
             let first = self.inst(first_inst);
 
             // Color based on block terminator.
-            let (fill, border) = if last.is_diverging() && !last.is_legacy_jump() {
+            let (fill, border) = if last.is_diverging()
+                && !last.is_legacy_jump()
+                && !matches!(last.opcode, op::STOP | op::RETURN)
+            {
+                (REVERT_FILL, REVERT_BORDER)
+            } else if matches!(last.opcode, op::STOP | op::RETURN) {
                 (EXIT_FILL, EXIT_BORDER)
             } else if last.is_legacy_jump() {
                 (BRANCH_FILL, BRANCH_BORDER)
@@ -303,8 +323,8 @@ impl<'a> Bytecode<'a> {
         if self.has_dynamic_jumps {
             writeln!(
                 w,
-                "  dynamic [shape=diamond style=filled fillcolor=\"{EXIT_FILL}\" \
-                 color=\"{EXIT_BORDER}\" fontcolor=\"{TEXT}\" \
+                "  dynamic [shape=diamond style=filled fillcolor=\"{REVERT_FILL}\" \
+                 color=\"{REVERT_BORDER}\" fontcolor=\"{TEXT}\" \
                  label=\"dynamic\\njump table\"];"
             )?;
             for &(block_idx, first_inst, _) in &info.blocks {
