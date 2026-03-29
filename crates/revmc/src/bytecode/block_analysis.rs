@@ -365,7 +365,7 @@ impl Bytecode<'_> {
         self.has_dynamic_jumps = self
             .insts
             .iter()
-            .any(|inst| inst.is_legacy_jump() && !inst.flags.contains(InstFlags::STATIC_JUMP));
+            .any(|inst| inst.is_jump() && !inst.flags.contains(InstFlags::STATIC_JUMP));
     }
 
     /// Build a basic-block CFG from the instruction list.
@@ -449,7 +449,7 @@ impl Bytecode<'_> {
             }
 
             // Static jump edges.
-            if term.is_legacy_static_jump() && !term.flags.contains(InstFlags::INVALID_JUMP) {
+            if term.is_static_jump() && !term.flags.contains(InstFlags::INVALID_JUMP) {
                 let target_inst = term.data as usize;
                 if let Some(target_block) = inst_to_block.raw[target_inst] {
                     blocks[target_block].preds.push(bid);
@@ -480,7 +480,7 @@ impl Bytecode<'_> {
         // Collect unresolved jumps.
         let mut jump_insts: Vec<Inst> = Vec::new();
         for (i, inst) in self.insts.iter_enumerated() {
-            if inst.is_legacy_jump() && !inst.flags.contains(InstFlags::STATIC_JUMP) {
+            if inst.is_jump() && !inst.flags.contains(InstFlags::STATIC_JUMP) {
                 jump_insts.push(i);
             }
         }
@@ -708,7 +708,7 @@ impl Bytecode<'_> {
 
             // For dynamic jumps, discover target edges to propagate state through.
             let term = &self.insts.raw[block.insts.end - 1];
-            if term.is_legacy_jump()
+            if term.is_jump()
                 && !term.flags.contains(InstFlags::STATIC_JUMP)
                 && let Some(operand) = self.jump_operand(block, &input)
             {
@@ -1149,7 +1149,7 @@ mod tests {
         // The return JUMP (last inst before STOP's block) should be multi-target.
         let return_jump = bytecode
             .iter_insts()
-            .find(|(_, d)| d.is_legacy_jump() && d.flags.contains(InstFlags::MULTI_JUMP));
+            .find(|(_, d)| d.is_jump() && d.flags.contains(InstFlags::MULTI_JUMP));
         assert!(return_jump.is_some(), "expected a multi-target jump");
         let (rj_inst, _) = return_jump.unwrap();
         let targets = bytecode.multi_jump_targets(rj_inst).unwrap();
@@ -1226,7 +1226,7 @@ mod tests {
         // The inner return JUMP should resolve to Multi([ret1, ret_w]).
         let inner_return = bytecode
             .iter_insts()
-            .find(|(_, d)| d.is_legacy_jump() && d.flags.contains(InstFlags::MULTI_JUMP));
+            .find(|(_, d)| d.is_jump() && d.flags.contains(InstFlags::MULTI_JUMP));
         assert!(inner_return.is_some(), "expected inner return to be multi-target");
 
         // The wrapper return JUMP (pc=30) is the hard case: the outer return
