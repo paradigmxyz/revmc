@@ -259,11 +259,7 @@ impl<'a> Bytecode<'a> {
             if last.is_legacy_static_jump() && !last.flags.contains(InstFlags::INVALID_JUMP) {
                 let target = last.data as usize;
                 if let Some(&target_block) = info.inst_to_block.get(&target) {
-                    let (label, color) = if last.opcode == op::JUMPI {
-                        ("true", "#5cdb95")
-                    } else {
-                        ("", "#53a8b6")
-                    };
+                    let color = if last.opcode == op::JUMPI { "#5cdb95" } else { "#53a8b6" };
                     let extra = if block_idx == target_block {
                         " tailport=s headport=e constraint=false"
                     } else if target_block <= block_idx {
@@ -271,30 +267,17 @@ impl<'a> Bytecode<'a> {
                     } else {
                         ""
                     };
-                    writeln!(
-                        w,
-                        "  bb{block_idx} -> bb{target_block} \
-                         [label=\"{label}\" color=\"{color}\" fontcolor=\"{color}\"{extra}];"
-                    )?;
+                    writeln!(w, "  bb{block_idx} -> bb{target_block} [color=\"{color}\"{extra}];")?;
                 }
             } else if last.is_legacy_jump() && !last.is_legacy_static_jump() {
-                writeln!(
-                    w,
-                    "  bb{block_idx} -> dynamic \
-                     [label=\"dynamic\" color=\"#e94560\" fontcolor=\"#e94560\" style=dashed];"
-                )?;
+                writeln!(w, "  bb{block_idx} -> dynamic [color=\"#e94560\" style=dashed];")?;
             }
 
             // Fallthrough edge.
             let has_fallthrough = last.can_fall_through();
             if has_fallthrough && let Some(&(next_block, _, _)) = info.blocks.get(i + 1) {
-                let (label, color) =
-                    if last.opcode == op::JUMPI { ("false", "#e94560") } else { ("", "#555577") };
-                writeln!(
-                    w,
-                    "  bb{block_idx} -> bb{next_block} \
-                     [label=\"{label}\" color=\"{color}\" fontcolor=\"{color}\"];"
-                )?;
+                let color = if last.opcode == op::JUMPI { "#e94560" } else { "#555577" };
+                writeln!(w, "  bb{block_idx} -> bb{next_block} [color=\"{color}\"];")?;
             }
         }
 
@@ -439,10 +422,8 @@ bb2:
         assert!(dot.contains("bb0 -> bb1"), "missing jump edge");
         // bb1 -> bb1 (loop back-edge).
         assert!(dot.contains("bb1 -> bb1"), "missing loop back-edge");
-        assert!(dot.contains("\"true\""), "missing true label");
         // bb1 -> bb2 (fallthrough on false).
         assert!(dot.contains("bb1 -> bb2"), "missing false edge");
-        assert!(dot.contains("\"false\""), "missing false label");
         assert!(!dot.contains("dynamic"), "unexpected dynamic jump table");
     }
 
