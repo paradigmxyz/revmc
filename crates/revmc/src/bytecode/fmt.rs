@@ -94,7 +94,7 @@ impl Bytecode<'_> {
                 write!(text, "{opcode}").unwrap();
                 if data.flags.contains(InstFlags::INVALID_JUMP) {
                     text.push_str(" -> INVALID");
-                } else if data.is_legacy_static_jump() {
+                } else if data.is_static_jump() {
                     let target = data.data as usize;
                     match info.inst_to_block.get(&target) {
                         Some(b) => write!(text, " bb{b}").unwrap(),
@@ -195,6 +195,8 @@ mod dot_colors {
     const TEAL: &str = "#53a8b6";
     const GREEN: &str = "#5cdb95";
     const DARK_GREEN: &str = "#1a2e1a";
+    const DARK_ORANGE: &str = "#2e2416";
+    const ORANGE: &str = "#e0a030";
     const DARK_RED: &str = "#2d1b2e";
     const RED: &str = "#e94560";
     const GRAY: &str = "#555577";
@@ -211,6 +213,9 @@ mod dot_colors {
     // Non-reverting exit blocks (STOP, RETURN).
     pub(super) const EXIT_FILL: &str = DARK_GREEN;
     pub(super) const EXIT_BORDER: &str = GREEN;
+    // Suspending blocks (CALL, CREATE, ...).
+    pub(super) const SUSPEND_FILL: &str = DARK_ORANGE;
+    pub(super) const SUSPEND_BORDER: &str = ORANGE;
     // Branching blocks.
     pub(super) const BRANCH_FILL: &str = DARK_TEAL;
     pub(super) const BRANCH_BORDER: &str = TEAL;
@@ -245,14 +250,13 @@ impl<'a> Bytecode<'a> {
             let first = self.inst(first_inst);
 
             // Color based on block terminator.
-            let (fill, border) = if last.is_diverging()
-                && !last.is_legacy_jump()
-                && !matches!(last.opcode, op::STOP | op::RETURN)
-            {
-                (REVERT_FILL, REVERT_BORDER)
-            } else if matches!(last.opcode, op::STOP | op::RETURN) {
+            let (fill, border) = if matches!(last.opcode, op::STOP | op::RETURN) {
                 (EXIT_FILL, EXIT_BORDER)
-            } else if last.is_legacy_jump() {
+            } else if last.is_diverging() {
+                (REVERT_FILL, REVERT_BORDER)
+            } else if last.may_suspend() {
+                (SUSPEND_FILL, SUSPEND_BORDER)
+            } else if last.is_jump() {
                 (BRANCH_FILL, BRANCH_BORDER)
             } else {
                 (NODE_FILL, NODE_BORDER)
@@ -294,7 +298,7 @@ impl<'a> Bytecode<'a> {
             let last = self.inst(last_inst);
 
             // Jump edge.
-            if last.is_legacy_static_jump() && !last.flags.contains(InstFlags::INVALID_JUMP) {
+            if last.is_static_jump() && !last.flags.contains(InstFlags::INVALID_JUMP) {
                 let target = last.data as usize;
                 if let Some(&target_block) = info.inst_to_block.get(&target) {
                     let color = if last.opcode == op::JUMPI { EDGE_COND_JUMP } else { EDGE_JUMP };
@@ -307,7 +311,7 @@ impl<'a> Bytecode<'a> {
                     };
                     writeln!(w, "  bb{block_idx} -> bb{target_block} [color=\"{color}\"{extra}];")?;
                 }
-            } else if last.is_legacy_jump() && !last.is_legacy_static_jump() {
+            } else if last.is_jump() && !last.is_static_jump() {
                 writeln!(w, "  bb{block_idx} -> dynamic [color=\"{EDGE_FALSE}\" style=dashed];")?;
             }
 
@@ -380,7 +384,8 @@ mod tests {
     use revm_bytecode::opcode as op;
     use revm_primitives::hardfork::SpecId;
 
-    /// Test bytecode with SSTORE (splits gas but not stack) and a loop (back-edge).
+    /// Test bytecode with SSTORE (splits gas but not stack), a loop (back-edge), and CALL
+    /// (suspending instruction that splits both gas and stack sections).
     ///
     /// ```text
     /// PUSH1 0x03  ; pc=0, skip
@@ -392,7 +397,16 @@ mod tests {
     /// PUSH1 0x01  ; pc=9
     /// PUSH1 0x03  ; pc=11, skip
     /// JUMPI       ; pc=13, -> bb1 (loop)
-    /// STOP        ; pc=14
+    /// PUSH1 0x00  ; pc=14, retLength
+    /// PUSH1 0x00  ; pc=16, retOffset
+    /// PUSH1 0x00  ; pc=18, argsLength
+    /// PUSH1 0x00  ; pc=20, argsOffset
+    /// PUSH1 0x00  ; pc=22, value
+    /// PUSH1 0x42  ; pc=24, addr
+    /// PUSH2 0xffff; pc=26, gas
+    /// CALL        ; pc=29, suspends
+    /// POP         ; pc=30, discard return value
+    /// STOP        ; pc=31
     /// ```
     fn test_bytecode() -> Bytecode<'static> {
         #[rustfmt::skip]
@@ -406,6 +420,15 @@ mod tests {
             op::PUSH1, 0x01,
             op::PUSH1, 0x03,
             op::JUMPI,
+            op::PUSH1, 0x00,
+            op::PUSH1, 0x00,
+            op::PUSH1, 0x00,
+            op::PUSH1, 0x00,
+            op::PUSH1, 0x00,
+            op::PUSH1, 0x42,
+            op::PUSH2, 0xff, 0xff,
+            op::CALL,
+            op::POP,
             op::STOP,
         ];
         let mut bytecode = Bytecode::new(code, SpecId::OSAKA);
@@ -420,23 +443,34 @@ mod tests {
         snapbox::assert_data_eq!(
             actual,
             snapbox::str![[r#"
-             ; spec_id=Osaka, has_dynamic_jumps=false, may_suspend=false
+               ; spec_id=Osaka, has_dynamic_jumps=false, may_suspend=true
 
-bb0:         ; stack_in=0, max_growth=1
-  PUSH1 0x03 ; pc=0, gas=11, skip
-  JUMP bb1   ; pc=2
+bb0:           ; stack_in=0, max_growth=1
+  PUSH1 0x03   ; pc=0, gas=11, skip
+  JUMP bb1     ; pc=2
 
-bb1:         ; stack_in=0, max_growth=2
-  JUMPDEST   ; pc=3, gas=7, reachable
-  PUSH1 0x01 ; pc=4
-  PUSH1 0x00 ; pc=6
-  SSTORE     ; pc=8
-  PUSH1 0x01 ; pc=9, gas=16
-  PUSH1 0x03 ; pc=11, skip
-  JUMPI bb1  ; pc=13
+bb1:           ; stack_in=0, max_growth=2
+  JUMPDEST     ; pc=3, gas=7, reachable
+  PUSH1 0x01   ; pc=4
+  PUSH1 0x00   ; pc=6
+  SSTORE       ; pc=8
+  PUSH1 0x01   ; pc=9, gas=16
+  PUSH1 0x03   ; pc=11, skip
+  JUMPI bb1    ; pc=13
 
-bb2:
-  STOP       ; pc=14
+bb2:           ; stack_in=0, max_growth=7
+  PUSH1 0x00   ; pc=14, gas=121
+  PUSH1 0x00   ; pc=16
+  PUSH1 0x00   ; pc=18
+  PUSH1 0x00   ; pc=20
+  PUSH1 0x00   ; pc=22
+  PUSH1 0x42   ; pc=24
+  PUSH2 0xffff ; pc=26
+  CALL         ; pc=29, suspends
+
+bb3:           ; stack_in=1, max_growth=0
+  POP          ; pc=30, gas=2
+  STOP         ; pc=31
 
 "#]]
         );
@@ -450,17 +484,23 @@ bb2:
         assert!(dot.contains("bb0"));
         assert!(dot.contains("bb1"));
         assert!(dot.contains("bb2"));
+        assert!(dot.contains("bb3"));
         // SSTORE present in bb1.
         assert!(dot.contains("SSTORE"), "missing SSTORE");
         // SSTORE splits gas sections: two [g=] annotations in bb1.
         assert!(dot.contains("[g=7]"), "missing first gas section");
         assert!(dot.contains("[g=16]"), "missing second gas section");
+        // CALL present in bb2, suspends and splits into bb3.
+        assert!(dot.contains("CALL"), "missing CALL");
+        assert!(dot.contains("[g=121]"), "missing CALL gas section");
         // bb0 -> bb1 (unconditional jump).
         assert!(dot.contains("bb0 -> bb1"), "missing jump edge");
         // bb1 -> bb1 (loop back-edge).
         assert!(dot.contains("bb1 -> bb1"), "missing loop back-edge");
         // bb1 -> bb2 (fallthrough on false).
         assert!(dot.contains("bb1 -> bb2"), "missing false edge");
+        // bb2 -> bb3 (fallthrough after CALL).
+        assert!(dot.contains("bb2 -> bb3"), "missing CALL fallthrough edge");
         assert!(!dot.contains("dynamic"), "unexpected dynamic jump table");
     }
 

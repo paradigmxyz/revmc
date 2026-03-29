@@ -202,7 +202,7 @@ impl<'a> Bytecode<'a> {
         for jump_inst in 0..self.insts.len() {
             let jump = &self.insts[jump_inst];
             let Some(push_inst) = jump_inst.checked_sub(1) else {
-                if jump.is_legacy_jump() {
+                if jump.is_jump() {
                     trace!(jump_inst, target=?None::<()>, "found jump");
                     self.has_dynamic_jumps = true;
                 }
@@ -210,8 +210,8 @@ impl<'a> Bytecode<'a> {
             };
 
             let push = &self.insts[push_inst];
-            if !(push.is_push() && jump.is_legacy_jump()) {
-                if jump.is_legacy_jump() {
+            if !(push.is_push() && jump.is_jump()) {
+                if jump.is_jump() {
                     trace!(jump_inst, target=?None::<()>, "found jump");
                     self.has_dynamic_jumps = true;
                 }
@@ -431,7 +431,7 @@ impl InstData {
     #[inline]
     pub(crate) fn stack_io(&self) -> (u8, u8) {
         let (mut inp, out) = stack_io(self.opcode);
-        if self.is_legacy_static_jump()
+        if self.is_static_jump()
             && !(self.opcode == op::JUMPI && self.flags.contains(InstFlags::INVALID_JUMP))
         {
             inp -= 1;
@@ -458,17 +458,17 @@ impl InstData {
         matches!(self.opcode, op::PUSH0..=op::PUSH32)
     }
 
-    /// Returns `true` if this instruction is a legacy jump instruction (`JUMP`/`JUMPI`).
+    /// Returns `true` if this instruction is a jump instruction (`JUMP`/`JUMPI`).
     #[inline]
-    pub(crate) fn is_legacy_jump(&self) -> bool {
+    pub(crate) fn is_jump(&self) -> bool {
         matches!(self.opcode, op::JUMP | op::JUMPI)
     }
 
-    /// Returns `true` if this instruction is a legacy jump instruction (`JUMP`/`JUMPI`), and the
+    /// Returns `true` if this instruction is a jump instruction (`JUMP`/`JUMPI`), and the
     /// target known statically.
     #[inline]
-    pub(crate) fn is_legacy_static_jump(&self) -> bool {
-        self.is_legacy_jump() && self.flags.contains(InstFlags::STATIC_JUMP)
+    pub(crate) fn is_static_jump(&self) -> bool {
+        self.is_jump() && self.flags.contains(InstFlags::STATIC_JUMP)
     }
 
     /// Returns `true` if this instruction is a `JUMPDEST`.
@@ -506,7 +506,7 @@ impl InstData {
     /// Returns `true` if we know that this instruction will branch or stop execution.
     #[inline]
     pub(crate) fn is_branching(&self) -> bool {
-        self.is_legacy_jump() || self.is_diverging()
+        self.is_jump() || self.is_diverging()
     }
 
     /// Returns `true` if we know that this instruction will stop execution.
