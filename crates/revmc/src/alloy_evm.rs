@@ -3,10 +3,7 @@
 //! Provides [`JitEvm`] and [`JitEvmFactory`] which wrap the standard Ethereum EVM with
 //! JIT-compiled function dispatch via [`JitBackend`].
 
-use crate::{
-    revm_evm::JitHandler,
-    runtime::{JitBackend, LookupDecision},
-};
+use crate::{revm_evm, runtime::JitBackend};
 use alloy_evm::{
     Database,
     env::EvmEnv,
@@ -15,61 +12,43 @@ use alloy_evm::{
     precompiles::PrecompilesMap,
 };
 use alloy_primitives::{Address, Bytes};
-use revm_context::{BlockEnv, ContextSetters, Evm as RevmEvm, TxEnv};
+use revm_context::{BlockEnv, Evm as RevmEvm, TxEnv};
 use revm_context_interface::result::{EVMError, HaltReason, ResultAndState};
 use revm_handler::{
-    EthFrame, ExecuteEvm, Handler, PrecompileProvider, SystemCallEvm, SystemCallTx,
-    instructions::EthInstructions,
+    EthFrame, ExecuteEvm, PrecompileProvider, SystemCallEvm, instructions::EthInstructions,
 };
 use revm_inspector::{InspectEvm, Inspector, NoOpInspector};
 use revm_interpreter::{InterpreterResult, interpreter::EthInterpreter};
-use revm_primitives::{B256Map, hardfork::SpecId};
+use revm_primitives::hardfork::SpecId;
 
 type InnerEvm<DB, I, P> =
     RevmEvm<EthEvmContext<DB>, I, EthInstructions<EthInterpreter, EthEvmContext<DB>>, P, EthFrame>;
 
 /// Ethereum EVM with JIT-compiled function dispatch.
 ///
-/// Wraps the standard revm EVM and overrides execution to look up compiled functions via
-/// [`JitBackend`] before falling back to the interpreter.
+/// Wraps the standard revm EVM inside a [`revm_evm::JitEvm`] which overrides `frame_run`
+/// to look up compiled functions via [`JitBackend`] before falling back to the interpreter.
 #[expect(missing_debug_implementations)]
 pub struct JitEvm<DB: Database, I, PRECOMPILE = PrecompilesMap> {
-    inner: InnerEvm<DB, I, PRECOMPILE>,
+    inner: revm_evm::JitEvm<InnerEvm<DB, I, PRECOMPILE>>,
     inspect: bool,
-    backend: JitBackend,
+}
 
-    /// Cached lookup decisions keyed by `code_hash` alone.
-    /// Invalidated when the `spec_id` changes.
-    lookup_cache: B256Map<LookupDecision>,
-    /// The `spec_id` the cache was built for; cleared on mismatch.
-    lookup_cache_spec_id: SpecId,
+impl<DB, I, P> JitEvm<DB, I, P>
+where
+    DB: Database,
+    P: PrecompileProvider<EthEvmContext<DB>, Output = InterpreterResult>,
+{
+    /// Creates a new JIT EVM from an inner revm EVM, inspect flag, and backend.
+    pub fn new(inner: InnerEvm<DB, I, P>, inspect: bool, backend: JitBackend) -> Self {
+        Self { inner: revm_evm::JitEvm::new(inner, backend), inspect }
+    }
 }
 
 impl<DB: Database, I, P> JitEvm<DB, I, P> {
-    /// Creates a new JIT EVM from an inner revm EVM and backend.
-    pub fn new(inner: InnerEvm<DB, I, P>, inspect: bool, backend: JitBackend) -> Self {
-        let spec_id = inner.cfg.spec;
-        Self {
-            inner,
-            inspect,
-            backend,
-            lookup_cache: B256Map::with_capacity_and_hasher(16, Default::default()),
-            lookup_cache_spec_id: spec_id,
-        }
-    }
-
     /// Returns a reference to the JIT backend.
     pub const fn backend(&self) -> &JitBackend {
-        &self.backend
-    }
-
-    /// Clears the lookup cache if the spec has changed since the last call.
-    fn invalidate_cache(&mut self) {
-        let spec_id = self.inner.cfg.spec;
-        if spec_id != self.lookup_cache_spec_id {
-            self.lookup_cache.clear();
-            self.lookup_cache_spec_id = spec_id;
-        }
+        self.inner.backend()
     }
 }
 
@@ -116,16 +95,7 @@ where
         &mut self,
         tx: Self::Tx,
     ) -> Result<ResultAndState<Self::HaltReason>, Self::Error> {
-        if self.inspect {
-            self.inner.inspect_tx(tx)
-        } else {
-            self.inner.ctx.set_tx(tx);
-            self.invalidate_cache();
-            JitHandler::new(&self.backend, &mut self.lookup_cache).run(&mut self.inner).map(|r| {
-                let state = self.inner.finalize();
-                ResultAndState::new(r, state)
-            })
-        }
+        if self.inspect { self.inner.inspect_tx(tx) } else { self.inner.transact(tx) }
     }
 
     fn transact_system_call(
@@ -134,19 +104,12 @@ where
         contract: Address,
         data: Bytes,
     ) -> Result<ResultAndState<Self::HaltReason>, Self::Error> {
-        self.inner.ctx.set_tx(TxEnv::new_system_tx_with_caller(caller, contract, data));
-        self.invalidate_cache();
-        JitHandler::new(&self.backend, &mut self.lookup_cache).run_system_call(&mut self.inner).map(
-            |r| {
-                let state = self.inner.finalize();
-                ResultAndState::new(r, state)
-            },
-        )
+        self.inner.system_call_with_caller(caller, contract, data)
     }
 
     fn finish(self) -> (Self::DB, EvmEnv<Self::Spec>) {
         let revm_context::Context { block: block_env, cfg: cfg_env, journaled_state, .. } =
-            self.inner.ctx;
+            self.inner.into_inner().ctx;
         (journaled_state.database, EvmEnv { block_env, cfg_env })
     }
 
@@ -155,15 +118,13 @@ where
     }
 
     fn components(&self) -> (&Self::DB, &Self::Inspector, &Self::Precompiles) {
-        (&self.inner.ctx.journaled_state.database, &self.inner.inspector, &self.inner.precompiles)
+        let inner = self.inner.inner();
+        (&inner.ctx.journaled_state.database, &inner.inspector, &inner.precompiles)
     }
 
     fn components_mut(&mut self) -> (&mut Self::DB, &mut Self::Inspector, &mut Self::Precompiles) {
-        (
-            &mut self.inner.ctx.journaled_state.database,
-            &mut self.inner.inspector,
-            &mut self.inner.precompiles,
-        )
+        let inner = self.inner.inner_mut();
+        (&mut inner.ctx.journaled_state.database, &mut inner.inspector, &mut inner.precompiles)
     }
 }
 
@@ -298,6 +259,10 @@ mod tests {
             }
             other => panic!("expected Success, got: {other:?}"),
         }
+
+        let stats = backend.stats();
+        assert!(stats.jit_successes > 0, "expected JIT compilations, got: {stats:?}");
+        assert!(stats.resident_entries > 0, "expected resident entries, got: {stats:?}");
     }
 
     #[test]
