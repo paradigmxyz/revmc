@@ -95,7 +95,7 @@ impl<'a> Bytecode<'a> {
         };
 
         // Pad code to ensure there is at least one diverging instruction.
-        if bytecode.insts.last().is_none_or(|last| !last.is_diverging()) {
+        if bytecode.insts.last().is_none_or(|last| last.can_fall_through()) {
             bytecode.insts.push(InstData::new(op::STOP));
         }
 
@@ -496,6 +496,12 @@ impl InstData {
         // For SSTORE, see `revm_interpreter::gas::sstore_cost`.
         self.opcode == op::GAS
             || (self.opcode == op::SSTORE && spec_id.is_enabled_in(SpecId::ISTANBUL))
+    }
+
+    /// Returns `true` if execution can fall through to the next sequential instruction.
+    #[inline]
+    pub(crate) fn can_fall_through(&self) -> bool {
+        !self.is_diverging() && self.opcode != op::JUMP
     }
 
     /// Returns `true` if we know that this instruction will branch or stop execution.
