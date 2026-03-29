@@ -188,24 +188,22 @@ impl fmt::Debug for InstData {
 
 // DOT graph colors.
 mod dot_colors {
-    // Graph background.
-    pub(super) const BG: &str = "#1a1a2e";
-    // Text.
-    pub(super) const TEXT: &str = "#e0e0e0";
-    // Default node (dark blue).
-    pub(super) const NODE_FILL: &str = "#16213e";
-    pub(super) const NODE_BORDER: &str = "#0f3460";
-    // Exit/diverging blocks (red).
-    pub(super) const EXIT_FILL: &str = "#2d1b2e";
-    pub(super) const EXIT_BORDER: &str = "#e94560";
-    // Branching blocks (teal).
-    pub(super) const BRANCH_FILL: &str = "#1a2340";
-    pub(super) const BRANCH_BORDER: &str = "#53a8b6";
-    // Edge colors.
-    pub(super) const EDGE: &str = "#555577";
-    pub(super) const EDGE_JUMP: &str = "#53a8b6";
-    pub(super) const EDGE_COND_JUMP: &str = "#5cdb95";
-    pub(super) const EDGE_FALSE: &str = "#e94560";
+    pub(super) const BG: &str = "#1a1a2e"; // dark navy
+    pub(super) const TEXT: &str = "#e0e0e0"; // light gray
+    // Default node.
+    pub(super) const NODE_FILL: &str = "#16213e"; // dark blue
+    pub(super) const NODE_BORDER: &str = "#0f3460"; // blue
+    // Exit/diverging blocks.
+    pub(super) const EXIT_FILL: &str = "#2d1b2e"; // dark red
+    pub(super) const EXIT_BORDER: &str = "#e94560"; // red
+    // Branching blocks.
+    pub(super) const BRANCH_FILL: &str = "#1a2340"; // dark teal
+    pub(super) const BRANCH_BORDER: &str = "#53a8b6"; // teal
+    // Edges.
+    pub(super) const EDGE: &str = "#555577"; // gray
+    pub(super) const EDGE_JUMP: &str = "#53a8b6"; // teal
+    pub(super) const EDGE_COND_JUMP: &str = "#5cdb95"; // green
+    pub(super) const EDGE_FALSE: &str = "#e94560"; // red
 }
 
 impl<'a> Bytecode<'a> {
