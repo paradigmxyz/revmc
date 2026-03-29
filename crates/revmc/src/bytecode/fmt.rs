@@ -333,13 +333,12 @@ impl<'a> Bytecode<'a> {
                             writeln!(
                                 w,
                                 "  bb{block_idx} -> bb{target_block} \
-                                 [label=\"multi\" color=\"{color}\" fontcolor=\"{color}\"{extra}];"
+                                 [color=\"{color}\" {extra}];"
                             )?;
                         }
                     }
                 }
-            } else if last.is_static_jump() && !last.flags.contains(InstFlags::INVALID_JUMP)
-            {
+            } else if last.is_static_jump() && !last.flags.contains(InstFlags::INVALID_JUMP) {
                 let target = Inst::from_usize(last.data as usize);
                 if let Some(&target_block) = info.inst_to_block.get(&target) {
                     let color = if last.opcode == op::JUMPI { EDGE_COND_JUMP } else { EDGE_JUMP };
