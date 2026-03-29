@@ -4,16 +4,15 @@ use crate::runner::{
     check_evm_execution, execute_test_suite, skip_test, TestError, TestErrorKind, TestRunnerState,
 };
 use dashmap::DashMap;
-use revm::{
-    context::{block::BlockEnv, cfg::CfgEnv, tx::TxEnv},
-    context_interface::result::{EVMError, HaltReason, InvalidTransaction},
-    database::{self, bal::EvmDatabaseError},
-    database_interface::{DatabaseCommit, EmptyDB},
-    handler::{EvmTr, FrameResult, Handler, ItemOrResult},
-    primitives::{hardfork::SpecId, keccak256, B256, U256},
-    statetest_types::{SpecName, TestSuite, TestUnit},
-    Context, MainBuilder, MainContext, MainnetEvm,
+use revm_context::{block::BlockEnv, cfg::CfgEnv, tx::TxEnv, Context};
+use revm_context_interface::result::{EVMError, HaltReason, InvalidTransaction};
+use revm_database::{self as database, bal::EvmDatabaseError};
+use revm_database_interface::{DatabaseCommit, EmptyDB};
+use revm_handler::{
+    EvmTr, FrameResult, Handler, ItemOrResult, MainBuilder, MainContext, MainnetEvm,
 };
+use revm_primitives::{hardfork::SpecId, keccak256, B256, U256};
+use revm_statetest_types::{SpecName, TestSuite, TestUnit};
 use revmc::{EvmCompiler, EvmCompilerFn, EvmLlvmBackend, Linker, OptimizationLevel};
 use std::{
     cell::RefCell,
@@ -66,7 +65,7 @@ impl CompiledContracts {
 
 // ── Handler ─────────────────────────────────────────────────────────────────
 
-type StateTestEvm<'a> = MainnetEvm<revm::handler::MainnetContext<&'a mut database::State<EmptyDB>>>;
+type StateTestEvm<'a> = MainnetEvm<revm_handler::MainnetContext<&'a mut database::State<EmptyDB>>>;
 type StateTestError = EVMError<EvmDatabaseError<std::convert::Infallible>, InvalidTransaction>;
 
 /// Custom handler that dispatches to compiled functions. All bytecodes —
@@ -86,7 +85,7 @@ impl Handler for CompiledHandler<'_> {
     fn run_exec_loop(
         &mut self,
         evm: &mut Self::Evm,
-        first_frame_input: revm::interpreter::interpreter_action::FrameInit,
+        first_frame_input: revm_interpreter::interpreter_action::FrameInit,
     ) -> Result<FrameResult, Self::Error> {
         let res = evm.frame_init(first_frame_input)?;
         if let ItemOrResult::Result(frame_result) = res {
@@ -416,7 +415,7 @@ pub struct CompiledTestContext<'a> {
     pub compiled: &'a CompiledContracts,
     pub cache: &'a CompileCache,
     pub spec_id: SpecId,
-    pub test: &'a revm::statetest_types::Test,
+    pub test: &'a revm_statetest_types::Test,
     pub unit: &'a TestUnit,
     pub name: &'a str,
     pub cfg: &'a CfgEnv,

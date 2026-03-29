@@ -1,11 +1,9 @@
 use std::convert::Infallible;
 
 use alloy_trie::{root::storage_root_unhashed, HashBuilder, Nibbles, TrieAccount};
-use revm::{
-    context::result::{EVMError, ExecutionResult, HaltReason, InvalidTransaction},
-    database::{bal::EvmDatabaseError, EmptyDB, PlainAccount, State},
-    primitives::{keccak256, Address, Log, B256},
-};
+use revm_context_interface::result::{EVMError, ExecutionResult, HaltReason, InvalidTransaction};
+use revm_database::{bal::EvmDatabaseError, EmptyDB, PlainAccount, State};
+use revm_primitives::{keccak256, Address, Log, B256};
 
 pub struct TestValidationResult {
     pub logs_root: B256,

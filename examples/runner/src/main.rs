@@ -1,11 +1,9 @@
-use revm::{
-    bytecode::Bytecode,
-    context::TxEnv,
-    database::{CacheDB, EmptyDB},
-    handler::ExecuteEvm,
-    primitives::{TxKind, U256, address, hex},
-    state::AccountInfo,
-};
+use revm_bytecode::Bytecode;
+use revm_context::TxEnv;
+use revm_database::{CacheDB, EmptyDB};
+use revm_handler::ExecuteEvm;
+use revm_primitives::{TxKind, U256, address, hex};
+use revm_state::AccountInfo;
 use revmc_examples_runner::build_evm;
 
 include!("./common.rs");

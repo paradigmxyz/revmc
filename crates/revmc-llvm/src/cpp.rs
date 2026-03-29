@@ -7,12 +7,12 @@ use inkwell::{
         error::LLVMErrorRef,
         orc2::{
             LLVMOrcExecutionSessionRef, LLVMOrcExecutorAddress, LLVMOrcJITDylibRef,
-            lljit::LLVMOrcLLJITRef,
+            lljit::{LLVMOrcLLJITBuilderRef, LLVMOrcLLJITRef},
         },
         prelude::{LLVMAttributeRef, LLVMContextRef},
     },
 };
-use std::ffi::c_char;
+use std::{ffi::c_char, sync::atomic::AtomicUsize};
 
 #[link(name = "revmc_llvm_cpp", kind = "static")]
 unsafe extern "C" {
@@ -27,9 +27,7 @@ unsafe extern "C" {
         other: LLVMOrcJITDylibRef,
     );
 
-    pub(crate) fn revmc_llvm_lljit_builder_set_concurrent_compiler(
-        builder: inkwell::llvm_sys::orc2::lljit::LLVMOrcLLJITBuilderRef,
-    );
+    pub(crate) fn revmc_llvm_lljit_builder_set_concurrent_compiler(builder: LLVMOrcLLJITBuilderRef);
 
     pub(crate) fn revmc_llvm_execution_session_remove_jit_dylib(
         es: LLVMOrcExecutionSessionRef,
@@ -44,6 +42,12 @@ unsafe extern "C" {
     ) -> LLVMErrorRef;
 
     pub(crate) fn revmc_llvm_lljit_enable_perf_support(jit: LLVMOrcLLJITRef) -> LLVMErrorRef;
+
+    pub(crate) fn revmc_llvm_lljit_enable_memory_usage(
+        jit: LLVMOrcLLJITRef,
+        code_bytes: *const AtomicUsize,
+        data_bytes: *const AtomicUsize,
+    ) -> LLVMErrorRef;
 }
 
 pub(crate) fn create_initializes_attr(cx: &Context, lower: i64, upper: i64) -> Attribute {
