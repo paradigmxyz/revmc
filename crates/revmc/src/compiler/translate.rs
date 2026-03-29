@@ -344,21 +344,20 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         fx.bcx.unreachable();
         if bytecode.has_dynamic_jumps() {
             fx.bcx.switch_to_block(fx.dynamic_jump_table);
-            // TODO: Manually reduce to i32?
             let jumpdests = bytecode.iter_insts().filter(|(_, data)| data.opcode == op::JUMPDEST);
-            // let max_pc =
-            //     jumpdests.clone().map(|(_, data)| data.pc).next_back().expect("no jumpdests");
             let targets = jumpdests
                 .map(|(inst, data)| (data.pc as u64, fx.inst_entries[inst]))
                 .collect::<Vec<_>>();
             let index = fx.bcx.phi(fx.word_type, &fx.incoming_dynamic_jumps);
-            // let target =
-            //     fx.bcx.create_block_after(fx.dynamic_jump_table, "dynamic_jump_table.contd");
-            // let overflow = fx.bcx.icmp_imm(IntCC::UnsignedGreaterThan, index, max_pc as i64);
-            // fx.bcx.brif(overflow, default, target);
 
-            // fx.bcx.switch_to_block(target);
-            // let index = fx.bcx.ireduce(i32_type, index);
+            // Saturating convert i256 to i64: if the value doesn't fit, select u64::MAX
+            // which won't match any valid jump target.
+            let i64_type = fx.bcx.type_int(64);
+            let reduced = fx.bcx.ireduce(i64_type, index);
+            let extended = fx.bcx.zext(fx.word_type, reduced);
+            let fits = fx.bcx.icmp(IntCC::Equal, index, extended);
+            let sentinel = fx.bcx.iconst(i64_type, u64::MAX as i64);
+            let index = fx.bcx.select(fits, reduced, sentinel);
             fx.add_invalid_jump();
             fx.bcx.switch(index, return_block, &targets, true);
         } else {
