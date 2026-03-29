@@ -840,6 +840,15 @@ impl ExecutionSessionRef<'_> {
         self.es
     }
 
+    /// Returns the SymbolStringPool for this ExecutionSession.
+    pub fn get_symbol_string_pool(&self) -> SymbolStringPoolRef {
+        unsafe {
+            SymbolStringPoolRef::from_inner(LLVMOrcExecutionSessionGetSymbolStringPool(
+                self.as_inner(),
+            ))
+        }
+    }
+
     /// Intern a string in the ExecutionSession's SymbolStringPool and return a reference to it.
     pub fn intern(&self, name: &CStr) -> SymbolStringPoolEntry {
         unsafe {

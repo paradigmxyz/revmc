@@ -191,14 +191,12 @@ fn obj_capture_transform(obj: &[u8]) -> Result<Option<Vec<u8>>, String> {
 /// Process-global shared LLJIT instance.
 ///
 /// ORC/LLJIT is thread-safe and designed to be shared. Individual compilers get
-/// their own [`JITDylib`](orc::JITDylibRef) for symbol isolation, recycled via a pool.
+/// their own [`JITDylib`](orc::JITDylibRef) for symbol isolation.
 ///
 /// Builtin function pointers (absolute symbols) are defined once in a shared
 /// `builtins` JITDylib. Each per-compiler JITDylib links against the builtins
 /// JD so compiled code can resolve them without duplicating definitions.
 struct GlobalOrcJit {
-    jit: orc::LLJIT,
-
     /// Shared JITDylib containing absolute symbols for builtin functions.
     /// Added to each per-compiler JITDylib's link order.
     builtins_jd: orc::JITDylibRef,
@@ -207,11 +205,11 @@ struct GlobalOrcJit {
     builtins_defined: std::sync::Mutex<HashSet<CString>>,
 
     next_dylib_id: AtomicU64,
-    /// Pool of cleared JITDylibs ready for reuse.
-    pool: std::sync::Mutex<Vec<orc::JITDylibRef>>,
 
     /// Live JIT memory counters, updated by the C++ MemoryUsagePlugin.
     memory_counters: &'static JitMemoryCounters,
+
+    jit: orc::LLJIT,
 }
 
 impl GlobalOrcJit {
@@ -262,7 +260,6 @@ impl GlobalOrcJit {
                 builtins_jd,
                 builtins_defined: Default::default(),
                 next_dylib_id: Default::default(),
-                pool: Default::default(),
                 memory_counters,
             })
         });
@@ -272,14 +269,12 @@ impl GlobalOrcJit {
         }
     }
 
-    /// Acquires a JITDylib from the pool, or creates a new one.
-    fn acquire_jit_dylib(&self) -> orc::JITDylibRef {
-        if let Some(jd) = self.pool.lock().unwrap().pop() {
-            return jd;
-        }
+    /// Creates a fresh JITDylib for a compiler.
+    fn create_jit_dylib(&self) -> orc::JITDylibRef {
         let id = self.next_dylib_id.fetch_add(1, Ordering::Relaxed);
         let name = CString::new(format!("revmc.compiler.{id}")).unwrap();
-        let jd = self.jit.get_execution_session().create_bare_jit_dylib(&name);
+        let es = self.jit.get_execution_session();
+        let jd = es.create_bare_jit_dylib(&name);
         // Link against the builtins JD so compiled code can resolve builtin symbols.
         jd.add_to_link_order(&self.builtins_jd);
         // Attach a process symbol generator so the JITDylib can resolve libc and other
@@ -291,13 +286,14 @@ impl GlobalOrcJit {
         jd
     }
 
-    /// Returns a cleared JITDylib to the pool for reuse.
-    fn release_jit_dylib(&self, jd: orc::JITDylibRef) {
-        if let Err(e) = jd.clear() {
-            error!("failed to clear JITDylib for pool: {e}");
-            return;
+    /// Removes a JITDylib from the ExecutionSession, freeing all its resources.
+    fn remove_jit_dylib(&self, jd: orc::JITDylibRef) {
+        let es = self.jit.get_execution_session();
+        if let Err(e) = es.remove_jit_dylib(&jd) {
+            error!("failed to remove JITDylib: {e}");
         }
-        self.pool.lock().unwrap().push(jd);
+        // Reclaim unreferenced interned strings after removing symbols.
+        es.get_symbol_string_pool().clear_dead_entries();
     }
 
     /// Defines absolute symbols in the shared builtins JITDylib, skipping any
@@ -343,7 +339,7 @@ pub struct JitDylibGuard {
 
 impl Drop for JitDylibGuard {
     fn drop(&mut self) {
-        self.global.release_jit_dylib(self.jd);
+        self.global.remove_jit_dylib(self.jd);
     }
 }
 
@@ -385,7 +381,7 @@ impl fmt::Debug for OrcJitState {
 impl OrcJitState {
     fn new(debug_support: bool, profiling_support: bool) -> Result<Self> {
         let global = GlobalOrcJit::get(debug_support, profiling_support)?;
-        let jd = global.acquire_jit_dylib();
+        let jd = global.create_jit_dylib();
         let jd_guard = Arc::new(JitDylibGuard { global, jd });
         Ok(Self {
             global,
@@ -992,6 +988,7 @@ impl Backend for EvmLlvmBackend {
         self.module = create_module(self.cx, &self.machine, self.aot)?;
         if let Some(orc) = &mut self.orc {
             orc.staged_functions.clear();
+            orc.global.jit.get_execution_session().get_symbol_string_pool().clear_dead_entries();
         }
         Ok(())
     }
