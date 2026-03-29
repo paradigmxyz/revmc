@@ -44,7 +44,7 @@ pub(crate) struct RunArgs {
     display: bool,
 
     /// Parse the bytecode and render the CFG as a DOT graph.
-    #[arg(long, default_missing_value = "svg")]
+    #[arg(long, default_missing_value = "svg", num_args = 0..=1)]
     dot: Option<DotFormat>,
 
     /// Don't open URLs in the browser.
