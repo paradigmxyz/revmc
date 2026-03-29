@@ -10,7 +10,7 @@ use std::cell::RefCell;
 mod block_analysis;
 mod fmt;
 mod sections;
-use sections::{Section, SectionAnalysis};
+use sections::{GasSection, SectionsAnalysis, StackSection};
 
 mod info;
 pub use info::*;
@@ -79,9 +79,18 @@ impl<'a> Bytecode<'a> {
             }
             let base_gas = info.base_gas();
 
-            let section = Section::default();
+            let gas_section = GasSection::default();
+            let stack_section = StackSection::default();
 
-            insts.push(InstData { opcode, flags, base_gas, data, pc: pc as u32, section });
+            insts.push(InstData {
+                opcode,
+                flags,
+                base_gas,
+                data,
+                pc: pc as u32,
+                gas_section,
+                stack_section,
+            });
         }
 
         let mut bytecode = Self {
@@ -96,7 +105,7 @@ impl<'a> Bytecode<'a> {
         };
 
         // Pad code to ensure there is at least one diverging instruction.
-        if bytecode.insts.last().is_none_or(|last| !last.is_diverging()) {
+        if bytecode.insts.last().is_none_or(|last| last.can_fall_through()) {
             bytecode.insts.push(InstData::new(op::STOP));
         }
 
@@ -195,7 +204,7 @@ impl<'a> Bytecode<'a> {
         for jump_inst in 0..self.insts.len() {
             let jump = &self.insts[jump_inst];
             let Some(push_inst) = jump_inst.checked_sub(1) else {
-                if jump.is_legacy_jump() {
+                if jump.is_jump() {
                     trace!(jump_inst, target=?None::<()>, "found jump");
                     self.has_dynamic_jumps = true;
                 }
@@ -203,8 +212,8 @@ impl<'a> Bytecode<'a> {
             };
 
             let push = &self.insts[push_inst];
-            if !(push.is_push() && jump.is_legacy_jump()) {
-                if jump.is_legacy_jump() {
+            if !(push.is_push() && jump.is_jump()) {
+                if jump.is_jump() {
                     trace!(jump_inst, target=?None::<()>, "found jump");
                     self.has_dynamic_jumps = true;
                 }
@@ -293,25 +302,13 @@ impl<'a> Bytecode<'a> {
     /// Constructs the sections in the bytecode.
     #[instrument(name = "sections", level = "debug", skip_all)]
     fn construct_sections(&mut self) {
-        let mut analysis = SectionAnalysis::default();
+        let mut analysis = SectionsAnalysis::default();
         for inst in 0..self.insts.len() {
             if !self.inst(inst).is_dead_code() {
                 analysis.process(self, inst);
             }
         }
         analysis.finish(self);
-    }
-
-    /// Constructs the sections in the bytecode.
-    #[instrument(name = "sections", level = "debug", skip_all)]
-    #[cfg(any())]
-    fn construct_sections_default(&mut self) {
-        for inst in &mut self.insts {
-            let (inp, out) = inst.stack_io();
-            let stack_diff = out as i16 - inp as i16;
-            inst.section =
-                Section { gas_cost: inst.base_gas as _, inputs: inp as _, max_growth: stack_diff }
-        }
     }
 
     /// Returns the immediate value of the given instruction data, if any.
@@ -398,8 +395,10 @@ pub(crate) struct InstData {
     pub(crate) data: u32,
     /// The program counter, meaning `code[pc]` is this instruction's opcode.
     pub(crate) pc: u32,
-    /// The section this instruction belongs to.
-    pub(crate) section: Section,
+    /// The gas section this instruction belongs to.
+    pub(crate) gas_section: GasSection,
+    /// The stack section this instruction belongs to.
+    pub(crate) stack_section: StackSection,
 }
 
 impl PartialEq<u8> for InstData {
@@ -437,7 +436,7 @@ impl InstData {
         // For adjacent PUSH+JUMP, the PUSH is marked SKIP_LOGIC so the target is never on the
         // stack. Reduce inputs accordingly. Block-resolved jumps still have the target on the
         // stack, so their input count is unchanged.
-        if self.is_legacy_static_jump()
+        if self.is_static_jump()
             && !self.flags.contains(InstFlags::BLOCK_RESOLVED_JUMP)
             && !(self.opcode == op::JUMPI && self.flags.contains(InstFlags::INVALID_JUMP))
         {
@@ -465,17 +464,17 @@ impl InstData {
         matches!(self.opcode, op::PUSH0..=op::PUSH32)
     }
 
-    /// Returns `true` if this instruction is a legacy jump instruction (`JUMP`/`JUMPI`).
+    /// Returns `true` if this instruction is a jump instruction (`JUMP`/`JUMPI`).
     #[inline]
-    pub(crate) fn is_legacy_jump(&self) -> bool {
+    pub(crate) fn is_jump(&self) -> bool {
         matches!(self.opcode, op::JUMP | op::JUMPI)
     }
 
-    /// Returns `true` if this instruction is a legacy jump instruction (`JUMP`/`JUMPI`), and the
+    /// Returns `true` if this instruction is a jump instruction (`JUMP`/`JUMPI`), and the
     /// target known statically.
     #[inline]
-    pub(crate) fn is_legacy_static_jump(&self) -> bool {
-        self.is_legacy_jump() && self.flags.contains(InstFlags::STATIC_JUMP)
+    pub(crate) fn is_static_jump(&self) -> bool {
+        self.is_jump() && self.flags.contains(InstFlags::STATIC_JUMP)
     }
 
     /// Returns `true` if this instruction is a `JUMPDEST`.
@@ -504,10 +503,16 @@ impl InstData {
             || (self.opcode == op::SSTORE && spec_id.is_enabled_in(SpecId::ISTANBUL))
     }
 
+    /// Returns `true` if execution can fall through to the next sequential instruction.
+    #[inline]
+    pub(crate) fn can_fall_through(&self) -> bool {
+        !self.is_diverging() && self.opcode != op::JUMP
+    }
+
     /// Returns `true` if we know that this instruction will branch or stop execution.
     #[inline]
     pub(crate) fn is_branching(&self) -> bool {
-        self.is_legacy_jump() || self.is_diverging()
+        self.is_jump() || self.is_diverging()
     }
 
     /// Returns `true` if we know that this instruction will stop execution.
