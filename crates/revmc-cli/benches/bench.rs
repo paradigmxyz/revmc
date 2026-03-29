@@ -17,16 +17,8 @@ const SPEC_ID: SpecId = SpecId::OSAKA;
 
 /// Benchmarks that are too slow for CI due to large bytecode (LLVM compilation time under
 /// valgrind).
-const SKIP_COMPILE: &[&str] = &[
-    "snailtracer",
-    "seaport",
-    "fiat_token",
-    "uniswap_v2_pair",
-    "airdrop",
-    "erc20_transfer",
-    "weth",
-    "usdc_proxy",
-];
+const SKIP_COMPILE: &[&str] =
+    &["snailtracer", "seaport", "fiat_token", "uniswap_v2_pair", "airdrop", "usdc_proxy"];
 /// Benchmarks that are too slow for CI entirely (runtime is also very slow under valgrind).
 const SKIP_ALL: &[&str] = &["seaport", "snailtracer"];
 
@@ -142,12 +134,22 @@ fn run_bytecode_bench(c: &mut Criterion, bench: &revmc_cli::Bench) {
         )
     };
 
-    let jit_matrix = [("default", (true, true)), ("no_gas", (false, true))];
-    let jit_ids = jit_matrix.map(|(kind, (gas, stack))| {
-        compiler.gas_metering(gas);
-        unsafe { compiler.stack_bound_checks(stack) };
-        (kind, compiler.translate(kind, bytecode_raw.original_byte_slice(), SPEC_ID).expect(kind))
-    });
+    const NO_GAS_BENCHES: &[&str] = &["fibonacci", "fibonacci-calldata", "factorial"];
+    let mut jit_variants: Vec<(&str, (bool, bool))> = vec![("default", (true, true))];
+    if NO_GAS_BENCHES.contains(&name) {
+        jit_variants.push(("no_gas", (false, true)));
+    }
+    let jit_ids: Vec<_> = jit_variants
+        .iter()
+        .map(|&(kind, (gas, stack))| {
+            compiler.gas_metering(gas);
+            unsafe { compiler.stack_bound_checks(stack) };
+            (
+                kind,
+                compiler.translate(kind, bytecode_raw.original_byte_slice(), SPEC_ID).expect(kind),
+            )
+        })
+        .collect();
     for &(kind, fn_id) in &jit_ids {
         let jit = unsafe { compiler.jit_function(fn_id) }.expect(kind);
         g.bench_function(format!("{name}/rt/jit/{kind}"), |b| {
