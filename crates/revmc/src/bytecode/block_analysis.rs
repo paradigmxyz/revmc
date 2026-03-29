@@ -191,7 +191,7 @@ impl Bytecode<'_> {
         self.has_dynamic_jumps = self
             .insts
             .iter()
-            .any(|inst| inst.is_legacy_jump() && !inst.flags.contains(InstFlags::STATIC_JUMP));
+            .any(|inst| inst.is_jump() && !inst.flags.contains(InstFlags::STATIC_JUMP));
     }
 
     /// Build a basic-block CFG from the instruction list.
@@ -276,7 +276,7 @@ impl Bytecode<'_> {
             }
 
             // Static jump edges.
-            if term.is_legacy_static_jump() && !term.flags.contains(InstFlags::INVALID_JUMP) {
+            if term.is_static_jump() && !term.flags.contains(InstFlags::INVALID_JUMP) {
                 let target_inst = term.data as usize;
                 let target_block = inst_to_block[target_inst];
                 if target_block != usize::MAX && target_block < num_blocks {
@@ -298,7 +298,7 @@ impl Bytecode<'_> {
         // Collect unresolved jumps.
         let mut jump_insts: Vec<usize> = Vec::new();
         for (i, inst) in self.insts.iter().enumerate() {
-            if inst.is_legacy_jump() && !inst.flags.contains(InstFlags::STATIC_JUMP) {
+            if inst.is_jump() && !inst.flags.contains(InstFlags::STATIC_JUMP) {
                 jump_insts.push(i);
             }
         }
@@ -499,7 +499,7 @@ impl Bytecode<'_> {
 
             // For dynamic jumps, discover target edges to propagate state through.
             let term = &self.insts[block.end];
-            if term.is_legacy_jump() && !term.flags.contains(InstFlags::STATIC_JUMP) {
+            if term.is_jump() && !term.flags.contains(InstFlags::STATIC_JUMP) {
                 let pre_jump_stack = if block.start == block.end {
                     input.clone()
                 } else {
