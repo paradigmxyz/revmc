@@ -94,7 +94,7 @@ impl Bytecode<'_> {
                 write!(text, "{opcode}").unwrap();
                 if data.flags.contains(InstFlags::INVALID_JUMP) {
                     text.push_str(" -> INVALID");
-                } else if data.is_legacy_static_jump() {
+                } else if data.is_static_jump() {
                     let target = data.data as usize;
                     match info.inst_to_block.get(&target) {
                         Some(b) => write!(text, " bb{b}").unwrap(),
@@ -186,25 +186,63 @@ impl fmt::Debug for InstData {
     }
 }
 
+// DOT graph colors.
+mod dot_colors {
+    const DARK_NAVY: &str = "#1a1a2e";
+    const DARK_BLUE: &str = "#16213e";
+    const BLUE: &str = "#0f3460";
+    const DARK_TEAL: &str = "#1a2340";
+    const TEAL: &str = "#53a8b6";
+    const GREEN: &str = "#5cdb95";
+    const DARK_GREEN: &str = "#1a2e1a";
+    const DARK_ORANGE: &str = "#2e2416";
+    const ORANGE: &str = "#e0a030";
+    const DARK_RED: &str = "#2d1b2e";
+    const RED: &str = "#e94560";
+    const GRAY: &str = "#555577";
+    const LIGHT_GRAY: &str = "#e0e0e0";
+
+    pub(super) const BG: &str = DARK_NAVY;
+    pub(super) const TEXT: &str = LIGHT_GRAY;
+    // Default node.
+    pub(super) const NODE_FILL: &str = DARK_BLUE;
+    pub(super) const NODE_BORDER: &str = BLUE;
+    // Reverting/error blocks.
+    pub(super) const REVERT_FILL: &str = DARK_RED;
+    pub(super) const REVERT_BORDER: &str = RED;
+    // Non-reverting exit blocks (STOP, RETURN).
+    pub(super) const EXIT_FILL: &str = DARK_GREEN;
+    pub(super) const EXIT_BORDER: &str = GREEN;
+    // Suspending blocks (CALL, CREATE, ...).
+    pub(super) const SUSPEND_FILL: &str = DARK_ORANGE;
+    pub(super) const SUSPEND_BORDER: &str = ORANGE;
+    // Branching blocks.
+    pub(super) const BRANCH_FILL: &str = DARK_TEAL;
+    pub(super) const BRANCH_BORDER: &str = TEAL;
+    // Edges.
+    pub(super) const EDGE: &str = GRAY;
+    pub(super) const EDGE_JUMP: &str = TEAL;
+    pub(super) const EDGE_COND_JUMP: &str = GREEN;
+    pub(super) const EDGE_FALSE: &str = RED;
+}
+
 impl<'a> Bytecode<'a> {
     /// Writes the bytecode as a DOT graph to the given writer.
     #[doc(hidden)]
     pub fn write_dot<W: fmt::Write>(&self, w: &mut W) -> fmt::Result {
+        use dot_colors::*;
+
         let info = self.collect_blocks();
 
         writeln!(w, "digraph bytecode {{")?;
-        writeln!(w, "  graph [bgcolor=\"#1a1a2e\" rankdir=TB];")?;
+        writeln!(w, "  graph [bgcolor=\"{BG}\" rankdir=TB];")?;
         writeln!(
             w,
             "  node [shape=Mrecord fontname=\"Courier\" fontsize=10 \
-             style=filled fillcolor=\"#16213e\" fontcolor=\"#e0e0e0\" \
-             color=\"#0f3460\" penwidth=1.5];"
+             style=filled fillcolor=\"{NODE_FILL}\" fontcolor=\"{TEXT}\" \
+             color=\"{NODE_BORDER}\" penwidth=1.5];"
         )?;
-        writeln!(
-            w,
-            "  edge [fontname=\"Courier\" fontsize=9 color=\"#555577\" \
-             fontcolor=\"#8888aa\"];"
-        )?;
+        writeln!(w, "  edge [fontname=\"Courier\" fontsize=9 color=\"{EDGE}\"];")?;
 
         // Emit nodes.
         for &(block_idx, first_inst, last_inst) in &info.blocks {
@@ -212,14 +250,16 @@ impl<'a> Bytecode<'a> {
             let first = self.inst(first_inst);
 
             // Color based on block terminator.
-            let (fill, border) = if last.is_diverging() && !last.is_legacy_jump() {
-                ("#2d1b2e", "#e94560") // exit blocks: dark red
-            } else if last.is_legacy_jump() {
-                ("#1a2340", "#53a8b6") // branching blocks: teal
-            } else if first.is_reachable_jumpdest(self.has_dynamic_jumps) {
-                ("#1a2e1a", "#5cdb95") // jump targets: green
+            let (fill, border) = if matches!(last.opcode, op::STOP | op::RETURN) {
+                (EXIT_FILL, EXIT_BORDER)
+            } else if last.is_diverging() {
+                (REVERT_FILL, REVERT_BORDER)
+            } else if last.may_suspend() {
+                (SUSPEND_FILL, SUSPEND_BORDER)
+            } else if last.is_jump() {
+                (BRANCH_FILL, BRANCH_BORDER)
             } else {
-                ("#16213e", "#0f3460") // default: dark blue
+                (NODE_FILL, NODE_BORDER)
             };
 
             write!(
@@ -258,14 +298,10 @@ impl<'a> Bytecode<'a> {
             let last = self.inst(last_inst);
 
             // Jump edge.
-            if last.is_legacy_static_jump() && !last.flags.contains(InstFlags::INVALID_JUMP) {
+            if last.is_static_jump() && !last.flags.contains(InstFlags::INVALID_JUMP) {
                 let target = last.data as usize;
                 if let Some(&target_block) = info.inst_to_block.get(&target) {
-                    let (label, color) = if last.opcode == op::JUMPI {
-                        ("true", "#5cdb95")
-                    } else {
-                        ("", "#53a8b6")
-                    };
+                    let color = if last.opcode == op::JUMPI { EDGE_COND_JUMP } else { EDGE_JUMP };
                     let extra = if block_idx == target_block {
                         " tailport=s headport=e constraint=false"
                     } else if target_block <= block_idx {
@@ -273,30 +309,17 @@ impl<'a> Bytecode<'a> {
                     } else {
                         ""
                     };
-                    writeln!(
-                        w,
-                        "  bb{block_idx} -> bb{target_block} \
-                         [label=\"{label}\" color=\"{color}\" fontcolor=\"{color}\"{extra}];"
-                    )?;
+                    writeln!(w, "  bb{block_idx} -> bb{target_block} [color=\"{color}\"{extra}];")?;
                 }
-            } else if last.is_legacy_jump() && !last.is_legacy_static_jump() {
-                writeln!(
-                    w,
-                    "  bb{block_idx} -> dynamic \
-                     [label=\"dynamic\" color=\"#e94560\" fontcolor=\"#e94560\" style=dashed];"
-                )?;
+            } else if last.is_jump() && !last.is_static_jump() {
+                writeln!(w, "  bb{block_idx} -> dynamic [color=\"{EDGE_FALSE}\" style=dashed];")?;
             }
 
             // Fallthrough edge.
             let has_fallthrough = last.can_fall_through();
             if has_fallthrough && let Some(&(next_block, _, _)) = info.blocks.get(i + 1) {
-                let (label, color) =
-                    if last.opcode == op::JUMPI { ("false", "#e94560") } else { ("", "#555577") };
-                writeln!(
-                    w,
-                    "  bb{block_idx} -> bb{next_block} \
-                     [label=\"{label}\" color=\"{color}\" fontcolor=\"{color}\"];"
-                )?;
+                let color = if last.opcode == op::JUMPI { EDGE_FALSE } else { EDGE };
+                writeln!(w, "  bb{block_idx} -> bb{next_block} [color=\"{color}\"];")?;
             }
         }
 
@@ -304,8 +327,8 @@ impl<'a> Bytecode<'a> {
         if self.has_dynamic_jumps {
             writeln!(
                 w,
-                "  dynamic [shape=diamond style=filled fillcolor=\"#2d1b2e\" \
-                 color=\"#e94560\" fontcolor=\"#e0e0e0\" \
+                "  dynamic [shape=diamond style=filled fillcolor=\"{REVERT_FILL}\" \
+                 color=\"{REVERT_BORDER}\" fontcolor=\"{TEXT}\" \
                  label=\"dynamic\\njump table\"];"
             )?;
             for &(block_idx, first_inst, _) in &info.blocks {
@@ -313,8 +336,7 @@ impl<'a> Bytecode<'a> {
                 if first.is_reachable_jumpdest(self.has_dynamic_jumps) {
                     writeln!(
                         w,
-                        "  dynamic -> bb{block_idx} \
-                         [color=\"#e94560\" style=dashed];"
+                        "  dynamic -> bb{block_idx} [color=\"{EDGE_FALSE}\" style=dashed];"
                     )?;
                 }
             }
@@ -362,20 +384,8 @@ mod tests {
     use revm_bytecode::opcode as op;
     use revm_primitives::hardfork::SpecId;
 
-    /// Test bytecode with SSTORE (splits gas but not stack) and a loop (back-edge).
-    ///
-    /// ```text
-    /// PUSH1 0x03  ; pc=0, skip
-    /// JUMP        ; pc=2, -> bb1
-    /// JUMPDEST    ; pc=3, loop header
-    /// PUSH1 0x01  ; pc=4
-    /// PUSH1 0x00  ; pc=6
-    /// SSTORE      ; pc=8, splits gas section only
-    /// PUSH1 0x01  ; pc=9
-    /// PUSH1 0x03  ; pc=11, skip
-    /// JUMPI       ; pc=13, -> bb1 (loop)
-    /// STOP        ; pc=14
-    /// ```
+    /// Test bytecode with SSTORE (splits gas but not stack), a loop (back-edge), and CALL
+    /// (suspending instruction that splits both gas and stack sections).
     fn test_bytecode() -> Bytecode<'static> {
         #[rustfmt::skip]
         let code: &[u8] = &[
@@ -388,6 +398,15 @@ mod tests {
             op::PUSH1, 0x01,
             op::PUSH1, 0x03,
             op::JUMPI,
+            op::PUSH1, 0x00,
+            op::PUSH1, 0x00,
+            op::PUSH1, 0x00,
+            op::PUSH1, 0x00,
+            op::PUSH1, 0x00,
+            op::PUSH1, 0x42,
+            op::PUSH2, 0xff, 0xff,
+            op::CALL,
+            op::POP,
             op::STOP,
         ];
         let mut bytecode = Bytecode::new(code, SpecId::OSAKA);
@@ -402,23 +421,34 @@ mod tests {
         snapbox::assert_data_eq!(
             actual,
             snapbox::str![[r#"
-             ; spec_id=Osaka, has_dynamic_jumps=false, may_suspend=false
+               ; spec_id=Osaka, has_dynamic_jumps=false, may_suspend=true
 
-bb0:         ; stack_in=0, max_growth=1
-  PUSH1 0x03 ; pc=0, gas=11, skip
-  JUMP bb1   ; pc=2
+bb0:           ; stack_in=0, max_growth=1
+  PUSH1 0x03   ; pc=0, gas=11, skip
+  JUMP bb1     ; pc=2
 
-bb1:         ; stack_in=0, max_growth=2
-  JUMPDEST   ; pc=3, gas=7, reachable
-  PUSH1 0x01 ; pc=4
-  PUSH1 0x00 ; pc=6
-  SSTORE     ; pc=8
-  PUSH1 0x01 ; pc=9, gas=16
-  PUSH1 0x03 ; pc=11, skip
-  JUMPI bb1  ; pc=13
+bb1:           ; stack_in=0, max_growth=2
+  JUMPDEST     ; pc=3, gas=7, reachable
+  PUSH1 0x01   ; pc=4
+  PUSH1 0x00   ; pc=6
+  SSTORE       ; pc=8
+  PUSH1 0x01   ; pc=9, gas=16
+  PUSH1 0x03   ; pc=11, skip
+  JUMPI bb1    ; pc=13
 
-bb2:
-  STOP       ; pc=14
+bb2:           ; stack_in=0, max_growth=7
+  PUSH1 0x00   ; pc=14, gas=121
+  PUSH1 0x00   ; pc=16
+  PUSH1 0x00   ; pc=18
+  PUSH1 0x00   ; pc=20
+  PUSH1 0x00   ; pc=22
+  PUSH1 0x42   ; pc=24
+  PUSH2 0xffff ; pc=26
+  CALL         ; pc=29, suspends
+
+bb3:           ; stack_in=1, max_growth=0
+  POP          ; pc=30, gas=2
+  STOP         ; pc=31
 
 "#]]
         );
@@ -432,19 +462,23 @@ bb2:
         assert!(dot.contains("bb0"));
         assert!(dot.contains("bb1"));
         assert!(dot.contains("bb2"));
+        assert!(dot.contains("bb3"));
         // SSTORE present in bb1.
         assert!(dot.contains("SSTORE"), "missing SSTORE");
         // SSTORE splits gas sections: two [g=] annotations in bb1.
         assert!(dot.contains("[g=7]"), "missing first gas section");
         assert!(dot.contains("[g=16]"), "missing second gas section");
+        // CALL present in bb2, suspends and splits into bb3.
+        assert!(dot.contains("CALL"), "missing CALL");
+        assert!(dot.contains("[g=121]"), "missing CALL gas section");
         // bb0 -> bb1 (unconditional jump).
         assert!(dot.contains("bb0 -> bb1"), "missing jump edge");
         // bb1 -> bb1 (loop back-edge).
         assert!(dot.contains("bb1 -> bb1"), "missing loop back-edge");
-        assert!(dot.contains("\"true\""), "missing true label");
         // bb1 -> bb2 (fallthrough on false).
         assert!(dot.contains("bb1 -> bb2"), "missing false edge");
-        assert!(dot.contains("\"false\""), "missing false label");
+        // bb2 -> bb3 (fallthrough after CALL).
+        assert!(dot.contains("bb2 -> bb3"), "missing CALL fallthrough edge");
         assert!(!dot.contains("dynamic"), "unexpected dynamic jump table");
     }
 
