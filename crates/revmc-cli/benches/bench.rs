@@ -77,7 +77,7 @@ fn run_bytecode_bench(c: &mut Criterion, bench: &revmc_cli::Bench) {
     if !SKIP_COMPILE.contains(&name) {
         g.bench_function(format!("{name}/compile/translate"), |b| {
             b.iter_batched_ref(
-                || new_compiler(OptimizationLevel::None),
+                || new_compiler(OptimizationLevel::Default),
                 |compiler| {
                     compiler.translate(name, &def.bytecode, SPEC_ID).unwrap();
                 },
