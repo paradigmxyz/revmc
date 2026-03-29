@@ -275,7 +275,7 @@ mod tests {
 
         // Run via JitEvmFactory.
         let jit_result = {
-            let factory = JitEvmFactory::new(backend.clone());
+            let factory = JitEvmFactory::new(backend);
             let mut evm = factory.create_evm(CacheDB::<EmptyDB>::default(), EvmEnv::default());
             let addr = deploy_contract(&mut evm, runtime_code);
             evm.transact_raw(TxEnv {
@@ -308,7 +308,7 @@ mod tests {
     #[test]
     fn jit_evm_factory_roundtrip() {
         let backend = blocking_backend();
-        let factory = JitEvmFactory::new(backend.clone());
+        let factory = JitEvmFactory::new(backend);
 
         let mut evm = factory.create_evm(CacheDB::<EmptyDB>::default(), EvmEnv::default());
         assert_eq!(evm.chain_id(), 1);

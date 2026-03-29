@@ -421,7 +421,7 @@ impl OrcJitState {
     /// O(N²) total cost over many compilations.
     fn maybe_clear_dead_pool_entries(&mut self) {
         self.clear_pool_counter += 1;
-        if self.clear_pool_counter % 256 == 0 {
+        if self.clear_pool_counter.is_multiple_of(256) {
             self.global.jit.get_execution_session().get_symbol_string_pool().clear_dead_entries();
         }
     }
