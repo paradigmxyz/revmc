@@ -635,6 +635,7 @@ impl BackendState {
 }
 
 /// Runs the backend event loop. Called on the backend thread.
+#[expect(clippy::too_many_arguments)]
 pub(crate) fn run(
     cmd_rx: chan::Receiver<Command>,
     resident: Arc<ResidentMap>,
