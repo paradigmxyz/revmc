@@ -43,6 +43,8 @@ unsafe extern "C" {
 
     pub(crate) fn revmc_llvm_lljit_enable_perf_support(jit: LLVMOrcLLJITRef) -> LLVMErrorRef;
 
+    pub(crate) fn revmc_llvm_lljit_enable_simple_perf(jit: LLVMOrcLLJITRef) -> LLVMErrorRef;
+
     pub(crate) fn revmc_llvm_lljit_enable_memory_usage(
         jit: LLVMOrcLLJITRef,
         code_bytes: *const AtomicUsize,
