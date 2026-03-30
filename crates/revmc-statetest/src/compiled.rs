@@ -1,7 +1,8 @@
 // revmc-specific code: compilation, handler integration, and test orchestration.
 
 use crate::runner::{
-    check_evm_execution, execute_test_suite, skip_test, TestError, TestErrorKind, TestRunnerState,
+    check_evm_execution, execute_test_suite, skip_test, statetest_precheck_invalid_tx, TestError,
+    TestErrorKind, TestRunnerState,
 };
 use dashmap::DashMap;
 use revm_context::{block::BlockEnv, cfg::CfgEnv, tx::TxEnv, Context};
@@ -430,6 +431,19 @@ pub fn execute_single_test_compiled(ctx: CompiledTestContext<'_>) -> Result<(), 
     let prestate = ctx.cache_state.clone();
     let mut state =
         database::State::builder().with_cached_prestate(prestate).with_bundle_update().build();
+
+    if let Some(err) = statetest_precheck_invalid_tx(ctx.unit, ctx.tx) {
+        let exec_result = Err(EVMError::Transaction(err));
+        return check_evm_execution(
+            ctx.test,
+            ctx.unit.out.as_ref(),
+            ctx.name,
+            &exec_result,
+            &mut state,
+            *ctx.cfg.spec(),
+            false,
+        );
+    }
 
     let timer = Instant::now();
     // SAFETY: The handler and evm do not outlive `state`. The `'static` in

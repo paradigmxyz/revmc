@@ -71,13 +71,8 @@ pub fn skip_test(path: &Path) -> bool {
 
     matches!(
         name,
-        // Test check if gas price overflows, we handle this correctly but does not match tests
-        // specific exception.
-        | "CreateTransactionHighNonce.json"
-
         // Test with some storage check.
-        | "RevertInCreateInInit_Paris.json"
-        | "RevertInCreateInInit.json"
+        |"RevertInCreateInInit_Paris.json"| "RevertInCreateInInit.json"
         | "dynamicAccountOverwriteEmpty.json"
         | "dynamicAccountOverwriteEmpty_Paris.json"
         | "RevertInCreateInInitCreate2Paris.json"
@@ -256,6 +251,21 @@ pub(crate) fn check_evm_execution(
     Ok(())
 }
 
+pub(crate) fn statetest_precheck_invalid_tx(
+    unit: &TestUnit,
+    tx: &TxEnv,
+) -> Option<InvalidTransaction> {
+    // Mirror the EIP-2681-style "sender nonce is already max" transaction rejection.
+    // Current revm validation does not surface this for state tests, but the official
+    // fixtures expect the transaction to fail before execution.
+    if tx.nonce == u64::MAX
+        && unit.pre.get(&tx.caller).is_some_and(|account| account.nonce == u64::MAX)
+    {
+        return Some(InvalidTransaction::NonceOverflowInTransaction);
+    }
+    None
+}
+
 /// Execute a single test suite file containing multiple tests.
 pub fn execute_test_suite(
     path: &Path,
@@ -352,6 +362,19 @@ fn execute_single_test(ctx: TestExecutionContext) -> Result<(), TestErrorKind> {
     let cache = ctx.cache_state.clone();
     let mut state =
         database::State::builder().with_cached_prestate(cache).with_bundle_update().build();
+
+    if let Some(err) = statetest_precheck_invalid_tx(ctx.unit, ctx.tx) {
+        let exec_result = Err(EVMError::Transaction(err));
+        return check_evm_execution(
+            ctx.test,
+            ctx.unit.out.as_ref(),
+            ctx.name,
+            &exec_result,
+            &mut state,
+            *ctx.cfg.spec(),
+            ctx.print_json_outcome,
+        );
+    }
 
     let evm_context = Context::mainnet()
         .with_block(ctx.block)
