@@ -247,8 +247,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         assert!(!inst_entries.is_empty(), "translating empty bytecode");
 
         // Apply dedup redirects: map dead duplicate entries to their canonical block.
-        if bytecode.has_dedups() {
-            for (&from, &to) in &bytecode.dedup_redirects {
+        if bytecode.has_redirects() {
+            for (&from, &to) in &bytecode.redirects {
                 inst_entries[from] = inst_entries[to];
             }
         }

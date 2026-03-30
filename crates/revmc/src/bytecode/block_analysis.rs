@@ -248,13 +248,13 @@ impl Worklist {
 
 /// A basic block in the CFG.
 pub(crate) struct BlockData {
-    /// Instruction index range (exclusive end). The terminator is at `insts.end - 1`.
+    /// Instruction index range (exclusive end). All instructions in this range are live.
     pub(crate) insts: Range<Inst>,
     /// Predecessor block IDs.
     pub(crate) preds: SmallVec<[Block; 4]>,
     /// Successor block IDs.
     pub(crate) succs: SmallVec<[Block; 4]>,
-    /// Whether all instructions in this block are dead code.
+    /// Whether this block has been eliminated (e.g. by dedup).
     pub(crate) dead: bool,
 }
 
@@ -399,18 +399,15 @@ impl Bytecode<'_> {
     #[instrument(level = "debug", skip_all)]
     pub(crate) fn rebuild_cfg(&mut self) {
         let finish_block = |cfg: &mut Cfg, start: usize, end: usize| {
+            debug_assert!(start < end, "empty block range: {start}..{end}",);
             let bid = cfg.blocks.push(BlockData {
                 insts: Inst::from_usize(start)..Inst::from_usize(end),
                 preds: SmallVec::new(),
                 succs: SmallVec::new(),
-                dead: true,
+                dead: false,
             });
-            let b = &mut cfg.blocks[bid];
-            for i in b.insts() {
-                if !self.insts[i].is_dead_code() {
-                    b.dead = false;
-                    cfg.inst_to_block[i] = Some(bid);
-                }
+            for i in start..end {
+                cfg.inst_to_block[Inst::from_usize(i)] = Some(bid);
             }
         };
 
@@ -439,9 +436,11 @@ impl Bytecode<'_> {
             }
         }
 
-        // Build blocks.
+        // Build blocks. Dead instructions are skipped; `current_end` tracks the
+        // exclusive end of live instructions so block ranges never include dead code.
         cfg.inst_to_block.resize(n, None);
         let mut current_start = None;
+        let mut current_end = 0;
 
         for i in 0..n {
             if self.insts.raw[i].is_dead_code() {
@@ -450,15 +449,16 @@ impl Bytecode<'_> {
 
             if is_leader[i] || current_start.is_none() {
                 if let Some(start) = current_start {
-                    finish_block(cfg, start, i);
+                    finish_block(cfg, start, current_end);
                 }
                 current_start = Some(i);
             }
+            current_end = i + 1;
         }
 
         // Close the last block.
         if let Some(start) = current_start {
-            finish_block(cfg, start, n);
+            finish_block(cfg, start, current_end);
         }
 
         // Build edges based on known control flow.
@@ -469,16 +469,29 @@ impl Bytecode<'_> {
             let term = &self.insts[cfg.blocks[bid].terminator()];
 
             // Fallthrough edge: if the terminator doesn't unconditionally branch/diverge.
-            if term.can_fall_through()
-                && cfg.blocks[bid].insts.end.index() < n
-                && let Some(next_block) = cfg.inst_to_block[cfg.blocks[bid].insts.end]
-            {
-                cfg.blocks[next_block].preds.push(bid);
-                cfg.blocks[bid].succs.push(next_block);
+            // Scan forward from the terminator to find the next live block, skipping
+            // any dead instructions that may sit between this block and its successor.
+            if term.can_fall_through() {
+                let next_live = (cfg.blocks[bid].terminator().index() + 1..n)
+                    .find_map(|i| cfg.inst_to_block[Inst::from_usize(i)]);
+                if let Some(next_block) = next_live {
+                    cfg.blocks[next_block].preds.push(bid);
+                    cfg.blocks[bid].succs.push(next_block);
+                }
             }
 
-            // Static jump edges.
-            if term.is_static_jump() && !term.flags.contains(InstFlags::INVALID_JUMP) {
+            // Jump edges: static single-target, or multi-jump.
+            let term_inst = cfg.blocks[bid].terminator();
+            if term.flags.contains(InstFlags::MULTI_JUMP) {
+                if let Some(targets) = self.multi_jump_targets.get(&term_inst) {
+                    for &t in targets {
+                        if let Some(target_block) = cfg.inst_to_block[t] {
+                            cfg.blocks[target_block].preds.push(bid);
+                            cfg.blocks[bid].succs.push(target_block);
+                        }
+                    }
+                }
+            } else if term.is_static_jump() && !term.flags.contains(InstFlags::INVALID_JUMP) {
                 let target_inst = Inst::from_usize(term.data as usize);
                 if let Some(target_block) = cfg.inst_to_block[target_inst] {
                     cfg.blocks[target_block].preds.push(bid);
@@ -1041,9 +1054,17 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn analyze_code(code: Vec<u8>) -> Bytecode<'static> {
+        analyze_code_with(code, super::super::AnalysisConfig::ALL)
+    }
+
+    pub(crate) fn analyze_code_with(
+        code: Vec<u8>,
+        config: super::super::AnalysisConfig,
+    ) -> Bytecode<'static> {
         let code = &*Box::leak(code.into_boxed_slice());
         eprintln!("{}", hex::encode(code));
         let mut bytecode = Bytecode::new(code, SpecId::CANCUN);
+        bytecode.config = config;
         bytecode.analyze().unwrap();
         bytecode
     }

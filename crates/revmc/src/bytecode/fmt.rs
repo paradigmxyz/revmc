@@ -312,48 +312,42 @@ impl<'a> Bytecode<'a> {
             writeln!(w, "\"];")?;
         }
 
-        // Emit edges.
+        // Emit edges from the CFG.
         for (bid, block) in self.cfg.blocks.iter_enumerated() {
             if block.dead {
                 continue;
             }
-            let last_inst = block.terminator();
-            let last = self.inst(last_inst);
+            let last = self.inst(block.terminator());
 
-            // Jump edge.
-            if last.flags.contains(InstFlags::MULTI_JUMP) {
-                if let Some(targets) = self.multi_jump_targets(last_inst) {
-                    for &t in targets {
-                        if let Some(target_block) = self.target_block(t) {
-                            let color = "#e2a93b";
-                            let extra = if target_block <= bid { " constraint=false" } else { "" };
-                            writeln!(
-                                w,
-                                "  {bid} -> {target_block} \
-                                 [color=\"{color}\" {extra}];"
-                            )?;
-                        }
-                    }
-                }
-            } else if last.is_static_jump() && !last.flags.contains(InstFlags::INVALID_JUMP) {
-                let target = Inst::from_usize(last.data as usize);
-                if let Some(target_block) = self.target_block(target) {
-                    let color = if last.opcode == op::JUMPI { EDGE_COND_JUMP } else { EDGE_JUMP };
-                    let extra = if target_block <= bid { " constraint=false" } else { "" };
-                    writeln!(w, "  {bid} -> {target_block} [color=\"{color}\"{extra}];")?;
-                }
-            } else if last.is_jump() && !last.is_static_jump() {
+            if last.is_jump()
+                && !last.is_static_jump()
+                && !last.flags.contains(InstFlags::MULTI_JUMP)
+            {
                 writeln!(w, "  {bid} -> dynamic [color=\"{EDGE_FALSE}\" style=dashed];")?;
+                continue;
             }
 
-            // Fallthrough edge: the next non-dead block in program order.
-            if last.can_fall_through() {
-                let next =
-                    self.cfg.blocks.iter_enumerated().skip(bid.index() + 1).find(|(_, b)| !b.dead);
-                if let Some((next_bid, _)) = next {
-                    let color = if last.opcode == op::JUMPI { EDGE_FALSE } else { EDGE };
-                    writeln!(w, "  {bid} -> {next_bid} [color=\"{color}\"];")?;
-                }
+            // Succs layout: [fallthrough?, jump_target(s)...].
+            // Fallthrough is first when present (JUMPI or non-branching terminator).
+            let mut succs = block.succs.iter().copied();
+            if last.can_fall_through()
+                && let Some(ft) = succs.next()
+            {
+                let color = if last.opcode == op::JUMPI { EDGE_FALSE } else { EDGE };
+                writeln!(w, "  {bid} -> {ft} [color=\"{color}\"];")?;
+            }
+            // Remaining succs are jump targets.
+            let is_multi = last.flags.contains(InstFlags::MULTI_JUMP);
+            for target in succs {
+                let color = if is_multi {
+                    "#e2a93b"
+                } else if last.opcode == op::JUMPI {
+                    EDGE_COND_JUMP
+                } else {
+                    EDGE_JUMP
+                };
+                let extra = if target <= bid { " constraint=false" } else { "" };
+                writeln!(w, "  {bid} -> {target} [color=\"{color}\"{extra}];")?;
             }
         }
 
