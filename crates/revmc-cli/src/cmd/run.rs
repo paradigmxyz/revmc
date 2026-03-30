@@ -397,14 +397,21 @@ fn open_dot(dot_path: &Path, fmt: DotFormat, open: bool) -> Result<()> {
 <html><head>
 <meta charset="utf-8">
 <title>revmc CFG</title>
-<style>html,body{{margin:0;height:100%;background:#1a1a2e}}
-svg{{width:100%;height:100%}}</style>
+<style>
+html,body{{margin:0;height:100%;overflow:hidden;background:#1a1a2e}}
+#graph{{width:100%;height:100%}}
+</style>
 </head><body>
+<div id="graph"></div>
 <script type="module">
 import {{ instance }} from "https://cdn.jsdelivr.net/npm/@viz-js/viz@3/+esm";
+import svgPanZoom from "https://cdn.jsdelivr.net/npm/svg-pan-zoom@3/+esm";
 const viz = await instance();
 const svg = viz.renderSVGElement(`{dot_escaped}`);
-document.body.appendChild(svg);
+svg.setAttribute("width", "100%");
+svg.setAttribute("height", "100%");
+document.getElementById("graph").appendChild(svg);
+svgPanZoom(svg, {{zoomScaleSensitivity:0.3, minZoom:0.1, maxZoom:50, controlIconsEnabled:true}});
 </script>
 </body></html>"#
         ),
