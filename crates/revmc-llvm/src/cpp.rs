@@ -10,6 +10,7 @@ use inkwell::{
             lljit::{LLVMOrcLLJITBuilderRef, LLVMOrcLLJITRef},
         },
         prelude::{LLVMAttributeRef, LLVMContextRef},
+        target_machine::{LLVMCodeGenOptLevel, LLVMTargetMachineRef},
     },
 };
 use std::{ffi::c_char, sync::atomic::AtomicUsize};
@@ -50,6 +51,11 @@ unsafe extern "C" {
         code_bytes: *const AtomicUsize,
         data_bytes: *const AtomicUsize,
     ) -> LLVMErrorRef;
+
+    pub(crate) fn revmc_llvm_target_machine_set_opt_level(
+        tm: LLVMTargetMachineRef,
+        level: LLVMCodeGenOptLevel,
+    );
 }
 
 pub(crate) fn create_initializes_attr(cx: &Context, lower: i64, upper: i64) -> Attribute {

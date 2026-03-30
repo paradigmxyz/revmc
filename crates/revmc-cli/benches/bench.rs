@@ -113,8 +113,7 @@ fn run_bytecode_bench(c: &mut Criterion, bench: &revmc_cli::Bench) {
     host.apply_bench(def);
     let table = instruction_table::<EthInterpreter, BenchHost>();
 
-    let opt_level = revmc::OptimizationLevel::default();
-    let backend = EvmLlvmBackend::new(false, opt_level).unwrap();
+    let backend = EvmLlvmBackend::new(false).unwrap();
     let mut compiler = EvmCompiler::new(backend);
     compiler.inspect_stack_length(!def.stack_input.is_empty());
     compiler.gas_metering(true);
@@ -195,8 +194,10 @@ fn run_bytecode_bench(c: &mut Criterion, bench: &revmc_cli::Bench) {
 }
 
 fn new_compiler(opt_level: OptimizationLevel) -> EvmCompiler<EvmLlvmBackend> {
-    let backend = EvmLlvmBackend::new(false, opt_level).unwrap();
-    EvmCompiler::new(backend)
+    let backend = EvmLlvmBackend::new(false).unwrap();
+    let mut compiler = EvmCompiler::new(backend);
+    compiler.set_opt_level(opt_level);
+    compiler
 }
 
 criterion_group!(benches, bench);

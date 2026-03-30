@@ -13,9 +13,7 @@ use revm_handler::{
 };
 use revm_primitives::{hardfork::SpecId, keccak256, B256, U256};
 use revm_statetest_types::{SpecName, TestSuite, TestUnit};
-use revmc::{
-    shared_library_path, EvmCompiler, EvmCompilerFn, EvmLlvmBackend, Linker, OptimizationLevel,
-};
+use revmc::{shared_library_path, EvmCompiler, EvmCompilerFn, EvmLlvmBackend, Linker};
 use std::{
     cell::RefCell,
     collections::HashMap,
@@ -408,7 +406,7 @@ impl CompileCache {
 }
 
 fn make_compiler(aot: bool) -> RefCell<EvmCompiler<EvmLlvmBackend>> {
-    RefCell::new(EvmCompiler::new(EvmLlvmBackend::new(aot, OptimizationLevel::default()).unwrap()))
+    RefCell::new(EvmCompiler::new(EvmLlvmBackend::new(aot).unwrap()))
 }
 
 // ── Compiled test execution ─────────────────────────────────────────────────

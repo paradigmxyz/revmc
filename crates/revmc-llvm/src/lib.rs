@@ -460,17 +460,14 @@ impl EvmLlvmBackend {
     /// Creates a new LLVM backend for the host machine.
     ///
     /// Use [`new_for_target`](Self::new_for_target) to create a backend for a specific target.
-    pub fn new(aot: bool, opt_level: OptimizationLevel) -> Result<Self> {
-        Self::new_for_target(aot, opt_level, &revmc_backend::Target::Native)
+    pub fn new(aot: bool) -> Result<Self> {
+        Self::new_for_target(aot, &revmc_backend::Target::Native)
     }
 
     /// Creates a new LLVM backend for the given target.
     #[instrument(name = "new_llvm_backend", level = "debug", skip_all)]
-    pub fn new_for_target(
-        aot: bool,
-        opt_level: OptimizationLevel,
-        target: &revmc_backend::Target,
-    ) -> Result<Self> {
+    pub fn new_for_target(aot: bool, target: &revmc_backend::Target) -> Result<Self> {
+        let config = BackendConfig::default();
         init()?;
 
         let target_info = TargetInfo::new(target)?;
@@ -480,7 +477,7 @@ impl EvmLlvmBackend {
                 &target_info.triple,
                 &target_info.cpu,
                 &target_info.features,
-                convert_opt_level(opt_level),
+                convert_opt_level(config.opt_level),
                 if aot { RelocMode::PIC } else { RelocMode::Static },
                 if aot { CodeModel::Default } else { CodeModel::JITDefault },
             )
@@ -536,7 +533,7 @@ impl EvmLlvmBackend {
             ty_isize,
             ty_ptr,
             aot,
-            backend_config: BackendConfig { opt_level, ..BackendConfig::default() },
+            backend_config: config,
             function_counter: 0,
             function_names: FxHashMap::default(),
             di_state: None,
@@ -762,6 +759,14 @@ impl Backend for EvmLlvmBackend {
     fn apply_config(&mut self, config: BackendConfig) {
         if self.backend_config.is_dumping != config.is_dumping {
             self.machine.set_asm_verbosity(config.is_dumping);
+        }
+        if self.backend_config.opt_level != config.opt_level {
+            unsafe {
+                cpp::revmc_llvm_target_machine_set_opt_level(
+                    self.machine.as_mut_ptr(),
+                    convert_opt_level(config.opt_level).into(),
+                );
+            }
         }
         self.backend_config = config;
     }
