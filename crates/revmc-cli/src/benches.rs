@@ -130,6 +130,11 @@ pub fn get_benches() -> Vec<Bench> {
             ..Default::default()
         },
         Bench {
+            name: "univ2_router",
+            bytecode: include_code_str!("../../../data/univ2_router.rt.hex").unwrap(),
+            ..Default::default()
+        },
+        Bench {
             name: "seaport",
             bytecode: include_code_str!("../../../data/seaport.rt.hex").unwrap(),
             ..Default::default()
