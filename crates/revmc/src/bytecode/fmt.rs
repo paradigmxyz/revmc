@@ -265,7 +265,10 @@ impl<'a> Bytecode<'a> {
              fillcolor=\"{NODE_FILL}\" fontcolor=\"{TEXT}\" \
              color=\"{NODE_BORDER}\" penwidth=1.5];"
         )?;
-        writeln!(w, "  edge [fontname=\"Courier\" fontsize=9 color=\"{EDGE}\"];")?;
+        writeln!(
+            w,
+            "  edge [fontname=\"Courier\" fontsize=9 color=\"{EDGE}\" tailport=s headport=n];"
+        )?;
 
         // Emit nodes.
         for &(block_idx, first_inst, last_inst) in &info.blocks {
@@ -326,13 +329,8 @@ impl<'a> Bytecode<'a> {
                     for &t in targets {
                         if let Some(&target_block) = info.inst_to_block.get(&t) {
                             let color = "#e2a93b";
-                            let extra = if block_idx == target_block {
-                                " tailport=s headport=n constraint=false"
-                            } else if target_block <= block_idx {
-                                " constraint=false"
-                            } else {
-                                ""
-                            };
+                            let extra =
+                                if target_block <= block_idx { " constraint=false" } else { "" };
                             writeln!(
                                 w,
                                 "  bb{block_idx} -> bb{target_block} \
@@ -345,13 +343,7 @@ impl<'a> Bytecode<'a> {
                 let target = Inst::from_usize(last.data as usize);
                 if let Some(&target_block) = info.inst_to_block.get(&target) {
                     let color = if last.opcode == op::JUMPI { EDGE_COND_JUMP } else { EDGE_JUMP };
-                    let extra = if block_idx == target_block {
-                        " tailport=s headport=n constraint=false"
-                    } else if target_block <= block_idx {
-                        " constraint=false"
-                    } else {
-                        ""
-                    };
+                    let extra = if target_block <= block_idx { " constraint=false" } else { "" };
                     writeln!(w, "  bb{block_idx} -> bb{target_block} [color=\"{color}\"{extra}];")?;
                 }
             } else if last.is_jump() && !last.is_static_jump() {
