@@ -181,9 +181,7 @@ impl BlockState {
                 // Pad existing stack at the bottom with Top if incoming is deeper.
                 if existing.len() < new_len {
                     let pad = new_len - existing.len();
-                    let mut widened = vec![AbsValue::Top; pad];
-                    widened.extend(existing.iter().copied());
-                    *existing = widened;
+                    existing.splice(0..0, std::iter::repeat_n(AbsValue::Top, pad));
                     changed = true;
                 }
 
