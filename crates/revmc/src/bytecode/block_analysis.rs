@@ -1132,6 +1132,61 @@ mod tests {
     }
 
     #[test]
+    fn const_operand_join_same_constant() {
+        // Unknown JUMPI condition reaches both branches. Both paths leave the same
+        // constant on stack before the join, so the joined state should retain it.
+        let target: u8 = 10;
+        let join: u8 = 13;
+        #[rustfmt::skip]
+        let bytecode = analyze_code(vec![
+            op::PUSH0,
+            op::CALLDATALOAD,
+            op::PUSH1, target,
+            op::JUMPI,
+            op::PUSH1, 0x42,
+            op::PUSH1, join,
+            op::JUMP,
+            op::JUMPDEST,
+            op::PUSH1, 0x42,
+            op::JUMPDEST,
+            op::PUSH0,
+            op::MSTORE,
+            op::STOP,
+        ]);
+
+        assert_eq!(bytecode.const_operand(Inst::from_usize(11), 0), Some(U256::ZERO));
+        assert_eq!(bytecode.const_operand(Inst::from_usize(11), 1), Some(U256::from(0x42)));
+    }
+
+    #[test]
+    fn const_operand_join_conflicting_constant() {
+        // Unknown JUMPI condition reaches both branches. The two paths leave
+        // conflicting constants on stack before the join, so the joined state
+        // should degrade to unknown for that operand.
+        let target: u8 = 10;
+        let join: u8 = 13;
+        #[rustfmt::skip]
+        let bytecode = analyze_code(vec![
+            op::PUSH0,
+            op::CALLDATALOAD,
+            op::PUSH1, target,
+            op::JUMPI,
+            op::PUSH1, 0x42,
+            op::PUSH1, join,
+            op::JUMP,
+            op::JUMPDEST,
+            op::PUSH1, 0x43,
+            op::JUMPDEST,
+            op::PUSH0,
+            op::MSTORE,
+            op::STOP,
+        ]);
+
+        assert_eq!(bytecode.const_operand(Inst::from_usize(11), 0), Some(U256::ZERO));
+        assert_eq!(bytecode.const_operand(Inst::from_usize(11), 1), None);
+    }
+
+    #[test]
     fn multi_target_jump() {
         // Internal function called from two sites with different return addresses.
         // The return JUMP at the end should resolve to Multi([ret1, ret2]).
