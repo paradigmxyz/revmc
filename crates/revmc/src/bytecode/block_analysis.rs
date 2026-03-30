@@ -216,8 +216,8 @@ impl BlockState {
 
 oxc_index::define_index_type! {
     /// A block index in the CFG.
-    struct Block = u32;
-    DISPLAY_FORMAT = "{}";
+    pub(crate) struct Block = u32;
+    DISPLAY_FORMAT = "bb{}";
 }
 
 /// FIFO worklist with deduplication.
@@ -247,15 +247,34 @@ impl Worklist {
 }
 
 /// A basic block in the CFG.
-struct BlockData {
+pub(crate) struct BlockData {
     /// Instruction index range (exclusive end). The terminator is at `insts.end - 1`.
-    insts: Range<usize>,
+    pub(crate) insts: Range<Inst>,
     /// Predecessor block IDs.
-    preds: SmallVec<[Block; 2]>,
+    pub(crate) preds: SmallVec<[Block; 4]>,
     /// Successor block IDs.
-    succs: SmallVec<[Block; 2]>,
+    pub(crate) succs: SmallVec<[Block; 4]>,
     /// Whether all instructions in this block are dead code.
-    dead: bool,
+    pub(crate) dead: bool,
+}
+
+impl BlockData {
+    /// Returns the number of instructions in this block.
+    #[inline]
+    fn len(&self) -> usize {
+        self.insts().len()
+    }
+
+    #[inline]
+    pub(crate) fn terminator(&self) -> Inst {
+        self.insts.end - 1
+    }
+
+    /// Returns the instruction range as `Range<usize>` for indexing into raw arrays.
+    #[inline]
+    pub(crate) fn insts(&self) -> impl ExactSizeIterator<Item = Inst> + use<> {
+        (self.insts.start.index()..self.insts.end.index()).map(Inst::from_usize)
+    }
 }
 
 /// Resolved jump target after fixpoint.
@@ -274,10 +293,11 @@ enum JumpTarget {
 }
 
 /// CFG for abstract interpretation.
-struct Cfg {
-    blocks: IndexVec<Block, BlockData>,
+#[derive(Default)]
+pub(crate) struct Cfg {
+    pub(crate) blocks: IndexVec<Block, BlockData>,
     /// Maps instruction index to block ID. `None` for dead-code instructions.
-    inst_to_block: IndexVec<Inst, Option<Block>>,
+    pub(crate) inst_to_block: IndexVec<Inst, Option<Block>>,
 }
 
 impl Bytecode<'_> {
@@ -286,14 +306,13 @@ impl Bytecode<'_> {
     /// Also computes and stores per-instruction stack snapshots for constant propagation.
     #[instrument(name = "ba", level = "debug", skip_all)]
     pub(crate) fn block_analysis(&mut self) {
-        let cfg = self.build_cfg();
-        if cfg.blocks.is_empty() {
+        if self.cfg.blocks.is_empty() {
             return;
         }
 
         let mut snapshots: IndexVec<Inst, OperandSnapshot> =
             IndexVec::from_vec(vec![SmallVec::new(); self.insts.len()]);
-        let (resolved, count) = self.run_abstract_interp(&cfg, &mut snapshots);
+        let (resolved, count) = self.run_abstract_interp(&self.cfg, &mut snapshots);
         self.stack_snapshots = snapshots;
 
         if count == 0 {
@@ -376,11 +395,32 @@ impl Bytecode<'_> {
             .any(|inst| inst.is_jump() && !inst.flags.contains(InstFlags::STATIC_JUMP));
     }
 
-    /// Build a basic-block CFG from the instruction list.
-    fn build_cfg(&self) -> Cfg {
+    /// Rebuild the basic-block CFG from the current instruction state.
+    #[instrument(level = "debug", skip_all)]
+    pub(crate) fn rebuild_cfg(&mut self) {
+        let finish_block = |cfg: &mut Cfg, start: usize, end: usize| {
+            let bid = cfg.blocks.push(BlockData {
+                insts: Inst::from_usize(start)..Inst::from_usize(end),
+                preds: SmallVec::new(),
+                succs: SmallVec::new(),
+                dead: true,
+            });
+            let b = &mut cfg.blocks[bid];
+            for i in b.insts() {
+                if !self.insts[i].is_dead_code() {
+                    b.dead = false;
+                    cfg.inst_to_block[i] = Some(bid);
+                }
+            }
+        };
+
         let n = self.insts.len();
+
+        let cfg = &mut self.cfg;
+        cfg.blocks.clear();
+        cfg.inst_to_block.clear();
         if n == 0 {
-            return Cfg { blocks: IndexVec::new(), inst_to_block: IndexVec::new() };
+            return;
         }
 
         // Identify block leaders.
@@ -400,25 +440,8 @@ impl Bytecode<'_> {
         }
 
         // Build blocks.
-        let mut blocks: IndexVec<Block, BlockData> = IndexVec::new();
-        let mut inst_to_block: IndexVec<Inst, Option<Block>> = IndexVec::from_vec(vec![None; n]);
+        cfg.inst_to_block.resize(n, None);
         let mut current_start = None;
-
-        let mut finish_block = |start: usize, end: usize| {
-            let range = start..end;
-            let dead = range.clone().all(|j| self.insts.raw[j].is_dead_code());
-            let bid = blocks.push(BlockData {
-                insts: range.clone(),
-                preds: SmallVec::new(),
-                succs: SmallVec::new(),
-                dead,
-            });
-            for j in range {
-                if !self.insts.raw[j].is_dead_code() {
-                    inst_to_block.raw[j] = Some(bid);
-                }
-            }
-        };
 
         for i in 0..n {
             if self.insts.raw[i].is_dead_code() {
@@ -427,7 +450,7 @@ impl Bytecode<'_> {
 
             if is_leader[i] || current_start.is_none() {
                 if let Some(start) = current_start {
-                    finish_block(start, i);
+                    finish_block(cfg, start, i);
                 }
                 current_start = Some(i);
             }
@@ -435,38 +458,34 @@ impl Bytecode<'_> {
 
         // Close the last block.
         if let Some(start) = current_start {
-            finish_block(start, n);
+            finish_block(cfg, start, n);
         }
 
         // Build edges based on known control flow.
-        for bid in blocks.indices() {
-            if blocks[bid].dead {
+        for bid in cfg.blocks.indices() {
+            if cfg.blocks[bid].dead {
                 continue;
             }
-            let term_idx = blocks[bid].insts.end - 1;
-            let term = &self.insts.raw[term_idx];
+            let term = &self.insts[cfg.blocks[bid].terminator()];
 
             // Fallthrough edge: if the terminator doesn't unconditionally branch/diverge.
-            let has_fallthrough = !term.is_diverging() && (term.opcode != op::JUMP);
-            if has_fallthrough
-                && blocks[bid].insts.end < n
-                && let Some(next_block) = inst_to_block.raw[blocks[bid].insts.end]
+            if term.can_fall_through()
+                && cfg.blocks[bid].insts.end.index() < n
+                && let Some(next_block) = cfg.inst_to_block[cfg.blocks[bid].insts.end]
             {
-                blocks[next_block].preds.push(bid);
-                blocks[bid].succs.push(next_block);
+                cfg.blocks[next_block].preds.push(bid);
+                cfg.blocks[bid].succs.push(next_block);
             }
 
             // Static jump edges.
             if term.is_static_jump() && !term.flags.contains(InstFlags::INVALID_JUMP) {
-                let target_inst = term.data as usize;
-                if let Some(target_block) = inst_to_block.raw[target_inst] {
-                    blocks[target_block].preds.push(bid);
-                    blocks[bid].succs.push(target_block);
+                let target_inst = Inst::from_usize(term.data as usize);
+                if let Some(target_block) = cfg.inst_to_block[target_inst] {
+                    cfg.blocks[target_block].preds.push(bid);
+                    cfg.blocks[bid].succs.push(target_block);
                 }
             }
         }
-
-        Cfg { blocks, inst_to_block }
     }
 
     /// Run worklist-based abstract interpretation over the CFG.
@@ -603,7 +622,7 @@ impl Bytecode<'_> {
                         if !matches!(block_states[pred], BlockState::Bottom) {
                             return false;
                         }
-                        self.insts.raw[cfg.blocks[pred].insts.start].is_jumpdest()
+                        self.insts[cfg.blocks[pred].insts.start].is_jumpdest()
                     });
                 if has_suspect {
                     suspect.set(bi, true);
@@ -695,7 +714,7 @@ impl Bytecode<'_> {
                         if block_states[succ].conflict() {
                             trace!(
                                 from = %bid, to = %succ,
-                                to_pc = self.insts.raw[cfg.blocks[succ].insts.start].pc,
+                                to_pc = self.insts[cfg.blocks[succ].insts.start].pc,
                                 "propagating conflict",
                             );
                             worklist.push(succ);
@@ -710,13 +729,12 @@ impl Bytecode<'_> {
                 continue;
             }
 
-            let Some(output) = self.interpret_block(block.insts.clone(), &input, Some(snapshots))
-            else {
+            let Some(output) = self.interpret_block(block.insts(), &input, Some(snapshots)) else {
                 continue;
             };
 
             // For dynamic jumps, discover target edges to propagate state through.
-            let term = &self.insts.raw[block.insts.end - 1];
+            let term = &self.insts[block.terminator()];
             if term.is_jump()
                 && !term.flags.contains(InstFlags::STATIC_JUMP)
                 && let Some(operand) = self.jump_operand(block, &input)
@@ -772,14 +790,14 @@ impl Bytecode<'_> {
     /// into `snapshots[inst_index]`.
     fn interpret_block<'a>(
         &self,
-        range: Range<usize>,
+        insts: impl IntoIterator<Item = Inst>,
         input: &'a [AbsValue],
         mut snapshots: Option<&mut IndexVec<Inst, OperandSnapshot>>,
     ) -> Option<Cow<'a, [AbsValue]>> {
         let mut stack = Cow::Borrowed(input);
 
-        for i in range {
-            let inst = &self.insts.raw[i];
+        for i in insts {
+            let inst = &self.insts[i];
             if inst.is_dead_code() {
                 continue;
             }
@@ -798,7 +816,7 @@ impl Bytecode<'_> {
                 let inp = inp as usize;
                 let len = stack.len();
                 let start = len.saturating_sub(inp);
-                snaps.raw[i] = stack[start..].iter().rev().map(|v| v.as_const()).collect();
+                snaps[i] = stack[start..].iter().rev().map(|v| v.as_const()).collect();
             }
 
             match inst.opcode {
@@ -867,16 +885,14 @@ impl Bytecode<'_> {
 
     /// Returns the abstract value of the jump operand (TOS before the terminator) for a block.
     fn jump_operand(&self, block: &BlockData, input: &[AbsValue]) -> Option<AbsValue> {
-        if block.insts.len() == 1 {
+        if block.len() == 1 {
             input.last().copied()
         } else {
-            self.interpret_block(block.insts.start..block.insts.end - 1, input, None)?
-                .last()
-                .copied()
+            self.interpret_block(block.insts().take(block.len() - 1), input, None)?.last().copied()
         }
     }
 
-    /// Try to constant-fold in instruction.
+    /// Try to constant-fold an instruction.
     fn try_const_fold(&self, inst: &InstData, inputs: &[AbsValue]) -> Option<AbsValue> {
         let opcode = inst.opcode;
         let mut interner = self.u256_interner.borrow_mut();
@@ -1015,7 +1031,7 @@ impl Bytecode<'_> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::{super::Inst, *};
     use revm_primitives::{hardfork::SpecId, hex};
 
@@ -1024,7 +1040,7 @@ mod tests {
         analyze_code(code)
     }
 
-    pub(super) fn analyze_code(code: Vec<u8>) -> Bytecode<'static> {
+    pub(crate) fn analyze_code(code: Vec<u8>) -> Bytecode<'static> {
         let code = &*Box::leak(code.into_boxed_slice());
         eprintln!("{}", hex::encode(code));
         let mut bytecode = Bytecode::new(code, SpecId::CANCUN);

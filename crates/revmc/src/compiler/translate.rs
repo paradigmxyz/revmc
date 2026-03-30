@@ -230,8 +230,10 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let ecx = bcx.fn_param(4);
 
         // Create all instruction entry blocks.
+        // Dead-code instructions map to `unreachable_block`, except when block deduplication
+        // has a redirect — those are resolved in a second pass once all blocks exist.
         let unreachable_block = bcx.create_block("unreachable");
-        let inst_entries: IndexVec<Inst, _> = bytecode
+        let mut inst_entries: IndexVec<Inst, _> = bytecode
             .iter_all_insts()
             .map(|(i, data)| {
                 if data.is_dead_code() {
@@ -243,6 +245,13 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             })
             .collect();
         assert!(!inst_entries.is_empty(), "translating empty bytecode");
+
+        // Apply dedup redirects: map dead duplicate entries to their canonical block.
+        if bytecode.has_dedups() {
+            for (&from, &to) in &bytecode.dedup_redirects {
+                inst_entries[from] = inst_entries[to];
+            }
+        }
 
         let dynamic_jump_table = bcx.create_block("dynamic_jump_table");
         let suspend_block = bcx.create_block("suspend");

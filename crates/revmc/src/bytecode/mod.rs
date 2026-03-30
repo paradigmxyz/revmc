@@ -10,7 +10,9 @@ use smallvec::SmallVec;
 use std::cell::RefCell;
 
 mod block_analysis;
-use block_analysis::OperandSnapshot;
+use block_analysis::{Cfg, OperandSnapshot};
+
+mod dedup;
 
 mod fmt;
 
@@ -59,19 +61,28 @@ pub struct Bytecode<'a> {
     has_dynamic_jumps: bool,
     /// Whether the bytecode may suspend execution.
     may_suspend: bool,
+    /// Mapping from program counter to instruction.
+    pc_to_inst: FxHashMap<u32, Inst>,
+
+    /// Deduplicated constant pool for U256 values.
+    u256_interner: RefCell<Interner<U256Idx, U256, alloy_primitives::map::FbBuildHasher<32>>>,
+
     /// Per-instruction operand snapshots computed by block analysis.
     /// Each entry contains the known-constant status of the instruction's input operands,
     /// with index 0 = TOS (depth 0).
     stack_snapshots: IndexVec<Inst, OperandSnapshot>,
-    /// Deduplicated constant pool for U256 values.
-    u256_interner: RefCell<Interner<U256Idx, U256, alloy_primitives::map::FbBuildHasher<32>>>,
     /// Multi-target jump table: maps a JUMP/JUMPI instruction to its set of known targets.
     /// Only populated for jumps resolved to multiple targets by block analysis.
     multi_jump_targets: FxHashMap<Inst, SmallVec<[Inst; 4]>>,
-    /// Mapping from program counter to instruction.
-    pc_to_inst: FxHashMap<u32, Inst>,
+
     /// Instruction index to 1-based line number in the formatted dump, built during formatting.
     inst_lines: RefCell<IndexVec<Inst, u32>>,
+
+    /// Block deduplication redirects: maps the first instruction of a dead duplicate block to
+    /// the first instruction of the canonical (surviving) block.
+    pub(crate) dedup_redirects: FxHashMap<Inst, Inst>,
+    /// Basic-block CFG, rebuilt by [`Bytecode::rebuild_cfg`].
+    cfg: Cfg,
 }
 
 impl<'a> Bytecode<'a> {
@@ -127,6 +138,8 @@ impl<'a> Bytecode<'a> {
             multi_jump_targets: FxHashMap::default(),
             pc_to_inst,
             inst_lines: RefCell::new(IndexVec::new()),
+            dedup_redirects: FxHashMap::default(),
+            cfg: Cfg::default(),
         };
 
         // Pad code to ensure there is at least one diverging instruction.
@@ -213,10 +226,16 @@ impl<'a> Bytecode<'a> {
     pub(crate) fn analyze(&mut self) -> Result<()> {
         self.static_jump_analysis();
         self.mark_dead_code();
+
+        self.rebuild_cfg();
         self.block_analysis();
+
         // Run again: block_analysis may mark additional jumps as invalid/diverging,
         // enabling more dead code elimination.
         self.mark_dead_code();
+
+        self.rebuild_cfg();
+        self.dedup_blocks();
 
         self.calc_may_suspend();
 
@@ -362,6 +381,11 @@ impl<'a> Bytecode<'a> {
     /// Returns `true` if the bytecode may suspend execution, to be resumed later.
     pub(crate) fn may_suspend(&self) -> bool {
         self.may_suspend
+    }
+
+    /// Returns `true` if block deduplication eliminated any duplicate blocks.
+    pub(crate) fn has_dedups(&self) -> bool {
+        !self.dedup_redirects.is_empty()
     }
 
     /// Returns `true` if the bytecode is small.
