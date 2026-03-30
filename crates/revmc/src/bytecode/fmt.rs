@@ -241,8 +241,8 @@ impl<'a> Bytecode<'a> {
         writeln!(w, "  graph [bgcolor=\"{BG}\" rankdir=TB];")?;
         writeln!(
             w,
-            "  node [shape=Mrecord fontname=\"Courier\" fontsize=10 \
-             style=filled fillcolor=\"{NODE_FILL}\" fontcolor=\"{TEXT}\" \
+            "  node [shape=box style=\"rounded,filled\" fontname=\"Courier\" fontsize=10 \
+             fillcolor=\"{NODE_FILL}\" fontcolor=\"{TEXT}\" \
              color=\"{NODE_BORDER}\" penwidth=1.5];"
         )?;
         writeln!(w, "  edge [fontname=\"Courier\" fontsize=9 color=\"{EDGE}\"];")?;
@@ -268,18 +268,18 @@ impl<'a> Bytecode<'a> {
             write!(
                 w,
                 "  bb{block_idx} [fillcolor=\"{fill}\" color=\"{border}\" \
-                 label=\"{{bb{block_idx}",
+                 label=\"bb{block_idx}",
             )?;
 
             if !first.stack_section.is_empty() {
                 write!(
                     w,
-                    " | in={} growth={}",
+                    " [in={} growth={}]",
                     first.stack_section.inputs, first.stack_section.max_growth
                 )?;
             }
 
-            write!(w, " |")?;
+            write!(w, "\\n")?;
             for inst in first_inst..=last_inst {
                 let data = self.inst(inst);
                 if data.is_dead_code() {
@@ -293,7 +293,7 @@ impl<'a> Bytecode<'a> {
                 }
                 write!(w, "{op_str}\\l")?;
             }
-            writeln!(w, "}}\"];")?;
+            writeln!(w, "\"];")?;
         }
 
         // Emit edges.
@@ -426,7 +426,7 @@ mod tests {
             snapbox::str![[r#"
                ; spec_id=Osaka, has_dynamic_jumps=false, may_suspend=true
 
-bb0:
+bb0:           ; stack_in=0, max_growth=1
   PUSH1 0x03   ; pc=0, gas=11, skip
   JUMP bb1     ; pc=2
 

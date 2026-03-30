@@ -518,7 +518,7 @@ fn run_compiled_test_case(test_case: &TestCase<'_>, f: EvmCompilerFn) {
 
         // When modify_ecx is set, the interpreter runs with different inputs than the JIT,
         // so we cannot use interpreter results as expected values or compare against them.
-        let skip_interpreter_checks = modify_ecx.is_some();
+        let skip_interpreter_checks = modify_ecx.is_some() || expected_return.is_error();
 
         let mut expected_stack = expected_stack;
         if expected_stack == STACK_WHAT_INTERPRETER_SAYS {

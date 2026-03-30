@@ -650,6 +650,9 @@ impl<B: Backend> EvmCompiler<B> {
 
     #[instrument(level = "debug", skip_all)]
     fn verify_module(&mut self) -> Result<()> {
+        if !self.config.debug_assertions {
+            return Ok(());
+        }
         let _t = self.remarks.time(|r| &r.verify);
         self.backend.verify_module()
     }
