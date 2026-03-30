@@ -147,7 +147,7 @@ enum BlockState {
     Bottom,
     /// Block has been reached with a known stack state (top-aligned).
     Known(Vec<AbsValue>),
-    /// Reserved: analysis gives up on this block. Currently never produced by `join`.
+    /// Analysis gives up on this block.
     Conflict,
 }
 
@@ -177,6 +177,16 @@ impl BlockState {
             Self::Known(existing) => {
                 let new_len = existing.len().max(incoming.len());
                 let mut changed = false;
+
+                // Cap the abstract stack to prevent unbounded growth in loops where each
+                // iteration pushes net items and the top-aligned join keeps padding.
+                // EVM stack max is 1024; we use a lower limit since legitimate dispatch
+                // patterns only differ by 1–2 items.
+                const MAX_STACK_DEPTH: usize = 64;
+                if new_len > MAX_STACK_DEPTH {
+                    *self = Self::Conflict;
+                    return true;
+                }
 
                 // Pad existing stack at the bottom with Top if incoming is deeper.
                 if existing.len() < new_len {
@@ -666,11 +676,12 @@ impl Bytecode<'_> {
 
         let max_iterations = num_blocks * 8;
         let mut iterations = 0;
+        let mut converged = true;
 
         while let Some(bid) = worklist.pop() {
             iterations += 1;
             if iterations > max_iterations {
-                debug!("iteration limit reached");
+                converged = false;
                 break;
             }
 
@@ -746,6 +757,11 @@ impl Bytecode<'_> {
             }
         }
 
+        debug!(
+            "{msg} after {iterations} iterations (max={max_iterations})",
+            msg = if converged { "converged" } else { "did not converge" },
+        );
+
         discovered_jump_edges
     }
 
@@ -813,9 +829,6 @@ impl Bytecode<'_> {
                     }
                     stack.swap(len - 1, len - 1 - depth);
                 }
-                op::JUMPDEST => {
-                    // No stack effect.
-                }
                 _ => {
                     // For static jumps that were resolved by the simple pass, the jump
                     // already had its input count reduced — use `stack_io()` which accounts
@@ -826,6 +839,9 @@ impl Bytecode<'_> {
 
                     if stack.len() < inp {
                         return None;
+                    }
+                    if out == 0 {
+                        continue;
                     }
 
                     // Try constant folding for common arithmetic.
