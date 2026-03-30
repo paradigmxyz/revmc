@@ -13,7 +13,7 @@ mod compiler;
 pub use compiler::{EvmCompiler, EvmCompilerInput};
 
 mod linker;
-pub use linker::Linker;
+pub use linker::{Linker, shared_library_path};
 
 /// Internal tests and testing utilities. Not public API.
 #[cfg(any(test, feature = "__fuzzing"))]

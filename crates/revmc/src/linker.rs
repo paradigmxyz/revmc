@@ -1,4 +1,14 @@
-use std::path::{Path, PathBuf};
+use std::{
+    ffi::OsString,
+    path::{Path, PathBuf},
+};
+
+/// Returns the path for a platform-native shared library filename.
+pub fn shared_library_path(dir: &Path, stem: &str) -> PathBuf {
+    let mut file_name = OsString::from(stem);
+    file_name.push(std::env::consts::DLL_SUFFIX);
+    dir.join(file_name)
+}
 
 /// EVM bytecode compiler linker.
 #[derive(Debug)]
@@ -83,16 +93,27 @@ impl Linker {
     }
 }
 
-#[cfg(all(test, feature = "llvm"))]
+#[cfg(test)]
 mod tests {
     use super::*;
-    use crate::SpecId;
 
     #[test]
+    fn shared_library_path_uses_platform_suffix() {
+        let dir = Path::new("/tmp");
+        let path = shared_library_path(dir, "out");
+        let expected = format!("out{}", std::env::consts::DLL_SUFFIX);
+
+        assert_eq!(path, dir.join(expected));
+    }
+
+    #[cfg(feature = "llvm")]
+    #[test]
     fn basic() {
+        use crate::SpecId;
+
         let tmp = tempfile::tempdir().expect("could not create temp dir");
         let obj = tmp.path().join("out.o");
-        let so = tmp.path().join("out.so");
+        let shared_lib = shared_library_path(tmp.path(), "out");
 
         // Compile and build object file.
         let opt_level = revmc_backend::OptimizationLevel::default();
@@ -116,12 +137,12 @@ mod tests {
             }
             n += 1;
 
-            let _ = std::fs::remove_file(&so);
+            let _ = std::fs::remove_file(&shared_lib);
             linker.cc = Some(driver.into());
-            if let Err(e) = linker.link(&so, [&obj]) {
+            if let Err(e) = linker.link(&shared_lib, [&obj]) {
                 panic!("failed to link with {driver}: {e}");
             }
-            assert!(so.exists());
+            assert!(shared_lib.exists());
         }
         assert!(n > 0, "no C compiler found");
     }
