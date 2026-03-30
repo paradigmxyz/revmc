@@ -1,47 +1,17 @@
-use super::{Bytecode, Inst, InstData, InstFlags, bitvec_as_bytes};
-use crate::FxHashMap;
+use super::{Bytecode, Inst, InstData, InstFlags, bitvec_as_bytes, block_analysis::Block};
 use oxc_index::IndexVec;
 use revm_bytecode::opcode as op;
 use revm_primitives::hex;
 use std::{borrow::Cow, fmt, fmt::Write};
 
-/// Basic block info collected from bytecode analysis.
-struct BlockInfo {
-    /// `(block_idx, first_inst, last_inst)` for each block.
-    blocks: Vec<(usize, Inst, Inst)>,
-    /// Maps instruction index to block index.
-    inst_to_block: FxHashMap<Inst, usize>,
-}
-
 impl Bytecode<'_> {
-    fn collect_blocks(&self) -> BlockInfo {
-        let mut blocks = Vec::new();
-        let mut inst_to_block = FxHashMap::default();
-        let mut block_idx = 0usize;
-        let mut need_header = true;
-        for (inst, data) in self.iter_all_insts() {
-            if data.is_dead_code() {
-                continue;
-            }
-            if !data.stack_section.is_empty() || need_header {
-                inst_to_block.insert(inst, block_idx);
-                blocks.push((block_idx, inst, inst));
-                block_idx += 1;
-                need_header = false;
-            }
-            if let Some(b) = blocks.last_mut() {
-                b.2 = inst;
-            }
-            if data.is_branching() {
-                need_header = true;
-            }
-        }
-        BlockInfo { blocks, inst_to_block }
+    /// Resolves a jump target instruction to its CFG block index.
+    fn target_block(&self, target: Inst) -> Option<Block> {
+        self.cfg.inst_to_block.get(target).copied().flatten()
     }
 
     /// Collects formatted lines and builds the inst-to-line map stored in `self.inst_lines`.
     fn collect_lines(&self) -> Vec<(String, String)> {
-        let info = self.collect_blocks();
         let mut lines: Vec<(String, String)> = Vec::new();
         let mut inst_lines = IndexVec::<Inst, u32>::from_vec(vec![0u32; self.insts.len()]);
 
@@ -54,15 +24,21 @@ impl Bytecode<'_> {
         ));
         lines.push((String::new(), String::new()));
 
-        for &(block_idx, first_inst, last_inst) in &info.blocks {
+        for (bid, block) in self.cfg.blocks.iter_enumerated() {
+            if block.dead {
+                continue;
+            }
+
             // Blank line between blocks.
-            if first_inst.index() > 0 {
+            if !lines.is_empty()
+                && lines.last().is_some_and(|(t, c)| !t.is_empty() || !c.is_empty())
+            {
                 lines.push((String::new(), String::new()));
             }
 
             // Block header.
-            let first = self.inst(first_inst);
-            let mut header = format!("bb{block_idx}:");
+            let first = self.inst(block.insts.start);
+            let mut header = format!("{bid}:");
             let mut comment = String::new();
             if !first.stack_section.is_empty() {
                 write!(
@@ -79,8 +55,7 @@ impl Bytecode<'_> {
             lines.push((header, comment));
 
             // Instructions.
-            for i in first_inst.index()..=last_inst.index() {
-                let inst = Inst::from_usize(i);
+            for inst in block.insts() {
                 let data = self.inst(inst);
                 if data.is_dead_code() {
                     continue;
@@ -102,16 +77,16 @@ impl Bytecode<'_> {
                             if i > 0 {
                                 text.push_str(", ");
                             }
-                            match info.inst_to_block.get(&t) {
-                                Some(b) => write!(text, " bb{b}").unwrap(),
+                            match self.target_block(t) {
+                                Some(b) => write!(text, " {b}").unwrap(),
                                 None => write!(text, " inst {t}").unwrap(),
                             }
                         }
                     }
                 } else if data.is_static_jump() {
                     let target = Inst::from_usize(data.data as usize);
-                    match info.inst_to_block.get(&target) {
-                        Some(b) => write!(text, " bb{b}").unwrap(),
+                    match self.target_block(target) {
+                        Some(b) => write!(text, " {b}").unwrap(),
                         None => write!(text, " inst {target}").unwrap(),
                     }
                 }
@@ -255,8 +230,6 @@ impl<'a> Bytecode<'a> {
     pub fn write_dot<W: fmt::Write>(&self, w: &mut W) -> fmt::Result {
         use dot_colors::*;
 
-        let info = self.collect_blocks();
-
         writeln!(w, "digraph bytecode {{")?;
         writeln!(w, "  graph [bgcolor=\"{BG}\" rankdir=TB];")?;
         writeln!(
@@ -268,9 +241,12 @@ impl<'a> Bytecode<'a> {
         writeln!(w, "  edge [fontname=\"Courier\" fontsize=9 color=\"{EDGE}\"];")?;
 
         // Emit nodes.
-        for &(block_idx, first_inst, last_inst) in &info.blocks {
-            let last = self.inst(last_inst);
-            let first = self.inst(first_inst);
+        for (bid, block) in self.cfg.blocks.iter_enumerated() {
+            if block.dead {
+                continue;
+            }
+            let last = self.inst(block.terminator());
+            let first = self.inst(block.insts.start);
 
             // Color based on block terminator.
             let (fill, border) = if matches!(last.opcode, op::STOP | op::RETURN) {
@@ -287,8 +263,8 @@ impl<'a> Bytecode<'a> {
 
             write!(
                 w,
-                "  bb{block_idx} [fillcolor=\"{fill}\" color=\"{border}\" \
-                 label=\"bb{block_idx}",
+                "  {bid} [fillcolor=\"{fill}\" color=\"{border}\" \
+                 label=\"{bid}",
             )?;
 
             if !first.stack_section.is_empty() {
@@ -300,8 +276,8 @@ impl<'a> Bytecode<'a> {
             }
 
             write!(w, "\\n")?;
-            for i in first_inst.index()..=last_inst.index() {
-                let data = self.inst(Inst::from_usize(i));
+            for inst in block.insts() {
+                let data = self.inst(inst);
                 if data.is_dead_code() {
                     continue;
                 }
@@ -317,25 +293,29 @@ impl<'a> Bytecode<'a> {
         }
 
         // Emit edges.
-        for (i, &(block_idx, _, last_inst)) in info.blocks.iter().enumerate() {
+        for (bid, block) in self.cfg.blocks.iter_enumerated() {
+            if block.dead {
+                continue;
+            }
+            let last_inst = block.terminator();
             let last = self.inst(last_inst);
 
             // Jump edge.
             if last.flags.contains(InstFlags::MULTI_JUMP) {
                 if let Some(targets) = self.multi_jump_targets(last_inst) {
                     for &t in targets {
-                        if let Some(&target_block) = info.inst_to_block.get(&t) {
+                        if let Some(target_block) = self.target_block(t) {
                             let color = "#e2a93b";
-                            let extra = if block_idx == target_block {
+                            let extra = if bid == target_block {
                                 " tailport=s headport=e constraint=false"
-                            } else if target_block <= block_idx {
+                            } else if target_block <= bid {
                                 " constraint=false"
                             } else {
                                 ""
                             };
                             writeln!(
                                 w,
-                                "  bb{block_idx} -> bb{target_block} \
+                                "  {bid} -> {target_block} \
                                  [color=\"{color}\" {extra}];"
                             )?;
                         }
@@ -343,26 +323,33 @@ impl<'a> Bytecode<'a> {
                 }
             } else if last.is_static_jump() && !last.flags.contains(InstFlags::INVALID_JUMP) {
                 let target = Inst::from_usize(last.data as usize);
-                if let Some(&target_block) = info.inst_to_block.get(&target) {
+                if let Some(target_block) = self.target_block(target) {
                     let color = if last.opcode == op::JUMPI { EDGE_COND_JUMP } else { EDGE_JUMP };
-                    let extra = if block_idx == target_block {
+                    let extra = if bid == target_block {
                         " tailport=s headport=e constraint=false"
-                    } else if target_block <= block_idx {
+                    } else if target_block <= bid {
                         " constraint=false"
                     } else {
                         ""
                     };
-                    writeln!(w, "  bb{block_idx} -> bb{target_block} [color=\"{color}\"{extra}];")?;
+                    writeln!(w, "  {bid} -> {target_block} [color=\"{color}\"{extra}];")?;
                 }
             } else if last.is_jump() && !last.is_static_jump() {
-                writeln!(w, "  bb{block_idx} -> dynamic [color=\"{EDGE_FALSE}\" style=dashed];")?;
+                writeln!(w, "  {bid} -> dynamic [color=\"{EDGE_FALSE}\" style=dashed];")?;
             }
 
-            // Fallthrough edge.
-            let has_fallthrough = last.can_fall_through();
-            if has_fallthrough && let Some(&(next_block, _, _)) = info.blocks.get(i + 1) {
-                let color = if last.opcode == op::JUMPI { EDGE_FALSE } else { EDGE };
-                writeln!(w, "  bb{block_idx} -> bb{next_block} [color=\"{color}\"];")?;
+            // Fallthrough edges from CFG successors.
+            if last.can_fall_through() {
+                for &succ in &block.succs {
+                    // Successor is a fallthrough if it's not the jump target.
+                    let is_jump_target = last.is_static_jump()
+                        && !last.flags.contains(InstFlags::INVALID_JUMP)
+                        && self.target_block(Inst::from_usize(last.data as usize)) == Some(succ);
+                    if !is_jump_target {
+                        let color = if last.opcode == op::JUMPI { EDGE_FALSE } else { EDGE };
+                        writeln!(w, "  {bid} -> {succ} [color=\"{color}\"];")?;
+                    }
+                }
             }
         }
 
@@ -374,13 +361,13 @@ impl<'a> Bytecode<'a> {
                  color=\"{REVERT_BORDER}\" fontcolor=\"{TEXT}\" \
                  label=\"dynamic\\njump table\"];"
             )?;
-            for &(block_idx, first_inst, _) in &info.blocks {
-                let first = self.inst(first_inst);
+            for (bid, block) in self.cfg.blocks.iter_enumerated() {
+                if block.dead {
+                    continue;
+                }
+                let first = self.inst(block.insts.start);
                 if first.is_reachable_jumpdest(self.has_dynamic_jumps) {
-                    writeln!(
-                        w,
-                        "  dynamic -> bb{block_idx} [color=\"{EDGE_FALSE}\" style=dashed];"
-                    )?;
+                    writeln!(w, "  dynamic -> {bid} [color=\"{EDGE_FALSE}\" style=dashed];")?;
                 }
             }
         }
@@ -488,8 +475,6 @@ bb2:           ; stack_in=0, max_growth=7
   PUSH1 0x42   ; pc=24
   PUSH2 0xffff ; pc=26
   CALL         ; pc=29, suspends
-
-bb3:           ; stack_in=1, max_growth=0
   POP          ; pc=30, gas=2
   STOP         ; pc=31
 
@@ -505,13 +490,12 @@ bb3:           ; stack_in=1, max_growth=0
         assert!(dot.contains("bb0"));
         assert!(dot.contains("bb1"));
         assert!(dot.contains("bb2"));
-        assert!(dot.contains("bb3"));
         // SSTORE present in bb1.
         assert!(dot.contains("SSTORE"), "missing SSTORE");
         // SSTORE splits gas sections: two [g=] annotations in bb1.
         assert!(dot.contains("[g=7]"), "missing first gas section");
         assert!(dot.contains("[g=16]"), "missing second gas section");
-        // CALL present in bb2, suspends and splits into bb3.
+        // CALL present in bb2.
         assert!(dot.contains("CALL"), "missing CALL");
         assert!(dot.contains("[g=121]"), "missing CALL gas section");
         // bb0 -> bb1 (unconditional jump).
@@ -520,8 +504,6 @@ bb3:           ; stack_in=1, max_growth=0
         assert!(dot.contains("bb1 -> bb1"), "missing loop back-edge");
         // bb1 -> bb2 (fallthrough on false).
         assert!(dot.contains("bb1 -> bb2"), "missing false edge");
-        // bb2 -> bb3 (fallthrough after CALL).
-        assert!(dot.contains("bb2 -> bb3"), "missing CALL fallthrough edge");
         assert!(!dot.contains("dynamic"), "unexpected dynamic jump table");
     }
 
