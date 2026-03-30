@@ -265,6 +265,16 @@ enum JumpTarget {
     Top,
 }
 
+/// Internal function entry reached by multiple static-call sites at different stack depths.
+struct InternalFunc {
+    /// Entry block in the CFG.
+    entry: Block,
+    /// Caller blocks whose terminator is a static JUMP to this entry.
+    callers: SmallVec<[Block; 2]>,
+    /// Frame depth: min(caller output heights). Slots below this are caller-owned.
+    frame_depth: usize,
+}
+
 /// CFG for abstract interpretation.
 struct Cfg {
     blocks: IndexVec<Block, BlockData>,
@@ -488,8 +498,18 @@ impl Bytecode<'_> {
         // Always run the fixpoint to propagate stack states through the CFG.
         // Snapshots are recorded during interpretation — last write wins (= converged state).
         let mut const_sets = ConstSetInterner::new();
-        let discovered_edges =
+        let mut discovered_edges =
             self.run_fixpoint(cfg, &mut block_states, snapshots, &mut const_sets);
+
+        // Post-fixpoint refinement: detect internal functions called from sites with
+        // different stack depths and refine per-caller return states.
+        let funcs = self.detect_internal_functions(cfg, &block_states);
+
+        let refined_targets = if funcs.is_empty() {
+            crate::FxHashMap::default()
+        } else {
+            self.refine_func_returns(cfg, &block_states, &funcs, &discovered_edges, &mut const_sets)
+        };
 
         if jump_insts.is_empty() {
             return (Vec::new(), 0);
@@ -545,13 +565,50 @@ impl Bytecode<'_> {
                             }
                         }
                         out => {
-                            trace!(
-                                inst = %jump_inst,
-                                in=?input,
-                                ?out,
-                                "unresolved jump",
-                            );
-                            JumpTarget::Top
+                            // Check if the per-caller refinement resolved this jump.
+                            if let Some(pcs) = refined_targets.get(&jump_inst) {
+                                let mut targets = SmallVec::new();
+                                let mut all_valid = true;
+                                for &pc in pcs {
+                                    if self.is_valid_jump(pc) {
+                                        targets.push(self.pc_to_inst(pc));
+                                    } else {
+                                        all_valid = false;
+                                        break;
+                                    }
+                                }
+                                if all_valid && targets.len() == 1 {
+                                    trace!(
+                                        inst = %jump_inst,
+                                        target = %targets[0],
+                                        "refined const jump",
+                                    );
+                                    JumpTarget::Const(targets[0])
+                                } else if all_valid && targets.len() > 1 {
+                                    trace!(
+                                        inst = %jump_inst,
+                                        n_targets = targets.len(),
+                                        "refined multi-target jump",
+                                    );
+                                    JumpTarget::Multi(targets)
+                                } else {
+                                    trace!(
+                                        inst = %jump_inst,
+                                        in=?input,
+                                        ?out,
+                                        "unresolved jump",
+                                    );
+                                    JumpTarget::Top
+                                }
+                            } else {
+                                trace!(
+                                    inst = %jump_inst,
+                                    in=?input,
+                                    ?out,
+                                    "unresolved jump",
+                                );
+                                JumpTarget::Top
+                            }
                         }
                     },
                 },
@@ -749,6 +806,227 @@ impl Bytecode<'_> {
         }
 
         discovered_jump_edges
+    }
+
+    /// Detect internal functions: JUMPDEST entries reached by 2+ static JUMP call sites
+    /// with different output stack heights.
+    fn detect_internal_functions(
+        &self,
+        cfg: &Cfg,
+        block_states: &IndexVec<Block, BlockState>,
+    ) -> Vec<InternalFunc> {
+        let mut funcs = Vec::new();
+
+        for entry in cfg.blocks.indices() {
+            let entry_block = &cfg.blocks[entry];
+            if entry_block.dead {
+                continue;
+            }
+            if !self.insts.raw[entry_block.insts.start].is_jumpdest() {
+                continue;
+            }
+
+            let mut callers = SmallVec::<[Block; 2]>::new();
+            let mut heights = SmallVec::<[usize; 2]>::new();
+            let mut deltas = SmallVec::<[usize; 2]>::new();
+
+            for &pred in &entry_block.preds {
+                let pred_block = &cfg.blocks[pred];
+                if pred_block.dead {
+                    continue;
+                }
+
+                let term = &self.insts.raw[pred_block.insts.end - 1];
+                if term.opcode != op::JUMP
+                    || !term.is_static_jump()
+                    || term.flags.contains(InstFlags::INVALID_JUMP)
+                    || term.flags.contains(InstFlags::BLOCK_RESOLVED_JUMP)
+                {
+                    continue;
+                }
+
+                let BlockState::Known(input) = &block_states[pred] else {
+                    continue;
+                };
+                let Some(output) = self.interpret_block(pred_block.insts.clone(), input, None)
+                else {
+                    continue;
+                };
+
+                // Net stack delta = items the caller pushes for the function's frame.
+                let input_len = input.len();
+                let output_len = output.len();
+                let delta = output_len.saturating_sub(input_len);
+
+                callers.push(pred);
+                heights.push(output_len);
+                deltas.push(delta);
+            }
+
+            if callers.len() < 2 {
+                continue;
+            }
+            if heights.windows(2).all(|w| w[0] == w[1]) {
+                continue;
+            }
+
+            // Frame depth = min of per-caller deltas: the minimum number of items
+            // any caller pushes for this function (return address + args).
+            let frame_depth = deltas.iter().copied().min().unwrap_or(0);
+            trace!(
+                %entry,
+                pc = self.insts.raw[entry_block.insts.start].pc,
+                ?heights,
+                frame_depth,
+                "detected internal function",
+            );
+            funcs.push(InternalFunc { entry, callers, frame_depth });
+        }
+
+        funcs
+    }
+
+    /// Post-fixpoint refinement: for each detected internal function, re-interpret
+    /// the function body per caller to resolve return jumps that the flat fixpoint
+    /// couldn't handle due to top-aligned join padding.
+    ///
+    /// Returns a map of jump instructions to their refined target PCs.
+    fn refine_func_returns(
+        &self,
+        cfg: &Cfg,
+        block_states: &IndexVec<Block, BlockState>,
+        funcs: &[InternalFunc],
+        discovered_edges: &IndexVec<Block, SmallVec<[Block; 2]>>,
+        const_sets: &mut ConstSetInterner,
+    ) -> crate::FxHashMap<Inst, SmallVec<[usize; 4]>> {
+        let mut refined_targets: crate::FxHashMap<Inst, SmallVec<[usize; 4]>> =
+            crate::FxHashMap::default();
+
+        for func in funcs {
+            // For each caller, compute the function's input from that specific caller.
+            let mut caller_inputs = SmallVec::<[Vec<AbsValue>; 2]>::new();
+
+            for &caller in &func.callers {
+                let BlockState::Known(input) = &block_states[caller] else {
+                    caller_inputs.push(Vec::new());
+                    continue;
+                };
+                let Some(output) =
+                    self.interpret_block(cfg.blocks[caller].insts.clone(), input, None)
+                else {
+                    caller_inputs.push(Vec::new());
+                    continue;
+                };
+                caller_inputs.push(output.into_owned());
+            }
+
+            // Find return blocks: dynamic JUMPs reachable from the function entry.
+            for ret_bid in cfg.blocks.indices() {
+                let ret_block = &cfg.blocks[ret_bid];
+                if ret_block.dead {
+                    continue;
+                }
+                let ret_term_idx = ret_block.insts.end - 1;
+                let term = &self.insts.raw[ret_term_idx];
+                if term.opcode != op::JUMP || term.flags.contains(InstFlags::STATIC_JUMP) {
+                    continue;
+                }
+                if !self.block_reaches(cfg, discovered_edges, func.entry, ret_bid) {
+                    continue;
+                }
+
+                let ret_inst = Inst::from_usize(ret_term_idx);
+                let targets = refined_targets.entry(ret_inst).or_default();
+
+                // For each caller, interpret the function entry block with the
+                // caller's specific input, then check if the return block is a
+                // direct discovered-edge target.
+                for caller_input in &caller_inputs {
+                    if caller_input.is_empty() {
+                        continue;
+                    }
+
+                    // Interpret the entry block with this caller's input.
+                    let entry_block = &cfg.blocks[func.entry];
+                    let Some(entry_output) =
+                        self.interpret_block(entry_block.insts.clone(), caller_input, None)
+                    else {
+                        continue;
+                    };
+
+                    // Check if the return block is a direct successor of the entry
+                    // block (via discovered edges). For multi-block functions, we'd
+                    // need a scoped mini-fixpoint here.
+                    if !discovered_edges[func.entry].contains(&ret_bid)
+                        && !entry_block.succs.contains(&ret_bid)
+                    {
+                        continue;
+                    }
+
+                    // The state at the return block is the entry block's output,
+                    // joined with any existing state.
+                    let state = entry_output.into_owned();
+
+                    // Resolve the jump operand.
+                    let Some(operand) = self.jump_operand(ret_block, &state) else {
+                        continue;
+                    };
+                    let pcs: SmallVec<[usize; 4]> = match operand {
+                        AbsValue::Const(idx) => {
+                            let val = *self.u256_interner.borrow().get(idx);
+                            usize::try_from(val).ok().into_iter().collect()
+                        }
+                        AbsValue::ConstSet(set_idx) => {
+                            let interner = self.u256_interner.borrow();
+                            const_sets
+                                .get(set_idx)
+                                .iter()
+                                .filter_map(|&idx| usize::try_from(*interner.get(idx)).ok())
+                                .collect()
+                        }
+                        _ => continue,
+                    };
+
+                    for pc in pcs {
+                        if self.is_valid_jump(pc) && !targets.contains(&pc) {
+                            targets.push(pc);
+                        }
+                    }
+                }
+            }
+        }
+
+        refined_targets
+    }
+
+    /// Check if `from` can reach `to` in the CFG via forward edges.
+    fn block_reaches(
+        &self,
+        cfg: &Cfg,
+        discovered_edges: &IndexVec<Block, SmallVec<[Block; 2]>>,
+        from: Block,
+        to: Block,
+    ) -> bool {
+        if from == to {
+            return true;
+        }
+        let mut seen: BitVec = BitVec::repeat(false, cfg.blocks.len());
+        let mut queue = VecDeque::new();
+        seen.set(from.index(), true);
+        queue.push_back(from);
+        while let Some(bid) = queue.pop_front() {
+            for &succ in cfg.blocks[bid].succs.iter().chain(discovered_edges[bid].iter()) {
+                if succ == to {
+                    return true;
+                }
+                let si = succ.index();
+                if !seen[si] {
+                    seen.set(si, true);
+                    queue.push_back(succ);
+                }
+            }
+        }
+        false
     }
 
     /// Interpret a sequence of instructions on the abstract stack.
@@ -1229,11 +1507,11 @@ mod tests {
             .find(|(_, d)| d.is_jump() && d.flags.contains(InstFlags::MULTI_JUMP));
         assert!(inner_return.is_some(), "expected inner return to be multi-target");
 
-        // The wrapper return JUMP (pc=30) is the hard case: the outer return
-        // address (ret2=14) was buried below the inner function's frame and
-        // lost to Top during the top-aligned join at inner's entry.
-        // TODO: with interprocedural / summary-based analysis, this should resolve.
-        assert!(bytecode.has_dynamic_jumps, "expected the wrapper return jump to remain dynamic");
+        // The wrapper return JUMP (pc=30) was previously unresolvable because the
+        // outer return address (ret2=14) was buried below the inner function's frame
+        // and lost to Top during the top-aligned join at inner's entry.
+        // The per-caller refinement pass now recovers the below-frame return address.
+        assert!(!bytecode.has_dynamic_jumps, "expected all jumps to be resolved");
     }
 
     #[test]
