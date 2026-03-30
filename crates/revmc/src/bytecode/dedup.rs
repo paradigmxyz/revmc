@@ -9,6 +9,7 @@ use super::{
     block_analysis::{Block, BlockData},
 };
 use alloy_primitives::map::HashMap;
+use revm_bytecode::opcode as op;
 use smallvec::SmallVec;
 
 impl<'a> Bytecode<'a> {
@@ -46,6 +47,12 @@ impl<'a> Bytecode<'a> {
             // dynamic jumps and must remain at their original PC for the jump table.
             let first = &self.insts[block.insts.start];
             if first.is_reachable_jumpdest(self.has_dynamic_jumps) {
+                continue;
+            }
+
+            // Skip blocks containing PC — it returns the current program counter,
+            // so identical bytecode at different positions produces different results.
+            if block.insts().any(|i| self.insts[i].opcode == op::PC) {
                 continue;
             }
 
@@ -201,6 +208,28 @@ mod tests {
 
         let redirect_count = bytecode.dedup_redirects.len();
         assert_eq!(redirect_count, 2, "expected 2 redirects, got {redirect_count}");
+    }
+
+    #[test]
+    fn dedup_skips_pc_opcode() {
+        // Two identical `PC / PUSH1 0x00 / REVERT` blocks — PC is position-dependent,
+        // so they must NOT be deduplicated.
+        #[rustfmt::skip]
+        let bytecode = analyze_code(vec![
+            // bb0: JUMPI -> pc=9
+            op::PUSH0, op::CALLDATALOAD, op::PUSH1, 9, op::JUMPI,
+            // bb1: PC + revert A
+            op::PC, op::PUSH1, 0x00, op::REVERT,
+            // bb2: JUMPDEST -> fallthrough
+            op::JUMPDEST, op::PUSH0, op::CALLDATALOAD, op::PUSH1, 19, op::JUMPI,
+            // bb3: PC + revert B (same bytes, different PC value)
+            op::PC, op::PUSH1, 0x00, op::REVERT,
+            // bb4: target
+            op::JUMPDEST, op::STOP,
+        ]);
+
+        eprintln!("{bytecode}");
+        assert!(bytecode.dedup_redirects.is_empty(), "should not dedup blocks containing PC");
     }
 
     #[test]
