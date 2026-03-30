@@ -1007,9 +1007,11 @@ impl Backend for EvmLlvmBackend {
 
     fn clear_ir(&mut self) -> Result<()> {
         self.di_state = None;
+        self.function_names.clear();
         self.module = create_module(self.cx, &self.machine, self.aot)?;
         if let Some(orc) = &mut self.orc {
             orc.staged_functions.clear();
+            orc.pending_symbols.clear();
             orc.maybe_clear_dead_pool_entries();
         }
         Ok(())
