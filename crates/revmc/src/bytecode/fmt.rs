@@ -96,6 +96,14 @@ impl Bytecode<'_> {
                 if !data.gas_section.is_empty() {
                     write!(comment, ", gas={}", data.gas_section.gas_cost).unwrap();
                 }
+                if inst != block.insts.start && !data.stack_section.is_empty() {
+                    write!(
+                        comment,
+                        ", stack_in={}, max_growth={}",
+                        data.stack_section.inputs, data.stack_section.max_growth,
+                    )
+                    .unwrap();
+                }
                 let flags = data.flags;
                 if flags.contains(InstFlags::SKIP_LOGIC) {
                     comment.push_str(", skip");
@@ -280,6 +288,14 @@ impl<'a> Bytecode<'a> {
                 let data = self.inst(inst);
                 if data.is_dead_code() {
                     continue;
+                }
+                // Show stack section header for mid-block section boundaries.
+                if inst != block.insts.start && !data.stack_section.is_empty() {
+                    write!(
+                        w,
+                        "--- [in={} growth={}]\\l",
+                        data.stack_section.inputs, data.stack_section.max_growth
+                    )?;
                 }
                 let opcode = data.to_op_in(self);
                 let mut op_str =
@@ -475,7 +491,7 @@ bb2:           ; stack_in=0, max_growth=7
   PUSH1 0x42   ; pc=24
   PUSH2 0xffff ; pc=26
   CALL         ; pc=29, suspends
-  POP          ; pc=30, gas=2
+  POP          ; pc=30, gas=2, stack_in=1, max_growth=0
   STOP         ; pc=31
 
 "#]]
