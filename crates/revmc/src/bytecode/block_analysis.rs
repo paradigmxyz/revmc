@@ -840,12 +840,13 @@ impl Bytecode<'_> {
                     if stack.len() < inp {
                         return None;
                     }
-                    if out == 0 {
-                        continue;
-                    }
 
                     // Try constant folding for common arithmetic.
-                    let result = self.try_const_fold(inst, &stack[stack.len() - inp..]);
+                    let result = if out > 0 {
+                        self.try_const_fold(inst, &stack[stack.len() - inp..])
+                    } else {
+                        None
+                    };
 
                     // Pop inputs.
                     stack.truncate(stack.len() - inp);
