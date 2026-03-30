@@ -354,17 +354,13 @@ impl<'a> Bytecode<'a> {
                 writeln!(w, "  {bid} -> dynamic [color=\"{EDGE_FALSE}\" style=dashed];")?;
             }
 
-            // Fallthrough edges from CFG successors.
+            // Fallthrough edge: the next non-dead block in program order.
             if last.can_fall_through() {
-                for &succ in &block.succs {
-                    // Successor is a fallthrough if it's not the jump target.
-                    let is_jump_target = last.is_static_jump()
-                        && !last.flags.contains(InstFlags::INVALID_JUMP)
-                        && self.target_block(Inst::from_usize(last.data as usize)) == Some(succ);
-                    if !is_jump_target {
-                        let color = if last.opcode == op::JUMPI { EDGE_FALSE } else { EDGE };
-                        writeln!(w, "  {bid} -> {succ} [color=\"{color}\"];")?;
-                    }
+                let next =
+                    self.cfg.blocks.iter_enumerated().skip(bid.index() + 1).find(|(_, b)| !b.dead);
+                if let Some((next_bid, _)) = next {
+                    let color = if last.opcode == op::JUMPI { EDGE_FALSE } else { EDGE };
+                    writeln!(w, "  {bid} -> {next_bid} [color=\"{color}\"];")?;
                 }
             }
         }
