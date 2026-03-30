@@ -1,5 +1,6 @@
-use super::{Bytecode, InstData, InstFlags, bitvec_as_bytes};
+use super::{Bytecode, Inst, InstData, InstFlags, bitvec_as_bytes};
 use crate::FxHashMap;
+use oxc_index::IndexVec;
 use revm_bytecode::opcode as op;
 use revm_primitives::hex;
 use std::{borrow::Cow, fmt, fmt::Write};
@@ -7,9 +8,9 @@ use std::{borrow::Cow, fmt, fmt::Write};
 /// Basic block info collected from bytecode analysis.
 struct BlockInfo {
     /// `(block_idx, first_inst, last_inst)` for each block.
-    blocks: Vec<(usize, usize, usize)>,
+    blocks: Vec<(usize, Inst, Inst)>,
     /// Maps instruction index to block index.
-    inst_to_block: FxHashMap<usize, usize>,
+    inst_to_block: FxHashMap<Inst, usize>,
 }
 
 impl Bytecode<'_> {
@@ -42,7 +43,7 @@ impl Bytecode<'_> {
     fn collect_lines(&self) -> Vec<(String, String)> {
         let info = self.collect_blocks();
         let mut lines: Vec<(String, String)> = Vec::new();
-        let mut inst_lines = vec![0u32; self.insts.len()];
+        let mut inst_lines = IndexVec::<Inst, u32>::from_vec(vec![0u32; self.insts.len()]);
 
         lines.push((
             String::new(),
@@ -55,7 +56,7 @@ impl Bytecode<'_> {
 
         for &(block_idx, first_inst, last_inst) in &info.blocks {
             // Blank line between blocks.
-            if first_inst > 0 {
+            if first_inst.index() > 0 {
                 lines.push((String::new(), String::new()));
             }
 
@@ -78,8 +79,8 @@ impl Bytecode<'_> {
             lines.push((header, comment));
 
             // Instructions.
-            #[allow(clippy::needless_range_loop)]
-            for inst in first_inst..=last_inst {
+            for i in first_inst.index()..=last_inst.index() {
+                let inst = Inst::from_usize(i);
                 let data = self.inst(inst);
                 if data.is_dead_code() {
                     continue;
@@ -93,9 +94,22 @@ impl Bytecode<'_> {
                 let opcode = data.to_op_in(self);
                 write!(text, "{opcode}").unwrap();
                 if data.flags.contains(InstFlags::INVALID_JUMP) {
-                    text.push_str(" -> INVALID");
+                    text.push_str(" INVALID");
+                } else if data.flags.contains(InstFlags::MULTI_JUMP) {
+                    if let Some(targets) = self.multi_jump_targets(inst) {
+                        text.push(' ');
+                        for (i, &t) in targets.iter().enumerate() {
+                            if i > 0 {
+                                text.push_str(", ");
+                            }
+                            match info.inst_to_block.get(&t) {
+                                Some(b) => write!(text, " bb{b}").unwrap(),
+                                None => write!(text, " inst {t}").unwrap(),
+                            }
+                        }
+                    }
                 } else if data.is_static_jump() {
-                    let target = data.data as usize;
+                    let target = Inst::from_usize(data.data as usize);
                     match info.inst_to_block.get(&target) {
                         Some(b) => write!(text, " bb{b}").unwrap(),
                         None => write!(text, " inst {target}").unwrap(),
@@ -122,6 +136,12 @@ impl Bytecode<'_> {
                 }
                 if flags.contains(InstFlags::INVALID_JUMP) {
                     comment.push_str(", invalid_jump");
+                }
+                if flags.contains(InstFlags::BLOCK_RESOLVED_JUMP) {
+                    comment.push_str(", block_resolved");
+                }
+                if flags.contains(InstFlags::MULTI_JUMP) {
+                    comment.push_str(", multi_jump");
                 }
                 if flags.contains(InstFlags::BLOCK_RESOLVED_JUMP) {
                     comment.push_str(", block_resolved");
@@ -280,8 +300,8 @@ impl<'a> Bytecode<'a> {
             }
 
             write!(w, "\\n")?;
-            for inst in first_inst..=last_inst {
-                let data = self.inst(inst);
+            for i in first_inst.index()..=last_inst.index() {
+                let data = self.inst(Inst::from_usize(i));
                 if data.is_dead_code() {
                     continue;
                 }
@@ -301,8 +321,28 @@ impl<'a> Bytecode<'a> {
             let last = self.inst(last_inst);
 
             // Jump edge.
-            if last.is_static_jump() && !last.flags.contains(InstFlags::INVALID_JUMP) {
-                let target = last.data as usize;
+            if last.flags.contains(InstFlags::MULTI_JUMP) {
+                if let Some(targets) = self.multi_jump_targets(last_inst) {
+                    for &t in targets {
+                        if let Some(&target_block) = info.inst_to_block.get(&t) {
+                            let color = "#e2a93b";
+                            let extra = if block_idx == target_block {
+                                " tailport=s headport=e constraint=false"
+                            } else if target_block <= block_idx {
+                                " constraint=false"
+                            } else {
+                                ""
+                            };
+                            writeln!(
+                                w,
+                                "  bb{block_idx} -> bb{target_block} \
+                                 [color=\"{color}\" {extra}];"
+                            )?;
+                        }
+                    }
+                }
+            } else if last.is_static_jump() && !last.flags.contains(InstFlags::INVALID_JUMP) {
+                let target = Inst::from_usize(last.data as usize);
                 if let Some(&target_block) = info.inst_to_block.get(&target) {
                     let color = if last.opcode == op::JUMPI { EDGE_COND_JUMP } else { EDGE_JUMP };
                     let extra = if block_idx == target_block {

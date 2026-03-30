@@ -2225,6 +2225,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d211803b9b6b570f68772237e415a029d5a50c65d382910b879fb19d3271f94d"
 
 [[package]]
+name = "oxc_index"
+version = "4.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eb3e6120999627ec9703025eab7c9f410ebb7e95557632a8902ca48210416c2b"
+
+[[package]]
 name = "p256"
 version = "0.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2833,6 +2839,8 @@ dependencies = [
  "bitflags",
  "bitvec",
  "either",
+ "indexmap 2.13.0",
+ "oxc_index",
  "paste",
  "revm-bytecode",
  "revm-context-interface",
@@ -2846,6 +2854,7 @@ dependencies = [
  "revmc-llvm",
  "revmc-statetest",
  "similar-asserts",
+ "smallvec",
  "snapbox",
  "tempfile",
  "tracing",
