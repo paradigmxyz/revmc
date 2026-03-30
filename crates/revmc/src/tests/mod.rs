@@ -258,6 +258,10 @@ tests! {
             expected_gas: 3 + 3 + 3 + 3 + 3,
         }),
 
+        overflow_analysis_edge_case(@raw {
+            bytecode: &[&[op::JUMPDEST][..], &[op::PUSH0; 1025][..], &[op::JUMPI][..]].concat(),
+            expected_return: InstructionResult::StackOverflow,
+        }),
     }
 
     control_flow {
