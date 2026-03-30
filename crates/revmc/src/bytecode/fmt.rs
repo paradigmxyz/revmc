@@ -486,6 +486,7 @@ bb2:           ; stack_in=0, max_growth=7
     fn dot_format() {
         let bytecode = test_bytecode();
         let dot = bytecode.to_dot();
+        eprintln!("{dot}");
         assert!(dot.starts_with("digraph bytecode {"));
         assert!(dot.contains("bb0"));
         assert!(dot.contains("bb1"));
