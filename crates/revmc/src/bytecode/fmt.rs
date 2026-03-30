@@ -256,12 +256,13 @@ impl<'a> Bytecode<'a> {
             let last = self.inst(block.terminator());
             let first = self.inst(block.insts.start);
 
-            // Color based on block terminator.
+            // Color based on block behavior.
+            let has_suspend = block.insts().any(|i| self.inst(i).may_suspend());
             let (fill, border) = if matches!(last.opcode, op::STOP | op::RETURN) {
                 (EXIT_FILL, EXIT_BORDER)
             } else if last.is_diverging() {
                 (REVERT_FILL, REVERT_BORDER)
-            } else if last.may_suspend() {
+            } else if has_suspend {
                 (SUSPEND_FILL, SUSPEND_BORDER)
             } else if last.is_jump() {
                 (BRANCH_FILL, BRANCH_BORDER)
