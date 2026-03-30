@@ -479,7 +479,7 @@ impl InstData {
     /// Returns the number of input and output stack elements of this instruction.
     #[inline]
     pub(crate) fn stack_io(&self) -> (u8, u8) {
-        let (mut inp, out) = stack_io(self.opcode);
+        let (mut inp, out) = self.stack_io_raw();
         // For adjacent PUSH+JUMP, the PUSH is marked SKIP_LOGIC so the target is never on the
         // stack. Reduce inputs accordingly. Block-resolved jumps still have the target on the
         // stack, so their input count is unchanged.
@@ -490,6 +490,11 @@ impl InstData {
             inp -= 1;
         }
         (inp, out)
+    }
+
+    #[inline]
+    pub(crate) fn stack_io_raw(&self) -> (u8, u8) {
+        stack_io(self.opcode)
     }
 
     /// Converts this instruction to a raw opcode. Note that the immediate data is not resolved.
