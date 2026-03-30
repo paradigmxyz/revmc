@@ -17,8 +17,15 @@ const SPEC_ID: SpecId = SpecId::OSAKA;
 
 /// Benchmarks that are too slow for CI due to large bytecode (LLVM compilation time under
 /// valgrind).
-const SKIP_COMPILE: &[&str] =
-    &["snailtracer", "seaport", "fiat_token", "uniswap_v2_pair", "airdrop", "usdc_proxy"];
+const SKIP_COMPILE: &[&str] = &[
+    "snailtracer",
+    "seaport",
+    "fiat_token",
+    "uniswap_v2_pair",
+    "univ2_router",
+    "airdrop",
+    "usdc_proxy",
+];
 /// Benchmarks that are too slow for CI entirely (runtime is also very slow under valgrind).
 const SKIP_ALL: &[&str] = &["seaport", "snailtracer"];
 
