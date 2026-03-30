@@ -139,8 +139,9 @@ impl RunArgs {
 
         // Build the compiler.
         let target = revmc::Target::new(self.target, self.target_cpu, self.target_features);
-        let backend = EvmLlvmBackend::new_for_target(self.aot, self.opt_level, &target)?;
+        let backend = EvmLlvmBackend::new_for_target(self.aot, &target)?;
         let mut compiler = EvmCompiler::new(backend);
+        compiler.set_opt_level(self.opt_level);
         let out_dir = if self.out_dir.is_some() {
             self.out_dir
         } else if self.dot.is_some() || self.display || self.parse_only {

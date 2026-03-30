@@ -1,6 +1,8 @@
 #include <llvm-c/LLJIT.h>
 #include <llvm-c/Orc.h>
+#include <llvm-c/TargetMachine.h>
 #include <llvm/ExecutionEngine/Orc/AbsoluteSymbols.h>
+#include <llvm/Target/TargetMachine.h>
 #include <llvm/ExecutionEngine/Orc/CompileUtils.h>
 #include <llvm/ExecutionEngine/Orc/Debugging/DebugInfoSupport.h>
 #include <llvm/ExecutionEngine/Orc/Debugging/PerfSupportPlugin.h>
@@ -46,6 +48,9 @@ revmc_llvm_jit_dylib_add_to_link_order(LLVMOrcJITDylibRef JD,
 /// Use ConcurrentIRCompiler (thread-safe, fresh TargetMachine per compilation)
 /// while keeping the default InPlaceTaskDispatcher (no background threads).
 ///
+/// Sets the codegen optimization level to Aggressive (O3) for best JIT code
+/// quality. The IR optimization passes are run separately with their own level.
+///
 /// setSupportConcurrentCompilation(true) would also switch the dispatcher to
 /// DynamicThreadPoolTaskDispatcher, spawning background threads. We only want
 /// the thread-safe compiler, not the thread pool.
@@ -55,6 +60,7 @@ extern "C" void revmc_llvm_lljit_builder_set_concurrent_compiler(
   B->setCompileFunctionCreator(
       [](orc::JITTargetMachineBuilder JTMB)
           -> Expected<std::unique_ptr<orc::IRCompileLayer::IRCompiler>> {
+        JTMB.setCodeGenOptLevel(CodeGenOptLevel::Aggressive);
         return std::make_unique<orc::ConcurrentIRCompiler>(std::move(JTMB));
       });
 }
@@ -286,4 +292,18 @@ revmc_llvm_lljit_enable_perf_support(LLVMOrcLLJITRef J) {
       EPC, StartAddr, EndAddr, ImplAddr,
       /*EmitDebugInfo=*/true, /*EmitUnwindInfo=*/true));
   return LLVMErrorSuccess;
+}
+
+extern "C" void
+revmc_llvm_target_machine_set_opt_level(LLVMTargetMachineRef TM,
+                                        LLVMCodeGenOptLevel Level) {
+  auto *Machine = reinterpret_cast<TargetMachine *>(TM);
+  CodeGenOptLevel L = CodeGenOptLevel::Default;
+  switch (Level) {
+  case LLVMCodeGenLevelNone:       L = CodeGenOptLevel::None; break;
+  case LLVMCodeGenLevelLess:       L = CodeGenOptLevel::Less; break;
+  case LLVMCodeGenLevelDefault:    L = CodeGenOptLevel::Default; break;
+  case LLVMCodeGenLevelAggressive: L = CodeGenOptLevel::Aggressive; break;
+  }
+  Machine->setOptLevel(L);
 }

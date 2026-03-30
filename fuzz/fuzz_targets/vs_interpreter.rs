@@ -13,8 +13,9 @@ fuzz_target!(|test_case: TestCase<'_>| {
         return;
     }
 
-    let backend = EvmLlvmBackend::new(false, OptimizationLevel::None).unwrap();
+    let backend = EvmLlvmBackend::new(false).unwrap();
     let mut compiler = EvmCompiler::new(backend);
+    compiler.set_opt_level(OptimizationLevel::None);
     if let Ok(dump_location) = std::env::var("COMPILER_DUMP") {
         compiler.set_dump_to(Some(PathBuf::from(dump_location)));
     }
