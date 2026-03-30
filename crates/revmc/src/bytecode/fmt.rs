@@ -426,7 +426,7 @@ mod tests {
             snapbox::str![[r#"
                ; spec_id=Osaka, has_dynamic_jumps=false, may_suspend=true
 
-bb0:
+bb0:           ; stack_in=0, max_growth=1
   PUSH1 0x03   ; pc=0, gas=11, skip
   JUMP bb1     ; pc=2
 
