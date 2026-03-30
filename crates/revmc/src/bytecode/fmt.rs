@@ -143,6 +143,9 @@ impl Bytecode<'_> {
                 if flags.contains(InstFlags::MULTI_JUMP) {
                     comment.push_str(", multi_jump");
                 }
+                if flags.contains(InstFlags::BLOCK_RESOLVED_JUMP) {
+                    comment.push_str(", block_resolved");
+                }
                 if data.may_suspend() {
                     comment.push_str(", suspends");
                 }
