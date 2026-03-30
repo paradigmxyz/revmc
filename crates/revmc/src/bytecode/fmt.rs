@@ -327,7 +327,7 @@ impl<'a> Bytecode<'a> {
                         if let Some(&target_block) = info.inst_to_block.get(&t) {
                             let color = "#e2a93b";
                             let extra = if block_idx == target_block {
-                                " tailport=s headport=e constraint=false"
+                                " tailport=s headport=n constraint=false"
                             } else if target_block <= block_idx {
                                 " constraint=false"
                             } else {
@@ -346,7 +346,7 @@ impl<'a> Bytecode<'a> {
                 if let Some(&target_block) = info.inst_to_block.get(&target) {
                     let color = if last.opcode == op::JUMPI { EDGE_COND_JUMP } else { EDGE_JUMP };
                     let extra = if block_idx == target_block {
-                        " tailport=s headport=e constraint=false"
+                        " tailport=s headport=n constraint=false"
                     } else if target_block <= block_idx {
                         " constraint=false"
                     } else {
