@@ -46,6 +46,25 @@ oxc_index::define_index_type! {
     DISPLAY_FORMAT = "{}";
 }
 
+bitflags::bitflags! {
+    /// Controls which analysis passes run during [`Bytecode::analyze`].
+    #[derive(Clone, Copy, Debug)]
+    pub(crate) struct AnalysisConfig: u8 {
+        /// Run block deduplication.
+        const DEDUP = 1 << 0;
+
+        /// All passes enabled.
+        const ALL = Self::DEDUP.bits();
+    }
+}
+
+impl Default for AnalysisConfig {
+    #[inline]
+    fn default() -> Self {
+        Self::ALL
+    }
+}
+
 /// EVM bytecode.
 #[doc(hidden)] // Not public API.
 pub struct Bytecode<'a> {
@@ -78,11 +97,13 @@ pub struct Bytecode<'a> {
     /// Instruction index to 1-based line number in the formatted dump, built during formatting.
     inst_lines: RefCell<IndexVec<Inst, u32>>,
 
-    /// Block deduplication redirects: maps the first instruction of a dead duplicate block to
-    /// the first instruction of the canonical (surviving) block.
-    pub(crate) dedup_redirects: FxHashMap<Inst, Inst>,
+    /// Dead-block redirects: maps the first instruction of a dead/merged block to the target
+    /// instruction. Used by both block deduplication and block merging.
+    pub(crate) redirects: FxHashMap<Inst, Inst>,
     /// Basic-block CFG, rebuilt by [`Bytecode::rebuild_cfg`].
     cfg: Cfg,
+    /// Controls which analysis passes are enabled.
+    pub(crate) config: AnalysisConfig,
 }
 
 impl<'a> Bytecode<'a> {
@@ -138,8 +159,9 @@ impl<'a> Bytecode<'a> {
             multi_jump_targets: FxHashMap::default(),
             pc_to_inst,
             inst_lines: RefCell::new(IndexVec::new()),
-            dedup_redirects: FxHashMap::default(),
+            redirects: FxHashMap::default(),
             cfg: Cfg::default(),
+            config: AnalysisConfig::default(),
         };
 
         // Pad code to ensure there is at least one diverging instruction.
@@ -234,8 +256,13 @@ impl<'a> Bytecode<'a> {
         // enabling more dead code elimination.
         self.mark_dead_code();
 
+        if self.config.contains(AnalysisConfig::DEDUP) {
+            self.rebuild_cfg();
+            self.dedup_blocks();
+        }
+
+        // Final rebuild so the CFG is consistent for sections analysis and DOT output.
         self.rebuild_cfg();
-        self.dedup_blocks();
 
         self.calc_may_suspend();
 
@@ -383,9 +410,9 @@ impl<'a> Bytecode<'a> {
         self.may_suspend
     }
 
-    /// Returns `true` if block deduplication eliminated any duplicate blocks.
-    pub(crate) fn has_dedups(&self) -> bool {
-        !self.dedup_redirects.is_empty()
+    /// Returns `true` if any dead-block redirects exist.
+    pub(crate) fn has_redirects(&self) -> bool {
+        !self.redirects.is_empty()
     }
 
     /// Returns `true` if the bytecode is small.

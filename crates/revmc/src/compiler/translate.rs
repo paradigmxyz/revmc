@@ -247,8 +247,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         assert!(!inst_entries.is_empty(), "translating empty bytecode");
 
         // Apply dedup redirects: map dead duplicate entries to their canonical block.
-        if bytecode.has_dedups() {
-            for (&from, &to) in &bytecode.dedup_redirects {
+        if bytecode.has_redirects() {
+            for (&from, &to) in &bytecode.redirects {
                 inst_entries[from] = inst_entries[to];
             }
         }
@@ -520,7 +520,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 !this.bytecode.is_instr_diverging(inst),
                 "attempted to branch to next instruction in a diverging instruction: {data:?}",
             );
-            if let Some(next) = this.inst_entries.get(inst + 1usize) {
+            if let Some(next) = this.inst_entries.get(inst + 1) {
                 this.bcx.br(*next);
             }
         };
@@ -945,7 +945,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                         if opcode == op::JUMPI {
                             let cond_word = self.pop();
                             let cond = self.bcx.icmp_imm(IntCC::NotEqual, cond_word, 0);
-                            let next = self.inst_entries[inst + 1usize];
+                            let next = self.inst_entries[inst + 1];
                             let switch_block = self.bcx.create_block("multi_jump");
                             self.bcx.brif(cond, switch_block, next);
                             self.bcx.switch_to_block(switch_block);
@@ -988,7 +988,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                     if opcode == op::JUMPI {
                         let cond_word = self.pop();
                         let cond = self.bcx.icmp_imm(IntCC::NotEqual, cond_word, 0);
-                        let next = self.inst_entries[inst + 1usize];
+                        let next = self.inst_entries[inst + 1];
                         if target == self.return_block.unwrap() {
                             self.add_invalid_jump();
                         }
@@ -1208,7 +1208,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     fn suspend(&mut self) {
         // Register the next instruction as the resume block.
         let idx = self.resume_blocks.len();
-        let value = self.add_resume_at(self.inst_entries[self.current_inst.unwrap() + 1usize]);
+        let value = self.add_resume_at(self.inst_entries[self.current_inst.unwrap() + 1]);
 
         // Register the current block as the suspend block.
         let value = match value {
