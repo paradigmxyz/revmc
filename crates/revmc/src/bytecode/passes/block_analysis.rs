@@ -892,8 +892,8 @@ impl Bytecode<'_> {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    pub(crate) use crate::bytecode::Inst;
     use super::*;
+    pub(crate) use crate::bytecode::Inst;
     use revm_primitives::{hardfork::SpecId, hex};
 
     fn analyze_hex(hex: &str) -> Bytecode<'static> {
