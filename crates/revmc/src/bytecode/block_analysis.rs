@@ -566,74 +566,8 @@ impl Bytecode<'_> {
         }
 
         // Invalidate resolutions that may be unsound due to incomplete analysis.
-        //
-        // When there are Top (unresolved) dynamic jumps, some blocks may have
-        // incomplete input states because the jump discovered only a subset of
-        // its targets during the fixpoint.
-        //
-        // A Const/Invalid resolution is invalidated if any block in the transitive
-        // predecessor set (following both static CFG edges and discovered dynamic-jump
-        // edges backwards) has a Bottom predecessor that starts with a JUMPDEST.
-        // Such a predecessor could be reached at runtime by any Top (unresolved)
-        // jump, making the resolved jump's input state potentially incomplete.
         if has_top_jump {
-            // Build reverse discovered-edge map: for each target block, which source blocks have
-            // discovered edges pointing to it.
-            let mut disc_preds: IndexVec<Block, SmallVec<[Block; 4]>> =
-                IndexVec::from_vec(vec![SmallVec::new(); num_blocks]);
-            for (src, targets) in discovered_edges.iter_enumerated() {
-                for &tgt in targets {
-                    disc_preds[tgt].push(src);
-                }
-            }
-
-            // Precompute: for each block, whether it has a suspect (Bottom + JUMPDEST) predecessor.
-            let mut suspect: BitVec = BitVec::repeat(false, num_blocks);
-            for bid in self.cfg.blocks.indices() {
-                let bi = bid.index();
-                let has_suspect =
-                    self.cfg.blocks[bid].preds.iter().chain(disc_preds[bid].iter()).any(|&pred| {
-                        if !matches!(block_states[pred], BlockState::Bottom) {
-                            return false;
-                        }
-                        self.insts[self.cfg.blocks[pred].insts.start].is_jumpdest()
-                    });
-                if has_suspect {
-                    suspect.set(bi, true);
-                }
-            }
-
-            // Propagate suspect flag forward through the CFG: if a block is suspect,
-            // all its successors (static + discovered) are also suspect.
-            let mut propagate = Worklist::new(num_blocks);
-            for bid in self.cfg.blocks.indices() {
-                if suspect[bid.index()] {
-                    propagate.push(bid);
-                }
-            }
-            while let Some(bid) = propagate.pop() {
-                for &succ in self.cfg.blocks[bid].succs.iter().chain(discovered_edges[bid].iter()) {
-                    let si = succ.index();
-                    if !suspect[si] {
-                        suspect.set(si, true);
-                        propagate.push(succ);
-                    }
-                }
-            }
-
-            for (inst, target) in jump_targets.iter_mut() {
-                if !matches!(
-                    target,
-                    JumpTarget::Const(_) | JumpTarget::Multi(_) | JumpTarget::Invalid
-                ) {
-                    continue;
-                }
-                if let Some(bid) = self.cfg.inst_to_block[*inst]
-                    && suspect[bid.index()]
-                {
-                    *target = JumpTarget::Top;
-                }
-            }
+            self.invalidate_suspect_jumps(&mut jump_targets, &block_states, &discovered_edges);
         }
 
         let count = jump_targets
@@ -719,6 +653,75 @@ impl Bytecode<'_> {
             {
                 discovered[bid].push(tb);
                 disc_preds[tb].push(bid);
+            }
+        }
+    }
+
+    /// Invalidates jump resolutions that may be unsound due to unresolved `Top` jumps.
+    ///
+    /// When unresolved dynamic jumps remain, some blocks may have incomplete input states
+    /// because the jump discovered only a subset of its targets during the fixpoint.
+    /// A resolution is invalidated if any block in its transitive predecessor set has a
+    /// `Bottom` predecessor starting with a `JUMPDEST` — such a predecessor could be
+    /// reached at runtime by any unresolved jump.
+    fn invalidate_suspect_jumps(
+        &self,
+        jump_targets: &mut [(Inst, JumpTarget)],
+        block_states: &IndexVec<Block, BlockState>,
+        discovered_edges: &IndexVec<Block, SmallVec<[Block; 4]>>,
+    ) {
+        let num_blocks = self.cfg.blocks.len();
+
+        // Build reverse discovered-edge map.
+        let mut disc_preds: IndexVec<Block, SmallVec<[Block; 4]>> =
+            IndexVec::from_vec(vec![SmallVec::new(); num_blocks]);
+        for (src, targets) in discovered_edges.iter_enumerated() {
+            for &tgt in targets {
+                disc_preds[tgt].push(src);
+            }
+        }
+
+        // Precompute: for each block, whether it has a suspect (Bottom + JUMPDEST) predecessor.
+        let mut suspect: BitVec = BitVec::repeat(false, num_blocks);
+        for bid in self.cfg.blocks.indices() {
+            let has_suspect =
+                self.cfg.blocks[bid].preds.iter().chain(disc_preds[bid].iter()).any(|&pred| {
+                    if !matches!(block_states[pred], BlockState::Bottom) {
+                        return false;
+                    }
+                    self.insts[self.cfg.blocks[pred].insts.start].is_jumpdest()
+                });
+            if has_suspect {
+                suspect.set(bid.index(), true);
+            }
+        }
+
+        // Propagate suspect flag forward through the CFG.
+        let mut propagate = Worklist::new(num_blocks);
+        for bid in self.cfg.blocks.indices() {
+            if suspect[bid.index()] {
+                propagate.push(bid);
+            }
+        }
+        while let Some(bid) = propagate.pop() {
+            for &succ in self.cfg.blocks[bid].succs.iter().chain(discovered_edges[bid].iter()) {
+                let si = succ.index();
+                if !suspect[si] {
+                    suspect.set(si, true);
+                    propagate.push(succ);
+                }
+            }
+        }
+
+        for (inst, target) in jump_targets.iter_mut() {
+            if !matches!(target, JumpTarget::Const(_) | JumpTarget::Multi(_) | JumpTarget::Invalid)
+            {
+                continue;
+            }
+            if let Some(bid) = self.cfg.inst_to_block[*inst]
+                && suspect[bid.index()]
+            {
+                *target = JumpTarget::Top;
             }
         }
     }
