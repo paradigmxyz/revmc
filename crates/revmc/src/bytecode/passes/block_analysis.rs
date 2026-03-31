@@ -206,6 +206,10 @@ const MAX_ABS_STACK_DEPTH: usize = 64;
 const MAX_FIXPOINT_ITER_MULTIPLIER: usize = 8;
 /// Minimum worklist budget for the context-sensitive refinement.
 const MIN_CONTEXT_FIXPOINT_ITERATIONS: usize = 256;
+/// Always allow refinement for tiny CFGs where the extra pass is still cheap.
+const MAX_CONTEXT_REFINEMENT_SMALL_CFG_BLOCKS: usize = 32;
+/// Skip context refinement on larger CFGs where the second pass is usually wasted work.
+const MAX_CONTEXT_REFINEMENT_BLOCKS: usize = 128;
 /// Maximum number of call-string frames tracked for full CFG discovery.
 const MAX_CALL_CONTEXT_DEPTH: u8 = 8;
 
@@ -753,7 +757,10 @@ impl Bytecode<'_> {
     }
 
     fn should_refine_with_contexts(&self, flat: &InterpResult) -> bool {
-        flat.jump_targets.iter().any(|(_, target)| matches!(target, JumpTarget::Top))
+        let num_blocks = self.cfg.blocks.len();
+        ((num_blocks <= MAX_CONTEXT_REFINEMENT_SMALL_CFG_BLOCKS)
+            || (flat.converged && num_blocks <= MAX_CONTEXT_REFINEMENT_BLOCKS))
+            && flat.jump_targets.iter().any(|(_, target)| matches!(target, JumpTarget::Top))
             && self.insts.iter().any(|inst| {
                 inst.opcode == op::JUMP
                     && inst.is_static_jump()
@@ -773,7 +780,7 @@ impl Bytecode<'_> {
         block_states[Block::from_usize(0)] = BlockState::Known(Vec::new());
 
         let mut const_sets = ConstSetInterner::new();
-        let discovered_edges =
+        let (discovered_edges, converged) =
             self.run_flat_fixpoint(&mut block_states, snapshots, &mut const_sets);
 
         let mut jump_targets: Vec<(Inst, JumpTarget)> = Vec::new();
@@ -803,7 +810,7 @@ impl Bytecode<'_> {
             })
             .count();
 
-        InterpResult { jump_targets, count, converged: true }
+        InterpResult { jump_targets, count, converged }
     }
 
     fn run_flat_fixpoint_no_dynamic_jumps(&self, snapshots: &mut Snapshots) {
@@ -1125,7 +1132,7 @@ impl Bytecode<'_> {
         block_states: &mut IndexVec<Block, BlockState>,
         snapshots: &mut Snapshots,
         const_sets: &mut ConstSetInterner,
-    ) -> IndexVec<Block, SmallVec<[Block; 4]>> {
+    ) -> (IndexVec<Block, SmallVec<[Block; 4]>>, bool) {
         let num_blocks = self.cfg.blocks.len();
         let mut worklist = BlockWorklist::new(num_blocks);
         worklist.push(Block::from_usize(0));
@@ -1189,7 +1196,7 @@ impl Bytecode<'_> {
             msg = if converged { "converged" } else { "did not converge" },
         );
 
-        discovered
+        (discovered, converged)
     }
 
     /// Run a worklist-based fixpoint to compute abstract block states.
