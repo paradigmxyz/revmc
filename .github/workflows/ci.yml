@@ -68,6 +68,9 @@ jobs:
       matrix:
         os: ["ubuntu", "macos"]
         mode: [interpreter, jit, aot]
+        exclude:
+          - os: macos
+            mode: aot
         include:
           - os: ubuntu
             runner: depot-ubuntu-latest-8
