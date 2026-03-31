@@ -1,4 +1,4 @@
-use super::{Bytecode, Inst, InstData, InstFlags, bitvec_as_bytes, block_analysis::Block};
+use super::{Bytecode, Inst, InstData, InstFlags, bitvec_as_bytes, passes::block_analysis::Block};
 use oxc_index::IndexVec;
 use revm_bytecode::opcode as op;
 use revm_primitives::hex;

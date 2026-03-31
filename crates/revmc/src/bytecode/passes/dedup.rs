@@ -4,10 +4,8 @@
 //! and eliminates duplicates by marking them as dead code and redirecting predecessors to a
 //! single canonical copy.
 
-use super::{
-    Bytecode, InstFlags,
-    block_analysis::{Block, BlockData},
-};
+use super::block_analysis::{Block, BlockData};
+use crate::bytecode::{Bytecode, InstFlags};
 use alloy_primitives::map::HashMap;
 use revm_bytecode::opcode as op;
 use smallvec::SmallVec;
@@ -123,7 +121,7 @@ impl<'a> Bytecode<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{AnalysisConfig, block_analysis::tests::analyze_code_with};
+    use crate::bytecode::{AnalysisConfig, passes::block_analysis::tests::analyze_code_with};
     use revm_bytecode::opcode as op;
 
     #[test]
@@ -239,7 +237,7 @@ mod tests {
     #[test]
     fn dedup_weth() {
         let code =
-            revm_primitives::hex::decode(include_str!("../../../../data/weth.rt.hex").trim())
+            revm_primitives::hex::decode(include_str!("../../../../../data/weth.rt.hex").trim())
                 .unwrap();
         let mut bytecode = crate::Bytecode::new(&code, revm_primitives::hardfork::SpecId::CANCUN);
         bytecode.config = AnalysisConfig::DEDUP;
