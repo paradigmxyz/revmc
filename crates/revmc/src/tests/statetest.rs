@@ -8,7 +8,11 @@ fn run_state_tests(mode: CompileMode) {
         return;
     };
 
-    if let Ok(subdir) = std::env::var("SUBDIR") {
+    let mut subdir = std::env::var("SUBDIR").ok();
+    if subdir.is_none() && std::env::var_os("CI").is_none() && matches!(mode, CompileMode::Aot) {
+        subdir = Some("stRevertTest".into());
+    }
+    if let Some(subdir) = subdir {
         path = path.join(subdir);
     }
 
