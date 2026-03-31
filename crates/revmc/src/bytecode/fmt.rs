@@ -66,8 +66,14 @@ impl Bytecode<'_> {
 
                 // Instruction text.
                 let mut text = String::from("  ");
-                let opcode = data.to_op_in(self);
-                write!(text, "{opcode}").unwrap();
+                if data.has_push_override() {
+                    let val = self.push_value(data).unwrap();
+                    let name = data.to_op();
+                    write!(text, "{name} {val:#x}").unwrap();
+                } else {
+                    let opcode = data.to_op_in(self);
+                    write!(text, "{opcode}").unwrap();
+                }
                 if data.flags.contains(InstFlags::INVALID_JUMP) {
                     text.push_str(" INVALID");
                 } else if data.flags.contains(InstFlags::MULTI_JUMP) {
@@ -301,9 +307,14 @@ impl<'a> Bytecode<'a> {
                         data.stack_section.inputs, data.stack_section.max_growth
                     )?;
                 }
-                let opcode = data.to_op_in(self);
+                let op_display = if data.has_push_override() {
+                    let val = self.push_value(data).unwrap();
+                    format!("{} {val:#x}", data.to_op())
+                } else {
+                    data.to_op_in(self).to_string()
+                };
                 let mut op_str =
-                    abbreviate_hex(&opcode.to_string()).replace('>', "\\>").replace('<', "\\<");
+                    abbreviate_hex(&op_display).replace('>', "\\>").replace('<', "\\<");
                 if !data.gas_section.is_empty() {
                     write!(op_str, " [g={}]", data.gas_section.gas_cost).unwrap();
                 }

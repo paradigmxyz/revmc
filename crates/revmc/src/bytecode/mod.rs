@@ -253,6 +253,8 @@ impl<'a> Bytecode<'a> {
         self.mark_dead_code();
 
         self.rebuild_cfg();
+        self.clone_continuations();
+        self.rebuild_cfg();
         self.block_analysis();
 
         // Run again: block_analysis may mark additional jumps as invalid/diverging,
@@ -396,6 +398,39 @@ impl<'a> Bytecode<'a> {
         }
         let start = data.pc as usize + 1;
         self.code.get(start..start + imm_len)
+    }
+
+    /// Returns the semantic push value for a PUSH instruction.
+    ///
+    /// Unlike [`get_imm`], this respects push overrides set by [`set_push_override`]
+    /// (e.g. for cloned continuation blocks with synthetic PCs).
+    pub(crate) fn push_value(&self, data: &InstData) -> Option<U256> {
+        match data.opcode {
+            op::PUSH0 => Some(U256::ZERO),
+            op::PUSH1..=op::PUSH32 => {
+                if data.has_push_override() {
+                    let idx = U256Idx::from_usize((data.data - 1) as usize);
+                    Some(*self.u256_interner.borrow().get(idx))
+                } else {
+                    self.get_imm(data).map(U256::from_be_slice)
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Overrides the push value for a PUSH instruction.
+    ///
+    /// Used by continuation block cloning to redirect a caller's PUSH to point at
+    /// a cloned continuation's synthetic PC instead of the original.
+    fn set_push_override(&mut self, inst: Inst, value: U256) {
+        debug_assert!(
+            matches!(self.insts[inst].opcode, op::PUSH1..=op::PUSH32),
+            "set_push_override on non-PUSH: {:?}",
+            self.insts[inst].to_op(),
+        );
+        let idx = self.intern_u256(value);
+        self.insts[inst].data = idx.index() as u32 + 1;
     }
 
     /// Returns `true` if the given program counter is a valid jump destination.
@@ -579,6 +614,12 @@ impl InstData {
     #[inline]
     pub(crate) fn is_push(&self) -> bool {
         matches!(self.opcode, op::PUSH0..=op::PUSH32)
+    }
+
+    /// Returns `true` if this PUSH instruction has an overridden value.
+    #[inline]
+    pub(crate) fn has_push_override(&self) -> bool {
+        self.is_push() && self.data != 0
     }
 
     /// Returns `true` if this instruction is a jump instruction (`JUMP`/`JUMPI`).

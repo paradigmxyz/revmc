@@ -3,6 +3,8 @@
 pub(crate) mod block_analysis;
 pub(crate) use block_analysis::{Cfg, Snapshots};
 
+mod clone;
+
 mod const_fold;
 
 mod dedup;
