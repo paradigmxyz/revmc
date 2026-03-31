@@ -264,12 +264,6 @@ pub(crate) struct BlockData {
 }
 
 impl BlockData {
-    /// Returns the number of instructions in this block.
-    #[inline]
-    fn len(&self) -> usize {
-        self.insts().len()
-    }
-
     #[inline]
     pub(crate) fn terminator(&self) -> Inst {
         self.insts.end - 1
