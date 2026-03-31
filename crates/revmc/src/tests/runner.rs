@@ -14,6 +14,11 @@ use revm_primitives::{B256, HashMap};
 use similar_asserts::assert_eq;
 use std::{fmt, path::Path, sync::OnceLock};
 
+/// Initializes `tracing_subscriber` for tests. Safe to call multiple times.
+pub fn init_tracing() {
+    let _ = tracing_subscriber::fmt::try_init();
+}
+
 /// Default test environment struct for test expected values.
 #[derive(Clone, Debug)]
 pub struct DefEnv {
