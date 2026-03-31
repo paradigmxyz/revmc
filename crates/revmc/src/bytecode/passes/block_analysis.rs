@@ -1309,6 +1309,8 @@ impl Bytecode<'_> {
         // When non-return Top jumps exist, any private-function entry (reachable
         // JUMPDEST that is the callee of a private call) could receive an unexpected
         // stack at runtime, making return resolutions from that function unsound.
+        // Only invalidate the return jumps of affected functions, not the entire
+        // transitive successor set — intermediate block resolutions remain valid.
         let has_external_top_jump = jump_targets.iter().any(|(inst, target)| {
             if !matches!(target, JumpTarget::Top) {
                 return false;
@@ -1317,17 +1319,56 @@ impl Bytecode<'_> {
             !summaries[bid].is_private_return
         });
         if has_external_top_jump {
+            // Collect function entry blocks.
+            let mut function_entries: BitVec = BitVec::repeat(false, num_blocks);
             for bid in self.cfg.blocks.indices() {
                 let is_function_entry = summaries
                     .iter()
                     .any(|s| s.private_call.as_ref().is_some_and(|c| c.callee_block == bid));
                 if is_function_entry {
-                    suspect.set(bid.index(), true);
+                    function_entries.set(bid.index(), true);
+                }
+            }
+
+            // Only invalidate return jumps: jumps in blocks that are private returns
+            // AND are reachable from a function entry (transitively through the CFG).
+            let mut in_function: BitVec = BitVec::repeat(false, num_blocks);
+            let mut propagate = BlockWorklist::new(num_blocks);
+            for bid in self.cfg.blocks.indices() {
+                if function_entries[bid.index()] {
+                    in_function.set(bid.index(), true);
+                    propagate.push(bid);
+                }
+            }
+            while let Some(bid) = propagate.pop() {
+                for &succ in self.cfg.blocks[bid].succs.iter().chain(discovered_edges[bid].iter()) {
+                    let si = succ.index();
+                    // Stop at function entries — don't cross into called functions.
+                    if !in_function[si] && !function_entries[si] {
+                        in_function.set(si, true);
+                        propagate.push(succ);
+                    }
+                }
+            }
+
+            // Invalidate return jumps within function bodies.
+            for (inst, target) in jump_targets.iter_mut() {
+                if !matches!(
+                    target,
+                    JumpTarget::Const(_) | JumpTarget::Multi(_) | JumpTarget::Invalid
+                ) {
+                    continue;
+                }
+                if let Some(bid) = self.cfg.inst_to_block[*inst]
+                    && summaries[bid].is_private_return
+                    && in_function[bid.index()]
+                {
+                    *target = JumpTarget::Top;
                 }
             }
         }
 
-        // Propagate suspect flag forward through the CFG.
+        // Propagate suspect flag forward through the CFG for Bottom+JUMPDEST predecessors.
         let mut propagate = BlockWorklist::new(num_blocks);
         for bid in self.cfg.blocks.indices() {
             if suspect[bid.index()] {
@@ -1388,7 +1429,7 @@ impl Bytecode<'_> {
             }
         }
 
-        // Same function-entry seeding as the context-sensitive variant.
+        // Targeted invalidation of return jumps in function bodies.
         let has_external_top_jump = jump_targets.iter().any(|(inst, target)| {
             if !matches!(target, JumpTarget::Top) {
                 return false;
@@ -1397,12 +1438,46 @@ impl Bytecode<'_> {
             !summaries[bid].is_private_return
         });
         if has_external_top_jump {
+            let mut function_entries: BitVec = BitVec::repeat(false, num_blocks);
             for bid in self.cfg.blocks.indices() {
                 let is_function_entry = summaries
                     .iter()
                     .any(|s| s.private_call.as_ref().is_some_and(|c| c.callee_block == bid));
                 if is_function_entry {
-                    suspect.set(bid.index(), true);
+                    function_entries.set(bid.index(), true);
+                }
+            }
+
+            let mut in_function: BitVec = BitVec::repeat(false, num_blocks);
+            let mut propagate = BlockWorklist::new(num_blocks);
+            for bid in self.cfg.blocks.indices() {
+                if function_entries[bid.index()] {
+                    in_function.set(bid.index(), true);
+                    propagate.push(bid);
+                }
+            }
+            while let Some(bid) = propagate.pop() {
+                for &succ in self.cfg.blocks[bid].succs.iter().chain(discovered_edges[bid].iter()) {
+                    let si = succ.index();
+                    if !in_function[si] && !function_entries[si] {
+                        in_function.set(si, true);
+                        propagate.push(succ);
+                    }
+                }
+            }
+
+            for (inst, target) in jump_targets.iter_mut() {
+                if !matches!(
+                    target,
+                    JumpTarget::Const(_) | JumpTarget::Multi(_) | JumpTarget::Invalid
+                ) {
+                    continue;
+                }
+                if let Some(bid) = self.cfg.inst_to_block[*inst]
+                    && summaries[bid].is_private_return
+                    && in_function[bid.index()]
+                {
+                    *target = JumpTarget::Top;
                 }
             }
         }
