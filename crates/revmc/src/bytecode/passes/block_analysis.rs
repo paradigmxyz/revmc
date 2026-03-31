@@ -460,7 +460,7 @@ impl BlockData {
 }
 
 /// Resolved jump target after fixpoint.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum JumpTarget {
     /// Not yet observed.
     Bottom,
@@ -1624,6 +1624,41 @@ pub(crate) mod tests {
         bytecode
     }
 
+    pub(crate) fn prepare_bytecode_for_block_analysis(code: Vec<u8>) -> Bytecode<'static> {
+        crate::tests::init_tracing();
+
+        let code = &*Box::leak(code.into_boxed_slice());
+        eprintln!("{}", hex::encode(code));
+        let mut bytecode = Bytecode::new(code, SpecId::CANCUN);
+        bytecode.static_jump_analysis();
+        bytecode.mark_dead_code();
+        bytecode.rebuild_cfg();
+        bytecode
+    }
+
+    pub(crate) fn prepare_hex_for_block_analysis(hex: &str) -> Bytecode<'static> {
+        let code = hex::decode(hex.trim()).unwrap();
+        prepare_bytecode_for_block_analysis(code)
+    }
+
+    pub(crate) fn empty_snapshots(bytecode: &Bytecode<'_>) -> Snapshots {
+        let n = bytecode.insts.len();
+        Snapshots {
+            inputs: IndexVec::from_vec(vec![SmallVec::new(); n]),
+            outputs: IndexVec::from_vec(vec![None; n]),
+        }
+    }
+
+    pub(crate) fn unresolved_jump_insts(bytecode: &Bytecode<'_>) -> Vec<Inst> {
+        bytecode
+            .insts
+            .iter_enumerated()
+            .filter_map(|(inst, data)| {
+                (data.is_jump() && !data.flags.contains(InstFlags::STATIC_JUMP)).then_some(inst)
+            })
+            .collect()
+    }
+
     #[test]
     fn revert_sub_call_storage_oog() {
         let bytecode = analyze_hex(
@@ -2127,6 +2162,124 @@ mod tests_edge_cases {
         eprintln!("{bytecode}");
         // The JUMPI should be resolved as static.
         assert!(!bytecode.has_dynamic_jumps);
+    }
+
+    #[test]
+    fn no_dynamic_jumps_still_produce_snapshots() {
+        let merge_pc: u8 = 16;
+        let then_pc: u8 = 10;
+        #[rustfmt::skip]
+        let mut bytecode = prepare_bytecode_for_block_analysis(vec![
+            op::PUSH0,                 // pc=0: condition (always false)
+            op::PUSH1, then_pc,        // pc=1
+            op::JUMPI,                 // pc=3: static after simple jump analysis
+            // Else: push 0xAA.
+            op::PUSH1, 0xAA,           // pc=4
+            op::PUSH1, merge_pc,       // pc=6
+            op::JUMP,                  // pc=8: -> merge
+            op::INVALID,               // pc=9
+            // Then: push 0xBB (dead after constant-JUMPI pruning).
+            op::JUMPDEST,              // pc=10
+            op::PUSH1, 0xBB,           // pc=11
+            op::PUSH1, merge_pc,       // pc=13
+            op::JUMP,                  // pc=15: -> merge
+            // Merge.
+            op::JUMPDEST,              // pc=16
+            op::PUSH0,                 // pc=17
+            op::MSTORE,                // pc=18
+            op::STOP,                  // pc=19
+        ]);
+
+        assert!(!bytecode.has_dynamic_jumps, "expected static-jump-only bytecode");
+
+        let mut snapshots = empty_snapshots(&bytecode);
+        let (resolved, count) = bytecode.run_abstract_interp(&mut snapshots);
+        assert!(resolved.is_empty(), "unexpected jump resolutions in no-dynamic-jump path");
+        assert_eq!(count, 0);
+
+        bytecode.snapshots = snapshots;
+        let mstore = bytecode.iter_insts().find(|(_, d)| d.opcode == op::MSTORE).unwrap().0;
+        assert_eq!(bytecode.const_operand(mstore, 1), Some(U256::from(0xAA)));
+    }
+
+    #[test]
+    fn tiny_cfg_refines_even_if_flat_does_not_converge() {
+        let fn_pc: u8 = 6;
+        #[rustfmt::skip]
+        let bytecode = prepare_bytecode_for_block_analysis(vec![
+            op::PUSH1, fn_pc,         // pc=0
+            op::JUMP,                 // pc=2: static call-like jump
+            op::INVALID,              // pc=3
+            op::INVALID,              // pc=4
+            op::INVALID,              // pc=5
+            op::JUMPDEST,             // pc=6: function entry
+            op::PUSH0,                // pc=7
+            op::MLOAD,                // pc=8: unknown jump target
+            op::JUMP,                 // pc=9
+        ]);
+
+        assert!(bytecode.cfg.blocks.len() <= MAX_CONTEXT_REFINEMENT_SMALL_CFG_BLOCKS);
+
+        let dynamic_jump = unresolved_jump_insts(&bytecode).into_iter().next().unwrap();
+        let flat = InterpResult {
+            jump_targets: vec![(dynamic_jump, JumpTarget::Top)],
+            count: 0,
+            converged: false,
+        };
+
+        assert!(bytecode.should_refine_with_contexts(&flat));
+    }
+
+    #[test]
+    fn refinement_is_discarded_when_it_does_not_improve() {
+        let fn_pc: u8 = 6;
+        #[rustfmt::skip]
+        let bytecode = prepare_bytecode_for_block_analysis(vec![
+            op::PUSH1, fn_pc,         // pc=0
+            op::JUMP,                 // pc=2: static call-like jump
+            op::INVALID,              // pc=3
+            op::INVALID,              // pc=4
+            op::INVALID,              // pc=5
+            op::JUMPDEST,             // pc=6: function entry
+            op::PUSH0,                // pc=7
+            op::MLOAD,                // pc=8: unknown jump target
+            op::JUMP,                 // pc=9
+        ]);
+
+        let jump_insts = unresolved_jump_insts(&bytecode);
+        let mut flat_snapshots = empty_snapshots(&bytecode);
+        let flat = bytecode.run_flat_abstract_interp(&jump_insts, &mut flat_snapshots);
+        assert!(bytecode.should_refine_with_contexts(&flat));
+
+        let mut context_snapshots = empty_snapshots(&bytecode);
+        let refined = bytecode.run_context_sensitive_interp(&jump_insts, &mut context_snapshots);
+        assert!(refined.converged, "expected refinement to converge for tiny CFG");
+        assert_eq!(refined.count, flat.count);
+        assert!(refined.jump_targets.iter().all(|(_, target)| matches!(target, JumpTarget::Top)));
+
+        let mut chosen_snapshots = empty_snapshots(&bytecode);
+        let (chosen_targets, chosen_count) = bytecode.run_abstract_interp(&mut chosen_snapshots);
+        assert_eq!(chosen_count, flat.count);
+        assert_eq!(chosen_targets, flat.jump_targets);
+    }
+
+    #[test]
+    fn large_cfg_skips_refinement_and_keeps_flat_result() {
+        let bytecode =
+            prepare_hex_for_block_analysis(include_str!("../../../../../data/fiat_token.rt.hex"));
+
+        assert!(bytecode.cfg.blocks.len() > MAX_CONTEXT_REFINEMENT_BLOCKS);
+
+        let jump_insts = unresolved_jump_insts(&bytecode);
+        let mut flat_snapshots = empty_snapshots(&bytecode);
+        let flat = bytecode.run_flat_abstract_interp(&jump_insts, &mut flat_snapshots);
+        assert!(flat.jump_targets.iter().any(|(_, target)| matches!(target, JumpTarget::Top)));
+        assert!(!bytecode.should_refine_with_contexts(&flat));
+
+        let mut chosen_snapshots = empty_snapshots(&bytecode);
+        let (chosen_targets, chosen_count) = bytecode.run_abstract_interp(&mut chosen_snapshots);
+        assert_eq!(chosen_count, flat.count);
+        assert_eq!(chosen_targets, flat.jump_targets);
     }
 
     /// A loop where the stack grows each iteration until clamped.
