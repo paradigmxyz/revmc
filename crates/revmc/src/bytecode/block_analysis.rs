@@ -1708,3 +1708,278 @@ mod tests_const_fold {
         assert_eq!(const_fold(op::SAR, &[U256::from(256), U256::from(1)]), Some(U256::ZERO));
     }
 }
+
+#[cfg(test)]
+mod tests_edge_cases {
+    use super::{tests::*, *};
+
+    /// Three callers to the same internal function. The return JUMP should
+    /// resolve to Multi with three targets.
+    #[test]
+    fn multi_target_jump_three_callers() {
+        let ret1: u8 = 5;
+        let ret2: u8 = 12;
+        let ret3: u8 = 19;
+        let func: u8 = 22;
+        #[rustfmt::skip]
+        let bytecode = analyze_code(vec![
+            // Call site 1.
+            op::PUSH1, ret1,
+            op::PUSH1, func,
+            op::JUMP,
+            op::JUMPDEST,       // ret1
+            op::POP,
+            // Call site 2.
+            op::PUSH1, ret2,
+            op::PUSH1, func,
+            op::JUMP,
+            op::JUMPDEST,       // ret2
+            op::POP,
+            // Call site 3.
+            op::PUSH1, ret3,
+            op::PUSH1, func,
+            op::JUMP,
+            op::JUMPDEST,       // ret3
+            op::POP,
+            op::STOP,
+            // Internal function.
+            op::JUMPDEST,       // func
+            op::PUSH1, 0x42,
+            op::SWAP1,
+            op::JUMP,           // return (dynamic)
+        ]);
+        eprintln!("{bytecode}");
+
+        let return_jump = bytecode
+            .iter_insts()
+            .find(|(_, d)| d.is_jump() && d.flags.contains(InstFlags::MULTI_JUMP));
+        assert!(return_jump.is_some(), "expected a multi-target jump");
+        let (rj_inst, _) = return_jump.unwrap();
+        let targets = bytecode.multi_jump_targets(rj_inst).unwrap();
+        assert_eq!(targets.len(), 3, "expected 3 targets, got {}", targets.len());
+        assert!(!bytecode.has_dynamic_jumps, "expected no dynamic jumps");
+    }
+
+    /// DUP and SWAP should preserve constant values through the stack.
+    #[test]
+    fn dup_swap_const_propagation() {
+        // PUSH1 0xAA -> [0xAA]
+        // PUSH1 0xBB -> [0xAA, 0xBB]
+        // DUP2       -> [0xAA, 0xBB, 0xAA]
+        // SWAP1      -> [0xAA, 0xAA, 0xBB]
+        // PUSH0      -> [0xAA, 0xAA, 0xBB, 0x00]
+        // MSTORE     -> pops (0x00, 0xBB), leaves [0xAA, 0xAA]
+        // STOP
+        #[rustfmt::skip]
+        let bytecode = analyze_code(vec![
+            op::PUSH1, 0xAA,   // inst 0
+            op::PUSH1, 0xBB,   // inst 1
+            op::DUP2,          // inst 2
+            op::SWAP1,         // inst 3
+            op::PUSH0,         // inst 4
+            op::MSTORE,        // inst 5
+            op::STOP,          // inst 6
+        ]);
+        // DUP2 output should be 0xAA.
+        assert_eq!(bytecode.const_output(Inst::from_usize(2)), Some(U256::from(0xAA)));
+        // At MSTORE (inst 5): TOS = 0x00, second = 0xBB (swapped back).
+        assert_eq!(bytecode.const_operand(Inst::from_usize(5), 0), Some(U256::ZERO));
+        assert_eq!(bytecode.const_operand(Inst::from_usize(5), 1), Some(U256::from(0xBB)));
+    }
+
+    /// JUMPI with a constant condition should still record both operands.
+    #[test]
+    fn jumpi_const_condition_snapshot() {
+        let target: u8 = 8;
+        #[rustfmt::skip]
+        let bytecode = analyze_code(vec![
+            op::PUSH1, 0x01,       // inst 0: condition = 1 (always taken)
+            op::PUSH1, target,     // inst 1: target
+            op::JUMPI,             // inst 2: static JUMPI
+            op::STOP,              // inst 3: fallthrough
+            op::JUMPDEST,          // inst 4: target
+            op::STOP,              // inst 5
+        ]);
+        eprintln!("{bytecode}");
+        // The JUMPI should be resolved as static.
+        assert!(!bytecode.has_dynamic_jumps);
+    }
+
+    /// A loop where the stack grows each iteration until clamped.
+    /// Verifies the analysis converges without losing precision at the top.
+    #[test]
+    fn loop_stack_growth_clamping() {
+        // bb0: PUSH1 0x42, then fall through to bb1.
+        // bb1: JUMPDEST, PUSH1 0x01, PUSH1 bb1_pc, JUMP  (loop back, growing stack).
+        //
+        // The stack grows by 1 each iteration (net +1 from PUSH before the loop jump).
+        // The abstract stack should clamp to MAX_ABS_STACK_DEPTH without conflict.
+        let loop_pc: u8 = 3;
+        #[rustfmt::skip]
+        let bytecode = analyze_code(vec![
+            op::PUSH1, 0x42,       // pc=0: initial value
+            op::PUSH1, 0x01,       // pc=2: another
+            op::JUMPDEST,          // pc=3: loop header (bb1)
+            op::PUSH1, 0x01,       // pc=4: push each iteration
+            op::PUSH1, loop_pc,    // pc=6: loop target
+            op::JUMP,              // pc=8: back-edge
+        ]);
+        eprintln!("{bytecode}");
+        // Should converge without panicking.
+        // The JUMP should be static (resolved by adjacent PUSH+JUMP).
+        assert!(!bytecode.has_dynamic_jumps);
+    }
+
+    /// An unreached block that contains a constant sequence should still
+    /// have its intra-block snapshots populated via recovery seeding.
+    #[test]
+    fn unreached_block_dup_const_propagation() {
+        // The function stores the return address to memory, making it
+        // unresolvable. The return block uses DUP to copy a constant.
+        let ret_pc: u8 = 5;
+        let func_pc: u8 = 12;
+        #[rustfmt::skip]
+        let bytecode = analyze_code(vec![
+            op::PUSH1, ret_pc,     // pc=0
+            op::PUSH1, func_pc,    // pc=2
+            op::JUMP,              // pc=4: -> func
+            // Return block (unreached).
+            op::JUMPDEST,          // pc=5, inst=3: ret
+            op::PUSH1, 0x20,      // pc=6, inst=4
+            op::DUP1,             // pc=8, inst=5: dup 0x20
+            op::MSTORE,           // pc=9, inst=6: MSTORE(0x20, 0x20)
+            op::STOP,             // pc=10, inst=7
+            op::INVALID,          // pc=11
+            // Function body: store return addr to memory, then load and jump.
+            op::JUMPDEST,         // pc=12, inst=9
+            op::PUSH0,            // pc=13, inst=10
+            op::MSTORE,           // pc=14, inst=11
+            op::PUSH0,            // pc=15, inst=12
+            op::MLOAD,            // pc=16, inst=13
+            op::JUMP,             // pc=17, inst=14
+        ]);
+        eprintln!("{bytecode}");
+
+        // Return jump should remain dynamic.
+        assert!(bytecode.has_dynamic_jumps);
+        // In the unreached block, DUP1 should produce const 0x20.
+        assert_eq!(bytecode.const_output(Inst::from_usize(5)), Some(U256::from(0x20)));
+        // MSTORE operands: TOS = 0x20 (duped), second = 0x20 (original).
+        assert_eq!(bytecode.const_operand(Inst::from_usize(6), 0), Some(U256::from(0x20)));
+        assert_eq!(bytecode.const_operand(Inst::from_usize(6), 1), Some(U256::from(0x20)));
+    }
+
+    /// A single-instruction block (just JUMPDEST as the terminator) used as a
+    /// jump target. This tests the edge case where block.len() == 1.
+    #[test]
+    fn single_inst_block_jump_target() {
+        let target: u8 = 5;
+        #[rustfmt::skip]
+        let bytecode = analyze_code(vec![
+            op::PUSH1, target,     // pc=0
+            op::JUMP,              // pc=2: static jump
+            op::INVALID,           // pc=3
+            op::INVALID,           // pc=4
+            op::JUMPDEST,          // pc=5: single-inst block
+            op::STOP,              // pc=6
+        ]);
+        eprintln!("{bytecode}");
+        assert!(!bytecode.has_dynamic_jumps);
+    }
+
+    /// A JUMP with an invalid target (not a JUMPDEST) should be marked invalid.
+    #[test]
+    fn invalid_jump_target() {
+        // The dynamic jump target points to a non-JUMPDEST instruction.
+        // The function pushes a constant that isn't a valid JUMPDEST pc.
+        let func_pc: u8 = 5;
+        #[rustfmt::skip]
+        let bytecode = analyze_code(vec![
+            op::PUSH1, 0xFF,       // pc=0: push invalid target
+            op::PUSH1, func_pc,    // pc=2: push function entry
+            op::JUMP,              // pc=4: -> func
+            // Function: swap and jump to the caller-provided target.
+            op::JUMPDEST,          // pc=5: func
+            op::JUMP,              // pc=6: jump to 0xFF (invalid)
+        ]);
+        eprintln!("{bytecode}");
+        // The dynamic JUMP at pc=6 should be resolved as invalid.
+        let jump_inst = bytecode
+            .iter_insts()
+            .find(|(_, d)| d.is_jump() && d.flags.contains(InstFlags::INVALID_JUMP));
+        assert!(jump_inst.is_some(), "expected an invalid jump");
+    }
+
+    /// Constant propagation through a diamond CFG (if-then-else merge).
+    /// Both branches push the same constant, so the merge should preserve it.
+    #[test]
+    fn diamond_cfg_same_const() {
+        let then_pc: u8 = 9;
+        let merge_pc: u8 = 13;
+        #[rustfmt::skip]
+        let bytecode = analyze_code(vec![
+            op::PUSH1, 0x42,           // pc=0: push same const on both paths
+            op::PUSH0,                 // pc=2: condition (always false)
+            op::PUSH1, then_pc,        // pc=3
+            op::JUMPI,                 // pc=5: branch
+            // Else: push same const.
+            op::PUSH1, merge_pc,       // pc=6
+            op::JUMP,                  // pc=8: -> merge
+            // Then:
+            op::JUMPDEST,              // pc=9
+            op::PUSH1, merge_pc,       // pc=10
+            op::JUMP,                  // pc=12: -> merge
+            // Merge:
+            op::JUMPDEST,              // pc=13
+            op::PUSH0,                 // pc=14
+            op::MSTORE,               // pc=15: MSTORE(0, 0x42)
+            op::STOP,                  // pc=16
+        ]);
+        eprintln!("{bytecode}");
+        // At the merge MSTORE, the value (operand 1) should still be 0x42
+        // since both branches had the same constant on the stack.
+        let mstore = bytecode.iter_insts().find(|(_, d)| d.opcode == op::MSTORE).unwrap().0;
+        assert_eq!(bytecode.const_operand(mstore, 1), Some(U256::from(0x42)));
+    }
+
+    /// Diamond CFG where branches push different constants — the merge should
+    /// yield None (Top) for const_operand.
+    #[test]
+    fn diamond_cfg_different_const() {
+        let then_pc: u8 = 10;
+        let merge_pc: u8 = 16;
+        #[rustfmt::skip]
+        let bytecode = analyze_code(vec![
+            op::PUSH0,                 // pc=0: condition
+            op::PUSH1, then_pc,        // pc=1
+            op::JUMPI,                 // pc=3: branch
+            // Else: push 0xAA.
+            op::PUSH1, 0xAA,          // pc=4
+            op::PUSH1, merge_pc,       // pc=6
+            op::JUMP,                  // pc=8: -> merge
+            op::INVALID,               // pc=9
+            // Then: push 0xBB.
+            op::JUMPDEST,              // pc=10
+            op::PUSH1, 0xBB,          // pc=11
+            op::PUSH1, merge_pc,       // pc=13
+            op::JUMP,                  // pc=15: -> merge
+            // Merge:
+            op::JUMPDEST,              // pc=16: merge
+            op::PUSH0,                 // pc=17
+            op::MSTORE,               // pc=18: MSTORE(0, ???)
+            op::STOP,                  // pc=19
+        ]);
+        eprintln!("{bytecode}");
+        // At the merge MSTORE, the value (operand 1) should be None
+        // since the two branches push different constants.
+        let mstore = bytecode.iter_insts().find(|(_, d)| d.opcode == op::MSTORE).unwrap().0;
+        assert_eq!(bytecode.const_operand(mstore, 1), None);
+    }
+
+    /// Bytecode that is just STOP — minimal edge case.
+    #[test]
+    fn empty_bytecode() {
+        let bytecode = analyze_code(vec![op::STOP]);
+        assert!(!bytecode.has_dynamic_jumps);
+    }
+}
