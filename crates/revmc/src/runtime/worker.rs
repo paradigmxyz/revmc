@@ -271,7 +271,7 @@ fn worker_loop(
     let _span = debug_span!("revmc_worker", id).entered();
     debug!("compile worker started");
 
-    let backend = match EvmLlvmBackend::new(false, opt_level) {
+    let backend = match EvmLlvmBackend::new(false) {
         Ok(b) => b,
         Err(e) => {
             error!(error = %e, "failed to create LLVM backend, worker exiting");
@@ -279,6 +279,7 @@ fn worker_loop(
         }
     };
     let mut jit_compiler = EvmCompiler::new(backend);
+    jit_compiler.set_opt_level(opt_level);
     jit_compiler.debug_assertions(debug_assertions);
 
     use crate::runtime::config::CompilationKind;
@@ -373,9 +374,10 @@ fn compile_aot_artifact(job: &AotJob) -> Result<WorkerSuccess, String> {
     use crate::{EvmCompiler, EvmLlvmBackend, Linker};
     use std::io::Read;
 
-    let backend = EvmLlvmBackend::new(true, job.opt_level)
+    let backend = EvmLlvmBackend::new(true)
         .map_err(|e| format!("AOT backend creation failed: {e}"))?;
     let mut compiler = EvmCompiler::new(backend);
+    compiler.set_opt_level(job.opt_level);
 
     compiler
         .translate(&job.symbol_name, &job.bytecode[..], job.key.spec_id)
