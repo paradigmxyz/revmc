@@ -462,7 +462,8 @@ impl<'a> Bytecode<'a> {
     /// Returns `None` if the value is unknown or the analysis didn't cover this instruction.
     #[allow(dead_code)]
     pub(crate) fn const_operand(&self, inst: Inst, depth: usize) -> Option<U256> {
-        let idx = self.snapshots.inputs.get(inst)?.get(depth)?.as_const()?;
+        let snap = self.snapshots.inputs.get(inst)?;
+        let idx = snap.get(snap.len().checked_sub(1 + depth)?)?.as_const()?;
         Some(*self.u256_interner.borrow().get(idx))
     }
 

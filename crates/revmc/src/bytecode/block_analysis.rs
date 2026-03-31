@@ -31,6 +31,7 @@
 use super::{Bytecode, Inst, InstFlags, Interner, U256Idx};
 use crate::InstData;
 use bitvec::vec::BitVec;
+use either::Either;
 use oxc_index::IndexVec;
 use revm_bytecode::opcode as op;
 use revm_interpreter::instructions::i256::{i256_cmp, i256_div, i256_mod};
@@ -46,7 +47,7 @@ super::impl_index_display!(ConstSetIdx, "{}");
 
 /// Per-instruction snapshot of abstract operand values.
 ///
-/// Index 0 is TOS (first popped / depth 0), index 1 is second from top, etc.
+/// Stored in stack order: index 0 is the deepest operand, last element is TOS.
 /// Only the instruction's inputs are stored, not the entire stack.
 pub(crate) type OperandSnapshot = SmallVec<[AbsValue; 4]>;
 
@@ -551,7 +552,7 @@ impl Bytecode<'_> {
         let mut jump_targets: Vec<(Inst, JumpTarget)> = Vec::new();
         let mut has_top_jump = false;
         for &jump_inst in &jump_insts {
-            let target = match snapshots.inputs[jump_inst].first() {
+            let target = match snapshots.inputs[jump_inst].last() {
                 Some(&operand) => self.resolve_jump_operand(operand, &const_sets),
                 None => {
                     // No snapshot means the block was never interpreted (unreachable).
@@ -628,8 +629,6 @@ impl Bytecode<'_> {
         discovered: &mut IndexVec<Block, SmallVec<[Block; 4]>>,
         disc_preds: &mut IndexVec<Block, SmallVec<[Block; 4]>>,
     ) {
-        use either::Either;
-
         let consts = match operand {
             AbsValue::Const(idx) => Either::Left(std::iter::once(idx)),
             AbsValue::ConstSet(set_idx) => Either::Right(const_sets.get(set_idx).iter().copied()),
@@ -830,7 +829,7 @@ impl Bytecode<'_> {
             let term = &self.insts[term_inst];
             if term.is_jump()
                 && !term.flags.contains(InstFlags::STATIC_JUMP)
-                && let Some(&operand) = snapshots.inputs[term_inst].first()
+                && let Some(&operand) = snapshots.inputs[term_inst].last()
             {
                 self.discover_jump_edges(
                     operand,
@@ -901,13 +900,11 @@ impl Bytecode<'_> {
             let inp = inp as usize;
             let out = out as usize;
 
-            // Record pre-instruction input operand snapshot.
+            // Record pre-instruction input operand snapshot (in stack order, TOS last).
             let start = stack.len().saturating_sub(inp);
             let snap = &mut snapshots.inputs[i];
             snap.clear();
-            for &v in stack[start..].iter().rev() {
-                snap.push(v);
-            }
+            snap.extend_from_slice(&stack[start..]);
 
             match inst.opcode {
                 op::PUSH0 => {
