@@ -9,18 +9,13 @@ use revmc_backend::Result;
 use smallvec::SmallVec;
 use std::cell::RefCell;
 
-mod block_analysis;
-use block_analysis::{Cfg, Snapshots};
-
-mod dedup;
+mod passes;
+use passes::{Cfg, GasSection, SectionsAnalysis, Snapshots, StackSection};
 
 mod fmt;
 
 mod interner;
 pub(crate) use interner::Interner;
-
-mod sections;
-use sections::{GasSection, SectionsAnalysis, StackSection};
 
 mod info;
 pub use info::*;
@@ -221,9 +216,7 @@ impl<'a> Bytecode<'a> {
 
     /// Returns an iterator over the instructions.
     #[inline]
-    pub(crate) fn iter_insts(
-        &self,
-    ) -> impl DoubleEndedIterator<Item = (Inst, &InstData)> + Clone + '_ {
+    pub(crate) fn iter_insts(&self) -> impl DoubleEndedIterator<Item = (Inst, &InstData)> + Clone {
         self.iter_all_insts().filter(|(_, data)| !data.is_dead_code())
     }
 
@@ -232,7 +225,7 @@ impl<'a> Bytecode<'a> {
     #[allow(dead_code)]
     pub(crate) fn iter_mut_insts(
         &mut self,
-    ) -> impl DoubleEndedIterator<Item = (Inst, &mut InstData)> + '_ {
+    ) -> impl DoubleEndedIterator<Item = (Inst, &mut InstData)> {
         self.iter_mut_all_insts().filter(|(_, data)| !data.is_dead_code())
     }
 
@@ -240,7 +233,7 @@ impl<'a> Bytecode<'a> {
     #[inline]
     pub(crate) fn iter_all_insts(
         &self,
-    ) -> impl DoubleEndedIterator<Item = (Inst, &InstData)> + ExactSizeIterator + Clone + '_ {
+    ) -> impl DoubleEndedIterator<Item = (Inst, &InstData)> + ExactSizeIterator + Clone {
         self.insts.iter_enumerated()
     }
 
@@ -249,7 +242,7 @@ impl<'a> Bytecode<'a> {
     #[allow(dead_code)]
     pub(crate) fn iter_mut_all_insts(
         &mut self,
-    ) -> impl DoubleEndedIterator<Item = (Inst, &mut InstData)> + ExactSizeIterator + '_ {
+    ) -> impl DoubleEndedIterator<Item = (Inst, &mut InstData)> + ExactSizeIterator {
         self.insts.iter_mut_enumerated()
     }
 

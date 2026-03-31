@@ -1,4 +1,4 @@
-use super::{Bytecode, Inst};
+use crate::bytecode::{Bytecode, Inst};
 use core::fmt;
 
 /// A gas section tracks the total base gas cost of a sequence of instructions.
