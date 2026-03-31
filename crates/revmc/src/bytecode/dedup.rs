@@ -1,0 +1,252 @@
+//! Block deduplication pass.
+//!
+//! Identifies structurally identical non-fallthrough blocks (same opcode + immediate sequence)
+//! and eliminates duplicates by marking them as dead code and redirecting predecessors to a
+//! single canonical copy.
+
+use super::{
+    Bytecode, InstFlags,
+    block_analysis::{Block, BlockData},
+};
+use alloy_primitives::map::HashMap;
+use revm_bytecode::opcode as op;
+use smallvec::SmallVec;
+
+impl<'a> Bytecode<'a> {
+    /// Deduplicate structurally identical non-fallthrough blocks.
+    ///
+    /// Eligible blocks are those whose terminator cannot fall through (diverging instructions
+    /// like REVERT/STOP/RETURN, or unconditional JUMP). For every group of byte-identical
+    /// blocks, keeps one canonical copy while marking the rest as dead code.
+    /// Predecessors that reach a dead duplicate via a static jump or multi-jump are
+    /// redirected to the canonical block. For predecessors that reach the duplicate via
+    /// fallthrough, a redirect entry is stored in [`Bytecode::redirects`] so the
+    /// translator can map the dead instruction to the canonical block's IR block.
+    #[instrument(name = "dedup", level = "debug", skip_all)]
+    pub(crate) fn dedup_blocks(&mut self) {
+        if self.cfg.blocks.is_empty() {
+            return;
+        }
+
+        // Group eligible (diverging, non-dead) blocks by their raw bytecode content.
+        let mut key_to_blocks = HashMap::<&[u8], SmallVec<[Block; 4]>>::default();
+        for bid in self.cfg.blocks.indices() {
+            let block = &self.cfg.blocks[bid];
+            if block.dead {
+                continue;
+            }
+
+            // Only dedup blocks whose terminator cannot fall through (diverging or
+            // unconditional JUMP). JUMPI blocks fall through to position-dependent targets.
+            let term = &self.insts[block.terminator()];
+            if term.can_fall_through() {
+                continue;
+            }
+
+            // Skip blocks that start with a reachable JUMPDEST — these can be targets of
+            // dynamic jumps and must remain at their original PC for the jump table.
+            let first = &self.insts[block.insts.start];
+            if first.is_reachable_jumpdest(self.has_dynamic_jumps) {
+                continue;
+            }
+
+            // Skip blocks containing PC — it returns the current program counter,
+            // so identical bytecode at different positions produces different results.
+            if block.insts().any(|i| self.insts[i].opcode == op::PC) {
+                continue;
+            }
+
+            let bytes = self.block_bytes(block);
+            if bytes.is_empty() {
+                continue;
+            }
+            key_to_blocks.entry(bytes).or_default().push(bid);
+        }
+
+        let mut deduped = 0usize;
+        for group in key_to_blocks.values() {
+            if group.len() < 2 {
+                continue;
+            }
+            let (&canonical, dups) = group.split_first().unwrap();
+            let canonical_first_inst = self.cfg.blocks[canonical].insts.start;
+            for &dup in dups {
+                deduped += 1;
+                debug!("deduped: {from} -> {to}", from = dup, to = canonical);
+
+                // Mark all instructions in the duplicate block as dead.
+                self.cfg.blocks[dup].dead = true;
+                let dup_block = &self.cfg.blocks[dup];
+                for i in dup_block.insts() {
+                    self.insts[i].flags |= InstFlags::DEAD_CODE;
+                }
+
+                let dup_first_inst = dup_block.insts.start;
+                self.redirects.insert(dup_first_inst, canonical_first_inst);
+
+                // Redirect predecessors that reach the duplicate via static jumps.
+                for &pred in &dup_block.preds {
+                    let term_inst = self.cfg.blocks[pred].terminator();
+                    let term = &self.insts[term_inst];
+                    let is_static = term.is_static_jump()
+                        && !term.flags.contains(InstFlags::INVALID_JUMP)
+                        && !term.flags.contains(InstFlags::MULTI_JUMP)
+                        && term.data == dup_first_inst.index() as u32;
+                    let is_multi = term.flags.contains(InstFlags::MULTI_JUMP);
+
+                    if is_static {
+                        self.insts[term_inst].data = canonical_first_inst.index() as u32;
+                    }
+                    if is_multi && let Some(targets) = self.multi_jump_targets.get_mut(&term_inst) {
+                        for t in targets.iter_mut() {
+                            if *t == dup_first_inst {
+                                *t = canonical_first_inst;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        debug!(deduped, "finished");
+    }
+
+    /// Returns the raw bytecode bytes for a block's PC range, or empty if the block
+    /// extends past the original code (e.g. the synthetic STOP padding).
+    fn block_bytes(&self, block: &BlockData) -> &'a [u8] {
+        let start_pc = self.insts[block.insts.start].pc as usize;
+        let end_inst = &self.insts[block.terminator()];
+        let end_pc = end_inst.pc as usize + 1 + end_inst.imm_len() as usize;
+        self.code.get(start_pc..end_pc).unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{AnalysisConfig, block_analysis::tests::analyze_code_with};
+    use revm_bytecode::opcode as op;
+
+    #[test]
+    fn dedup_identical_revert_blocks() {
+        // Two JUMPI branches each fall through to an identical `PUSH1 0x00 / DUP1 / REVERT`.
+        #[rustfmt::skip]
+        let bytecode = analyze_code_with(vec![
+            // bb0: JUMPI to pc=9
+            op::PUSH0,          // pc=0
+            op::CALLDATALOAD,   // pc=1
+            op::PUSH1, 9,       // pc=2
+            op::JUMPI,          // pc=4
+            // bb1: revert A
+            op::PUSH1, 0x00,    // pc=5
+            op::DUP1,           // pc=7
+            op::REVERT,         // pc=8
+            // bb2: JUMPDEST, JUMPI to pc=19
+            op::JUMPDEST,       // pc=9
+            op::PUSH0,          // pc=10
+            op::CALLDATALOAD,   // pc=11
+            op::PUSH1, 19,      // pc=12
+            op::JUMPI,          // pc=14
+            // bb3: revert B (identical to A)
+            op::PUSH1, 0x00,    // pc=15
+            op::DUP1,           // pc=17
+            op::REVERT,         // pc=18
+            // bb4: actual target
+            op::JUMPDEST,       // pc=19
+            op::STOP,           // pc=20
+        ], AnalysisConfig::DEDUP);
+
+        eprintln!("{bytecode}");
+
+        // One of the two `PUSH1 0x00 / DUP1 / REVERT` blocks should be redirected.
+        assert_eq!(
+            bytecode.redirects.len(),
+            1,
+            "expected exactly 1 redirect for 2 identical revert blocks",
+        );
+    }
+
+    #[test]
+    fn dedup_preserves_unique_blocks() {
+        // Two different diverging blocks — they should NOT be deduplicated.
+        #[rustfmt::skip]
+        let bytecode = analyze_code_with(vec![
+            op::PUSH0,
+            op::CALLDATALOAD,
+            op::PUSH1, 9,
+            op::JUMPI,
+            // revert with 0
+            op::PUSH1, 0x00,
+            op::DUP1,
+            op::REVERT,
+            // JUMPDEST -> STOP (different terminator)
+            op::JUMPDEST,
+            op::STOP,
+        ], AnalysisConfig::DEDUP);
+
+        eprintln!("{bytecode}");
+        assert!(bytecode.redirects.is_empty(), "should not dedup different blocks");
+    }
+
+    #[test]
+    fn dedup_three_identical_blocks() {
+        // Three identical `PUSH1 0x00 / DUP1 / REVERT` blocks.
+        #[rustfmt::skip]
+        let bytecode = analyze_code_with(vec![
+            // bb0: JUMPI -> pc=9
+            op::PUSH0, op::CALLDATALOAD, op::PUSH1, 9, op::JUMPI,
+            // bb1: revert A
+            op::PUSH1, 0x00, op::DUP1, op::REVERT,
+            // bb2: JUMPI -> pc=19
+            op::JUMPDEST, op::PUSH0, op::CALLDATALOAD, op::PUSH1, 19, op::JUMPI,
+            // bb3: revert B
+            op::PUSH1, 0x00, op::DUP1, op::REVERT,
+            // bb4: JUMPI -> pc=29
+            op::JUMPDEST, op::PUSH0, op::CALLDATALOAD, op::PUSH1, 29, op::JUMPI,
+            // bb5: revert C
+            op::PUSH1, 0x00, op::DUP1, op::REVERT,
+            // bb6: target
+            op::JUMPDEST, op::STOP,
+        ], AnalysisConfig::DEDUP);
+
+        eprintln!("{bytecode}");
+
+        let redirect_count = bytecode.redirects.len();
+        assert_eq!(redirect_count, 2, "expected 2 redirects, got {redirect_count}");
+    }
+
+    #[test]
+    fn dedup_skips_pc_opcode() {
+        // Two identical `PC / PUSH1 0x00 / REVERT` blocks — PC is position-dependent,
+        // so they must NOT be deduplicated.
+        #[rustfmt::skip]
+        let bytecode = analyze_code_with(vec![
+            // bb0: JUMPI -> pc=9
+            op::PUSH0, op::CALLDATALOAD, op::PUSH1, 9, op::JUMPI,
+            // bb1: PC + revert A
+            op::PC, op::PUSH1, 0x00, op::REVERT,
+            // bb2: JUMPDEST -> fallthrough
+            op::JUMPDEST, op::PUSH0, op::CALLDATALOAD, op::PUSH1, 19, op::JUMPI,
+            // bb3: PC + revert B (same bytes, different PC value)
+            op::PC, op::PUSH1, 0x00, op::REVERT,
+            // bb4: target
+            op::JUMPDEST, op::STOP,
+        ], AnalysisConfig::DEDUP);
+
+        eprintln!("{bytecode}");
+        assert!(bytecode.redirects.is_empty(), "should not dedup blocks containing PC");
+    }
+
+    #[test]
+    fn dedup_weth() {
+        let code =
+            revm_primitives::hex::decode(include_str!("../../../../data/weth.rt.hex").trim())
+                .unwrap();
+        let mut bytecode = crate::Bytecode::new(&code, revm_primitives::hardfork::SpecId::CANCUN);
+        bytecode.config = AnalysisConfig::DEDUP;
+        bytecode.analyze().unwrap();
+
+        eprintln!("{bytecode}");
+
+        assert_eq!(bytecode.redirects.len(), 13);
+    }
+}

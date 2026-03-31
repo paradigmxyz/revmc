@@ -1,4 +1,4 @@
-use revmc::{EvmCompiler, EvmLlvmBackend, OptimizationLevel, Result, SpecId, primitives::hex};
+use revmc::{EvmCompiler, EvmLlvmBackend, Result, SpecId, primitives::hex};
 use std::path::PathBuf;
 
 include!("./src/common.rs");
@@ -13,7 +13,7 @@ fn main() -> Result<()> {
     let bytecode = FIBONACCI_CODE;
 
     let out_dir = PathBuf::from(std::env::var("OUT_DIR")?);
-    let backend = EvmLlvmBackend::new(true, OptimizationLevel::default())?;
+    let backend = EvmLlvmBackend::new(true)?;
     let mut compiler = EvmCompiler::new(backend);
     compiler.translate(name, bytecode, SpecId::CANCUN)?;
     let object = out_dir.join(name).with_extension("o");

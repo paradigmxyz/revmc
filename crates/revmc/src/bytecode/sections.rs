@@ -1,4 +1,4 @@
-use super::Bytecode;
+use super::{Bytecode, Inst};
 use core::fmt;
 
 /// A gas section tracks the total base gas cost of a sequence of instructions.
@@ -63,27 +63,32 @@ impl StackSection {
 }
 
 /// Gas section analysis state.
-#[derive(Default)]
 struct GasSectionAnalysis {
     gas_cost: u64,
-    start_inst: usize,
+    start_inst: Inst,
+}
+
+impl Default for GasSectionAnalysis {
+    fn default() -> Self {
+        Self { gas_cost: 0, start_inst: Inst::from_usize(0) }
+    }
 }
 
 impl GasSectionAnalysis {
     /// Saves the current gas section to the bytecode.
-    fn save_to(&self, bytecode: &mut Bytecode<'_>, next_section_inst: usize) {
-        if self.start_inst >= bytecode.insts.len() {
+    fn save_to(&self, bytecode: &mut Bytecode<'_>, next_section_inst: Inst) {
+        if self.start_inst >= bytecode.insts.len_idx() {
             return;
         }
         let section = self.section();
         if !section.is_empty() {
             trace!(
-                inst = self.start_inst,
-                len = next_section_inst - self.start_inst,
+                inst = %self.start_inst,
+                len = next_section_inst.index() - self.start_inst.index(),
                 ?section,
                 "saving gas"
             );
-            let mut insts = bytecode.insts[self.start_inst..].iter_mut();
+            let mut insts = bytecode.insts.raw[self.start_inst.index()..].iter_mut();
             if let Some(inst) = insts.find(|inst| !inst.is_dead_code()) {
                 inst.gas_section = section;
             }
@@ -91,7 +96,7 @@ impl GasSectionAnalysis {
     }
 
     /// Resets the analysis for a new section.
-    fn reset(&mut self, inst: usize) {
+    fn reset(&mut self, inst: Inst) {
         *self = Self { start_inst: inst, ..Default::default() };
     }
 
@@ -102,29 +107,34 @@ impl GasSectionAnalysis {
 }
 
 /// Stack section analysis state.
-#[derive(Default)]
 struct StackSectionAnalysis {
     inputs: i32,
     diff: i32,
     max_growth: i32,
-    start_inst: usize,
+    start_inst: Inst,
+}
+
+impl Default for StackSectionAnalysis {
+    fn default() -> Self {
+        Self { inputs: 0, diff: 0, max_growth: 0, start_inst: Inst::from_usize(0) }
+    }
 }
 
 impl StackSectionAnalysis {
     /// Saves the current stack section to the bytecode.
-    fn save_to(&self, bytecode: &mut Bytecode<'_>, next_section_inst: usize) {
-        if self.start_inst >= bytecode.insts.len() {
+    fn save_to(&self, bytecode: &mut Bytecode<'_>, next_section_inst: Inst) {
+        if self.start_inst >= bytecode.insts.len_idx() {
             return;
         }
         let section = self.section();
         if !section.is_empty() {
             trace!(
-                inst = self.start_inst,
-                len = next_section_inst - self.start_inst,
+                inst = %self.start_inst,
+                len = next_section_inst.index() - self.start_inst.index(),
                 ?section,
                 "saving stack"
             );
-            let mut insts = bytecode.insts[self.start_inst..].iter_mut();
+            let mut insts = bytecode.insts.raw[self.start_inst.index()..].iter_mut();
             if let Some(inst) = insts.find(|inst| !inst.is_dead_code()) {
                 inst.stack_section = section;
             }
@@ -132,7 +142,7 @@ impl StackSectionAnalysis {
     }
 
     /// Resets the analysis for a new section.
-    fn reset(&mut self, inst: usize) {
+    fn reset(&mut self, inst: Inst) {
         *self = Self { start_inst: inst, ..Default::default() };
     }
 
@@ -154,7 +164,7 @@ pub(crate) struct SectionsAnalysis {
 
 impl SectionsAnalysis {
     /// Process a single instruction.
-    pub(crate) fn process(&mut self, bytecode: &mut Bytecode<'_>, inst: usize) {
+    pub(crate) fn process(&mut self, bytecode: &mut Bytecode<'_>, inst: Inst) {
         // JUMPDEST starts both gas and stack sections.
         if bytecode.inst(inst).is_reachable_jumpdest(bytecode.has_dynamic_jumps()) {
             self.gas.save_to(bytecode, inst);
@@ -191,18 +201,18 @@ impl SectionsAnalysis {
 
     /// Finishes the analysis.
     pub(crate) fn finish(self, bytecode: &mut Bytecode<'_>) {
-        let last = bytecode.insts.len() - 1;
+        let last = bytecode.insts.len_idx() - 1;
         self.gas.save_to(bytecode, last);
         self.stack.save_to(bytecode, last);
         if enabled!(tracing::Level::DEBUG) {
-            let mut max_len = 0;
-            let mut current = 0;
+            let mut max_len = 0usize;
+            let mut current = Inst::from_usize(0);
             let mut count = 0usize;
             for (inst, data) in bytecode.iter_insts() {
                 if data.stack_section.is_empty() {
                     continue;
                 }
-                let len = inst - current;
+                let len = inst.index() - current.index();
                 max_len = max_len.max(len);
                 current = inst;
                 count += 1;

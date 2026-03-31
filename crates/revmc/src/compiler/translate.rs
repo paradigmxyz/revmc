@@ -2,6 +2,7 @@
 
 use super::default_attrs;
 use crate::{Backend, Builder, Bytecode, EvmContext, Inst, InstData, InstFlags, IntCC, Result};
+use oxc_index::IndexVec;
 use revm_bytecode::opcode as op;
 use revm_interpreter::{InputsImpl, InstructionResult};
 use revm_primitives::U256;
@@ -90,11 +91,11 @@ pub(super) struct FunctionCx<'a, B: Backend> {
     /// The bytecode being translated.
     bytecode: &'a Bytecode<'a>,
     /// Instruction index to 1-based line number in bytecode.txt (for debug info).
-    inst_lines: Vec<u32>,
+    inst_lines: IndexVec<Inst, u32>,
     /// All entry blocks for each instruction.
-    inst_entries: Vec<B::BasicBlock>,
+    inst_entries: IndexVec<Inst, B::BasicBlock>,
     /// The current instruction being translated.
-    current_inst: Inst,
+    current_inst: Option<Inst>,
 
     // Basic blocks are `None` when outside of a main function.
     /// `dynamic_jump_table` incoming values.
@@ -229,19 +230,28 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let ecx = bcx.fn_param(4);
 
         // Create all instruction entry blocks.
+        // Dead-code instructions map to `unreachable_block`, except when block deduplication
+        // has a redirect — those are resolved in a second pass once all blocks exist.
         let unreachable_block = bcx.create_block("unreachable");
-        let inst_entries: Vec<_> = bytecode
+        let mut inst_entries: IndexVec<Inst, _> = bytecode
             .iter_all_insts()
             .map(|(i, data)| {
                 if data.is_dead_code() {
                     unreachable_block
                 } else {
-                    let name = if config.debug { &bytecode.op_block_name(i, "") } else { "" };
+                    let name = if config.debug { &bytecode.op_block_name(Some(i), "") } else { "" };
                     bcx.create_block(name)
                 }
             })
             .collect();
         assert!(!inst_entries.is_empty(), "translating empty bytecode");
+
+        // Apply dedup redirects: map dead duplicate entries to their canonical block.
+        if bytecode.has_redirects() {
+            for (&from, &to) in &bytecode.redirects {
+                inst_entries[from] = inst_entries[to];
+            }
+        }
 
         let dynamic_jump_table = bcx.create_block("dynamic_jump_table");
         let suspend_block = bcx.create_block("suspend");
@@ -267,9 +277,9 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             bcx,
 
             bytecode,
-            inst_lines: if config.debug { bytecode.take_inst_lines() } else { Vec::new() },
+            inst_lines: if config.debug { bytecode.take_inst_lines() } else { IndexVec::new() },
             inst_entries,
-            current_inst: usize::MAX,
+            current_inst: None,
 
             incoming_dynamic_jumps: Vec::new(),
             dynamic_jump_table,
@@ -323,7 +333,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         }
 
         // The bytecode is guaranteed to have at least one instruction.
-        let first_inst_block = fx.inst_entries[0];
+        let first_inst_block = fx.inst_entries[Inst::from_usize(0)];
         let post_entry_block = fx.bcx.create_block_after(entry_block, "entry.post");
         let resume_block = fx.bcx.create_block_after(post_entry_block, "resume");
         fx.bcx.br(post_entry_block);
@@ -493,7 +503,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
     #[instrument(level = "debug", skip_all, fields(inst = %self.bytecode.inst(inst).to_op()))]
     fn translate_inst(&mut self, inst: Inst) -> Result<()> {
-        self.current_inst = inst;
+        self.current_inst = Some(inst);
         let data = self.bytecode.inst(inst);
         let opcode = data.opcode;
         let entry_block = self.inst_entries[inst];
@@ -928,12 +938,38 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                             self.len_offset -= 1;
                         }
                         self.return_block.unwrap()
+                    } else if data.flags.contains(InstFlags::MULTI_JUMP) {
+                        let target_value = self.pop();
+                        let targets = self.bytecode.multi_jump_targets(inst).unwrap();
+
+                        if opcode == op::JUMPI {
+                            let cond_word = self.pop();
+                            let cond = self.bcx.icmp_imm(IntCC::NotEqual, cond_word, 0);
+                            let next = self.inst_entries[inst + 1];
+                            let switch_block = self.bcx.create_block("multi_jump");
+                            self.bcx.brif(cond, switch_block, next);
+                            self.bcx.switch_to_block(switch_block);
+                        }
+
+                        let switch_targets: Vec<_> = targets
+                            .iter()
+                            .map(|&t| {
+                                let pc = self.bytecode.inst(t).pc as u64;
+                                (pc, self.inst_entries[t])
+                            })
+                            .collect();
+                        self.add_invalid_jump();
+                        let return_block = self.return_block.unwrap();
+                        self.bcx.switch(target_value, return_block, &switch_targets, true);
+
+                        self.inst_entries[inst] = self.bcx.current_block().unwrap();
+                        goto_return!(no_branch);
                     } else if data.flags.contains(InstFlags::STATIC_JUMP) {
                         // Block-resolved jumps still have the target on the stack; pop and discard.
                         if data.flags.contains(InstFlags::BLOCK_RESOLVED_JUMP) {
                             let _ = self.pop();
                         }
-                        let target_inst = data.data as usize;
+                        let target_inst = Inst::from_usize(data.data as usize);
                         debug_assert_eq!(
                             *self.bytecode.inst(target_inst),
                             op::JUMPDEST,
@@ -1172,7 +1208,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     fn suspend(&mut self) {
         // Register the next instruction as the resume block.
         let idx = self.resume_blocks.len();
-        let value = self.add_resume_at(self.inst_entries[self.current_inst + 1]);
+        let value = self.add_resume_at(self.inst_entries[self.current_inst.unwrap() + 1]);
 
         // Register the current block as the suspend block.
         let value = match value {
@@ -1504,7 +1540,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
     /// Returns the current instruction.
     fn current_inst(&self) -> &InstData {
-        self.bytecode.inst(self.current_inst)
+        self.bytecode.inst(self.current_inst.unwrap())
     }
 
     /// Returns the current block.

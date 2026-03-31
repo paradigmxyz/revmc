@@ -13,7 +13,7 @@ mod compiler;
 pub use compiler::{CompileTimings, EvmCompiler, EvmCompilerInput};
 
 mod linker;
-pub use linker::Linker;
+pub use linker::{Linker, shared_library_path};
 
 #[cfg(feature = "alloy-evm")]
 pub mod alloy_evm;
@@ -61,8 +61,7 @@ type FxHashMap<K, V> = alloy_primitives::map::HashMap<K, V, alloy_primitives::ma
 /// Enable for `cargo asm -p revmc --lib`.
 #[cfg(any())]
 pub fn generate_all_assembly() -> EvmCompiler<EvmLlvmBackend> {
-    let mut compiler =
-        EvmCompiler::new(EvmLlvmBackend::new(false, OptimizationLevel::default()).unwrap());
+    let mut compiler = EvmCompiler::new(EvmLlvmBackend::new(false).unwrap());
     let _ = compiler.jit(None, &[], primitives::SpecId::ARROW_GLACIER).unwrap();
     unsafe { compiler.clear().unwrap() };
     compiler

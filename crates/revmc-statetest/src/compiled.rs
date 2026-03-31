@@ -13,7 +13,7 @@ use revm_handler::{
 };
 use revm_primitives::{hardfork::SpecId, keccak256, B256, U256};
 use revm_statetest_types::{SpecName, TestSuite, TestUnit};
-use revmc::{EvmCompiler, EvmCompilerFn, EvmLlvmBackend, Linker, OptimizationLevel};
+use revmc::{shared_library_path, EvmCompiler, EvmCompilerFn, EvmLlvmBackend, Linker};
 use std::{
     cell::RefCell,
     collections::HashMap,
@@ -353,7 +353,7 @@ impl CompileCache {
         let tmp_dir = tempfile::tempdir()
             .map_err(|e| TestErrorKind::CompilationError(format!("tempdir: {e}")))?;
         let obj_path = tmp_dir.path().join("a.o");
-        let so_path = tmp_dir.path().join("a.so");
+        let shared_lib_path = shared_library_path(tmp_dir.path(), "a");
 
         compiler
             .write_object_to_file(&obj_path)
@@ -361,10 +361,10 @@ impl CompileCache {
 
         let linker = Linker::new();
         linker
-            .link(&so_path, [obj_path.to_str().unwrap()])
+            .link(&shared_lib_path, [obj_path.to_str().unwrap()])
             .map_err(|e| TestErrorKind::CompilationError(format!("link: {e}")))?;
 
-        let lib = unsafe { libloading::Library::new(&so_path) }
+        let lib = unsafe { libloading::Library::new(&shared_lib_path) }
             .map_err(|e| TestErrorKind::CompilationError(format!("load: {e}")))?;
 
         for (i, (code_hash, name)) in names.iter().enumerate() {
@@ -409,7 +409,7 @@ impl CompileCache {
 }
 
 fn make_compiler(aot: bool) -> RefCell<EvmCompiler<EvmLlvmBackend>> {
-    RefCell::new(EvmCompiler::new(EvmLlvmBackend::new(aot, OptimizationLevel::default()).unwrap()))
+    RefCell::new(EvmCompiler::new(EvmLlvmBackend::new(aot).unwrap()))
 }
 
 // ── Compiled test execution ─────────────────────────────────────────────────

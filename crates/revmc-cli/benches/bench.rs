@@ -15,10 +15,17 @@ use std::time::Duration;
 
 const SPEC_ID: SpecId = SpecId::OSAKA;
 
-/// Benchmarks that are too slow for CI due to large bytecode (LLVM compilation time under
-/// valgrind).
-const SKIP_COMPILE: &[&str] =
-    &["snailtracer", "seaport", "fiat_token", "uniswap_v2_pair", "airdrop", "usdc_proxy"];
+/// Benchmarks whose LLVM JIT compilation is too slow for CI under valgrind.
+/// The `translate` (frontend) benchmark is still included.
+const SKIP_JIT: &[&str] = &[
+    "snailtracer",
+    "seaport",
+    "fiat_token",
+    "uniswap_v2_pair",
+    "univ2_router",
+    "airdrop",
+    "usdc_proxy",
+];
 /// Benchmarks that are too slow for CI entirely (runtime is also very slow under valgrind).
 const SKIP_ALL: &[&str] = &["seaport", "snailtracer"];
 
@@ -74,17 +81,17 @@ fn run_bytecode_bench(c: &mut Criterion, bench: &revmc_cli::Bench) {
 
     // ── Compile-time ────────────────────────────────────────────────────
 
-    if !SKIP_COMPILE.contains(&name) {
-        g.bench_function(format!("{name}/compile/translate"), |b| {
-            b.iter_batched_ref(
-                || new_compiler(OptimizationLevel::Default),
-                |compiler| {
-                    compiler.translate(name, &def.bytecode, SPEC_ID).unwrap();
-                },
-                BatchSize::PerIteration,
-            )
-        });
+    g.bench_function(format!("{name}/compile/translate"), |b| {
+        b.iter_batched_ref(
+            || new_compiler(OptimizationLevel::Default),
+            |compiler| {
+                compiler.translate(name, &def.bytecode, SPEC_ID).unwrap();
+            },
+            BatchSize::PerIteration,
+        )
+    });
 
+    if !SKIP_JIT.contains(&name) {
         g.bench_function(format!("{name}/compile/jit"), |b| {
             b.iter_batched_ref(
                 || {
@@ -106,8 +113,7 @@ fn run_bytecode_bench(c: &mut Criterion, bench: &revmc_cli::Bench) {
     host.apply_bench(def);
     let table = instruction_table::<EthInterpreter, BenchHost>();
 
-    let opt_level = revmc::OptimizationLevel::default();
-    let backend = EvmLlvmBackend::new(false, opt_level).unwrap();
+    let backend = EvmLlvmBackend::new(false).unwrap();
     let mut compiler = EvmCompiler::new(backend);
     compiler.inspect_stack_length(!def.stack_input.is_empty());
     compiler.gas_metering(true);
@@ -188,8 +194,10 @@ fn run_bytecode_bench(c: &mut Criterion, bench: &revmc_cli::Bench) {
 }
 
 fn new_compiler(opt_level: OptimizationLevel) -> EvmCompiler<EvmLlvmBackend> {
-    let backend = EvmLlvmBackend::new(false, opt_level).unwrap();
-    EvmCompiler::new(backend)
+    let backend = EvmLlvmBackend::new(false).unwrap();
+    let mut compiler = EvmCompiler::new(backend);
+    compiler.set_opt_level(opt_level);
+    compiler
 }
 
 criterion_group!(benches, bench);

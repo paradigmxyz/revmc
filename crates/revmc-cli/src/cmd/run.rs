@@ -7,7 +7,7 @@ use revm_interpreter::{
 };
 use revmc::{
     EvmCompiler, EvmContext, EvmLlvmBackend, OptimizationLevel, eyre::ensure,
-    primitives::hardfork::SpecId,
+    primitives::hardfork::SpecId, shared_library_path,
 };
 use revmc_cli::{Bench, BenchHost, PreparedFixtureBench, get_benches, read_code};
 use std::{
@@ -139,8 +139,9 @@ impl RunArgs {
 
         // Build the compiler.
         let target = revmc::Target::new(self.target, self.target_cpu, self.target_features);
-        let backend = EvmLlvmBackend::new_for_target(self.aot, self.opt_level, &target)?;
+        let backend = EvmLlvmBackend::new_for_target(self.aot, &target)?;
         let mut compiler = EvmCompiler::new(backend);
+        compiler.set_opt_level(self.opt_level);
         let out_dir = if self.out_dir.is_some() {
             self.out_dir
         } else if self.dot.is_some() || self.display || self.parse_only {
@@ -207,16 +208,16 @@ impl RunArgs {
 
             // Link.
             if !self.no_link {
-                let so = out_dir.join("a.so");
+                let shared_lib = shared_library_path(&out_dir, "a");
                 let linker = revmc::Linker::new();
-                linker.link(&so, [obj.to_str().unwrap()])?;
-                ensure!(so.exists(), "Failed to link object file");
-                eprintln!("Linked shared object file to {}", so.display());
+                linker.link(&shared_lib, [obj.to_str().unwrap()])?;
+                ensure!(shared_lib.exists(), "Failed to link object file");
+                eprintln!("Linked shared object file to {}", shared_lib.display());
             }
 
             // Fall through to loading the library below if requested.
             if let Some(load @ None) = &mut load {
-                *load = Some(out_dir.join("a.so"));
+                *load = Some(shared_library_path(&out_dir, "a"));
             } else {
                 return Ok(());
             }

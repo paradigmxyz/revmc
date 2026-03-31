@@ -10,7 +10,7 @@ use revm_handler::{
 };
 use revm_primitives::{Address, B256, Bytes, StorageKeyMap, StorageValue, TxKind, U256};
 use revm_state::AccountInfo;
-use revmc::{EvmCompiler, EvmCompilerFn, EvmLlvmBackend, OptimizationLevel, RawEvmCompilerFn};
+use revmc::{EvmCompiler, EvmCompilerFn, EvmLlvmBackend, RawEvmCompilerFn};
 use serde::Deserialize;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -234,8 +234,7 @@ impl PreparedFixtureBench {
         };
 
         // JIT compile all contract bytecodes.
-        let backend =
-            EvmLlvmBackend::new(false, OptimizationLevel::default()).expect("LLVM backend");
+        let backend = EvmLlvmBackend::new(false).expect("LLVM backend");
         let mut compiler = Box::new(EvmCompiler::new(backend));
         let mut seen = HashSet::new();
         let mut pending = Vec::new();
