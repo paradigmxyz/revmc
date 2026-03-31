@@ -533,6 +533,8 @@ impl Bytecode<'_> {
             }
         }
 
+        // Run the fixpoint. When the worklist drains, unreached blocks are seeded
+        // with all-Top input (roots first, then remaining) and the fixpoint continues.
         let mut const_sets = ConstSetInterner::new();
         let discovered_edges = self.run_fixpoint(&mut block_states, snapshots, &mut const_sets);
 
@@ -709,6 +711,10 @@ impl Bytecode<'_> {
 
     /// Run a worklist-based fixpoint to compute abstract block states.
     ///
+    /// After the initial fixpoint converges, unreached (Bottom) blocks are seeded with
+    /// all-Top input — JUMPDEST roots first (one at a time for precision), then any
+    /// remaining blocks — and the fixpoint continues to propagate through them.
+    ///
     /// Returns the discovered dynamic-jump target edges per block.
     fn run_fixpoint(
         &self,
@@ -718,23 +724,73 @@ impl Bytecode<'_> {
     ) -> IndexVec<Block, SmallVec<[Block; 4]>> {
         let num_blocks = self.cfg.blocks.len();
         let mut worklist = Worklist::new(num_blocks);
-        worklist.push(Block::from_usize(0));
+        let first = Block::from_usize(0);
+        worklist.push(first);
 
-        // Discovered dynamic-jump target edges per block.
+        // Discovered dynamic-jump target edges per block, accumulated across all phases.
         let mut discovered: IndexVec<Block, SmallVec<[Block; 4]>> =
             IndexVec::from_vec(vec![SmallVec::new(); num_blocks]);
         // Reverse map: discovered predecessors per block.
         let mut disc_preds: IndexVec<Block, SmallVec<[Block; 4]>> =
             IndexVec::from_vec(vec![SmallVec::new(); num_blocks]);
 
-        let max_iterations = num_blocks * 8;
+        // Budget covers initial fixpoint + per-root recovery + batch-seed.
+        // Each root seed can trigger O(num_blocks) iterations, and there can be
+        // O(num_blocks) roots, so the total is O(num_blocks^2).
+        let max_iterations = num_blocks.saturating_mul(num_blocks).max(num_blocks * 8).min(100_000);
         let mut iterations = 0;
         let mut converged = true;
+        let mut seeded_remaining = false;
+        let mut last_root = first;
 
         // Reusable buffer to avoid per-iteration allocations.
         let mut stack_buf: Vec<AbsValue> = Vec::with_capacity(MAX_ABS_STACK_DEPTH);
 
-        while let Some(bid) = worklist.pop() {
+        loop {
+            let Some(bid) = worklist.pop() else {
+                if seeded_remaining {
+                    break;
+                }
+
+                // Find a root: Bottom, not dead, no predecessors.
+                // A Bottom block's predecessors are necessarily also Bottom (if a
+                // Known predecessor had an edge here, the fixpoint would have
+                // propagated to it), so this is equivalent to "no predecessors."
+                let root = self.cfg.blocks.iter_enumerated().find_map(|(bid, block)| {
+                    if !matches!(block_states[bid], BlockState::Bottom) || block.dead {
+                        return None;
+                    }
+                    (block.preds.is_empty() && disc_preds[bid].is_empty()).then_some(bid)
+                });
+
+                let mut push_block_with_fake_stack = |block_states: &mut IndexVec<_, _>, bid| {
+                    let block = &self.cfg.blocks[bid];
+                    let n = self.block_min_input_depth(block);
+                    block_states[bid] = BlockState::Known(vec![AbsValue::Top; n]);
+                    worklist.push(bid);
+                };
+
+                if let Some(root) = root {
+                    trace!(prev = %last_root, next = %root, %iterations, "finished root subgraph");
+                    push_block_with_fake_stack(block_states, root);
+                    last_root = root;
+                    continue;
+                }
+
+                // No more roots — batch-seed all remaining Bottom blocks.
+                seeded_remaining = true;
+                trace!(%iterations, "batch-seeding remaining");
+                for (bid, block) in self.cfg.blocks.iter_enumerated() {
+                    if matches!(block_states[bid], BlockState::Bottom) && !block.dead {
+                        push_block_with_fake_stack(block_states, bid);
+                        trace!(block = %bid, "adding remaining block");
+                    }
+                }
+                if worklist.queue.is_empty() {
+                    break;
+                }
+                continue;
+            };
             iterations += 1;
             if iterations > max_iterations {
                 converged = false;
@@ -787,6 +843,23 @@ impl Bytecode<'_> {
         );
 
         discovered
+    }
+
+    /// Computes the minimum input stack depth required to interpret a block without underflow.
+    fn block_min_input_depth(&self, block: &BlockData) -> usize {
+        let mut depth: isize = 0;
+        let mut min_depth: isize = 0;
+        for i in block.insts() {
+            let inst = &self.insts[i];
+            if inst.is_dead_code() || inst.flags.contains(InstFlags::SKIP_LOGIC) {
+                continue;
+            }
+            let (inp, out) = inst.stack_io();
+            depth -= inp as isize;
+            min_depth = min_depth.min(depth);
+            depth += out as isize;
+        }
+        (-min_depth) as usize
     }
 
     /// Interpret a sequence of instructions on the abstract stack.
@@ -1738,6 +1811,83 @@ mod tests_edge_cases {
         // Should converge without panicking.
         // The JUMP should be static (resolved by adjacent PUSH+JUMP).
         assert!(!bytecode.has_dynamic_jumps);
+    }
+
+    /// An unreached block that contains a constant sequence should still
+    /// have its intra-block snapshots populated via recovery seeding.
+    #[test]
+    fn unreached_block_const_propagation() {
+        // Simulates an internal function call where the return block is unreached by the
+        // fixpoint. The function stores the return address to memory then loads it back,
+        // making the return JUMP unresolvable by abstract interpretation.
+        let ret_pc: u8 = 5;
+        let func_pc: u8 = 10;
+        #[rustfmt::skip]
+        let bytecode = analyze_code(vec![
+            op::PUSH1, ret_pc,
+            op::PUSH1, func_pc,
+            op::JUMP,
+            // Return block (unreached).
+            op::JUMPDEST,
+            op::PUSH1, 0x40,
+            op::MLOAD,
+            op::STOP,
+            // Function body.
+            op::JUMPDEST,
+            op::PUSH0,
+            op::MSTORE,
+            op::PUSH0,
+            op::MLOAD,
+            op::JUMP,
+        ]);
+        eprintln!("{bytecode:?}");
+
+        // The return JUMP should be unresolved (dynamic).
+        assert!(bytecode.has_dynamic_jumps, "return jump should be unresolved");
+        let last_jump = bytecode.insts.last().unwrap();
+        assert!(last_jump.is_jump() && !last_jump.is_static_jump());
+
+        // The MLOAD at inst 5 (pc=8) should see const 0x40 from the PUSH at inst 4,
+        // even though the block starting at JUMPDEST (pc=5) is unreached by the fixpoint.
+        assert_eq!(bytecode.const_operand(Inst::from_usize(5), 0), Some(U256::from(0x40)));
+        // Output snapshot for the PUSH at inst 4 should also be available.
+        assert_eq!(bytecode.const_output(Inst::from_usize(4)), Some(U256::from(0x40)));
+    }
+
+    /// An unreached block with DUP should still propagate constants via recovery seeding.
+    #[test]
+    fn unreached_block_dup_const_propagation() {
+        let ret_pc: u8 = 5;
+        let func_pc: u8 = 12;
+        #[rustfmt::skip]
+        let bytecode = analyze_code(vec![
+            op::PUSH1, ret_pc,     // pc=0
+            op::PUSH1, func_pc,    // pc=2
+            op::JUMP,              // pc=4: -> func
+            // Return block (unreached).
+            op::JUMPDEST,          // pc=5, inst=3: ret
+            op::PUSH1, 0x20,      // pc=6, inst=4
+            op::DUP1,             // pc=8, inst=5: dup 0x20
+            op::MSTORE,           // pc=9, inst=6: MSTORE(0x20, 0x20)
+            op::STOP,             // pc=10, inst=7
+            op::INVALID,          // pc=11
+            // Function body: store return addr to memory, then load and jump.
+            op::JUMPDEST,         // pc=12, inst=9
+            op::PUSH0,            // pc=13, inst=10
+            op::MSTORE,           // pc=14, inst=11
+            op::PUSH0,            // pc=15, inst=12
+            op::MLOAD,            // pc=16, inst=13
+            op::JUMP,             // pc=17, inst=14
+        ]);
+        eprintln!("{bytecode}");
+
+        // Return jump should remain dynamic.
+        assert!(bytecode.has_dynamic_jumps);
+        // In the unreached block, DUP1 should produce const 0x20.
+        assert_eq!(bytecode.const_output(Inst::from_usize(5)), Some(U256::from(0x20)));
+        // MSTORE operands: TOS = 0x20 (duped), second = 0x20 (original).
+        assert_eq!(bytecode.const_operand(Inst::from_usize(6), 0), Some(U256::from(0x20)));
+        assert_eq!(bytecode.const_operand(Inst::from_usize(6), 1), Some(U256::from(0x20)));
     }
 
     /// A single-instruction block (just JUMPDEST as the terminator) used as a
