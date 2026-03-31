@@ -900,10 +900,12 @@ impl Bytecode<'_> {
                 continue;
             }
 
+            let (inp, out) = inst.stack_io();
+            let inp = inp as usize;
+            let out = out as usize;
+
             // Record pre-instruction input operand snapshot.
-            let (inp, _) = inst.stack_io();
-            let inp_n = inp as usize;
-            let start = stack.len().saturating_sub(inp_n);
+            let start = stack.len().saturating_sub(inp);
             let snap = &mut snapshots.inputs[i];
             snap.clear();
             for &v in stack[start..].iter().rev() {
@@ -941,25 +943,19 @@ impl Bytecode<'_> {
                     stack.swap(len - 1, len - 1 - depth);
                 }
                 _ => {
-                    // For static jumps that were resolved by the simple pass, the jump
-                    // already had its input count reduced — use `stack_io()` which accounts
-                    // for that.
-                    let (_, out) = inst.stack_io();
-                    let out = out as usize;
-
-                    if stack.len() < inp_n {
+                    if stack.len() < inp {
                         return false;
                     }
 
                     // Try constant folding for common arithmetic.
                     let result = if out > 0 {
-                        self.try_const_fold(inst, &stack[stack.len() - inp_n..])
+                        self.try_const_fold(inst, &stack[stack.len() - inp..])
                     } else {
                         None
                     };
 
                     // Pop inputs.
-                    stack.truncate(stack.len() - inp_n);
+                    stack.truncate(stack.len() - inp);
 
                     // Push outputs.
                     if let Some(folded) = result {
@@ -972,7 +968,6 @@ impl Bytecode<'_> {
             }
 
             // Record post-instruction output snapshot.
-            let (_, out) = inst.stack_io();
             if out > 0 {
                 snapshots.outputs[i] = stack.last().copied();
             }
