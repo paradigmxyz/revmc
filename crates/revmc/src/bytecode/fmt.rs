@@ -337,7 +337,7 @@ impl<'a> Bytecode<'a> {
                 writeln!(w, "  {bid} -> {ft} [color=\"{color}\"];")?;
             }
             // Remaining succs are jump targets.
-            let is_multi = last.flags.contains(InstFlags::MULTI_JUMP);
+            let is_multi = last.flags.contains(InstFlags::MULTI_JUMP) && block.succs.len() > 1;
             for target in succs {
                 let color = if is_multi {
                     "#e2a93b"

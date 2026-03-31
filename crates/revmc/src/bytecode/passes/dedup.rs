@@ -41,10 +41,16 @@ impl<'a> Bytecode<'a> {
                 continue;
             }
 
-            // Skip blocks that start with a reachable JUMPDEST — these can be targets of
-            // dynamic jumps and must remain at their original PC for the jump table.
+            // Reachable JUMPDESTs can only be deduped when:
+            // - all jumps are statically resolved (no dynamic jumps), AND
+            // - the block terminates execution (STOP/RETURN/REVERT/etc.), not JUMP.
+            // Blocks ending in JUMP cannot be deduped by raw bytes alone because
+            // block_analysis may have resolved different target sets for byte-identical
+            // copies (e.g. different return-address contexts).
             let first = &self.insts[block.insts.start];
-            if first.is_reachable_jumpdest(self.has_dynamic_jumps) {
+            if first.is_reachable_jumpdest(self.has_dynamic_jumps)
+                && (self.has_dynamic_jumps || term.opcode == op::JUMP)
+            {
                 continue;
             }
 
@@ -82,6 +88,12 @@ impl<'a> Bytecode<'a> {
                 let dup_first_inst = dup_block.insts.start;
                 self.redirects.insert(dup_first_inst, canonical_first_inst);
 
+                // If the duplicate was a reachable JUMPDEST, the canonical must be too
+                // so that sections/gas-checks treat it as a jump target entry point.
+                if self.insts[dup_first_inst].data == 1 {
+                    self.insts[canonical_first_inst].data = 1;
+                }
+
                 // Redirect predecessors that reach the duplicate via static jumps.
                 for &pred in &dup_block.preds {
                     let term_inst = self.cfg.blocks[pred].terminator();
@@ -90,18 +102,14 @@ impl<'a> Bytecode<'a> {
                         && !term.flags.contains(InstFlags::INVALID_JUMP)
                         && !term.flags.contains(InstFlags::MULTI_JUMP)
                         && term.data == dup_first_inst.index() as u32;
-                    let is_multi = term.flags.contains(InstFlags::MULTI_JUMP);
-
                     if is_static {
                         self.insts[term_inst].data = canonical_first_inst.index() as u32;
                     }
-                    if is_multi && let Some(targets) = self.multi_jump_targets.get_mut(&term_inst) {
-                        for t in targets.iter_mut() {
-                            if *t == dup_first_inst {
-                                *t = canonical_first_inst;
-                            }
-                        }
-                    }
+                    // Multi-jump targets are NOT rewritten: each target carries a
+                    // distinct PC that callers may push as a return address. The
+                    // `inst_entries` redirect (translate.rs) already maps the dead
+                    // instruction's IR entry to the canonical one, so the switch
+                    // correctly emits cases for both PCs pointing to the same IR block.
                 }
             }
         }
@@ -245,6 +253,6 @@ mod tests {
 
         eprintln!("{bytecode}");
 
-        assert_eq!(bytecode.redirects.len(), 13);
+        assert_eq!(bytecode.redirects.len(), 20);
     }
 }
