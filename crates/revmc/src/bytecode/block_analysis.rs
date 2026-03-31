@@ -1054,7 +1054,7 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn analyze_code(code: Vec<u8>) -> Bytecode<'static> {
-        analyze_code_with(code, super::super::AnalysisConfig::ALL)
+        analyze_code_with(code, Default::default())
     }
 
     pub(crate) fn analyze_code_with(

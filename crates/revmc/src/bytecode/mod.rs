@@ -58,6 +58,13 @@ bitflags::bitflags! {
     }
 }
 
+impl Default for AnalysisConfig {
+    #[inline]
+    fn default() -> Self {
+        Self::ALL
+    }
+}
+
 /// EVM bytecode.
 #[doc(hidden)] // Not public API.
 pub struct Bytecode<'a> {
@@ -154,7 +161,7 @@ impl<'a> Bytecode<'a> {
             inst_lines: RefCell::new(IndexVec::new()),
             redirects: FxHashMap::default(),
             cfg: Cfg::default(),
-            config: AnalysisConfig::ALL,
+            config: AnalysisConfig::default(),
         };
 
         // Pad code to ensure there is at least one diverging instruction.
