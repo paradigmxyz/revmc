@@ -209,7 +209,7 @@ const MIN_CONTEXT_FIXPOINT_ITERATIONS: usize = 256;
 /// Always allow refinement for tiny CFGs where the extra pass is still cheap.
 const MAX_CONTEXT_REFINEMENT_SMALL_CFG_BLOCKS: usize = 32;
 /// Skip context refinement on larger CFGs where the second pass is usually wasted work.
-const MAX_CONTEXT_REFINEMENT_BLOCKS: usize = 128;
+const MAX_CONTEXT_REFINEMENT_BLOCKS: usize = 512;
 /// Maximum number of call-string frames tracked for full CFG discovery.
 const MAX_CALL_CONTEXT_DEPTH: u8 = 8;
 
@@ -737,10 +737,14 @@ impl Bytecode<'_> {
         };
         let refined = self.run_context_sensitive_interp(&jump_insts, &mut context_snapshots);
 
-        if refined.converged && refined.count > flat.count {
+        // Accept the context-sensitive result if it resolves strictly more jumps.
+        // The `invalidate_suspect_jumps` pass already ensures soundness even when
+        // the fixpoint didn't fully converge.
+        if refined.count > flat.count {
             debug!(
                 baseline = flat.count,
                 refined = refined.count,
+                converged = refined.converged,
                 "using context-sensitive refinement"
             );
             *snapshots = context_snapshots;
@@ -751,7 +755,7 @@ impl Bytecode<'_> {
             debug!(
                 baseline = flat.count,
                 refined = refined.count,
-                "discarding non-converged context-sensitive refinement"
+                "discarding non-converged context-sensitive refinement (no improvement)"
             );
         }
 
