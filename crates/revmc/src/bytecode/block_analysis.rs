@@ -740,7 +740,7 @@ impl Bytecode<'_> {
         // Budget covers initial fixpoint + per-root recovery + batch-seed.
         // Each root seed can trigger O(num_blocks) iterations, and there can be
         // O(num_blocks) roots, so the total is O(num_blocks^2).
-        let max_iterations = num_blocks.saturating_mul(num_blocks).clamp(num_blocks * 8, 100_000);
+        let max_iterations = num_blocks.saturating_mul(num_blocks).max(num_blocks * 8).min(100_000);
         let mut iterations = 0;
         let mut converged = true;
         let mut seeded_remaining = false;
