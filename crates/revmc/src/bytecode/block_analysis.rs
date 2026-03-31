@@ -40,15 +40,15 @@ use std::{cmp::Ordering, collections::VecDeque, ops::Range};
 
 oxc_index::define_nonmax_u32_index_type! {
     /// Index into the interned constant-set pool.
-    struct ConstSetIdx;
+    pub(crate) struct ConstSetIdx;
 }
 super::impl_index_display!(ConstSetIdx, "{}");
 
-/// Per-instruction snapshot of known-constant operands.
+/// Per-instruction snapshot of abstract operand values.
 ///
 /// Index 0 is TOS (first popped / depth 0), index 1 is second from top, etc.
 /// Only the instruction's inputs are stored, not the entire stack.
-pub(crate) type OperandSnapshot = SmallVec<[Option<U256Idx>; 4]>;
+pub(crate) type OperandSnapshot = SmallVec<[AbsValue; 4]>;
 
 /// Bundles input and output snapshots for recording during abstract interpretation.
 #[derive(Default)]
@@ -56,22 +56,23 @@ pub(crate) struct Snapshots {
     /// Pre-instruction input operand snapshots.
     pub(crate) inputs: IndexVec<Inst, OperandSnapshot>,
     /// Post-instruction output snapshot (single value per instruction).
-    pub(crate) outputs: IndexVec<Inst, Option<U256Idx>>,
+    pub(crate) outputs: IndexVec<Inst, Option<AbsValue>>,
 }
 
 /// Abstract value on the stack.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum AbsValue {
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum AbsValue {
     Const(U256Idx),
     /// Multiple known constant values (interned, sorted, deduplicated).
     ConstSet(ConstSetIdx),
     /// Top value (unknown concrete value).
+    #[default]
     Top,
 }
 
 impl AbsValue {
     /// Returns the single constant if this is `Const`, or `None` otherwise.
-    fn as_const(self) -> Option<U256Idx> {
+    pub(crate) fn as_const(self) -> Option<U256Idx> {
         match self {
             Self::Const(v) => Some(v),
             _ => None,
@@ -546,13 +547,18 @@ impl Bytecode<'_> {
             return (Vec::new(), 0);
         }
 
-        // After convergence, resolve each dynamic jump using the final block states.
-        // This avoids the problem of the fixpoint accumulating stale partial results.
+        // After convergence, resolve each dynamic jump from its snapshot operand.
         let mut jump_targets: Vec<(Inst, JumpTarget)> = Vec::new();
         let mut has_top_jump = false;
-        let mut scratch = Vec::new();
         for &jump_inst in &jump_insts {
-            let target = self.resolve_jump(jump_inst, &block_states, &const_sets, &mut scratch);
+            let target = match snapshots.inputs[jump_inst].first() {
+                Some(&operand) => self.resolve_jump_operand(operand, &const_sets),
+                None => {
+                    // No snapshot means the block was never interpreted (unreachable).
+                    trace!(%jump_inst, pc = self.insts[jump_inst].pc, "jump in unreached block");
+                    JumpTarget::Bottom
+                }
+            };
             if matches!(target, JumpTarget::Top) {
                 has_top_jump = true;
             }
@@ -640,66 +646,79 @@ impl Bytecode<'_> {
         (jump_targets, count)
     }
 
-    /// Resolves a single dynamic jump using the current block states.
-    fn resolve_jump(
-        &self,
-        jump_inst: Inst,
-        block_states: &IndexVec<Block, BlockState>,
-        const_sets: &ConstSetInterner,
-        scratch: &mut Vec<AbsValue>,
-    ) -> JumpTarget {
-        let Some(bid) = self.cfg.inst_to_block[jump_inst] else {
-            return JumpTarget::Bottom;
-        };
-        match &block_states[bid] {
-            BlockState::Bottom => {
-                trace!(%jump_inst, pc = self.insts[jump_inst].pc, "jump in unreached block");
-                JumpTarget::Bottom
+    /// Resolves a jump target from the snapshot operand recorded during the fixpoint.
+    fn resolve_jump_operand(&self, operand: AbsValue, const_sets: &ConstSetInterner) -> JumpTarget {
+        match operand {
+            AbsValue::Const(idx) => {
+                let val = *self.u256_interner.borrow().get(idx);
+                match usize::try_from(val) {
+                    Ok(target_pc) if self.is_valid_jump(target_pc) => {
+                        JumpTarget::Const(self.pc_to_inst(target_pc))
+                    }
+                    _ => JumpTarget::Invalid,
+                }
             }
-            BlockState::Known(input) => {
-                match self.jump_operand(&self.cfg.blocks[bid], input, scratch) {
-                    Some(AbsValue::Const(idx)) => {
-                        let val = *self.u256_interner.borrow().get(idx);
-                        match usize::try_from(val) {
-                            Ok(target_pc) if self.is_valid_jump(target_pc) => {
-                                JumpTarget::Const(self.pc_to_inst(target_pc))
-                            }
-                            _ => JumpTarget::Invalid,
+            AbsValue::ConstSet(set_idx) => {
+                let consts = const_sets.get(set_idx);
+                let interner = self.u256_interner.borrow();
+                let mut targets = SmallVec::new();
+                let mut all_valid = true;
+                for &idx in consts {
+                    let val = *interner.get(idx);
+                    match usize::try_from(val) {
+                        Ok(pc) if self.is_valid_jump(pc) => {
+                            targets.push(self.pc_to_inst(pc));
                         }
-                    }
-                    Some(AbsValue::ConstSet(set_idx)) => {
-                        let consts = const_sets.get(set_idx);
-                        let interner = self.u256_interner.borrow();
-                        let mut targets = SmallVec::new();
-                        let mut all_valid = true;
-                        for &idx in consts {
-                            let val = *interner.get(idx);
-                            match usize::try_from(val) {
-                                Ok(pc) if self.is_valid_jump(pc) => {
-                                    targets.push(self.pc_to_inst(pc));
-                                }
-                                _ => {
-                                    all_valid = false;
-                                    break;
-                                }
-                            }
+                        _ => {
+                            all_valid = false;
+                            break;
                         }
-                        if all_valid && !targets.is_empty() {
-                            JumpTarget::Multi(targets)
-                        } else {
-                            JumpTarget::Invalid
-                        }
-                    }
-                    out => {
-                        trace!(
-                            inst = %jump_inst,
-                            in=?input,
-                            ?out,
-                            "unresolved jump",
-                        );
-                        JumpTarget::Top
                     }
                 }
+                if all_valid && !targets.is_empty() {
+                    JumpTarget::Multi(targets)
+                } else {
+                    JumpTarget::Invalid
+                }
+            }
+            AbsValue::Top => JumpTarget::Top,
+        }
+    }
+
+    /// Adds discovered dynamic-jump target edges for a block.
+    fn discover_jump_edges(
+        &self,
+        operand: AbsValue,
+        bid: Block,
+        const_sets: &ConstSetInterner,
+        discovered: &mut IndexVec<Block, SmallVec<[Block; 4]>>,
+        disc_preds: &mut IndexVec<Block, SmallVec<[Block; 4]>>,
+    ) {
+        let target_pcs: SmallVec<[usize; 4]> = match operand {
+            AbsValue::Const(idx) => {
+                let val = *self.u256_interner.borrow().get(idx);
+                usize::try_from(val).ok().into_iter().collect()
+            }
+            AbsValue::ConstSet(set_idx) => {
+                let interner = self.u256_interner.borrow();
+                const_sets
+                    .get(set_idx)
+                    .iter()
+                    .filter_map(|&idx| usize::try_from(*interner.get(idx)).ok())
+                    .collect()
+            }
+            AbsValue::Top => return,
+        };
+        for target_pc in target_pcs {
+            if !self.is_valid_jump(target_pc) {
+                continue;
+            }
+            let ti = self.pc_to_inst(target_pc);
+            if let Some(tb) = self.cfg.inst_to_block[ti]
+                && !discovered[bid].contains(&tb)
+            {
+                discovered[bid].push(tb);
+                disc_preds[tb].push(bid);
             }
         }
     }
@@ -738,9 +757,8 @@ impl Bytecode<'_> {
         let mut seeded_remaining = false;
         let mut last_root = first;
 
-        // Reusable buffers to avoid per-iteration allocations.
-        let mut stack_buf: Vec<AbsValue> = Vec::with_capacity(64);
-        let mut scratch_buf: Vec<AbsValue> = Vec::with_capacity(64);
+        // Reusable buffer to avoid per-iteration allocations.
+        let mut stack_buf: Vec<AbsValue> = Vec::with_capacity(MAX_ABS_STACK_DEPTH);
 
         loop {
             let Some(bid) = worklist.pop() else {
@@ -810,43 +828,20 @@ impl Bytecode<'_> {
                 continue;
             }
 
-            // Discover dynamic-jump target edges.
-            let term = &self.insts[block.terminator()];
-            if term.is_jump() && !term.flags.contains(InstFlags::STATIC_JUMP) {
-                // Read the input state again for jump_operand (stack_buf is now the output).
-                let input = match &block_states[bid] {
-                    BlockState::Known(s) => s.as_slice(),
-                    BlockState::Bottom => unreachable!(),
-                };
-                if let Some(operand) = self.jump_operand(block, input, &mut scratch_buf) {
-                    let target_pcs: SmallVec<[usize; 4]> = match operand {
-                        AbsValue::Const(idx) => {
-                            let val = *self.u256_interner.borrow().get(idx);
-                            usize::try_from(val).ok().into_iter().collect()
-                        }
-                        AbsValue::ConstSet(set_idx) => {
-                            let interner = self.u256_interner.borrow();
-                            const_sets
-                                .get(set_idx)
-                                .iter()
-                                .filter_map(|&idx| usize::try_from(*interner.get(idx)).ok())
-                                .collect()
-                        }
-                        AbsValue::Top => SmallVec::new(),
-                    };
-                    for target_pc in target_pcs {
-                        if !self.is_valid_jump(target_pc) {
-                            continue;
-                        }
-                        let ti = self.pc_to_inst(target_pc);
-                        if let Some(tb) = self.cfg.inst_to_block[ti]
-                            && !discovered[bid].contains(&tb)
-                        {
-                            discovered[bid].push(tb);
-                            disc_preds[tb].push(bid);
-                        }
-                    }
-                }
+            // Discover dynamic-jump target edges from the snapshot recorded above.
+            let term_inst = block.terminator();
+            let term = &self.insts[term_inst];
+            if term.is_jump()
+                && !term.flags.contains(InstFlags::STATIC_JUMP)
+                && let Some(&operand) = snapshots.inputs[term_inst].first()
+            {
+                self.discover_jump_edges(
+                    operand,
+                    bid,
+                    const_sets,
+                    &mut discovered,
+                    &mut disc_preds,
+                );
             }
 
             // Propagate to static CFG successors and discovered dynamic-jump targets.
@@ -914,8 +909,8 @@ impl Bytecode<'_> {
                 let start = len.saturating_sub(inp);
                 let snap = &mut snaps.inputs[i];
                 snap.clear();
-                for v in stack[start..].iter().rev() {
-                    snap.push(v.as_const());
+                for &v in stack[start..].iter().rev() {
+                    snap.push(v);
                 }
             }
 
@@ -985,31 +980,12 @@ impl Bytecode<'_> {
             if let Some(snaps) = &mut snapshots {
                 let (_, out) = inst.stack_io();
                 if out > 0 {
-                    snaps.outputs[i] = stack.last().and_then(|v| v.as_const());
+                    snaps.outputs[i] = stack.last().copied();
                 }
             }
         }
 
         true
-    }
-
-    /// Returns the abstract value of the jump operand (TOS before the terminator) for a block.
-    fn jump_operand(
-        &self,
-        block: &BlockData,
-        input: &[AbsValue],
-        scratch: &mut Vec<AbsValue>,
-    ) -> Option<AbsValue> {
-        if block.len() == 1 {
-            input.last().copied()
-        } else {
-            scratch.clear();
-            scratch.extend_from_slice(input);
-            if !self.interpret_block(block.insts().take(block.len() - 1), scratch, None) {
-                return None;
-            }
-            scratch.last().copied()
-        }
     }
 
     /// Try to constant-fold an instruction.
