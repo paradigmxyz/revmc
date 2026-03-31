@@ -591,7 +591,6 @@ impl Bytecode<'_> {
                 let consts = const_sets.get(set_idx);
                 let interner = self.u256_interner.borrow();
                 let mut targets = SmallVec::new();
-                let mut all_valid = true;
                 for &idx in consts {
                     let val = *interner.get(idx);
                     match usize::try_from(val) {
@@ -599,16 +598,13 @@ impl Bytecode<'_> {
                             targets.push(self.pc_to_inst(pc));
                         }
                         _ => {
-                            all_valid = false;
-                            break;
+                            // Mixed valid + invalid: can't resolve since at runtime
+                            // the value might be any member of the set.
+                            return JumpTarget::Top;
                         }
                     }
                 }
-                if all_valid && !targets.is_empty() {
-                    JumpTarget::Multi(targets)
-                } else {
-                    JumpTarget::Invalid
-                }
+                if !targets.is_empty() { JumpTarget::Multi(targets) } else { JumpTarget::Invalid }
             }
             AbsValue::Top => JumpTarget::Top,
         }
