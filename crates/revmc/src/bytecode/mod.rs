@@ -98,7 +98,7 @@ pub struct Bytecode<'a> {
     inst_lines: RefCell<IndexVec<Inst, u32>>,
 
     /// Dead-block redirects: maps the first instruction of a dead/merged block to the target
-    /// instruction. Used by both block deduplication and block merging.
+    /// instruction. Used mainly for fallthrough jumps.
     pub(crate) redirects: FxHashMap<Inst, Inst>,
     /// Basic-block CFG, rebuilt by [`Bytecode::rebuild_cfg`].
     cfg: Cfg,
