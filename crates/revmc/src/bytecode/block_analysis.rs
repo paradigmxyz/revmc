@@ -39,17 +39,25 @@ use revm_primitives::U256;
 use smallvec::SmallVec;
 use std::{borrow::Cow, cmp::Ordering, collections::VecDeque, ops::Range};
 
-oxc_index::define_index_type! {
+oxc_index::define_nonmax_u32_index_type! {
     /// Index into the interned constant-set pool.
-    struct ConstSetIdx = u32;
-    DISPLAY_FORMAT = "{}";
+    struct ConstSetIdx;
 }
+super::impl_index_display!(ConstSetIdx, "{}");
 
 /// Per-instruction snapshot of known-constant operands.
 ///
 /// Index 0 is TOS (first popped / depth 0), index 1 is second from top, etc.
 /// Only the instruction's inputs are stored, not the entire stack.
-pub(crate) type OperandSnapshot = SmallVec<[Option<U256Idx>; 2]>;
+pub(crate) type OperandSnapshot = SmallVec<[Option<U256Idx>; 4]>;
+
+/// Bundles input and output snapshots for recording during abstract interpretation.
+struct Snapshots {
+    /// Pre-instruction input operand snapshots.
+    inputs: IndexVec<Inst, OperandSnapshot>,
+    /// Post-instruction output snapshot (single value per instruction).
+    outputs: IndexVec<Inst, Option<U256Idx>>,
+}
 
 /// Abstract value on the stack.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -214,11 +222,11 @@ impl BlockState {
     }
 }
 
-oxc_index::define_index_type! {
+oxc_index::define_nonmax_u32_index_type! {
     /// A block index in the CFG.
-    pub(crate) struct Block = u32;
-    DISPLAY_FORMAT = "bb{}";
+    pub(crate) struct Block;
 }
+super::impl_index_display!(Block, "bb{}");
 
 /// FIFO worklist with deduplication.
 struct Worklist {
@@ -310,10 +318,14 @@ impl Bytecode<'_> {
             return;
         }
 
-        let mut snapshots: IndexVec<Inst, OperandSnapshot> =
-            IndexVec::from_vec(vec![SmallVec::new(); self.insts.len()]);
-        let (resolved, count) = self.run_abstract_interp(&self.cfg, &mut snapshots);
-        self.stack_snapshots = snapshots;
+        let n = self.insts.len();
+        let mut snapshots = Snapshots {
+            inputs: IndexVec::from_vec(vec![SmallVec::new(); n]),
+            outputs: IndexVec::from_vec(vec![None; n]),
+        };
+        let (resolved, count) = self.run_abstract_interp(&mut snapshots);
+        self.stack_snapshots = snapshots.inputs;
+        self.output_snapshots = snapshots.outputs;
 
         if count == 0 {
             return;
@@ -389,10 +401,15 @@ impl Bytecode<'_> {
         debug!(newly_resolved, "block_analysis complete");
 
         // Recompute dynamic jumps flag.
-        self.has_dynamic_jumps = self
+        let n = self
             .insts
             .iter()
-            .any(|inst| inst.is_jump() && !inst.flags.contains(InstFlags::STATIC_JUMP));
+            .filter(|inst| inst.is_jump() && !inst.flags.contains(InstFlags::STATIC_JUMP))
+            .count();
+        self.has_dynamic_jumps = n > 0;
+        if self.has_dynamic_jumps {
+            debug!(n, "unresolved dynamic jumps remain");
+        }
     }
 
     /// Rebuild the basic-block CFG from the current instruction state.
@@ -505,11 +522,8 @@ impl Bytecode<'_> {
     ///
     /// Returns a list of (jump_inst, resolved_target) pairs and the count of resolvable jumps.
     /// Stack snapshots are recorded into `snapshots` during the fixpoint.
-    fn run_abstract_interp(
-        &self,
-        cfg: &Cfg,
-        snapshots: &mut IndexVec<Inst, OperandSnapshot>,
-    ) -> (Vec<(Inst, JumpTarget)>, usize) {
+    fn run_abstract_interp(&self, snapshots: &mut Snapshots) -> (Vec<(Inst, JumpTarget)>, usize) {
+        let cfg = &self.cfg;
         let num_blocks = cfg.blocks.len();
 
         // Initialize block states. Entry block starts with an empty stack.
@@ -528,8 +542,10 @@ impl Bytecode<'_> {
         // Always run the fixpoint to propagate stack states through the CFG.
         // Snapshots are recorded during interpretation — last write wins (= converged state).
         let mut const_sets = ConstSetInterner::new();
-        let discovered_edges =
-            self.run_fixpoint(cfg, &mut block_states, snapshots, &mut const_sets);
+        let discovered_edges = self.run_fixpoint(&mut block_states, snapshots, &mut const_sets);
+
+        // Fill snapshots for blocks the fixpoint never reached.
+        self.fill_unreached_snapshots(&block_states, snapshots);
 
         if jump_insts.is_empty() {
             return (Vec::new(), 0);
@@ -691,11 +707,11 @@ impl Bytecode<'_> {
     /// Stack snapshots are recorded into `snapshots` during each block interpretation.
     fn run_fixpoint(
         &self,
-        cfg: &Cfg,
         block_states: &mut IndexVec<Block, BlockState>,
-        snapshots: &mut IndexVec<Inst, OperandSnapshot>,
+        snapshots: &mut Snapshots,
         const_sets: &mut ConstSetInterner,
     ) -> IndexVec<Block, SmallVec<[Block; 2]>> {
+        let cfg = &self.cfg;
         let num_blocks = cfg.blocks.len();
         let mut worklist = Worklist::new(num_blocks);
         worklist.push(Block::from_usize(0));
@@ -796,16 +812,59 @@ impl Bytecode<'_> {
         discovered_jump_edges
     }
 
+    /// Fills operand snapshots for blocks the fixpoint never reached (state=Bottom).
+    ///
+    /// These are typically return targets of internal function calls whose return JUMPs could
+    /// not be resolved. Each such block is interpreted with an all-Top input stack sized to its
+    /// minimum required depth. This recovers intra-block constant propagation (e.g. `PUSH 0x40;
+    /// MLOAD`) without affecting reachability analysis.
+    fn fill_unreached_snapshots(
+        &self,
+        block_states: &IndexVec<Block, BlockState>,
+        snapshots: &mut Snapshots,
+    ) {
+        let mut count = 0u32;
+        let mut fake_input = Vec::new();
+        for (bid, block) in self.cfg.blocks.iter_enumerated() {
+            if !matches!(block_states[bid], BlockState::Bottom) || block.dead {
+                continue;
+            }
+            count += 1;
+            let required_depth = self.block_min_input_depth(block);
+            fake_input.clear();
+            fake_input.resize(required_depth, AbsValue::Top);
+            let _ = self.interpret_block(block.insts(), &fake_input, Some(snapshots));
+        }
+        debug!(count, "filled unreached block snapshots");
+    }
+
+    /// Computes the minimum input stack depth required to interpret a block without underflow.
+    fn block_min_input_depth(&self, block: &BlockData) -> usize {
+        let mut depth: isize = 0;
+        let mut min_depth: isize = 0;
+        for i in block.insts() {
+            let inst = &self.insts[i];
+            if inst.is_dead_code() || inst.flags.contains(InstFlags::SKIP_LOGIC) {
+                continue;
+            }
+            let (inp, out) = inst.stack_io();
+            depth -= inp as isize;
+            min_depth = min_depth.min(depth);
+            depth += out as isize;
+        }
+        (-min_depth) as usize
+    }
+
     /// Interpret a sequence of instructions on the abstract stack.
     /// Returns the abstract stack state after the last instruction, or `None` on conflict.
     ///
-    /// If `snapshots` is provided, records the abstract stack state *before* each instruction
-    /// into `snapshots[inst_index]`.
+    /// If `snapshots` is provided, records the abstract stack state before and after each
+    /// instruction.
     fn interpret_block<'a>(
         &self,
         insts: impl IntoIterator<Item = Inst>,
         input: &'a [AbsValue],
-        mut snapshots: Option<&mut IndexVec<Inst, OperandSnapshot>>,
+        mut snapshots: Option<&mut Snapshots>,
     ) -> Option<Cow<'a, [AbsValue]>> {
         let mut stack = Cow::Borrowed(input);
 
@@ -823,13 +882,13 @@ impl Bytecode<'_> {
 
             let stack = stack.to_mut();
 
-            // Record pre-instruction operand snapshot: only the top `inp` values.
+            // Record pre-instruction input operand snapshot.
             if let Some(snaps) = &mut snapshots {
                 let (inp, _) = inst.stack_io();
                 let inp = inp as usize;
                 let len = stack.len();
                 let start = len.saturating_sub(inp);
-                snaps[i] = stack[start..].iter().rev().map(|v| v.as_const()).collect();
+                snaps.inputs[i] = stack[start..].iter().rev().map(|v| v.as_const()).collect();
             }
 
             match inst.opcode {
@@ -889,6 +948,14 @@ impl Bytecode<'_> {
                     } else {
                         stack.resize(stack.len() + out, AbsValue::Top);
                     }
+                }
+            }
+
+            // Record post-instruction output snapshot.
+            if let Some(snaps) = &mut snapshots {
+                let (_, out) = inst.stack_io();
+                if out > 0 {
+                    snaps.outputs[i] = stack.last().and_then(|v| v.as_const());
                 }
             }
         }
@@ -1166,6 +1233,98 @@ pub(crate) mod tests {
         // At inst 3 (MSTORE), operand 0 (TOS) = 0x00, operand 1 = unknown (CALLDATALOAD result).
         assert_eq!(bytecode.const_operand(Inst::from_usize(3), 0), Some(U256::ZERO));
         assert_eq!(bytecode.const_operand(Inst::from_usize(3), 1), None);
+    }
+
+    #[test]
+    fn const_output_basic() {
+        // PUSH1 0x42 -> output[0] = 0x42
+        // PUSH1 0x01 -> output[0] = 0x01
+        // ADD        -> output[0] = 0x43 (const-folded)
+        // PUSH0      -> output[0] = 0x00
+        // MSTORE     -> no outputs
+        // STOP
+        #[rustfmt::skip]
+        let bytecode = analyze_code(vec![
+            op::PUSH1, 0x42,
+            op::PUSH1, 0x01,
+            op::ADD,
+            op::PUSH0,
+            op::MSTORE,
+            op::STOP,
+        ]);
+        assert_eq!(bytecode.const_output(Inst::from_usize(0)), Some(U256::from(0x42)));
+        assert_eq!(bytecode.const_output(Inst::from_usize(1)), Some(U256::from(0x01)));
+        assert_eq!(bytecode.const_output(Inst::from_usize(2)), Some(U256::from(0x43)));
+        assert_eq!(bytecode.const_output(Inst::from_usize(3)), Some(U256::ZERO));
+        // MSTORE has no outputs.
+        assert_eq!(bytecode.const_output(Inst::from_usize(4)), None);
+    }
+
+    #[test]
+    fn const_output_dynamic() {
+        // CALLDATALOAD pushes an unknown -> output should be None.
+        #[rustfmt::skip]
+        let bytecode = analyze_code(vec![
+            op::PUSH0,
+            op::CALLDATALOAD,
+            op::STOP,
+        ]);
+        assert_eq!(bytecode.const_output(Inst::from_usize(0)), Some(U256::ZERO));
+        assert_eq!(bytecode.const_output(Inst::from_usize(1)), None);
+    }
+
+    #[test]
+    fn unreached_block_const_propagation() {
+        // Simulates an internal function call where the return block is unreached by the
+        // fixpoint. The function stores the return address to memory then loads it back,
+        // making the return JUMP unresolvable by abstract interpretation.
+        //
+        // Layout (pc / inst):
+        //   0 / 0: PUSH1 ret_pc     (return address)
+        //   2 / 1: PUSH1 func_pc    (function entry)
+        //   4 / 2: JUMP             (static: PUSH+JUMP to func)
+        //   5 / 3: JUMPDEST         (return target — unreached by fixpoint)
+        //   6 / 4: PUSH1 0x40
+        //   8 / 5: MLOAD
+        //   9 / 6: STOP
+        //  10 / 7: JUMPDEST         (func entry)
+        //  11 / 8: PUSH0            (offset for MSTORE)
+        //  12 / 9: MSTORE           (store return addr to memory)
+        //  13 /10: PUSH0            (offset for MLOAD)
+        //  14 /11: MLOAD            (load return addr from memory — now Top)
+        //  15 /12: JUMP             (return — dynamic, unresolvable)
+        let ret_pc: u8 = 5;
+        let func_pc: u8 = 10;
+        #[rustfmt::skip]
+        let bytecode = analyze_code(vec![
+            op::PUSH1, ret_pc,
+            op::PUSH1, func_pc,
+            op::JUMP,
+            // Return block (unreached).
+            op::JUMPDEST,
+            op::PUSH1, 0x40,
+            op::MLOAD,
+            op::STOP,
+            // Function body.
+            op::JUMPDEST,
+            op::PUSH0,
+            op::MSTORE,
+            op::PUSH0,
+            op::MLOAD,
+            op::JUMP,
+        ]);
+        eprintln!("{bytecode:?}");
+
+        // The return JUMP should be unresolved (dynamic).
+        assert!(bytecode.has_dynamic_jumps, "return jump should be unresolved");
+        let last_jump = bytecode.insts.last().unwrap();
+        assert!(last_jump.is_jump() && !last_jump.is_static_jump());
+
+        // The MLOAD at inst 5 (pc=8) should see const 0x40 from the PUSH at inst 4,
+        // even though the block starting at JUMPDEST (pc=5) is unreached by the fixpoint.
+        assert_eq!(bytecode.const_operand(Inst::from_usize(5), 0), Some(U256::from(0x40)));
+        // Output snapshot for the PUSH at inst 4 should also be available.
+        assert_eq!(bytecode.const_output(Inst::from_usize(4)), Some(U256::from(0x40)));
     }
 
     #[test]

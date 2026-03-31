@@ -70,8 +70,8 @@ impl<I: Idx, T: std::fmt::Debug, S> std::fmt::Debug for Interner<I, T, S> {
 mod tests {
     use super::*;
 
-    oxc_index::define_index_type! {
-        struct TestIdx = u32;
+    oxc_index::define_nonmax_u32_index_type! {
+        struct TestIdx;
     }
 
     #[test]

@@ -32,19 +32,31 @@ pub use opcode::*;
 #[cfg(any(feature = "__fuzzing", test))]
 pub(crate) const TEST_SUSPEND: u8 = 0x25;
 
-oxc_index::define_index_type! {
+/// Implements `Display` for a nonmax index type using a format string.
+macro_rules! impl_index_display {
+    ($ty:ty, $fmt:literal) => {
+        impl std::fmt::Display for $ty {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, $fmt, self.index())
+            }
+        }
+    };
+}
+pub(crate) use impl_index_display;
+
+oxc_index::define_nonmax_u32_index_type! {
     /// An EVM instruction index into [`Bytecode`] instructions.
     ///
     /// Also known as `ic`, or instruction counter; not to be confused with SSA `inst`s.
-    pub(crate) struct Inst = u32;
-    DISPLAY_FORMAT = "{}";
+    pub(crate) struct Inst;
 }
+impl_index_display!(Inst, "{}");
 
-oxc_index::define_index_type! {
+oxc_index::define_nonmax_u32_index_type! {
     /// Index into the deduplicated U256 constant pool.
-    pub(crate) struct U256Idx = u32;
-    DISPLAY_FORMAT = "{}";
+    pub(crate) struct U256Idx;
 }
+impl_index_display!(U256Idx, "{}");
 
 bitflags::bitflags! {
     /// Controls which analysis passes run during [`Bytecode::analyze`].
@@ -90,6 +102,9 @@ pub struct Bytecode<'a> {
     /// Each entry contains the known-constant status of the instruction's input operands,
     /// with index 0 = TOS (depth 0).
     stack_snapshots: IndexVec<Inst, OperandSnapshot>,
+    /// Per-instruction output snapshot computed by block analysis.
+    /// Contains the known-constant value of the instruction's single output, if any.
+    output_snapshots: IndexVec<Inst, Option<U256Idx>>,
     /// Multi-target jump table: maps a JUMP/JUMPI instruction to its set of known targets.
     /// Only populated for jumps resolved to multiple targets by block analysis.
     multi_jump_targets: FxHashMap<Inst, SmallVec<[Inst; 4]>>,
@@ -155,6 +170,7 @@ impl<'a> Bytecode<'a> {
             has_dynamic_jumps: false,
             may_suspend: false,
             stack_snapshots: IndexVec::new(),
+            output_snapshots: IndexVec::new(),
             u256_interner: RefCell::new(Interner::new()),
             multi_jump_targets: FxHashMap::default(),
             pc_to_inst,
@@ -453,6 +469,16 @@ impl<'a> Bytecode<'a> {
     #[allow(dead_code)]
     pub(crate) fn const_operand(&self, inst: Inst, depth: usize) -> Option<U256> {
         let idx = (*self.stack_snapshots.get(inst)?.get(depth)?)?;
+        Some(*self.u256_interner.borrow().get(idx))
+    }
+
+    /// Returns the known constant output value of the given instruction.
+    ///
+    /// Returns `None` if the output is unknown, the instruction has no output, or the
+    /// analysis didn't cover this instruction.
+    #[allow(dead_code)]
+    pub(crate) fn const_output(&self, inst: Inst) -> Option<U256> {
+        let idx = (*self.output_snapshots.get(inst)?)?;
         Some(*self.u256_interner.borrow().get(idx))
     }
 

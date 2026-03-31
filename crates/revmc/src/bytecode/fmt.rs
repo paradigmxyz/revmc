@@ -72,10 +72,9 @@ impl Bytecode<'_> {
                     text.push_str(" INVALID");
                 } else if data.flags.contains(InstFlags::MULTI_JUMP) {
                     if let Some(targets) = self.multi_jump_targets(inst) {
-                        text.push(' ');
                         for (i, &t) in targets.iter().enumerate() {
                             if i > 0 {
-                                text.push_str(", ");
+                                text.push(',');
                             }
                             match self.target_block(t) {
                                 Some(b) => write!(text, " {b}").unwrap(),
@@ -119,9 +118,6 @@ impl Bytecode<'_> {
                 }
                 if flags.contains(InstFlags::INVALID_JUMP) {
                     comment.push_str(", invalid_jump");
-                }
-                if flags.contains(InstFlags::BLOCK_RESOLVED_JUMP) {
-                    comment.push_str(", block_resolved");
                 }
                 if flags.contains(InstFlags::MULTI_JUMP) {
                     comment.push_str(", multi_jump");
