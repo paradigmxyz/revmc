@@ -10,7 +10,7 @@ use smallvec::SmallVec;
 use std::cell::RefCell;
 
 mod block_analysis;
-use block_analysis::{Cfg, OperandSnapshot};
+use block_analysis::{Cfg, OperandSnapshot, Snapshots};
 
 mod dedup;
 
@@ -99,12 +99,7 @@ pub struct Bytecode<'a> {
     u256_interner: RefCell<Interner<U256Idx, U256, alloy_primitives::map::FbBuildHasher<32>>>,
 
     /// Per-instruction operand snapshots computed by block analysis.
-    /// Each entry contains the known-constant status of the instruction's input operands,
-    /// with index 0 = TOS (depth 0).
-    stack_snapshots: IndexVec<Inst, OperandSnapshot>,
-    /// Per-instruction output snapshot computed by block analysis.
-    /// Contains the known-constant value of the instruction's single output, if any.
-    output_snapshots: IndexVec<Inst, Option<U256Idx>>,
+    snapshots: Snapshots,
     /// Multi-target jump table: maps a JUMP/JUMPI instruction to its set of known targets.
     /// Only populated for jumps resolved to multiple targets by block analysis.
     multi_jump_targets: FxHashMap<Inst, SmallVec<[Inst; 4]>>,
@@ -169,8 +164,7 @@ impl<'a> Bytecode<'a> {
             spec_id,
             has_dynamic_jumps: false,
             may_suspend: false,
-            stack_snapshots: IndexVec::new(),
-            output_snapshots: IndexVec::new(),
+            snapshots: Snapshots::default(),
             u256_interner: RefCell::new(Interner::new()),
             multi_jump_targets: FxHashMap::default(),
             pc_to_inst,
@@ -468,7 +462,7 @@ impl<'a> Bytecode<'a> {
     /// Returns `None` if the value is unknown or the analysis didn't cover this instruction.
     #[allow(dead_code)]
     pub(crate) fn const_operand(&self, inst: Inst, depth: usize) -> Option<U256> {
-        let idx = (*self.stack_snapshots.get(inst)?.get(depth)?)?;
+        let idx = (*self.snapshots.inputs.get(inst)?.get(depth)?)?;
         Some(*self.u256_interner.borrow().get(idx))
     }
 
@@ -478,7 +472,7 @@ impl<'a> Bytecode<'a> {
     /// analysis didn't cover this instruction.
     #[allow(dead_code)]
     pub(crate) fn const_output(&self, inst: Inst) -> Option<U256> {
-        let idx = (*self.output_snapshots.get(inst)?)?;
+        let idx = (*self.snapshots.outputs.get(inst)?)?;
         Some(*self.u256_interner.borrow().get(idx))
     }
 

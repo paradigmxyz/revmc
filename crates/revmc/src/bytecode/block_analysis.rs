@@ -52,11 +52,12 @@ super::impl_index_display!(ConstSetIdx, "{}");
 pub(crate) type OperandSnapshot = SmallVec<[Option<U256Idx>; 4]>;
 
 /// Bundles input and output snapshots for recording during abstract interpretation.
-struct Snapshots {
+#[derive(Default)]
+pub(crate) struct Snapshots {
     /// Pre-instruction input operand snapshots.
-    inputs: IndexVec<Inst, OperandSnapshot>,
+    pub(crate) inputs: IndexVec<Inst, OperandSnapshot>,
     /// Post-instruction output snapshot (single value per instruction).
-    outputs: IndexVec<Inst, Option<U256Idx>>,
+    pub(crate) outputs: IndexVec<Inst, Option<U256Idx>>,
 }
 
 /// Abstract value on the stack.
@@ -324,8 +325,7 @@ impl Bytecode<'_> {
             outputs: IndexVec::from_vec(vec![None; n]),
         };
         let (resolved, count) = self.run_abstract_interp(&mut snapshots);
-        self.stack_snapshots = snapshots.inputs;
-        self.output_snapshots = snapshots.outputs;
+        self.snapshots = snapshots;
 
         if count == 0 {
             return;
