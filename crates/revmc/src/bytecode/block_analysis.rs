@@ -628,22 +628,16 @@ impl Bytecode<'_> {
         discovered: &mut IndexVec<Block, SmallVec<[Block; 4]>>,
         disc_preds: &mut IndexVec<Block, SmallVec<[Block; 4]>>,
     ) {
-        let target_pcs: SmallVec<[usize; 4]> = match operand {
-            AbsValue::Const(idx) => {
-                let val = *self.u256_interner.borrow().get(idx);
-                usize::try_from(val).ok().into_iter().collect()
-            }
-            AbsValue::ConstSet(set_idx) => {
-                let interner = self.u256_interner.borrow();
-                const_sets
-                    .get(set_idx)
-                    .iter()
-                    .filter_map(|&idx| usize::try_from(*interner.get(idx)).ok())
-                    .collect()
-            }
+        use either::Either;
+
+        let consts = match operand {
+            AbsValue::Const(idx) => Either::Left(std::iter::once(idx)),
+            AbsValue::ConstSet(set_idx) => Either::Right(const_sets.get(set_idx).iter().copied()),
             AbsValue::Top => return,
         };
-        for target_pc in target_pcs {
+        let interner = self.u256_interner.borrow();
+        for idx in consts {
+            let Ok(target_pc) = usize::try_from(*interner.get(idx)) else { continue };
             if !self.is_valid_jump(target_pc) {
                 continue;
             }
