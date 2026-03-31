@@ -399,7 +399,7 @@ impl Bytecode<'_> {
     #[instrument(level = "debug", skip_all)]
     pub(crate) fn rebuild_cfg(&mut self) {
         let finish_block = |cfg: &mut Cfg, start: usize, end: usize| {
-            debug_assert!(start < end, "empty block range: {start}..{end}",);
+            debug_assert!(start < end, "empty block range: {start}..{end}");
             let bid = cfg.blocks.push(BlockData {
                 insts: Inst::from_usize(start)..Inst::from_usize(end),
                 preds: SmallVec::new(),
