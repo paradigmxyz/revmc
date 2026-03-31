@@ -28,7 +28,10 @@
 //! invalidates suspect resolutions that may be reachable from those unresolved jumps, ensuring
 //! that only sound jump targets are reported as resolved.
 
-use crate::bytecode::{Bytecode, Inst, InstFlags, Interner, U256Idx};
+use crate::{
+    InstData,
+    bytecode::{Bytecode, Inst, InstFlags, Interner, U256Idx},
+};
 use bitvec::vec::BitVec;
 use either::Either;
 use oxc_index::IndexVec;
@@ -199,8 +202,18 @@ impl ConstSetInterner {
 /// padding can grow without bound. Clamping discards only those bottom `Top` entries, so no
 /// precision is lost.
 const MAX_ABS_STACK_DEPTH: usize = 64;
+/// Maximum number of worklist visits per block for the flat fixpoint.
+const MAX_FIXPOINT_ITER_MULTIPLIER: usize = 8;
+/// Maximum number of worklist visits per block for the context-sensitive refinement.
+const MAX_CONTEXT_FIXPOINT_ITER_MULTIPLIER: usize = 32;
 /// Maximum number of call-string frames tracked for full CFG discovery.
 const MAX_CALL_CONTEXT_DEPTH: u8 = 8;
+
+struct InterpResult {
+    jump_targets: Vec<(Inst, JumpTarget)>,
+    count: usize,
+    converged: bool,
+}
 
 /// Abstract state at the entry of a block.
 #[derive(Clone, Debug)]
@@ -684,6 +697,188 @@ impl Bytecode<'_> {
     /// Returns a list of (jump_inst, resolved_target) pairs and the count of resolvable jumps.
     /// Stack snapshots are recorded into `snapshots` during the fixpoint.
     fn run_abstract_interp(&self, snapshots: &mut Snapshots) -> (Vec<(Inst, JumpTarget)>, usize) {
+        // Collect unresolved jumps.
+        let mut jump_insts: Vec<Inst> = Vec::new();
+        for (i, inst) in self.insts.iter_enumerated() {
+            if inst.is_jump() && !inst.flags.contains(InstFlags::STATIC_JUMP) {
+                jump_insts.push(i);
+            }
+        }
+
+        let n = self.insts.len();
+        let mut flat_snapshots = Snapshots {
+            inputs: IndexVec::from_vec(vec![SmallVec::new(); n]),
+            outputs: IndexVec::from_vec(vec![None; n]),
+        };
+
+        if jump_insts.is_empty() {
+            self.run_flat_fixpoint_no_dynamic_jumps(&mut flat_snapshots);
+            *snapshots = flat_snapshots;
+            return (Vec::new(), 0);
+        }
+
+        let flat = self.run_flat_abstract_interp(&jump_insts, &mut flat_snapshots);
+
+        if !self.should_refine_with_contexts(&flat) {
+            *snapshots = flat_snapshots;
+            return (flat.jump_targets, flat.count);
+        }
+
+        let mut context_snapshots = Snapshots {
+            inputs: IndexVec::from_vec(vec![SmallVec::new(); n]),
+            outputs: IndexVec::from_vec(vec![None; n]),
+        };
+        let refined = self.run_context_sensitive_interp(&jump_insts, &mut context_snapshots);
+
+        if refined.converged && refined.count > flat.count {
+            debug!(
+                baseline = flat.count,
+                refined = refined.count,
+                "using context-sensitive refinement"
+            );
+            *snapshots = context_snapshots;
+            return (refined.jump_targets, refined.count);
+        }
+
+        if !refined.converged {
+            debug!(
+                baseline = flat.count,
+                refined = refined.count,
+                "discarding non-converged context-sensitive refinement"
+            );
+        }
+
+        *snapshots = flat_snapshots;
+        (flat.jump_targets, flat.count)
+    }
+
+    fn should_refine_with_contexts(&self, flat: &InterpResult) -> bool {
+        flat.jump_targets.iter().any(|(_, target)| matches!(target, JumpTarget::Top))
+            && self.insts.iter().any(|inst| {
+                inst.opcode == op::JUMP
+                    && inst.is_static_jump()
+                    && !inst.flags.contains(InstFlags::BLOCK_RESOLVED_JUMP)
+            })
+    }
+
+    fn run_flat_abstract_interp(
+        &self,
+        jump_insts: &[Inst],
+        snapshots: &mut Snapshots,
+    ) -> InterpResult {
+        let num_blocks = self.cfg.blocks.len();
+
+        let mut block_states: IndexVec<Block, BlockState> =
+            IndexVec::from_vec(vec![BlockState::Bottom; num_blocks]);
+        block_states[Block::from_usize(0)] = BlockState::Known(Vec::new());
+
+        let mut const_sets = ConstSetInterner::new();
+        let discovered_edges =
+            self.run_flat_fixpoint(&mut block_states, snapshots, &mut const_sets);
+
+        let mut jump_targets: Vec<(Inst, JumpTarget)> = Vec::new();
+        let mut has_top_jump = false;
+        for &jump_inst in jump_insts {
+            let target = match snapshots.inputs[jump_inst].last() {
+                Some(&operand) => self.resolve_jump_operand(operand, &const_sets),
+                None => {
+                    trace!(%jump_inst, pc = self.insts[jump_inst].pc, "jump in unreached block");
+                    JumpTarget::Bottom
+                }
+            };
+            if matches!(target, JumpTarget::Top) {
+                has_top_jump = true;
+            }
+            jump_targets.push((jump_inst, target));
+        }
+
+        if has_top_jump {
+            self.invalidate_suspect_jumps_flat(&mut jump_targets, &block_states, &discovered_edges);
+        }
+
+        let count = jump_targets
+            .iter()
+            .filter(|(_, t)| {
+                matches!(t, JumpTarget::Const(_) | JumpTarget::Multi(_) | JumpTarget::Invalid)
+            })
+            .count();
+
+        InterpResult { jump_targets, count, converged: true }
+    }
+
+    fn run_flat_fixpoint_no_dynamic_jumps(&self, snapshots: &mut Snapshots) {
+        let num_blocks = self.cfg.blocks.len();
+
+        let mut block_states: IndexVec<Block, BlockState> =
+            IndexVec::from_vec(vec![BlockState::Bottom; num_blocks]);
+        block_states[Block::from_usize(0)] = BlockState::Known(Vec::new());
+
+        let mut const_sets = ConstSetInterner::new();
+        let mut worklist = BlockWorklist::new(num_blocks);
+        worklist.push(Block::from_usize(0));
+
+        let max_iterations = num_blocks.saturating_mul(MAX_FIXPOINT_ITER_MULTIPLIER);
+        let mut iterations = 0;
+        let mut converged = true;
+        let mut stack_buf: Vec<AbsValue> = Vec::with_capacity(MAX_ABS_STACK_DEPTH);
+
+        while let Some(bid) = worklist.pop() {
+            iterations += 1;
+            if iterations > max_iterations {
+                converged = false;
+                break;
+            }
+
+            stack_buf.clear();
+            match &block_states[bid] {
+                BlockState::Known(s) => stack_buf.extend_from_slice(s),
+                BlockState::Bottom => continue,
+            };
+
+            let block = &self.cfg.blocks[bid];
+            if block.dead {
+                continue;
+            }
+
+            if !self.interpret_block_flat(block.insts(), &mut stack_buf, snapshots) {
+                continue;
+            }
+
+            let term_inst = block.terminator();
+            let term = &self.insts[term_inst];
+            let (skip_fallthrough, skip_jump) = if term.opcode == op::JUMPI
+                && let Some(AbsValue::Const(idx)) = snapshots.inputs[term_inst].first().copied()
+            {
+                let val = *self.u256_interner.borrow().get(idx);
+                if val.is_zero() { (false, true) } else { (true, false) }
+            } else {
+                (false, false)
+            };
+
+            for (si, &succ) in block.succs.iter().enumerate() {
+                let is_fallthrough = si == 0 && term.opcode == op::JUMPI && term.can_fall_through();
+                let is_jump_edge = !is_fallthrough;
+                if (is_fallthrough && skip_fallthrough) || (is_jump_edge && skip_jump) {
+                    continue;
+                }
+
+                if block_states[succ].join(&stack_buf, &mut const_sets) {
+                    worklist.push(succ);
+                }
+            }
+        }
+
+        debug!(
+            "{msg} after {iterations} iterations (max={max_iterations})",
+            msg = if converged { "converged" } else { "did not converge" },
+        );
+    }
+
+    fn run_context_sensitive_interp(
+        &self,
+        jump_insts: &[Inst],
+        snapshots: &mut Snapshots,
+    ) -> InterpResult {
         let num_blocks = self.cfg.blocks.len();
 
         let mut const_sets = ConstSetInterner::new();
@@ -694,27 +889,15 @@ impl Bytecode<'_> {
         let mut block_states = BlockContexts::new(num_blocks);
         block_states.join(Block::from_usize(0), root_ctx, &[], &mut const_sets);
 
-        // Collect unresolved jumps.
-        let mut jump_insts: Vec<Inst> = Vec::new();
-        for (i, inst) in self.insts.iter_enumerated() {
-            if inst.is_jump() && !inst.flags.contains(InstFlags::STATIC_JUMP) {
-                jump_insts.push(i);
-            }
-        }
-
-        let discovered_edges =
-            self.run_fixpoint(&mut block_states, snapshots, &mut const_sets, &mut contexts);
-
-        if jump_insts.is_empty() {
-            return (Vec::new(), 0);
-        }
+        let (discovered_edges, converged) =
+            self.run_context_fixpoint(&mut block_states, snapshots, &mut const_sets, &mut contexts);
 
         // After convergence, resolve each dynamic jump from its snapshot operand.
         // For JUMP the snapshot is [target]; for JUMPI it's [condition, target].
         // The jump target is always the top-of-stack operand, i.e. `last()`.
         let mut jump_targets: Vec<(Inst, JumpTarget)> = Vec::new();
         let mut has_top_jump = false;
-        for &jump_inst in &jump_insts {
+        for &jump_inst in jump_insts {
             let snap = &snapshots.inputs[jump_inst];
             let target = if snap.is_empty() {
                 // No snapshot means the block was never interpreted (unreachable).
@@ -741,7 +924,7 @@ impl Bytecode<'_> {
             })
             .count();
 
-        (jump_targets, count)
+        InterpResult { jump_targets, count, converged }
     }
 
     /// Resolves a jump target from the snapshot operand recorded during the fixpoint.
@@ -878,16 +1061,147 @@ impl Bytecode<'_> {
         }
     }
 
+    fn invalidate_suspect_jumps_flat(
+        &self,
+        jump_targets: &mut [(Inst, JumpTarget)],
+        block_states: &IndexVec<Block, BlockState>,
+        discovered_edges: &IndexVec<Block, SmallVec<[Block; 4]>>,
+    ) {
+        let num_blocks = self.cfg.blocks.len();
+
+        let mut disc_preds: IndexVec<Block, SmallVec<[Block; 4]>> =
+            IndexVec::from_vec(vec![SmallVec::new(); num_blocks]);
+        for (src, targets) in discovered_edges.iter_enumerated() {
+            for &tgt in targets {
+                disc_preds[tgt].push(src);
+            }
+        }
+
+        let mut suspect: BitVec = BitVec::repeat(false, num_blocks);
+        for bid in self.cfg.blocks.indices() {
+            let has_suspect =
+                self.cfg.blocks[bid].preds.iter().chain(disc_preds[bid].iter()).any(|&pred| {
+                    if !matches!(block_states[pred], BlockState::Bottom) {
+                        return false;
+                    }
+                    self.insts[self.cfg.blocks[pred].insts.start].is_jumpdest()
+                });
+            if has_suspect {
+                suspect.set(bid.index(), true);
+            }
+        }
+
+        let mut propagate = BlockWorklist::new(num_blocks);
+        for bid in self.cfg.blocks.indices() {
+            if suspect[bid.index()] {
+                propagate.push(bid);
+            }
+        }
+        while let Some(bid) = propagate.pop() {
+            for &succ in self.cfg.blocks[bid].succs.iter().chain(discovered_edges[bid].iter()) {
+                let si = succ.index();
+                if !suspect[si] {
+                    suspect.set(si, true);
+                    propagate.push(succ);
+                }
+            }
+        }
+
+        for (inst, target) in jump_targets.iter_mut() {
+            if !matches!(target, JumpTarget::Const(_) | JumpTarget::Multi(_) | JumpTarget::Invalid)
+            {
+                continue;
+            }
+            if let Some(bid) = self.cfg.inst_to_block[*inst]
+                && suspect[bid.index()]
+            {
+                *target = JumpTarget::Top;
+            }
+        }
+    }
+
+    fn run_flat_fixpoint(
+        &self,
+        block_states: &mut IndexVec<Block, BlockState>,
+        snapshots: &mut Snapshots,
+        const_sets: &mut ConstSetInterner,
+    ) -> IndexVec<Block, SmallVec<[Block; 4]>> {
+        let num_blocks = self.cfg.blocks.len();
+        let mut worklist = BlockWorklist::new(num_blocks);
+        worklist.push(Block::from_usize(0));
+
+        let mut discovered: IndexVec<Block, SmallVec<[Block; 4]>> =
+            IndexVec::from_vec(vec![SmallVec::new(); num_blocks]);
+        let mut disc_preds: IndexVec<Block, SmallVec<[Block; 4]>> =
+            IndexVec::from_vec(vec![SmallVec::new(); num_blocks]);
+
+        let max_iterations = num_blocks.saturating_mul(MAX_FIXPOINT_ITER_MULTIPLIER);
+        let mut iterations = 0;
+        let mut converged = true;
+        let mut stack_buf: Vec<AbsValue> = Vec::with_capacity(MAX_ABS_STACK_DEPTH);
+
+        while let Some(bid) = worklist.pop() {
+            iterations += 1;
+            if iterations > max_iterations {
+                converged = false;
+                break;
+            }
+
+            stack_buf.clear();
+            match &block_states[bid] {
+                BlockState::Known(s) => stack_buf.extend_from_slice(s),
+                BlockState::Bottom => continue,
+            };
+
+            let block = &self.cfg.blocks[bid];
+            if block.dead {
+                continue;
+            }
+
+            if !self.interpret_block_flat(block.insts(), &mut stack_buf, snapshots) {
+                continue;
+            }
+
+            let term_inst = block.terminator();
+            let term = &self.insts[term_inst];
+            if term.is_jump()
+                && !term.flags.contains(InstFlags::STATIC_JUMP)
+                && let Some(&operand) = snapshots.inputs[term_inst].last()
+            {
+                self.discover_jump_edges(
+                    operand,
+                    bid,
+                    const_sets,
+                    &mut discovered,
+                    &mut disc_preds,
+                );
+            }
+
+            for &succ in block.succs.iter().chain(&discovered[bid]) {
+                if block_states[succ].join(&stack_buf, const_sets) {
+                    worklist.push(succ);
+                }
+            }
+        }
+
+        debug!(
+            "{msg} after {iterations} iterations (max={max_iterations})",
+            msg = if converged { "converged" } else { "did not converge" },
+        );
+
+        discovered
+    }
+
     /// Run a worklist-based fixpoint to compute abstract block states.
     ///
     /// Returns the discovered dynamic-jump target edges per block.
-    fn run_fixpoint(
+    fn run_context_fixpoint(
         &self,
         block_states: &mut BlockContexts,
         snapshots: &mut Snapshots,
         const_sets: &mut ConstSetInterner,
         contexts: &mut ContextInterner,
-    ) -> IndexVec<Block, SmallVec<[Block; 4]>> {
+    ) -> (IndexVec<Block, SmallVec<[Block; 4]>>, bool) {
         let num_blocks = self.cfg.blocks.len();
         let mut worklist = ContextWorklist::new(num_blocks);
         worklist.push(Block::from_usize(0), contexts.root());
@@ -899,7 +1213,7 @@ impl Bytecode<'_> {
         let mut disc_preds: IndexVec<Block, SmallVec<[Block; 4]>> =
             IndexVec::from_vec(vec![SmallVec::new(); num_blocks]);
 
-        let max_iterations = num_blocks.saturating_mul(256);
+        let max_iterations = num_blocks.saturating_mul(MAX_CONTEXT_FIXPOINT_ITER_MULTIPLIER);
         let mut iterations = 0;
         let mut converged = true;
 
@@ -939,7 +1253,7 @@ impl Bytecode<'_> {
                 }
             }
 
-            let (ok, term_snap) = self.interpret_block(
+            let (ok, term_snap) = self.interpret_block_context(
                 block.insts(),
                 block.terminator(),
                 input,
@@ -1009,7 +1323,7 @@ impl Bytecode<'_> {
             msg = if converged { "converged" } else { "did not converge" },
         );
 
-        discovered
+        (discovered, converged)
     }
 
     /// Interpret a sequence of instructions on the abstract stack.
@@ -1017,7 +1331,97 @@ impl Bytecode<'_> {
     ///
     /// The caller must pre-fill `stack` with the input state; on return it contains the output.
     /// Records per-instruction operand snapshots into `snapshots`.
-    fn interpret_block(
+    fn interpret_block_flat(
+        &self,
+        insts: impl IntoIterator<Item = Inst>,
+        stack: &mut Vec<AbsValue>,
+        snapshots: &mut Snapshots,
+    ) -> bool {
+        for i in insts {
+            let inst = &self.insts[i];
+            if inst.is_dead_code() {
+                continue;
+            }
+
+            if inst.flags.contains(InstFlags::SKIP_LOGIC) {
+                continue;
+            }
+
+            let (inp, out) = inst.stack_io();
+            let inp = inp as usize;
+            let out = out as usize;
+
+            let start = stack.len().saturating_sub(inp);
+            let snap = &mut snapshots.inputs[i];
+            snap.clear();
+            snap.extend_from_slice(&stack[start..]);
+
+            match inst.opcode {
+                op::PUSH0 => {
+                    stack.push(AbsValue::Const(self.intern_u256(U256::ZERO)));
+                }
+                op::PUSH1..=op::PUSH32 => {
+                    let val = self.get_imm(inst).map_or(AbsValue::Top, |imm| {
+                        AbsValue::Const(self.intern_u256(U256::from_be_slice(imm)))
+                    });
+                    stack.push(val);
+                }
+                op::POP => {
+                    if stack.pop().is_none() {
+                        return false;
+                    }
+                }
+                op::DUP1..=op::DUP16 => {
+                    let depth = (inst.opcode - op::DUP1 + 1) as usize;
+                    if stack.len() < depth {
+                        return false;
+                    }
+                    stack.push(stack[stack.len() - depth]);
+                }
+                op::SWAP1..=op::SWAP16 => {
+                    let depth = (inst.opcode - op::SWAP1 + 1) as usize;
+                    let len = stack.len();
+                    if len < depth + 1 {
+                        return false;
+                    }
+                    stack.swap(len - 1, len - 1 - depth);
+                }
+                _ => {
+                    if stack.len() < inp {
+                        return false;
+                    }
+
+                    let result = if out > 0 {
+                        super::const_fold::try_const_fold(
+                            inst,
+                            &stack[stack.len() - inp..],
+                            &mut self.u256_interner.borrow_mut(),
+                            self.code.len(),
+                        )
+                    } else {
+                        None
+                    };
+
+                    stack.truncate(stack.len() - inp);
+
+                    if let Some(folded) = result {
+                        debug_assert_eq!(out, 1);
+                        stack.push(folded);
+                    } else {
+                        stack.resize(stack.len() + out, AbsValue::Top);
+                    }
+                }
+            }
+
+            if out > 0 {
+                snapshots.outputs[i] = stack.last().copied();
+            }
+        }
+
+        true
+    }
+
+    fn interpret_block_context(
         &self,
         insts: impl IntoIterator<Item = Inst>,
         term_inst: Inst,
