@@ -1154,6 +1154,160 @@ tests! {
             expected_gas: GAS_WHAT_INTERPRETER_SAYS,
             expected_next_action: ACTION_WHAT_INTERPRETER_SAYS,
         }),
+
+        // Pre-Berlin specs: different static gas costs for CALL (700 vs 100).
+        call_value_petersburg(@raw {
+            bytecode: &[
+                op::PUSH1, 1,   // ret length
+                op::PUSH1, 2,   // ret offset
+                op::PUSH1, 3,   // args length
+                op::PUSH1, 4,   // args offset
+                op::PUSH1, 5,   // value (non-zero)
+                op::PUSH1, 6,   // address
+                op::PUSH1, 7,   // gas
+                op::CALL,
+            ],
+            spec_id: SpecId::PETERSBURG,
+            expected_return: RETURN_WHAT_INTERPRETER_SAYS,
+            expected_memory: MEMORY_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+            expected_next_action: ACTION_WHAT_INTERPRETER_SAYS,
+        }),
+        call_no_value_petersburg(@raw {
+            bytecode: &[
+                op::PUSH1, 1,   // ret length
+                op::PUSH1, 2,   // ret offset
+                op::PUSH1, 3,   // args length
+                op::PUSH1, 4,   // args offset
+                op::PUSH1, 0,   // value = 0
+                op::PUSH1, 6,   // address
+                op::PUSH1, 7,   // gas
+                op::CALL,
+            ],
+            spec_id: SpecId::PETERSBURG,
+            expected_return: RETURN_WHAT_INTERPRETER_SAYS,
+            expected_memory: MEMORY_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+            expected_next_action: ACTION_WHAT_INTERPRETER_SAYS,
+        }),
+        staticcall_petersburg(@raw {
+            bytecode: &[
+                op::PUSH1, 1,   // ret length
+                op::PUSH1, 2,   // ret offset
+                op::PUSH1, 3,   // args length
+                op::PUSH1, 4,   // args offset
+                op::PUSH1, 5,   // address
+                op::PUSH1, 6,   // gas
+                op::STATICCALL,
+            ],
+            spec_id: SpecId::PETERSBURG,
+            expected_return: RETURN_WHAT_INTERPRETER_SAYS,
+            expected_memory: MEMORY_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+            expected_next_action: ACTION_WHAT_INTERPRETER_SAYS,
+        }),
+        call_value_istanbul(@raw {
+            bytecode: &[
+                op::PUSH1, 1,   // ret length
+                op::PUSH1, 2,   // ret offset
+                op::PUSH1, 3,   // args length
+                op::PUSH1, 4,   // args offset
+                op::PUSH1, 5,   // value (non-zero)
+                op::PUSH1, 6,   // address
+                op::PUSH1, 7,   // gas
+                op::CALL,
+            ],
+            spec_id: SpecId::ISTANBUL,
+            expected_return: RETURN_WHAT_INTERPRETER_SAYS,
+            expected_memory: MEMORY_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+            expected_next_action: ACTION_WHAT_INTERPRETER_SAYS,
+        }),
+        call_no_value_istanbul(@raw {
+            bytecode: &[
+                op::PUSH1, 1,   // ret length
+                op::PUSH1, 2,   // ret offset
+                op::PUSH1, 3,   // args length
+                op::PUSH1, 4,   // args offset
+                op::PUSH1, 0,   // value = 0
+                op::PUSH1, 6,   // address
+                op::PUSH1, 7,   // gas
+                op::CALL,
+            ],
+            spec_id: SpecId::ISTANBUL,
+            expected_return: RETURN_WHAT_INTERPRETER_SAYS,
+            expected_memory: MEMORY_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+            expected_next_action: ACTION_WHAT_INTERPRETER_SAYS,
+        }),
+        delegatecall_istanbul(@raw {
+            bytecode: &[
+                op::PUSH1, 1,   // ret length
+                op::PUSH1, 2,   // ret offset
+                op::PUSH1, 3,   // args length
+                op::PUSH1, 4,   // args offset
+                op::PUSH1, 5,   // address
+                op::PUSH1, 6,   // gas
+                op::DELEGATECALL,
+            ],
+            spec_id: SpecId::ISTANBUL,
+            expected_return: RETURN_WHAT_INTERPRETER_SAYS,
+            expected_memory: MEMORY_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+            expected_next_action: ACTION_WHAT_INTERPRETER_SAYS,
+        }),
+        call_value_byzantium(@raw {
+            bytecode: &[
+                op::PUSH1, 1,   // ret length
+                op::PUSH1, 2,   // ret offset
+                op::PUSH1, 3,   // args length
+                op::PUSH1, 4,   // args offset
+                op::PUSH1, 5,   // value (non-zero)
+                op::PUSH1, 6,   // address
+                op::PUSH1, 7,   // gas
+                op::CALL,
+            ],
+            spec_id: SpecId::BYZANTIUM,
+            expected_return: RETURN_WHAT_INTERPRETER_SAYS,
+            expected_memory: MEMORY_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+            expected_next_action: ACTION_WHAT_INTERPRETER_SAYS,
+        }),
+        call_high_gas_value_istanbul(@raw {
+            bytecode: &[
+                op::PUSH1, 32,       // ret length
+                op::PUSH1, 0,        // ret offset
+                op::PUSH1, 64,       // args length
+                op::PUSH1, 0,        // args offset
+                op::PUSH1, 100,      // value = 100
+                op::PUSH1, 0x69,     // address
+                op::PUSH2, 0xFF, 0xFF, // gas = 65535
+                op::CALL,
+            ],
+            spec_id: SpecId::ISTANBUL,
+            expected_return: RETURN_WHAT_INTERPRETER_SAYS,
+            expected_memory: MEMORY_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+            expected_next_action: ACTION_WHAT_INTERPRETER_SAYS,
+        }),
+        // Muir Glacier uses ISTANBUL gas table.
+        call_value_muir_glacier(@raw {
+            bytecode: &[
+                op::PUSH1, 1,   // ret length
+                op::PUSH1, 2,   // ret offset
+                op::PUSH1, 3,   // args length
+                op::PUSH1, 4,   // args offset
+                op::PUSH1, 5,   // value (non-zero)
+                op::PUSH1, 6,   // address
+                op::PUSH1, 7,   // gas
+                op::CALL,
+            ],
+            spec_id: SpecId::MUIR_GLACIER,
+            expected_return: RETURN_WHAT_INTERPRETER_SAYS,
+            expected_memory: MEMORY_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+            expected_next_action: ACTION_WHAT_INTERPRETER_SAYS,
+        }),
         call_high_gas_value(@raw {
             bytecode: &[
                 op::PUSH1, 32,       // ret length

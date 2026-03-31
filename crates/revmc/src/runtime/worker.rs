@@ -374,8 +374,8 @@ fn compile_aot_artifact(job: &AotJob) -> Result<WorkerSuccess, String> {
     use crate::{EvmCompiler, EvmLlvmBackend, Linker};
     use std::io::Read;
 
-    let backend = EvmLlvmBackend::new(true)
-        .map_err(|e| format!("AOT backend creation failed: {e}"))?;
+    let backend =
+        EvmLlvmBackend::new(true).map_err(|e| format!("AOT backend creation failed: {e}"))?;
     let mut compiler = EvmCompiler::new(backend);
     compiler.set_opt_level(job.opt_level);
 
