@@ -824,7 +824,7 @@ impl Bytecode<'_> {
                 continue;
             }
 
-            if !self.interpret_block(block.insts(), &mut stack_buf, Some(snapshots)) {
+            if !self.interpret_block(block.insts(), &mut stack_buf, snapshots) {
                 continue;
             }
 
@@ -881,13 +881,12 @@ impl Bytecode<'_> {
     /// Returns `false` on stack underflow (conflict).
     ///
     /// The caller must pre-fill `stack` with the input state; on return it contains the output.
-    /// If `snapshots` is provided, records the abstract stack state before and after each
-    /// instruction.
+    /// Records per-instruction operand snapshots into `snapshots`.
     fn interpret_block(
         &self,
         insts: impl IntoIterator<Item = Inst>,
         stack: &mut Vec<AbsValue>,
-        mut snapshots: Option<&mut Snapshots>,
+        snapshots: &mut Snapshots,
     ) -> bool {
         for i in insts {
             let inst = &self.insts[i];
@@ -902,16 +901,13 @@ impl Bytecode<'_> {
             }
 
             // Record pre-instruction input operand snapshot.
-            if let Some(snaps) = &mut snapshots {
-                let (inp, _) = inst.stack_io();
-                let inp = inp as usize;
-                let len = stack.len();
-                let start = len.saturating_sub(inp);
-                let snap = &mut snaps.inputs[i];
-                snap.clear();
-                for &v in stack[start..].iter().rev() {
-                    snap.push(v);
-                }
+            let (inp, _) = inst.stack_io();
+            let inp_n = inp as usize;
+            let start = stack.len().saturating_sub(inp_n);
+            let snap = &mut snapshots.inputs[i];
+            snap.clear();
+            for &v in stack[start..].iter().rev() {
+                snap.push(v);
             }
 
             match inst.opcode {
@@ -948,23 +944,22 @@ impl Bytecode<'_> {
                     // For static jumps that were resolved by the simple pass, the jump
                     // already had its input count reduced — use `stack_io()` which accounts
                     // for that.
-                    let (inp, out) = inst.stack_io();
-                    let inp = inp as usize;
+                    let (_, out) = inst.stack_io();
                     let out = out as usize;
 
-                    if stack.len() < inp {
+                    if stack.len() < inp_n {
                         return false;
                     }
 
                     // Try constant folding for common arithmetic.
                     let result = if out > 0 {
-                        self.try_const_fold(inst, &stack[stack.len() - inp..])
+                        self.try_const_fold(inst, &stack[stack.len() - inp_n..])
                     } else {
                         None
                     };
 
                     // Pop inputs.
-                    stack.truncate(stack.len() - inp);
+                    stack.truncate(stack.len() - inp_n);
 
                     // Push outputs.
                     if let Some(folded) = result {
@@ -977,11 +972,9 @@ impl Bytecode<'_> {
             }
 
             // Record post-instruction output snapshot.
-            if let Some(snaps) = &mut snapshots {
-                let (_, out) = inst.stack_io();
-                if out > 0 {
-                    snaps.outputs[i] = stack.last().copied();
-                }
+            let (_, out) = inst.stack_io();
+            if out > 0 {
+                snapshots.outputs[i] = stack.last().copied();
             }
         }
 
