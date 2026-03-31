@@ -65,6 +65,7 @@ pub fn with_jit_compiler<R>(
     opt_level: OptimizationLevel,
     f: fn(&mut EvmCompiler<crate::llvm::EvmLlvmBackend>) -> R,
 ) -> R {
+    init_tracing();
     let backend = crate::llvm::EvmLlvmBackend::new(false).unwrap();
     let mut compiler = EvmCompiler::new(backend);
     compiler.set_opt_level(opt_level);

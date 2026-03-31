@@ -132,6 +132,14 @@ pub fn get_benches() -> Vec<Bench> {
         Bench {
             name: "univ2_router",
             bytecode: include_code_str!("../../../data/univ2_router.rt.hex").unwrap(),
+            // `getAmountOut(1_000_000, 100_000_000_000, 50_000_000_000)`
+            calldata: hex!(
+                "054d50d4"
+                "00000000000000000000000000000000000000000000000000000000000f4240"
+                "000000000000000000000000000000000000000000000000000000174876e800"
+                "0000000000000000000000000000000000000000000000000000000ba43b7400"
+            )
+            .to_vec(),
             ..Default::default()
         },
         Bench {

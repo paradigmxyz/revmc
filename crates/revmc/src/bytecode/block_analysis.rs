@@ -1141,6 +1141,8 @@ pub(crate) mod tests {
         code: Vec<u8>,
         config: super::super::AnalysisConfig,
     ) -> Bytecode<'static> {
+        crate::tests::init_tracing();
+
         let code = &*Box::leak(code.into_boxed_slice());
         eprintln!("{}", hex::encode(code));
         let mut bytecode = Bytecode::new(code, SpecId::CANCUN);

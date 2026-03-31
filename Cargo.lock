@@ -2867,6 +2867,7 @@ dependencies = [
  "snapbox",
  "tempfile",
  "tracing",
+ "tracing-subscriber 0.3.23",
 ]
 
 [[package]]
