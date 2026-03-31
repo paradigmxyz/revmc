@@ -10,7 +10,7 @@ use smallvec::SmallVec;
 use std::cell::RefCell;
 
 mod block_analysis;
-use block_analysis::{Cfg, OperandSnapshot, Snapshots};
+use block_analysis::{Cfg, Snapshots};
 
 mod dedup;
 

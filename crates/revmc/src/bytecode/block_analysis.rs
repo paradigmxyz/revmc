@@ -331,12 +331,29 @@ impl Bytecode<'_> {
             return;
         }
 
-        // Check if any jump remains unresolved (Top).
+        let newly_resolved = self.commit_resolved_jumps(&resolved);
+        debug!(newly_resolved, "resolved jumps");
+
+        // Recompute dynamic jumps flag.
+        let n = self
+            .insts
+            .iter()
+            .filter(|inst| inst.is_jump() && !inst.flags.contains(InstFlags::STATIC_JUMP))
+            .count();
+        self.has_dynamic_jumps = n > 0;
+        if self.has_dynamic_jumps {
+            debug!(n, "unresolved dynamic jumps remain");
+        }
+    }
+
+    /// Commits resolved jump targets by setting flags and data on the corresponding instructions.
+    ///
+    /// Returns the number of newly resolved jumps.
+    fn commit_resolved_jumps(&mut self, resolved: &[(Inst, JumpTarget)]) -> u32 {
         let has_top_jump = resolved.iter().any(|(_, t)| matches!(t, JumpTarget::Top));
 
-        // Commit resolved targets.
         let mut newly_resolved = 0u32;
-        for &(jump_inst, ref target) in &resolved {
+        for &(jump_inst, ref target) in resolved {
             // Skip if already resolved by static_jump_analysis.
             if self.insts[jump_inst].flags.contains(InstFlags::STATIC_JUMP) {
                 continue;
@@ -397,19 +414,7 @@ impl Bytecode<'_> {
                 }
             }
         }
-
-        debug!(newly_resolved, "block_analysis complete");
-
-        // Recompute dynamic jumps flag.
-        let n = self
-            .insts
-            .iter()
-            .filter(|inst| inst.is_jump() && !inst.flags.contains(InstFlags::STATIC_JUMP))
-            .count();
-        self.has_dynamic_jumps = n > 0;
-        if self.has_dynamic_jumps {
-            debug!(n, "unresolved dynamic jumps remain");
-        }
+        newly_resolved
     }
 
     /// Rebuild the basic-block CFG from the current instruction state.
@@ -523,8 +528,7 @@ impl Bytecode<'_> {
     /// Returns a list of (jump_inst, resolved_target) pairs and the count of resolvable jumps.
     /// Stack snapshots are recorded into `snapshots` during the fixpoint.
     fn run_abstract_interp(&self, snapshots: &mut Snapshots) -> (Vec<(Inst, JumpTarget)>, usize) {
-        let cfg = &self.cfg;
-        let num_blocks = cfg.blocks.len();
+        let num_blocks = self.cfg.blocks.len();
 
         // Initialize block states. Entry block starts with an empty stack.
         let mut block_states: IndexVec<Block, BlockState> =
@@ -539,13 +543,10 @@ impl Bytecode<'_> {
             }
         }
 
-        // Always run the fixpoint to propagate stack states through the CFG.
-        // Snapshots are recorded during interpretation — last write wins (= converged state).
+        // Run the fixpoint. When the worklist drains, unreached blocks are seeded
+        // with all-Top input (roots first, then remaining) and the fixpoint continues.
         let mut const_sets = ConstSetInterner::new();
         let discovered_edges = self.run_fixpoint(&mut block_states, snapshots, &mut const_sets);
-
-        // Fill snapshots for blocks the fixpoint never reached.
-        self.fill_unreached_snapshots(&block_states, snapshots);
 
         if jump_insts.is_empty() {
             return (Vec::new(), 0);
@@ -556,62 +557,7 @@ impl Bytecode<'_> {
         let mut jump_targets: Vec<(Inst, JumpTarget)> = Vec::new();
         let mut has_top_jump = false;
         for &jump_inst in &jump_insts {
-            let target = match cfg.inst_to_block[jump_inst] {
-                None => JumpTarget::Bottom,
-                Some(bid) => match &block_states[bid] {
-                    BlockState::Bottom => {
-                        trace!(%jump_inst, pc = self.insts[jump_inst].pc, "jump in unreached block");
-                        JumpTarget::Bottom
-                    }
-                    BlockState::Conflict => {
-                        trace!(%jump_inst, pc = self.insts[jump_inst].pc, "jump in conflict block");
-                        JumpTarget::Top
-                    }
-                    BlockState::Known(input) => match self.jump_operand(&cfg.blocks[bid], input) {
-                        Some(AbsValue::Const(idx)) => {
-                            let val = *self.u256_interner.borrow().get(idx);
-                            match usize::try_from(val) {
-                                Ok(target_pc) if self.is_valid_jump(target_pc) => {
-                                    JumpTarget::Const(self.pc_to_inst(target_pc))
-                                }
-                                _ => JumpTarget::Invalid,
-                            }
-                        }
-                        Some(AbsValue::ConstSet(set_idx)) => {
-                            let consts = const_sets.get(set_idx);
-                            let interner = self.u256_interner.borrow();
-                            let mut targets = SmallVec::new();
-                            let mut all_valid = true;
-                            for &idx in consts {
-                                let val = *interner.get(idx);
-                                match usize::try_from(val) {
-                                    Ok(pc) if self.is_valid_jump(pc) => {
-                                        targets.push(self.pc_to_inst(pc));
-                                    }
-                                    _ => {
-                                        all_valid = false;
-                                        break;
-                                    }
-                                }
-                            }
-                            if all_valid && !targets.is_empty() {
-                                JumpTarget::Multi(targets)
-                            } else {
-                                JumpTarget::Invalid
-                            }
-                        }
-                        out => {
-                            trace!(
-                                inst = %jump_inst,
-                                in=?input,
-                                ?out,
-                                "unresolved jump",
-                            );
-                            JumpTarget::Top
-                        }
-                    },
-                },
-            };
+            let target = self.resolve_jump(jump_inst, &block_states, &const_sets);
             if matches!(target, JumpTarget::Top) {
                 has_top_jump = true;
             }
@@ -634,7 +580,7 @@ impl Bytecode<'_> {
         if has_top_jump {
             // Build reverse discovered-edge map: for each target block, which source blocks have
             // discovered edges pointing to it.
-            let mut disc_preds: IndexVec<Block, SmallVec<[Block; 2]>> =
+            let mut disc_preds: IndexVec<Block, SmallVec<[Block; 4]>> =
                 IndexVec::from_vec(vec![SmallVec::new(); num_blocks]);
             for (src, targets) in discovered_edges.iter_enumerated() {
                 for &tgt in targets {
@@ -644,14 +590,14 @@ impl Bytecode<'_> {
 
             // Precompute: for each block, whether it has a suspect (Bottom + JUMPDEST) predecessor.
             let mut suspect: BitVec = BitVec::repeat(false, num_blocks);
-            for bid in cfg.blocks.indices() {
+            for bid in self.cfg.blocks.indices() {
                 let bi = bid.index();
                 let has_suspect =
-                    cfg.blocks[bid].preds.iter().chain(disc_preds[bid].iter()).any(|&pred| {
+                    self.cfg.blocks[bid].preds.iter().chain(disc_preds[bid].iter()).any(|&pred| {
                         if !matches!(block_states[pred], BlockState::Bottom) {
                             return false;
                         }
-                        self.insts[cfg.blocks[pred].insts.start].is_jumpdest()
+                        self.insts[self.cfg.blocks[pred].insts.start].is_jumpdest()
                     });
                 if has_suspect {
                     suspect.set(bi, true);
@@ -661,13 +607,13 @@ impl Bytecode<'_> {
             // Propagate suspect flag forward through the CFG: if a block is suspect,
             // all its successors (static + discovered) are also suspect.
             let mut propagate = Worklist::new(num_blocks);
-            for bid in cfg.blocks.indices() {
+            for bid in self.cfg.blocks.indices() {
                 if suspect[bid.index()] {
                     propagate.push(bid);
                 }
             }
             while let Some(bid) = propagate.pop() {
-                for &succ in cfg.blocks[bid].succs.iter().chain(discovered_edges[bid].iter()) {
+                for &succ in self.cfg.blocks[bid].succs.iter().chain(discovered_edges[bid].iter()) {
                     let si = succ.index();
                     if !suspect[si] {
                         suspect.set(si, true);
@@ -683,7 +629,7 @@ impl Bytecode<'_> {
                 ) {
                     continue;
                 }
-                if let Some(bid) = cfg.inst_to_block[*inst]
+                if let Some(bid) = self.cfg.inst_to_block[*inst]
                     && suspect[bid.index()]
                 {
                     *target = JumpTarget::Top;
@@ -701,32 +647,146 @@ impl Bytecode<'_> {
         (jump_targets, count)
     }
 
+    /// Resolves a single dynamic jump using the current block states.
+    fn resolve_jump(
+        &self,
+        jump_inst: Inst,
+        block_states: &IndexVec<Block, BlockState>,
+        const_sets: &ConstSetInterner,
+    ) -> JumpTarget {
+        let Some(bid) = self.cfg.inst_to_block[jump_inst] else {
+            return JumpTarget::Bottom;
+        };
+        match &block_states[bid] {
+            BlockState::Bottom => {
+                trace!(%jump_inst, pc = self.insts[jump_inst].pc, "jump in unreached block");
+                JumpTarget::Bottom
+            }
+            BlockState::Conflict => {
+                trace!(%jump_inst, pc = self.insts[jump_inst].pc, "jump in conflict block");
+                JumpTarget::Top
+            }
+            BlockState::Known(input) => match self.jump_operand(&self.cfg.blocks[bid], input) {
+                Some(AbsValue::Const(idx)) => {
+                    let val = *self.u256_interner.borrow().get(idx);
+                    match usize::try_from(val) {
+                        Ok(target_pc) if self.is_valid_jump(target_pc) => {
+                            JumpTarget::Const(self.pc_to_inst(target_pc))
+                        }
+                        _ => JumpTarget::Invalid,
+                    }
+                }
+                Some(AbsValue::ConstSet(set_idx)) => {
+                    let consts = const_sets.get(set_idx);
+                    let interner = self.u256_interner.borrow();
+                    let mut targets = SmallVec::new();
+                    let mut all_valid = true;
+                    for &idx in consts {
+                        let val = *interner.get(idx);
+                        match usize::try_from(val) {
+                            Ok(pc) if self.is_valid_jump(pc) => {
+                                targets.push(self.pc_to_inst(pc));
+                            }
+                            _ => {
+                                all_valid = false;
+                                break;
+                            }
+                        }
+                    }
+                    if all_valid && !targets.is_empty() {
+                        JumpTarget::Multi(targets)
+                    } else {
+                        JumpTarget::Invalid
+                    }
+                }
+                out => {
+                    trace!(
+                        inst = %jump_inst,
+                        in=?input,
+                        ?out,
+                        "unresolved jump",
+                    );
+                    JumpTarget::Top
+                }
+            },
+        }
+    }
+
     /// Run a worklist-based fixpoint to compute abstract block states.
     ///
+    /// After the initial fixpoint converges, unreached (Bottom) blocks are seeded with
+    /// all-Top input — JUMPDEST roots first (one at a time for precision), then any
+    /// remaining blocks — and the fixpoint continues to propagate through them.
+    ///
     /// Returns the discovered dynamic-jump target edges per block.
-    /// Stack snapshots are recorded into `snapshots` during each block interpretation.
     fn run_fixpoint(
         &self,
         block_states: &mut IndexVec<Block, BlockState>,
         snapshots: &mut Snapshots,
         const_sets: &mut ConstSetInterner,
-    ) -> IndexVec<Block, SmallVec<[Block; 2]>> {
-        let cfg = &self.cfg;
-        let num_blocks = cfg.blocks.len();
+    ) -> IndexVec<Block, SmallVec<[Block; 4]>> {
+        let num_blocks = self.cfg.blocks.len();
         let mut worklist = Worklist::new(num_blocks);
-        worklist.push(Block::from_usize(0));
+        for bid in self.cfg.blocks.indices() {
+            if !matches!(block_states[bid], BlockState::Bottom) {
+                worklist.push(bid);
+            }
+        }
 
-        // Persistent set of discovered dynamic-jump target edges per block.
-        // Once a dynamic jump in block `bid` resolves to a target block, that
-        // edge is kept for all subsequent visits so updated states propagate.
-        let mut discovered_jump_edges: IndexVec<Block, SmallVec<[Block; 2]>> =
+        // Discovered dynamic-jump target edges per block, accumulated across all phases.
+        let mut discovered: IndexVec<Block, SmallVec<[Block; 4]>> =
+            IndexVec::from_vec(vec![SmallVec::new(); num_blocks]);
+        // Reverse map: discovered predecessors per block.
+        let mut disc_preds: IndexVec<Block, SmallVec<[Block; 4]>> =
             IndexVec::from_vec(vec![SmallVec::new(); num_blocks]);
 
         let max_iterations = num_blocks * 8;
         let mut iterations = 0;
         let mut converged = true;
+        let mut seeded_remaining = false;
 
-        while let Some(bid) = worklist.pop() {
+        loop {
+            let Some(bid) = worklist.pop() else {
+                if seeded_remaining {
+                    break;
+                }
+
+                // Find a root: Bottom, not dead, no predecessors.
+                // A Bottom block's predecessors are necessarily also Bottom (if a
+                // Known predecessor had an edge here, the fixpoint would have
+                // propagated to it), so this is equivalent to "no predecessors."
+                let root = self.cfg.blocks.iter_enumerated().find_map(|(bid, block)| {
+                    if !matches!(block_states[bid], BlockState::Bottom) || block.dead {
+                        return None;
+                    }
+                    (block.preds.is_empty() && disc_preds[bid].is_empty()).then_some(bid)
+                });
+
+                if let Some(root) = root {
+                    let depth = self.block_min_input_depth(&self.cfg.blocks[root]);
+                    block_states[root] = BlockState::Known(vec![AbsValue::Top; depth]);
+                    worklist.push(root);
+                    debug!("main graph finished after {iterations} iterations");
+                    iterations = 0;
+                    continue;
+                }
+
+                // No more roots — batch-seed all remaining Bottom blocks.
+                seeded_remaining = true;
+                for (bid, block) in self.cfg.blocks.iter_enumerated() {
+                    if matches!(block_states[bid], BlockState::Bottom) && !block.dead {
+                        let depth = self.block_min_input_depth(block);
+                        block_states[bid] = BlockState::Known(vec![AbsValue::Top; depth]);
+                        worklist.push(bid);
+                    }
+                }
+                if worklist.queue.is_empty() {
+                    break;
+                }
+                iterations = 0;
+                continue;
+            };
+
             iterations += 1;
             if iterations > max_iterations {
                 converged = false;
@@ -737,13 +797,11 @@ impl Bytecode<'_> {
                 BlockState::Known(s) => s.clone(),
                 BlockState::Bottom => continue,
                 BlockState::Conflict => {
-                    // Propagate Conflict to all successors so they know their
-                    // state may be incomplete.
-                    for &succ in cfg.blocks[bid].succs.iter().chain(&discovered_jump_edges[bid]) {
+                    for &succ in self.cfg.blocks[bid].succs.iter().chain(&discovered[bid]) {
                         if block_states[succ].conflict() {
                             trace!(
                                 from = %bid, to = %succ,
-                                to_pc = self.insts[cfg.blocks[succ].insts.start].pc,
+                                to_pc = self.insts[self.cfg.blocks[succ].insts.start].pc,
                                 "propagating conflict",
                             );
                             worklist.push(succ);
@@ -753,7 +811,7 @@ impl Bytecode<'_> {
                 }
             };
 
-            let block = &cfg.blocks[bid];
+            let block = &self.cfg.blocks[bid];
             if block.dead {
                 continue;
             }
@@ -762,7 +820,7 @@ impl Bytecode<'_> {
                 continue;
             };
 
-            // For dynamic jumps, discover target edges to propagate state through.
+            // Discover dynamic-jump target edges.
             let term = &self.insts[block.terminator()];
             if term.is_jump()
                 && !term.flags.contains(InstFlags::STATIC_JUMP)
@@ -788,16 +846,17 @@ impl Bytecode<'_> {
                         continue;
                     }
                     let ti = self.pc_to_inst(target_pc);
-                    if let Some(tb) = cfg.inst_to_block[ti]
-                        && !discovered_jump_edges[bid].contains(&tb)
+                    if let Some(tb) = self.cfg.inst_to_block[ti]
+                        && !discovered[bid].contains(&tb)
                     {
-                        discovered_jump_edges[bid].push(tb);
+                        discovered[bid].push(tb);
+                        disc_preds[tb].push(bid);
                     }
                 }
             }
 
             // Propagate to static CFG successors and discovered dynamic-jump targets.
-            for &succ in block.succs.iter().chain(&discovered_jump_edges[bid]) {
+            for &succ in block.succs.iter().chain(&discovered[bid]) {
                 if block_states[succ].join(&output, const_sets) {
                     worklist.push(succ);
                 }
@@ -809,33 +868,7 @@ impl Bytecode<'_> {
             msg = if converged { "converged" } else { "did not converge" },
         );
 
-        discovered_jump_edges
-    }
-
-    /// Fills operand snapshots for blocks the fixpoint never reached (state=Bottom).
-    ///
-    /// These are typically return targets of internal function calls whose return JUMPs could
-    /// not be resolved. Each such block is interpreted with an all-Top input stack sized to its
-    /// minimum required depth. This recovers intra-block constant propagation (e.g. `PUSH 0x40;
-    /// MLOAD`) without affecting reachability analysis.
-    fn fill_unreached_snapshots(
-        &self,
-        block_states: &IndexVec<Block, BlockState>,
-        snapshots: &mut Snapshots,
-    ) {
-        let mut count = 0u32;
-        let mut fake_input = Vec::new();
-        for (bid, block) in self.cfg.blocks.iter_enumerated() {
-            if !matches!(block_states[bid], BlockState::Bottom) || block.dead {
-                continue;
-            }
-            count += 1;
-            let required_depth = self.block_min_input_depth(block);
-            fake_input.clear();
-            fake_input.resize(required_depth, AbsValue::Top);
-            let _ = self.interpret_block(block.insts(), &fake_input, Some(snapshots));
-        }
-        debug!(count, "filled unreached block snapshots");
+        discovered
     }
 
     /// Computes the minimum input stack depth required to interpret a block without underflow.
