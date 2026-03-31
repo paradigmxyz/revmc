@@ -36,7 +36,7 @@ use revm_bytecode::opcode as op;
 use revm_interpreter::instructions::i256::{i256_cmp, i256_div, i256_mod};
 use revm_primitives::U256;
 use smallvec::SmallVec;
-use std::{borrow::Cow, cmp::Ordering, collections::VecDeque, ops::Range};
+use std::{cmp::Ordering, collections::VecDeque, ops::Range};
 
 oxc_index::define_nonmax_u32_index_type! {
     /// Index into the interned constant-set pool.
@@ -550,8 +550,9 @@ impl Bytecode<'_> {
         // This avoids the problem of the fixpoint accumulating stale partial results.
         let mut jump_targets: Vec<(Inst, JumpTarget)> = Vec::new();
         let mut has_top_jump = false;
+        let mut scratch = Vec::new();
         for &jump_inst in &jump_insts {
-            let target = self.resolve_jump(jump_inst, &block_states, &const_sets);
+            let target = self.resolve_jump(jump_inst, &block_states, &const_sets, &mut scratch);
             if matches!(target, JumpTarget::Top) {
                 has_top_jump = true;
             }
@@ -645,6 +646,7 @@ impl Bytecode<'_> {
         jump_inst: Inst,
         block_states: &IndexVec<Block, BlockState>,
         const_sets: &ConstSetInterner,
+        scratch: &mut Vec<AbsValue>,
     ) -> JumpTarget {
         let Some(bid) = self.cfg.inst_to_block[jump_inst] else {
             return JumpTarget::Bottom;
@@ -654,49 +656,51 @@ impl Bytecode<'_> {
                 trace!(%jump_inst, pc = self.insts[jump_inst].pc, "jump in unreached block");
                 JumpTarget::Bottom
             }
-            BlockState::Known(input) => match self.jump_operand(&self.cfg.blocks[bid], input) {
-                Some(AbsValue::Const(idx)) => {
-                    let val = *self.u256_interner.borrow().get(idx);
-                    match usize::try_from(val) {
-                        Ok(target_pc) if self.is_valid_jump(target_pc) => {
-                            JumpTarget::Const(self.pc_to_inst(target_pc))
-                        }
-                        _ => JumpTarget::Invalid,
-                    }
-                }
-                Some(AbsValue::ConstSet(set_idx)) => {
-                    let consts = const_sets.get(set_idx);
-                    let interner = self.u256_interner.borrow();
-                    let mut targets = SmallVec::new();
-                    let mut all_valid = true;
-                    for &idx in consts {
-                        let val = *interner.get(idx);
+            BlockState::Known(input) => {
+                match self.jump_operand(&self.cfg.blocks[bid], input, scratch) {
+                    Some(AbsValue::Const(idx)) => {
+                        let val = *self.u256_interner.borrow().get(idx);
                         match usize::try_from(val) {
-                            Ok(pc) if self.is_valid_jump(pc) => {
-                                targets.push(self.pc_to_inst(pc));
+                            Ok(target_pc) if self.is_valid_jump(target_pc) => {
+                                JumpTarget::Const(self.pc_to_inst(target_pc))
                             }
-                            _ => {
-                                all_valid = false;
-                                break;
-                            }
+                            _ => JumpTarget::Invalid,
                         }
                     }
-                    if all_valid && !targets.is_empty() {
-                        JumpTarget::Multi(targets)
-                    } else {
-                        JumpTarget::Invalid
+                    Some(AbsValue::ConstSet(set_idx)) => {
+                        let consts = const_sets.get(set_idx);
+                        let interner = self.u256_interner.borrow();
+                        let mut targets = SmallVec::new();
+                        let mut all_valid = true;
+                        for &idx in consts {
+                            let val = *interner.get(idx);
+                            match usize::try_from(val) {
+                                Ok(pc) if self.is_valid_jump(pc) => {
+                                    targets.push(self.pc_to_inst(pc));
+                                }
+                                _ => {
+                                    all_valid = false;
+                                    break;
+                                }
+                            }
+                        }
+                        if all_valid && !targets.is_empty() {
+                            JumpTarget::Multi(targets)
+                        } else {
+                            JumpTarget::Invalid
+                        }
+                    }
+                    out => {
+                        trace!(
+                            inst = %jump_inst,
+                            in=?input,
+                            ?out,
+                            "unresolved jump",
+                        );
+                        JumpTarget::Top
                     }
                 }
-                out => {
-                    trace!(
-                        inst = %jump_inst,
-                        in=?input,
-                        ?out,
-                        "unresolved jump",
-                    );
-                    JumpTarget::Top
-                }
-            },
+            }
         }
     }
 
@@ -733,6 +737,10 @@ impl Bytecode<'_> {
         let mut converged = true;
         let mut seeded_remaining = false;
         let mut last_root = first;
+
+        // Reusable buffers to avoid per-iteration allocations.
+        let mut stack_buf: Vec<AbsValue> = Vec::with_capacity(64);
+        let mut scratch_buf: Vec<AbsValue> = Vec::with_capacity(64);
 
         loop {
             let Some(bid) = worklist.pop() else {
@@ -786,8 +794,10 @@ impl Bytecode<'_> {
                 break;
             }
 
-            let input = match &block_states[bid] {
-                BlockState::Known(s) => s.clone(),
+            // Copy input state into reusable buffer.
+            stack_buf.clear();
+            match &block_states[bid] {
+                BlockState::Known(s) => stack_buf.extend_from_slice(s),
                 BlockState::Bottom => continue,
             };
 
@@ -796,48 +806,52 @@ impl Bytecode<'_> {
                 continue;
             }
 
-            let Some(output) = self.interpret_block(block.insts(), &input, Some(snapshots)) else {
+            if !self.interpret_block(block.insts(), &mut stack_buf, Some(snapshots)) {
                 continue;
-            };
+            }
 
             // Discover dynamic-jump target edges.
             let term = &self.insts[block.terminator()];
-            if term.is_jump()
-                && !term.flags.contains(InstFlags::STATIC_JUMP)
-                && let Some(operand) = self.jump_operand(block, &input)
-            {
-                let target_pcs: SmallVec<[usize; 4]> = match operand {
-                    AbsValue::Const(idx) => {
-                        let val = *self.u256_interner.borrow().get(idx);
-                        usize::try_from(val).ok().into_iter().collect()
-                    }
-                    AbsValue::ConstSet(set_idx) => {
-                        let interner = self.u256_interner.borrow();
-                        const_sets
-                            .get(set_idx)
-                            .iter()
-                            .filter_map(|&idx| usize::try_from(*interner.get(idx)).ok())
-                            .collect()
-                    }
-                    AbsValue::Top => SmallVec::new(),
+            if term.is_jump() && !term.flags.contains(InstFlags::STATIC_JUMP) {
+                // Read the input state again for jump_operand (stack_buf is now the output).
+                let input = match &block_states[bid] {
+                    BlockState::Known(s) => s.as_slice(),
+                    BlockState::Bottom => unreachable!(),
                 };
-                for target_pc in target_pcs {
-                    if !self.is_valid_jump(target_pc) {
-                        continue;
-                    }
-                    let ti = self.pc_to_inst(target_pc);
-                    if let Some(tb) = self.cfg.inst_to_block[ti]
-                        && !discovered[bid].contains(&tb)
-                    {
-                        discovered[bid].push(tb);
-                        disc_preds[tb].push(bid);
+                if let Some(operand) = self.jump_operand(block, input, &mut scratch_buf) {
+                    let target_pcs: SmallVec<[usize; 4]> = match operand {
+                        AbsValue::Const(idx) => {
+                            let val = *self.u256_interner.borrow().get(idx);
+                            usize::try_from(val).ok().into_iter().collect()
+                        }
+                        AbsValue::ConstSet(set_idx) => {
+                            let interner = self.u256_interner.borrow();
+                            const_sets
+                                .get(set_idx)
+                                .iter()
+                                .filter_map(|&idx| usize::try_from(*interner.get(idx)).ok())
+                                .collect()
+                        }
+                        AbsValue::Top => SmallVec::new(),
+                    };
+                    for target_pc in target_pcs {
+                        if !self.is_valid_jump(target_pc) {
+                            continue;
+                        }
+                        let ti = self.pc_to_inst(target_pc);
+                        if let Some(tb) = self.cfg.inst_to_block[ti]
+                            && !discovered[bid].contains(&tb)
+                        {
+                            discovered[bid].push(tb);
+                            disc_preds[tb].push(bid);
+                        }
                     }
                 }
             }
 
             // Propagate to static CFG successors and discovered dynamic-jump targets.
             for &succ in block.succs.iter().chain(&discovered[bid]) {
-                if block_states[succ].join(&output, const_sets) {
+                if block_states[succ].join(&stack_buf, const_sets) {
                     worklist.push(succ);
                 }
             }
@@ -869,18 +883,17 @@ impl Bytecode<'_> {
     }
 
     /// Interpret a sequence of instructions on the abstract stack.
-    /// Returns the abstract stack state after the last instruction, or `None` on conflict.
+    /// Returns `false` on stack underflow (conflict).
     ///
+    /// The caller must pre-fill `stack` with the input state; on return it contains the output.
     /// If `snapshots` is provided, records the abstract stack state before and after each
     /// instruction.
-    fn interpret_block<'a>(
+    fn interpret_block(
         &self,
         insts: impl IntoIterator<Item = Inst>,
-        input: &'a [AbsValue],
+        stack: &mut Vec<AbsValue>,
         mut snapshots: Option<&mut Snapshots>,
-    ) -> Option<Cow<'a, [AbsValue]>> {
-        let mut stack = Cow::Borrowed(input);
-
+    ) -> bool {
         for i in insts {
             let inst = &self.insts[i];
             if inst.is_dead_code() {
@@ -893,15 +906,17 @@ impl Bytecode<'_> {
                 continue;
             }
 
-            let stack = stack.to_mut();
-
             // Record pre-instruction input operand snapshot.
             if let Some(snaps) = &mut snapshots {
                 let (inp, _) = inst.stack_io();
                 let inp = inp as usize;
                 let len = stack.len();
                 let start = len.saturating_sub(inp);
-                snaps.inputs[i] = stack[start..].iter().rev().map(|v| v.as_const()).collect();
+                let snap = &mut snaps.inputs[i];
+                snap.clear();
+                for v in stack[start..].iter().rev() {
+                    snap.push(v.as_const());
+                }
             }
 
             match inst.opcode {
@@ -915,12 +930,14 @@ impl Bytecode<'_> {
                     stack.push(val);
                 }
                 op::POP => {
-                    stack.pop()?;
+                    if stack.pop().is_none() {
+                        return false;
+                    }
                 }
                 op::DUP1..=op::DUP16 => {
                     let depth = (inst.opcode - op::DUP1 + 1) as usize;
                     if stack.len() < depth {
-                        return None;
+                        return false;
                     }
                     stack.push(stack[stack.len() - depth]);
                 }
@@ -928,7 +945,7 @@ impl Bytecode<'_> {
                     let depth = (inst.opcode - op::SWAP1 + 1) as usize;
                     let len = stack.len();
                     if len < depth + 1 {
-                        return None;
+                        return false;
                     }
                     stack.swap(len - 1, len - 1 - depth);
                 }
@@ -941,7 +958,7 @@ impl Bytecode<'_> {
                     let out = out as usize;
 
                     if stack.len() < inp {
-                        return None;
+                        return false;
                     }
 
                     // Try constant folding for common arithmetic.
@@ -973,15 +990,25 @@ impl Bytecode<'_> {
             }
         }
 
-        Some(stack)
+        true
     }
 
     /// Returns the abstract value of the jump operand (TOS before the terminator) for a block.
-    fn jump_operand(&self, block: &BlockData, input: &[AbsValue]) -> Option<AbsValue> {
+    fn jump_operand(
+        &self,
+        block: &BlockData,
+        input: &[AbsValue],
+        scratch: &mut Vec<AbsValue>,
+    ) -> Option<AbsValue> {
         if block.len() == 1 {
             input.last().copied()
         } else {
-            self.interpret_block(block.insts().take(block.len() - 1), input, None)?.last().copied()
+            scratch.clear();
+            scratch.extend_from_slice(input);
+            if !self.interpret_block(block.insts().take(block.len() - 1), scratch, None) {
+                return None;
+            }
+            scratch.last().copied()
         }
     }
 
