@@ -469,12 +469,12 @@ impl Bytecode<'_> {
             let term = &self.insts[cfg.blocks[bid].terminator()];
 
             // Fallthrough edge: if the terminator doesn't unconditionally branch/diverge.
-            // Scan forward from the terminator to find the next live block, skipping
-            // any dead instructions that may sit between this block and its successor.
+            // The next instruction may be dead (e.g. deduped); follow redirects to find
+            // the canonical target block.
             if term.can_fall_through() {
-                let next_live = (cfg.blocks[bid].terminator().index() + 1..n)
-                    .find_map(|i| cfg.inst_to_block[Inst::from_usize(i)]);
-                if let Some(next_block) = next_live {
+                let next_inst = cfg.blocks[bid].terminator() + 1;
+                let target = self.redirects.get(&next_inst).copied().unwrap_or(next_inst);
+                if let Some(&Some(next_block)) = cfg.inst_to_block.get(target) {
                     cfg.blocks[next_block].preds.push(bid);
                     cfg.blocks[bid].succs.push(next_block);
                 }
