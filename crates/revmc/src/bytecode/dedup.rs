@@ -72,7 +72,7 @@ impl<'a> Bytecode<'a> {
             let canonical_first_inst = self.cfg.blocks[canonical].insts.start;
             for &dup in dups {
                 deduped += 1;
-                debug!("deduped: {from} -> {to}", from = dup, to = canonical);
+                trace!("deduped: {from} -> {to}", from = dup, to = canonical);
 
                 // Mark all instructions in the duplicate block as dead.
                 self.cfg.blocks[dup].dead = true;

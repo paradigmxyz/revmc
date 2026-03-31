@@ -21,7 +21,6 @@
 //! - `Bottom` — block not yet reached.
 //! - `Known(Vec<AbsValue>)` — reached with a known stack state (top-aligned; when predecessors have
 //!   different stack heights, the shorter stack is bottom-padded with `Top`).
-//! - `Conflict` — reserved for future use; currently never produced.
 //!
 //! ## Soundness
 //!
@@ -149,6 +148,12 @@ impl ConstSetInterner {
     }
 }
 
+/// Maximum abstract stack depth tracked by the analysis. Top-aligned joins across paths with
+/// differing stack heights pad the shorter stack with `Top` at the bottom; on CFG cycles this
+/// padding can grow without bound. Clamping discards only those bottom `Top` entries, so no
+/// precision is lost.
+const MAX_ABS_STACK_DEPTH: usize = 64;
+
 /// Abstract state at the entry of a block.
 #[derive(Clone, Debug)]
 enum BlockState {
@@ -156,21 +161,9 @@ enum BlockState {
     Bottom,
     /// Block has been reached with a known stack state (top-aligned).
     Known(Vec<AbsValue>),
-    /// Analysis gives up on this block.
-    Conflict,
 }
 
 impl BlockState {
-    /// Force this state to Conflict. Returns `true` if the state changed.
-    fn conflict(&mut self) -> bool {
-        if matches!(self, Self::Conflict) {
-            false
-        } else {
-            *self = Self::Conflict;
-            true
-        }
-    }
-
     /// Join another incoming state into this one. Returns `true` if the state changed.
     ///
     /// When stack heights differ, the stacks are top-aligned and the shorter one is
@@ -180,35 +173,37 @@ impl BlockState {
     fn join(&mut self, incoming: &[AbsValue], sets: &mut ConstSetInterner) -> bool {
         match self {
             Self::Bottom => {
-                *self = Self::Known(incoming.to_vec());
+                let start = incoming.len().saturating_sub(MAX_ABS_STACK_DEPTH);
+                *self = Self::Known(incoming[start..].to_vec());
                 true
             }
             Self::Known(existing) => {
                 let new_len = existing.len().max(incoming.len());
                 let mut changed = false;
 
-                // Cap the abstract stack to prevent unbounded growth in loops where each
-                // iteration pushes net items and the top-aligned join keeps padding.
-                // EVM stack max is 1024; we use a lower limit since legitimate dispatch
-                // patterns only differ by 1–2 items.
-                const MAX_STACK_DEPTH: usize = 64;
-                if new_len > MAX_STACK_DEPTH {
-                    *self = Self::Conflict;
-                    return true;
-                }
+                // Clamp to MAX_ABS_STACK_DEPTH by only joining the top portion;
+                // elements below that are unreachable by any EVM instruction (max
+                // depth is DUP16/SWAP16 = 16) and discarding them preserves soundness.
+                let join_len = new_len.min(MAX_ABS_STACK_DEPTH);
 
-                // Pad existing stack at the bottom with Top if incoming is deeper.
-                if existing.len() < new_len {
-                    let pad = new_len - existing.len();
+                // Resize existing to join_len: pad at bottom with Top or truncate.
+                if existing.len() < join_len {
+                    let pad = join_len - existing.len();
                     existing.splice(0..0, std::iter::repeat_n(AbsValue::Top, pad));
+                    changed = true;
+                } else if existing.len() > join_len {
+                    existing.drain(..existing.len() - join_len);
                     changed = true;
                 }
 
-                // Join element-wise, top-aligned.
-                let incoming_pad = new_len - incoming.len();
-                for i in 0..new_len {
-                    let inc =
-                        if i < incoming_pad { AbsValue::Top } else { incoming[i - incoming_pad] };
+                // Join element-wise, top-aligned. Both stacks have their top at the end.
+                // `incoming` may be longer than join_len — we only look at its top portion.
+                let incoming_start = incoming.len().saturating_sub(join_len);
+                let incoming_top = &incoming[incoming_start..];
+                // incoming_top.len() <= join_len. If shorter, bottom positions get Top.
+                let pad = join_len - incoming_top.len();
+                for i in 0..join_len {
+                    let inc = if i < pad { AbsValue::Top } else { incoming_top[i - pad] };
                     let joined = sets.join(existing[i], inc);
                     if joined != existing[i] {
                         existing[i] = joined;
@@ -218,7 +213,6 @@ impl BlockState {
 
                 changed
             }
-            Self::Conflict => false,
         }
     }
 }
@@ -566,11 +560,9 @@ impl Bytecode<'_> {
 
         // Invalidate resolutions that may be unsound due to incomplete analysis.
         //
-        // When there are Top (unresolved) or Conflict dynamic jumps, some blocks
-        // may have incomplete input states because:
-        // 1. A Top jump discovered only a subset of its targets during the fixpoint.
-        // 2. A Conflict block suppressed propagation, leaving successor blocks at Bottom
-        //    (unreachable) even though they ARE reachable at runtime.
+        // When there are Top (unresolved) dynamic jumps, some blocks may have
+        // incomplete input states because the jump discovered only a subset of
+        // its targets during the fixpoint.
         //
         // A Const/Invalid resolution is invalidated if any block in the transitive
         // predecessor set (following both static CFG edges and discovered dynamic-jump
@@ -661,10 +653,6 @@ impl Bytecode<'_> {
             BlockState::Bottom => {
                 trace!(%jump_inst, pc = self.insts[jump_inst].pc, "jump in unreached block");
                 JumpTarget::Bottom
-            }
-            BlockState::Conflict => {
-                trace!(%jump_inst, pc = self.insts[jump_inst].pc, "jump in conflict block");
-                JumpTarget::Top
             }
             BlockState::Known(input) => match self.jump_operand(&self.cfg.blocks[bid], input) {
                 Some(AbsValue::Const(idx)) => {
@@ -801,19 +789,6 @@ impl Bytecode<'_> {
             let input = match &block_states[bid] {
                 BlockState::Known(s) => s.clone(),
                 BlockState::Bottom => continue,
-                BlockState::Conflict => {
-                    for &succ in self.cfg.blocks[bid].succs.iter().chain(&discovered[bid]) {
-                        if block_states[succ].conflict() {
-                            trace!(
-                                from = %bid, to = %succ,
-                                to_pc = self.insts[self.cfg.blocks[succ].insts.start].pc,
-                                "propagating conflict",
-                            );
-                            worklist.push(succ);
-                        }
-                    }
-                    continue;
-                }
             };
 
             let block = &self.cfg.blocks[bid];
