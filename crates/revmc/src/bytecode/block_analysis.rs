@@ -727,11 +727,8 @@ impl Bytecode<'_> {
     ) -> IndexVec<Block, SmallVec<[Block; 4]>> {
         let num_blocks = self.cfg.blocks.len();
         let mut worklist = Worklist::new(num_blocks);
-        for bid in self.cfg.blocks.indices() {
-            if !matches!(block_states[bid], BlockState::Bottom) {
-                worklist.push(bid);
-            }
-        }
+        let first = Block::from_usize(0);
+        worklist.push(first);
 
         // Discovered dynamic-jump target edges per block, accumulated across all phases.
         let mut discovered: IndexVec<Block, SmallVec<[Block; 4]>> =
@@ -740,10 +737,14 @@ impl Bytecode<'_> {
         let mut disc_preds: IndexVec<Block, SmallVec<[Block; 4]>> =
             IndexVec::from_vec(vec![SmallVec::new(); num_blocks]);
 
-        let max_iterations = num_blocks * 8;
+        // Budget covers initial fixpoint + per-root recovery + batch-seed.
+        // Each root seed can trigger O(num_blocks) iterations, and there can be
+        // O(num_blocks) roots, so the total is O(num_blocks^2).
+        let max_iterations = num_blocks.saturating_mul(num_blocks).clamp(num_blocks * 8, 100_000);
         let mut iterations = 0;
         let mut converged = true;
         let mut seeded_remaining = false;
+        let mut last_root = first;
 
         loop {
             let Some(bid) = worklist.pop() else {
@@ -762,28 +763,32 @@ impl Bytecode<'_> {
                     (block.preds.is_empty() && disc_preds[bid].is_empty()).then_some(bid)
                 });
 
+                let mut push_block_with_fake_stack = |block_states: &mut IndexVec<_, _>, bid| {
+                    let block = &self.cfg.blocks[bid];
+                    let n = self.block_min_input_depth(block);
+                    block_states[bid] = BlockState::Known(vec![AbsValue::Top; n]);
+                    worklist.push(bid);
+                };
+
                 if let Some(root) = root {
-                    let depth = self.block_min_input_depth(&self.cfg.blocks[root]);
-                    block_states[root] = BlockState::Known(vec![AbsValue::Top; depth]);
-                    worklist.push(root);
-                    debug!("main graph finished after {iterations} iterations");
-                    iterations = 0;
+                    trace!(prev = %last_root, next = %root, %iterations, "finished root subgraph");
+                    push_block_with_fake_stack(block_states, root);
+                    last_root = root;
                     continue;
                 }
 
                 // No more roots — batch-seed all remaining Bottom blocks.
                 seeded_remaining = true;
+                trace!(%iterations, "batch-seeding remaining");
                 for (bid, block) in self.cfg.blocks.iter_enumerated() {
                     if matches!(block_states[bid], BlockState::Bottom) && !block.dead {
-                        let depth = self.block_min_input_depth(block);
-                        block_states[bid] = BlockState::Known(vec![AbsValue::Top; depth]);
-                        worklist.push(bid);
+                        push_block_with_fake_stack(block_states, bid);
+                        trace!(block = %bid, "adding remaining block");
                     }
                 }
                 if worklist.queue.is_empty() {
                     break;
                 }
-                iterations = 0;
                 continue;
             };
 
