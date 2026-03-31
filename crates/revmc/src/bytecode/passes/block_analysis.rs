@@ -209,7 +209,7 @@ const MIN_CONTEXT_FIXPOINT_ITERATIONS: usize = 256;
 /// Always allow refinement for tiny CFGs where the extra pass is still cheap.
 const MAX_CONTEXT_REFINEMENT_SMALL_CFG_BLOCKS: usize = 32;
 /// Skip context refinement on larger CFGs where the second pass is usually wasted work.
-const MAX_CONTEXT_REFINEMENT_BLOCKS: usize = 512;
+const MAX_CONTEXT_REFINEMENT_BLOCKS: usize = 20000;
 /// Maximum number of call-string frames tracked for full CFG discovery.
 const MAX_CALL_CONTEXT_DEPTH: u8 = 8;
 
