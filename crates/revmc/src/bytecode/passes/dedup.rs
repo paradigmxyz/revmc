@@ -4,10 +4,8 @@
 //! and eliminates duplicates by marking them as dead code and redirecting predecessors to a
 //! single canonical copy.
 
-use super::{
-    super::{Bytecode, InstFlags},
-    block_analysis::{Block, BlockData},
-};
+use super::block_analysis::{Block, BlockData};
+use crate::bytecode::{Bytecode, InstFlags};
 use alloy_primitives::map::HashMap;
 use revm_bytecode::opcode as op;
 use smallvec::SmallVec;

@@ -28,7 +28,7 @@
 //! invalidates suspect resolutions that may be reachable from those unresolved jumps, ensuring
 //! that only sound jump targets are reported as resolved.
 
-use super::super::{Bytecode, Inst, InstFlags, Interner, U256Idx};
+use crate::bytecode::{Bytecode, Inst, InstFlags, Interner, U256Idx};
 use bitvec::vec::BitVec;
 use either::Either;
 use oxc_index::IndexVec;
@@ -41,7 +41,7 @@ oxc_index::define_nonmax_u32_index_type! {
     /// Index into the interned constant-set pool.
     pub(crate) struct ConstSetIdx;
 }
-super::super::impl_index_display!(ConstSetIdx, "{}");
+crate::bytecode::impl_index_display!(ConstSetIdx, "{}");
 
 /// Per-instruction snapshot of abstract operand values.
 ///
@@ -221,7 +221,7 @@ oxc_index::define_nonmax_u32_index_type! {
     /// A block index in the CFG.
     pub(crate) struct Block;
 }
-super::super::impl_index_display!(Block, "bb{}");
+crate::bytecode::impl_index_display!(Block, "bb{}");
 
 /// FIFO worklist with deduplication.
 struct Worklist {
@@ -892,7 +892,7 @@ impl Bytecode<'_> {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    pub(crate) use super::super::super::Inst;
+    pub(crate) use crate::bytecode::Inst;
     use super::*;
     use revm_primitives::{hardfork::SpecId, hex};
 
@@ -907,7 +907,7 @@ pub(crate) mod tests {
 
     pub(crate) fn analyze_code_with(
         code: Vec<u8>,
-        config: super::super::super::AnalysisConfig,
+        config: crate::bytecode::AnalysisConfig,
     ) -> Bytecode<'static> {
         crate::tests::init_tracing();
 

@@ -1,9 +1,7 @@
 //! Constant folding for EVM arithmetic during abstract interpretation.
 
-use super::{
-    super::{Interner, U256Idx},
-    block_analysis::AbsValue,
-};
+use super::block_analysis::AbsValue;
+use crate::bytecode::{Interner, U256Idx};
 use crate::InstData;
 use revm_bytecode::opcode as op;
 use revm_interpreter::instructions::i256::{i256_cmp, i256_div, i256_mod};
