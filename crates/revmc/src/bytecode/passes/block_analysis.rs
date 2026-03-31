@@ -204,8 +204,8 @@ impl ConstSetInterner {
 const MAX_ABS_STACK_DEPTH: usize = 64;
 /// Maximum number of worklist visits per block for the flat fixpoint.
 const MAX_FIXPOINT_ITER_MULTIPLIER: usize = 8;
-/// Maximum number of worklist visits per block for the context-sensitive refinement.
-const MAX_CONTEXT_FIXPOINT_ITER_MULTIPLIER: usize = 32;
+/// Minimum worklist budget for the context-sensitive refinement.
+const MIN_CONTEXT_FIXPOINT_ITERATIONS: usize = 256;
 /// Maximum number of call-string frames tracked for full CFG discovery.
 const MAX_CALL_CONTEXT_DEPTH: u8 = 8;
 
@@ -1213,7 +1213,9 @@ impl Bytecode<'_> {
         let mut disc_preds: IndexVec<Block, SmallVec<[Block; 4]>> =
             IndexVec::from_vec(vec![SmallVec::new(); num_blocks]);
 
-        let max_iterations = num_blocks.saturating_mul(MAX_CONTEXT_FIXPOINT_ITER_MULTIPLIER);
+        let max_iterations = num_blocks
+            .saturating_mul(MAX_FIXPOINT_ITER_MULTIPLIER)
+            .max(MIN_CONTEXT_FIXPOINT_ITERATIONS);
         let mut iterations = 0;
         let mut converged = true;
 
