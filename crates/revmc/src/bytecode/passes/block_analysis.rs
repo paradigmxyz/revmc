@@ -320,7 +320,6 @@ impl Bytecode<'_> {
             debug!(newly_resolved, "resolved jumps");
         }
 
-        // Always recompute: excludes dead-code jumps that static_jump_analysis counted.
         self.recompute_has_dynamic_jumps();
     }
 
