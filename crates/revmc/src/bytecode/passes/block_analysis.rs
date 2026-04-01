@@ -312,8 +312,8 @@ impl Bytecode<'_> {
     pub(crate) fn block_analysis_local(&mut self) {
         self.init_snapshots();
 
-        let mut newly_resolved = 0usize;
-        let mut newly_resolved_non_adjacent = 0usize;
+        let empty_sets = ConstSetInterner::new();
+        let mut resolved = Vec::new();
         let mut stack = Vec::new();
 
         for bid in self.cfg.blocks.indices() {
@@ -339,48 +339,30 @@ impl Bytecode<'_> {
                 continue;
             }
 
-            // Check if the jump target resolved to a single constant.
-            let Some(val) = self.const_operand(term_inst, 0) else {
-                continue;
-            };
+            let Some(&operand) = self.snapshots.inputs[term_inst].last() else { continue };
+            debug_assert!(!matches!(operand, AbsValue::ConstSet(_)));
+            let target = self.resolve_jump_operand(operand, &empty_sets);
+            let JumpTarget::Const(target_inst) = target else { continue };
 
-            let target_pc = usize::try_from(val).ok();
-            let target_pc = if let Some(target_pc) = target_pc
-                && self.is_valid_jump(target_pc)
+            // Log non-adjacent resolutions (not simple PUSH+JUMP).
+            if enabled!(tracing::Level::TRACE)
+                && let is_adjacent = (term_inst > 0 && {
+                    let prev_inst = term_inst - 1;
+                    let prev = &self.insts[prev_inst];
+                    matches!(prev.opcode, op::PUSH0..=op::PUSH32)
+                        && !prev.is_dead_code()
+                        && block.insts.contains(&prev_inst)
+                })
+                && !is_adjacent
             {
-                target_pc
-            } else {
-                self.insts[term_inst].flags |= InstFlags::STATIC_JUMP | InstFlags::INVALID_JUMP;
-                newly_resolved += 1;
-                trace!(%term_inst, ?target_pc, "invalid jump target");
-                continue;
-            };
-
-            let target = self.pc_to_inst(target_pc);
-
-            // Check if this is a non-adjacent resolution (not simple PUSH+JUMP).
-            let is_adjacent = term_inst > 0 && {
-                let prev_inst = term_inst - 1;
-                let prev = &self.insts[prev_inst];
-                matches!(prev.opcode, op::PUSH0..=op::PUSH32)
-                    && !prev.is_dead_code()
-                    && block.insts.contains(&prev_inst)
-            };
-            if !is_adjacent {
-                newly_resolved_non_adjacent += 1;
-                debug!(%term_inst, %target, pc = self.insts[term_inst].pc, "resolved non-adjacent jump");
+                trace!(%term_inst, %target_inst, pc = self.insts[term_inst].pc, "resolved non-adjacent jump");
             }
 
-            self.insts[term_inst].flags |= InstFlags::STATIC_JUMP;
-
-            // Set target and mark JUMPDEST as reachable.
-            self.insts[term_inst].data = target.index() as u32;
-            self.insts[target].data = 1;
-            newly_resolved += 1;
-            trace!(%term_inst, %target, "resolved jump");
+            resolved.push((term_inst, target));
         }
 
-        debug!(newly_resolved, newly_resolved_non_adjacent, "finished");
+        let newly_resolved = self.commit_resolved_jumps(&resolved);
+        debug!(newly_resolved, "finished");
         self.recompute_has_dynamic_jumps();
     }
 
@@ -461,6 +443,7 @@ impl Bytecode<'_> {
                     // Truly unreachable: no unresolved jumps remain, so this
                     // code cannot be reached at runtime. Mark as invalid.
                     self.insts[jump_inst].flags |= InstFlags::STATIC_JUMP | InstFlags::INVALID_JUMP;
+                    newly_resolved += 1;
                     trace!(%jump_inst, "unreachable jump");
                 }
                 JumpTarget::Bottom => {
@@ -1117,28 +1100,37 @@ pub(crate) mod tests {
 
     #[test]
     fn snapshots_all_blocks() {
-        // Snapshots must be populated for every block, not just those with
-        // unresolved jumps. Here block 0 has a static PUSH+JUMP so the old
-        // code would skip it; we verify const_operand still works.
+        // Blocks with unresolvable dynamic jumps must still get snapshots from
+        // block_analysis_local. Here CALLDATALOAD produces an opaque jump target,
+        // so the JUMP stays dynamic, but the block's other instructions should
+        // still have snapshots populated.
         #[rustfmt::skip]
         let bytecode = analyze_asm("
             PUSH1 0x42          ; inst 0
-            PUSH %target        ; inst 1
-            JUMP                ; inst 2: static jump
+            PUSH1 0x01          ; inst 1
+            ADD                 ; inst 2: 0x42 + 0x01 = 0x43
+            PUSH0               ; inst 3
+            CALLDATALOAD        ; inst 4: opaque value
+            JUMP                ; inst 5: dynamic, unresolvable
         target:
-            JUMPDEST            ; inst 3
-            PUSH1 0x01          ; inst 4
-            ADD                 ; inst 5
-            PUSH1 0x00          ; inst 6
-            MSTORE              ; inst 7
-            STOP                ; inst 8
+            JUMPDEST            ; inst 6
+            PUSH1 0x01          ; inst 7
+            ADD                 ; inst 8
+            STOP                ; inst 9
         ");
-        // Block 0 (PUSH+PUSH+JUMP): the PUSH instructions should have snapshots.
-        assert_eq!(bytecode.const_output(Inst::from_usize(0)), Some(U256::from(0x42)));
-        // Block 1 (JUMPDEST..STOP): ADD operands should be known.
-        assert_eq!(bytecode.const_operand(Inst::from_usize(5), 0), Some(U256::from(0x01)));
-        assert_eq!(bytecode.const_operand(Inst::from_usize(5), 1), Some(U256::from(0x42)));
-        assert_eq!(bytecode.const_output(Inst::from_usize(5)), Some(U256::from(0x43)));
+        // The JUMP at inst 5 should remain dynamic.
+        assert!(bytecode.has_dynamic_jumps, "expected unresolved dynamic jump");
+        let jump = bytecode.inst(Inst::from_usize(5));
+        assert!(jump.is_jump());
+        assert!(!jump.flags.contains(InstFlags::STATIC_JUMP));
+        // JUMP's TOS operand is Top (CALLDATALOAD result).
+        assert_eq!(bytecode.const_operand(Inst::from_usize(5), 0), None);
+        // block_analysis_local should still have populated snapshots for ADD at inst 2.
+        assert_eq!(bytecode.const_operand(Inst::from_usize(2), 0), Some(U256::from(0x01)));
+        assert_eq!(bytecode.const_operand(Inst::from_usize(2), 1), Some(U256::from(0x42)));
+        assert_eq!(bytecode.const_output(Inst::from_usize(2)), Some(U256::from(0x43)));
+        // The target block also gets snapshots (ADD at inst 8).
+        assert_eq!(bytecode.const_operand(Inst::from_usize(8), 0), Some(U256::from(0x01)));
     }
 
     #[test]
