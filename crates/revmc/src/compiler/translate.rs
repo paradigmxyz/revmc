@@ -456,20 +456,12 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 let resume_at = get_ecx_resume_at_ptr(&mut fx);
                 fx.bcx.store_aligned(resume_value, resume_at, 1);
 
-                // Copy the stack back before suspending; the caller needs the updated values
-                // to resume execution.
-                fx.copy_stack_to_arg();
-                fx.save_stack_len();
-
-                let ret = InstructionResult::Stop;
-                if config.inspect_stack_length {
-                    // Return directly instead of going through the return block to avoid
-                    // a redundant stack copy when inspect_stack_length is enabled.
-                    let ret = fx.bcx.iconst(fx.i8_type, ret as i64);
-                    fx.bcx.ret(&[ret]);
-                } else {
-                    fx.build_return_imm(ret);
+                if !config.inspect_stack_length {
+                    fx.copy_stack_to_arg();
+                    fx.save_stack_len();
                 }
+
+                fx.build_return_imm(InstructionResult::Stop);
             }
         } else {
             debug_assert!(fx.resume_blocks.is_empty());
