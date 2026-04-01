@@ -172,8 +172,10 @@ fn make_map(spec_id: SpecId) -> [OpcodeInfo; 256] {
             continue;
         }
 
-        // Skip opcodes not supported by revmc (e.g. EOF-only).
+        // Mark opcodes not supported by revmc (e.g. EOF-only) as disabled rather than
+        // unknown, so they return `NotActivated` instead of `OpcodeNotFound` at runtime.
         if UNSUPPORTED_OPCODES.contains(&op) {
+            map[op as usize].set_disabled();
             continue;
         }
 
@@ -298,6 +300,13 @@ mod tests {
 
         // Unknown opcode.
         assert!(cancun[0x0C].is_unknown());
+
+        // Unsupported (EOF-only) opcodes should be disabled, not unknown.
+        assert!(cancun[op::DUPN as usize].is_disabled());
+        assert!(!cancun[op::DUPN as usize].is_unknown());
+        assert!(cancun[op::SWAPN as usize].is_disabled());
+        assert!(cancun[op::EXCHANGE as usize].is_disabled());
+        assert!(cancun[op::SLOTNUM as usize].is_disabled());
 
         // Spec-gated: PUSH0 disabled before Shanghai.
         let pre_shanghai = op_info_map(SpecId::MERGE);
