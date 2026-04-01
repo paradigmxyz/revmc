@@ -461,10 +461,15 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 fx.copy_stack_to_arg();
                 fx.save_stack_len();
 
-                // Return directly instead of going through the return block to avoid
-                // a redundant stack copy when inspect_stack_length is enabled.
-                let ret = fx.bcx.iconst(fx.i8_type, InstructionResult::Stop as i64);
-                fx.bcx.ret(&[ret]);
+                let ret = InstructionResult::Stop;
+                if config.inspect_stack_length {
+                    // Return directly instead of going through the return block to avoid
+                    // a redundant stack copy when inspect_stack_length is enabled.
+                    let ret = fx.bcx.iconst(fx.i8_type, ret as i64);
+                    fx.bcx.ret(&[ret]);
+                } else {
+                    fx.build_return_imm(ret);
+                }
             }
         } else {
             debug_assert!(fx.resume_blocks.is_empty());
