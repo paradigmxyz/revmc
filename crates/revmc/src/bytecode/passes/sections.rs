@@ -60,6 +60,22 @@ impl StackSection {
     pub(crate) fn is_empty(self) -> bool {
         self == Self::default()
     }
+
+    /// Compute a stack section from an iterator of `(inputs, outputs)` pairs.
+    pub(crate) fn from_stack_io(iter: impl IntoIterator<Item = (u8, u8)>) -> Self {
+        let mut inputs = 0i32;
+        let mut diff = 0i32;
+        let mut max_growth = 0i32;
+        for (inp, out) in iter {
+            inputs = inputs.max(inp as i32 - diff);
+            diff += out as i32 - inp as i32;
+            max_growth = max_growth.max(diff);
+        }
+        Self {
+            inputs: inputs.max(0).try_into().unwrap_or(u16::MAX),
+            max_growth: max_growth.try_into().unwrap_or(i16::MAX),
+        }
+    }
 }
 
 /// Gas section analysis state.
@@ -84,11 +100,11 @@ impl GasSectionAnalysis {
         if !section.is_empty() {
             trace!(
                 inst = %self.start_inst,
-                len = next_section_inst.index() - self.start_inst.index(),
+                len = %(next_section_inst - self.start_inst),
                 ?section,
                 "saving gas"
             );
-            let mut insts = bytecode.insts.raw[self.start_inst.index()..].iter_mut();
+            let mut insts = bytecode.insts[self.start_inst..].iter_mut();
             if let Some(inst) = insts.find(|inst| !inst.is_dead_code()) {
                 inst.gas_section = section;
             }

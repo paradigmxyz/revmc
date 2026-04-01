@@ -28,6 +28,7 @@
 //! invalidates suspect resolutions that may be reachable from those unresolved jumps, ensuring
 //! that only sound jump targets are reported as resolved.
 
+use super::StackSection;
 use crate::bytecode::{Bytecode, Inst, InstFlags, Interner, U256Idx};
 use bitvec::vec::BitVec;
 use either::Either;
@@ -318,8 +319,10 @@ impl Bytecode<'_> {
                 continue;
             }
 
-            // Compute required entry depth for this block.
-            let entry_depth = self.required_block_inputs(block);
+            // Compute required entry depth for this block using stack section analysis.
+            let section =
+                StackSection::from_stack_io(block.insts().map(|i| self.insts[i].stack_io_raw()));
+            let entry_depth = section.inputs as usize;
 
             // Seed with Top values.
             let mut stack: Vec<AbsValue> = vec![AbsValue::Top; entry_depth];
@@ -963,23 +966,6 @@ impl Bytecode<'_> {
         }
 
         true
-    }
-
-    /// Compute the required stack depth at block entry (how many values the block reads from
-    /// below).
-    fn required_block_inputs(&self, block: &BlockData) -> usize {
-        let mut inputs = 0i32;
-        let mut diff = 0i32;
-        for i in block.insts() {
-            let inst = &self.insts[i];
-            if inst.is_dead_code() {
-                continue;
-            }
-            let (inp, out) = inst.stack_io_raw();
-            inputs = inputs.max(inp as i32 - diff);
-            diff += out as i32 - inp as i32;
-        }
-        inputs.max(0) as usize
     }
 
     /// Interpret a block locally without recording snapshots.
