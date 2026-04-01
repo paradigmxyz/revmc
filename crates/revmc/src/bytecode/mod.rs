@@ -7,7 +7,7 @@ use revm_bytecode::opcode as op;
 use revm_primitives::{U256, hardfork::SpecId};
 use revmc_backend::Result;
 use smallvec::SmallVec;
-use std::cell::RefCell;
+use std::{borrow::Cow, cell::RefCell};
 
 mod passes;
 use passes::{Cfg, GasSection, SectionsAnalysis, Snapshots, StackSection};
@@ -75,8 +75,8 @@ impl Default for AnalysisConfig {
 /// EVM bytecode.
 #[doc(hidden)] // Not public API.
 pub struct Bytecode<'a> {
-    /// The original bytecode slice.
-    pub(crate) code: &'a [u8],
+    /// The original bytecode.
+    pub(crate) code: Cow<'a, [u8]>,
     /// The instructions.
     insts: IndexVec<Inst, InstData>,
     /// `JUMPDEST` opcode map. `jumpdests[pc]` is `true` if `code[pc] == op::JUMPDEST`.
@@ -112,13 +112,17 @@ pub struct Bytecode<'a> {
 }
 
 impl<'a> Bytecode<'a> {
-    #[instrument(name = "new_bytecode", level = "debug", skip_all)]
-    pub(crate) fn new(code: &'a [u8], spec_id: SpecId) -> Self {
+    pub(crate) fn new(code: impl Into<Cow<'a, [u8]>>, spec_id: SpecId) -> Self {
+        Self::new_mono(code.into(), spec_id)
+    }
+
+    #[instrument(name = "Bytecode::new", level = "debug", skip_all)]
+    fn new_mono(code: Cow<'a, [u8]>, spec_id: SpecId) -> Self {
         let mut insts = IndexVec::with_capacity(code.len() + 8);
         let mut jumpdests = BitVec::repeat(false, code.len());
         let mut pc_to_inst = FxHashMap::with_capacity_and_hasher(code.len(), Default::default());
         let op_infos = op_info_map(spec_id);
-        for (pc, Opcode { opcode, immediate: _ }) in OpcodesIter::new(code, spec_id).with_pc() {
+        for (pc, Opcode { opcode, immediate: _ }) in OpcodesIter::new(&code, spec_id).with_pc() {
             let inst: Inst = insts.next_idx();
             pc_to_inst.insert(pc as u32, inst);
 
@@ -152,7 +156,13 @@ impl<'a> Bytecode<'a> {
             });
         }
 
-        let mut bytecode = Self {
+        // Pad code to ensure there is at least one diverging instruction.
+        if insts.last().is_none_or(|last| last.can_fall_through()) {
+            trace!("adding STOP padding");
+            insts.push(InstData::new(op::STOP));
+        }
+
+        Self {
             code,
             insts,
             jumpdests,
@@ -167,15 +177,7 @@ impl<'a> Bytecode<'a> {
             redirects: FxHashMap::default(),
             cfg: Cfg::default(),
             config: AnalysisConfig::default(),
-        };
-
-        // Pad code to ensure there is at least one diverging instruction.
-        if bytecode.insts.last().is_none_or(|last| last.can_fall_through()) {
-            trace!("adding STOP padding");
-            bytecode.insts.push(InstData::new(op::STOP));
         }
-
-        bytecode
     }
 
     /// Takes the instruction-to-line map built during formatting.
@@ -188,8 +190,8 @@ impl<'a> Bytecode<'a> {
     /// Returns an iterator over the opcodes.
     #[inline]
     #[allow(dead_code)]
-    pub(crate) fn opcodes(&self) -> OpcodesIter<'a> {
-        OpcodesIter::new(self.code, self.spec_id)
+    pub(crate) fn opcodes(&self) -> OpcodesIter<'_> {
+        OpcodesIter::new(&self.code, self.spec_id)
     }
 
     /// Returns the instruction at the given instruction counter.
@@ -329,7 +331,7 @@ impl<'a> Bytecode<'a> {
 
     /// Returns the immediate value of the given instruction data, if any.
     /// Returns `None` if out of bounds too.
-    pub(crate) fn get_imm(&self, data: &InstData) -> Option<&'a [u8]> {
+    pub(crate) fn get_imm(&self, data: &InstData) -> Option<&[u8]> {
         let imm_len = data.imm_len() as usize;
         if imm_len == 0 {
             return None;
@@ -511,7 +513,7 @@ impl InstData {
     /// Converts this instruction to a raw opcode in the given bytecode.
     #[inline]
     #[allow(dead_code)]
-    pub(crate) fn to_op_in<'a>(&self, bytecode: &Bytecode<'a>) -> Opcode<'a> {
+    pub(crate) fn to_op_in<'a>(&self, bytecode: &'a Bytecode<'_>) -> Opcode<'a> {
         Opcode { opcode: self.opcode, immediate: bytecode.get_imm(self) }
     }
 

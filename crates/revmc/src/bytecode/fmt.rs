@@ -165,7 +165,7 @@ impl fmt::Display for Bytecode<'_> {
 impl fmt::Debug for Bytecode<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Bytecode")
-            .field("code", &hex::encode(self.code))
+            .field("code", &hex::encode(&*self.code))
             .field("insts", &self.insts)
             .field("jumpdests", &hex::encode(bitvec_as_bytes(&self.jumpdests)))
             .field("spec_id", &self.spec_id)

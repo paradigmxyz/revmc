@@ -108,6 +108,26 @@ tests! {
             expected_return: InstructionResult::OpcodeNotFound,
             expected_gas: 0,
         }),
+        unsupported_dupn(@raw {
+            bytecode: &[op::DUPN],
+            expected_return: InstructionResult::NotActivated,
+            expected_gas: 0,
+        }),
+        unsupported_swapn(@raw {
+            bytecode: &[op::SWAPN],
+            expected_return: InstructionResult::NotActivated,
+            expected_gas: 0,
+        }),
+        unsupported_exchange(@raw {
+            bytecode: &[op::EXCHANGE],
+            expected_return: InstructionResult::NotActivated,
+            expected_gas: 0,
+        }),
+        unsupported_slotnum(@raw {
+            bytecode: &[op::SLOTNUM],
+            expected_return: InstructionResult::NotActivated,
+            expected_gas: 0,
+        }),
         underflow1(@raw {
             bytecode: &[op::ADD],
             expected_return: InstructionResult::StackUnderflow,
