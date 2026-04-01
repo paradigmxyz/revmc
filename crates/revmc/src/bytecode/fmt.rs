@@ -25,10 +25,6 @@ impl Bytecode<'_> {
         lines.push((String::new(), String::new()));
 
         for (bid, block) in self.cfg.blocks.iter_enumerated() {
-            if block.dead {
-                continue;
-            }
-
             // Blank line between blocks.
             if !lines.is_empty()
                 && lines.last().is_some_and(|(t, c)| !t.is_empty() || !c.is_empty())
@@ -253,9 +249,6 @@ impl<'a> Bytecode<'a> {
 
         // Emit nodes.
         for (bid, block) in self.cfg.blocks.iter_enumerated() {
-            if block.dead {
-                continue;
-            }
             let last = self.inst(block.terminator());
             let first = self.inst(block.insts.start);
 
@@ -314,9 +307,6 @@ impl<'a> Bytecode<'a> {
 
         // Emit edges from the CFG.
         for (bid, block) in self.cfg.blocks.iter_enumerated() {
-            if block.dead {
-                continue;
-            }
             let last = self.inst(block.terminator());
 
             if last.is_jump()
@@ -360,9 +350,6 @@ impl<'a> Bytecode<'a> {
                  label=\"dynamic\\njump table\"];"
             )?;
             for (bid, block) in self.cfg.blocks.iter_enumerated() {
-                if block.dead {
-                    continue;
-                }
                 let first = self.inst(block.insts.start);
                 if first.is_reachable_jumpdest(self.has_dynamic_jumps) {
                     writeln!(w, "  dynamic -> {bid} [color=\"{EDGE_FALSE}\" style=dashed];")?;

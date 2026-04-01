@@ -30,10 +30,6 @@ impl<'a> Bytecode<'a> {
         let mut key_to_blocks = HashMap::<&[u8], SmallVec<[Block; 4]>>::default();
         for bid in self.cfg.blocks.indices() {
             let block = &self.cfg.blocks[bid];
-            if block.dead {
-                continue;
-            }
-
             // Only dedup blocks whose terminator cannot fall through (diverging or
             // unconditional JUMP). JUMPI blocks fall through to position-dependent targets.
             let term = &self.insts[block.terminator()];
@@ -79,7 +75,6 @@ impl<'a> Bytecode<'a> {
                 debug!("deduped: {from} -> {to}", from = dup, to = canonical);
 
                 // Mark all instructions in the duplicate block as dead.
-                self.cfg.blocks[dup].dead = true;
                 let dup_block = &self.cfg.blocks[dup];
                 for i in dup_block.insts() {
                     self.insts[i].flags |= InstFlags::DEAD_CODE;
