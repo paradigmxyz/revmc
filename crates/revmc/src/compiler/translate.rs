@@ -461,8 +461,10 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 fx.copy_stack_to_arg();
                 fx.save_stack_len();
 
-                // Signal that execution suspended - caller checks next_action for Call/Create
-                fx.build_return_imm(InstructionResult::Stop);
+                // Return directly instead of going through the return block to avoid
+                // a redundant stack copy when inspect_stack_length is enabled.
+                let ret = fx.bcx.iconst(fx.i8_type, InstructionResult::Stop as i64);
+                fx.bcx.ret(&[ret]);
             }
         } else {
             debug_assert!(fx.resume_blocks.is_empty());
