@@ -322,11 +322,20 @@ impl Bytecode<'_> {
         let newly_resolved = self.commit_resolved_jumps(&resolved);
         debug!(newly_resolved, "resolved jumps");
 
-        // Recompute dynamic jumps flag.
+        // Always recompute: excludes dead-code jumps that static_jump_analysis counted.
+        self.recompute_has_dynamic_jumps();
+    }
+
+    /// Recomputes `has_dynamic_jumps` by scanning live instructions.
+    fn recompute_has_dynamic_jumps(&mut self) {
         let n = self
             .insts
             .iter()
-            .filter(|inst| inst.is_jump() && !inst.flags.contains(InstFlags::STATIC_JUMP))
+            .filter(|inst| {
+                inst.is_jump()
+                    && !inst.flags.contains(InstFlags::STATIC_JUMP)
+                    && !inst.is_dead_code()
+            })
             .count();
         self.has_dynamic_jumps = n > 0;
         if self.has_dynamic_jumps {
