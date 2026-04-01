@@ -2,8 +2,8 @@
 #include <llvm-c/LLJITUtils.h>
 #include <llvm-c/Orc.h>
 #include <llvm-c/TargetMachine.h>
+#include <llvm/ExecutionEngine/JITLink/JITLink.h>
 #include <llvm/ExecutionEngine/Orc/AbsoluteSymbols.h>
-#include <llvm/Target/TargetMachine.h>
 #include <llvm/ExecutionEngine/Orc/CompileUtils.h>
 #include <llvm/ExecutionEngine/Orc/Debugging/DebugInfoSupport.h>
 #include <llvm/ExecutionEngine/Orc/Debugging/PerfSupportPlugin.h>
@@ -11,8 +11,8 @@
 #include <llvm/ExecutionEngine/Orc/ObjectLinkingLayer.h>
 #include <llvm/ExecutionEngine/Orc/TargetProcess/JITLoaderGDB.h>
 #include <llvm/ExecutionEngine/Orc/TargetProcess/JITLoaderPerf.h>
-#include <llvm/ExecutionEngine/JITLink/JITLink.h>
 #include <llvm/IR/Attributes.h>
+#include <llvm/Target/TargetMachine.h>
 
 #include <atomic>
 #include <fstream>
@@ -100,34 +100,35 @@ public:
   void modifyPassConfig(orc::MaterializationResponsibility &MR,
                         jitlink::LinkGraph &,
                         jitlink::PassConfiguration &Config) override {
-    Config.PostAllocationPasses.push_back(
-        [this, &MR](jitlink::LinkGraph &G) -> Error {
-          size_t code = 0, data = 0;
-          for (auto &section : G.sections()) {
-            size_t sec_size = 0;
-            for (auto *block : section.blocks())
-              sec_size += block->getSize();
-            if ((section.getMemProt() & orc::MemProt::Exec) != orc::MemProt::None)
-              code += sec_size;
-            else
-              data += sec_size;
-          }
-          CodeBytes->fetch_add(code, std::memory_order_relaxed);
-          DataBytes->fetch_add(data, std::memory_order_relaxed);
-          return MR.withResourceKeyDo([&](orc::ResourceKey Key) {
-            std::lock_guard<std::mutex> Lock(Mutex);
-            auto &Entry = Allocs[Key];
-            Entry.first += code;
-            Entry.second += data;
-          });
-        });
+    Config.PostAllocationPasses.push_back([this, &MR](
+                                              jitlink::LinkGraph &G) -> Error {
+      size_t code = 0, data = 0;
+      for (auto &section : G.sections()) {
+        size_t sec_size = 0;
+        for (auto *block : section.blocks())
+          sec_size += block->getSize();
+        if ((section.getMemProt() & orc::MemProt::Exec) != orc::MemProt::None)
+          code += sec_size;
+        else
+          data += sec_size;
+      }
+      CodeBytes->fetch_add(code, std::memory_order_relaxed);
+      DataBytes->fetch_add(data, std::memory_order_relaxed);
+      return MR.withResourceKeyDo([&](orc::ResourceKey Key) {
+        std::lock_guard<std::mutex> Lock(Mutex);
+        auto &Entry = Allocs[Key];
+        Entry.first += code;
+        Entry.second += data;
+      });
+    });
   }
 
   Error notifyFailed(orc::MaterializationResponsibility &) override {
     return Error::success();
   }
 
-  Error notifyRemovingResources(orc::JITDylib &, orc::ResourceKey Key) override {
+  Error notifyRemovingResources(orc::JITDylib &,
+                                orc::ResourceKey Key) override {
     std::lock_guard<std::mutex> Lock(Mutex);
     auto It = Allocs.find(Key);
     if (It != Allocs.end()) {
@@ -170,8 +171,8 @@ revmc_llvm_lljit_enable_memory_usage(LLVMOrcLLJITRef J,
 
 /// JITLink plugin that writes `/tmp/perf-<pid>.map` in the perf map format.
 ///
-/// For each finalized link graph the plugin emits one line per named, executable
-/// symbol:
+/// For each finalized link graph the plugin emits one line per named,
+/// executable symbol:
 ///
 ///     <hex_addr> <hex_size> <name>\n
 ///
@@ -193,25 +194,24 @@ public:
   void modifyPassConfig(orc::MaterializationResponsibility &,
                         jitlink::LinkGraph &,
                         jitlink::PassConfiguration &Config) override {
-    Config.PostFixupPasses.push_back(
-        [this](jitlink::LinkGraph &G) -> Error {
-          if (!MapFile)
-            return Error::success();
-          std::lock_guard<std::mutex> Lock(Mutex);
-          for (auto *Sym : G.defined_symbols()) {
-            if (!Sym->hasName())
-              continue;
-            auto &Section = Sym->getBlock().getSection();
-            if ((Section.getMemProt() & orc::MemProt::Exec) == orc::MemProt::None)
-              continue;
-            auto Addr = Sym->getAddress().getValue();
-            auto Size = Sym->getSize();
-            MapFile << std::hex << Addr << ' ' << Size << ' '
-                    << (*Sym->getName()).str() << '\n';
-          }
-          MapFile.flush();
-          return Error::success();
-        });
+    Config.PostFixupPasses.push_back([this](jitlink::LinkGraph &G) -> Error {
+      if (!MapFile)
+        return Error::success();
+      std::lock_guard<std::mutex> Lock(Mutex);
+      for (auto *Sym : G.defined_symbols()) {
+        if (!Sym->hasName())
+          continue;
+        auto &Section = Sym->getBlock().getSection();
+        if ((Section.getMemProt() & orc::MemProt::Exec) == orc::MemProt::None)
+          continue;
+        auto Addr = Sym->getAddress().getValue();
+        auto Size = Sym->getSize();
+        MapFile << std::hex << Addr << ' ' << Size << ' '
+                << (*Sym->getName()).str() << '\n';
+      }
+      MapFile.flush();
+      return Error::success();
+    });
   }
 
   Error notifyFailed(orc::MaterializationResponsibility &) override {
@@ -234,8 +234,7 @@ public:
 /// Not suitable for long-running programs; see `SimplePerfSupportPlugin`.
 ///
 /// Returns an error if the object layer is not JITLink-based.
-extern "C" LLVMErrorRef
-revmc_llvm_lljit_enable_simple_perf(LLVMOrcLLJITRef J) {
+extern "C" LLVMErrorRef revmc_llvm_lljit_enable_simple_perf(LLVMOrcLLJITRef J) {
   auto *Jit = reinterpret_cast<orc::LLJIT *>(J);
   auto *OLL = dyn_cast<orc::ObjectLinkingLayer>(&Jit->getObjLinkingLayer());
   if (!OLL)
@@ -268,17 +267,20 @@ revmc_llvm_lljit_enable_perf_support(LLVMOrcLLJITRef J) {
   auto &EPC = ES.getExecutorProcessControl();
 
   if (!EPC.getTargetTriple().isOSBinFormatELF())
-    return wrap(make_error<StringError>(
-        "PerfSupportPlugin requires ELF target", inconvertibleErrorCode()));
+    return wrap(make_error<StringError>("PerfSupportPlugin requires ELF target",
+                                        inconvertibleErrorCode()));
 
   // Register JITLoaderPerf function addresses as absolute symbols in the main
   // JITDylib to avoid dynamic symbol lookup crashes.
   auto Flags = JITSymbolFlags::Exported | JITSymbolFlags::Callable;
   orc::SymbolMap PerfFns;
-  auto StartAddr = orc::ExecutorAddr::fromPtr(&llvm_orc_registerJITLoaderPerfStart);
+  auto StartAddr =
+      orc::ExecutorAddr::fromPtr(&llvm_orc_registerJITLoaderPerfStart);
   auto EndAddr = orc::ExecutorAddr::fromPtr(&llvm_orc_registerJITLoaderPerfEnd);
-  auto ImplAddr = orc::ExecutorAddr::fromPtr(&llvm_orc_registerJITLoaderPerfImpl);
-  PerfFns[ES.intern("llvm_orc_registerJITLoaderPerfStart")] = {StartAddr, Flags};
+  auto ImplAddr =
+      orc::ExecutorAddr::fromPtr(&llvm_orc_registerJITLoaderPerfImpl);
+  PerfFns[ES.intern("llvm_orc_registerJITLoaderPerfStart")] = {StartAddr,
+                                                               Flags};
   PerfFns[ES.intern("llvm_orc_registerJITLoaderPerfEnd")] = {EndAddr, Flags};
   PerfFns[ES.intern("llvm_orc_registerJITLoaderPerfImpl")] = {ImplAddr, Flags};
   if (auto Err = Jit->getMainJITDylib().define(orc::absoluteSymbols(PerfFns)))
@@ -320,14 +322,22 @@ revmc_llvm_lljit_enable_debug_support(LLVMOrcLLJITRef J) {
 
 extern "C" void
 revmc_llvm_target_machine_set_opt_level(LLVMTargetMachineRef TM,
-                                         LLVMCodeGenOptLevel Level) {
+                                        LLVMCodeGenOptLevel Level) {
   auto *Machine = reinterpret_cast<TargetMachine *>(TM);
   CodeGenOptLevel L = CodeGenOptLevel::Default;
   switch (Level) {
-  case LLVMCodeGenLevelNone:       L = CodeGenOptLevel::None; break;
-  case LLVMCodeGenLevelLess:       L = CodeGenOptLevel::Less; break;
-  case LLVMCodeGenLevelDefault:    L = CodeGenOptLevel::Default; break;
-  case LLVMCodeGenLevelAggressive: L = CodeGenOptLevel::Aggressive; break;
+  case LLVMCodeGenLevelNone:
+    L = CodeGenOptLevel::None;
+    break;
+  case LLVMCodeGenLevelLess:
+    L = CodeGenOptLevel::Less;
+    break;
+  case LLVMCodeGenLevelDefault:
+    L = CodeGenOptLevel::Default;
+    break;
+  case LLVMCodeGenLevelAggressive:
+    L = CodeGenOptLevel::Aggressive;
+    break;
   }
   Machine->setOptLevel(L);
 }
