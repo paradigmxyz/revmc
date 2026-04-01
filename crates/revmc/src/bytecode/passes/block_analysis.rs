@@ -257,8 +257,6 @@ pub(crate) struct BlockData {
     pub(crate) preds: SmallVec<[Block; 4]>,
     /// Successor block IDs.
     pub(crate) succs: SmallVec<[Block; 4]>,
-    /// Whether this block has been eliminated (e.g. by dedup).
-    pub(crate) dead: bool,
 }
 
 impl BlockData {
@@ -413,7 +411,6 @@ impl Bytecode<'_> {
                 insts: Inst::from_usize(start)..Inst::from_usize(end),
                 preds: SmallVec::new(),
                 succs: SmallVec::new(),
-                dead: false,
             });
             for i in start..end {
                 cfg.inst_to_block[Inst::from_usize(i)] = Some(bid);
@@ -472,9 +469,6 @@ impl Bytecode<'_> {
 
         // Build edges based on known control flow.
         for bid in cfg.blocks.indices() {
-            if cfg.blocks[bid].dead {
-                continue;
-            }
             let term = &self.insts[cfg.blocks[bid].terminator()];
 
             // Resolve a target instruction through redirects to a CFG block.
@@ -750,10 +744,6 @@ impl Bytecode<'_> {
             };
 
             let block = &self.cfg.blocks[bid];
-            if block.dead {
-                continue;
-            }
-
             if !self.interpret_block(block.insts(), &mut stack_buf, snapshots) {
                 continue;
             }
