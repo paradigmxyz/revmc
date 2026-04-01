@@ -306,6 +306,8 @@ impl Bytecode<'_> {
 
     /// Block-local jump resolution: interpret each block independently to discover
     /// jumps resolvable from block-local computation alone.
+    ///
+    /// Also initializes `self.snapshots`.
     #[instrument(name = "local_jumps", level = "debug", skip_all)]
     pub(crate) fn block_analysis_local(&mut self) {
         if self.cfg.blocks.is_empty() {
@@ -315,52 +317,40 @@ impl Bytecode<'_> {
         self.init_snapshots();
 
         let mut newly_resolved = 0u32;
-        let mut stack: Vec<AbsValue> = Vec::new();
+        let mut stack = Vec::new();
 
         for bid in self.cfg.blocks.indices() {
             let block = &self.cfg.blocks[bid];
+
+            // Compute required entry depth for this block using stack section analysis.
+            let section =
+                StackSection::from_stack_io(block.insts().map(|i| self.insts[i].stack_io_raw()));
+
+            // Interpret the block with `Top` as inputs.
+            stack.clear();
+            stack.resize(section.inputs as usize, AbsValue::Top);
+            if !self.interpret_block(block.insts(), &mut stack) {
+                continue;
+            }
+
             // Check if the block's terminator is an unresolved jump.
+            // We interpret every block to initialize `snapshots`, so we check this after.
+            let block = &self.cfg.blocks[bid];
             let term_inst = block.terminator();
             let term = &self.insts[term_inst];
             if !term.is_jump() || term.flags.contains(InstFlags::STATIC_JUMP) {
                 continue;
             }
 
-            // Compute required entry depth for this block using stack section analysis.
-            let section =
-                StackSection::from_stack_io(block.insts().map(|i| self.insts[i].stack_io_raw()));
-            let entry_depth = section.inputs as usize;
-            let block_insts = block.insts.clone();
-
-            // Seed with Top values.
-            stack.clear();
-            stack.resize(entry_depth, AbsValue::Top);
-
-            // Interpret the block up to (but not including) the terminator so the
-            // jump target remains on the stack.
-            let non_term = (block_insts.start.index()..block_insts.end.index())
-                .map(Inst::from_usize)
-                .filter(|&i| i != term_inst);
-            let ok = self.interpret_block(non_term, &mut stack);
-            if !ok {
-                continue;
-            }
-
             // Check if the jump target resolved to a single constant.
-            let target_operand = stack.last().copied();
-            let Some(AbsValue::Const(idx)) = target_operand else {
+            let Some(val) = self.const_operand(term_inst, 0) else {
                 continue;
             };
-
-            let val = *self.u256_interner.borrow().get(idx);
-            let target_pc = match usize::try_from(val) {
-                Ok(pc) => pc,
-                Err(_) => {
-                    // Target too large — invalid jump.
-                    self.insts[term_inst].flags |= InstFlags::STATIC_JUMP | InstFlags::INVALID_JUMP;
-                    newly_resolved += 1;
-                    continue;
-                }
+            let Ok(target_pc) = usize::try_from(val) else {
+                // Target too large — invalid jump.
+                self.insts[term_inst].flags |= InstFlags::STATIC_JUMP | InstFlags::INVALID_JUMP;
+                newly_resolved += 1;
+                continue;
             };
 
             if !self.is_valid_jump(target_pc) {
@@ -377,7 +367,7 @@ impl Bytecode<'_> {
             let is_adjacent_push_jump = term_inst.index() > 0 && {
                 let push_inst = Inst::from_usize(term_inst.index() - 1);
                 let push = &self.insts[push_inst];
-                push.is_push() && !push.is_dead_code() && block_insts.contains(&push_inst)
+                push.is_push() && !push.is_dead_code() && block.insts.contains(&push_inst)
             };
 
             if is_adjacent_push_jump {
@@ -1138,6 +1128,42 @@ pub(crate) mod tests {
         ]);
         assert_eq!(bytecode.const_output(Inst::from_usize(0)), Some(U256::ZERO));
         assert_eq!(bytecode.const_output(Inst::from_usize(1)), None);
+    }
+
+    #[test]
+    fn snapshots_all_blocks() {
+        // Snapshots must be populated for every block, not just those with
+        // unresolved jumps. Here block 0 has a static PUSH+JUMP so the old
+        // code would skip it; we verify const_operand still works.
+        //
+        // pc 0: PUSH1 0x42   (inst 0) -> stack: [0x42]
+        // pc 2: PUSH1 0x05  (inst 1) -> stack: [0x42, 0x05]
+        // pc 4: JUMP        (inst 2) -> static jump to pc 5
+        // pc 5: JUMPDEST    (inst 3)
+        // pc 6: PUSH1 0x01  (inst 4) -> stack: [0x42, 0x01]
+        // pc 8: ADD         (inst 5) -> stack: [0x43]
+        // pc 9: PUSH1 0x00  (inst 6) -> stack: [0x43, 0x00]
+        // pc 11: MSTORE     (inst 7)
+        // pc 12: STOP       (inst 8)
+        #[rustfmt::skip]
+        let bytecode = analyze_code(vec![
+            op::PUSH1, 0x42,
+            op::PUSH1, 0x05,
+            op::JUMP,
+            op::JUMPDEST,
+            op::PUSH1, 0x01,
+            op::ADD,
+            op::PUSH1, 0x00,
+            op::MSTORE,
+            op::STOP,
+        ]);
+        // Block 0 (PUSH+PUSH+JUMP): the PUSH instructions should have snapshots.
+        assert_eq!(bytecode.const_output(Inst::from_usize(0)), Some(U256::from(0x42)));
+        assert_eq!(bytecode.const_output(Inst::from_usize(1)), Some(U256::from(0x05)));
+        // Block 1 (JUMPDEST..STOP): ADD operands should be known.
+        assert_eq!(bytecode.const_operand(Inst::from_usize(5), 0), Some(U256::from(0x01)));
+        assert_eq!(bytecode.const_operand(Inst::from_usize(5), 1), Some(U256::from(0x42)));
+        assert_eq!(bytecode.const_output(Inst::from_usize(5)), Some(U256::from(0x43)));
     }
 
     #[test]

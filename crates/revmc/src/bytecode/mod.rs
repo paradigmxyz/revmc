@@ -252,18 +252,20 @@ impl<'a> Bytecode<'a> {
     #[instrument(level = "debug", skip_all)]
     pub(crate) fn analyze(&mut self) -> Result<()> {
         self.recompute_has_dynamic_jumps();
+        self.mark_dead_code();
+
         self.rebuild_cfg();
         self.block_analysis_local();
         self.mark_dead_code();
 
         self.rebuild_cfg();
         self.block_analysis();
-
         self.mark_dead_code();
 
         if self.config.contains(AnalysisConfig::DEDUP) {
             self.rebuild_cfg();
             self.dedup_blocks();
+            self.mark_dead_code();
         }
 
         // Final rebuild so the CFG is consistent for sections analysis and DOT output.
@@ -290,15 +292,19 @@ impl<'a> Bytecode<'a> {
         while let Some((i, data)) = iter.next() {
             if data.is_diverging() {
                 let mut end = i;
+                let mut any_new = false;
                 for (j, data) in &mut iter {
                     end = j;
                     if data.is_reachable_jumpdest(self.has_dynamic_jumps) {
                         break;
                     }
+                    if !data.flags.contains(InstFlags::DEAD_CODE) {
+                        any_new = true;
+                    }
                     data.flags |= InstFlags::DEAD_CODE;
                 }
                 let start = i + 1;
-                if end > start {
+                if any_new && end > start {
                     debug!("found dead code: {start:?}..{end:?}");
                 }
             }
