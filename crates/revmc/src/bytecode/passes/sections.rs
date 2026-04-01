@@ -146,11 +146,11 @@ impl StackSectionAnalysis {
         if !section.is_empty() {
             trace!(
                 inst = %self.start_inst,
-                len = next_section_inst.index() - self.start_inst.index(),
+                len = %(next_section_inst - self.start_inst),
                 ?section,
                 "saving stack"
             );
-            let mut insts = bytecode.insts.raw[self.start_inst.index()..].iter_mut();
+            let mut insts = bytecode.insts[self.start_inst..].iter_mut();
             if let Some(inst) = insts.find(|inst| !inst.is_dead_code()) {
                 inst.stack_section = section;
             }

@@ -330,7 +330,7 @@ impl Bytecode<'_> {
             // Interpret the block up to (but not including) the terminator so the
             // jump target remains on the stack.
             let non_term = block.insts().filter(|&i| i != term_inst);
-            let ok = self.interpret_block_local(non_term, &mut stack);
+            let ok = self.interpret_block(non_term, &mut stack, None);
             if !ok {
                 continue;
             }
@@ -830,7 +830,7 @@ impl Bytecode<'_> {
             };
 
             let block = &self.cfg.blocks[bid];
-            if !self.interpret_block(block.insts(), &mut stack_buf, snapshots) {
+            if !self.interpret_block(block.insts(), &mut stack_buf, Some(snapshots)) {
                 continue;
             }
 
@@ -870,12 +870,12 @@ impl Bytecode<'_> {
     /// Returns `false` on stack underflow (conflict).
     ///
     /// The caller must pre-fill `stack` with the input state; on return it contains the output.
-    /// Records per-instruction operand snapshots into `snapshots`.
+    /// When `snapshots` is provided, records per-instruction operand snapshots.
     fn interpret_block(
         &self,
         insts: impl IntoIterator<Item = Inst>,
         stack: &mut Vec<AbsValue>,
-        snapshots: &mut Snapshots,
+        mut snapshots: Option<&mut Snapshots>,
     ) -> bool {
         for i in insts {
             let inst = &self.insts[i];
@@ -894,10 +894,12 @@ impl Bytecode<'_> {
             let out = out as usize;
 
             // Record pre-instruction input operand snapshot (in stack order, TOS last).
-            let start = stack.len().saturating_sub(inp);
-            let snap = &mut snapshots.inputs[i];
-            snap.clear();
-            snap.extend_from_slice(&stack[start..]);
+            if let Some(ref mut snapshots) = snapshots {
+                let start = stack.len().saturating_sub(inp);
+                let snap = &mut snapshots.inputs[i];
+                snap.clear();
+                snap.extend_from_slice(&stack[start..]);
+            }
 
             match inst.opcode {
                 op::PUSH0 => {
@@ -960,86 +962,13 @@ impl Bytecode<'_> {
             }
 
             // Record post-instruction output snapshot.
-            if out > 0 {
-                snapshots.outputs[i] = stack.last().copied();
-            }
-        }
-
-        true
-    }
-
-    /// Interpret a block locally without recording snapshots.
-    /// Returns `false` on stack underflow.
-    fn interpret_block_local(
-        &self,
-        insts: impl IntoIterator<Item = Inst>,
-        stack: &mut Vec<AbsValue>,
-    ) -> bool {
-        for i in insts {
-            let inst = &self.insts[i];
-            if inst.is_dead_code() {
-                continue;
-            }
-
-            let (inp, out) = inst.stack_io_raw();
-            let inp = inp as usize;
-            let out = out as usize;
-
-            match inst.opcode {
-                op::PUSH0 => {
-                    stack.push(AbsValue::Const(self.intern_u256(U256::ZERO)));
-                }
-                op::PUSH1..=op::PUSH32 => {
-                    let val = self.get_imm(inst).map_or(AbsValue::Top, |imm| {
-                        AbsValue::Const(self.intern_u256(U256::from_be_slice(imm)))
-                    });
-                    stack.push(val);
-                }
-                op::POP => {
-                    if stack.pop().is_none() {
-                        return false;
-                    }
-                }
-                op::DUP1..=op::DUP16 => {
-                    let depth = (inst.opcode - op::DUP1 + 1) as usize;
-                    if stack.len() < depth {
-                        return false;
-                    }
-                    stack.push(stack[stack.len() - depth]);
-                }
-                op::SWAP1..=op::SWAP16 => {
-                    let depth = (inst.opcode - op::SWAP1 + 1) as usize;
-                    let len = stack.len();
-                    if len < depth + 1 {
-                        return false;
-                    }
-                    stack.swap(len - 1, len - 1 - depth);
-                }
-                _ => {
-                    if stack.len() < inp {
-                        return false;
-                    }
-                    // Try constant folding.
-                    let result = if out > 0 {
-                        super::const_fold::try_const_fold(
-                            inst,
-                            &stack[stack.len() - inp..],
-                            &mut self.u256_interner.borrow_mut(),
-                            self.code.len(),
-                        )
-                    } else {
-                        None
-                    };
-                    stack.truncate(stack.len() - inp);
-                    if let Some(folded) = result {
-                        debug_assert_eq!(out, 1);
-                        stack.push(folded);
-                    } else {
-                        stack.resize(stack.len() + out, AbsValue::Top);
-                    }
+            if let Some(ref mut snapshots) = snapshots {
+                if out > 0 {
+                    snapshots.outputs[i] = stack.last().copied();
                 }
             }
         }
+
         true
     }
 }
