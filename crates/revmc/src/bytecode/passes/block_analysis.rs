@@ -897,6 +897,7 @@ pub(crate) mod tests {
         let mut bytecode = Bytecode::new(code, SpecId::CANCUN);
         bytecode.config = config;
         bytecode.analyze().unwrap();
+        eprintln!("{bytecode}");
         bytecode
     }
 
@@ -913,7 +914,7 @@ pub(crate) mod tests {
 
     #[test]
     fn revert_sub_call_storage_oog() {
-        let bytecode = analyze_hex(
+        analyze_hex(
             "60606040526000357c01000000000000000000000000000000000000000000000000000000009004\
              63ffffffff168063b28175c4146046578063c0406226146052575b6000565b34600057605060765\
              65b005b34600057605c6081565b604051808215151515815260200191505060405180910390f35b\
@@ -921,12 +922,11 @@ pub(crate) mod tests {
              b905600a165627a7a723058202a8a75d7d795b5bcb9042fb18b283daa90b999a11ddec892f54873\
              22",
         );
-        eprintln!("{bytecode}");
     }
 
     #[test]
     fn revert_remote_sub_call_storage_oog() {
-        let bytecode = analyze_hex(
+        analyze_hex(
             "608060405234801561001057600080fd5b506004361061002b5760003560e01c806373027f6d14\
              610030575b600080fd5b61004a600480360381019061004591906101a9565b61004c565b005b60\
              00808273ffffffffffffffffffffffffffffffffffffffff1660405160240160405160208183030\
@@ -948,7 +948,6 @@ pub(crate) mod tests {
         // This contract has a single function with one call site. The analysis
         // should NOT incorrectly resolve any jumps (all dynamic jumps should
         // remain dynamic or be correctly resolved).
-        eprintln!("{bytecode}");
     }
 
     #[test]
@@ -962,8 +961,7 @@ pub(crate) mod tests {
             "60065f601d565b5f5560106001601d565b6001555f80808080335af1005b5c9056",
         ];
         for hex in &contracts {
-            let bytecode = analyze_hex(hex);
-            eprintln!("{bytecode}");
+            analyze_hex(hex);
         }
     }
 
@@ -1076,7 +1074,6 @@ pub(crate) mod tests {
             SWAP1               ; swap result and return address
             JUMP                ; return (dynamic)
         ");
-        eprintln!("{bytecode}");
 
         // The return JUMP (last inst before STOP's block) should be multi-target.
         let return_jump = bytecode
@@ -1146,7 +1143,6 @@ pub(crate) mod tests {
             SWAP1                   ; pc=23: swap result and return addr
             JUMP                    ; pc=24: return (UNSOUND: resolved to Multi)
         ");
-        eprintln!("{bytecode}");
 
         // The return JUMP at pc=24 should NOT be resolved — the opaque jump at
         // pc=16 can reach fn_entry with any return address. But the current
@@ -1218,7 +1214,6 @@ pub(crate) mod tests {
             SWAP1                   ; pc=35
             JUMP                    ; pc=36: jump to ret_addr
         ");
-        eprintln!("{bytecode}");
 
         // The wrapper return JUMP (pc=30) remains dynamic because the outer
         // return address is lost to Top during the top-aligned join.
@@ -1236,7 +1231,6 @@ pub(crate) mod tests {
         .unwrap();
         let mut bytecode = Bytecode::new(code, SpecId::CANCUN);
         bytecode.analyze().unwrap();
-        eprintln!("{bytecode}");
         assert!(!bytecode.has_dynamic_jumps, "expected all jumps to be resolved");
     }
 }
@@ -1280,7 +1274,6 @@ mod tests_edge_cases {
             SWAP1
             JUMP
         ");
-        eprintln!("{bytecode}");
 
         let return_jump = bytecode
             .iter_insts()
@@ -1332,7 +1325,6 @@ mod tests_edge_cases {
             JUMPDEST                ; inst 4: target
             STOP                    ; inst 5
         ");
-        eprintln!("{bytecode}");
         // The JUMPI should be resolved as static.
         assert!(!bytecode.has_dynamic_jumps);
     }
@@ -1356,7 +1348,6 @@ mod tests_edge_cases {
             PUSH %loop_header       ; loop target
             JUMP                    ; back-edge
         ");
-        eprintln!("{bytecode}");
         // Should converge without panicking.
         // The JUMP should be static (resolved by adjacent PUSH+JUMP).
         assert!(!bytecode.has_dynamic_jumps);
@@ -1376,7 +1367,6 @@ mod tests_edge_cases {
             JUMPDEST                ; single-inst block
             STOP
         ");
-        eprintln!("{bytecode}");
         assert!(!bytecode.has_dynamic_jumps);
     }
 
@@ -1395,7 +1385,6 @@ mod tests_edge_cases {
             JUMPDEST
             JUMP                    ; jump to 0xFF (invalid)
         ");
-        eprintln!("{bytecode}");
         // The dynamic JUMP at pc=6 should be resolved as invalid.
         let jump_inst = bytecode
             .iter_insts()
@@ -1428,7 +1417,6 @@ mod tests_edge_cases {
             MSTORE                  ; MSTORE(0, 0x42)
             STOP
         ");
-        eprintln!("{bytecode}");
         // At the merge MSTORE, the value (operand 1) should still be 0x42
         // since both branches had the same constant on the stack.
         let mstore = bytecode.iter_insts().find(|(_, d)| d.opcode == op::MSTORE).unwrap().0;
@@ -1462,7 +1450,6 @@ mod tests_edge_cases {
             MSTORE                  ; MSTORE(0, ???)
             STOP
         ");
-        eprintln!("{bytecode}");
         // At the merge MSTORE, the value (operand 1) should be None
         // since the two branches push different constants.
         let mstore = bytecode.iter_insts().find(|(_, d)| d.opcode == op::MSTORE).unwrap().0;
@@ -1516,7 +1503,6 @@ mod tests_edge_cases {
             op::SWAP1,                  // pc=31
             op::JUMP,                   // pc=32: return
         ]);
-        eprintln!("{bytecode}");
 
         // The fn return JUMP at pc=32 must NOT be resolved — the trampoline
         // can reach fn_entry with any return address.
@@ -1565,7 +1551,6 @@ mod tests_edge_cases {
             op::JUMPI,              // pc=27: conditional return (always taken)
             op::STOP,               // pc=28: fallthrough (dead)
         ]);
-        eprintln!("{bytecode}");
 
         // The JUMPI at pc=27 should NOT be resolved — opaque jump can reach
         // fn_entry with any return address.
@@ -1618,7 +1603,6 @@ mod tests_edge_cases {
             op::SWAP1,              // pc=29
             op::JUMP,               // pc=30: return
         ]);
-        eprintln!("{bytecode}");
 
         // The return JUMP at pc=30 must NOT be resolved — the opaque caller
         // at pc=25 reaches fn_entry with an arbitrary return address.
@@ -1647,7 +1631,6 @@ mod tests_edge_cases {
             CALLDATALOAD
             JUMP
         ");
-        eprintln!("{bytecode}");
         assert!(!bytecode.has_dynamic_jumps);
     }
 }

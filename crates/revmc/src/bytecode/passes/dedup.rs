@@ -163,8 +163,6 @@ mod tests {
             AnalysisConfig::DEDUP,
         );
 
-        eprintln!("{bytecode}");
-
         // One of the two `PUSH1 0x00 / DUP1 / REVERT` blocks should be redirected.
         assert_eq!(
             bytecode.redirects.len(),
@@ -193,7 +191,6 @@ mod tests {
             AnalysisConfig::DEDUP,
         );
 
-        eprintln!("{bytecode}");
         assert!(bytecode.redirects.is_empty(), "should not dedup different blocks");
     }
 
@@ -237,8 +234,6 @@ mod tests {
             AnalysisConfig::DEDUP,
         );
 
-        eprintln!("{bytecode}");
-
         let redirect_count = bytecode.redirects.len();
         assert_eq!(redirect_count, 2, "expected 2 redirects, got {redirect_count}");
     }
@@ -274,7 +269,6 @@ mod tests {
             AnalysisConfig::DEDUP,
         );
 
-        eprintln!("{bytecode}");
         assert!(bytecode.redirects.is_empty(), "should not dedup blocks containing PC");
     }
 
@@ -286,8 +280,6 @@ mod tests {
         let mut bytecode = crate::Bytecode::new(code, revm_primitives::hardfork::SpecId::CANCUN);
         bytecode.config = AnalysisConfig::DEDUP;
         bytecode.analyze().unwrap();
-
-        eprintln!("{bytecode}");
 
         assert_eq!(bytecode.redirects.len(), 13);
     }

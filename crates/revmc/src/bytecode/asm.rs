@@ -22,11 +22,14 @@ use crate::{
     eyre::{self, Result},
 };
 use revm_bytecode::opcode::OpCode;
-use std::{cmp::Ordering, collections::HashMap, str::FromStr};
+use revm_primitives::map::HashMap;
+use std::{cmp::Ordering, str::FromStr};
 
 /// Parse EVM assembly from a string into bytecode.
 ///
-/// See [module docs](self) for syntax.
+/// Supports standard EVM opcodes (`ADD`, `PUSH1 0x42`, etc.), auto-sized pushes
+/// (`PUSH 0x1234` picks the smallest encoding), labels (`name:` / `PUSH %name`),
+/// and comments starting with `;`.
 pub fn parse_asm(s: &str) -> Result<Vec<u8>> {
     let items = parse_items(s)?;
     layout_and_emit(&items)
@@ -157,7 +160,7 @@ fn min_push_width(val: usize) -> u8 {
 /// Layout items with label resolution (fixed-point for auto-sized label pushes) and emit bytecode.
 fn layout_and_emit(items: &[Item<'_>]) -> Result<Vec<u8>> {
     // Collect auto-push-label indices for the fixpoint.
-    let mut auto_label_indices: Vec<usize> = Vec::new();
+    let mut auto_label_indices = Vec::new();
     let mut has_any_label = false;
 
     for (i, item) in items.iter().enumerate() {
@@ -186,8 +189,8 @@ fn layout_and_emit(items: &[Item<'_>]) -> Result<Vec<u8>> {
     }
 
     // Fixed-point layout: auto-push widths start at 0 and grow monotonically.
-    let mut auto_widths: Vec<u8> = vec![0; items.len()];
-    let mut label_pcs: HashMap<&str, usize> = HashMap::new();
+    let mut auto_widths = vec![0u8; items.len()];
+    let mut label_pcs = HashMap::<&str, usize>::default();
 
     loop {
         // Compute PCs with current widths.
