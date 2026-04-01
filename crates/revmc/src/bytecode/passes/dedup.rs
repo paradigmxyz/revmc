@@ -131,37 +131,35 @@ fn block_bytes<'a>(
 
 #[cfg(test)]
 mod tests {
-    use crate::bytecode::{AnalysisConfig, passes::block_analysis::tests::analyze_code_with};
-    use revm_bytecode::opcode as op;
+    use crate::bytecode::{AnalysisConfig, passes::block_analysis::tests::analyze_asm_with};
 
     #[test]
     fn dedup_identical_revert_blocks() {
         // Two JUMPI branches each fall through to an identical `PUSH1 0x00 / DUP1 / REVERT`.
-        #[rustfmt::skip]
-        let bytecode = analyze_code_with(vec![
-            // bb0: JUMPI to pc=9
-            op::PUSH0,          // pc=0
-            op::CALLDATALOAD,   // pc=1
-            op::PUSH1, 9,       // pc=2
-            op::JUMPI,          // pc=4
-            // bb1: revert A
-            op::PUSH1, 0x00,    // pc=5
-            op::DUP1,           // pc=7
-            op::REVERT,         // pc=8
-            // bb2: JUMPDEST, JUMPI to pc=19
-            op::JUMPDEST,       // pc=9
-            op::PUSH0,          // pc=10
-            op::CALLDATALOAD,   // pc=11
-            op::PUSH1, 19,      // pc=12
-            op::JUMPI,          // pc=14
-            // bb3: revert B (identical to A)
-            op::PUSH1, 0x00,    // pc=15
-            op::DUP1,           // pc=17
-            op::REVERT,         // pc=18
-            // bb4: actual target
-            op::JUMPDEST,       // pc=19
-            op::STOP,           // pc=20
-        ], AnalysisConfig::DEDUP);
+        let bytecode = analyze_asm_with(
+            "
+            PUSH0
+            CALLDATALOAD
+            PUSH bb2
+            JUMPI
+            ; revert A
+            PUSH1 0x00
+            DUP1
+            REVERT
+            bb2: JUMPDEST
+            PUSH0
+            CALLDATALOAD
+            PUSH bb4
+            JUMPI
+            ; revert B (identical to A)
+            PUSH1 0x00
+            DUP1
+            REVERT
+            bb4: JUMPDEST
+            STOP
+        ",
+            AnalysisConfig::DEDUP,
+        );
 
         eprintln!("{bytecode}");
 
@@ -176,20 +174,21 @@ mod tests {
     #[test]
     fn dedup_preserves_unique_blocks() {
         // Two different diverging blocks — they should NOT be deduplicated.
-        #[rustfmt::skip]
-        let bytecode = analyze_code_with(vec![
-            op::PUSH0,
-            op::CALLDATALOAD,
-            op::PUSH1, 9,
-            op::JUMPI,
-            // revert with 0
-            op::PUSH1, 0x00,
-            op::DUP1,
-            op::REVERT,
-            // JUMPDEST -> STOP (different terminator)
-            op::JUMPDEST,
-            op::STOP,
-        ], AnalysisConfig::DEDUP);
+        let bytecode = analyze_asm_with(
+            "
+            PUSH0
+            CALLDATALOAD
+            PUSH target
+            JUMPI
+            ; revert with 0
+            PUSH1 0x00
+            DUP1
+            REVERT
+            target: JUMPDEST
+            STOP
+        ",
+            AnalysisConfig::DEDUP,
+        );
 
         eprintln!("{bytecode}");
         assert!(bytecode.redirects.is_empty(), "should not dedup different blocks");
@@ -198,23 +197,39 @@ mod tests {
     #[test]
     fn dedup_three_identical_blocks() {
         // Three identical `PUSH1 0x00 / DUP1 / REVERT` blocks.
-        #[rustfmt::skip]
-        let bytecode = analyze_code_with(vec![
-            // bb0: JUMPI -> pc=9
-            op::PUSH0, op::CALLDATALOAD, op::PUSH1, 9, op::JUMPI,
-            // bb1: revert A
-            op::PUSH1, 0x00, op::DUP1, op::REVERT,
-            // bb2: JUMPI -> pc=19
-            op::JUMPDEST, op::PUSH0, op::CALLDATALOAD, op::PUSH1, 19, op::JUMPI,
-            // bb3: revert B
-            op::PUSH1, 0x00, op::DUP1, op::REVERT,
-            // bb4: JUMPI -> pc=29
-            op::JUMPDEST, op::PUSH0, op::CALLDATALOAD, op::PUSH1, 29, op::JUMPI,
-            // bb5: revert C
-            op::PUSH1, 0x00, op::DUP1, op::REVERT,
-            // bb6: target
-            op::JUMPDEST, op::STOP,
-        ], AnalysisConfig::DEDUP);
+        let bytecode = analyze_asm_with(
+            "
+            PUSH0
+            CALLDATALOAD
+            PUSH bb2
+            JUMPI
+            ; revert A
+            PUSH1 0x00
+            DUP1
+            REVERT
+            bb2: JUMPDEST
+            PUSH0
+            CALLDATALOAD
+            PUSH bb4
+            JUMPI
+            ; revert B
+            PUSH1 0x00
+            DUP1
+            REVERT
+            bb4: JUMPDEST
+            PUSH0
+            CALLDATALOAD
+            PUSH bb6
+            JUMPI
+            ; revert C
+            PUSH1 0x00
+            DUP1
+            REVERT
+            bb6: JUMPDEST
+            STOP
+        ",
+            AnalysisConfig::DEDUP,
+        );
 
         eprintln!("{bytecode}");
 
@@ -226,19 +241,30 @@ mod tests {
     fn dedup_skips_pc_opcode() {
         // Two identical `PC / PUSH1 0x00 / REVERT` blocks — PC is position-dependent,
         // so they must NOT be deduplicated.
-        #[rustfmt::skip]
-        let bytecode = analyze_code_with(vec![
-            // bb0: JUMPI -> pc=9
-            op::PUSH0, op::CALLDATALOAD, op::PUSH1, 9, op::JUMPI,
-            // bb1: PC + revert A
-            op::PC, op::PUSH1, 0x00, op::REVERT,
-            // bb2: JUMPDEST -> fallthrough
-            op::JUMPDEST, op::PUSH0, op::CALLDATALOAD, op::PUSH1, 19, op::JUMPI,
-            // bb3: PC + revert B (same bytes, different PC value)
-            op::PC, op::PUSH1, 0x00, op::REVERT,
-            // bb4: target
-            op::JUMPDEST, op::STOP,
-        ], AnalysisConfig::DEDUP);
+        let bytecode = analyze_asm_with(
+            "
+            PUSH0
+            CALLDATALOAD
+            PUSH bb2
+            JUMPI
+            ; PC + revert A
+            PC
+            PUSH1 0x00
+            REVERT
+            bb2: JUMPDEST
+            PUSH0
+            CALLDATALOAD
+            PUSH bb4
+            JUMPI
+            ; PC + revert B (same bytes, different PC value)
+            PC
+            PUSH1 0x00
+            REVERT
+            bb4: JUMPDEST
+            STOP
+        ",
+            AnalysisConfig::DEDUP,
+        );
 
         eprintln!("{bytecode}");
         assert!(bytecode.redirects.is_empty(), "should not dedup blocks containing PC");
