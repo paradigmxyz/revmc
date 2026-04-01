@@ -28,7 +28,10 @@
 //! invalidates suspect resolutions that may be reachable from those unresolved jumps, ensuring
 //! that only sound jump targets are reported as resolved.
 
-use crate::bytecode::{Bytecode, Inst, InstFlags, Interner, U256Idx};
+use crate::{
+    FxHashMap,
+    bytecode::{Bytecode, Inst, InstFlags, Interner, U256Idx},
+};
 use bitvec::vec::BitVec;
 use either::Either;
 use oxc_index::IndexVec;
@@ -322,50 +325,63 @@ pub(crate) struct Cfg {
     pub(crate) inst_to_block: IndexVec<Inst, Option<Block>>,
 }
 
+/// A PCR hint: a return jump and its resolved targets.
+struct PcrHint {
+    /// The return jump instruction.
+    jump_inst: Inst,
+    /// The resolved target instructions.
+    targets: SmallVec<[Inst; 4]>,
+}
+
 impl Bytecode<'_> {
-    /// Resolves private function return jumps using local summaries and
-    /// context-sensitive graph traversal.
+    /// Computes private call/return hints for the abstract interpreter.
     ///
-    /// This runs before `block_analysis` to pre-resolve return jumps that the
-    /// abstract interpreter cannot handle (because it merges return addresses
-    /// at function entry points).
+    /// Returns PCR hints containing return edges discovered by context-sensitive
+    /// call-string analysis, along with the function entries each depends on.
     #[instrument(name = "pcr", level = "debug", skip_all)]
-    pub(crate) fn resolve_private_call_returns(&mut self) {
+    fn compute_pcr_hints(&self) -> Vec<PcrHint> {
         if self.cfg.blocks.is_empty() || !self.has_dynamic_jumps {
-            return;
+            return Vec::new();
         }
 
         let summaries = self.compute_local_summaries();
         let resolved = self.resolve_private_calls(&summaries);
 
-        if resolved.is_empty() {
-            return;
+        let mut hints = Vec::new();
+        for (inst, target) in resolved {
+            let targets = match target {
+                JumpTarget::Const(t) => smallvec::smallvec![t],
+                JumpTarget::Multi(targets) => targets,
+                _ => continue,
+            };
+            hints.push(PcrHint { jump_inst: inst, targets });
         }
 
-        let newly_resolved = self.commit_resolved_jumps(&resolved);
-        debug!(newly_resolved, "resolved private call returns");
-
-        if newly_resolved > 0 {
-            self.recompute_has_dynamic_jumps();
-            self.rebuild_cfg();
+        if !hints.is_empty() {
+            debug!(n = hints.len(), "PCR hints for fixpoint");
         }
+        hints
     }
 
     /// Runs abstract stack interpretation to resolve additional jump targets.
     ///
     /// Also computes and stores per-instruction stack snapshots for constant propagation.
+    /// Internally runs the private call/return detection pass and feeds the results
+    /// as seed edges into the fixpoint.
     #[instrument(name = "ba", level = "debug", skip_all)]
     pub(crate) fn block_analysis(&mut self) {
         if self.cfg.blocks.is_empty() {
             return;
         }
 
+        let pcr_hints = self.compute_pcr_hints();
+
         let n = self.insts.len();
         let mut snapshots = Snapshots {
             inputs: IndexVec::from_vec(vec![SmallVec::new(); n]),
             outputs: IndexVec::from_vec(vec![None; n]),
         };
-        let (resolved, count) = self.run_abstract_interp(&mut snapshots);
+        let (resolved, count) = self.run_abstract_interp(&mut snapshots, &pcr_hints);
         self.snapshots = snapshots;
 
         if count > 0 {
@@ -575,7 +591,15 @@ impl Bytecode<'_> {
     ///
     /// Returns a list of (jump_inst, resolved_target) pairs and the count of resolvable jumps.
     /// Stack snapshots are recorded into `snapshots` during the fixpoint.
-    fn run_abstract_interp(&self, snapshots: &mut Snapshots) -> (Vec<(Inst, JumpTarget)>, usize) {
+    ///
+    /// `pcr_hints` are private-call/return edges discovered by the PCR pass. They are seeded
+    /// into the fixpoint as discovered edges so the abstract interpreter can propagate states
+    /// along them without requiring them to be pre-committed.
+    fn run_abstract_interp(
+        &self,
+        snapshots: &mut Snapshots,
+        pcr_hints: &[PcrHint],
+    ) -> (Vec<(Inst, JumpTarget)>, usize) {
         let num_blocks = self.cfg.blocks.len();
 
         // Initialize block states. Entry block starts with an empty stack.
@@ -592,17 +616,23 @@ impl Bytecode<'_> {
         }
 
         let mut const_sets = ConstSetInterner::new();
-        let discovered_edges = self.run_fixpoint(&mut block_states, snapshots, &mut const_sets);
+        let discovered_edges =
+            self.run_fixpoint(&mut block_states, snapshots, &mut const_sets, pcr_hints);
 
         if jump_insts.is_empty() {
             return (Vec::new(), 0);
         }
 
+        // Build a lookup from PCR hints for quick access.
+        let pcr_map: FxHashMap<Inst, &PcrHint> =
+            pcr_hints.iter().map(|h| (h.jump_inst, h)).collect();
+
         // After convergence, resolve each dynamic jump from its snapshot operand.
+        // If the fixpoint couldn't resolve a jump but PCR has a hint, use the hint.
         let mut jump_targets: Vec<(Inst, JumpTarget)> = Vec::new();
         let mut has_top_jump = false;
         for &jump_inst in &jump_insts {
-            let target = match snapshots.inputs[jump_inst].last() {
+            let mut target = match snapshots.inputs[jump_inst].last() {
                 Some(&operand) => self.resolve_jump_operand(operand, &const_sets),
                 None => {
                     // No snapshot means the block was never interpreted (unreachable).
@@ -610,6 +640,19 @@ impl Bytecode<'_> {
                     JumpTarget::Bottom
                 }
             };
+
+            // If the fixpoint left this jump unresolved, use the PCR hint.
+            if matches!(target, JumpTarget::Top | JumpTarget::Bottom)
+                && let Some(hint) = pcr_map.get(&jump_inst)
+            {
+                target = if hint.targets.len() == 1 {
+                    JumpTarget::Const(hint.targets[0])
+                } else {
+                    JumpTarget::Multi(hint.targets.clone())
+                };
+                trace!(%jump_inst, n = hint.targets.len(), "resolved via PCR hint");
+            }
+
             if matches!(target, JumpTarget::Top) {
                 has_top_jump = true;
             }
@@ -1031,45 +1074,16 @@ impl Bytecode<'_> {
 
         debug!("resolve_private_calls: converged after {iterations} iterations");
 
-        // Soundness check: if any unresolved dynamic JUMPs remain (excluding
-        // the return JUMPs that we just resolved), those jumps could target any
-        // JUMPDEST including function entries, reaching them with arbitrary
-        // context. In that case we must not commit any resolutions.
-        //
-        // Build a set of return block terminators that we just resolved, then
-        // check if any OTHER unresolved dynamic jumps remain.
-        let resolved_return_insts: SmallVec<[Inst; 8]> = return_targets
-            .iter_enumerated()
-            .filter(|(_, targets)| !targets.is_empty())
-            .map(|(bid, _)| self.cfg.blocks[bid].terminator())
-            .filter(|&ti| !self.insts[ti].flags.contains(InstFlags::STATIC_JUMP))
-            .collect();
-
-        let has_other_unresolved = self.insts.iter_enumerated().any(|(i, inst)| {
-            inst.is_jump()
-                && !inst.flags.contains(InstFlags::STATIC_JUMP)
-                && !inst.is_dead_code()
-                && !resolved_return_insts.contains(&i)
-        });
-
         // Convert return_targets to JumpTarget resolutions.
+        // These are returned as hints — soundness is enforced downstream by the
+        // abstract interpreter's `invalidate_suspect_jumps`.
         let mut resolved = Vec::new();
         for (bid, targets) in return_targets.iter_enumerated() {
             if targets.is_empty() {
                 continue;
             }
             let term_inst = self.cfg.blocks[bid].terminator();
-            // Skip if already resolved.
             if self.insts[term_inst].flags.contains(InstFlags::STATIC_JUMP) {
-                continue;
-            }
-            // Skip all resolutions if other unresolved dynamic jumps remain.
-            if has_other_unresolved {
-                trace!(
-                    %bid,
-                    term = %term_inst,
-                    "skipping: other unresolved dynamic jumps remain"
-                );
                 continue;
             }
             let target = if targets.len() == 1 {
@@ -1092,11 +1106,15 @@ impl Bytecode<'_> {
     /// Run a worklist-based fixpoint to compute abstract block states.
     ///
     /// Returns the discovered dynamic-jump target edges per block.
+    ///
+    /// `pcr_hints` provides pre-computed private-call/return edges that are seeded into the
+    /// discovered-edge maps before the fixpoint begins.
     fn run_fixpoint(
         &self,
         block_states: &mut IndexVec<Block, BlockState>,
         snapshots: &mut Snapshots,
         const_sets: &mut ConstSetInterner,
+        pcr_hints: &[PcrHint],
     ) -> IndexVec<Block, SmallVec<[Block; 4]>> {
         let num_blocks = self.cfg.blocks.len();
         let mut worklist = Worklist::new(num_blocks);
@@ -1108,6 +1126,18 @@ impl Bytecode<'_> {
         // Reverse map: discovered predecessors per block.
         let mut disc_preds: IndexVec<Block, SmallVec<[Block; 4]>> =
             IndexVec::from_vec(vec![SmallVec::new(); num_blocks]);
+
+        // Seed PCR hints as discovered edges.
+        for hint in pcr_hints {
+            let Some(src_block) = self.cfg.inst_to_block[hint.jump_inst] else { continue };
+            for &target_inst in &hint.targets {
+                let Some(tgt_block) = self.cfg.inst_to_block[target_inst] else { continue };
+                if !discovered[src_block].contains(&tgt_block) {
+                    discovered[src_block].push(tgt_block);
+                    disc_preds[tgt_block].push(src_block);
+                }
+            }
+        }
 
         let max_iterations = num_blocks * 8;
         let mut iterations = 0;

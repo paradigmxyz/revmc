@@ -253,7 +253,6 @@ impl<'a> Bytecode<'a> {
         self.mark_dead_code();
 
         self.rebuild_cfg();
-        self.resolve_private_call_returns();
         self.block_analysis();
 
         // Run again: block_analysis may mark additional jumps as invalid/diverging,
