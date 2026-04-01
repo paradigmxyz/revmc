@@ -2,7 +2,7 @@
 //!
 //! This pass builds a basic-block CFG and runs worklist-based abstract interpretation to a
 //! fixpoint, propagating abstract stack states across blocks. It resolves jump targets that the
-//! simple `static_jump_analysis` (which only looks at adjacent `PUSH + JUMP/JUMPI`) cannot
+//! block-local pass `block_analysis_local` (which interprets each block independently) cannot
 //! handle — including internal function return patterns where multiple callers push different
 //! return addresses.
 //!
@@ -28,6 +28,7 @@
 //! invalidates suspect resolutions that may be reachable from those unresolved jumps, ensuring
 //! that only sound jump targets are reported as resolved.
 
+use super::StackSection;
 use crate::bytecode::{Bytecode, Inst, InstFlags, Interner, U256Idx};
 use bitvec::vec::BitVec;
 use either::Either;
@@ -296,22 +297,83 @@ pub(crate) struct Cfg {
 }
 
 impl Bytecode<'_> {
+    /// Ensures `self.snapshots` is sized for the current instruction count.
+    fn init_snapshots(&mut self) {
+        let n = self.insts.len();
+        self.snapshots.inputs.resize(n, SmallVec::new());
+        self.snapshots.outputs.resize(n, None);
+    }
+
+    /// Block-local jump resolution: interpret each block independently to discover
+    /// jumps resolvable from block-local computation alone.
+    ///
+    /// Also initializes `self.snapshots`.
+    #[instrument(name = "local_jumps", level = "debug", skip_all)]
+    pub(crate) fn block_analysis_local(&mut self) {
+        self.init_snapshots();
+
+        let empty_sets = ConstSetInterner::new();
+        let mut resolved = Vec::new();
+        let mut stack = Vec::new();
+        let trace_logs = enabled!(tracing::Level::TRACE);
+
+        for bid in self.cfg.blocks.indices() {
+            let block = &self.cfg.blocks[bid];
+
+            // Compute required entry depth for this block using stack section analysis.
+            let section =
+                StackSection::from_stack_io(block.insts().map(|i| self.insts[i].stack_io()));
+
+            // Interpret the block with `Top` as inputs.
+            stack.clear();
+            stack.resize(section.inputs as usize, AbsValue::Top);
+            if !self.interpret_block(block.insts(), &mut stack) {
+                continue;
+            }
+
+            // Check if the block's terminator is an unresolved jump.
+            // We interpret every block to initialize `snapshots`, so we check this after.
+            let block = &self.cfg.blocks[bid];
+            let term_inst = block.terminator();
+            let term = &self.insts[term_inst];
+            if !term.is_jump() || term.flags.contains(InstFlags::STATIC_JUMP) {
+                continue;
+            }
+
+            let Some(&operand) = self.snapshots.inputs[term_inst].last() else { continue };
+            debug_assert!(!matches!(operand, AbsValue::ConstSet(_)));
+            let target = self.resolve_jump_operand(operand, &empty_sets);
+            let JumpTarget::Const(target_inst) = target else { continue };
+
+            // Log non-adjacent resolutions (not simple PUSH+JUMP).
+            if trace_logs
+                && let is_adjacent = (term_inst > 0 && {
+                    let prev_inst = term_inst - 1;
+                    let prev = &self.insts[prev_inst];
+                    matches!(prev.opcode, op::PUSH0..=op::PUSH32)
+                        && !prev.is_dead_code()
+                        && block.insts.contains(&prev_inst)
+                })
+                && !is_adjacent
+            {
+                trace!(%term_inst, %target_inst, pc = self.insts[term_inst].pc, "resolved non-adjacent jump");
+            }
+
+            resolved.push((term_inst, target));
+        }
+
+        let newly_resolved = self.commit_resolved_jumps(&resolved);
+        debug!(newly_resolved, "finished");
+        self.recompute_has_dynamic_jumps();
+    }
+
     /// Runs abstract stack interpretation to resolve additional jump targets.
     ///
     /// Also computes and stores per-instruction stack snapshots for constant propagation.
     #[instrument(name = "ba", level = "debug", skip_all)]
     pub(crate) fn block_analysis(&mut self) {
-        if self.cfg.blocks.is_empty() {
-            return;
-        }
-
-        let n = self.insts.len();
-        let mut snapshots = Snapshots {
-            inputs: IndexVec::from_vec(vec![SmallVec::new(); n]),
-            outputs: IndexVec::from_vec(vec![None; n]),
-        };
-        let (resolved, count) = self.run_abstract_interp(&mut snapshots);
-        self.snapshots = snapshots;
+        self.init_snapshots();
+        let (resolved, count) = self.run_abstract_interp();
 
         if count > 0 {
             let newly_resolved = self.commit_resolved_jumps(&resolved);
@@ -321,7 +383,8 @@ impl Bytecode<'_> {
         self.recompute_has_dynamic_jumps();
     }
 
-    fn recompute_has_dynamic_jumps(&mut self) {
+    /// Recomputes the `has_dynamic_jumps` flag based on the current instruction set.
+    pub(crate) fn recompute_has_dynamic_jumps(&mut self) {
         let mut unresolved = self.insts.iter().filter(|inst| {
             inst.is_jump() && !inst.flags.contains(InstFlags::STATIC_JUMP) && !inst.is_dead_code()
         });
@@ -339,7 +402,7 @@ impl Bytecode<'_> {
 
         let mut newly_resolved = 0u32;
         for &(jump_inst, ref target) in resolved {
-            // Skip if already resolved by static_jump_analysis.
+            // Skip if already resolved by block_analysis_local.
             if self.insts[jump_inst].flags.contains(InstFlags::STATIC_JUMP) {
                 continue;
             }
@@ -351,8 +414,7 @@ impl Bytecode<'_> {
                         op::JUMPDEST,
                         "block_analysis resolved to non-JUMPDEST"
                     );
-                    self.insts[jump_inst].flags |=
-                        InstFlags::STATIC_JUMP | InstFlags::BLOCK_RESOLVED_JUMP;
+                    self.insts[jump_inst].flags |= InstFlags::STATIC_JUMP;
                     self.insts[jump_inst].data = target_inst.index() as u32;
                     // Mark JUMPDEST as reachable.
                     self.insts[target_inst].data = 1;
@@ -368,17 +430,13 @@ impl Bytecode<'_> {
                         );
                         self.insts[target_inst].data = 1;
                     }
-                    self.insts[jump_inst].flags |= InstFlags::STATIC_JUMP
-                        | InstFlags::BLOCK_RESOLVED_JUMP
-                        | InstFlags::MULTI_JUMP;
+                    self.insts[jump_inst].flags |= InstFlags::STATIC_JUMP | InstFlags::MULTI_JUMP;
                     self.multi_jump_targets.insert(jump_inst, targets.clone());
                     newly_resolved += 1;
                     trace!(%jump_inst, n_targets = targets.len(), "resolved multi-target jump");
                 }
                 JumpTarget::Invalid => {
-                    self.insts[jump_inst].flags |= InstFlags::STATIC_JUMP
-                        | InstFlags::INVALID_JUMP
-                        | InstFlags::BLOCK_RESOLVED_JUMP;
+                    self.insts[jump_inst].flags |= InstFlags::STATIC_JUMP | InstFlags::INVALID_JUMP;
                     newly_resolved += 1;
                     trace!(%jump_inst, "resolved invalid jump");
                 }
@@ -386,6 +444,7 @@ impl Bytecode<'_> {
                     // Truly unreachable: no unresolved jumps remain, so this
                     // code cannot be reached at runtime. Mark as invalid.
                     self.insts[jump_inst].flags |= InstFlags::STATIC_JUMP | InstFlags::INVALID_JUMP;
+                    newly_resolved += 1;
                     trace!(%jump_inst, "unreachable jump");
                 }
                 JumpTarget::Bottom => {
@@ -418,13 +477,11 @@ impl Bytecode<'_> {
         };
 
         let n = self.insts.len();
+        assert_ne!(n, 0, "insts should never be empty");
 
         let cfg = &mut self.cfg;
         cfg.blocks.clear();
         cfg.inst_to_block.clear();
-        if n == 0 {
-            return;
-        }
 
         // Identify block leaders.
         let mut is_leader: BitVec = BitVec::repeat(false, n);
@@ -506,13 +563,15 @@ impl Bytecode<'_> {
                 cfg.blocks[bid].succs.push(target_block);
             }
         }
+
+        assert_ne!(cfg.blocks.len(), 0, "should always build at least one block");
     }
 
     /// Run worklist-based abstract interpretation over the CFG.
     ///
     /// Returns a list of (jump_inst, resolved_target) pairs and the count of resolvable jumps.
-    /// Stack snapshots are recorded into `snapshots` during the fixpoint.
-    fn run_abstract_interp(&self, snapshots: &mut Snapshots) -> (Vec<(Inst, JumpTarget)>, usize) {
+    /// Stack snapshots are recorded into `self.snapshots` during the fixpoint.
+    fn run_abstract_interp(&mut self) -> (Vec<(Inst, JumpTarget)>, usize) {
         let num_blocks = self.cfg.blocks.len();
 
         // Initialize block states. Entry block starts with an empty stack.
@@ -529,7 +588,7 @@ impl Bytecode<'_> {
         }
 
         let mut const_sets = ConstSetInterner::new();
-        let discovered_edges = self.run_fixpoint(&mut block_states, snapshots, &mut const_sets);
+        let discovered_edges = self.run_fixpoint(&mut block_states, &mut const_sets);
 
         if jump_insts.is_empty() {
             return (Vec::new(), 0);
@@ -539,7 +598,7 @@ impl Bytecode<'_> {
         let mut jump_targets: Vec<(Inst, JumpTarget)> = Vec::new();
         let mut has_top_jump = false;
         for &jump_inst in &jump_insts {
-            let target = match snapshots.inputs[jump_inst].last() {
+            let target = match self.snapshots.inputs[jump_inst].last() {
                 Some(&operand) => self.resolve_jump_operand(operand, &const_sets),
                 None => {
                     // No snapshot means the block was never interpreted (unreachable).
@@ -653,9 +712,8 @@ impl Bytecode<'_> {
         // Seed: every reachable JUMPDEST block is suspect when Top jumps exist.
         let mut suspect: BitVec = BitVec::repeat(false, num_blocks);
         for bid in self.cfg.blocks.indices() {
-            let block = &self.cfg.blocks[bid];
             if !matches!(block_states[bid], BlockState::Bottom)
-                && self.insts[block.insts.start].is_jumpdest()
+                && self.insts[self.cfg.blocks[bid].insts.start].is_jumpdest()
             {
                 suspect.set(bid.index(), true);
             }
@@ -695,9 +753,8 @@ impl Bytecode<'_> {
     ///
     /// Returns the discovered dynamic-jump target edges per block.
     fn run_fixpoint(
-        &self,
+        &mut self,
         block_states: &mut IndexVec<Block, BlockState>,
-        snapshots: &mut Snapshots,
         const_sets: &mut ConstSetInterner,
     ) -> IndexVec<Block, SmallVec<[Block; 4]>> {
         let num_blocks = self.cfg.blocks.len();
@@ -733,16 +790,17 @@ impl Bytecode<'_> {
             };
 
             let block = &self.cfg.blocks[bid];
-            if !self.interpret_block(block.insts(), &mut stack_buf, snapshots) {
+            if !self.interpret_block(block.insts(), &mut stack_buf) {
                 continue;
             }
+            let block = &self.cfg.blocks[bid];
 
             // Discover dynamic-jump target edges from the snapshot recorded above.
             let term_inst = block.terminator();
             let term = &self.insts[term_inst];
             if term.is_jump()
                 && !term.flags.contains(InstFlags::STATIC_JUMP)
-                && let Some(&operand) = snapshots.inputs[term_inst].last()
+                && let Some(&operand) = self.snapshots.inputs[term_inst].last()
             {
                 self.discover_jump_edges(
                     operand,
@@ -773,22 +831,15 @@ impl Bytecode<'_> {
     /// Returns `false` on stack underflow (conflict).
     ///
     /// The caller must pre-fill `stack` with the input state; on return it contains the output.
-    /// Records per-instruction operand snapshots into `snapshots`.
+    /// Records per-instruction operand snapshots into `self.snapshots`.
     fn interpret_block(
-        &self,
+        &mut self,
         insts: impl IntoIterator<Item = Inst>,
         stack: &mut Vec<AbsValue>,
-        snapshots: &mut Snapshots,
     ) -> bool {
         for i in insts {
             let inst = &self.insts[i];
             if inst.is_dead_code() {
-                continue;
-            }
-
-            // Instructions marked SKIP_LOGIC (the PUSH in a PUSH+JUMP pair) are no-ops
-            // for abstract interpretation — the value is consumed by the already-resolved jump.
-            if inst.flags.contains(InstFlags::SKIP_LOGIC) {
                 continue;
             }
 
@@ -797,10 +848,12 @@ impl Bytecode<'_> {
             let out = out as usize;
 
             // Record pre-instruction input operand snapshot (in stack order, TOS last).
-            let start = stack.len().saturating_sub(inp);
-            let snap = &mut snapshots.inputs[i];
-            snap.clear();
-            snap.extend_from_slice(&stack[start..]);
+            if inp > 0 {
+                let start = stack.len().saturating_sub(inp);
+                let snap = &mut self.snapshots.inputs[i];
+                snap.clear();
+                snap.extend_from_slice(&stack[start..]);
+            }
 
             match inst.opcode {
                 op::PUSH0 => {
@@ -864,7 +917,7 @@ impl Bytecode<'_> {
 
             // Record post-instruction output snapshot.
             if out > 0 {
-                snapshots.outputs[i] = stack.last().copied();
+                self.snapshots.outputs[i] = stack.last().copied();
             }
         }
 
@@ -1044,6 +1097,55 @@ pub(crate) mod tests {
         ");
         assert_eq!(bytecode.const_output(Inst::from_usize(0)), Some(U256::ZERO));
         assert_eq!(bytecode.const_output(Inst::from_usize(1)), None);
+    }
+
+    #[test]
+    fn snapshots_all_blocks() {
+        // Blocks with unresolvable dynamic jumps must still get snapshots from
+        // block_analysis_local. Here CALLDATALOAD produces an opaque jump target,
+        // so the JUMP stays dynamic, but the block's other instructions should
+        // still have snapshots populated.
+        #[rustfmt::skip]
+        let bytecode = analyze_asm("
+            PUSH1 0x42          ; inst 0
+            PUSH1 0x01          ; inst 1
+            ADD                 ; inst 2: 0x42 + 0x01 = 0x43
+            PUSH0               ; inst 3
+            CALLDATALOAD        ; inst 4: opaque value
+            JUMP                ; inst 5: dynamic, unresolvable
+        target1:
+            JUMPDEST            ; inst 6
+            PUSH1 0x01          ; inst 7
+            ADD                 ; inst 8
+            STOP                ; inst 9
+        target2:
+            JUMPDEST            ; inst 10
+            PUSH1 0x02          ; inst 11
+            SUB                 ; inst 12
+            STOP                ; inst 13
+        ");
+        // The JUMP at inst 5 should remain dynamic.
+        assert!(bytecode.has_dynamic_jumps, "expected unresolved dynamic jump");
+        let jump = bytecode.inst(Inst::from_usize(5));
+        assert!(jump.is_jump());
+        assert!(!jump.flags.contains(InstFlags::STATIC_JUMP));
+        // JUMP's TOS operand is Top (CALLDATALOAD result).
+        assert_eq!(bytecode.const_operand(Inst::from_usize(5), 0), None);
+
+        // ADD 1
+        assert_eq!(bytecode.const_operand(Inst::from_usize(2), 0), Some(U256::from(0x01)));
+        assert_eq!(bytecode.const_operand(Inst::from_usize(2), 1), Some(U256::from(0x42)));
+        assert_eq!(bytecode.const_output(Inst::from_usize(2)), Some(U256::from(0x43)));
+
+        // ADD 2
+        assert_eq!(bytecode.const_operand(Inst::from_usize(8), 0), Some(U256::from(0x01)));
+        assert_eq!(bytecode.const_operand(Inst::from_usize(8), 1), None);
+        assert_eq!(bytecode.const_output(Inst::from_usize(8)), None);
+
+        // SUB
+        assert_eq!(bytecode.const_operand(Inst::from_usize(12), 0), Some(U256::from(0x02)));
+        assert_eq!(bytecode.const_operand(Inst::from_usize(12), 1), None);
+        assert_eq!(bytecode.const_output(Inst::from_usize(12)), None);
     }
 
     #[test]
@@ -1461,48 +1563,46 @@ mod tests_edge_cases {
     /// Top jump must not be filtered out by the `is_private_return` check.
     #[test]
     fn trampoline_private_return_unsound() {
-        let ret1: u8 = 10;
-        let ret2: u8 = 17;
-        let opaque_path: u8 = 20;
-        let tramp: u8 = 26;
-        let fn_entry: u8 = 28;
         #[rustfmt::skip]
-        let bytecode = analyze_code(vec![
-            // Entry: branch to opaque path or call site 1.
-            op::PUSH0,                  // pc=0
-            op::CALLDATALOAD,           // pc=1
-            op::PUSH1, opaque_path,     // pc=2
-            op::JUMPI,                  // pc=4
-            // Fallthrough: call site 1.
-            op::PUSH1, ret1,            // pc=5
-            op::PUSH1, fn_entry,        // pc=7
-            op::JUMP,                   // pc=9
-            // ret1.
-            op::JUMPDEST,               // pc=10
-            op::POP,                    // pc=11
-            // Call site 2.
-            op::PUSH1, ret2,            // pc=12
-            op::PUSH1, fn_entry,        // pc=14
-            op::JUMP,                   // pc=16
-            // ret2.
-            op::JUMPDEST,               // pc=17
-            op::POP,                    // pc=18
-            op::STOP,                   // pc=19
-            // Opaque path (reachable from JUMPI at pc=4).
-            op::JUMPDEST,               // pc=20
-            op::PUSH0,                  // pc=21
-            op::MLOAD,                  // pc=22: any_ret (Top)
-            op::PUSH1, tramp,           // pc=23
-            op::JUMP,                   // pc=25
-            // Trampoline: bare JUMPDEST + JUMP (is_private_return = true).
-            op::JUMPDEST,               // pc=26
-            op::JUMP,                   // pc=27: target = any_ret (Top)
-            // Internal function.
-            op::JUMPDEST,               // pc=28: fn_entry
-            op::PUSH1, 0x42,            // pc=29
-            op::SWAP1,                  // pc=31
-            op::JUMP,                   // pc=32: return
-        ]);
+        let bytecode = analyze_asm("
+            ; Entry: branch to opaque path or call site 1.
+            PUSH0                       ; pc=0
+            CALLDATALOAD                ; pc=1
+            PUSH %opaque_path           ; pc=2
+            JUMPI                       ; pc=4
+            ; Fallthrough: call site 1.
+            PUSH %ret1                  ; pc=5
+            PUSH %fn_entry              ; pc=7
+            JUMP                        ; pc=9
+        ret1:
+            JUMPDEST                    ; pc=10
+            POP                         ; pc=11
+            ; Call site 2.
+            PUSH %ret2                  ; pc=12
+            PUSH %fn_entry              ; pc=14
+            JUMP                        ; pc=16
+        ret2:
+            JUMPDEST                    ; pc=17
+            POP                         ; pc=18
+            STOP                        ; pc=19
+            ; Opaque path (reachable from JUMPI).
+        opaque_path:
+            JUMPDEST                    ; pc=20
+            PUSH0                       ; pc=21
+            MLOAD                       ; pc=22: any_ret (Top)
+            PUSH %tramp                 ; pc=23
+            JUMP                        ; pc=25
+            ; Trampoline: bare JUMPDEST + JUMP (is_private_return = true).
+        tramp:
+            JUMPDEST                    ; pc=26
+            JUMP                        ; pc=27: target = any_ret (Top)
+            ; Internal function.
+        fn_entry:
+            JUMPDEST                    ; pc=28
+            PUSH1 0x42                  ; pc=29
+            SWAP1                       ; pc=31
+            JUMP                        ; pc=32: return
+        ");
 
         // The fn return JUMP at pc=32 must NOT be resolved — the trampoline
         // can reach fn_entry with any return address.
@@ -1518,39 +1618,39 @@ mod tests_edge_cases {
     /// be invalidated when a Top jump exists, just like JUMP-based returns.
     #[test]
     fn jumpi_return_unsound() {
-        let ret1: u8 = 5;
-        let ret2: u8 = 12;
-        let fn_entry: u8 = 20;
         #[rustfmt::skip]
-        let bytecode = analyze_code(vec![
-            // Call site 1.
-            op::PUSH1, ret1,        // pc=0
-            op::PUSH1, fn_entry,    // pc=2
-            op::JUMP,               // pc=4
-            op::JUMPDEST,           // pc=5: ret1
-            op::POP,                // pc=6
-            // Call site 2.
-            op::PUSH1, ret2,        // pc=7
-            op::PUSH1, fn_entry,    // pc=9
-            op::JUMP,               // pc=11
-            op::JUMPDEST,           // pc=12: ret2
-            op::POP,                // pc=13
-            // Opaque jump.
-            op::PUSH0,              // pc=14
-            op::MLOAD,              // pc=15
-            op::JUMP,               // pc=16: Top
-            op::INVALID,            // pc=17
-            op::INVALID,            // pc=18
-            op::INVALID,            // pc=19
-            // Internal function using JUMPI to return.
-            op::JUMPDEST,           // pc=20: fn_entry
-            op::PUSH1, 0x42,        // pc=21: result
-            op::SWAP1,              // pc=23: [result, ret_addr]
-            op::PUSH1, 0x01,        // pc=24: condition (always true)
-            op::SWAP1,              // pc=26: [result, 1, ret_addr]
-            op::JUMPI,              // pc=27: conditional return (always taken)
-            op::STOP,               // pc=28: fallthrough (dead)
-        ]);
+        let bytecode = analyze_asm("
+            ; Call site 1.
+            PUSH %ret1              ; pc=0
+            PUSH %fn_entry          ; pc=2
+            JUMP                    ; pc=4
+        ret1:
+            JUMPDEST                ; pc=5
+            POP                     ; pc=6
+            ; Call site 2.
+            PUSH %ret2              ; pc=7
+            PUSH %fn_entry          ; pc=9
+            JUMP                    ; pc=11
+        ret2:
+            JUMPDEST                ; pc=12
+            POP                     ; pc=13
+            ; Opaque jump.
+            PUSH0                   ; pc=14
+            MLOAD                   ; pc=15
+            JUMP                    ; pc=16: Top
+            INVALID                 ; pc=17
+            INVALID                 ; pc=18
+            INVALID                 ; pc=19
+            ; Internal function using JUMPI to return.
+        fn_entry:
+            JUMPDEST                ; pc=20
+            PUSH1 0x42              ; pc=21: result
+            SWAP1                   ; pc=23: [result, ret_addr]
+            PUSH1 0x01              ; pc=24: condition (always true)
+            SWAP1                   ; pc=26: [result, 1, ret_addr]
+            JUMPI                   ; pc=27: conditional return (always taken)
+            STOP                    ; pc=28: fallthrough (dead)
+        ");
 
         // The JUMPI at pc=27 should NOT be resolved — opaque jump can reach
         // fn_entry with any return address.
@@ -1567,42 +1667,42 @@ mod tests_edge_cases {
     /// return jump must not be resolved because the return address is Top.
     #[test]
     fn opaque_return_addr_caller_unsound() {
-        let ret1: u8 = 10;
-        let ret2: u8 = 17;
-        let opaque_caller: u8 = 20;
-        let fn_entry: u8 = 26;
         #[rustfmt::skip]
-        let bytecode = analyze_code(vec![
-            // Entry: branch to opaque caller or fallthrough.
-            op::PUSH0,              // pc=0
-            op::CALLDATALOAD,       // pc=1
-            op::PUSH1, opaque_caller, // pc=2
-            op::JUMPI,              // pc=4
-            // Fallthrough: call site 1.
-            op::PUSH1, ret1,        // pc=5
-            op::PUSH1, fn_entry,    // pc=7
-            op::JUMP,               // pc=9
-            op::JUMPDEST,           // pc=10: ret1
-            op::POP,                // pc=11
-            // Call site 2.
-            op::PUSH1, ret2,        // pc=12
-            op::PUSH1, fn_entry,    // pc=14
-            op::JUMP,               // pc=16
-            op::JUMPDEST,           // pc=17: ret2
-            op::POP,                // pc=18
-            op::STOP,               // pc=19
-            // Opaque third caller: loads return addr from memory (reachable via JUMPI).
-            op::JUMPDEST,           // pc=20
-            op::PUSH0,              // pc=21
-            op::MLOAD,              // pc=22: any_ret
-            op::PUSH1, fn_entry,    // pc=23
-            op::JUMP,               // pc=25: → fn_entry with arbitrary return addr
-            // Internal function.
-            op::JUMPDEST,           // pc=26: fn_entry
-            op::PUSH1, 0x42,        // pc=27
-            op::SWAP1,              // pc=29
-            op::JUMP,               // pc=30: return
-        ]);
+        let bytecode = analyze_asm("
+            ; Entry: branch to opaque caller or fallthrough.
+            PUSH0                       ; pc=0
+            CALLDATALOAD                ; pc=1
+            PUSH %opaque_caller         ; pc=2
+            JUMPI                       ; pc=4
+            ; Fallthrough: call site 1.
+            PUSH %ret1                  ; pc=5
+            PUSH %fn_entry              ; pc=7
+            JUMP                        ; pc=9
+        ret1:
+            JUMPDEST                    ; pc=10
+            POP                         ; pc=11
+            ; Call site 2.
+            PUSH %ret2                  ; pc=12
+            PUSH %fn_entry              ; pc=14
+            JUMP                        ; pc=16
+        ret2:
+            JUMPDEST                    ; pc=17
+            POP                         ; pc=18
+            STOP                        ; pc=19
+            ; Opaque third caller: loads return addr from memory (reachable via JUMPI).
+        opaque_caller:
+            JUMPDEST                    ; pc=20
+            PUSH0                       ; pc=21
+            MLOAD                       ; pc=22: any_ret
+            PUSH %fn_entry              ; pc=23
+            JUMP                        ; pc=25: -> fn_entry with arbitrary return addr
+            ; Internal function.
+        fn_entry:
+            JUMPDEST                    ; pc=26
+            PUSH1 0x42                  ; pc=27
+            SWAP1                       ; pc=29
+            JUMP                        ; pc=30: return
+        ");
 
         // The return JUMP at pc=30 must NOT be resolved — the opaque caller
         // at pc=25 reaches fn_entry with an arbitrary return address.

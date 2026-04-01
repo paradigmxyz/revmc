@@ -924,19 +924,14 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             op::JUMP | op::JUMPI => {
                 let is_invalid = data.flags.contains(InstFlags::INVALID_JUMP);
                 if is_invalid && opcode == op::JUMP {
-                    // NOTE: We can't early return for `JUMPI` since the jump target is evaluated
-                    // lazily.
+                    // Pop and discard the target; it's always on the stack.
+                    let _ = self.pop();
                     self.build_fail_imm(InstructionResult::InvalidJump);
                 } else {
                     let target = if is_invalid {
                         debug_assert_eq!(*data, op::JUMPI);
-                        // The jump target is invalid, but we still need to account for the stack.
-                        if data.flags.contains(InstFlags::BLOCK_RESOLVED_JUMP) {
-                            // Block-resolved: target is on the stack, pop and discard.
-                            let _ = self.pop();
-                        } else {
-                            self.len_offset -= 1;
-                        }
+                        // The jump target is invalid, but we still need to pop it.
+                        let _ = self.pop();
                         self.return_block.unwrap()
                     } else if data.flags.contains(InstFlags::MULTI_JUMP) {
                         let target_value = self.pop();
@@ -965,10 +960,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                         self.inst_entries[inst] = self.bcx.current_block().unwrap();
                         goto_return!(no_branch);
                     } else if data.flags.contains(InstFlags::STATIC_JUMP) {
-                        // Block-resolved jumps still have the target on the stack; pop and discard.
-                        if data.flags.contains(InstFlags::BLOCK_RESOLVED_JUMP) {
-                            let _ = self.pop();
-                        }
+                        // Pop and discard the target; it's always on the stack.
+                        let _ = self.pop();
                         let target_inst = Inst::from_usize(data.data as usize);
                         debug_assert_eq!(
                             *self.bytecode.inst(target_inst),

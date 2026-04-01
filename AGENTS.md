@@ -68,3 +68,22 @@ To get a summary across all benchmarks:
 ```
 
 Use `cargo r -- run --list` to see available benchmark names.
+
+## Code style
+
+- Never call `.index()` on an index type just to reconstruct the same type.
+  Use arithmetic on the index directly:
+  ```rust
+  // BAD
+  let prev = &self.insts[Inst::from_usize(term_inst.index() - 1)];
+  // GOOD
+  let prev = &self.insts[term_inst - 1];
+  ```
+- Don't prefix log messages with the pass/function name — `#[instrument]` spans
+  already provide that context. Just describe what happened:
+  ```rust
+  // BAD
+  trace!("local: resolved jump");
+  // GOOD
+  trace!("resolved jump");
+  ```

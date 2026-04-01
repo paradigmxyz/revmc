@@ -23,10 +23,6 @@ impl<'a> Bytecode<'a> {
     /// translator can map the dead instruction to the canonical block's IR block.
     #[instrument(name = "dedup", level = "debug", skip_all)]
     pub(crate) fn dedup_blocks(&mut self) {
-        if self.cfg.blocks.is_empty() {
-            return;
-        }
-
         // Group eligible (diverging, non-dead) blocks by their raw bytecode content.
         // We borrow `self.code` separately to avoid holding a `&self` borrow across mutations.
         let code = &*self.code;
@@ -75,7 +71,7 @@ impl<'a> Bytecode<'a> {
             let canonical_first_inst = self.cfg.blocks[canonical].insts.start;
             for &dup in dups {
                 deduped += 1;
-                debug!("deduped: {from} -> {to}", from = dup, to = canonical);
+                trace!("deduped: {from} -> {to}", from = dup, to = canonical);
 
                 // Mark all instructions in the duplicate block as dead.
                 let dup_block = &self.cfg.blocks[dup];
