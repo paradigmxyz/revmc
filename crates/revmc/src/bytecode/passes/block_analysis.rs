@@ -395,18 +395,12 @@ impl Bytecode<'_> {
 
     /// Recomputes `has_dynamic_jumps` by scanning live instructions.
     fn recompute_has_dynamic_jumps(&mut self) {
-        let n = self
-            .insts
-            .iter()
-            .filter(|inst| {
-                inst.is_jump()
-                    && !inst.flags.contains(InstFlags::STATIC_JUMP)
-                    && !inst.is_dead_code()
-            })
-            .count();
-        self.has_dynamic_jumps = n > 0;
+        let mut dynamic_jumps = self.insts.iter().filter(|inst| {
+            !inst.is_dead_code() && inst.is_jump() && !inst.flags.contains(InstFlags::STATIC_JUMP)
+        });
+        self.has_dynamic_jumps = dynamic_jumps.next().is_some();
         if self.has_dynamic_jumps {
-            debug!(n, "unresolved dynamic jumps remain");
+            debug!(n = 1 + dynamic_jumps.count(), "unresolved dynamic jumps remain");
         }
     }
 
