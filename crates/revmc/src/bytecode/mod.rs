@@ -308,7 +308,7 @@ impl<'a> Bytecode<'a> {
                 }
                 let start = i + 1;
                 if any_new && end > start {
-                    debug!("found dead code: {start:?}..{end:?}");
+                    debug!("found dead code: {start}..{end}");
                 }
             }
         }
@@ -401,9 +401,8 @@ impl<'a> Bytecode<'a> {
     ///
     /// `depth` 0 is TOS (first popped by this instruction), 1 is second, etc.
     /// Returns `None` if the value is unknown or the analysis didn't cover this instruction.
-    #[allow(dead_code)]
     pub(crate) fn const_operand(&self, inst: Inst, depth: usize) -> Option<U256> {
-        let snap = self.snapshots.inputs.get(inst)?;
+        let snap = &self.snapshots.inputs[inst];
         let idx = snap.get(snap.len().checked_sub(1 + depth)?)?.as_const()?;
         Some(*self.u256_interner.borrow().get(idx))
     }
@@ -414,7 +413,7 @@ impl<'a> Bytecode<'a> {
     /// analysis didn't cover this instruction.
     #[allow(dead_code)]
     pub(crate) fn const_output(&self, inst: Inst) -> Option<U256> {
-        let idx = (*self.snapshots.outputs.get(inst)?)?.as_const()?;
+        let idx = self.snapshots.outputs[inst]?.as_const()?;
         Some(*self.u256_interner.borrow().get(idx))
     }
 
@@ -492,11 +491,6 @@ impl InstData {
     /// Returns the number of input and output stack elements of this instruction.
     #[inline]
     pub(crate) fn stack_io(&self) -> (u8, u8) {
-        self.stack_io_raw()
-    }
-
-    #[inline]
-    pub(crate) fn stack_io_raw(&self) -> (u8, u8) {
         stack_io(self.opcode)
     }
 

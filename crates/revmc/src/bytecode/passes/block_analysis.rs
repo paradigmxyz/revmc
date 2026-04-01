@@ -312,7 +312,8 @@ impl Bytecode<'_> {
     pub(crate) fn block_analysis_local(&mut self) {
         self.init_snapshots();
 
-        let mut newly_resolved = 0u32;
+        let mut newly_resolved = 0usize;
+        let mut newly_resolved_non_adjacent = 0usize;
         let mut stack = Vec::new();
 
         for bid in self.cfg.blocks.indices() {
@@ -320,7 +321,7 @@ impl Bytecode<'_> {
 
             // Compute required entry depth for this block using stack section analysis.
             let section =
-                StackSection::from_stack_io(block.insts().map(|i| self.insts[i].stack_io_raw()));
+                StackSection::from_stack_io(block.insts().map(|i| self.insts[i].stack_io()));
 
             // Interpret the block with `Top` as inputs.
             stack.clear();
@@ -351,11 +352,24 @@ impl Bytecode<'_> {
             } else {
                 self.insts[term_inst].flags |= InstFlags::STATIC_JUMP | InstFlags::INVALID_JUMP;
                 newly_resolved += 1;
-                trace!(%term_inst, ?target_pc, "local: invalid jump target");
+                trace!(%term_inst, ?target_pc, "invalid jump target");
                 continue;
             };
 
             let target = self.pc_to_inst(target_pc);
+
+            // Check if this is a non-adjacent resolution (not simple PUSH+JUMP).
+            let is_adjacent = term_inst > 0 && {
+                let prev_inst = term_inst - 1;
+                let prev = &self.insts[prev_inst];
+                matches!(prev.opcode, op::PUSH0..=op::PUSH32)
+                    && !prev.is_dead_code()
+                    && block.insts.contains(&prev_inst)
+            };
+            if !is_adjacent {
+                newly_resolved_non_adjacent += 1;
+                debug!(%term_inst, %target, pc = self.insts[term_inst].pc, "resolved non-adjacent jump");
+            }
 
             self.insts[term_inst].flags |= InstFlags::STATIC_JUMP;
 
@@ -363,10 +377,10 @@ impl Bytecode<'_> {
             self.insts[term_inst].data = target.index() as u32;
             self.insts[target].data = 1;
             newly_resolved += 1;
-            trace!(%term_inst, %target, "local: resolved jump");
+            trace!(%term_inst, %target, "resolved jump");
         }
 
-        debug!(newly_resolved, "local jump resolution");
+        debug!(newly_resolved, newly_resolved_non_adjacent, "finished");
         self.recompute_has_dynamic_jumps();
     }
 

@@ -190,7 +190,7 @@ impl SectionsAnalysis {
         }
 
         let data = bytecode.inst(inst);
-        let (inp, out) = data.stack_io_raw();
+        let (inp, out) = data.stack_io();
         let stack_diff = out as i32 - inp as i32;
         self.stack.inputs = self.stack.inputs.max(inp as i32 - self.stack.diff);
         self.stack.diff += stack_diff;
