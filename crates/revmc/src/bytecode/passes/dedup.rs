@@ -5,8 +5,9 @@
 //! single canonical copy.
 
 use super::block_analysis::{Block, BlockData};
-use crate::bytecode::{Bytecode, InstFlags};
+use crate::bytecode::{Bytecode, Inst, InstData, InstFlags};
 use alloy_primitives::map::HashMap;
+use oxc_index::IndexVec;
 use revm_bytecode::opcode as op;
 use smallvec::SmallVec;
 
@@ -27,6 +28,8 @@ impl<'a> Bytecode<'a> {
         }
 
         // Group eligible (diverging, non-dead) blocks by their raw bytecode content.
+        // We borrow `self.code` separately to avoid holding a `&self` borrow across mutations.
+        let code = &*self.code;
         let mut key_to_blocks = HashMap::<&[u8], SmallVec<[Block; 4]>>::default();
         for bid in self.cfg.blocks.indices() {
             let block = &self.cfg.blocks[bid];
@@ -56,7 +59,7 @@ impl<'a> Bytecode<'a> {
                 continue;
             }
 
-            let bytes = self.block_bytes(block);
+            let bytes = block_bytes(code, &self.insts, block);
             if bytes.is_empty() {
                 continue;
             }
@@ -111,15 +114,19 @@ impl<'a> Bytecode<'a> {
 
         debug!(deduped, "finished");
     }
+}
 
-    /// Returns the raw bytecode bytes for a block's PC range, or empty if the block
-    /// extends past the original code (e.g. the synthetic STOP padding).
-    fn block_bytes(&self, block: &BlockData) -> &'a [u8] {
-        let start_pc = self.insts[block.insts.start].pc as usize;
-        let end_inst = &self.insts[block.terminator()];
-        let end_pc = end_inst.pc as usize + 1 + end_inst.imm_len() as usize;
-        self.code.get(start_pc..end_pc).unwrap_or_default()
-    }
+/// Returns the raw bytecode bytes for a block's PC range, or empty if the block
+/// extends past the original code (e.g. the synthetic STOP padding).
+fn block_bytes<'a>(
+    code: &'a [u8],
+    insts: &IndexVec<Inst, InstData>,
+    block: &BlockData,
+) -> &'a [u8] {
+    let start_pc = insts[block.insts.start].pc as usize;
+    let end_inst = &insts[block.terminator()];
+    let end_pc = end_inst.pc as usize + 1 + end_inst.imm_len() as usize;
+    code.get(start_pc..end_pc).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -242,7 +249,7 @@ mod tests {
         let code =
             revm_primitives::hex::decode(include_str!("../../../../../data/weth.rt.hex").trim())
                 .unwrap();
-        let mut bytecode = crate::Bytecode::new(&code, revm_primitives::hardfork::SpecId::CANCUN);
+        let mut bytecode = crate::Bytecode::new(code, revm_primitives::hardfork::SpecId::CANCUN);
         bytecode.config = AnalysisConfig::DEDUP;
         bytecode.analyze().unwrap();
 

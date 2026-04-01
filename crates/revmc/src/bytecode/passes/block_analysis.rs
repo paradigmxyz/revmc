@@ -893,8 +893,7 @@ pub(crate) mod tests {
     ) -> Bytecode<'static> {
         crate::tests::init_tracing();
 
-        let code = &*Box::leak(code.into_boxed_slice());
-        eprintln!("{}", hex::encode(code));
+        eprintln!("{}", hex::encode(&code));
         let mut bytecode = Bytecode::new(code, SpecId::CANCUN);
         bytecode.config = config;
         bytecode.analyze().unwrap();
@@ -1224,7 +1223,6 @@ pub(crate) mod tests {
             include_str!("../../../../../data/hash_10k.rt.hex").trim(),
         )
         .unwrap();
-        let code = Box::leak(code.into_boxed_slice());
         let mut bytecode = Bytecode::new(code, SpecId::CANCUN);
         bytecode.analyze().unwrap();
         eprintln!("{bytecode}");
