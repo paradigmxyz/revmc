@@ -456,6 +456,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 let resume_at = get_ecx_resume_at_ptr(&mut fx);
                 fx.bcx.store_aligned(resume_value, resume_at, 1);
 
+                // Save stack back to caller only when suspending, or always if inspecting.
+                // This matches the inverse of the condition in the return block.
                 if !config.inspect_stack_length {
                     fx.copy_stack_to_arg();
                     fx.save_stack_len();
