@@ -1,4 +1,5 @@
 #include <llvm-c/LLJIT.h>
+#include <llvm-c/LLJITUtils.h>
 #include <llvm-c/Orc.h>
 #include <llvm-c/TargetMachine.h>
 #include <llvm/ExecutionEngine/Orc/AbsoluteSymbols.h>
@@ -8,6 +9,7 @@
 #include <llvm/ExecutionEngine/Orc/Debugging/PerfSupportPlugin.h>
 #include <llvm/ExecutionEngine/Orc/LLJIT.h>
 #include <llvm/ExecutionEngine/Orc/ObjectLinkingLayer.h>
+#include <llvm/ExecutionEngine/Orc/TargetProcess/JITLoaderGDB.h>
 #include <llvm/ExecutionEngine/Orc/TargetProcess/JITLoaderPerf.h>
 #include <llvm/ExecutionEngine/JITLink/JITLink.h>
 #include <llvm/IR/Attributes.h>
@@ -294,9 +296,31 @@ revmc_llvm_lljit_enable_perf_support(LLVMOrcLLJITRef J) {
   return LLVMErrorSuccess;
 }
 
+/// Register the JITLoaderGDB symbol and enable debug support.
+///
+/// Same pattern as `revmc_llvm_lljit_enable_perf_support`: register the
+/// runtime function as an absolute symbol so the process symbol lookup
+/// succeeds (it would otherwise fail on macOS where static library symbols
+/// aren't exported to dlsym).
+extern "C" LLVMErrorRef
+revmc_llvm_lljit_enable_debug_support(LLVMOrcLLJITRef J) {
+  auto *Jit = reinterpret_cast<orc::LLJIT *>(J);
+  auto &ES = Jit->getExecutionSession();
+
+  auto Flags = JITSymbolFlags::Exported | JITSymbolFlags::Callable;
+  orc::SymbolMap GDBFns;
+  GDBFns[ES.intern("llvm_orc_registerJITLoaderGDBAllocAction")] = {
+      orc::ExecutorAddr::fromPtr(&llvm_orc_registerJITLoaderGDBAllocAction),
+      Flags};
+  if (auto Err = Jit->getMainJITDylib().define(orc::absoluteSymbols(GDBFns)))
+    return wrap(std::move(Err));
+
+  return LLVMOrcLLJITEnableDebugSupport(J);
+}
+
 extern "C" void
 revmc_llvm_target_machine_set_opt_level(LLVMTargetMachineRef TM,
-                                        LLVMCodeGenOptLevel Level) {
+                                         LLVMCodeGenOptLevel Level) {
   auto *Machine = reinterpret_cast<TargetMachine *>(TM);
   CodeGenOptLevel L = CodeGenOptLevel::Default;
   switch (Level) {
