@@ -12,6 +12,9 @@ use std::{borrow::Cow, cell::RefCell};
 mod passes;
 use passes::{Cfg, GasSection, SectionsAnalysis, Snapshots, StackSection};
 
+mod asm;
+pub use asm::parse_asm;
+
 mod fmt;
 
 mod interner;
