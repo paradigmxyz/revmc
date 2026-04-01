@@ -2,7 +2,7 @@
 //!
 //! This pass builds a basic-block CFG and runs worklist-based abstract interpretation to a
 //! fixpoint, propagating abstract stack states across blocks. It resolves jump targets that the
-//! simple `static_jump_analysis` (which only looks at adjacent `PUSH + JUMP/JUMPI`) cannot
+//! block-local pass `block_analysis_local` (which interprets each block independently) cannot
 //! handle — including internal function return patterns where multiple callers push different
 //! return addresses.
 //!
@@ -298,6 +298,105 @@ pub(crate) struct Cfg {
 }
 
 impl Bytecode<'_> {
+    /// Block-local jump resolution: interpret each block independently to discover
+    /// jumps resolvable from block-local computation alone.
+    ///
+    /// This replaces the old `static_jump_analysis` (which only matched adjacent PUSH+JUMP)
+    /// and catches strictly more patterns (e.g. PUSH+PUSH+ADD+JUMP, PUSH+DUP+JUMP).
+    #[instrument(name = "local_jumps", level = "debug", skip_all)]
+    pub(crate) fn block_analysis_local(&mut self) {
+        if self.cfg.blocks.is_empty() {
+            return;
+        }
+
+        let mut newly_resolved = 0u32;
+
+        for bid in self.cfg.blocks.indices() {
+            let block = &self.cfg.blocks[bid];
+            if block.dead {
+                continue;
+            }
+
+            // Check if the block's terminator is an unresolved jump.
+            let term_inst = block.terminator();
+            let term = &self.insts[term_inst];
+            if !term.is_jump() || term.flags.contains(InstFlags::STATIC_JUMP) {
+                continue;
+            }
+
+            // Compute required entry depth for this block.
+            let entry_depth = self.required_block_inputs(block);
+
+            // Seed with Top values.
+            let mut stack: Vec<AbsValue> = vec![AbsValue::Top; entry_depth];
+
+            // Interpret the block up to (but not including) the terminator so the
+            // jump target remains on the stack.
+            let non_term = block.insts().filter(|&i| i != term_inst);
+            let ok = self.interpret_block_local(non_term, &mut stack);
+            if !ok {
+                continue;
+            }
+
+            // Check if the jump target resolved to a single constant.
+            let target_operand = stack.last().copied();
+            let Some(AbsValue::Const(idx)) = target_operand else {
+                continue;
+            };
+
+            let val = *self.u256_interner.borrow().get(idx);
+            let target_pc = match usize::try_from(val) {
+                Ok(pc) => pc,
+                Err(_) => {
+                    // Target too large — invalid jump.
+                    self.insts[term_inst].flags |= InstFlags::STATIC_JUMP | InstFlags::INVALID_JUMP;
+                    newly_resolved += 1;
+                    continue;
+                }
+            };
+
+            if !self.is_valid_jump(target_pc) {
+                self.insts[term_inst].flags |= InstFlags::STATIC_JUMP | InstFlags::INVALID_JUMP;
+                newly_resolved += 1;
+                trace!(%term_inst, target_pc, "local: invalid jump target");
+                continue;
+            }
+
+            let target = self.pc_to_inst(target_pc);
+
+            // Check if this is a simple adjacent PUSH+JUMP pattern.
+            // If so, use the SKIP_LOGIC optimization for backward compatibility with codegen.
+            let is_adjacent_push_jump = term_inst.index() > 0 && {
+                let push_inst = Inst::from_usize(term_inst.index() - 1);
+                let push = &self.insts[push_inst];
+                push.is_push() && !push.is_dead_code() && block.insts.contains(&push_inst)
+            };
+
+            if is_adjacent_push_jump {
+                let push_inst = Inst::from_usize(term_inst.index() - 1);
+                self.insts[push_inst].flags |= InstFlags::SKIP_LOGIC;
+                self.insts[term_inst].flags |= InstFlags::STATIC_JUMP;
+            } else {
+                self.insts[term_inst].flags |=
+                    InstFlags::STATIC_JUMP | InstFlags::BLOCK_RESOLVED_JUMP;
+            }
+
+            // Set target and mark JUMPDEST as reachable.
+            self.insts[term_inst].data = target.index() as u32;
+            self.insts[target].data = 1;
+            newly_resolved += 1;
+            trace!(%term_inst, %target, "local: resolved jump");
+        }
+
+        // Recompute dynamic jumps flag.
+        self.has_dynamic_jumps = self
+            .insts
+            .iter()
+            .any(|inst| inst.is_jump() && !inst.flags.contains(InstFlags::STATIC_JUMP));
+
+        debug!(newly_resolved, has_dynamic_jumps = self.has_dynamic_jumps, "local jump resolution");
+    }
+
     /// Runs abstract stack interpretation to resolve additional jump targets.
     ///
     /// Also computes and stores per-instruction stack snapshots for constant propagation.
@@ -342,7 +441,7 @@ impl Bytecode<'_> {
 
         let mut newly_resolved = 0u32;
         for &(jump_inst, ref target) in resolved {
-            // Skip if already resolved by static_jump_analysis.
+            // Skip if already resolved by block_analysis_local.
             if self.insts[jump_inst].flags.contains(InstFlags::STATIC_JUMP) {
                 continue;
             }
@@ -890,6 +989,98 @@ impl Bytecode<'_> {
             }
         }
 
+        true
+    }
+
+    /// Compute the required stack depth at block entry (how many values the block reads from
+    /// below).
+    fn required_block_inputs(&self, block: &BlockData) -> usize {
+        let mut inputs = 0i32;
+        let mut diff = 0i32;
+        for i in block.insts() {
+            let inst = &self.insts[i];
+            if inst.is_dead_code() {
+                continue;
+            }
+            let (inp, out) = inst.stack_io_raw();
+            inputs = inputs.max(inp as i32 - diff);
+            diff += out as i32 - inp as i32;
+        }
+        inputs.max(0) as usize
+    }
+
+    /// Interpret a block locally without recording snapshots.
+    /// Returns `false` on stack underflow.
+    fn interpret_block_local(
+        &self,
+        insts: impl IntoIterator<Item = Inst>,
+        stack: &mut Vec<AbsValue>,
+    ) -> bool {
+        for i in insts {
+            let inst = &self.insts[i];
+            if inst.is_dead_code() {
+                continue;
+            }
+
+            let (inp, out) = inst.stack_io_raw();
+            let inp = inp as usize;
+            let out = out as usize;
+
+            match inst.opcode {
+                op::PUSH0 => {
+                    stack.push(AbsValue::Const(self.intern_u256(U256::ZERO)));
+                }
+                op::PUSH1..=op::PUSH32 => {
+                    let val = self.get_imm(inst).map_or(AbsValue::Top, |imm| {
+                        AbsValue::Const(self.intern_u256(U256::from_be_slice(imm)))
+                    });
+                    stack.push(val);
+                }
+                op::POP => {
+                    if stack.pop().is_none() {
+                        return false;
+                    }
+                }
+                op::DUP1..=op::DUP16 => {
+                    let depth = (inst.opcode - op::DUP1 + 1) as usize;
+                    if stack.len() < depth {
+                        return false;
+                    }
+                    stack.push(stack[stack.len() - depth]);
+                }
+                op::SWAP1..=op::SWAP16 => {
+                    let depth = (inst.opcode - op::SWAP1 + 1) as usize;
+                    let len = stack.len();
+                    if len < depth + 1 {
+                        return false;
+                    }
+                    stack.swap(len - 1, len - 1 - depth);
+                }
+                _ => {
+                    if stack.len() < inp {
+                        return false;
+                    }
+                    // Try constant folding.
+                    let result = if out > 0 {
+                        super::const_fold::try_const_fold(
+                            inst,
+                            &stack[stack.len() - inp..],
+                            &mut self.u256_interner.borrow_mut(),
+                            self.code.len(),
+                        )
+                    } else {
+                        None
+                    };
+                    stack.truncate(stack.len() - inp);
+                    if let Some(folded) = result {
+                        debug_assert_eq!(out, 1);
+                        stack.push(folded);
+                    } else {
+                        stack.resize(stack.len() + out, AbsValue::Top);
+                    }
+                }
+            }
+        }
         true
     }
 }

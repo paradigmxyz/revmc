@@ -249,7 +249,10 @@ impl<'a> Bytecode<'a> {
     /// Runs a list of analysis passes on the instructions.
     #[instrument(level = "debug", skip_all)]
     pub(crate) fn analyze(&mut self) -> Result<()> {
-        self.static_jump_analysis();
+        // Pessimistically assume all jumps are dynamic for provisional CFG.
+        self.has_dynamic_jumps = self.insts.iter().any(|inst| inst.is_jump());
+        self.rebuild_cfg();
+        self.block_analysis_local();
         self.mark_dead_code();
 
         self.rebuild_cfg();
@@ -272,69 +275,6 @@ impl<'a> Bytecode<'a> {
         self.construct_sections();
 
         Ok(())
-    }
-
-    /// Mark `PUSH<N>` followed by `JUMP[I]` as `STATIC_JUMP` and resolve the target.
-    #[instrument(name = "sj", level = "debug", skip_all)]
-    fn static_jump_analysis(&mut self) {
-        for jump_inst in self.insts.indices() {
-            let jump = &self.insts[jump_inst];
-            let Some(push_inst) = jump_inst.index().checked_sub(1).map(Inst::from_usize) else {
-                if jump.is_jump() {
-                    trace!(%jump_inst, target=?None::<()>, "found jump");
-                    self.has_dynamic_jumps = true;
-                }
-                continue;
-            };
-
-            let push = &self.insts[push_inst];
-            if !(push.is_push() && jump.is_jump()) {
-                if jump.is_jump() {
-                    trace!(%jump_inst, target=?None::<()>, "found jump");
-                    self.has_dynamic_jumps = true;
-                }
-                continue;
-            }
-
-            let imm_opt = self.get_imm(push);
-            if push.opcode != op::PUSH0 && imm_opt.is_none() {
-                continue;
-            }
-            let imm = imm_opt.unwrap_or(&[]);
-            self.insts[jump_inst].flags |= InstFlags::STATIC_JUMP;
-
-            const USIZE_SIZE: usize = std::mem::size_of::<usize>();
-            if imm.len() > USIZE_SIZE {
-                trace!(%jump_inst, "jump target too large");
-                self.insts[jump_inst].flags |= InstFlags::INVALID_JUMP;
-                continue;
-            }
-
-            let mut padded = [0; USIZE_SIZE];
-            padded[USIZE_SIZE - imm.len()..].copy_from_slice(imm);
-            let target_pc = usize::from_be_bytes(padded);
-            if !self.is_valid_jump(target_pc) {
-                trace!(%jump_inst, target_pc, "invalid jump target");
-                self.insts[jump_inst].flags |= InstFlags::INVALID_JUMP;
-                continue;
-            }
-
-            self.insts[push_inst].flags |= InstFlags::SKIP_LOGIC;
-            let target = self.pc_to_inst(target_pc);
-
-            // Mark the `JUMPDEST` as reachable.
-            debug_assert_eq!(
-                self.insts[target],
-                op::JUMPDEST,
-                "is_valid_jump returned true for non-JUMPDEST: \
-                 jump_inst={jump_inst:?} target_pc={target_pc} target={target:?}",
-            );
-            self.insts[target].data = 1;
-
-            // Set the target on the `JUMP` instruction.
-            trace!(%jump_inst, %target, "found jump");
-            self.insts[jump_inst].data = target.index() as u32;
-        }
     }
 
     /// Mark unreachable instructions as `DEAD_CODE` to not generate any code for them.
