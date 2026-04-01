@@ -311,10 +311,6 @@ impl Bytecode<'_> {
 
         for bid in self.cfg.blocks.indices() {
             let block = &self.cfg.blocks[bid];
-            if block.dead {
-                continue;
-            }
-
             // Check if the block's terminator is an unresolved jump.
             let term_inst = block.terminator();
             let term = &self.insts[term_inst];
@@ -752,12 +748,8 @@ impl Bytecode<'_> {
         // Seed: every reachable JUMPDEST block is suspect when Top jumps exist.
         let mut suspect: BitVec = BitVec::repeat(false, num_blocks);
         for bid in self.cfg.blocks.indices() {
-            let block = &self.cfg.blocks[bid];
-            if block.dead {
-                continue;
-            }
             if !matches!(block_states[bid], BlockState::Bottom)
-                && self.insts[block.insts.start].is_jumpdest()
+                && self.insts[self.cfg.blocks[bid].insts.start].is_jumpdest()
             {
                 suspect.set(bid.index(), true);
             }
