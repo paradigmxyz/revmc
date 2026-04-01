@@ -1112,11 +1112,16 @@ pub(crate) mod tests {
             PUSH0               ; inst 3
             CALLDATALOAD        ; inst 4: opaque value
             JUMP                ; inst 5: dynamic, unresolvable
-        target:
+        target1:
             JUMPDEST            ; inst 6
             PUSH1 0x01          ; inst 7
             ADD                 ; inst 8
             STOP                ; inst 9
+        target2:
+            JUMPDEST            ; inst 10
+            PUSH1 0x02          ; inst 11
+            SUB                 ; inst 12
+            STOP                ; inst 13
         ");
         // The JUMP at inst 5 should remain dynamic.
         assert!(bytecode.has_dynamic_jumps, "expected unresolved dynamic jump");
@@ -1125,12 +1130,21 @@ pub(crate) mod tests {
         assert!(!jump.flags.contains(InstFlags::STATIC_JUMP));
         // JUMP's TOS operand is Top (CALLDATALOAD result).
         assert_eq!(bytecode.const_operand(Inst::from_usize(5), 0), None);
-        // block_analysis_local should still have populated snapshots for ADD at inst 2.
+
+        // ADD 1
         assert_eq!(bytecode.const_operand(Inst::from_usize(2), 0), Some(U256::from(0x01)));
         assert_eq!(bytecode.const_operand(Inst::from_usize(2), 1), Some(U256::from(0x42)));
         assert_eq!(bytecode.const_output(Inst::from_usize(2)), Some(U256::from(0x43)));
-        // The target block also gets snapshots (ADD at inst 8).
+
+        // ADD 2
         assert_eq!(bytecode.const_operand(Inst::from_usize(8), 0), Some(U256::from(0x01)));
+        assert_eq!(bytecode.const_operand(Inst::from_usize(8), 1), None);
+        assert_eq!(bytecode.const_output(Inst::from_usize(8)), None);
+
+        // SUB
+        assert_eq!(bytecode.const_operand(Inst::from_usize(12), 0), Some(U256::from(0x02)));
+        assert_eq!(bytecode.const_operand(Inst::from_usize(12), 1), None);
+        assert_eq!(bytecode.const_output(Inst::from_usize(12)), None);
     }
 
     #[test]
