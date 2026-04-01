@@ -478,35 +478,39 @@ impl Bytecode<'_> {
             }
             let term = &self.insts[cfg.blocks[bid].terminator()];
 
-            // Fallthrough edge: if the terminator doesn't unconditionally branch/diverge.
-            // The next instruction may be dead (e.g. deduped); follow redirects to find
-            // the canonical target block.
-            if term.can_fall_through() {
-                let next_inst = cfg.blocks[bid].terminator() + 1;
-                let target = self.redirects.get(&next_inst).copied().unwrap_or(next_inst);
-                if let Some(&Some(next_block)) = cfg.inst_to_block.get(target) {
-                    cfg.blocks[next_block].preds.push(bid);
-                    cfg.blocks[bid].succs.push(next_block);
-                }
+            // Resolve a target instruction through redirects to a CFG block.
+            let resolve = |target: Inst| -> Option<Block> {
+                let target = self.redirects.get(&target).copied().unwrap_or(target);
+                cfg.inst_to_block.get(target).copied().flatten()
+            };
+
+            // Fallthrough edge.
+            if term.can_fall_through()
+                && let Some(target_block) = resolve(cfg.blocks[bid].terminator() + 1)
+            {
+                cfg.blocks[target_block].preds.push(bid);
+                cfg.blocks[bid].succs.push(target_block);
             }
 
             // Jump edges: static single-target, or multi-jump.
             let term_inst = cfg.blocks[bid].terminator();
-            if term.flags.contains(InstFlags::MULTI_JUMP) {
-                if let Some(targets) = self.multi_jump_targets.get(&term_inst) {
-                    for &t in targets {
-                        if let Some(target_block) = cfg.inst_to_block[t] {
-                            cfg.blocks[target_block].preds.push(bid);
-                            cfg.blocks[bid].succs.push(target_block);
-                        }
+            if term.flags.contains(InstFlags::MULTI_JUMP)
+                && let Some(targets) = self.multi_jump_targets.get(&term_inst)
+            {
+                for &t in targets {
+                    if let Some(target_block) = resolve(t)
+                        && !cfg.blocks[bid].succs.contains(&target_block)
+                    {
+                        cfg.blocks[target_block].preds.push(bid);
+                        cfg.blocks[bid].succs.push(target_block);
                     }
                 }
-            } else if term.is_static_jump() && !term.flags.contains(InstFlags::INVALID_JUMP) {
-                let target_inst = Inst::from_usize(term.data as usize);
-                if let Some(target_block) = cfg.inst_to_block[target_inst] {
-                    cfg.blocks[target_block].preds.push(bid);
-                    cfg.blocks[bid].succs.push(target_block);
-                }
+            } else if term.is_static_jump()
+                && !term.flags.contains(InstFlags::INVALID_JUMP)
+                && let Some(target_block) = resolve(Inst::from_usize(term.data as usize))
+            {
+                cfg.blocks[target_block].preds.push(bid);
+                cfg.blocks[bid].succs.push(target_block);
             }
         }
     }
