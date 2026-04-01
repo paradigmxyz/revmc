@@ -310,10 +310,6 @@ impl Bytecode<'_> {
     /// Also initializes `self.snapshots`.
     #[instrument(name = "local_jumps", level = "debug", skip_all)]
     pub(crate) fn block_analysis_local(&mut self) {
-        if self.cfg.blocks.is_empty() {
-            return;
-        }
-
         self.init_snapshots();
 
         let mut newly_resolved = 0u32;
@@ -395,10 +391,6 @@ impl Bytecode<'_> {
     /// Also computes and stores per-instruction stack snapshots for constant propagation.
     #[instrument(name = "ba", level = "debug", skip_all)]
     pub(crate) fn block_analysis(&mut self) {
-        if self.cfg.blocks.is_empty() {
-            return;
-        }
-
         self.init_snapshots();
         let (resolved, count) = self.run_abstract_interp();
 
@@ -508,13 +500,11 @@ impl Bytecode<'_> {
         };
 
         let n = self.insts.len();
+        assert_ne!(n, 0, "insts should never be empty");
 
         let cfg = &mut self.cfg;
         cfg.blocks.clear();
         cfg.inst_to_block.clear();
-        if n == 0 {
-            return;
-        }
 
         // Identify block leaders.
         let mut is_leader: BitVec = BitVec::repeat(false, n);
@@ -596,6 +586,8 @@ impl Bytecode<'_> {
                 cfg.blocks[bid].succs.push(target_block);
             }
         }
+
+        assert_ne!(cfg.blocks.len(), 0, "should always build at least one block");
     }
 
     /// Run worklist-based abstract interpretation over the CFG.
@@ -1141,31 +1133,21 @@ pub(crate) mod tests {
         // Snapshots must be populated for every block, not just those with
         // unresolved jumps. Here block 0 has a static PUSH+JUMP so the old
         // code would skip it; we verify const_operand still works.
-        //
-        // pc 0: PUSH1 0x42   (inst 0) -> stack: [0x42]
-        // pc 2: PUSH1 0x05  (inst 1) -> stack: [0x42, 0x05]
-        // pc 4: JUMP        (inst 2) -> static jump to pc 5
-        // pc 5: JUMPDEST    (inst 3)
-        // pc 6: PUSH1 0x01  (inst 4) -> stack: [0x42, 0x01]
-        // pc 8: ADD         (inst 5) -> stack: [0x43]
-        // pc 9: PUSH1 0x00  (inst 6) -> stack: [0x43, 0x00]
-        // pc 11: MSTORE     (inst 7)
-        // pc 12: STOP       (inst 8)
         #[rustfmt::skip]
-        let bytecode = analyze_code(vec![
-            op::PUSH1, 0x42,
-            op::PUSH1, 0x05,
-            op::JUMP,
-            op::JUMPDEST,
-            op::PUSH1, 0x01,
-            op::ADD,
-            op::PUSH1, 0x00,
-            op::MSTORE,
-            op::STOP,
-        ]);
+        let bytecode = analyze_asm("
+            PUSH1 0x42          ; inst 0
+            PUSH %target        ; inst 1
+            JUMP                ; inst 2: static jump
+        target:
+            JUMPDEST            ; inst 3
+            PUSH1 0x01          ; inst 4
+            ADD                 ; inst 5
+            PUSH1 0x00          ; inst 6
+            MSTORE              ; inst 7
+            STOP                ; inst 8
+        ");
         // Block 0 (PUSH+PUSH+JUMP): the PUSH instructions should have snapshots.
         assert_eq!(bytecode.const_output(Inst::from_usize(0)), Some(U256::from(0x42)));
-        assert_eq!(bytecode.const_output(Inst::from_usize(1)), Some(U256::from(0x05)));
         // Block 1 (JUMPDEST..STOP): ADD operands should be known.
         assert_eq!(bytecode.const_operand(Inst::from_usize(5), 0), Some(U256::from(0x01)));
         assert_eq!(bytecode.const_operand(Inst::from_usize(5), 1), Some(U256::from(0x42)));
@@ -1587,48 +1569,46 @@ mod tests_edge_cases {
     /// Top jump must not be filtered out by the `is_private_return` check.
     #[test]
     fn trampoline_private_return_unsound() {
-        let ret1: u8 = 10;
-        let ret2: u8 = 17;
-        let opaque_path: u8 = 20;
-        let tramp: u8 = 26;
-        let fn_entry: u8 = 28;
         #[rustfmt::skip]
-        let bytecode = analyze_code(vec![
-            // Entry: branch to opaque path or call site 1.
-            op::PUSH0,                  // pc=0
-            op::CALLDATALOAD,           // pc=1
-            op::PUSH1, opaque_path,     // pc=2
-            op::JUMPI,                  // pc=4
-            // Fallthrough: call site 1.
-            op::PUSH1, ret1,            // pc=5
-            op::PUSH1, fn_entry,        // pc=7
-            op::JUMP,                   // pc=9
-            // ret1.
-            op::JUMPDEST,               // pc=10
-            op::POP,                    // pc=11
-            // Call site 2.
-            op::PUSH1, ret2,            // pc=12
-            op::PUSH1, fn_entry,        // pc=14
-            op::JUMP,                   // pc=16
-            // ret2.
-            op::JUMPDEST,               // pc=17
-            op::POP,                    // pc=18
-            op::STOP,                   // pc=19
-            // Opaque path (reachable from JUMPI at pc=4).
-            op::JUMPDEST,               // pc=20
-            op::PUSH0,                  // pc=21
-            op::MLOAD,                  // pc=22: any_ret (Top)
-            op::PUSH1, tramp,           // pc=23
-            op::JUMP,                   // pc=25
-            // Trampoline: bare JUMPDEST + JUMP (is_private_return = true).
-            op::JUMPDEST,               // pc=26
-            op::JUMP,                   // pc=27: target = any_ret (Top)
-            // Internal function.
-            op::JUMPDEST,               // pc=28: fn_entry
-            op::PUSH1, 0x42,            // pc=29
-            op::SWAP1,                  // pc=31
-            op::JUMP,                   // pc=32: return
-        ]);
+        let bytecode = analyze_asm("
+            ; Entry: branch to opaque path or call site 1.
+            PUSH0                       ; pc=0
+            CALLDATALOAD                ; pc=1
+            PUSH %opaque_path           ; pc=2
+            JUMPI                       ; pc=4
+            ; Fallthrough: call site 1.
+            PUSH %ret1                  ; pc=5
+            PUSH %fn_entry              ; pc=7
+            JUMP                        ; pc=9
+        ret1:
+            JUMPDEST                    ; pc=10
+            POP                         ; pc=11
+            ; Call site 2.
+            PUSH %ret2                  ; pc=12
+            PUSH %fn_entry              ; pc=14
+            JUMP                        ; pc=16
+        ret2:
+            JUMPDEST                    ; pc=17
+            POP                         ; pc=18
+            STOP                        ; pc=19
+            ; Opaque path (reachable from JUMPI).
+        opaque_path:
+            JUMPDEST                    ; pc=20
+            PUSH0                       ; pc=21
+            MLOAD                       ; pc=22: any_ret (Top)
+            PUSH %tramp                 ; pc=23
+            JUMP                        ; pc=25
+            ; Trampoline: bare JUMPDEST + JUMP (is_private_return = true).
+        tramp:
+            JUMPDEST                    ; pc=26
+            JUMP                        ; pc=27: target = any_ret (Top)
+            ; Internal function.
+        fn_entry:
+            JUMPDEST                    ; pc=28
+            PUSH1 0x42                  ; pc=29
+            SWAP1                       ; pc=31
+            JUMP                        ; pc=32: return
+        ");
 
         // The fn return JUMP at pc=32 must NOT be resolved — the trampoline
         // can reach fn_entry with any return address.
@@ -1644,39 +1624,39 @@ mod tests_edge_cases {
     /// be invalidated when a Top jump exists, just like JUMP-based returns.
     #[test]
     fn jumpi_return_unsound() {
-        let ret1: u8 = 5;
-        let ret2: u8 = 12;
-        let fn_entry: u8 = 20;
         #[rustfmt::skip]
-        let bytecode = analyze_code(vec![
-            // Call site 1.
-            op::PUSH1, ret1,        // pc=0
-            op::PUSH1, fn_entry,    // pc=2
-            op::JUMP,               // pc=4
-            op::JUMPDEST,           // pc=5: ret1
-            op::POP,                // pc=6
-            // Call site 2.
-            op::PUSH1, ret2,        // pc=7
-            op::PUSH1, fn_entry,    // pc=9
-            op::JUMP,               // pc=11
-            op::JUMPDEST,           // pc=12: ret2
-            op::POP,                // pc=13
-            // Opaque jump.
-            op::PUSH0,              // pc=14
-            op::MLOAD,              // pc=15
-            op::JUMP,               // pc=16: Top
-            op::INVALID,            // pc=17
-            op::INVALID,            // pc=18
-            op::INVALID,            // pc=19
-            // Internal function using JUMPI to return.
-            op::JUMPDEST,           // pc=20: fn_entry
-            op::PUSH1, 0x42,        // pc=21: result
-            op::SWAP1,              // pc=23: [result, ret_addr]
-            op::PUSH1, 0x01,        // pc=24: condition (always true)
-            op::SWAP1,              // pc=26: [result, 1, ret_addr]
-            op::JUMPI,              // pc=27: conditional return (always taken)
-            op::STOP,               // pc=28: fallthrough (dead)
-        ]);
+        let bytecode = analyze_asm("
+            ; Call site 1.
+            PUSH %ret1              ; pc=0
+            PUSH %fn_entry          ; pc=2
+            JUMP                    ; pc=4
+        ret1:
+            JUMPDEST                ; pc=5
+            POP                     ; pc=6
+            ; Call site 2.
+            PUSH %ret2              ; pc=7
+            PUSH %fn_entry          ; pc=9
+            JUMP                    ; pc=11
+        ret2:
+            JUMPDEST                ; pc=12
+            POP                     ; pc=13
+            ; Opaque jump.
+            PUSH0                   ; pc=14
+            MLOAD                   ; pc=15
+            JUMP                    ; pc=16: Top
+            INVALID                 ; pc=17
+            INVALID                 ; pc=18
+            INVALID                 ; pc=19
+            ; Internal function using JUMPI to return.
+        fn_entry:
+            JUMPDEST                ; pc=20
+            PUSH1 0x42              ; pc=21: result
+            SWAP1                   ; pc=23: [result, ret_addr]
+            PUSH1 0x01              ; pc=24: condition (always true)
+            SWAP1                   ; pc=26: [result, 1, ret_addr]
+            JUMPI                   ; pc=27: conditional return (always taken)
+            STOP                    ; pc=28: fallthrough (dead)
+        ");
 
         // The JUMPI at pc=27 should NOT be resolved — opaque jump can reach
         // fn_entry with any return address.
@@ -1693,42 +1673,42 @@ mod tests_edge_cases {
     /// return jump must not be resolved because the return address is Top.
     #[test]
     fn opaque_return_addr_caller_unsound() {
-        let ret1: u8 = 10;
-        let ret2: u8 = 17;
-        let opaque_caller: u8 = 20;
-        let fn_entry: u8 = 26;
         #[rustfmt::skip]
-        let bytecode = analyze_code(vec![
-            // Entry: branch to opaque caller or fallthrough.
-            op::PUSH0,              // pc=0
-            op::CALLDATALOAD,       // pc=1
-            op::PUSH1, opaque_caller, // pc=2
-            op::JUMPI,              // pc=4
-            // Fallthrough: call site 1.
-            op::PUSH1, ret1,        // pc=5
-            op::PUSH1, fn_entry,    // pc=7
-            op::JUMP,               // pc=9
-            op::JUMPDEST,           // pc=10: ret1
-            op::POP,                // pc=11
-            // Call site 2.
-            op::PUSH1, ret2,        // pc=12
-            op::PUSH1, fn_entry,    // pc=14
-            op::JUMP,               // pc=16
-            op::JUMPDEST,           // pc=17: ret2
-            op::POP,                // pc=18
-            op::STOP,               // pc=19
-            // Opaque third caller: loads return addr from memory (reachable via JUMPI).
-            op::JUMPDEST,           // pc=20
-            op::PUSH0,              // pc=21
-            op::MLOAD,              // pc=22: any_ret
-            op::PUSH1, fn_entry,    // pc=23
-            op::JUMP,               // pc=25: → fn_entry with arbitrary return addr
-            // Internal function.
-            op::JUMPDEST,           // pc=26: fn_entry
-            op::PUSH1, 0x42,        // pc=27
-            op::SWAP1,              // pc=29
-            op::JUMP,               // pc=30: return
-        ]);
+        let bytecode = analyze_asm("
+            ; Entry: branch to opaque caller or fallthrough.
+            PUSH0                       ; pc=0
+            CALLDATALOAD                ; pc=1
+            PUSH %opaque_caller         ; pc=2
+            JUMPI                       ; pc=4
+            ; Fallthrough: call site 1.
+            PUSH %ret1                  ; pc=5
+            PUSH %fn_entry              ; pc=7
+            JUMP                        ; pc=9
+        ret1:
+            JUMPDEST                    ; pc=10
+            POP                         ; pc=11
+            ; Call site 2.
+            PUSH %ret2                  ; pc=12
+            PUSH %fn_entry              ; pc=14
+            JUMP                        ; pc=16
+        ret2:
+            JUMPDEST                    ; pc=17
+            POP                         ; pc=18
+            STOP                        ; pc=19
+            ; Opaque third caller: loads return addr from memory (reachable via JUMPI).
+        opaque_caller:
+            JUMPDEST                    ; pc=20
+            PUSH0                       ; pc=21
+            MLOAD                       ; pc=22: any_ret
+            PUSH %fn_entry              ; pc=23
+            JUMP                        ; pc=25: -> fn_entry with arbitrary return addr
+            ; Internal function.
+        fn_entry:
+            JUMPDEST                    ; pc=26
+            PUSH1 0x42                  ; pc=27
+            SWAP1                       ; pc=29
+            JUMP                        ; pc=30: return
+        ");
 
         // The return JUMP at pc=30 must NOT be resolved — the opaque caller
         // at pc=25 reaches fn_entry with an arbitrary return address.
