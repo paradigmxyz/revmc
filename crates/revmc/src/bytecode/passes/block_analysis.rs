@@ -274,6 +274,31 @@ impl BlockData {
     }
 }
 
+/// Local per-block summary for private call/return detection.
+///
+/// Computed by a single-pass stack simulation of each block, without any fixpoint.
+/// These properties mirror gigahorse's `PrivateFunctionCall` and `PrivateFunctionReturn`
+/// relations from `local_components.dl`.
+#[derive(Clone, Debug, Default)]
+struct LocalBlockSummary {
+    /// If this block is a private function call: `(callee_inst, continuation_inst)`.
+    /// Detected when the block's terminator is a `STATIC_JUMP` (adjacent PUSH+JUMP)
+    /// and the block also pushes a valid JUMPDEST label that survives to exit.
+    private_call: Option<PrivateCallInfo>,
+    /// Whether this block is a private function return: the terminator is a JUMP
+    /// with no `STATIC_JUMP` flag (target comes from the stack).
+    is_return: bool,
+}
+
+/// Information about a private function call detected in a block.
+#[derive(Clone, Debug)]
+struct PrivateCallInfo {
+    /// The callee function entry instruction (JUMPDEST target of the static jump).
+    callee: Inst,
+    /// The continuation instruction (JUMPDEST where the callee should return to).
+    continuation: Inst,
+}
+
 /// Resolved jump target after fixpoint.
 #[derive(Clone, Debug)]
 enum JumpTarget {
@@ -298,6 +323,34 @@ pub(crate) struct Cfg {
 }
 
 impl Bytecode<'_> {
+    /// Resolves private function return jumps using local summaries and
+    /// context-sensitive graph traversal.
+    ///
+    /// This runs before `block_analysis` to pre-resolve return jumps that the
+    /// abstract interpreter cannot handle (because it merges return addresses
+    /// at function entry points).
+    #[instrument(name = "pcr", level = "debug", skip_all)]
+    pub(crate) fn resolve_private_call_returns(&mut self) {
+        if self.cfg.blocks.is_empty() || !self.has_dynamic_jumps {
+            return;
+        }
+
+        let summaries = self.compute_local_summaries();
+        let resolved = self.resolve_private_calls(&summaries);
+
+        if resolved.is_empty() {
+            return;
+        }
+
+        let newly_resolved = self.commit_resolved_jumps(&resolved);
+        debug!(newly_resolved, "resolved private call returns");
+
+        if newly_resolved > 0 {
+            self.recompute_has_dynamic_jumps();
+            self.rebuild_cfg();
+        }
+    }
+
     /// Runs abstract stack interpretation to resolve additional jump targets.
     ///
     /// Also computes and stores per-instruction stack snapshots for constant propagation.
@@ -315,18 +368,25 @@ impl Bytecode<'_> {
         let (resolved, count) = self.run_abstract_interp(&mut snapshots);
         self.snapshots = snapshots;
 
-        if count == 0 {
-            return;
+        if count > 0 {
+            let newly_resolved = self.commit_resolved_jumps(&resolved);
+            debug!(newly_resolved, "resolved jumps");
         }
 
-        let newly_resolved = self.commit_resolved_jumps(&resolved);
-        debug!(newly_resolved, "resolved jumps");
+        // Always recompute dynamic jumps flag (dead-code jumps excluded).
+        self.recompute_has_dynamic_jumps();
+    }
 
-        // Recompute dynamic jumps flag.
+    /// Recomputes `has_dynamic_jumps` by scanning live instructions.
+    fn recompute_has_dynamic_jumps(&mut self) {
         let n = self
             .insts
             .iter()
-            .filter(|inst| inst.is_jump() && !inst.flags.contains(InstFlags::STATIC_JUMP))
+            .filter(|inst| {
+                inst.is_jump()
+                    && !inst.flags.contains(InstFlags::STATIC_JUMP)
+                    && !inst.is_dead_code()
+            })
             .count();
         self.has_dynamic_jumps = n > 0;
         if self.has_dynamic_jumps {
@@ -703,6 +763,330 @@ impl Bytecode<'_> {
                 *target = JumpTarget::Top;
             }
         }
+    }
+
+    /// Compute local per-block summaries for private call/return detection.
+    ///
+    /// For each block, simulates the stack effect to determine:
+    /// - Whether the block is a private function call (static jump + pushed label).
+    /// - Whether the block is a private function return (dynamic jump from stack).
+    fn compute_local_summaries(&self) -> IndexVec<Block, LocalBlockSummary> {
+        let mut summaries =
+            IndexVec::from_vec(vec![LocalBlockSummary::default(); self.cfg.blocks.len()]);
+
+        for bid in self.cfg.blocks.indices() {
+            let block = &self.cfg.blocks[bid];
+            if block.dead {
+                continue;
+            }
+
+            let term_inst = block.terminator();
+            let term = &self.insts[term_inst];
+
+            if !term.is_jump() {
+                continue;
+            }
+
+            // Private function return: JUMP with no static target, and the block
+            // only does stack manipulation (the jump target comes from the entry
+            // stack, not from memory/storage/computation).
+            if !term.flags.contains(InstFlags::STATIC_JUMP) {
+                let is_pure_return = block.insts().all(|i| {
+                    let inst = &self.insts[i];
+                    if inst.is_dead_code() || inst.flags.contains(InstFlags::SKIP_LOGIC) {
+                        return true;
+                    }
+                    matches!(
+                        inst.opcode,
+                        op::JUMPDEST
+                            | op::JUMP
+                            | op::POP
+                            | op::DUP1..=op::DUP16
+                            | op::SWAP1..=op::SWAP16
+                            | op::PUSH0..=op::PUSH32
+                    )
+                });
+                if is_pure_return {
+                    summaries[bid].is_return = true;
+                }
+                continue;
+            }
+
+            // Private function call: STATIC_JUMP + a pushed label surviving to exit.
+            // The callee is the static jump target.
+            let callee = Inst::from_usize(term.data as usize);
+
+            // Stack-simulate the block to find which PUSH values survive to exit.
+            // We track indices of values pushed by PUSH instructions in the block.
+            // A "label" is a pushed value that is a valid JUMPDEST pc.
+            if let Some(continuation) = self.find_surviving_label(block) {
+                summaries[bid].private_call = Some(PrivateCallInfo { callee, continuation });
+            }
+        }
+
+        for (bid, summary) in summaries.iter_enumerated() {
+            if let Some(ref call) = summary.private_call {
+                trace!(
+                    %bid,
+                    callee = %call.callee,
+                    continuation = %call.continuation,
+                    "private call"
+                );
+            }
+            if summary.is_return {
+                trace!(%bid, "private return");
+            }
+        }
+
+        summaries
+    }
+
+    /// Simulate a block's stack to find the first pushed JUMPDEST label that survives
+    /// to exit (i.e., remains on the stack after all instructions execute).
+    ///
+    /// Returns the instruction index of the JUMPDEST target, if found.
+    fn find_surviving_label(&self, block: &BlockData) -> Option<Inst> {
+        // Track stack positions. Each entry is Some(inst_idx) if pushed by a PUSH
+        // in this block that targets a valid JUMPDEST, or None otherwise.
+        let mut stack: Vec<Option<Inst>> = Vec::new();
+
+        for i in block.insts() {
+            let inst = &self.insts[i];
+            if inst.is_dead_code() {
+                continue;
+            }
+            if inst.flags.contains(InstFlags::SKIP_LOGIC) {
+                continue;
+            }
+
+            let (inp, out) = inst.stack_io();
+            let inp = inp as usize;
+            let out = out as usize;
+
+            match inst.opcode {
+                op::PUSH0 => stack.push(None),
+                op::PUSH1..=op::PUSH32 => {
+                    let label = self.get_imm(inst).and_then(|imm| {
+                        // Only care about small values that could be valid PCs.
+                        if imm.len() > std::mem::size_of::<usize>() {
+                            return None;
+                        }
+                        let mut padded = [0u8; std::mem::size_of::<usize>()];
+                        padded[std::mem::size_of::<usize>() - imm.len()..].copy_from_slice(imm);
+                        let pc = usize::from_be_bytes(padded);
+                        if self.is_valid_jump(pc) { Some(self.pc_to_inst(pc)) } else { None }
+                    });
+                    stack.push(label);
+                }
+                op::POP => {
+                    stack.pop();
+                }
+                op::DUP1..=op::DUP16 => {
+                    let depth = (inst.opcode - op::DUP1 + 1) as usize;
+                    let val = stack.len().checked_sub(depth).and_then(|i| stack[i]);
+                    stack.push(val);
+                }
+                op::SWAP1..=op::SWAP16 => {
+                    let depth = (inst.opcode - op::SWAP1 + 1) as usize;
+                    let len = stack.len();
+                    if len > depth {
+                        stack.swap(len - 1, len - 1 - depth);
+                    }
+                }
+                _ => {
+                    let len = stack.len();
+                    stack.truncate(len.saturating_sub(inp));
+                    stack.resize(stack.len() + out, None);
+                }
+            }
+        }
+
+        // Find the deepest surviving label (the one pushed earliest, which is the
+        // continuation/return address in the standard PUSH ret_addr; PUSH func; JUMP pattern).
+        // In Solidity, the return address is typically pushed before the function arguments
+        // and callee address, so it ends up deeper in the stack.
+        stack.into_iter().flatten().next()
+    }
+
+    /// Resolve private function return jumps using context-sensitive graph traversal.
+    ///
+    /// Uses the local summaries to trace call-strings through the CFG. When a
+    /// `PrivateFunctionReturn` block is reached, the call-string context reveals which
+    /// caller pushed the return address, allowing the return edge to be materialized.
+    ///
+    /// Returns resolved jump targets for return blocks.
+    #[instrument(name = "resolve_calls", level = "debug", skip_all)]
+    fn resolve_private_calls(
+        &self,
+        summaries: &IndexVec<Block, LocalBlockSummary>,
+    ) -> Vec<(Inst, JumpTarget)> {
+        let num_blocks = self.cfg.blocks.len();
+
+        // Maximum call-string depth. Each entry is a caller block ID.
+        const MAX_CONTEXT_DEPTH: usize = 8;
+
+        // Context = call-string (stack of caller block IDs, most recent first).
+        type Context = SmallVec<[Block; 4]>;
+
+        // Per (block, context): set of visited states.
+        // We use a map from Block to set of contexts to avoid exponential blowup.
+        let mut visited: IndexVec<Block, SmallVec<[Context; 2]>> =
+            IndexVec::from_vec(vec![SmallVec::new(); num_blocks]);
+
+        // Per return-block: set of discovered continuation targets.
+        let mut return_targets: IndexVec<Block, SmallVec<[Inst; 4]>> =
+            IndexVec::from_vec(vec![SmallVec::new(); num_blocks]);
+
+        // Worklist of (block, context) pairs.
+        let mut worklist: VecDeque<(Block, Context)> = VecDeque::new();
+
+        // Seed: entry block with empty context.
+        let empty_ctx: Context = SmallVec::new();
+        visited[Block::from_usize(0)].push(empty_ctx.clone());
+        worklist.push_back((Block::from_usize(0), empty_ctx));
+
+        let mut iterations = 0;
+        let max_iterations = num_blocks * 64;
+
+        while let Some((bid, ctx)) = worklist.pop_front() {
+            iterations += 1;
+            if iterations > max_iterations {
+                debug!("resolve_private_calls: did not converge after {iterations} iterations");
+                break;
+            }
+
+            let block = &self.cfg.blocks[bid];
+            if block.dead {
+                continue;
+            }
+
+            let summary = &summaries[bid];
+
+            if let Some(ref call) = summary.private_call {
+                // Private function call: push caller onto context, follow to callee.
+                let mut new_ctx = ctx.clone();
+                if new_ctx.len() >= MAX_CONTEXT_DEPTH {
+                    // Truncate oldest entry (last element) to keep bounded.
+                    new_ctx.pop();
+                }
+                new_ctx.insert(0, bid);
+
+                // Follow to callee.
+                if let Some(callee_block) = self.cfg.inst_to_block[call.callee]
+                    && !visited[callee_block].contains(&new_ctx)
+                {
+                    visited[callee_block].push(new_ctx.clone());
+                    worklist.push_back((callee_block, new_ctx));
+                }
+
+                // Also follow the fallthrough edge (for JUMPI terminators).
+                let term = &self.insts[block.terminator()];
+                if term.opcode == op::JUMPI {
+                    for &succ in &block.succs {
+                        if let Some(callee_block) = self.cfg.inst_to_block[call.callee]
+                            && succ != callee_block
+                            && !visited[succ].contains(&ctx)
+                        {
+                            visited[succ].push(ctx.clone());
+                            worklist.push_back((succ, ctx.clone()));
+                        }
+                    }
+                }
+            } else if summary.is_return {
+                // Private function return: look up the context to find the caller
+                // that pushed the matching continuation address (CutToCaller).
+                if let Some(caller_bid) = ctx.first().copied() {
+                    if let Some(ref caller_call) = summaries[caller_bid].private_call {
+                        let continuation = caller_call.continuation;
+
+                        // Record this return -> continuation edge.
+                        if !return_targets[bid].contains(&continuation) {
+                            return_targets[bid].push(continuation);
+                        }
+
+                        // Pop the caller from context and continue at the continuation.
+                        let new_ctx: Context = ctx[1..].into();
+                        if let Some(cont_block) = self.cfg.inst_to_block[continuation]
+                            && !visited[cont_block].contains(&new_ctx)
+                        {
+                            visited[cont_block].push(new_ctx.clone());
+                            worklist.push_back((cont_block, new_ctx));
+                        }
+                    } else {
+                        // Caller in context doesn't have a call summary — context is stale.
+                        // Fall through: leave as unresolved.
+                    }
+                }
+                // If context is empty, we can't resolve the return — leave as Top.
+            } else {
+                // Normal block: propagate to all successors with same context.
+                for &succ in &block.succs {
+                    if !visited[succ].contains(&ctx) {
+                        visited[succ].push(ctx.clone());
+                        worklist.push_back((succ, ctx.clone()));
+                    }
+                }
+            }
+        }
+
+        debug!("resolve_private_calls: converged after {iterations} iterations");
+
+        // Soundness check: if any unresolved dynamic JUMPs remain (excluding
+        // the return JUMPs that we just resolved), those jumps could target any
+        // JUMPDEST including function entries, reaching them with arbitrary
+        // context. In that case we must not commit any resolutions.
+        //
+        // Build a set of return block terminators that we just resolved, then
+        // check if any OTHER unresolved dynamic jumps remain.
+        let resolved_return_insts: SmallVec<[Inst; 8]> = return_targets
+            .iter_enumerated()
+            .filter(|(_, targets)| !targets.is_empty())
+            .map(|(bid, _)| self.cfg.blocks[bid].terminator())
+            .filter(|&ti| !self.insts[ti].flags.contains(InstFlags::STATIC_JUMP))
+            .collect();
+
+        let has_other_unresolved = self.insts.iter_enumerated().any(|(i, inst)| {
+            inst.is_jump()
+                && !inst.flags.contains(InstFlags::STATIC_JUMP)
+                && !inst.is_dead_code()
+                && !resolved_return_insts.contains(&i)
+        });
+
+        // Convert return_targets to JumpTarget resolutions.
+        let mut resolved = Vec::new();
+        for (bid, targets) in return_targets.iter_enumerated() {
+            if targets.is_empty() {
+                continue;
+            }
+            let term_inst = self.cfg.blocks[bid].terminator();
+            // Skip if already resolved.
+            if self.insts[term_inst].flags.contains(InstFlags::STATIC_JUMP) {
+                continue;
+            }
+            // Skip all resolutions if other unresolved dynamic jumps remain.
+            if has_other_unresolved {
+                trace!(
+                    %bid,
+                    term = %term_inst,
+                    "skipping: other unresolved dynamic jumps remain"
+                );
+                continue;
+            }
+            let target = if targets.len() == 1 {
+                JumpTarget::Const(targets[0])
+            } else {
+                JumpTarget::Multi(targets.clone())
+            };
+            trace!(
+                %bid,
+                term = %term_inst,
+                n_targets = targets.len(),
+                "resolved private return"
+            );
+            resolved.push((term_inst, target));
+        }
+
+        resolved
     }
 
     /// Run a worklist-based fixpoint to compute abstract block states.
@@ -1235,11 +1619,11 @@ pub(crate) mod tests {
             .find(|(_, d)| d.is_jump() && d.flags.contains(InstFlags::MULTI_JUMP));
         assert!(inner_return.is_some(), "expected inner return to be multi-target");
 
-        // The wrapper return JUMP (pc=30) is the hard case: the outer return
-        // address (ret2=14) was buried below the inner function's frame and
-        // lost to Top during the top-aligned join at inner's entry.
-        // TODO: with interprocedural / summary-based analysis, this should resolve.
-        assert!(bytecode.has_dynamic_jumps, "expected the wrapper return jump to remain dynamic");
+        // The wrapper return JUMP (pc=30) was previously unresolvable because
+        // the outer return address was buried below the inner function's frame
+        // and lost during top-aligned joins. The context-sensitive call/return
+        // resolution pass now resolves it via call-string tracking.
+        assert!(!bytecode.has_dynamic_jumps, "expected all jumps to be resolved");
     }
 
     #[test]
