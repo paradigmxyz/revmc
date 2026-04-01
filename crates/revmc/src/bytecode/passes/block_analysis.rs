@@ -987,12 +987,24 @@ pub(crate) mod tests {
         let mut bytecode = Bytecode::new(code, SpecId::CANCUN);
         bytecode.config = config;
         bytecode.analyze().unwrap();
+        eprintln!("{bytecode}");
         bytecode
+    }
+
+    pub(crate) fn analyze_asm(src: &str) -> Bytecode<'static> {
+        analyze_code(crate::parse_asm(src).unwrap())
+    }
+
+    pub(crate) fn analyze_asm_with(
+        src: &str,
+        config: crate::bytecode::AnalysisConfig,
+    ) -> Bytecode<'static> {
+        analyze_code_with(crate::parse_asm(src).unwrap(), config)
     }
 
     #[test]
     fn revert_sub_call_storage_oog() {
-        let bytecode = analyze_hex(
+        analyze_hex(
             "60606040526000357c01000000000000000000000000000000000000000000000000000000009004\
              63ffffffff168063b28175c4146046578063c0406226146052575b6000565b34600057605060765\
              65b005b34600057605c6081565b604051808215151515815260200191505060405180910390f35b\
@@ -1000,12 +1012,11 @@ pub(crate) mod tests {
              b905600a165627a7a723058202a8a75d7d795b5bcb9042fb18b283daa90b999a11ddec892f54873\
              22",
         );
-        eprintln!("{bytecode}");
     }
 
     #[test]
     fn revert_remote_sub_call_storage_oog() {
-        let bytecode = analyze_hex(
+        analyze_hex(
             "608060405234801561001057600080fd5b506004361061002b5760003560e01c806373027f6d14\
              610030575b600080fd5b61004a600480360381019061004591906101a9565b61004c565b005b60\
              00808273ffffffffffffffffffffffffffffffffffffffff1660405160240160405160208183030\
@@ -1027,7 +1038,6 @@ pub(crate) mod tests {
         // This contract has a single function with one call site. The analysis
         // should NOT incorrectly resolve any jumps (all dynamic jumps should
         // remain dynamic or be correctly resolved).
-        eprintln!("{bytecode}");
     }
 
     #[test]
@@ -1041,8 +1051,7 @@ pub(crate) mod tests {
             "60065f601d565b5f5560106001601d565b6001555f80808080335af1005b5c9056",
         ];
         for hex in &contracts {
-            let bytecode = analyze_hex(hex);
-            eprintln!("{bytecode}");
+            analyze_hex(hex);
         }
     }
 
@@ -1056,15 +1065,15 @@ pub(crate) mod tests {
         // inst 5: JUMPDEST
         // inst 6: STOP
         #[rustfmt::skip]
-        let bytecode = analyze_code(vec![
-            op::PUSH1, 0x42,
-            op::PUSH1, 0x01,
-            op::ADD,
-            op::PUSH1, 0x00,
-            op::MSTORE,
-            op::JUMPDEST,
-            op::STOP,
-        ]);
+        let bytecode = analyze_asm("
+            PUSH1 0x42
+            PUSH1 0x01
+            ADD
+            PUSH1 0x00
+            MSTORE
+            JUMPDEST
+            STOP
+        ");
         // At inst 2 (ADD), operand 0 (TOS) = 0x01, operand 1 = 0x42.
         assert_eq!(bytecode.const_operand(Inst::from_usize(2), 0), Some(U256::from(0x01)));
         assert_eq!(bytecode.const_operand(Inst::from_usize(2), 1), Some(U256::from(0x42)));
@@ -1077,13 +1086,13 @@ pub(crate) mod tests {
     fn const_operand_dynamic() {
         // CALLDATALOAD pushes an unknown value -> const_operand should return None.
         #[rustfmt::skip]
-        let bytecode = analyze_code(vec![
-            op::PUSH0,
-            op::CALLDATALOAD,
-            op::PUSH0,
-            op::MSTORE,
-            op::STOP,
-        ]);
+        let bytecode = analyze_asm("
+            PUSH0
+            CALLDATALOAD
+            PUSH0
+            MSTORE
+            STOP
+        ");
         // At inst 3 (MSTORE), operand 0 (TOS) = 0x00, operand 1 = unknown (CALLDATALOAD result).
         assert_eq!(bytecode.const_operand(Inst::from_usize(3), 0), Some(U256::ZERO));
         assert_eq!(bytecode.const_operand(Inst::from_usize(3), 1), None);
@@ -1098,14 +1107,14 @@ pub(crate) mod tests {
         // MSTORE     -> no outputs
         // STOP
         #[rustfmt::skip]
-        let bytecode = analyze_code(vec![
-            op::PUSH1, 0x42,
-            op::PUSH1, 0x01,
-            op::ADD,
-            op::PUSH0,
-            op::MSTORE,
-            op::STOP,
-        ]);
+        let bytecode = analyze_asm("
+            PUSH1 0x42
+            PUSH1 0x01
+            ADD
+            PUSH0
+            MSTORE
+            STOP
+        ");
         assert_eq!(bytecode.const_output(Inst::from_usize(0)), Some(U256::from(0x42)));
         assert_eq!(bytecode.const_output(Inst::from_usize(1)), Some(U256::from(0x01)));
         assert_eq!(bytecode.const_output(Inst::from_usize(2)), Some(U256::from(0x43)));
@@ -1118,11 +1127,11 @@ pub(crate) mod tests {
     fn const_output_dynamic() {
         // CALLDATALOAD pushes an unknown -> output should be None.
         #[rustfmt::skip]
-        let bytecode = analyze_code(vec![
-            op::PUSH0,
-            op::CALLDATALOAD,
-            op::STOP,
-        ]);
+        let bytecode = analyze_asm("
+            PUSH0
+            CALLDATALOAD
+            STOP
+        ");
         assert_eq!(bytecode.const_output(Inst::from_usize(0)), Some(U256::ZERO));
         assert_eq!(bytecode.const_output(Inst::from_usize(1)), None);
     }
@@ -1167,31 +1176,30 @@ pub(crate) mod tests {
     fn multi_target_jump() {
         // Internal function called from two sites with different return addresses.
         // The return JUMP at the end should resolve to Multi([ret1, ret2]).
-        let ret1: u8 = 5;
-        let ret2: u8 = 12;
-        let func: u8 = 15;
         #[rustfmt::skip]
-        let bytecode = analyze_code(vec![
-            // Call site 1.
-            op::PUSH1, ret1,    // 0: push return address
-            op::PUSH1, func,    // 2: push function entry
-            op::JUMP,           // 4: call function (static: PUSH+JUMP)
-            op::JUMPDEST,       // 5: ret1
-            op::POP,            // 6: consume function result
-            // Call site 2.
-            op::PUSH1, ret2,    // 7: push return address
-            op::PUSH1, func,    // 9: push function entry
-            op::JUMP,           // 11: call function (static: PUSH+JUMP)
-            op::JUMPDEST,       // 12: ret2
-            op::POP,            // 13: consume function result
-            op::STOP,           // 14
-            // Internal function.
-            op::JUMPDEST,       // 15: func entry
-            op::PUSH1, 0x42,    // 16: push a result
-            op::SWAP1,          // 18: swap result and return address
-            op::JUMP,           // 19: return (dynamic)
-        ]);
-        eprintln!("{bytecode}");
+        let bytecode = analyze_asm("
+            ; Call site 1.
+            PUSH %ret1          ; push return address
+            PUSH %func          ; push function entry
+            JUMP                ; call function (static: PUSH+JUMP)
+        ret1:
+            JUMPDEST
+            POP                 ; consume function result
+            ; Call site 2.
+            PUSH %ret2          ; push return address
+            PUSH %func          ; push function entry
+            JUMP                ; call function (static: PUSH+JUMP)
+        ret2:
+            JUMPDEST
+            POP                 ; consume function result
+            STOP
+            ; Internal function.
+        func:
+            JUMPDEST
+            PUSH1 0x42          ; push a result
+            SWAP1               ; swap result and return address
+            JUMP                ; return (dynamic)
+        ");
 
         // The return JUMP (last inst before STOP's block) should be multi-target.
         let return_jump = bytecode
@@ -1231,37 +1239,36 @@ pub(crate) mod tests {
     /// so the return jump is correctly invalidated.
     #[test]
     fn known_jumpdest_unsound_resolution() {
-        let ret1: u8 = 5;
-        let ret2: u8 = 12;
-        let fn_entry: u8 = 20;
         #[rustfmt::skip]
-        let bytecode = analyze_code(vec![
-            // Call site 1.
-            op::PUSH1, ret1,        // pc=0
-            op::PUSH1, fn_entry,    // pc=2
-            op::JUMP,               // pc=4: → fn_entry
-            op::JUMPDEST,           // pc=5: ret1
-            op::POP,                // pc=6: drop result
-            // Call site 2.
-            op::PUSH1, ret2,        // pc=7
-            op::PUSH1, fn_entry,    // pc=9
-            op::JUMP,               // pc=11: → fn_entry
-            op::JUMPDEST,           // pc=12: ret2
-            op::POP,                // pc=13: drop result
-            // Opaque jump: loads target from memory (Top).
-            op::PUSH0,              // pc=14
-            op::MLOAD,              // pc=15: → Top
-            op::JUMP,               // pc=16: dynamic, target = Top
-            op::INVALID,            // pc=17
-            op::INVALID,            // pc=18
-            op::INVALID,            // pc=19
-            // Internal function: pushes result, swaps with return addr, jumps back.
-            op::JUMPDEST,           // pc=20: fn_entry
-            op::PUSH1, 0x42,        // pc=21: result
-            op::SWAP1,              // pc=23: swap result and return addr
-            op::JUMP,               // pc=24: return (UNSOUND: resolved to Multi)
-        ]);
-        eprintln!("{bytecode}");
+        let bytecode = analyze_asm("
+            ; Call site 1.
+            PUSH %ret1              ; pc=0
+            PUSH %fn_entry          ; pc=2
+            JUMP                    ; pc=4: -> fn_entry
+        ret1:
+            JUMPDEST                ; pc=5
+            POP                     ; pc=6: drop result
+            ; Call site 2.
+            PUSH %ret2              ; pc=7
+            PUSH %fn_entry          ; pc=9
+            JUMP                    ; pc=11: -> fn_entry
+        ret2:
+            JUMPDEST                ; pc=12
+            POP                     ; pc=13: drop result
+            ; Opaque jump: loads target from memory (Top).
+            PUSH0                   ; pc=14
+            MLOAD                   ; pc=15: -> Top
+            JUMP                    ; pc=16: dynamic, target = Top
+            INVALID                 ; pc=17
+            INVALID                 ; pc=18
+            INVALID                 ; pc=19
+            ; Internal function: pushes result, swaps with return addr, jumps back.
+        fn_entry:
+            JUMPDEST                ; pc=20
+            PUSH1 0x42              ; pc=21: result
+            SWAP1                   ; pc=23: swap result and return addr
+            JUMP                    ; pc=24: return (UNSOUND: resolved to Multi)
+        ");
 
         // The return JUMP at pc=24 should NOT be resolved — the opaque jump at
         // pc=16 can reach fn_entry with any return address. But the current
@@ -1289,51 +1296,50 @@ pub(crate) mod tests {
         // wrapper's final JUMP (at ret_w) must recover the outer return address
         // from deep in the stack — which the analysis currently cannot resolve
         // because the top-aligned join pads it to Top.
-        let ret1: u8 = 5; // return from direct call
-        let ret2: u8 = 14; // return from wrapper call
-        let wrapper: u8 = 19; // wrapper entry
-        let ret_w: u8 = 27; // inner returns here (inside wrapper)
-        let inner: u8 = 32; // inner function entry
         #[rustfmt::skip]
-        let bytecode = analyze_code(vec![
-            // Call site 1: direct call to inner.
-            op::PUSH1, ret1,        // pc=0
-            op::PUSH1, inner,       // pc=2
-            op::JUMP,               // pc=4: -> inner
-            op::JUMPDEST,           // pc=5: ret1
-            op::POP,                // pc=6: drop result
-            // Call site 2: call through wrapper.
-            op::PUSH1, ret2,        // pc=7
-            op::PUSH1, 0x42,        // pc=9: an argument
-            op::PUSH1, wrapper,     // pc=11
-            op::JUMP,               // pc=13: -> wrapper
-            op::JUMPDEST,           // pc=14: ret2
-            op::POP,                // pc=15: drop result
-            op::POP,                // pc=16: drop arg
-            op::STOP,               // pc=17
-            op::INVALID,            // pc=18
-            // Wrapper function: calls inner, then returns to caller.
-            // Entry stack: [outer_ret, arg]
-            op::JUMPDEST,           // pc=19: wrapper entry
-            op::PUSH1, ret_w,       // pc=20: push return addr for inner
-            op::PUSH1, inner,       // pc=22: push inner entry
-            op::JUMP,               // pc=24: -> inner
-            op::INVALID,            // pc=25
-            op::INVALID,            // pc=26
-            op::JUMPDEST,           // pc=27: ret_w — inner returned here
-            // Stack: [outer_ret, arg, inner_result]
-            op::POP,                // pc=28: drop inner_result
-            op::POP,                // pc=29: drop arg
-            op::JUMP,               // pc=30: return to caller via outer_ret (dynamic)
-            op::INVALID,            // pc=31
-            // Inner function: pushes a result and returns.
-            // Entry stack: [..., ret_addr]
-            op::JUMPDEST,           // pc=32: inner entry
-            op::PUSH1, 0x42,        // pc=33: push result → [..., ret_addr, 0x42]
-            op::SWAP1,              // pc=35: → [..., 0x42, ret_addr]
-            op::JUMP,               // pc=36: jump to ret_addr, leaves [..., 0x42]
-        ]);
-        eprintln!("{bytecode}");
+        let bytecode = analyze_asm("
+            ; Call site 1: direct call to inner.
+            PUSH %ret1              ; pc=0
+            PUSH %inner             ; pc=2
+            JUMP                    ; pc=4: -> inner
+        ret1:
+            JUMPDEST                ; pc=5
+            POP                     ; pc=6: drop result
+            ; Call site 2: call through wrapper.
+            PUSH %ret2              ; pc=7
+            PUSH1 0x42              ; pc=9: an argument
+            PUSH %wrapper           ; pc=11
+            JUMP                    ; pc=13: -> wrapper
+        ret2:
+            JUMPDEST                ; pc=14
+            POP                     ; pc=15: drop result
+            POP                     ; pc=16: drop arg
+            STOP                    ; pc=17
+            INVALID                 ; pc=18
+            ; Wrapper function: calls inner, then returns to caller.
+            ; Entry stack: [outer_ret, arg]
+        wrapper:
+            JUMPDEST                ; pc=19
+            PUSH %ret_w             ; pc=20: push return addr for inner
+            PUSH %inner             ; pc=22: push inner entry
+            JUMP                    ; pc=24: -> inner
+            INVALID                 ; pc=25
+            INVALID                 ; pc=26
+        ret_w:
+            JUMPDEST                ; pc=27: inner returned here
+            ; Stack: [outer_ret, arg, inner_result]
+            POP                     ; pc=28: drop inner_result
+            POP                     ; pc=29: drop arg
+            JUMP                    ; pc=30: return to caller via outer_ret (dynamic)
+            INVALID                 ; pc=31
+            ; Inner function: pushes a result and returns.
+            ; Entry stack: [..., ret_addr]
+        inner:
+            JUMPDEST                ; pc=32
+            PUSH1 0x42              ; pc=33: push result
+            SWAP1                   ; pc=35
+            JUMP                    ; pc=36: jump to ret_addr
+        ");
 
         // The wrapper return JUMP (pc=30) remains dynamic because the outer
         // return address is lost to Top during the top-aligned join.
@@ -1351,7 +1357,6 @@ pub(crate) mod tests {
         .unwrap();
         let mut bytecode = Bytecode::new(code, SpecId::CANCUN);
         bytecode.analyze().unwrap();
-        eprintln!("{bytecode}");
         assert!(!bytecode.has_dynamic_jumps, "expected all jumps to be resolved");
     }
 }
@@ -1364,38 +1369,37 @@ mod tests_edge_cases {
     /// resolve to Multi with three targets.
     #[test]
     fn multi_target_jump_three_callers() {
-        let ret1: u8 = 5;
-        let ret2: u8 = 12;
-        let ret3: u8 = 19;
-        let func: u8 = 22;
         #[rustfmt::skip]
-        let bytecode = analyze_code(vec![
-            // Call site 1.
-            op::PUSH1, ret1,
-            op::PUSH1, func,
-            op::JUMP,
-            op::JUMPDEST,       // ret1
-            op::POP,
-            // Call site 2.
-            op::PUSH1, ret2,
-            op::PUSH1, func,
-            op::JUMP,
-            op::JUMPDEST,       // ret2
-            op::POP,
-            // Call site 3.
-            op::PUSH1, ret3,
-            op::PUSH1, func,
-            op::JUMP,
-            op::JUMPDEST,       // ret3
-            op::POP,
-            op::STOP,
-            // Internal function.
-            op::JUMPDEST,       // func
-            op::PUSH1, 0x42,
-            op::SWAP1,
-            op::JUMP,           // return (dynamic)
-        ]);
-        eprintln!("{bytecode}");
+        let bytecode = analyze_asm("
+            ; Call site 1.
+            PUSH %ret1
+            PUSH %func
+            JUMP
+        ret1:
+            JUMPDEST
+            POP
+            ; Call site 2.
+            PUSH %ret2
+            PUSH %func
+            JUMP
+        ret2:
+            JUMPDEST
+            POP
+            ; Call site 3.
+            PUSH %ret3
+            PUSH %func
+            JUMP
+        ret3:
+            JUMPDEST
+            POP
+            STOP
+            ; Internal function.
+        func:
+            JUMPDEST
+            PUSH1 0x42
+            SWAP1
+            JUMP
+        ");
 
         let return_jump = bytecode
             .iter_insts()
@@ -1418,15 +1422,15 @@ mod tests_edge_cases {
         // MSTORE     -> pops (0x00, 0xBB), leaves [0xAA, 0xAA]
         // STOP
         #[rustfmt::skip]
-        let bytecode = analyze_code(vec![
-            op::PUSH1, 0xAA,   // inst 0
-            op::PUSH1, 0xBB,   // inst 1
-            op::DUP2,          // inst 2
-            op::SWAP1,         // inst 3
-            op::PUSH0,         // inst 4
-            op::MSTORE,        // inst 5
-            op::STOP,          // inst 6
-        ]);
+        let bytecode = analyze_asm("
+            PUSH1 0xAA          ; inst 0
+            PUSH1 0xBB          ; inst 1
+            DUP2                ; inst 2
+            SWAP1               ; inst 3
+            PUSH0               ; inst 4
+            MSTORE              ; inst 5
+            STOP                ; inst 6
+        ");
         // DUP2 output should be 0xAA.
         assert_eq!(bytecode.const_output(Inst::from_usize(2)), Some(U256::from(0xAA)));
         // At MSTORE (inst 5): TOS = 0x00, second = 0xBB (swapped back).
@@ -1437,17 +1441,16 @@ mod tests_edge_cases {
     /// JUMPI with a constant condition should still record both operands.
     #[test]
     fn jumpi_const_condition_snapshot() {
-        let target: u8 = 8;
         #[rustfmt::skip]
-        let bytecode = analyze_code(vec![
-            op::PUSH1, 0x01,       // inst 0: condition = 1 (always taken)
-            op::PUSH1, target,     // inst 1: target
-            op::JUMPI,             // inst 2: static JUMPI
-            op::STOP,              // inst 3: fallthrough
-            op::JUMPDEST,          // inst 4: target
-            op::STOP,              // inst 5
-        ]);
-        eprintln!("{bytecode}");
+        let bytecode = analyze_asm("
+            PUSH1 0x01              ; inst 0: condition = 1 (always taken)
+            PUSH %target            ; inst 1: target
+            JUMPI                   ; inst 2: static JUMPI
+            STOP                    ; inst 3: fallthrough
+        target:
+            JUMPDEST                ; inst 4: target
+            STOP                    ; inst 5
+        ");
         // The JUMPI should be resolved as static.
         assert!(!bytecode.has_dynamic_jumps);
     }
@@ -1461,17 +1464,16 @@ mod tests_edge_cases {
         //
         // The stack grows by 1 each iteration (net +1 from PUSH before the loop jump).
         // The abstract stack should clamp to MAX_ABS_STACK_DEPTH without conflict.
-        let loop_pc: u8 = 3;
         #[rustfmt::skip]
-        let bytecode = analyze_code(vec![
-            op::PUSH1, 0x42,       // pc=0: initial value
-            op::PUSH1, 0x01,       // pc=2: another
-            op::JUMPDEST,          // pc=3: loop header (bb1)
-            op::PUSH1, 0x01,       // pc=4: push each iteration
-            op::PUSH1, loop_pc,    // pc=6: loop target
-            op::JUMP,              // pc=8: back-edge
-        ]);
-        eprintln!("{bytecode}");
+        let bytecode = analyze_asm("
+            PUSH1 0x42              ; pc=0: initial value
+            PUSH1 0x01              ; pc=2: another
+        loop_header:
+            JUMPDEST                ; loop header (bb1)
+            PUSH1 0x01              ; push each iteration
+            PUSH %loop_header       ; loop target
+            JUMP                    ; back-edge
+        ");
         // Should converge without panicking.
         // The JUMP should be static (resolved by adjacent PUSH+JUMP).
         assert!(!bytecode.has_dynamic_jumps);
@@ -1481,17 +1483,16 @@ mod tests_edge_cases {
     /// jump target. This tests the edge case where block.len() == 1.
     #[test]
     fn single_inst_block_jump_target() {
-        let target: u8 = 5;
         #[rustfmt::skip]
-        let bytecode = analyze_code(vec![
-            op::PUSH1, target,     // pc=0
-            op::JUMP,              // pc=2: static jump
-            op::INVALID,           // pc=3
-            op::INVALID,           // pc=4
-            op::JUMPDEST,          // pc=5: single-inst block
-            op::STOP,              // pc=6
-        ]);
-        eprintln!("{bytecode}");
+        let bytecode = analyze_asm("
+            PUSH %target            ; pc=0
+            JUMP                    ; static jump
+            INVALID
+            INVALID
+        target:
+            JUMPDEST                ; single-inst block
+            STOP
+        ");
         assert!(!bytecode.has_dynamic_jumps);
     }
 
@@ -1500,17 +1501,16 @@ mod tests_edge_cases {
     fn invalid_jump_target() {
         // The dynamic jump target points to a non-JUMPDEST instruction.
         // The function pushes a constant that isn't a valid JUMPDEST pc.
-        let func_pc: u8 = 5;
         #[rustfmt::skip]
-        let bytecode = analyze_code(vec![
-            op::PUSH1, 0xFF,       // pc=0: push invalid target
-            op::PUSH1, func_pc,    // pc=2: push function entry
-            op::JUMP,              // pc=4: -> func
-            // Function: swap and jump to the caller-provided target.
-            op::JUMPDEST,          // pc=5: func
-            op::JUMP,              // pc=6: jump to 0xFF (invalid)
-        ]);
-        eprintln!("{bytecode}");
+        let bytecode = analyze_asm("
+            PUSH1 0xFF              ; pc=0: push invalid target
+            PUSH %func              ; pc=2: push function entry
+            JUMP                    ; pc=4: -> func
+            ; Function: swap and jump to the caller-provided target.
+        func:
+            JUMPDEST
+            JUMP                    ; jump to 0xFF (invalid)
+        ");
         // The dynamic JUMP at pc=6 should be resolved as invalid.
         let jump_inst = bytecode
             .iter_insts()
@@ -1522,28 +1522,27 @@ mod tests_edge_cases {
     /// Both branches push the same constant, so the merge should preserve it.
     #[test]
     fn diamond_cfg_same_const() {
-        let then_pc: u8 = 9;
-        let merge_pc: u8 = 13;
         #[rustfmt::skip]
-        let bytecode = analyze_code(vec![
-            op::PUSH1, 0x42,           // pc=0: push same const on both paths
-            op::PUSH0,                 // pc=2: condition (always false)
-            op::PUSH1, then_pc,        // pc=3
-            op::JUMPI,                 // pc=5: branch
-            // Else: push same const.
-            op::PUSH1, merge_pc,       // pc=6
-            op::JUMP,                  // pc=8: -> merge
-            // Then:
-            op::JUMPDEST,              // pc=9
-            op::PUSH1, merge_pc,       // pc=10
-            op::JUMP,                  // pc=12: -> merge
-            // Merge:
-            op::JUMPDEST,              // pc=13
-            op::PUSH0,                 // pc=14
-            op::MSTORE,               // pc=15: MSTORE(0, 0x42)
-            op::STOP,                  // pc=16
-        ]);
-        eprintln!("{bytecode}");
+        let bytecode = analyze_asm("
+            PUSH1 0x42              ; push same const on both paths
+            PUSH0                   ; condition (always false)
+            PUSH %then_pc           ; then target
+            JUMPI                   ; branch
+            ; Else: push same const.
+            PUSH %merge
+            JUMP                    ; -> merge
+            ; Then:
+        then_pc:
+            JUMPDEST
+            PUSH %merge
+            JUMP                    ; -> merge
+            ; Merge:
+        merge:
+            JUMPDEST
+            PUSH0
+            MSTORE                  ; MSTORE(0, 0x42)
+            STOP
+        ");
         // At the merge MSTORE, the value (operand 1) should still be 0x42
         // since both branches had the same constant on the stack.
         let mstore = bytecode.iter_insts().find(|(_, d)| d.opcode == op::MSTORE).unwrap().0;
@@ -1554,30 +1553,29 @@ mod tests_edge_cases {
     /// yield None (Top) for const_operand.
     #[test]
     fn diamond_cfg_different_const() {
-        let then_pc: u8 = 10;
-        let merge_pc: u8 = 16;
         #[rustfmt::skip]
-        let bytecode = analyze_code(vec![
-            op::PUSH0,                 // pc=0: condition
-            op::PUSH1, then_pc,        // pc=1
-            op::JUMPI,                 // pc=3: branch
-            // Else: push 0xAA.
-            op::PUSH1, 0xAA,          // pc=4
-            op::PUSH1, merge_pc,       // pc=6
-            op::JUMP,                  // pc=8: -> merge
-            op::INVALID,               // pc=9
-            // Then: push 0xBB.
-            op::JUMPDEST,              // pc=10
-            op::PUSH1, 0xBB,          // pc=11
-            op::PUSH1, merge_pc,       // pc=13
-            op::JUMP,                  // pc=15: -> merge
-            // Merge:
-            op::JUMPDEST,              // pc=16: merge
-            op::PUSH0,                 // pc=17
-            op::MSTORE,               // pc=18: MSTORE(0, ???)
-            op::STOP,                  // pc=19
-        ]);
-        eprintln!("{bytecode}");
+        let bytecode = analyze_asm("
+            PUSH0                   ; condition
+            PUSH %then_pc
+            JUMPI                   ; branch
+            ; Else: push 0xAA.
+            PUSH1 0xAA
+            PUSH %merge
+            JUMP                    ; -> merge
+            INVALID
+            ; Then: push 0xBB.
+        then_pc:
+            JUMPDEST
+            PUSH1 0xBB
+            PUSH %merge
+            JUMP                    ; -> merge
+            ; Merge:
+        merge:
+            JUMPDEST
+            PUSH0
+            MSTORE                  ; MSTORE(0, ???)
+            STOP
+        ");
         // At the merge MSTORE, the value (operand 1) should be None
         // since the two branches push different constants.
         let mstore = bytecode.iter_insts().find(|(_, d)| d.opcode == op::MSTORE).unwrap().0;
@@ -1631,7 +1629,6 @@ mod tests_edge_cases {
             op::SWAP1,                  // pc=31
             op::JUMP,                   // pc=32: return
         ]);
-        eprintln!("{bytecode}");
 
         // The fn return JUMP at pc=32 must NOT be resolved — the trampoline
         // can reach fn_entry with any return address.
@@ -1680,7 +1677,6 @@ mod tests_edge_cases {
             op::JUMPI,              // pc=27: conditional return (always taken)
             op::STOP,               // pc=28: fallthrough (dead)
         ]);
-        eprintln!("{bytecode}");
 
         // The JUMPI at pc=27 should NOT be resolved — opaque jump can reach
         // fn_entry with any return address.
@@ -1733,7 +1729,6 @@ mod tests_edge_cases {
             op::SWAP1,              // pc=29
             op::JUMP,               // pc=30: return
         ]);
-        eprintln!("{bytecode}");
 
         // The return JUMP at pc=30 must NOT be resolved — the opaque caller
         // at pc=25 reaches fn_entry with an arbitrary return address.
@@ -1748,7 +1743,7 @@ mod tests_edge_cases {
     /// Bytecode that is just STOP — minimal edge case.
     #[test]
     fn empty_bytecode() {
-        let bytecode = analyze_code(vec![op::STOP]);
+        let bytecode = analyze_asm("STOP");
         assert!(!bytecode.has_dynamic_jumps);
     }
 
@@ -1756,13 +1751,12 @@ mod tests_edge_cases {
     #[test]
     fn dead_code_dynamic_jump() {
         #[rustfmt::skip]
-        let bytecode = analyze_code(vec![
-            op::STOP,
-            op::PUSH0,
-            op::CALLDATALOAD,
-            op::JUMP,
-        ]);
-        eprintln!("{bytecode}");
+        let bytecode = analyze_asm("
+            STOP
+            PUSH0
+            CALLDATALOAD
+            JUMP
+        ");
         assert!(!bytecode.has_dynamic_jumps);
     }
 }
