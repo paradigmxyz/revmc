@@ -315,6 +315,7 @@ impl Bytecode<'_> {
         let empty_sets = ConstSetInterner::new();
         let mut resolved = Vec::new();
         let mut stack = Vec::new();
+        let trace_logs = enabled!(tracing::Level::TRACE);
 
         for bid in self.cfg.blocks.indices() {
             let block = &self.cfg.blocks[bid];
@@ -345,7 +346,7 @@ impl Bytecode<'_> {
             let JumpTarget::Const(target_inst) = target else { continue };
 
             // Log non-adjacent resolutions (not simple PUSH+JUMP).
-            if enabled!(tracing::Level::TRACE)
+            if trace_logs
                 && let is_adjacent = (term_inst > 0 && {
                     let prev_inst = term_inst - 1;
                     let prev = &self.insts[prev_inst];

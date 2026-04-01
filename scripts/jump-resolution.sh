@@ -15,23 +15,23 @@ else
     mapfile -t BENCHES < <(cargo r -q -- run --list)
 fi
 
-sum_matches() {
-    local total=0
-    while IFS= read -r n; do
-        total=$((total + n))
-    done
-    echo "$total"
+last_match() {
+    # Print the last matching capture, or 0 if none.
+    rg -o "$1" -r '$1' | tail -1 || echo 0
 }
 
-printf "%-25s %10s %10s %10s\n" "BENCHMARK" "RESOLVED" "UNRESOLVED" "TOTAL"
-printf "%-25s %10s %10s %10s\n" "---------" "--------" "----------" "-----"
+printf "%-25s %6s %6s %6s %6s %10s\n" "BENCHMARK" "LOCAL" "NONADJ" "FIXPT" "UNRES" "TOTAL"
+printf "%-25s %6s %6s %6s %6s %10s\n" "---------" "-----" "------" "-----" "-----" "-----"
 
 for bench in "${BENCHES[@]}"; do
-    output=$(NO_COLOR=1 RUST_LOG=debug cargo r -q -- run "$bench" --parse-only --display 2>&1)
+    output=$(NO_COLOR=1 RUST_LOG=revmc::bytecode=trace cargo r -q -- run "$bench" --parse-only 2>&1)
 
-    resolved=$(echo "$output" | { rg -o 'newly_resolved=(\d+)' -r '$1' || true; } | sum_matches)
-    unresolved=$(echo "$output" | { rg -o 'unresolved dynamic jumps remain n=(\d+)' -r '$1' || true; } | sum_matches)
-    total=$((resolved + unresolved))
+    local_res=$(echo "$output" | { rg -o 'local_jumps.*newly_resolved=(\d+)' -r '$1' | tail -1 || echo 0; })
+    non_adj=$(echo "$output" | { rg -c 'resolved non-adjacent jump' || echo 0; })
+    fixpt_res=$(echo "$output" | { rg -o 'ba:.*newly_resolved=(\d+)' -r '$1' | tail -1 || echo 0; })
+    # Use the last "unresolved" line (after all passes).
+    unresolved=$(echo "$output" | { rg -o 'unresolved dynamic jumps remain n=(\d+)' -r '$1' | tail -1 || echo 0; })
+    total=$((local_res + fixpt_res + unresolved))
 
-    printf "%-25s %10d %10d %10d\n" "$bench" "$resolved" "$unresolved" "$total"
+    printf "%-25s %6d %6d %6d %6d %10d\n" "$bench" "$local_res" "$non_adj" "$fixpt_res" "$unresolved" "$total"
 done
