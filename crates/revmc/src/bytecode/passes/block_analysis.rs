@@ -315,22 +315,21 @@ impl Bytecode<'_> {
         let (resolved, count) = self.run_abstract_interp(&mut snapshots);
         self.snapshots = snapshots;
 
-        if count == 0 {
-            return;
+        if count > 0 {
+            let newly_resolved = self.commit_resolved_jumps(&resolved);
+            debug!(newly_resolved, "resolved jumps");
         }
 
-        let newly_resolved = self.commit_resolved_jumps(&resolved);
-        debug!(newly_resolved, "resolved jumps");
+        self.recompute_has_dynamic_jumps();
+    }
 
-        // Recompute dynamic jumps flag.
-        let n = self
-            .insts
-            .iter()
-            .filter(|inst| inst.is_jump() && !inst.flags.contains(InstFlags::STATIC_JUMP))
-            .count();
-        self.has_dynamic_jumps = n > 0;
+    fn recompute_has_dynamic_jumps(&mut self) {
+        let mut unresolved = self.insts.iter().filter(|inst| {
+            inst.is_jump() && !inst.flags.contains(InstFlags::STATIC_JUMP) && !inst.is_dead_code()
+        });
+        self.has_dynamic_jumps = unresolved.next().is_some();
         if self.has_dynamic_jumps {
-            debug!(n, "unresolved dynamic jumps remain");
+            debug!(n = 1 + unresolved.count(), "unresolved dynamic jumps remain");
         }
     }
 
@@ -1492,6 +1491,20 @@ mod tests_edge_cases {
     #[test]
     fn empty_bytecode() {
         let bytecode = analyze_code(vec![op::STOP]);
+        assert!(!bytecode.has_dynamic_jumps);
+    }
+
+    /// A dynamic jump in dead code should not cause `has_dynamic_jumps` to be true.
+    #[test]
+    fn dead_code_dynamic_jump() {
+        #[rustfmt::skip]
+        let bytecode = analyze_code(vec![
+            op::STOP,
+            op::PUSH0,
+            op::CALLDATALOAD,
+            op::JUMP,
+        ]);
+        eprintln!("{bytecode}");
         assert!(!bytecode.has_dynamic_jumps);
     }
 }
