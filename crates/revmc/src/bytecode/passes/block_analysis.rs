@@ -654,9 +654,6 @@ impl Bytecode<'_> {
         let mut suspect: BitVec = BitVec::repeat(false, num_blocks);
         for bid in self.cfg.blocks.indices() {
             let block = &self.cfg.blocks[bid];
-            if block.dead {
-                continue;
-            }
             if !matches!(block_states[bid], BlockState::Bottom)
                 && self.insts[block.insts.start].is_jumpdest()
             {
