@@ -456,6 +456,11 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 let resume_at = get_ecx_resume_at_ptr(&mut fx);
                 fx.bcx.store_aligned(resume_value, resume_at, 1);
 
+                // Copy the stack back before suspending; the caller needs the updated values
+                // to resume execution.
+                fx.copy_stack_to_arg();
+                fx.save_stack_len();
+
                 // Signal that execution suspended - caller checks next_action for Call/Create
                 fx.build_return_imm(InstructionResult::Stop);
             }
@@ -487,7 +492,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         fx.bcx.switch_to_block(fx.return_block.unwrap());
         if !fx.incoming_returns.is_empty() {
             let return_value = fx.bcx.phi(fx.i8_type, &fx.incoming_returns);
-            if stack_length_observable {
+            if config.inspect_stack_length {
                 fx.copy_stack_to_arg();
                 fx.save_stack_len();
             }
