@@ -492,17 +492,7 @@ impl InstData {
     /// Returns the number of input and output stack elements of this instruction.
     #[inline]
     pub(crate) fn stack_io(&self) -> (u8, u8) {
-        let (mut inp, out) = self.stack_io_raw();
-        // For adjacent PUSH+JUMP, the PUSH is marked SKIP_LOGIC so the target is never on the
-        // stack. Reduce inputs accordingly. Block-resolved jumps still have the target on the
-        // stack, so their input count is unchanged.
-        if self.is_static_jump()
-            && !self.flags.contains(InstFlags::BLOCK_RESOLVED_JUMP)
-            && !(self.opcode == op::JUMPI && self.flags.contains(InstFlags::INVALID_JUMP))
-        {
-            inp -= 1;
-        }
-        (inp, out)
+        self.stack_io_raw()
     }
 
     #[inline]
@@ -521,12 +511,6 @@ impl InstData {
     #[allow(dead_code)]
     pub(crate) fn to_op_in<'a>(&self, bytecode: &'a Bytecode<'_>) -> Opcode<'a> {
         Opcode { opcode: self.opcode, immediate: bytecode.get_imm(self) }
-    }
-
-    /// Returns `true` if this instruction is a push instruction.
-    #[inline]
-    pub(crate) fn is_push(&self) -> bool {
-        matches!(self.opcode, op::PUSH0..=op::PUSH32)
     }
 
     /// Returns `true` if this instruction is a jump instruction (`JUMP`/`JUMPI`).
@@ -632,12 +616,8 @@ bitflags::bitflags! {
         /// Always returns [`InstructionResult::NotFound`] at runtime.
         const UNKNOWN = 1 << 4;
 
-        /// The jump target was resolved by block analysis (not adjacent PUSH+JUMP).
-        /// The target value is still on the stack and must be popped at runtime.
-        const BLOCK_RESOLVED_JUMP = 1 << 5;
-
         /// Skip generating instruction logic, but keep the gas calculation.
-        const SKIP_LOGIC = 1 << 6;
+        const SKIP_LOGIC = 1 << 5;
         /// Don't generate any code.
         const DEAD_CODE = 1 << 7;
     }

@@ -342,38 +342,22 @@ impl Bytecode<'_> {
             let Some(val) = self.const_operand(term_inst, 0) else {
                 continue;
             };
-            let Ok(target_pc) = usize::try_from(val) else {
-                // Target too large — invalid jump.
+
+            let target_pc = usize::try_from(val).ok();
+            let target_pc = if let Some(target_pc) = target_pc
+                && self.is_valid_jump(target_pc)
+            {
+                target_pc
+            } else {
                 self.insts[term_inst].flags |= InstFlags::STATIC_JUMP | InstFlags::INVALID_JUMP;
                 newly_resolved += 1;
+                trace!(%term_inst, ?target_pc, "local: invalid jump target");
                 continue;
             };
-
-            if !self.is_valid_jump(target_pc) {
-                self.insts[term_inst].flags |= InstFlags::STATIC_JUMP | InstFlags::INVALID_JUMP;
-                newly_resolved += 1;
-                trace!(%term_inst, target_pc, "local: invalid jump target");
-                continue;
-            }
 
             let target = self.pc_to_inst(target_pc);
 
-            // Check if this is a simple adjacent PUSH+JUMP pattern.
-            // If so, use the SKIP_LOGIC optimization for backward compatibility with codegen.
-            let is_adjacent_push_jump = term_inst.index() > 0 && {
-                let push_inst = Inst::from_usize(term_inst.index() - 1);
-                let push = &self.insts[push_inst];
-                push.is_push() && !push.is_dead_code() && block.insts.contains(&push_inst)
-            };
-
-            if is_adjacent_push_jump {
-                let push_inst = Inst::from_usize(term_inst.index() - 1);
-                self.insts[push_inst].flags |= InstFlags::SKIP_LOGIC;
-                self.insts[term_inst].flags |= InstFlags::STATIC_JUMP;
-            } else {
-                self.insts[term_inst].flags |=
-                    InstFlags::STATIC_JUMP | InstFlags::BLOCK_RESOLVED_JUMP;
-            }
+            self.insts[term_inst].flags |= InstFlags::STATIC_JUMP;
 
             // Set target and mark JUMPDEST as reachable.
             self.insts[term_inst].data = target.index() as u32;
@@ -433,8 +417,7 @@ impl Bytecode<'_> {
                         op::JUMPDEST,
                         "block_analysis resolved to non-JUMPDEST"
                     );
-                    self.insts[jump_inst].flags |=
-                        InstFlags::STATIC_JUMP | InstFlags::BLOCK_RESOLVED_JUMP;
+                    self.insts[jump_inst].flags |= InstFlags::STATIC_JUMP;
                     self.insts[jump_inst].data = target_inst.index() as u32;
                     // Mark JUMPDEST as reachable.
                     self.insts[target_inst].data = 1;
@@ -450,17 +433,13 @@ impl Bytecode<'_> {
                         );
                         self.insts[target_inst].data = 1;
                     }
-                    self.insts[jump_inst].flags |= InstFlags::STATIC_JUMP
-                        | InstFlags::BLOCK_RESOLVED_JUMP
-                        | InstFlags::MULTI_JUMP;
+                    self.insts[jump_inst].flags |= InstFlags::STATIC_JUMP | InstFlags::MULTI_JUMP;
                     self.multi_jump_targets.insert(jump_inst, targets.clone());
                     newly_resolved += 1;
                     trace!(%jump_inst, n_targets = targets.len(), "resolved multi-target jump");
                 }
                 JumpTarget::Invalid => {
-                    self.insts[jump_inst].flags |= InstFlags::STATIC_JUMP
-                        | InstFlags::INVALID_JUMP
-                        | InstFlags::BLOCK_RESOLVED_JUMP;
+                    self.insts[jump_inst].flags |= InstFlags::STATIC_JUMP | InstFlags::INVALID_JUMP;
                     newly_resolved += 1;
                     trace!(%jump_inst, "resolved invalid jump");
                 }
@@ -863,12 +842,6 @@ impl Bytecode<'_> {
         for i in insts {
             let inst = &self.insts[i];
             if inst.is_dead_code() {
-                continue;
-            }
-
-            // Instructions marked SKIP_LOGIC (the PUSH in a PUSH+JUMP pair) are no-ops
-            // for abstract interpretation — the value is consumed by the already-resolved jump.
-            if inst.flags.contains(InstFlags::SKIP_LOGIC) {
                 continue;
             }
 
