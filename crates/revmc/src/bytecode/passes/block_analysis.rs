@@ -821,16 +821,13 @@ impl Bytecode<'_> {
             };
 
             let block = &self.cfg.blocks[bid];
-            let block_insts = block.insts.clone();
-            let block_succs = block.succs.clone();
-            let insts_iter =
-                (block_insts.start.index()..block_insts.end.index()).map(Inst::from_usize);
-            if !self.interpret_block(insts_iter, &mut stack_buf) {
+            if !self.interpret_block(block.insts(), &mut stack_buf) {
                 continue;
             }
+            let block = &self.cfg.blocks[bid];
 
             // Discover dynamic-jump target edges from the snapshot recorded above.
-            let term_inst = block_insts.end - 1;
+            let term_inst = block.terminator();
             let term = &self.insts[term_inst];
             if term.is_jump()
                 && !term.flags.contains(InstFlags::STATIC_JUMP)
@@ -846,7 +843,7 @@ impl Bytecode<'_> {
             }
 
             // Propagate to static CFG successors and discovered dynamic-jump targets.
-            for &succ in block_succs.iter().chain(&discovered[bid]) {
+            for &succ in block.succs.iter().chain(&discovered[bid]) {
                 if block_states[succ].join(&stack_buf, const_sets) {
                     worklist.push(succ);
                 }
