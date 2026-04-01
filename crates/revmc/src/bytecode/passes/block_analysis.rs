@@ -315,6 +315,7 @@ impl Bytecode<'_> {
         self.init_snapshots();
 
         let mut newly_resolved = 0u32;
+        let mut stack: Vec<AbsValue> = Vec::new();
 
         for bid in self.cfg.blocks.indices() {
             let block = &self.cfg.blocks[bid];
@@ -332,7 +333,8 @@ impl Bytecode<'_> {
             let block_insts = block.insts.clone();
 
             // Seed with Top values.
-            let mut stack: Vec<AbsValue> = vec![AbsValue::Top; entry_depth];
+            stack.clear();
+            stack.resize(entry_depth, AbsValue::Top);
 
             // Interpret the block up to (but not including) the terminator so the
             // jump target remains on the stack.
