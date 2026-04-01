@@ -155,7 +155,8 @@ pub(crate) fn try_const_fold(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bytecode::passes::block_analysis::tests::{Inst, analyze_code};
+    use crate::bytecode::passes::block_analysis::tests::{Inst, analyze_asm};
+    use revm_bytecode::opcode::OpCode;
     use revm_primitives::U256;
 
     /// Builds bytecode that pushes operands, executes `opcode`, sinks the result
@@ -164,28 +165,21 @@ mod tests {
     /// Operands are in natural order matching the yellow paper specification:
     /// for `SUB(a, b)` = `a - b`, pass `&[a, b]` (first popped = first element).
     fn const_fold(opcode: u8, operands: &[U256]) -> Option<U256> {
-        let mut code = Vec::new();
+        use std::fmt::Write;
+        let mut src = String::new();
         let mut num_insts = 0usize;
         // Push in reverse so that operands[0] ends up on TOS.
         for v in operands.iter().rev() {
-            let bytes = v.to_be_bytes::<32>();
-            let lz = bytes.iter().position(|&b| b != 0).unwrap_or(32);
-            if lz == 32 {
-                code.push(op::PUSH0);
-            } else {
-                let len = 32 - lz;
-                code.push(op::PUSH0 + len as u8);
-                code.extend_from_slice(&bytes[lz..]);
-            }
+            writeln!(src, "PUSH {v}").unwrap();
             num_insts += 1;
         }
-        code.push(opcode);
+        writeln!(src, "{}", OpCode::new(opcode).unwrap()).unwrap();
         num_insts += 1;
         // Sink: PUSH0 + MSTORE + STOP to consume the result.
         let mstore_inst = num_insts + 1;
-        code.extend_from_slice(&[op::PUSH0, op::MSTORE, op::STOP]);
+        writeln!(src, "PUSH0\nMSTORE\nSTOP").unwrap();
 
-        let bytecode = analyze_code(code);
+        let bytecode = analyze_asm(&src);
         // The folded result is operand 1 (second from top) at MSTORE.
         bytecode.const_operand(Inst::from_usize(mstore_inst), 1)
     }

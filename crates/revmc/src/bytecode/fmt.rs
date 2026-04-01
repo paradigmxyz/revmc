@@ -25,10 +25,6 @@ impl Bytecode<'_> {
         lines.push((String::new(), String::new()));
 
         for (bid, block) in self.cfg.blocks.iter_enumerated() {
-            if block.dead {
-                continue;
-            }
-
             // Blank line between blocks.
             if !lines.is_empty()
                 && lines.last().is_some_and(|(t, c)| !t.is_empty() || !c.is_empty())
@@ -120,14 +116,8 @@ impl Bytecode<'_> {
                 if flags.contains(InstFlags::INVALID_JUMP) {
                     comment.push_str(", invalid_jump");
                 }
-                if flags.contains(InstFlags::BLOCK_RESOLVED_JUMP) {
-                    comment.push_str(", block_resolved");
-                }
                 if flags.contains(InstFlags::MULTI_JUMP) {
                     comment.push_str(", multi_jump");
-                }
-                if flags.contains(InstFlags::BLOCK_RESOLVED_JUMP) {
-                    comment.push_str(", block_resolved");
                 }
                 if data.may_suspend() {
                     comment.push_str(", suspends");
@@ -169,7 +159,7 @@ impl fmt::Display for Bytecode<'_> {
 impl fmt::Debug for Bytecode<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Bytecode")
-            .field("code", &hex::encode(self.code))
+            .field("code", &hex::encode(&*self.code))
             .field("insts", &self.insts)
             .field("jumpdests", &hex::encode(bitvec_as_bytes(&self.jumpdests)))
             .field("spec_id", &self.spec_id)
@@ -253,9 +243,6 @@ impl<'a> Bytecode<'a> {
 
         // Emit nodes.
         for (bid, block) in self.cfg.blocks.iter_enumerated() {
-            if block.dead {
-                continue;
-            }
             let last = self.inst(block.terminator());
             let first = self.inst(block.insts.start);
 
@@ -314,9 +301,6 @@ impl<'a> Bytecode<'a> {
 
         // Emit edges from the CFG.
         for (bid, block) in self.cfg.blocks.iter_enumerated() {
-            if block.dead {
-                continue;
-            }
             let last = self.inst(block.terminator());
 
             if last.is_jump()
@@ -337,7 +321,7 @@ impl<'a> Bytecode<'a> {
                 writeln!(w, "  {bid} -> {ft} [color=\"{color}\"];")?;
             }
             // Remaining succs are jump targets.
-            let is_multi = last.flags.contains(InstFlags::MULTI_JUMP);
+            let is_multi = last.flags.contains(InstFlags::MULTI_JUMP) && block.succs.len() > 1;
             for target in succs {
                 let color = if is_multi {
                     "#e2a93b"
@@ -360,9 +344,6 @@ impl<'a> Bytecode<'a> {
                  label=\"dynamic\\njump table\"];"
             )?;
             for (bid, block) in self.cfg.blocks.iter_enumerated() {
-                if block.dead {
-                    continue;
-                }
                 let first = self.inst(block.insts.start);
                 if first.is_reachable_jumpdest(self.has_dynamic_jumps) {
                     writeln!(w, "  dynamic -> {bid} [color=\"{EDGE_FALSE}\" style=dashed];")?;
@@ -452,7 +433,7 @@ mod tests {
                ; spec_id=Osaka, has_dynamic_jumps=false, may_suspend=true
 
 bb0:           ; stack_in=0, max_growth=1
-  PUSH1 0x03   ; pc=0, gas=11, skip
+  PUSH1 0x03   ; pc=0, gas=11
   JUMP bb1     ; pc=2
 
 bb1:           ; stack_in=0, max_growth=2
@@ -461,7 +442,7 @@ bb1:           ; stack_in=0, max_growth=2
   PUSH1 0x00   ; pc=6
   SSTORE       ; pc=8
   PUSH1 0x01   ; pc=9, gas=16
-  PUSH1 0x03   ; pc=11, skip
+  PUSH1 0x03   ; pc=11
   JUMPI bb1    ; pc=13
 
 bb2:           ; stack_in=0, max_growth=7

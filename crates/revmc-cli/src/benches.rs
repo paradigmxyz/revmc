@@ -93,6 +93,23 @@ pub fn get_benches() -> Vec<Bench> {
         Bench {
             name: "weth",
             bytecode: include_code_str!("../../../data/weth.rt.hex").unwrap(),
+            // `transfer(address(1), 1000)`
+            calldata: hex!(
+                "a9059cbb"
+                "0000000000000000000000000000000000000000000000000000000000000001"
+                "00000000000000000000000000000000000000000000000000000000000003e8"
+            )
+            .to_vec(),
+            // balanceOf[address(0)] = 1_000_000 (caller is address(0))
+            // slot = keccak256(abi.encode(address(0), uint256(3)))
+            storage: vec![(
+                U256::from_str_radix(
+                    "3617319a054d772f909f7c479a2cebe5066e836a939412e32403c99029b92eff",
+                    16,
+                )
+                .unwrap(),
+                U256::from(1_000_000),
+            )],
             ..Default::default()
         },
         Bench {

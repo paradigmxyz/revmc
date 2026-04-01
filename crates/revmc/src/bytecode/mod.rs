@@ -7,10 +7,13 @@ use revm_bytecode::opcode as op;
 use revm_primitives::{U256, hardfork::SpecId};
 use revmc_backend::Result;
 use smallvec::SmallVec;
-use std::cell::RefCell;
+use std::{borrow::Cow, cell::RefCell};
 
 mod passes;
 use passes::{Cfg, GasSection, SectionsAnalysis, Snapshots, StackSection};
+
+mod asm;
+pub use asm::parse_asm;
 
 mod fmt;
 
@@ -75,8 +78,8 @@ impl Default for AnalysisConfig {
 /// EVM bytecode.
 #[doc(hidden)] // Not public API.
 pub struct Bytecode<'a> {
-    /// The original bytecode slice.
-    pub(crate) code: &'a [u8],
+    /// The original bytecode.
+    pub(crate) code: Cow<'a, [u8]>,
     /// The instructions.
     insts: IndexVec<Inst, InstData>,
     /// `JUMPDEST` opcode map. `jumpdests[pc]` is `true` if `code[pc] == op::JUMPDEST`.
@@ -112,13 +115,17 @@ pub struct Bytecode<'a> {
 }
 
 impl<'a> Bytecode<'a> {
-    #[instrument(name = "new_bytecode", level = "debug", skip_all)]
-    pub(crate) fn new(code: &'a [u8], spec_id: SpecId) -> Self {
+    pub(crate) fn new(code: impl Into<Cow<'a, [u8]>>, spec_id: SpecId) -> Self {
+        Self::new_mono(code.into(), spec_id)
+    }
+
+    #[instrument(name = "Bytecode::new", level = "debug", skip_all)]
+    fn new_mono(code: Cow<'a, [u8]>, spec_id: SpecId) -> Self {
         let mut insts = IndexVec::with_capacity(code.len() + 8);
         let mut jumpdests = BitVec::repeat(false, code.len());
         let mut pc_to_inst = FxHashMap::with_capacity_and_hasher(code.len(), Default::default());
         let op_infos = op_info_map(spec_id);
-        for (pc, Opcode { opcode, immediate: _ }) in OpcodesIter::new(code, spec_id).with_pc() {
+        for (pc, Opcode { opcode, immediate: _ }) in OpcodesIter::new(&code, spec_id).with_pc() {
             let inst: Inst = insts.next_idx();
             pc_to_inst.insert(pc as u32, inst);
 
@@ -152,7 +159,13 @@ impl<'a> Bytecode<'a> {
             });
         }
 
-        let mut bytecode = Self {
+        // Pad code to ensure there is at least one diverging instruction.
+        if insts.last().is_none_or(|last| last.can_fall_through()) {
+            trace!("adding STOP padding");
+            insts.push(InstData::new(op::STOP));
+        }
+
+        Self {
             code,
             insts,
             jumpdests,
@@ -167,15 +180,7 @@ impl<'a> Bytecode<'a> {
             redirects: FxHashMap::default(),
             cfg: Cfg::default(),
             config: AnalysisConfig::default(),
-        };
-
-        // Pad code to ensure there is at least one diverging instruction.
-        if bytecode.insts.last().is_none_or(|last| last.can_fall_through()) {
-            trace!("adding STOP padding");
-            bytecode.insts.push(InstData::new(op::STOP));
         }
-
-        bytecode
     }
 
     /// Takes the instruction-to-line map built during formatting.
@@ -188,8 +193,8 @@ impl<'a> Bytecode<'a> {
     /// Returns an iterator over the opcodes.
     #[inline]
     #[allow(dead_code)]
-    pub(crate) fn opcodes(&self) -> OpcodesIter<'a> {
-        OpcodesIter::new(self.code, self.spec_id)
+    pub(crate) fn opcodes(&self) -> OpcodesIter<'_> {
+        OpcodesIter::new(&self.code, self.spec_id)
     }
 
     /// Returns the instruction at the given instruction counter.
@@ -249,19 +254,21 @@ impl<'a> Bytecode<'a> {
     /// Runs a list of analysis passes on the instructions.
     #[instrument(level = "debug", skip_all)]
     pub(crate) fn analyze(&mut self) -> Result<()> {
-        self.static_jump_analysis();
+        self.recompute_has_dynamic_jumps();
+        self.mark_dead_code();
+
+        self.rebuild_cfg();
+        self.block_analysis_local();
         self.mark_dead_code();
 
         self.rebuild_cfg();
         self.block_analysis();
-
-        // Run again: block_analysis may mark additional jumps as invalid/diverging,
-        // enabling more dead code elimination.
         self.mark_dead_code();
 
         if self.config.contains(AnalysisConfig::DEDUP) {
             self.rebuild_cfg();
             self.dedup_blocks();
+            self.mark_dead_code();
         }
 
         // Final rebuild so the CFG is consistent for sections analysis and DOT output.
@@ -272,69 +279,6 @@ impl<'a> Bytecode<'a> {
         self.construct_sections();
 
         Ok(())
-    }
-
-    /// Mark `PUSH<N>` followed by `JUMP[I]` as `STATIC_JUMP` and resolve the target.
-    #[instrument(name = "sj", level = "debug", skip_all)]
-    fn static_jump_analysis(&mut self) {
-        for jump_inst in self.insts.indices() {
-            let jump = &self.insts[jump_inst];
-            let Some(push_inst) = jump_inst.index().checked_sub(1).map(Inst::from_usize) else {
-                if jump.is_jump() {
-                    trace!(%jump_inst, target=?None::<()>, "found jump");
-                    self.has_dynamic_jumps = true;
-                }
-                continue;
-            };
-
-            let push = &self.insts[push_inst];
-            if !(push.is_push() && jump.is_jump()) {
-                if jump.is_jump() {
-                    trace!(%jump_inst, target=?None::<()>, "found jump");
-                    self.has_dynamic_jumps = true;
-                }
-                continue;
-            }
-
-            let imm_opt = self.get_imm(push);
-            if push.opcode != op::PUSH0 && imm_opt.is_none() {
-                continue;
-            }
-            let imm = imm_opt.unwrap_or(&[]);
-            self.insts[jump_inst].flags |= InstFlags::STATIC_JUMP;
-
-            const USIZE_SIZE: usize = std::mem::size_of::<usize>();
-            if imm.len() > USIZE_SIZE {
-                trace!(%jump_inst, "jump target too large");
-                self.insts[jump_inst].flags |= InstFlags::INVALID_JUMP;
-                continue;
-            }
-
-            let mut padded = [0; USIZE_SIZE];
-            padded[USIZE_SIZE - imm.len()..].copy_from_slice(imm);
-            let target_pc = usize::from_be_bytes(padded);
-            if !self.is_valid_jump(target_pc) {
-                trace!(%jump_inst, target_pc, "invalid jump target");
-                self.insts[jump_inst].flags |= InstFlags::INVALID_JUMP;
-                continue;
-            }
-
-            self.insts[push_inst].flags |= InstFlags::SKIP_LOGIC;
-            let target = self.pc_to_inst(target_pc);
-
-            // Mark the `JUMPDEST` as reachable.
-            debug_assert_eq!(
-                self.insts[target],
-                op::JUMPDEST,
-                "is_valid_jump returned true for non-JUMPDEST: \
-                 jump_inst={jump_inst:?} target_pc={target_pc} target={target:?}",
-            );
-            self.insts[target].data = 1;
-
-            // Set the target on the `JUMP` instruction.
-            trace!(%jump_inst, %target, "found jump");
-            self.insts[jump_inst].data = target.index() as u32;
-        }
     }
 
     /// Mark unreachable instructions as `DEAD_CODE` to not generate any code for them.
@@ -351,16 +295,20 @@ impl<'a> Bytecode<'a> {
         while let Some((i, data)) = iter.next() {
             if data.is_diverging() {
                 let mut end = i;
+                let mut any_new = false;
                 for (j, data) in &mut iter {
                     end = j;
                     if data.is_reachable_jumpdest(self.has_dynamic_jumps) {
                         break;
                     }
+                    if !data.flags.contains(InstFlags::DEAD_CODE) {
+                        any_new = true;
+                    }
                     data.flags |= InstFlags::DEAD_CODE;
                 }
                 let start = i + 1;
-                if end > start {
-                    debug!("found dead code: {start:?}..{end:?}");
+                if any_new && end > start {
+                    debug!("found dead code: {start}..{end}");
                 }
             }
         }
@@ -389,7 +337,7 @@ impl<'a> Bytecode<'a> {
 
     /// Returns the immediate value of the given instruction data, if any.
     /// Returns `None` if out of bounds too.
-    pub(crate) fn get_imm(&self, data: &InstData) -> Option<&'a [u8]> {
+    pub(crate) fn get_imm(&self, data: &InstData) -> Option<&[u8]> {
         let imm_len = data.imm_len() as usize;
         if imm_len == 0 {
             return None;
@@ -455,7 +403,7 @@ impl<'a> Bytecode<'a> {
     /// Returns `None` if the value is unknown or the analysis didn't cover this instruction.
     #[allow(dead_code)]
     pub(crate) fn const_operand(&self, inst: Inst, depth: usize) -> Option<U256> {
-        let snap = self.snapshots.inputs.get(inst)?;
+        let snap = &self.snapshots.inputs[inst];
         let idx = snap.get(snap.len().checked_sub(1 + depth)?)?.as_const()?;
         Some(*self.u256_interner.borrow().get(idx))
     }
@@ -466,7 +414,7 @@ impl<'a> Bytecode<'a> {
     /// analysis didn't cover this instruction.
     #[allow(dead_code)]
     pub(crate) fn const_output(&self, inst: Inst) -> Option<U256> {
-        let idx = (*self.snapshots.outputs.get(inst)?)?.as_const()?;
+        let idx = self.snapshots.outputs[inst]?.as_const()?;
         Some(*self.u256_interner.borrow().get(idx))
     }
 
@@ -544,21 +492,6 @@ impl InstData {
     /// Returns the number of input and output stack elements of this instruction.
     #[inline]
     pub(crate) fn stack_io(&self) -> (u8, u8) {
-        let (mut inp, out) = self.stack_io_raw();
-        // For adjacent PUSH+JUMP, the PUSH is marked SKIP_LOGIC so the target is never on the
-        // stack. Reduce inputs accordingly. Block-resolved jumps still have the target on the
-        // stack, so their input count is unchanged.
-        if self.is_static_jump()
-            && !self.flags.contains(InstFlags::BLOCK_RESOLVED_JUMP)
-            && !(self.opcode == op::JUMPI && self.flags.contains(InstFlags::INVALID_JUMP))
-        {
-            inp -= 1;
-        }
-        (inp, out)
-    }
-
-    #[inline]
-    pub(crate) fn stack_io_raw(&self) -> (u8, u8) {
         stack_io(self.opcode)
     }
 
@@ -571,14 +504,8 @@ impl InstData {
     /// Converts this instruction to a raw opcode in the given bytecode.
     #[inline]
     #[allow(dead_code)]
-    pub(crate) fn to_op_in<'a>(&self, bytecode: &Bytecode<'a>) -> Opcode<'a> {
+    pub(crate) fn to_op_in<'a>(&self, bytecode: &'a Bytecode<'_>) -> Opcode<'a> {
         Opcode { opcode: self.opcode, immediate: bytecode.get_imm(self) }
-    }
-
-    /// Returns `true` if this instruction is a push instruction.
-    #[inline]
-    pub(crate) fn is_push(&self) -> bool {
-        matches!(self.opcode, op::PUSH0..=op::PUSH32)
     }
 
     /// Returns `true` if this instruction is a jump instruction (`JUMP`/`JUMPI`).
@@ -684,12 +611,8 @@ bitflags::bitflags! {
         /// Always returns [`InstructionResult::NotFound`] at runtime.
         const UNKNOWN = 1 << 4;
 
-        /// The jump target was resolved by block analysis (not adjacent PUSH+JUMP).
-        /// The target value is still on the stack and must be popped at runtime.
-        const BLOCK_RESOLVED_JUMP = 1 << 5;
-
         /// Skip generating instruction logic, but keep the gas calculation.
-        const SKIP_LOGIC = 1 << 6;
+        const SKIP_LOGIC = 1 << 5;
         /// Don't generate any code.
         const DEAD_CODE = 1 << 7;
     }

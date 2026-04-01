@@ -1478,7 +1478,7 @@ impl LLJIT {
     /// automatically registered so that GDB, LLDB, `perf`, and other profilers
     /// can resolve JIT-compiled function names and source locations.
     pub fn enable_debug_support(&self) -> Result<(), LLVMString> {
-        cvt(unsafe { LLVMOrcLLJITEnableDebugSupport(self.as_inner()) })
+        cvt(unsafe { crate::cpp::revmc_llvm_lljit_enable_debug_support(self.as_inner()) })
     }
 }
 
