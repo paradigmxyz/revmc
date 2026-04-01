@@ -1499,8 +1499,10 @@ mod tests_edge_cases {
     fn dead_code_dynamic_jump() {
         #[rustfmt::skip]
         let bytecode = analyze_code(vec![
-            op::STOP,   // pc=0: diverges, everything after is dead
-            op::JUMP,   // pc=1: dead dynamic jump (no adjacent PUSH)
+            op::STOP,
+            op::PUSH0,
+            op::CALLDATALOAD,
+            op::JUMP,
         ]);
         eprintln!("{bytecode}");
         assert!(!bytecode.has_dynamic_jumps);
