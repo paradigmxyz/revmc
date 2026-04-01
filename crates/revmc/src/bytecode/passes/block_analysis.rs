@@ -385,13 +385,8 @@ impl Bytecode<'_> {
             trace!(%term_inst, %target, "local: resolved jump");
         }
 
-        // Recompute dynamic jumps flag.
-        self.has_dynamic_jumps = self
-            .insts
-            .iter()
-            .any(|inst| inst.is_jump() && !inst.flags.contains(InstFlags::STATIC_JUMP));
-
-        debug!(newly_resolved, has_dynamic_jumps = self.has_dynamic_jumps, "local jump resolution");
+        debug!(newly_resolved, "local jump resolution");
+        self.recompute_has_dynamic_jumps();
     }
 
     /// Runs abstract stack interpretation to resolve additional jump targets.

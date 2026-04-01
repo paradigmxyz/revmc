@@ -260,8 +260,6 @@ impl<'a> Bytecode<'a> {
         self.rebuild_cfg();
         self.block_analysis();
 
-        // Run again: block_analysis may mark additional jumps as invalid/diverging,
-        // enabling more dead code elimination.
         self.mark_dead_code();
 
         if self.config.contains(AnalysisConfig::DEDUP) {
