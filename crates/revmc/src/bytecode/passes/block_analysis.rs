@@ -297,16 +297,22 @@ pub(crate) struct Cfg {
 }
 
 impl Bytecode<'_> {
+    /// Ensures `self.snapshots` is sized for the current instruction count.
+    fn init_snapshots(&mut self) {
+        let n = self.insts.len();
+        self.snapshots.inputs.resize(n, SmallVec::new());
+        self.snapshots.outputs.resize(n, None);
+    }
+
     /// Block-local jump resolution: interpret each block independently to discover
     /// jumps resolvable from block-local computation alone.
-    ///
-    /// This replaces the old `static_jump_analysis` (which only matched adjacent PUSH+JUMP)
-    /// and catches strictly more patterns (e.g. PUSH+PUSH+ADD+JUMP, PUSH+DUP+JUMP).
     #[instrument(name = "local_jumps", level = "debug", skip_all)]
     pub(crate) fn block_analysis_local(&mut self) {
         if self.cfg.blocks.is_empty() {
             return;
         }
+
+        self.init_snapshots();
 
         let mut newly_resolved = 0u32;
 
@@ -323,14 +329,17 @@ impl Bytecode<'_> {
             let section =
                 StackSection::from_stack_io(block.insts().map(|i| self.insts[i].stack_io_raw()));
             let entry_depth = section.inputs as usize;
+            let block_insts = block.insts.clone();
 
             // Seed with Top values.
             let mut stack: Vec<AbsValue> = vec![AbsValue::Top; entry_depth];
 
             // Interpret the block up to (but not including) the terminator so the
             // jump target remains on the stack.
-            let non_term = block.insts().filter(|&i| i != term_inst);
-            let ok = self.interpret_block(non_term, &mut stack, None);
+            let non_term = (block_insts.start.index()..block_insts.end.index())
+                .map(Inst::from_usize)
+                .filter(|&i| i != term_inst);
+            let ok = self.interpret_block(non_term, &mut stack);
             if !ok {
                 continue;
             }
@@ -366,7 +375,7 @@ impl Bytecode<'_> {
             let is_adjacent_push_jump = term_inst.index() > 0 && {
                 let push_inst = Inst::from_usize(term_inst.index() - 1);
                 let push = &self.insts[push_inst];
-                push.is_push() && !push.is_dead_code() && block.insts.contains(&push_inst)
+                push.is_push() && !push.is_dead_code() && block_insts.contains(&push_inst)
             };
 
             if is_adjacent_push_jump {
@@ -398,13 +407,8 @@ impl Bytecode<'_> {
             return;
         }
 
-        let n = self.insts.len();
-        let mut snapshots = Snapshots {
-            inputs: IndexVec::from_vec(vec![SmallVec::new(); n]),
-            outputs: IndexVec::from_vec(vec![None; n]),
-        };
-        let (resolved, count) = self.run_abstract_interp(&mut snapshots);
-        self.snapshots = snapshots;
+        self.init_snapshots();
+        let (resolved, count) = self.run_abstract_interp();
 
         if count > 0 {
             let newly_resolved = self.commit_resolved_jumps(&resolved);
@@ -414,7 +418,8 @@ impl Bytecode<'_> {
         self.recompute_has_dynamic_jumps();
     }
 
-    fn recompute_has_dynamic_jumps(&mut self) {
+    /// Recomputes the `has_dynamic_jumps` flag based on the current instruction set.
+    pub(crate) fn recompute_has_dynamic_jumps(&mut self) {
         let mut unresolved = self.insts.iter().filter(|inst| {
             inst.is_jump() && !inst.flags.contains(InstFlags::STATIC_JUMP) && !inst.is_dead_code()
         });
@@ -604,8 +609,8 @@ impl Bytecode<'_> {
     /// Run worklist-based abstract interpretation over the CFG.
     ///
     /// Returns a list of (jump_inst, resolved_target) pairs and the count of resolvable jumps.
-    /// Stack snapshots are recorded into `snapshots` during the fixpoint.
-    fn run_abstract_interp(&self, snapshots: &mut Snapshots) -> (Vec<(Inst, JumpTarget)>, usize) {
+    /// Stack snapshots are recorded into `self.snapshots` during the fixpoint.
+    fn run_abstract_interp(&mut self) -> (Vec<(Inst, JumpTarget)>, usize) {
         let num_blocks = self.cfg.blocks.len();
 
         // Initialize block states. Entry block starts with an empty stack.
@@ -622,7 +627,7 @@ impl Bytecode<'_> {
         }
 
         let mut const_sets = ConstSetInterner::new();
-        let discovered_edges = self.run_fixpoint(&mut block_states, snapshots, &mut const_sets);
+        let discovered_edges = self.run_fixpoint(&mut block_states, &mut const_sets);
 
         if jump_insts.is_empty() {
             return (Vec::new(), 0);
@@ -632,7 +637,7 @@ impl Bytecode<'_> {
         let mut jump_targets: Vec<(Inst, JumpTarget)> = Vec::new();
         let mut has_top_jump = false;
         for &jump_inst in &jump_insts {
-            let target = match snapshots.inputs[jump_inst].last() {
+            let target = match self.snapshots.inputs[jump_inst].last() {
                 Some(&operand) => self.resolve_jump_operand(operand, &const_sets),
                 None => {
                     // No snapshot means the block was never interpreted (unreachable).
@@ -787,9 +792,8 @@ impl Bytecode<'_> {
     ///
     /// Returns the discovered dynamic-jump target edges per block.
     fn run_fixpoint(
-        &self,
+        &mut self,
         block_states: &mut IndexVec<Block, BlockState>,
-        snapshots: &mut Snapshots,
         const_sets: &mut ConstSetInterner,
     ) -> IndexVec<Block, SmallVec<[Block; 4]>> {
         let num_blocks = self.cfg.blocks.len();
@@ -825,16 +829,20 @@ impl Bytecode<'_> {
             };
 
             let block = &self.cfg.blocks[bid];
-            if !self.interpret_block(block.insts(), &mut stack_buf, Some(snapshots)) {
+            let block_insts = block.insts.clone();
+            let block_succs = block.succs.clone();
+            let insts_iter =
+                (block_insts.start.index()..block_insts.end.index()).map(Inst::from_usize);
+            if !self.interpret_block(insts_iter, &mut stack_buf) {
                 continue;
             }
 
             // Discover dynamic-jump target edges from the snapshot recorded above.
-            let term_inst = block.terminator();
+            let term_inst = block_insts.end - 1;
             let term = &self.insts[term_inst];
             if term.is_jump()
                 && !term.flags.contains(InstFlags::STATIC_JUMP)
-                && let Some(&operand) = snapshots.inputs[term_inst].last()
+                && let Some(&operand) = self.snapshots.inputs[term_inst].last()
             {
                 self.discover_jump_edges(
                     operand,
@@ -846,7 +854,7 @@ impl Bytecode<'_> {
             }
 
             // Propagate to static CFG successors and discovered dynamic-jump targets.
-            for &succ in block.succs.iter().chain(&discovered[bid]) {
+            for &succ in block_succs.iter().chain(&discovered[bid]) {
                 if block_states[succ].join(&stack_buf, const_sets) {
                     worklist.push(succ);
                 }
@@ -865,12 +873,11 @@ impl Bytecode<'_> {
     /// Returns `false` on stack underflow (conflict).
     ///
     /// The caller must pre-fill `stack` with the input state; on return it contains the output.
-    /// When `snapshots` is provided, records per-instruction operand snapshots.
+    /// Records per-instruction operand snapshots into `self.snapshots`.
     fn interpret_block(
-        &self,
+        &mut self,
         insts: impl IntoIterator<Item = Inst>,
         stack: &mut Vec<AbsValue>,
-        mut snapshots: Option<&mut Snapshots>,
     ) -> bool {
         for i in insts {
             let inst = &self.insts[i];
@@ -889,9 +896,9 @@ impl Bytecode<'_> {
             let out = out as usize;
 
             // Record pre-instruction input operand snapshot (in stack order, TOS last).
-            if let Some(ref mut snapshots) = snapshots {
+            if inp > 0 {
                 let start = stack.len().saturating_sub(inp);
-                let snap = &mut snapshots.inputs[i];
+                let snap = &mut self.snapshots.inputs[i];
                 snap.clear();
                 snap.extend_from_slice(&stack[start..]);
             }
@@ -957,10 +964,8 @@ impl Bytecode<'_> {
             }
 
             // Record post-instruction output snapshot.
-            if let Some(ref mut snapshots) = snapshots {
-                if out > 0 {
-                    snapshots.outputs[i] = stack.last().copied();
-                }
+            if out > 0 {
+                self.snapshots.outputs[i] = stack.last().copied();
             }
         }
 

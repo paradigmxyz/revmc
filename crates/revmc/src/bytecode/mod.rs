@@ -251,8 +251,7 @@ impl<'a> Bytecode<'a> {
     /// Runs a list of analysis passes on the instructions.
     #[instrument(level = "debug", skip_all)]
     pub(crate) fn analyze(&mut self) -> Result<()> {
-        // Pessimistically assume all jumps are dynamic for provisional CFG.
-        self.has_dynamic_jumps = self.insts.iter().any(|inst| inst.is_jump());
+        self.recompute_has_dynamic_jumps();
         self.rebuild_cfg();
         self.block_analysis_local();
         self.mark_dead_code();
