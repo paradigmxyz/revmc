@@ -3,9 +3,19 @@
 //! Assembles EVM mnemonics from a string into raw bytecode. Supports:
 //! - Standard EVM opcodes (`ADD`, `PUSH1 0x42`, etc.)
 //! - Auto-sized pushes (`PUSH 0x1234` picks the smallest encoding)
-//! - Labels: `name:` defines a label at the current PC, `PUSH name` / `PUSHn name` resolves to the
-//!   label's byte offset
+//! - Labels: `name:` defines a label at the current PC, `PUSH %name` / `PUSHn %name` resolves to
+//!   the label's byte offset
 //! - Comments starting with `;`
+//!
+//! ```evm
+//! entry:
+//!   PUSH %target
+//!   JUMP
+//!
+//! target:
+//!   JUMPDEST
+//!   STOP
+//! ```
 
 use crate::{
     U256,
@@ -75,7 +85,7 @@ fn parse_items<'a>(s: &'a str) -> Result<Vec<Item<'a>>> {
         if word == "PUSH" {
             let next =
                 words.next().ok_or_else(|| eyre::eyre!("missing immediate for opcode PUSH"))?;
-            let imm = parse_imm_or_label(next);
+            let imm = parse_imm_or_label(next)?;
             items.push(Item::Inst(Inst { opcode: 0, imm: Some(imm), push_kind: PushKind::Auto }));
         } else {
             let op = OpCode::parse(word).ok_or_else(|| eyre::eyre!("invalid opcode: {word:?}"))?;
@@ -84,7 +94,7 @@ fn parse_items<'a>(s: &'a str) -> Result<Vec<Item<'a>>> {
             if imm_len > 0 {
                 let next =
                     words.next().ok_or_else(|| eyre::eyre!("missing immediate for opcode {op}"))?;
-                let imm = parse_imm_or_label(next);
+                let imm = parse_imm_or_label(next)?;
                 items.push(Item::Inst(Inst {
                     opcode,
                     imm: Some(imm),
@@ -103,11 +113,14 @@ fn parse_items<'a>(s: &'a str) -> Result<Vec<Item<'a>>> {
     Ok(items)
 }
 
-/// Try to parse as a number, fall back to label reference.
-fn parse_imm_or_label<'a>(s: &'a str) -> Imm<'a> {
-    match U256::from_str(s) {
-        Ok(n) => Imm::Number(n),
-        Err(_) => Imm::Label(s),
+/// Parse an immediate: `%name` is a label reference, otherwise a number.
+fn parse_imm_or_label<'a>(s: &'a str) -> Result<Imm<'a>> {
+    if let Some(name) = s.strip_prefix('%') {
+        eyre::ensure!(!name.is_empty(), "empty label reference");
+        Ok(Imm::Label(name))
+    } else {
+        let n: U256 = s.parse().map_err(|_| eyre::eyre!("invalid immediate: {s:?}"))?;
+        Ok(Imm::Number(n))
     }
 }
 
@@ -212,9 +225,8 @@ fn layout_and_emit(items: &[Item<'_>]) -> Result<Vec<u8>> {
             if let Item::Inst(inst) = &items[i]
                 && let Some(Imm::Label(name)) = &inst.imm
             {
-                let target_pc = *label_pcs
-                    .get(name)
-                    .ok_or_else(|| eyre::eyre!("undefined label: {name:?}"))?;
+                let target_pc =
+                    *label_pcs.get(name).ok_or_else(|| eyre::eyre!("undefined label: {name:?}"))?;
                 let needed = min_push_width(target_pc);
                 if needed > auto_widths[i] {
                     auto_widths[i] = needed;
@@ -332,14 +344,14 @@ mod tests {
 
     #[test]
     fn label_forward_ref() {
-        // PUSH target / JUMP / JUMPDEST / STOP
-        // target: is at pc=3 (PUSH1 takes 2 bytes, JUMP takes 1).
         let code = parse_asm(
-            "PUSH target
-             JUMP
-             target:
-             JUMPDEST
-             STOP",
+            "
+            PUSH %target
+            JUMP
+        target:
+            JUMPDEST
+            STOP
+        ",
         )
         .unwrap();
         assert_eq!(code, vec![op::PUSH1, 3, op::JUMP, op::JUMPDEST, op::STOP]);
@@ -347,26 +359,28 @@ mod tests {
 
     #[test]
     fn label_backward_ref() {
-        // target: JUMPDEST / PUSH target / JUMP
         let code = parse_asm(
-            "target:
-             JUMPDEST
-             PUSH target
-             JUMP",
+            "
+        target:
+            JUMPDEST
+            PUSH %target
+            JUMP
+        ",
         )
         .unwrap();
-        // target is at pc=0.
         assert_eq!(code, vec![op::JUMPDEST, op::PUSH0, op::JUMP]);
     }
 
     #[test]
     fn label_fixed_width() {
         let code = parse_asm(
-            "PUSH1 target
-             JUMP
-             target:
-             JUMPDEST
-             STOP",
+            "
+            PUSH1 %target
+            JUMP
+        target:
+            JUMPDEST
+            STOP
+        ",
         )
         .unwrap();
         assert_eq!(code, vec![op::PUSH1, 3, op::JUMP, op::JUMPDEST, op::STOP]);
@@ -375,25 +389,31 @@ mod tests {
     #[test]
     fn multiple_labels_same_pc() {
         let code = parse_asm(
-            "a:
-             b:
-             JUMPDEST
-             PUSH a
-             PUSH b
-             STOP",
+            "
+        a:
+        b:
+            JUMPDEST
+            PUSH %a
+            PUSH %b
+            STOP
+        ",
         )
         .unwrap();
-        // Both labels at pc=0.
         assert_eq!(code, vec![op::JUMPDEST, op::PUSH0, op::PUSH0, op::STOP]);
     }
 
     #[test]
     fn undefined_label() {
-        assert!(parse_asm("PUSH missing JUMP").is_err());
+        assert!(parse_asm("PUSH %missing JUMP").is_err());
     }
 
     #[test]
     fn empty_label() {
         assert!(parse_asm(": STOP").is_err());
+    }
+
+    #[test]
+    fn empty_label_ref() {
+        assert!(parse_asm("PUSH % JUMP").is_err());
     }
 }

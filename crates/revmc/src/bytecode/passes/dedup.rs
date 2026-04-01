@@ -140,22 +140,24 @@ mod tests {
             "
             PUSH0
             CALLDATALOAD
-            PUSH bb2
+            PUSH %bb2
             JUMPI
             ; revert A
             PUSH1 0x00
             DUP1
             REVERT
-            bb2: JUMPDEST
+        bb2:
+            JUMPDEST
             PUSH0
             CALLDATALOAD
-            PUSH bb4
+            PUSH %bb4
             JUMPI
             ; revert B (identical to A)
             PUSH1 0x00
             DUP1
             REVERT
-            bb4: JUMPDEST
+        bb4:
+            JUMPDEST
             STOP
         ",
             AnalysisConfig::DEDUP,
@@ -178,13 +180,14 @@ mod tests {
             "
             PUSH0
             CALLDATALOAD
-            PUSH target
+            PUSH %target
             JUMPI
             ; revert with 0
             PUSH1 0x00
             DUP1
             REVERT
-            target: JUMPDEST
+        target:
+            JUMPDEST
             STOP
         ",
             AnalysisConfig::DEDUP,
@@ -201,31 +204,34 @@ mod tests {
             "
             PUSH0
             CALLDATALOAD
-            PUSH bb2
+            PUSH %bb2
             JUMPI
             ; revert A
             PUSH1 0x00
             DUP1
             REVERT
-            bb2: JUMPDEST
+        bb2:
+            JUMPDEST
             PUSH0
             CALLDATALOAD
-            PUSH bb4
+            PUSH %bb4
             JUMPI
             ; revert B
             PUSH1 0x00
             DUP1
             REVERT
-            bb4: JUMPDEST
+        bb4:
+            JUMPDEST
             PUSH0
             CALLDATALOAD
-            PUSH bb6
+            PUSH %bb6
             JUMPI
             ; revert C
             PUSH1 0x00
             DUP1
             REVERT
-            bb6: JUMPDEST
+        bb6:
+            JUMPDEST
             STOP
         ",
             AnalysisConfig::DEDUP,
@@ -245,22 +251,24 @@ mod tests {
             "
             PUSH0
             CALLDATALOAD
-            PUSH bb2
+            PUSH %bb2
             JUMPI
             ; PC + revert A
             PC
             PUSH1 0x00
             REVERT
-            bb2: JUMPDEST
+        bb2:
+            JUMPDEST
             PUSH0
             CALLDATALOAD
-            PUSH bb4
+            PUSH %bb4
             JUMPI
             ; PC + revert B (same bytes, different PC value)
             PC
             PUSH1 0x00
             REVERT
-            bb4: JUMPDEST
+        bb4:
+            JUMPDEST
             STOP
         ",
             AnalysisConfig::DEDUP,

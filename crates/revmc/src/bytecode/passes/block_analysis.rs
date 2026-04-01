@@ -1055,20 +1055,23 @@ pub(crate) mod tests {
         #[rustfmt::skip]
         let bytecode = analyze_asm("
             ; Call site 1.
-            PUSH ret1           ; push return address
-            PUSH func           ; push function entry
+            PUSH %ret1          ; push return address
+            PUSH %func          ; push function entry
             JUMP                ; call function (static: PUSH+JUMP)
-            ret1: JUMPDEST
+        ret1:
+            JUMPDEST
             POP                 ; consume function result
             ; Call site 2.
-            PUSH ret2           ; push return address
-            PUSH func           ; push function entry
+            PUSH %ret2          ; push return address
+            PUSH %func          ; push function entry
             JUMP                ; call function (static: PUSH+JUMP)
-            ret2: JUMPDEST
+        ret2:
+            JUMPDEST
             POP                 ; consume function result
             STOP
             ; Internal function.
-            func: JUMPDEST
+        func:
+            JUMPDEST
             PUSH1 0x42          ; push a result
             SWAP1               ; swap result and return address
             JUMP                ; return (dynamic)
@@ -1116,16 +1119,18 @@ pub(crate) mod tests {
         #[rustfmt::skip]
         let bytecode = analyze_asm("
             ; Call site 1.
-            PUSH ret1               ; pc=0
-            PUSH fn_entry           ; pc=2
+            PUSH %ret1              ; pc=0
+            PUSH %fn_entry          ; pc=2
             JUMP                    ; pc=4: -> fn_entry
-            ret1: JUMPDEST          ; pc=5
+        ret1:
+            JUMPDEST                ; pc=5
             POP                     ; pc=6: drop result
             ; Call site 2.
-            PUSH ret2               ; pc=7
-            PUSH fn_entry           ; pc=9
+            PUSH %ret2              ; pc=7
+            PUSH %fn_entry          ; pc=9
             JUMP                    ; pc=11: -> fn_entry
-            ret2: JUMPDEST          ; pc=12
+        ret2:
+            JUMPDEST                ; pc=12
             POP                     ; pc=13: drop result
             ; Opaque jump: loads target from memory (Top).
             PUSH0                   ; pc=14
@@ -1135,7 +1140,8 @@ pub(crate) mod tests {
             INVALID                 ; pc=18
             INVALID                 ; pc=19
             ; Internal function: pushes result, swaps with return addr, jumps back.
-            fn_entry: JUMPDEST      ; pc=20
+        fn_entry:
+            JUMPDEST                ; pc=20
             PUSH1 0x42              ; pc=21: result
             SWAP1                   ; pc=23: swap result and return addr
             JUMP                    ; pc=24: return (UNSOUND: resolved to Multi)
@@ -1171,30 +1177,34 @@ pub(crate) mod tests {
         #[rustfmt::skip]
         let bytecode = analyze_asm("
             ; Call site 1: direct call to inner.
-            PUSH ret1               ; pc=0
-            PUSH inner              ; pc=2
+            PUSH %ret1              ; pc=0
+            PUSH %inner             ; pc=2
             JUMP                    ; pc=4: -> inner
-            ret1: JUMPDEST          ; pc=5
+        ret1:
+            JUMPDEST                ; pc=5
             POP                     ; pc=6: drop result
             ; Call site 2: call through wrapper.
-            PUSH ret2               ; pc=7
+            PUSH %ret2              ; pc=7
             PUSH1 0x42              ; pc=9: an argument
-            PUSH wrapper            ; pc=11
+            PUSH %wrapper           ; pc=11
             JUMP                    ; pc=13: -> wrapper
-            ret2: JUMPDEST          ; pc=14
+        ret2:
+            JUMPDEST                ; pc=14
             POP                     ; pc=15: drop result
             POP                     ; pc=16: drop arg
             STOP                    ; pc=17
             INVALID                 ; pc=18
             ; Wrapper function: calls inner, then returns to caller.
             ; Entry stack: [outer_ret, arg]
-            wrapper: JUMPDEST       ; pc=19
-            PUSH ret_w              ; pc=20: push return addr for inner
-            PUSH inner              ; pc=22: push inner entry
+        wrapper:
+            JUMPDEST                ; pc=19
+            PUSH %ret_w             ; pc=20: push return addr for inner
+            PUSH %inner             ; pc=22: push inner entry
             JUMP                    ; pc=24: -> inner
             INVALID                 ; pc=25
             INVALID                 ; pc=26
-            ret_w: JUMPDEST         ; pc=27: inner returned here
+        ret_w:
+            JUMPDEST                ; pc=27: inner returned here
             ; Stack: [outer_ret, arg, inner_result]
             POP                     ; pc=28: drop inner_result
             POP                     ; pc=29: drop arg
@@ -1202,7 +1212,8 @@ pub(crate) mod tests {
             INVALID                 ; pc=31
             ; Inner function: pushes a result and returns.
             ; Entry stack: [..., ret_addr]
-            inner: JUMPDEST         ; pc=32
+        inner:
+            JUMPDEST                ; pc=32
             PUSH1 0x42              ; pc=33: push result
             SWAP1                   ; pc=35
             JUMP                    ; pc=36: jump to ret_addr
@@ -1241,26 +1252,30 @@ mod tests_edge_cases {
         #[rustfmt::skip]
         let bytecode = analyze_asm("
             ; Call site 1.
-            PUSH ret1
-            PUSH func
+            PUSH %ret1
+            PUSH %func
             JUMP
-            ret1: JUMPDEST
+        ret1:
+            JUMPDEST
             POP
             ; Call site 2.
-            PUSH ret2
-            PUSH func
+            PUSH %ret2
+            PUSH %func
             JUMP
-            ret2: JUMPDEST
+        ret2:
+            JUMPDEST
             POP
             ; Call site 3.
-            PUSH ret3
-            PUSH func
+            PUSH %ret3
+            PUSH %func
             JUMP
-            ret3: JUMPDEST
+        ret3:
+            JUMPDEST
             POP
             STOP
             ; Internal function.
-            func: JUMPDEST
+        func:
+            JUMPDEST
             PUSH1 0x42
             SWAP1
             JUMP
@@ -1310,10 +1325,11 @@ mod tests_edge_cases {
         #[rustfmt::skip]
         let bytecode = analyze_asm("
             PUSH1 0x01              ; inst 0: condition = 1 (always taken)
-            PUSH target             ; inst 1: target
+            PUSH %target            ; inst 1: target
             JUMPI                   ; inst 2: static JUMPI
             STOP                    ; inst 3: fallthrough
-            target: JUMPDEST        ; inst 4: target
+        target:
+            JUMPDEST                ; inst 4: target
             STOP                    ; inst 5
         ");
         eprintln!("{bytecode}");
@@ -1334,9 +1350,10 @@ mod tests_edge_cases {
         let bytecode = analyze_asm("
             PUSH1 0x42              ; pc=0: initial value
             PUSH1 0x01              ; pc=2: another
-            loop_header: JUMPDEST   ; loop header (bb1)
+        loop_header:
+            JUMPDEST                ; loop header (bb1)
             PUSH1 0x01              ; push each iteration
-            PUSH loop_header        ; loop target
+            PUSH %loop_header       ; loop target
             JUMP                    ; back-edge
         ");
         eprintln!("{bytecode}");
@@ -1351,11 +1368,12 @@ mod tests_edge_cases {
     fn single_inst_block_jump_target() {
         #[rustfmt::skip]
         let bytecode = analyze_asm("
-            PUSH target             ; pc=0
+            PUSH %target            ; pc=0
             JUMP                    ; static jump
             INVALID
             INVALID
-            target: JUMPDEST        ; single-inst block
+        target:
+            JUMPDEST                ; single-inst block
             STOP
         ");
         eprintln!("{bytecode}");
@@ -1370,10 +1388,11 @@ mod tests_edge_cases {
         #[rustfmt::skip]
         let bytecode = analyze_asm("
             PUSH1 0xFF              ; pc=0: push invalid target
-            PUSH func               ; pc=2: push function entry
+            PUSH %func              ; pc=2: push function entry
             JUMP                    ; pc=4: -> func
             ; Function: swap and jump to the caller-provided target.
-            func: JUMPDEST
+        func:
+            JUMPDEST
             JUMP                    ; jump to 0xFF (invalid)
         ");
         eprintln!("{bytecode}");
@@ -1392,17 +1411,19 @@ mod tests_edge_cases {
         let bytecode = analyze_asm("
             PUSH1 0x42              ; push same const on both paths
             PUSH0                   ; condition (always false)
-            PUSH then_pc            ; then target
+            PUSH %then_pc           ; then target
             JUMPI                   ; branch
             ; Else: push same const.
-            PUSH merge
+            PUSH %merge
             JUMP                    ; -> merge
             ; Then:
-            then_pc: JUMPDEST
-            PUSH merge
+        then_pc:
+            JUMPDEST
+            PUSH %merge
             JUMP                    ; -> merge
             ; Merge:
-            merge: JUMPDEST
+        merge:
+            JUMPDEST
             PUSH0
             MSTORE                  ; MSTORE(0, 0x42)
             STOP
@@ -1421,20 +1442,22 @@ mod tests_edge_cases {
         #[rustfmt::skip]
         let bytecode = analyze_asm("
             PUSH0                   ; condition
-            PUSH then_pc
+            PUSH %then_pc
             JUMPI                   ; branch
             ; Else: push 0xAA.
             PUSH1 0xAA
-            PUSH merge
+            PUSH %merge
             JUMP                    ; -> merge
             INVALID
             ; Then: push 0xBB.
-            then_pc: JUMPDEST
+        then_pc:
+            JUMPDEST
             PUSH1 0xBB
-            PUSH merge
+            PUSH %merge
             JUMP                    ; -> merge
             ; Merge:
-            merge: JUMPDEST
+        merge:
+            JUMPDEST
             PUSH0
             MSTORE                  ; MSTORE(0, ???)
             STOP
