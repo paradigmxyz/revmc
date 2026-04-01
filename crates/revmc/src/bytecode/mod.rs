@@ -112,9 +112,12 @@ pub struct Bytecode<'a> {
 }
 
 impl<'a> Bytecode<'a> {
-    #[instrument(name = "new_bytecode", level = "debug", skip_all)]
     pub(crate) fn new(code: impl Into<Cow<'a, [u8]>>, spec_id: SpecId) -> Self {
-        let code = code.into();
+        Self::new_mono(code.into(), spec_id)
+    }
+
+    #[instrument(name = "Bytecode::new", level = "debug", skip_all)]
+    fn new_mono(code: Cow<'a, [u8]>, spec_id: SpecId) -> Self {
         let mut insts = IndexVec::with_capacity(code.len() + 8);
         let mut jumpdests = BitVec::repeat(false, code.len());
         let mut pc_to_inst = FxHashMap::with_capacity_and_hasher(code.len(), Default::default());
@@ -153,7 +156,13 @@ impl<'a> Bytecode<'a> {
             });
         }
 
-        let mut bytecode = Self {
+        // Pad code to ensure there is at least one diverging instruction.
+        if insts.last().is_none_or(|last| last.can_fall_through()) {
+            trace!("adding STOP padding");
+            insts.push(InstData::new(op::STOP));
+        }
+
+        Self {
             code,
             insts,
             jumpdests,
@@ -168,15 +177,7 @@ impl<'a> Bytecode<'a> {
             redirects: FxHashMap::default(),
             cfg: Cfg::default(),
             config: AnalysisConfig::default(),
-        };
-
-        // Pad code to ensure there is at least one diverging instruction.
-        if bytecode.insts.last().is_none_or(|last| last.can_fall_through()) {
-            trace!("adding STOP padding");
-            bytecode.insts.push(InstData::new(op::STOP));
         }
-
-        bytecode
     }
 
     /// Takes the instruction-to-line map built during formatting.
