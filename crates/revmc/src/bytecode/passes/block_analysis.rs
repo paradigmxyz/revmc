@@ -51,7 +51,7 @@ crate::bytecode::impl_index_display!(ConstSetIdx, "{}");
 pub(crate) type OperandSnapshot = SmallVec<[AbsValue; 4]>;
 
 /// Bundles input and output snapshots for recording during abstract interpretation.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct Snapshots {
     /// Pre-instruction input operand snapshots.
     pub(crate) inputs: IndexVec<Inst, OperandSnapshot>,
@@ -372,8 +372,11 @@ impl Bytecode<'_> {
     /// Also computes and stores per-instruction stack snapshots for constant propagation.
     #[instrument(name = "ba", level = "debug", skip_all)]
     pub(crate) fn block_analysis(&mut self) {
+        // Save local snapshots so that suspect-block invalidation can restore
+        // block-local constants instead of clearing to empty.
+        let local_snapshots = self.snapshots.clone();
         self.init_snapshots();
-        let (resolved, count) = self.run_abstract_interp();
+        let (resolved, count) = self.run_abstract_interp(&local_snapshots);
 
         if count > 0 {
             let newly_resolved = self.commit_resolved_jumps(&resolved);
@@ -571,7 +574,10 @@ impl Bytecode<'_> {
     ///
     /// Returns a list of (jump_inst, resolved_target) pairs and the count of resolvable jumps.
     /// Stack snapshots are recorded into `self.snapshots` during the fixpoint.
-    fn run_abstract_interp(&mut self) -> (Vec<(Inst, JumpTarget)>, usize) {
+    fn run_abstract_interp(
+        &mut self,
+        local_snapshots: &Snapshots,
+    ) -> (Vec<(Inst, JumpTarget)>, usize) {
         let num_blocks = self.cfg.blocks.len();
 
         // Initialize block states. Entry block starts with an empty stack.
@@ -614,7 +620,12 @@ impl Bytecode<'_> {
 
         // Invalidate resolutions that may be unsound due to incomplete analysis.
         if has_top_jump {
-            self.invalidate_suspect_jumps(&mut jump_targets, &block_states, &discovered_edges);
+            self.invalidate_suspect_jumps(
+                &mut jump_targets,
+                &block_states,
+                &discovered_edges,
+                local_snapshots,
+            );
         }
 
         let count = jump_targets
@@ -708,6 +719,7 @@ impl Bytecode<'_> {
         jump_targets: &mut [(Inst, JumpTarget)],
         block_states: &IndexVec<Block, BlockState>,
         discovered_edges: &IndexVec<Block, SmallVec<[Block; 4]>>,
+        local_snapshots: &Snapshots,
     ) {
         let num_blocks = self.cfg.blocks.len();
 
@@ -750,16 +762,17 @@ impl Bytecode<'_> {
             }
         }
 
-        // Clear operand snapshots in suspect blocks: the fixpoint may have recorded
+        // Restore block-local snapshots in suspect blocks: the fixpoint may have recorded
         // precise values that are unsound because undiscovered edges (from Top jumps)
-        // could bring in different stack states.
+        // could bring in different stack states. However, block-local constants (computed
+        // by block_analysis_local without depending on the incoming stack) are always valid.
         for bid in self.cfg.blocks.indices() {
             if !suspect[bid.index()] {
                 continue;
             }
             for inst in self.cfg.blocks[bid].insts() {
-                self.snapshots.inputs[inst].clear();
-                self.snapshots.outputs[inst] = None;
+                self.snapshots.inputs[inst].clone_from(&local_snapshots.inputs[inst]);
+                self.snapshots.outputs[inst] = local_snapshots.outputs[inst];
             }
         }
     }
@@ -1940,6 +1953,161 @@ mod tests_edge_cases {
             .map(|(i, _)| i)
             .expect("LT at pc=416 not found");
         assert_eq!(bytecode.const_operand(lt_inst, 0), None);
+    }
+
+    /// Suspect-block invalidation must preserve block-local constants.
+    ///
+    /// When unresolved Top jumps exist, every reachable JUMPDEST block becomes
+    /// suspect. Previously, invalidation cleared ALL snapshots in suspect blocks,
+    /// losing block-local constants that don't depend on the incoming stack.
+    /// Now, invalidation restores snapshots from the block-local pass.
+    ///
+    /// The target block must be reachable via both a static edge (so the fixpoint
+    /// marks it `Known` and it becomes suspect) AND an opaque dynamic jump (so
+    /// `has_top_jump` is true and invalidation runs).
+    #[test]
+    fn suspect_block_preserves_local_const_operand() {
+        #[rustfmt::skip]
+        let bytecode = analyze_asm("
+            ; Static path to target (makes it Known in the fixpoint).
+            PUSH %target        ; inst 0
+            JUMP                ; inst 1: static jump to target
+            ; Opaque dynamic jump — triggers suspect invalidation.
+            JUMPDEST            ; inst 2
+            PUSH0               ; inst 3
+            CALLDATALOAD        ; inst 4: Top
+            JUMP                ; inst 5: unresolvable
+        target:
+            JUMPDEST            ; inst 6: reachable (Known) + JUMPDEST → suspect
+            PUSH1 0x03          ; inst 7
+            PUSH1 0x04          ; inst 8
+            ADD                 ; inst 9: 3 + 4 = 7, purely block-local
+            PUSH0               ; inst 10
+            MSTORE              ; inst 11
+            STOP                ; inst 12
+        ");
+        assert!(bytecode.has_dynamic_jumps);
+        // Block-local PUSH constants must survive invalidation.
+        assert_eq!(bytecode.const_operand(Inst::from_usize(9), 0), Some(U256::from(4)));
+        assert_eq!(bytecode.const_operand(Inst::from_usize(9), 1), Some(U256::from(3)));
+        // Block-local const-folded output must survive.
+        assert_eq!(bytecode.const_output(Inst::from_usize(9)), Some(U256::from(7)));
+        // MSTORE operands: TOS = 0, second = folded result (7).
+        assert_eq!(bytecode.const_operand(Inst::from_usize(11), 0), Some(U256::ZERO));
+        assert_eq!(bytecode.const_operand(Inst::from_usize(11), 1), Some(U256::from(7)));
+    }
+
+    /// Same as above but for const_output on a PUSH in a suspect block.
+    #[test]
+    fn suspect_block_preserves_local_const_output() {
+        #[rustfmt::skip]
+        let bytecode = analyze_asm("
+            PUSH %target        ; inst 0
+            JUMP                ; inst 1: static jump
+            JUMPDEST            ; inst 2
+            PUSH0               ; inst 3
+            MLOAD               ; inst 4: Top
+            JUMP                ; inst 5: unresolvable
+        target:
+            JUMPDEST            ; inst 6: suspect
+            PUSH1 0xFF          ; inst 7: block-local constant
+            PUSH0               ; inst 8
+            MSTORE              ; inst 9
+            STOP                ; inst 10
+        ");
+        assert!(bytecode.has_dynamic_jumps);
+        assert_eq!(bytecode.const_output(Inst::from_usize(7)), Some(U256::from(0xFF)));
+        assert_eq!(bytecode.const_output(Inst::from_usize(8)), Some(U256::ZERO));
+    }
+
+    /// Fallthrough block after a JUMPI in a suspect JUMPDEST block becomes
+    /// suspect via forward propagation. Block-local constants in the fallthrough
+    /// must still be preserved.
+    #[test]
+    fn suspect_jumpi_fallthrough_preserves_consts() {
+        #[rustfmt::skip]
+        let bytecode = analyze_asm("
+            ; Static path to target (makes it Known → suspect).
+            PUSH 0x69           ; inst 0: random value
+            CALLDATASIZE        ; inst 1: condition
+            PUSH %target        ; inst 2
+            JUMPI               ; inst 3
+            ; Fallthrough block
+            PUSH1 0x0A          ; inst 4
+            PUSH1 0x0B          ; inst 5
+            ADD                 ; inst 6: 0x0A + 0x0B = 0x15, block-local
+            PUSH0               ; inst 7
+            MSTORE              ; inst 8
+            MLOAD               ; inst 9
+            PUSH 1              ; inst 10
+            MSTORE              ; inst 11
+            STOP                ; inst 12
+            ; Opaque dynamic jump — triggers suspect invalidation.
+            JUMPDEST            ; inst 13
+            PUSH0               ; inst 14
+            CALLDATALOAD        ; inst 15: Top
+            JUMP                ; inst 16: unresolvable
+        target:
+            JUMPDEST            ; inst 17: suspect seed
+            PUSH1 0x42          ; inst 18
+            STOP                ; inst 19
+        ");
+        assert!(bytecode.has_dynamic_jumps);
+        // Fallthrough block: block-local constants must survive.
+        // ADD
+        assert_eq!(bytecode.const_operand(Inst::from_usize(6), 0), Some(U256::from(0x0B)));
+        assert_eq!(bytecode.const_operand(Inst::from_usize(6), 1), Some(U256::from(0x0A)));
+        assert_eq!(bytecode.const_output(Inst::from_usize(6)), Some(U256::from(0x15)));
+        // MSTORE 1
+        assert_eq!(bytecode.const_operand(Inst::from_usize(8), 0), Some(U256::from(0)));
+        assert_eq!(bytecode.const_operand(Inst::from_usize(8), 1), Some(U256::from(0x15)));
+        // MLOAD: the first block is its only predecessor so this can be resolved even if there are
+        // dynamic jumps in the contract, because there is no jumpdest (fallthrough).
+        assert_eq!(bytecode.const_operand(Inst::from_usize(9), 0), Some(U256::from(0x69)));
+
+        // Target block: block-local PUSH must survive.
+        assert_eq!(bytecode.const_output(Inst::from_usize(18)), Some(U256::from(0x42)));
+    }
+
+    /// JUMPI in a suspect JUMPDEST block: the fallthrough block inherits
+    /// suspect status via forward propagation. Incoming stack values from the
+    /// predecessor become Top (block-local pass doesn't see cross-block flow),
+    /// while block-local PUSHes in the fallthrough are preserved.
+    #[test]
+    fn suspect_jumpi_fallthrough_mixed_operands() {
+        #[rustfmt::skip]
+        let bytecode = analyze_asm("
+            ; Jump into the suspect JUMPDEST block with a value on the stack.
+            PUSH1 0xAA          ; inst 0: will be on stack at entry to target
+            PUSH %target        ; inst 1
+            JUMP                ; inst 2: static jump
+            ; Opaque dynamic jump — triggers suspect invalidation.
+            JUMPDEST            ; inst 3
+            PUSH0               ; inst 4
+            CALLDATALOAD        ; inst 5: Top
+            JUMP                ; inst 6: unresolvable
+        target:
+            ; Suspect JUMPDEST block with JUMPI.
+            ; Entry stack: [0xAA] (from pred, but unknown to block-local pass).
+            JUMPDEST            ; inst 7: suspect seed
+            PUSH1 0x01          ; inst 8: condition
+            PUSH %after         ; inst 9
+            JUMPI               ; inst 10: pops condition+target, [0xAA] remains
+            STOP                ; inst 11
+        after:
+            ; Fallthrough/target of JUMPI — suspect via propagation.
+            ; Entry stack: [0xAA] (inherited, but Top in block-local pass).
+            JUMPDEST            ; inst 12
+            PUSH1 0xBB          ; inst 13: block-local
+            ADD                 ; inst 14: 0xAA + 0xBB — depth 1 is incoming
+            STOP                ; inst 15
+        ");
+        assert!(bytecode.has_dynamic_jumps);
+        // ADD at inst 14: TOS (depth 0) = 0xBB (block-local), depth 1 = Top
+        // (incoming from suspect predecessor, block-local pass saw it as Top).
+        assert_eq!(bytecode.const_operand(Inst::from_usize(14), 0), Some(U256::from(0xBB)));
+        assert_eq!(bytecode.const_operand(Inst::from_usize(14), 1), None);
+        assert_eq!(bytecode.const_output(Inst::from_usize(14)), None);
     }
 
     /// Bytecode that is just STOP — minimal edge case.
