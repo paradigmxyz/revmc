@@ -270,6 +270,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let return_block = bcx.create_block("return");
 
         let section_start_sp = stack.addr(&mut bcx);
+        let zero = bcx.iconst(isize_type, 0);
         let mut fx = FunctionCx {
             config,
 
@@ -284,9 +285,9 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             gas_remaining,
             input,
             ecx,
-            len_before: bcx.iconst(isize_type, 0),
+            len_before: zero,
             len_offset: 0,
-            section_start_len: bcx.iconst(isize_type, 0),
+            section_start_len: zero,
             section_start_sp,
             section_len_offset: 0,
             bcx,
