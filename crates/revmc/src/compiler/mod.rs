@@ -271,12 +271,12 @@ impl<B: Backend> EvmCompiler<B> {
     ///
     /// If this is set to `true`, the stack length must be passed in the arguments.
     ///
-    /// This is useful to inspect the stack length after the function has been executed, but it does
+    /// This is useful to inspect the stack after the function has been executed, but it does
     /// incur a performance penalty as the length will be stored at all return sites.
     ///
     /// Defaults to `false`.
-    pub fn inspect_stack_length(&mut self, yes: bool) {
-        self.config.inspect_stack_length = yes;
+    pub fn inspect_stack(&mut self, yes: bool) {
+        self.config.inspect_stack = yes;
     }
 
     /// Sets whether to enable stack bound checks.

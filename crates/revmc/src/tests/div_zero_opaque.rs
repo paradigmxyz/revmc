@@ -58,7 +58,7 @@ fn run_opaque_zero_div_test<B: Backend>(
     let code = bytecode_binop_opaque(opcode, a, U256::ZERO);
 
     unsafe { compiler.clear() }.unwrap();
-    compiler.inspect_stack_length(true);
+    compiler.inspect_stack(true);
     let f = unsafe { compiler.jit(name, &code, DEF_SPEC) }.unwrap();
 
     with_evm_context(&code, DEF_SPEC, |ecx, stack, stack_len| {

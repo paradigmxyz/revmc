@@ -250,7 +250,7 @@ impl EvmCompilerFn {
     ///
     /// Arguments:
     /// - `stack`: Pointer to the stack. Must be `Some` if `local_stack` is set to `false`.
-    /// - `stack_len`: Pointer to the stack length. Must be `Some` if `inspect_stack_length` is set
+    /// - `stack_len`: Pointer to the stack length. Must be `Some` if `inspect_stack` is set
     ///   to `true`.
     /// - `ecx`: The context object.
     ///
