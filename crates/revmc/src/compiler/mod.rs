@@ -264,15 +264,12 @@ impl<B: Backend> EvmCompiler<B> {
         self.config.frame_pointers = yes;
     }
 
-    /// Sets whether to treat the stack length as observable outside the function.
-    ///
-    /// This also implies that the length is loaded in the beginning of the function, meaning
-    /// that a function can be executed with an initial stack.
+    /// Sets whether to treat the stack as observable outside the function.
     ///
     /// If this is set to `true`, the stack length must be passed in the arguments.
     ///
     /// This is useful to inspect the stack after the function has been executed, but it does
-    /// incur a performance penalty as the length will be stored at all return sites.
+    /// incur a performance penalty as the stack will be stored at all return sites.
     ///
     /// Defaults to `false`.
     pub fn inspect_stack(&mut self, yes: bool) {

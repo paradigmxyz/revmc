@@ -95,7 +95,7 @@ pub(crate) struct RunArgs {
     no_gas: bool,
     #[arg(long)]
     no_len_checks: bool,
-    /// Inspect the stack length after the function has been executed.
+    /// Inspect the stack after the function has been executed.
     #[arg(long)]
     inspect_stack: bool,
     #[arg(long, default_value = "1000000000")]
