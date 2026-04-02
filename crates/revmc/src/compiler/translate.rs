@@ -88,6 +88,17 @@ pub(super) struct FunctionCx<'a, B: Backend> {
     /// Stack length offset for the current instruction, used for push/pop.
     len_offset: i8,
 
+    /// Stack length at the start of the current stack section, loaded once from the alloca.
+    /// All intra-section `len_before` values are derived from this + `section_len_offset`.
+    section_start_len: B::Value,
+    /// Stack pointer at the start of the current stack section (`&stack[section_start_len]`).
+    /// All intra-section stack pointer GEPs are derived from this base to preserve pointer
+    /// provenance, which lets LLVM prove aliasing and fold redundant operations.
+    section_start_sp: B::Value,
+    /// Cumulative stack diff from the section start to the current instruction (compile-time).
+    /// Updated after the opcode handler so that push/pop/sp helpers see the pre-diff value.
+    section_len_offset: i32,
+
     /// The bytecode being translated.
     bytecode: &'a Bytecode<'a>,
     /// Instruction index to 1-based line number in bytecode.txt (for debug info).
@@ -258,6 +269,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let failure_block = bcx.create_block("failure");
         let return_block = bcx.create_block("return");
 
+        let section_start_sp = stack.addr(&mut bcx);
+        let zero = bcx.iconst(isize_type, 0);
         let mut fx = FunctionCx {
             config,
 
@@ -272,8 +285,11 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             gas_remaining,
             input,
             ecx,
-            len_before: bcx.iconst(isize_type, 0),
+            len_before: zero,
             len_offset: 0,
+            section_start_len: zero,
+            section_start_sp,
+            section_len_offset: 0,
             bcx,
 
             bytecode,
@@ -583,9 +599,20 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             goto_return!("skipped");
         }
 
-        // Reset the stack length offset for this instruction.
+        // Compute len_before for this instruction.
+        // At section heads: load from the alloca once and reset the section offset.
+        // Within a section: derive from section_start_len + compile-time offset.
         self.len_offset = 0;
-        self.len_before = self.stack_len.load(&mut self.bcx, "stack_len");
+        if data.is_stack_section_head() {
+            self.section_start_len = self.stack_len.load(&mut self.bcx, "stack_len");
+            self.section_start_sp = self.sp_at(self.section_start_len);
+            self.section_len_offset = 0;
+        }
+        self.len_before = if self.section_len_offset == 0 {
+            self.section_start_len
+        } else {
+            self.bcx.iadd_imm(self.section_start_len, self.section_len_offset as i64)
+        };
 
         // Check stack length for the current section.
         if self.config.stack_bound_checks {
@@ -634,18 +661,12 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         }
 
         // Update the stack length for this instruction.
+        // Note: `section_len_offset` is updated at the end of the function, after the opcode
+        // handler, so that push/pop/sp helpers see the pre-diff offset during codegen.
         {
-            let (inp, out) = data.stack_io();
-            let diff = out as i64 - inp as i64;
+            let diff = effective_stack_diff(data);
             if diff != 0 {
-                let mut diff = diff;
-                // HACK: For now all opcodes that suspend (minus the test one, which does not reach
-                // here) return exactly one value. This value is pushed onto the stack by the
-                // caller, so we don't account for it here.
-                if data.may_suspend() {
-                    diff -= 1;
-                }
-                let len_changed = self.bcx.iadd_imm(self.len_before, diff);
+                let len_changed = self.bcx.iadd_imm(self.len_before, diff as i64);
                 self.stack_len.store(&mut self.bcx, len_changed);
             }
         }
@@ -898,8 +919,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 let _ = self.call_builtin(Builtin::BlobHash, &[self.ecx, sp]);
             }
             op::BLOBBASEFEE => {
-                let len = self.len_before();
-                let slot = self.sp_at(len);
+                let slot = self.sp_at_top();
                 let _ = self.call_builtin(Builtin::BlobBaseFee, &[self.ecx, slot]);
             }
 
@@ -1094,6 +1114,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             _ => unreachable!("unimplemented instruction: {data:?}"),
         }
 
+        self.section_len_offset += effective_stack_diff(data);
         goto_return!("normal exit");
     }
 
@@ -1104,15 +1125,10 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
     /// Pushes 256-bit values onto the stack.
     fn pushn(&mut self, values: &[B::Value]) {
-        let len_start = self.len_before();
         for &value in values {
-            let len = if self.len_offset != 0 {
-                self.bcx.iadd_imm(len_start, self.len_offset as i64)
-            } else {
-                len_start
-            };
+            let offset = self.section_len_offset as i64 + self.len_offset as i64;
             self.len_offset += 1;
-            let sp = self.sp_at(len);
+            let sp = self.sp_from_section(offset);
             self.bcx.store(value, sp);
         }
     }
@@ -1128,15 +1144,10 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     fn popn<const N: usize>(&mut self) -> [B::Value; N] {
         debug_assert_ne!(N, 0);
 
-        let len_start = self.len_before();
         std::array::from_fn(|i| {
             self.len_offset -= 1;
-            let len = if self.len_offset != 0 {
-                self.bcx.iadd_imm(len_start, self.len_offset as i64)
-            } else {
-                len_start
-            };
-            let sp = self.sp_at(len);
+            let offset = self.section_len_offset as i64 + self.len_offset as i64;
+            let sp = self.sp_from_section(offset);
             let name = b'a' + i as u8;
             self.load_word(sp, std::str::from_utf8(&[name]).unwrap())
         })
@@ -1146,8 +1157,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     /// `n` cannot be `0`.
     fn dup(&mut self, n: usize) {
         debug_assert_ne!(n, 0);
-        let len = self.len_before();
-        let sp = self.sp_from_top(len, n);
+        let sp = self.sp_from_top(n);
         let name = if self.config.debug { &format!("dup{n}") } else { "" };
         let value = self.load_word(sp, name);
         self.push(value);
@@ -1164,12 +1174,11 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     /// `m` cannot be `0`.
     fn exchange(&mut self, n: usize, m: usize) {
         debug_assert_ne!(m, 0);
-        let len = self.len_before();
         // Load a.
-        let a_sp = self.sp_from_top(len, n + 1);
+        let a_sp = self.sp_from_top(n + 1);
         let a = self.load_word(a_sp, "swap.a");
         // Load b.
-        let b_sp = self.sp_from_top(len, n + m + 1);
+        let b_sp = self.sp_from_top(n + m + 1);
         let b = self.load_word(b_sp, "swap.b");
         // Store.
         self.bcx.store(a, b_sp);
@@ -1233,11 +1242,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         self.bcx.load(self.word_type, ptr, name)
     }
 
-    /// Gets the stack length before the current instruction.
-    fn len_before(&mut self) -> B::Value {
-        self.len_before
-    }
-
     /// Gets a field at the given offset.
     fn get_field(&mut self, ptr: B::Value, offset: usize, name: &str) -> B::Value {
         get_field(&mut self.bcx, ptr, offset, name)
@@ -1289,19 +1293,23 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
     /// Returns the stack pointer at the top (`&stack[stack.len]`).
     fn sp_at_top(&mut self) -> B::Value {
-        let len = self.len_before();
-        self.sp_at(len)
+        self.sp_from_section(self.section_len_offset as i64)
     }
 
     /// Returns the stack pointer after the input has been popped
     /// (`&stack[stack.len - op.input()]`).
     fn sp_after_inputs(&mut self) -> B::Value {
-        let mut len = self.len_before();
         let (inputs, _) = self.current_inst().stack_io();
-        if inputs > 0 {
-            len = self.bcx.isub_imm(len, inputs as i64);
+        self.sp_from_section(self.section_len_offset as i64 - inputs as i64)
+    }
+
+    /// Returns a stack pointer offset from `section_start_sp`.
+    fn sp_from_section(&mut self, offset: i64) -> B::Value {
+        if offset == 0 {
+            return self.section_start_sp;
         }
-        self.sp_at(len)
+        let offset = self.bcx.iconst(self.isize_type, offset);
+        self.bcx.gep(self.word_type, self.section_start_sp, &[offset], "sp")
     }
 
     /// Returns the stack pointer at `len` (`&stack[len]`).
@@ -1310,11 +1318,10 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         self.bcx.gep(self.word_type, ptr, &[len], "sp")
     }
 
-    /// Returns the stack pointer at `len` from the top (`&stack[CAPACITY - len]`).
-    fn sp_from_top(&mut self, len: B::Value, n: usize) -> B::Value {
+    /// Returns the stack pointer at `n` from the top (`&stack[len - n]`).
+    fn sp_from_top(&mut self, n: usize) -> B::Value {
         debug_assert_ne!(n, 0);
-        let len = self.bcx.isub_imm(len, n as i64);
-        self.sp_at(len)
+        self.sp_from_section(self.section_len_offset as i64 - n as i64)
     }
 
     /// Builds a gas cost deduction for an immediate value.
@@ -1758,6 +1765,17 @@ mod pf {
         expansion_cost: u64,
     }
     const _: [(); mem::size_of::<revm_interpreter::Gas>()] = [(); mem::size_of::<Gas>()];
+}
+
+/// Computes the effective stack diff for an instruction, matching the codegen semantics.
+fn effective_stack_diff(data: &InstData) -> i32 {
+    let (inp, out) = data.stack_io();
+    let mut diff = out as i32 - inp as i32;
+    // Suspending ops return one value pushed by the caller after resume.
+    if data.may_suspend() {
+        diff -= 1;
+    }
+    diff
 }
 
 fn get_field<B: Builder>(bcx: &mut B, ptr: B::Value, offset: usize, name: &str) -> B::Value {

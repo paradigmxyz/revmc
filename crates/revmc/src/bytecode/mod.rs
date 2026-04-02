@@ -533,6 +533,12 @@ impl InstData {
         self.is_jumpdest() && (has_dynamic_jumps || self.data == 1)
     }
 
+    /// Returns `true` if this instruction starts a new stack section.
+    #[inline]
+    pub(crate) fn is_stack_section_head(&self) -> bool {
+        self.flags.contains(InstFlags::STACK_SECTION_HEAD)
+    }
+
     /// Returns `true` if this instruction is dead code.
     pub(crate) fn is_dead_code(&self) -> bool {
         self.flags.contains(InstFlags::DEAD_CODE)
@@ -613,6 +619,8 @@ bitflags::bitflags! {
 
         /// Skip generating instruction logic, but keep the gas calculation.
         const SKIP_LOGIC = 1 << 5;
+        /// This instruction starts a new stack section.
+        const STACK_SECTION_HEAD = 1 << 6;
         /// Don't generate any code.
         const DEAD_CODE = 1 << 7;
     }

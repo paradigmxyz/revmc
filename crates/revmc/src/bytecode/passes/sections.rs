@@ -1,4 +1,4 @@
-use crate::bytecode::{Bytecode, Inst};
+use crate::bytecode::{Bytecode, Inst, InstFlags};
 use core::fmt;
 
 /// A gas section tracks the total base gas cost of a sequence of instructions.
@@ -143,17 +143,16 @@ impl StackSectionAnalysis {
             return;
         }
         let section = self.section();
-        if !section.is_empty() {
-            trace!(
-                inst = %self.start_inst,
-                len = %(next_section_inst - self.start_inst),
-                ?section,
-                "saving stack"
-            );
-            let mut insts = bytecode.insts[self.start_inst..].iter_mut();
-            if let Some(inst) = insts.find(|inst| !inst.is_dead_code()) {
-                inst.stack_section = section;
-            }
+        trace!(
+            inst = %self.start_inst,
+            len = %(next_section_inst - self.start_inst),
+            ?section,
+            "saving stack"
+        );
+        let mut insts = bytecode.insts[self.start_inst..].iter_mut();
+        if let Some(inst) = insts.find(|inst| !inst.is_dead_code()) {
+            inst.flags |= InstFlags::STACK_SECTION_HEAD;
+            inst.stack_section = section;
         }
     }
 
@@ -225,7 +224,7 @@ impl SectionsAnalysis {
             let mut current = Inst::from_usize(0);
             let mut count = 0usize;
             for (inst, data) in bytecode.iter_insts() {
-                if data.stack_section.is_empty() {
+                if !data.is_stack_section_head() {
                     continue;
                 }
                 let len = inst.index() - current.index();
