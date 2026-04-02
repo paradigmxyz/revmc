@@ -1,5 +1,41 @@
-use revm_interpreter::{InstructionResult, as_usize_saturated};
+use core::num::NonZero;
+use revm_interpreter::{InstructionResult, as_usize_saturated, host::LoadError};
 use revmc_context::{EvmContext, EvmWord};
+
+pub type BuiltinResult = Result<(), BuiltinError>;
+
+#[derive(Debug)]
+#[repr(transparent)]
+pub struct BuiltinError(NonZero<u8>);
+
+impl From<InstructionResult> for BuiltinError {
+    #[inline]
+    fn from(value: InstructionResult) -> Self {
+        Self(unsafe { NonZero::new(value as u8).unwrap_unchecked() })
+    }
+}
+
+impl From<LoadError> for BuiltinError {
+    #[inline]
+    fn from(value: LoadError) -> Self {
+        match value {
+            LoadError::ColdLoadSkipped => InstructionResult::OutOfGas.into(),
+            LoadError::DBError => InstructionResult::FatalExternalError.into(),
+        }
+    }
+}
+
+/// Extension trait to convert `Option<T>` to `BuiltinResult`.
+pub(crate) trait OkOrFatal<T> {
+    fn ok_or_fatal(self) -> Result<T, BuiltinError>;
+}
+
+impl<T> OkOrFatal<T> for Option<T> {
+    #[inline]
+    fn ok_or_fatal(self) -> Result<T, BuiltinError> {
+        self.ok_or(InstructionResult::FatalExternalError.into())
+    }
+}
 
 /// Splits the stack pointer into `N` elements by casting it to an array.
 ///
@@ -16,11 +52,7 @@ pub(crate) unsafe fn read_words_rev<'a, const N: usize>(sp: *mut EvmWord) -> &'a
 }
 
 #[inline]
-pub(crate) fn ensure_memory(
-    ecx: &mut EvmContext<'_>,
-    offset: usize,
-    len: usize,
-) -> InstructionResult {
+pub(crate) fn ensure_memory(ecx: &mut EvmContext<'_>, offset: usize, len: usize) -> BuiltinResult {
     revm_interpreter::interpreter::resize_memory(
         ecx.gas,
         ecx.memory,
@@ -28,23 +60,22 @@ pub(crate) fn ensure_memory(
         offset,
         len,
     )
-    .err()
-    .unwrap_or(InstructionResult::Stop)
+    .map_err(Into::into)
 }
 
 pub(crate) unsafe fn copy_operation(
     ecx: &mut EvmContext<'_>,
     rev![memory_offset, data_offset, len]: &mut [EvmWord; 3],
     data: &[u8],
-) -> InstructionResult {
+) -> BuiltinResult {
     let len = try_into_usize!(len);
     if len != 0 {
         gas!(ecx, ecx.host.gas_params().copy_cost(len));
         let memory_offset = try_into_usize!(memory_offset);
-        ensure_memory!(ecx, memory_offset, len);
+        ensure_memory(ecx, memory_offset, len)?;
         let data_offset = data_offset.to_u256();
         let data_offset = as_usize_saturated!(data_offset);
         ecx.memory.set_data(memory_offset, data_offset, len, data);
     }
-    InstructionResult::Stop
+    Ok(())
 }

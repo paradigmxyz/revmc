@@ -31,7 +31,7 @@ jobs:
             runner: depot-ubuntu-latest
             arch: x64
           - os: macos
-            runner: depot-macos-latest
+            runner: macos-latest
             arch: arm64
     steps:
       - uses: actions/checkout@v4

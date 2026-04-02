@@ -46,7 +46,7 @@ fn run_call_then_push<B: Backend>(compiler: &mut EvmCompiler<B>) {
     ];
 
     unsafe { compiler.clear() }.unwrap();
-    compiler.inspect_stack_length(true);
+    compiler.inspect_stack(true);
     let f = unsafe { compiler.jit("resume_call", bytecode, DEF_SPEC) }.unwrap();
 
     // First call: should suspend at CALL with NewFrame
@@ -130,7 +130,7 @@ fn run_call_then_return<B: Backend>(compiler: &mut EvmCompiler<B>) {
     ];
 
     unsafe { compiler.clear() }.unwrap();
-    compiler.inspect_stack_length(true);
+    compiler.inspect_stack(true);
     let f = unsafe { compiler.jit("resume_return", bytecode, DEF_SPEC) }.unwrap();
 
     let mut host = TestHost::new();
