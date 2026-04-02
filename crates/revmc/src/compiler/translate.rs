@@ -599,6 +599,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         self.gas_cost_imm(data.gas_section.gas_cost as u64);
 
         if data.flags.contains(InstFlags::SKIP_LOGIC) {
+            self.section_len_offset += effective_stack_diff(data);
             goto_return!("skipped");
         }
 
@@ -671,6 +672,26 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             if diff != 0 {
                 let len_changed = self.bcx.iadd_imm(self.len_before, diff as i64);
                 self.stack_len.store(&mut self.bcx, len_changed);
+            }
+        }
+
+        // If the output is a known constant and the opcode has no dynamic gas or side effects,
+        // skip the real logic and just write the result.
+        // The inputs are not loaded; we simply adjust the stack offset to consume them and
+        // push the folded constant. This turns e.g. `PUSH 3, PUSH 4, ADD` into a single
+        // store of `7`.
+        {
+            let (inp, out) = data.stack_io();
+            // Only for pure single-output ops without dynamic gas (EXP has dynamic gas).
+            if out == 1
+                && opcode != op::EXP
+                && let Some(const_out) = self.bytecode.const_output(inst)
+            {
+                self.len_offset -= inp as i8;
+                let value = self.bcx.iconst_256(const_out);
+                self.push(value);
+                self.section_len_offset += effective_stack_diff(data);
+                goto_return!("const output");
             }
         }
 
