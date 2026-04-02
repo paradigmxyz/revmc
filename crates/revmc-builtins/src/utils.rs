@@ -1,5 +1,19 @@
+use core::num::NonZero;
 use revm_interpreter::{InstructionResult, as_usize_saturated};
 use revmc_context::{EvmContext, EvmWord};
+
+pub type BuiltinResult = Result<(), BuiltinError>;
+
+#[derive(Debug)]
+#[repr(transparent)]
+pub struct BuiltinError(NonZero<u8>);
+
+impl From<InstructionResult> for BuiltinError {
+    #[inline]
+    fn from(value: InstructionResult) -> Self {
+        Self(unsafe { NonZero::new(value as u8).unwrap_unchecked() })
+    }
+}
 
 /// Splits the stack pointer into `N` elements by casting it to an array.
 ///
@@ -16,11 +30,7 @@ pub(crate) unsafe fn read_words_rev<'a, const N: usize>(sp: *mut EvmWord) -> &'a
 }
 
 #[inline]
-pub(crate) fn ensure_memory(
-    ecx: &mut EvmContext<'_>,
-    offset: usize,
-    len: usize,
-) -> InstructionResult {
+pub(crate) fn ensure_memory(ecx: &mut EvmContext<'_>, offset: usize, len: usize) -> BuiltinResult {
     revm_interpreter::interpreter::resize_memory(
         ecx.gas,
         ecx.memory,
@@ -28,15 +38,14 @@ pub(crate) fn ensure_memory(
         offset,
         len,
     )
-    .err()
-    .unwrap_or(InstructionResult::Stop)
+    .map_err(BuiltinError::from)
 }
 
 pub(crate) unsafe fn copy_operation(
     ecx: &mut EvmContext<'_>,
     rev![memory_offset, data_offset, len]: &mut [EvmWord; 3],
     data: &[u8],
-) -> InstructionResult {
+) -> BuiltinResult {
     let len = try_into_usize!(len);
     if len != 0 {
         gas!(ecx, ecx.host.gas_params().copy_cost(len));
@@ -46,5 +55,5 @@ pub(crate) unsafe fn copy_operation(
         let data_offset = as_usize_saturated!(data_offset);
         ecx.memory.set_data(memory_offset, data_offset, len, data);
     }
-    InstructionResult::Stop
+    Ok(())
 }

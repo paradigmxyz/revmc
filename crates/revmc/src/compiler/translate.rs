@@ -1360,10 +1360,9 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     }
     */
 
-    /// Builds a check, failing if `ret` is not `InstructionResult::Continue`.
+    /// Builds a check, failing if the builtin returned a non-zero error.
     fn build_check_instruction_result(&mut self, ret: B::Value) {
-        // Continue was 0 in old revm, use Stop (1) as the "continue" marker
-        let failure = self.bcx.icmp_imm(IntCC::NotEqual, ret, InstructionResult::Stop as i64);
+        let failure = self.bcx.icmp_imm(IntCC::NotEqual, ret, 0);
         let target = self.build_check_inner(true, failure, ret);
         self.bcx.switch_to_block(target);
     }

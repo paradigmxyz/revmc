@@ -4,7 +4,7 @@ macro_rules! tri {
     ($e:expr) => {
         match $e {
             Ok(x) => x,
-            Err(_) => return InstructionResult::InvalidOperandOOG,
+            Err(_) => return Err(BuiltinError::from(InstructionResult::InvalidOperandOOG)),
         }
     };
 }
@@ -14,17 +14,7 @@ macro_rules! try_host {
     ($e:expr) => {
         match $e {
             Some(x) => x,
-            None => return InstructionResult::FatalExternalError,
-        }
-    };
-}
-
-#[collapse_debuginfo(yes)]
-macro_rules! try_ir {
-    ($e:expr) => {
-        match $e {
-            InstructionResult::Stop => {}
-            ir => return ir,
+            None => return Err(BuiltinError::from(InstructionResult::FatalExternalError)),
         }
     };
 }
@@ -33,7 +23,7 @@ macro_rules! try_ir {
 macro_rules! gas {
     ($ecx:expr, $gas:expr) => {
         if !$ecx.gas.record_cost($gas) {
-            return InstructionResult::OutOfGas;
+            return Err(BuiltinError::from(InstructionResult::OutOfGas));
         }
     };
 }
@@ -43,7 +33,7 @@ macro_rules! gas_opt {
     ($ecx:expr, $gas:expr) => {
         match $gas {
             Some(gas) => gas!($ecx, gas),
-            None => return InstructionResult::OutOfGas,
+            None => return Err(BuiltinError::from(InstructionResult::OutOfGas)),
         }
     };
 }
@@ -66,8 +56,12 @@ macro_rules! berlin_load_account {
                 }
                 account
             }
-            Err(LoadError::ColdLoadSkipped) => return InstructionResult::OutOfGas,
-            Err(LoadError::DBError) => return InstructionResult::FatalExternalError,
+            Err(LoadError::ColdLoadSkipped) => {
+                return Err(BuiltinError::from(InstructionResult::OutOfGas));
+            }
+            Err(LoadError::DBError) => {
+                return Err(BuiltinError::from(InstructionResult::FatalExternalError));
+            }
         }
     }};
 }
@@ -76,7 +70,7 @@ macro_rules! berlin_load_account {
 macro_rules! ensure_non_staticcall {
     ($ecx:expr) => {
         if $ecx.is_static {
-            return InstructionResult::StateChangeDuringStaticCall;
+            return Err(BuiltinError::from(InstructionResult::StateChangeDuringStaticCall));
         }
     };
 }
@@ -84,7 +78,7 @@ macro_rules! ensure_non_staticcall {
 #[collapse_debuginfo(yes)]
 macro_rules! ensure_memory {
     ($ecx:expr, $offset:expr, $len:expr) => {
-        try_ir!(ensure_memory($ecx, $offset, $len))
+        ensure_memory($ecx, $offset, $len)?
     };
 }
 
@@ -112,7 +106,7 @@ macro_rules! try_into_usize {
         match $x.to_u256().as_limbs() {
             x => {
                 if (x[0] > usize::MAX as u64) | (x[1] != 0) | (x[2] != 0) | (x[3] != 0) {
-                    return InstructionResult::InvalidOperandOOG;
+                    return Err(BuiltinError::from(InstructionResult::InvalidOperandOOG));
                 }
                 x[0] as usize
             }
