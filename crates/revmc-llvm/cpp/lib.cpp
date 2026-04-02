@@ -6,6 +6,7 @@
 #include <llvm/ExecutionEngine/Orc/AbsoluteSymbols.h>
 #include <llvm/ExecutionEngine/Orc/CompileUtils.h>
 #include <llvm/ExecutionEngine/Orc/Debugging/DebugInfoSupport.h>
+#include <llvm/ExecutionEngine/Orc/Debugging/DebuggerSupport.h>
 #include <llvm/ExecutionEngine/Orc/Debugging/PerfSupportPlugin.h>
 #include <llvm/ExecutionEngine/Orc/LLJIT.h>
 #include <llvm/ExecutionEngine/Orc/ObjectLinkingLayer.h>
@@ -300,25 +301,39 @@ revmc_llvm_lljit_enable_perf_support(LLVMOrcLLJITRef J) {
 
 /// Register the JITLoaderGDB symbol and enable debug support.
 ///
-/// Same pattern as `revmc_llvm_lljit_enable_perf_support`: register the
-/// runtime function as an absolute symbol so the process symbol lookup
-/// succeeds (it would otherwise fail on macOS where static library symbols
-/// aren't exported to dlsym).
+/// `enableDebuggerSupport` (called by `LLVMOrcLLJITEnableDebugSupport`) looks
+/// up the symbol in the ProcessSymbolsJITDylib using `ES.intern()` with a
+/// hardcoded `_` prefix on MachO. On macOS, static library symbols aren't
+/// exported to dlsym, so the process symbol lookup fails.
+///
+/// We register the symbol as an absolute symbol in the ProcessSymbolsJITDylib
+/// (matching the lookup target) using `ES.intern()` with the same mangling that
+/// LLVM uses internally, then call `enableDebuggerSupport` directly.
 extern "C" LLVMErrorRef
 revmc_llvm_lljit_enable_debug_support(LLVMOrcLLJITRef J) {
   auto *Jit = reinterpret_cast<orc::LLJIT *>(J);
   auto &ES = Jit->getExecutionSession();
+  const auto &TT = Jit->getTargetTriple();
+
+  // Match the mangling used by GDBJITDebugInfoRegistrationPlugin::Create:
+  // hardcoded '_' prefix on MachO, no prefix otherwise.
+  auto SymName = TT.isOSBinFormatMachO()
+                     ? ES.intern("_llvm_orc_registerJITLoaderGDBAllocAction")
+                     : ES.intern("llvm_orc_registerJITLoaderGDBAllocAction");
+
+  // Define in the ProcessSymbolsJITDylib where enableDebuggerSupport looks.
+  auto ProcessJD = Jit->getProcessSymbolsJITDylib();
+  auto &TargetJD = ProcessJD ? *ProcessJD : Jit->getMainJITDylib();
 
   auto Flags = JITSymbolFlags::Exported | JITSymbolFlags::Callable;
   orc::SymbolMap GDBFns;
-  // Use mangleAndIntern to add the platform symbol prefix (e.g. '_' on macOS).
-  GDBFns[Jit->mangleAndIntern("llvm_orc_registerJITLoaderGDBAllocAction")] = {
+  GDBFns[SymName] = {
       orc::ExecutorAddr::fromPtr(&llvm_orc_registerJITLoaderGDBAllocAction),
       Flags};
-  if (auto Err = Jit->getMainJITDylib().define(orc::absoluteSymbols(GDBFns)))
+  if (auto Err = TargetJD.define(orc::absoluteSymbols(GDBFns)))
     return wrap(std::move(Err));
 
-  return LLVMOrcLLJITEnableDebugSupport(J);
+  return wrap(orc::enableDebuggerSupport(*Jit));
 }
 
 extern "C" void
