@@ -5,6 +5,8 @@ pub(crate) use block_analysis::{Cfg, Snapshots};
 
 mod const_fold;
 
+mod dead_store_elim;
+
 mod dedup;
 
 mod sections;

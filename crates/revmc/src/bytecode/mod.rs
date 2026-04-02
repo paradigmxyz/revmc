@@ -263,6 +263,7 @@ impl<'a> Bytecode<'a> {
 
         self.rebuild_cfg();
         self.block_analysis();
+        self.dead_store_elim();
         self.mark_dead_code();
 
         if self.config.contains(AnalysisConfig::DEDUP) {
