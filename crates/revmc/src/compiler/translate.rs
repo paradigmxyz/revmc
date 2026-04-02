@@ -20,7 +20,7 @@ pub(super) struct FcxConfig {
     pub(super) frame_pointers: bool,
 
     pub(super) debug: bool,
-    pub(super) inspect_stack_length: bool,
+    pub(super) inspect_stack: bool,
     pub(super) stack_bound_checks: bool,
     pub(super) gas_metering: bool,
 }
@@ -32,7 +32,7 @@ impl Default for FcxConfig {
             comments: false,
             frame_pointers: cfg!(debug_assertions) || cfg!(force_frame_pointers),
             debug: false,
-            inspect_stack_length: false,
+            inspect_stack: false,
             stack_bound_checks: true,
             gas_metering: true,
         }
@@ -180,12 +180,12 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     ///     #[cfg(may_suspend)]
     ///     suspend(resume_at: u32): {
     ///         ecx.resume_at = resume_at;
-    ///         goto return(InstructionResult::Stop);  // Caller checks next_action
+    ///         goto return(Ok(())); // Caller checks next_action
     ///     };
     ///
     ///     // All paths lead to here.
     ///     return(ir: InstructionResult): {
-    ///         #[cfg(inspect_stack_length)]
+    ///         #[cfg(inspect_stack)]
     ///         *args.stack_len = stack_len;
     ///         return ir;
     ///     }
@@ -224,8 +224,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let sp_arg = bcx.fn_param(1);
         // Use a local alloca for the stack to allow the backend to eliminate dead stores to
         // stack slots above `stack_len` at function exit (e.g. `PUSH0 POP`).
-        // Disabled when `inspect_stack_length` is set because the caller observes every store.
-        let local_stack = !config.inspect_stack_length;
+        // Disabled when `inspect_stack` is set because the caller observes every store.
+        let local_stack = !config.inspect_stack;
         let stack = if local_stack {
             let stack_type = bcx.type_array(word_type, STACK_CAP as u32);
             bcx.new_stack_slot(stack_type, "stack.addr")
@@ -313,9 +313,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             builtins,
         };
 
-        // We store the stack length if requested or necessary due to the bytecode.
-        let stack_length_observable = config.inspect_stack_length || bytecode.may_suspend();
-
         // Add debug assertions for the parameters.
         if config.debug_assertions {
             fx.pointer_panic_with_bool(
@@ -331,11 +328,11 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 "local stack is disabled",
             );
             fx.pointer_panic_with_bool(
-                stack_length_observable,
+                config.inspect_stack || bytecode.may_suspend(),
                 stack_len_arg,
                 "stack length pointer",
-                if config.inspect_stack_length {
-                    "stack length inspection is enabled"
+                if config.inspect_stack {
+                    "stack inspection is enabled"
                 } else {
                     "bytecode suspends execution"
                 },
@@ -396,7 +393,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         // Also here is where the stack length is initialized.
         let load_len_at_start = |fx: &mut Self| {
             // Loaded from args only for the config.
-            if config.inspect_stack_length {
+            if config.inspect_stack {
                 let stack_len = fx.bcx.load(fx.isize_type, stack_len_arg, "stack_len");
                 fx.stack_len.store(&mut fx.bcx, stack_len);
                 fx.copy_stack_from_arg(stack_len);
@@ -474,7 +471,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
                 // Save stack back to caller only when suspending, or always if inspecting.
                 // This matches the inverse of the condition in the return block.
-                if !config.inspect_stack_length {
+                if !config.inspect_stack {
                     fx.copy_stack_to_arg();
                     fx.save_stack_len();
                 }
@@ -509,7 +506,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         fx.bcx.switch_to_block(fx.return_block.unwrap());
         if !fx.incoming_returns.is_empty() {
             let return_value = fx.bcx.phi(fx.i8_type, &fx.incoming_returns);
-            if config.inspect_stack_length {
+            if config.inspect_stack {
                 fx.copy_stack_to_arg();
                 fx.save_stack_len();
             }
@@ -1232,7 +1229,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     /// Adds a resume point and returns its index.
     fn add_resume_at(&mut self, block: B::BasicBlock) -> Option<B::Value> {
         let value = self.bcx.block_addr(block);
-        if self.resume_blocks.is_empty() {
+        if self.resume_blocks.is_empty() && self.resume_kind == ResumeKind::Indexes {
             self.resume_kind =
                 if value.is_some() { ResumeKind::Blocks } else { ResumeKind::Indexes };
         }
@@ -1367,10 +1364,9 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     }
     */
 
-    /// Builds a check, failing if `ret` is not `InstructionResult::Continue`.
+    /// Builds a check, failing if the builtin returned a non-zero error.
     fn build_check_instruction_result(&mut self, ret: B::Value) {
-        // Continue was 0 in old revm, use Stop (1) as the "continue" marker
-        let failure = self.bcx.icmp_imm(IntCC::NotEqual, ret, InstructionResult::Stop as i64);
+        let failure = self.bcx.icmp_imm(IntCC::NotEqual, ret, 0);
         let target = self.build_check_inner(true, failure, ret);
         self.bcx.switch_to_block(target);
     }

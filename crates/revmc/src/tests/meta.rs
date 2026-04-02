@@ -31,7 +31,7 @@ matrix_tests!(
         use revm_bytecode::opcode as op;
 
         let spec_id = SpecId::CANCUN;
-        compiler.inspect_stack_length(true);
+        compiler.inspect_stack(true);
 
         // First function: PUSH1 42, STOP.
         let bytecode1: &[u8] = &[op::PUSH1, 42];
@@ -75,7 +75,7 @@ fn jit_and_verify<B: Backend>(
     code: &[u8],
     expected: U256,
 ) -> B::FuncId {
-    compiler.inspect_stack_length(true);
+    compiler.inspect_stack(true);
     let id = compiler.translate(name, code, super::DEF_SPEC).unwrap();
     let f = unsafe { compiler.jit_function(id) }.unwrap();
 
