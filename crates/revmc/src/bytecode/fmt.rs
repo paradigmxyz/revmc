@@ -15,6 +15,18 @@ impl Bytecode<'_> {
         let mut lines: Vec<(String, String)> = Vec::new();
         let mut inst_lines = IndexVec::<Inst, u32>::from_vec(vec![0u32; self.insts.len()]);
 
+        // Compute field widths for aligned ic=/pc= columns.
+        let (max_ic, max_pc) = self
+            .cfg
+            .blocks
+            .iter()
+            .flat_map(|b| {
+                b.insts().filter(|&i| !self.inst(i).is_dead_code()).map(|i| (i, self.inst(i).pc))
+            })
+            .fold((0u32, 0u32), |(mi, mp), (i, p)| (mi.max(i.index() as u32), mp.max(p)));
+        let ic_width = decimal_width(max_ic);
+        let pc_width = decimal_width(max_pc);
+
         lines.push((
             String::new(),
             format!(
@@ -87,8 +99,9 @@ impl Bytecode<'_> {
                     }
                 }
 
-                // Comment with pc and flags/behavior.
-                let mut comment = format!("pc={}", data.pc);
+                // Comment with ic, pc, and flags/behavior.
+                let mut comment =
+                    format!("ic={:>ic_width$} pc={:>pc_width$}", inst.index(), data.pc,);
                 if !data.gas_section.is_empty() {
                     write!(comment, ", gas={}", data.gas_section.gas_cost).unwrap();
                 }
@@ -363,6 +376,10 @@ impl<'a> Bytecode<'a> {
     }
 }
 
+fn decimal_width(n: u32) -> usize {
+    if n == 0 { 1 } else { n.ilog10() as usize + 1 }
+}
+
 /// Abbreviates hex strings with repeated leading byte pairs.
 /// E.g. `"PUSH32 0xffffffffff...ffe0"` → `"PUSH32 0xff..ffe0"`.
 fn abbreviate_hex(s: &str) -> Cow<'_, str> {
@@ -433,29 +450,29 @@ mod tests {
                ; spec_id=Osaka, has_dynamic_jumps=false, may_suspend=true
 
 bb0:           ; stack_in=0, max_growth=1
-  PUSH1 0x03   ; pc=0, gas=11
-  JUMP bb1     ; pc=2
+  PUSH1 0x03   ; ic= 0 pc= 0, gas=11
+  JUMP bb1     ; ic= 1 pc= 2
 
 bb1:           ; stack_in=0, max_growth=2
-  JUMPDEST     ; pc=3, gas=7, reachable
-  PUSH1 0x01   ; pc=4
-  PUSH1 0x00   ; pc=6
-  SSTORE       ; pc=8
-  PUSH1 0x01   ; pc=9, gas=16
-  PUSH1 0x03   ; pc=11
-  JUMPI bb1    ; pc=13
+  JUMPDEST     ; ic= 2 pc= 3, gas=7, reachable
+  PUSH1 0x01   ; ic= 3 pc= 4
+  PUSH1 0x00   ; ic= 4 pc= 6
+  SSTORE       ; ic= 5 pc= 8
+  PUSH1 0x01   ; ic= 6 pc= 9, gas=16
+  PUSH1 0x03   ; ic= 7 pc=11
+  JUMPI bb1    ; ic= 8 pc=13
 
 bb2:           ; stack_in=0, max_growth=7
-  PUSH1 0x00   ; pc=14, gas=121
-  PUSH1 0x00   ; pc=16
-  PUSH1 0x00   ; pc=18
-  PUSH1 0x00   ; pc=20
-  PUSH1 0x00   ; pc=22
-  PUSH1 0x42   ; pc=24
-  PUSH2 0xffff ; pc=26
-  CALL         ; pc=29, suspends
-  POP          ; pc=30, gas=2, stack_in=1, max_growth=0
-  STOP         ; pc=31
+  PUSH1 0x00   ; ic= 9 pc=14, gas=121
+  PUSH1 0x00   ; ic=10 pc=16
+  PUSH1 0x00   ; ic=11 pc=18
+  PUSH1 0x00   ; ic=12 pc=20
+  PUSH1 0x00   ; ic=13 pc=22
+  PUSH1 0x42   ; ic=14 pc=24
+  PUSH2 0xffff ; ic=15 pc=26
+  CALL         ; ic=16 pc=29, suspends
+  POP          ; ic=17 pc=30, gas=2, stack_in=1, max_growth=0
+  STOP         ; ic=18 pc=31
 
 "#]]
         );
