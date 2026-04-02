@@ -1148,11 +1148,14 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         debug_assert_ne!(N, 0);
 
         std::array::from_fn(|i| {
+            // Compute the operand depth: how many values have been popped so far
+            // from this instruction (including any prior `pop()` calls).
+            let depth = (-self.len_offset) as usize;
             self.len_offset -= 1;
             let offset = self.section_len_offset as i64 + self.len_offset as i64;
             let sp = self.sp_from_section(offset);
             let name = b'a' + i as u8;
-            self.load_word(sp, std::str::from_utf8(&[name]).unwrap())
+            self.operand_value_or_load(depth, sp, std::str::from_utf8(&[name]).unwrap())
         })
     }
 
@@ -1162,7 +1165,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         debug_assert_ne!(n, 0);
         let sp = self.sp_from_top(n);
         let name = if self.config.debug { &format!("dup{n}") } else { "" };
-        let value = self.load_word(sp, name);
+        let value = self.operand_value_or_load(n - 1, sp, name);
         self.push(value);
     }
 
@@ -1179,10 +1182,10 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         debug_assert_ne!(m, 0);
         // Load a.
         let a_sp = self.sp_from_top(n + 1);
-        let a = self.load_word(a_sp, "swap.a");
+        let a = self.operand_value_or_load(n, a_sp, "swap.a");
         // Load b.
         let b_sp = self.sp_from_top(n + m + 1);
-        let b = self.load_word(b_sp, "swap.b");
+        let b = self.operand_value_or_load(n + m, b_sp, "swap.b");
         // Store.
         self.bcx.store(a, b_sp);
         self.bcx.store(b, a_sp);
@@ -1325,6 +1328,16 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     fn sp_from_top(&mut self, n: usize) -> B::Value {
         debug_assert_ne!(n, 0);
         self.sp_from_section(self.section_len_offset as i64 - n as i64)
+    }
+
+    /// Returns the known constant value of a stack operand if available, otherwise loads from the
+    /// stack. `depth` 0 is TOS (first popped), 1 is second, etc.
+    fn operand_value_or_load(&mut self, depth: usize, sp: B::Value, name: &str) -> B::Value {
+        let inst = self.current_inst.unwrap();
+        if let Some(c) = self.bytecode.const_operand(inst, depth) {
+            return self.bcx.iconst_256(c);
+        }
+        self.load_word(sp, name)
     }
 
     /// Builds a gas cost deduction for an immediate value.

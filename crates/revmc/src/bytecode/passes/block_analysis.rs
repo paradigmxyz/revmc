@@ -692,17 +692,19 @@ impl Bytecode<'_> {
         }
     }
 
-    /// Invalidates jump resolutions that may be unsound due to unresolved `Top` jumps.
+    /// Invalidates jump resolutions and operand snapshots that may be unsound due to
+    /// unresolved `Top` jumps.
     ///
     /// When unresolved dynamic jumps remain, any reachable `JUMPDEST` block could
     /// potentially be reached by those jumps with an arbitrary stack state. This means
-    /// resolutions derived from the fixpoint may be based on incomplete information.
+    /// resolutions and snapshots derived from the fixpoint may be based on incomplete
+    /// information.
     ///
     /// The conservative rule: seed every reachable `JUMPDEST` block as suspect,
     /// propagate forward through the CFG and discovered edges, and invalidate all
-    /// resolved jumps in suspect blocks.
+    /// resolved jumps and operand snapshots in suspect blocks.
     fn invalidate_suspect_jumps(
-        &self,
+        &mut self,
         jump_targets: &mut [(Inst, JumpTarget)],
         block_states: &IndexVec<Block, BlockState>,
         discovered_edges: &IndexVec<Block, SmallVec<[Block; 4]>>,
@@ -745,6 +747,19 @@ impl Bytecode<'_> {
                 && suspect[bid.index()]
             {
                 *target = JumpTarget::Top;
+            }
+        }
+
+        // Clear operand snapshots in suspect blocks: the fixpoint may have recorded
+        // precise values that are unsound because undiscovered edges (from Top jumps)
+        // could bring in different stack states.
+        for bid in self.cfg.blocks.indices() {
+            if !suspect[bid.index()] {
+                continue;
+            }
+            for inst in self.cfg.blocks[bid].insts() {
+                self.snapshots.inputs[inst].clear();
+                self.snapshots.outputs[inst] = None;
             }
         }
     }
@@ -919,6 +934,12 @@ impl Bytecode<'_> {
             if out > 0 {
                 self.snapshots.outputs[i] = stack.last().copied();
             }
+
+            // After a suspending instruction (CALL/CREATE), the caller can modify any stack
+            // slot before resuming, so all values become unknown.
+            if inst.may_suspend() {
+                stack.fill(AbsValue::Top);
+            }
         }
 
         true
@@ -931,7 +952,7 @@ pub(crate) mod tests {
     pub(crate) use crate::bytecode::Inst;
     use revm_primitives::{hardfork::SpecId, hex};
 
-    fn analyze_hex(hex: &str) -> Bytecode<'static> {
+    pub(crate) fn analyze_hex(hex: &str) -> Bytecode<'static> {
         let code = hex::decode(hex.trim()).unwrap();
         analyze_code(code)
     }
@@ -1712,6 +1733,213 @@ mod tests_edge_cases {
             !rj.flags.contains(InstFlags::STATIC_JUMP),
             "unsound: return jump should not be resolved with opaque caller"
         );
+    }
+
+    /// Loop counter (inline increment) must be Top after fixpoint.
+    #[test]
+    fn const_snapshot_loop_counter_inline() {
+        #[rustfmt::skip]
+        let bytecode = analyze_asm("
+            PUSH1 0x00          ; inst 0: i = 0
+        loop:
+            JUMPDEST            ; inst 1
+            DUP1                ; inst 2
+            PUSH1 0x0a          ; inst 3
+            LT                  ; inst 4
+            ISZERO              ; inst 5
+            PUSH %exit          ; inst 6
+            JUMPI               ; inst 7
+            PUSH1 0x01          ; inst 8
+            ADD                 ; inst 9: i++
+            PUSH %loop          ; inst 10
+            JUMP                ; inst 11
+        exit:
+            JUMPDEST            ; inst 12
+            POP                 ; inst 13
+            STOP                ; inst 14
+        ");
+
+        // DUP1 at inst 2: counter is loop-variant.
+        assert_eq!(bytecode.const_operand(Inst::from_usize(2), 0), None);
+        // ADD at inst 9: TOS=1 (const), second=counter (Top).
+        assert_eq!(bytecode.const_operand(Inst::from_usize(9), 0), Some(U256::from(1)));
+        assert_eq!(bytecode.const_operand(Inst::from_usize(9), 1), None);
+    }
+
+    /// Loop counter incremented via single-caller subroutine must be Top.
+    #[test]
+    fn const_snapshot_loop_counter_subroutine() {
+        #[rustfmt::skip]
+        let bytecode = analyze_asm("
+            PUSH1 0x00
+        loop:
+            JUMPDEST            ; inst 1
+            DUP1                ; inst 2
+            PUSH1 0x0a
+            LT
+            ISZERO
+            PUSH %exit
+            JUMPI
+            ; call add_fn(counter, 1) -> counter'
+            PUSH1 0x01
+            DUP2
+            PUSH %ret
+            SWAP2
+            SWAP1
+            PUSH %add_fn
+            JUMP
+        ret:
+            JUMPDEST
+            SWAP1
+            POP
+            PUSH %loop
+            JUMP
+        exit:
+            JUMPDEST
+            POP
+            STOP
+        add_fn:
+            JUMPDEST
+            PUSH1 0x00
+            DUP3
+            DUP3
+            ADD
+            SWAP1
+            POP
+            DUP1
+            DUP3
+            GT
+            ISZERO
+            PUSH %add_ok
+            JUMPI
+            INVALID
+        add_ok:
+            JUMPDEST
+            SWAP3
+            SWAP2
+            POP
+            POP
+            JUMP
+        ");
+
+        assert_eq!(bytecode.const_operand(Inst::from_usize(2), 0), None);
+    }
+
+    /// Loop counter incremented via multi-caller subroutine must be Top.
+    #[test]
+    fn const_snapshot_loop_counter_multi_caller() {
+        #[rustfmt::skip]
+        let bytecode = analyze_asm("
+            ; Caller 1 (outside loop) to make add_fn multi-target.
+            PUSH1 0x02
+            PUSH1 0x03
+            PUSH %ret_outer
+            SWAP2
+            SWAP1
+            PUSH %add_fn
+            JUMP
+        ret_outer:
+            JUMPDEST            ; inst 7
+            POP
+            PUSH1 0x00          ; i = 0
+        loop:
+            JUMPDEST            ; inst 10
+            DUP1                ; inst 11
+            PUSH1 0x0a
+            LT
+            ISZERO
+            PUSH %exit
+            JUMPI
+            ; Caller 2 (inside loop).
+            PUSH1 0x01
+            DUP2
+            PUSH %ret_loop
+            SWAP2
+            SWAP1
+            PUSH %add_fn
+            JUMP
+        ret_loop:
+            JUMPDEST
+            SWAP1
+            POP
+            PUSH %loop
+            JUMP
+        exit:
+            JUMPDEST
+            POP
+            STOP
+        add_fn:
+            JUMPDEST
+            PUSH1 0x00
+            DUP3
+            DUP3
+            ADD
+            SWAP1
+            POP
+            DUP1
+            DUP3
+            GT
+            ISZERO
+            PUSH %add_ok
+            JUMPI
+            INVALID
+        add_ok:
+            JUMPDEST
+            SWAP3
+            SWAP2
+            POP
+            POP
+            JUMP
+        ");
+
+        // DUP1 at inst 11: counter is loop-variant.
+        assert_eq!(bytecode.const_operand(Inst::from_usize(11), 0), None);
+    }
+
+    /// loopExp statetest: loop counters through checked_add subroutine must be Top.
+    #[test]
+    fn const_snapshot_loop_exp() {
+        // tests/GeneralStateTests/VMTests/vmPerformance/loopExp.json
+        let bytecode = analyze_hex(
+            "608060405234801561001057600080fd5b506004361061004c5760003560e01c\
+             806363ad973214610051578063a34f51e414610081578063dfaf4a87146100b1\
+             578063f078245b146100e1575b600080fd5b61006b6004803603810190610066\
+             9190610275565b610111565b60405161007891906102d7565b60405180910390\
+             f35b61009b60048036038101906100969190610275565b610199565b60405161\
+             00a891906102d7565b60405180910390f35b6100cb60048036038101906100c6\
+             9190610275565b6101cb565b6040516100d891906102d7565b60405180910390\
+             f35b6100fb60048036038101906100f69190610275565b610208565b60405161\
+             010891906102d7565b60405180910390f35b60008083905060005b8381101561\
+             01865785820a915085820a915085820a915085820a915085820a915085820a91\
+             5085820a915085820a915085820a915085820a915085820a915085820a915085\
+             820a915085820a915085820a915085820a915060108161017f9190610321565b\
+             905061011a565b5080600081905550809150509392505050565b6000805b8281\
+             10156101b9576001816101b29190610321565b905061019d565b508260008190\
+             55508290509392505050565b60008083905060005b838110156101f55785820a\
+             91506001816101ee9190610321565b90506101d4565b50806000819055508091\
+             50509392505050565b6000805b82811015610228576010816102219190610321\
+             565b905061020c565b50826000819055508290509392505050565b600080fd5b\
+             6000819050919050565b6102528161023f565b811461025d57600080fd5b5056\
+             5b60008135905061026f81610249565b92915050565b60008060006060848603\
+             121561028e5761028d61023a565b5b600061029c86828701610260565b935050\
+             60206102ad86828701610260565b92505060406102be86828701610260565b91\
+             50509250925092565b6102d18161023f565b82525050565b6000602082019050\
+             6102ec60008301846102c8565b92915050565b7f4e487b710000000000000000\
+             0000000000000000000000000000000000000000600052601160045260246000\
+             fd5b600061032c8261023f565b91506103378361023f565b9250828201905080\
+             82111561034f5761034e6102f2565b5b9291505056fea2646970667358221220\
+             0b253a2b246ddfeb0f09ddf5ec7dc70e2235369b8a2f3f9b55e32a5ca01e04ff\
+             64736f6c63430008180033",
+        );
+
+        // simpleLoop LT at pc=416: counter (depth=0) is loop-variant.
+        let lt_inst = bytecode
+            .insts
+            .iter_enumerated()
+            .find(|(_, inst)| inst.opcode == op::LT && inst.pc == 416)
+            .map(|(i, _)| i)
+            .expect("LT at pc=416 not found");
+        assert_eq!(bytecode.const_operand(lt_inst, 0), None);
     }
 
     /// Bytecode that is just STOP — minimal edge case.
