@@ -1,5 +1,5 @@
 use core::num::NonZero;
-use revm_interpreter::{InstructionResult, as_usize_saturated};
+use revm_interpreter::{InstructionResult, as_usize_saturated, host::LoadError};
 use revmc_context::{EvmContext, EvmWord};
 
 pub type BuiltinResult = Result<(), BuiltinError>;
@@ -12,6 +12,28 @@ impl From<InstructionResult> for BuiltinError {
     #[inline]
     fn from(value: InstructionResult) -> Self {
         Self(unsafe { NonZero::new(value as u8).unwrap_unchecked() })
+    }
+}
+
+impl From<LoadError> for BuiltinError {
+    #[inline]
+    fn from(value: LoadError) -> Self {
+        match value {
+            LoadError::ColdLoadSkipped => InstructionResult::OutOfGas.into(),
+            LoadError::DBError => InstructionResult::FatalExternalError.into(),
+        }
+    }
+}
+
+/// Extension trait to convert `Option<T>` to `BuiltinResult`.
+pub(crate) trait OkOrFatal<T> {
+    fn ok_or_fatal(self) -> Result<T, BuiltinError>;
+}
+
+impl<T> OkOrFatal<T> for Option<T> {
+    #[inline]
+    fn ok_or_fatal(self) -> Result<T, BuiltinError> {
+        self.ok_or(BuiltinError::from(InstructionResult::FatalExternalError))
     }
 }
 

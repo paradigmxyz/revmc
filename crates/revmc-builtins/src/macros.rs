@@ -10,16 +10,6 @@ macro_rules! tri {
 }
 
 #[collapse_debuginfo(yes)]
-macro_rules! try_host {
-    ($e:expr) => {
-        match $e {
-            Some(x) => x,
-            None => return Err(BuiltinError::from(InstructionResult::FatalExternalError)),
-        }
-    };
-}
-
-#[collapse_debuginfo(yes)]
 macro_rules! gas {
     ($ecx:expr, $gas:expr) => {
         if !$ecx.gas.record_cost($gas) {
@@ -46,23 +36,14 @@ macro_rules! gas_opt {
 #[collapse_debuginfo(yes)]
 macro_rules! berlin_load_account {
     ($ecx:expr, $address:expr, $load_code:expr) => {{
-        use revm_context_interface::host::LoadError;
         let cold_load_gas = $ecx.host.gas_params().cold_account_additional_cost();
         let skip_cold_load = $ecx.gas.remaining() < cold_load_gas;
-        match $ecx.host.load_account_info_skip_cold_load($address, $load_code, skip_cold_load) {
-            Ok(account) => {
-                if account.is_cold {
-                    gas!($ecx, cold_load_gas);
-                }
-                account
-            }
-            Err(LoadError::ColdLoadSkipped) => {
-                return Err(BuiltinError::from(InstructionResult::OutOfGas));
-            }
-            Err(LoadError::DBError) => {
-                return Err(BuiltinError::from(InstructionResult::FatalExternalError));
-            }
+        let account =
+            $ecx.host.load_account_info_skip_cold_load($address, $load_code, skip_cold_load)?;
+        if account.is_cold {
+            gas!($ecx, cold_load_gas);
         }
+        account
     }};
 }
 
