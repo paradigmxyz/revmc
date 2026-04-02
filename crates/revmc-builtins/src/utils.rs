@@ -72,7 +72,7 @@ pub(crate) unsafe fn copy_operation(
     if len != 0 {
         gas!(ecx, ecx.host.gas_params().copy_cost(len));
         let memory_offset = try_into_usize!(memory_offset);
-        ensure_memory!(ecx, memory_offset, len);
+        ensure_memory(ecx, memory_offset, len)?;
         let data_offset = data_offset.to_u256();
         let data_offset = as_usize_saturated!(data_offset);
         ecx.memory.set_data(memory_offset, data_offset, len, data);

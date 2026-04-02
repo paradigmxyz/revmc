@@ -56,13 +56,6 @@ macro_rules! ensure_non_staticcall {
     };
 }
 
-#[collapse_debuginfo(yes)]
-macro_rules! ensure_memory {
-    ($ecx:expr, $offset:expr, $len:expr) => {
-        ensure_memory($ecx, $offset, $len)?
-    };
-}
-
 /// Same as `read_words_rev`, but returns the arguments in the order they were passed.
 #[collapse_debuginfo(yes)]
 macro_rules! read_words {
