@@ -4,7 +4,7 @@ macro_rules! tri {
     ($e:expr) => {
         match $e {
             Ok(x) => x,
-            Err(_) => return Err(BuiltinError::from(InstructionResult::InvalidOperandOOG)),
+            Err(_) => return Err(InstructionResult::InvalidOperandOOG.into()),
         }
     };
 }
@@ -13,7 +13,7 @@ macro_rules! tri {
 macro_rules! gas {
     ($ecx:expr, $gas:expr) => {
         if !$ecx.gas.record_cost($gas) {
-            return Err(BuiltinError::from(InstructionResult::OutOfGas));
+            return Err(InstructionResult::OutOfGas.into());
         }
     };
 }
@@ -23,7 +23,7 @@ macro_rules! gas_opt {
     ($ecx:expr, $gas:expr) => {
         match $gas {
             Some(gas) => gas!($ecx, gas),
-            None => return Err(BuiltinError::from(InstructionResult::OutOfGas)),
+            None => return Err(InstructionResult::OutOfGas.into()),
         }
     };
 }
@@ -51,7 +51,7 @@ macro_rules! berlin_load_account {
 macro_rules! ensure_non_staticcall {
     ($ecx:expr) => {
         if $ecx.is_static {
-            return Err(BuiltinError::from(InstructionResult::StateChangeDuringStaticCall));
+            return Err(InstructionResult::StateChangeDuringStaticCall.into());
         }
     };
 }
@@ -87,7 +87,7 @@ macro_rules! try_into_usize {
         match $x.to_u256().as_limbs() {
             x => {
                 if (x[0] > usize::MAX as u64) | (x[1] != 0) | (x[2] != 0) | (x[3] != 0) {
-                    return Err(BuiltinError::from(InstructionResult::InvalidOperandOOG));
+                    return Err(InstructionResult::InvalidOperandOOG.into());
                 }
                 x[0] as usize
             }

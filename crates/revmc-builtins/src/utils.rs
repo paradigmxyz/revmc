@@ -33,7 +33,7 @@ pub(crate) trait OkOrFatal<T> {
 impl<T> OkOrFatal<T> for Option<T> {
     #[inline]
     fn ok_or_fatal(self) -> Result<T, BuiltinError> {
-        self.ok_or(BuiltinError::from(InstructionResult::FatalExternalError))
+        self.ok_or(InstructionResult::FatalExternalError.into())
     }
 }
 
@@ -60,7 +60,7 @@ pub(crate) fn ensure_memory(ecx: &mut EvmContext<'_>, offset: usize, len: usize)
         offset,
         len,
     )
-    .map_err(BuiltinError::from)
+    .map_err(Into::into)
 }
 
 pub(crate) unsafe fn copy_operation(

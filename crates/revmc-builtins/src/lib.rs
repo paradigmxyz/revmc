@@ -301,7 +301,7 @@ pub unsafe extern "C" fn __revmc_builtin_returndatacopy(
     // Bounds check BEFORE charging gas, matching revm.
     let data_end = data_offset.saturating_add(len);
     if data_end > ecx.return_data.len() {
-        return Err(BuiltinError::from(InstructionResult::OutOfOffset));
+        return Err(InstructionResult::OutOfOffset.into());
     }
 
     gas!(ecx, ecx.host.gas_params().copy_cost(len));
@@ -461,7 +461,7 @@ pub unsafe extern "C" fn __revmc_builtin_sstore(
 
     // EIP-2200: If gasleft is less than or equal to gas stipend, fail with OOG.
     if is_istanbul && ecx.gas.remaining() <= ecx.host.gas_params().call_stipend() {
-        return Err(BuiltinError::from(InstructionResult::ReentrancySentryOOG));
+        return Err(InstructionResult::ReentrancySentryOOG.into());
     }
 
     gas!(ecx, ecx.host.gas_params().sstore_static_gas());
@@ -569,7 +569,7 @@ pub unsafe extern "C" fn __revmc_builtin_create(
             // Limit is set as double of max contract bytecode size
             let max_initcode_size = ecx.host.max_initcode_size();
             if len > max_initcode_size {
-                return Err(BuiltinError::from(InstructionResult::CreateInitCodeSizeLimit));
+                return Err(InstructionResult::CreateInitCodeSizeLimit.into());
             }
             gas!(ecx, ecx.host.gas_params().initcode_cost(len));
         }
@@ -632,7 +632,7 @@ pub unsafe extern "C" fn __revmc_builtin_call(
             pop!(sp; value);
             let value = value.to_u256();
             if call_kind == CallKind::Call && ecx.is_static && value != U256::ZERO {
-                return Err(BuiltinError::from(InstructionResult::CallNotAllowedInsideStatic));
+                return Err(InstructionResult::CallNotAllowedInsideStatic.into());
             }
             value
         }
