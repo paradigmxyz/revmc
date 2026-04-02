@@ -311,7 +311,8 @@ revmc_llvm_lljit_enable_debug_support(LLVMOrcLLJITRef J) {
 
   auto Flags = JITSymbolFlags::Exported | JITSymbolFlags::Callable;
   orc::SymbolMap GDBFns;
-  GDBFns[ES.intern("llvm_orc_registerJITLoaderGDBAllocAction")] = {
+  // Use mangleAndIntern to add the platform symbol prefix (e.g. '_' on macOS).
+  GDBFns[Jit->mangleAndIntern("llvm_orc_registerJITLoaderGDBAllocAction")] = {
       orc::ExecutorAddr::fromPtr(&llvm_orc_registerJITLoaderGDBAllocAction),
       Flags};
   if (auto Err = Jit->getMainJITDylib().define(orc::absoluteSymbols(GDBFns)))
