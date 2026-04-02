@@ -169,7 +169,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     ///     #[cfg(may_suspend)]
     ///     suspend(resume_at: u32): {
     ///         ecx.resume_at = resume_at;
-    ///         goto return(InstructionResult::Stop);  // Caller checks next_action
+    ///         goto return(Ok(())); // Caller checks next_action
     ///     };
     ///
     ///     // All paths lead to here.
@@ -1223,7 +1223,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     /// Adds a resume point and returns its index.
     fn add_resume_at(&mut self, block: B::BasicBlock) -> Option<B::Value> {
         let value = self.bcx.block_addr(block);
-        if self.resume_blocks.is_empty() {
+        if self.resume_blocks.is_empty() && self.resume_kind == ResumeKind::Indexes {
             self.resume_kind =
                 if value.is_some() { ResumeKind::Blocks } else { ResumeKind::Indexes };
         }
@@ -1360,10 +1360,9 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     }
     */
 
-    /// Builds a check, failing if `ret` is not `InstructionResult::Continue`.
+    /// Builds a check, failing if the builtin returned a non-zero error.
     fn build_check_instruction_result(&mut self, ret: B::Value) {
-        // Continue was 0 in old revm, use Stop (1) as the "continue" marker
-        let failure = self.bcx.icmp_imm(IntCC::NotEqual, ret, InstructionResult::Stop as i64);
+        let failure = self.bcx.icmp_imm(IntCC::NotEqual, ret, 0);
         let target = self.build_check_inner(true, failure, ret);
         self.bcx.switch_to_block(target);
     }
