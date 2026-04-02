@@ -261,8 +261,6 @@ pub(crate) struct BlockData {
     pub(crate) preds: SmallVec<[Block; 4]>,
     /// Successor block IDs.
     pub(crate) succs: SmallVec<[Block; 4]>,
-    /// Whether this block has been eliminated (e.g. by dedup).
-    pub(crate) dead: bool,
 }
 
 impl BlockData {
@@ -532,7 +530,6 @@ impl Bytecode<'_> {
                 insts: Inst::from_usize(start)..Inst::from_usize(end),
                 preds: SmallVec::new(),
                 succs: SmallVec::new(),
-                dead: false,
             });
             for i in start..end {
                 cfg.inst_to_block[Inst::from_usize(i)] = Some(bid);
@@ -845,9 +842,6 @@ impl Bytecode<'_> {
 
         for bid in self.cfg.blocks.indices() {
             let block = &self.cfg.blocks[bid];
-            if block.dead {
-                continue;
-            }
 
             let term_inst = block.terminator();
             let term = &self.insts[term_inst];
@@ -1027,9 +1021,6 @@ impl Bytecode<'_> {
             }
 
             let block = &self.cfg.blocks[bid];
-            if block.dead {
-                continue;
-            }
 
             let summary = &summaries[bid];
 
