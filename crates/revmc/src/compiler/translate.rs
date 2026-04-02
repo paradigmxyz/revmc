@@ -679,12 +679,19 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         // store of `7`.
         {
             let (inp, out) = data.stack_io();
-            // Only for pure single-output ops without dynamic gas (EXP has dynamic gas).
-            if out == 1
+            // Pure ops with a known-constant output: skip the opcode logic and just
+            // store the folded constant. Works for single-output arithmetic (ADD, MUL,
+            // ...) and DUP (which adds one new TOS without consuming its input).
+            // Excluded: EXP (dynamic gas), SWAP (modifies two stack positions).
+            if out >= 1
                 && opcode != op::EXP
+                && !matches!(opcode, op::SWAP1..=op::SWAP16)
                 && let Some(const_out) = self.bytecode.const_output(inst)
             {
-                self.len_offset -= inp as i8;
+                // We push exactly 1 value, so consume `inp + 1 - out` to match the
+                // real stack diff. For DUP (out = inp+1) this is 0; for ADD (out = 1)
+                // this equals inp.
+                self.len_offset -= (inp + 1 - out) as i8;
                 let value = self.bcx.iconst_256(const_out);
                 self.push(value);
                 self.section_len_offset += effective_stack_diff(data);
