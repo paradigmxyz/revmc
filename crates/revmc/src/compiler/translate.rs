@@ -662,7 +662,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         }
 
         // Update the stack length for this instruction.
-<<<<<<< HEAD
         // Note: `section_len_offset` is updated at the end of the function, after the opcode
         // handler, so that push/pop/sp helpers see the pre-diff offset during codegen.
         {
@@ -678,13 +677,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         // The inputs are not loaded; we simply adjust the stack offset to consume them and
         // push the folded constant. This turns e.g. `PUSH 3, PUSH 4, ADD` into a single
         // store of `7`.
-||||||| 8e0adfec
-=======
-        // Note: `section_len_offset` is updated at the end of the function, after the opcode
-        // handler, so that push/pop/sp helpers see the pre-diff offset during codegen.
->>>>>>> main
         {
-<<<<<<< HEAD
             let (inp, out) = data.stack_io();
             // Only for pure single-output ops without dynamic gas (EXP has dynamic gas).
             if out == 1
@@ -696,25 +689,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 self.push(value);
                 self.section_len_offset += effective_stack_diff(data);
                 goto_return!("const output");
-||||||| 8e0adfec
-            let (inp, out) = data.stack_io();
-            let diff = out as i64 - inp as i64;
-            if diff != 0 {
-                let mut diff = diff;
-                // HACK: For now all opcodes that suspend (minus the test one, which does not reach
-                // here) return exactly one value. This value is pushed onto the stack by the
-                // caller, so we don't account for it here.
-                if data.may_suspend() {
-                    diff -= 1;
-                }
-                let len_changed = self.bcx.iadd_imm(self.len_before, diff);
-                self.stack_len.store(&mut self.bcx, len_changed);
-=======
-            let diff = effective_stack_diff(data);
-            if diff != 0 {
-                let len_changed = self.bcx.iadd_imm(self.len_before, diff as i64);
-                self.stack_len.store(&mut self.bcx, len_changed);
->>>>>>> main
             }
         }
 
