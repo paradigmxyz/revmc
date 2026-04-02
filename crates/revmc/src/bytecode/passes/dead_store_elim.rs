@@ -66,10 +66,7 @@ impl Bytecode<'_> {
 
         for bid in self.cfg.blocks.indices() {
             let block = &self.cfg.blocks[bid];
-            let insts: Vec<Inst> = block.insts().collect();
-            if insts.is_empty() {
-                continue;
-            }
+            let insts = block.insts();
 
             // Compute the stack height at each instruction boundary by walking forward.
             // heights[i] = stack height *before* executing insts[i].
@@ -77,11 +74,11 @@ impl Bytecode<'_> {
             let mut heights: Vec<i32> = Vec::with_capacity(insts.len() + 1);
             let entry_height = {
                 let section =
-                    StackSection::from_stack_io(insts.iter().map(|&i| self.insts[i].stack_io()));
+                    StackSection::from_stack_io(insts.clone().map(|i| self.insts[i].stack_io()));
                 section.inputs as i32
             };
             heights.push(entry_height);
-            for &inst in &insts {
+            for inst in insts.clone() {
                 let data = &self.insts[inst];
                 if data.is_dead_code() || data.flags.contains(InstFlags::SKIP_LOGIC) {
                     heights.push(*heights.last().unwrap());
@@ -103,7 +100,7 @@ impl Bytecode<'_> {
             }
 
             // Walk backward.
-            for (idx, &inst) in insts.iter().enumerate().rev() {
+            for (idx, inst) in insts.clone().enumerate().rev() {
                 let data = &self.insts[inst];
                 if data.is_dead_code() || data.flags.contains(InstFlags::SKIP_LOGIC) {
                     continue;

@@ -268,7 +268,9 @@ impl BlockData {
 
     /// Returns the instruction range as `Range<usize>` for indexing into raw arrays.
     #[inline]
-    pub(crate) fn insts(&self) -> impl ExactSizeIterator<Item = Inst> + use<> {
+    pub(crate) fn insts(
+        &self,
+    ) -> impl ExactSizeIterator<Item = Inst> + DoubleEndedIterator + Clone + use<> {
         (self.insts.start.index()..self.insts.end.index()).map(Inst::from_usize)
     }
 }
@@ -468,7 +470,7 @@ impl Bytecode<'_> {
     #[instrument(level = "debug", skip_all)]
     pub(crate) fn rebuild_cfg(&mut self) {
         let finish_block = |cfg: &mut Cfg, start: usize, end: usize| {
-            debug_assert!(start < end, "empty block range: {start}..{end}");
+            assert!(start < end, "empty block range: {start}..{end}");
             let bid = cfg.blocks.push(BlockData {
                 insts: Inst::from_usize(start)..Inst::from_usize(end),
                 preds: SmallVec::new(),
