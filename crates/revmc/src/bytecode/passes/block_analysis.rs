@@ -948,9 +948,8 @@ impl Bytecode<'_> {
                 self.snapshots.outputs[i] = stack.last().copied();
             }
 
-            // After a suspending instruction (CALL/CREATE), the caller can modify any stack
-            // slot before resuming, so all values become unknown.
-            if inst.may_suspend() {
+            #[cfg(test)]
+            if inst.opcode == crate::TEST_SUSPEND {
                 stack.fill(AbsValue::Top);
             }
         }
