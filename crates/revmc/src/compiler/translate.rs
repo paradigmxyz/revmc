@@ -605,14 +605,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         // At section heads: load from the alloca once and reset the section offset.
         // Within a section: derive from section_start_len + compile-time offset.
         self.len_offset = 0;
-        let prev_was_branching = inst.index() > 0 && {
-            let prev = self.bytecode.inst(inst - 1);
-            prev.is_branching() || prev.may_suspend()
-        };
-        let is_section_head = !data.stack_section.is_empty()
-            || data.is_reachable_jumpdest(self.bytecode.has_dynamic_jumps())
-            || prev_was_branching;
-        if is_section_head {
+        if data.is_stack_section_head() {
             self.section_start_len = self.stack_len.load(&mut self.bcx, "stack_len");
             self.section_start_sp = self.sp_at(self.section_start_len);
             self.section_len_offset = 0;

@@ -36,7 +36,7 @@ impl Bytecode<'_> {
             let first = self.inst(block.insts.start);
             let mut header = format!("{bid}:");
             let mut comment = String::new();
-            if !first.stack_section.is_empty() {
+            if first.is_stack_section_head() {
                 write!(
                     comment,
                     "stack_in={}, max_growth={}",
@@ -92,7 +92,7 @@ impl Bytecode<'_> {
                 if !data.gas_section.is_empty() {
                     write!(comment, ", gas={}", data.gas_section.gas_cost).unwrap();
                 }
-                if inst != block.insts.start && !data.stack_section.is_empty() {
+                if inst != block.insts.start && data.is_stack_section_head() {
                     write!(
                         comment,
                         ", stack_in={}, max_growth={}",
@@ -266,7 +266,7 @@ impl<'a> Bytecode<'a> {
                  label=\"{bid}",
             )?;
 
-            if !first.stack_section.is_empty() {
+            if first.is_stack_section_head() {
                 write!(
                     w,
                     " [in={} growth={}]",
@@ -281,7 +281,7 @@ impl<'a> Bytecode<'a> {
                     continue;
                 }
                 // Show stack section header for mid-block section boundaries.
-                if inst != block.insts.start && !data.stack_section.is_empty() {
+                if inst != block.insts.start && data.is_stack_section_head() {
                     write!(
                         w,
                         "--- [in={} growth={}]\\l",
