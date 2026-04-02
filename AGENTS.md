@@ -8,10 +8,9 @@ cargo fmt --all                            # format
 cargo docs                                 # check docs
 
 cargo nextest run --workspace              # test all
-cargo nextest run -p revmc "test_name"     # test single
-cargo nextest run -p revmc "statetest"     # test statetests
-SUBDIR=stRevertTest cargo nextest run -p revmc "statetest" # test single statetest
-
+cargo nextest run "test_name"              # test single
+cargo nextest run "statetest"              # test statetests
+SUBDIR=stRevertTest cargo nextest run "statetest" # test single statetest
 ```
 
 ## Architecture
