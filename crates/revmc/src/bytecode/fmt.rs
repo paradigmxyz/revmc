@@ -100,8 +100,9 @@ impl Bytecode<'_> {
                 }
 
                 // Comment with ic, pc, and flags/behavior.
-                let mut comment =
-                    format!("ic={:>ic_width$} pc={:>pc_width$}", inst.index(), data.pc,);
+                let mut comment = String::new();
+                write!(comment, "ic={:>ic_width$}", inst.index()).unwrap();
+                write!(comment, " pc={:>pc_width$}", data.pc).unwrap();
                 if !data.gas_section.is_empty() {
                     write!(comment, " gas={}", data.gas_section.gas_cost).unwrap();
                 }
