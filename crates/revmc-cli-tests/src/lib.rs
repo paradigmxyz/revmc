@@ -105,7 +105,7 @@ fn run_test(config: &Config, path: &Path) {
 
     let mut compiler = Command::new(config.cmd);
     fs::create_dir_all(build_dir).unwrap();
-    compiler.arg("run").arg(path).arg("-o").arg(build_dir).arg("--inspect-stack-length");
+    compiler.arg("run").arg(path).arg("-o").arg(build_dir).arg("--inspect-stack");
     // eprintln!("running compiler: {compiler:?}");
     let output = compiler.output().expect("failed to run test");
     assert!(
