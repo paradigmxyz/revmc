@@ -169,7 +169,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     ///     #[cfg(may_suspend)]
     ///     suspend(resume_at: u32): {
     ///         ecx.resume_at = resume_at;
-    ///         goto return(InstructionResult::Stop);  // Caller checks next_action
+    ///         goto return(Ok(())); // Caller checks next_action
     ///     };
     ///
     ///     // All paths lead to here.
@@ -1223,7 +1223,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     /// Adds a resume point and returns its index.
     fn add_resume_at(&mut self, block: B::BasicBlock) -> Option<B::Value> {
         let value = self.bcx.block_addr(block);
-        if self.resume_blocks.is_empty() {
+        if self.resume_blocks.is_empty() && self.resume_kind == ResumeKind::Indexes {
             self.resume_kind =
                 if value.is_some() { ResumeKind::Blocks } else { ResumeKind::Indexes };
         }
