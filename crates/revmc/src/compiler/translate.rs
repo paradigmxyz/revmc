@@ -1,7 +1,10 @@
 //! EVM to IR translation.
 
 use super::default_attrs;
-use crate::{Backend, Builder, Bytecode, EvmContext, Inst, InstData, InstFlags, IntCC, Result};
+use crate::{
+    Backend, Builder, Bytecode, EvmContext, Inst, InstData, InstFlags, IntCC, Result, decode_pair,
+    decode_single,
+};
 use oxc_index::IndexVec;
 use revm_bytecode::opcode as op;
 use revm_interpreter::{InputsImpl, InstructionResult};
@@ -922,6 +925,10 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 let slot = self.sp_at_top();
                 let _ = self.call_builtin(Builtin::BlobBaseFee, &[self.ecx, slot]);
             }
+            op::SLOTNUM => {
+                let slot = self.sp_at_top();
+                let _ = self.call_builtin(Builtin::SlotNum, &[self.ecx, slot]);
+            }
 
             op::POP => { /* Already handled in stack_io */ }
             op::MLOAD => {
@@ -1060,8 +1067,30 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             }
 
             op::DUP1..=op::DUP16 => self.dup((opcode - op::DUP1 + 1) as usize),
+            op::DUPN => {
+                let imm = self.bytecode.get_imm(data).map(|b| b[0]);
+                match imm.and_then(decode_single) {
+                    Some(n) => self.dup(n as usize),
+                    None => goto_return!(fail InstructionResult::InvalidImmediateEncoding),
+                }
+            }
 
             op::SWAP1..=op::SWAP16 => self.swap((opcode - op::SWAP1 + 1) as usize),
+            op::SWAPN => {
+                let imm = self.bytecode.get_imm(data).map(|b| b[0]);
+                match imm.and_then(decode_single) {
+                    Some(n) => self.swap(n as usize),
+                    None => goto_return!(fail InstructionResult::InvalidImmediateEncoding),
+                }
+            }
+
+            op::EXCHANGE => {
+                let imm = self.bytecode.get_imm(data).map(|b| b[0]);
+                match imm.and_then(decode_pair) {
+                    Some((n, m)) => self.exchange(n as usize, (m - n) as usize),
+                    None => goto_return!(fail InstructionResult::InvalidImmediateEncoding),
+                }
+            }
 
             op::LOG0..=op::LOG4 => {
                 let n = opcode - op::LOG0;
@@ -1142,7 +1171,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     ///
     /// If `load` is `false`, returns just the pointers.
     fn popn<const N: usize>(&mut self) -> [B::Value; N] {
-        debug_assert_ne!(N, 0);
+        assert_ne!(N, 0);
 
         std::array::from_fn(|i| {
             self.len_offset -= 1;
@@ -1156,7 +1185,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     /// Duplicates the `n`th value from the top of the stack.
     /// `n` cannot be `0`.
     fn dup(&mut self, n: usize) {
-        debug_assert_ne!(n, 0);
+        assert_ne!(n, 0);
         let sp = self.sp_from_top(n);
         let name = if self.config.debug { &format!("dup{n}") } else { "" };
         let value = self.load_word(sp, name);
@@ -1173,7 +1202,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     /// `n` is the first index, and the second index is calculated as `n + m`.
     /// `m` cannot be `0`.
     fn exchange(&mut self, n: usize, m: usize) {
-        debug_assert_ne!(m, 0);
+        assert_ne!(m, 0);
         // Load a.
         let a_sp = self.sp_from_top(n + 1);
         let a = self.load_word(a_sp, "swap.a");
@@ -1320,7 +1349,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
     /// Returns the stack pointer at `n` from the top (`&stack[len - n]`).
     fn sp_from_top(&mut self, n: usize) -> B::Value {
-        debug_assert_ne!(n, 0);
+        assert_ne!(n, 0);
         self.sp_from_section(self.section_len_offset as i64 - n as i64)
     }
 

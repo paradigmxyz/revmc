@@ -18,10 +18,10 @@
 //! ```
 
 use crate::{
-    U256,
+    U256, encode_pair, encode_single,
     eyre::{self, Result},
 };
-use revm_bytecode::opcode::OpCode;
+use revm_bytecode::opcode::{self as op, OpCode};
 use revm_primitives::map::HashMap;
 use std::{cmp::Ordering, str::FromStr};
 
@@ -91,25 +91,62 @@ fn parse_items<'a>(s: &'a str) -> Result<Vec<Item<'a>>> {
             let imm = parse_imm_or_label(next)?;
             items.push(Item::Inst(Inst { opcode: 0, imm: Some(imm), push_kind: PushKind::Auto }));
         } else {
-            let op = OpCode::parse(word).ok_or_else(|| eyre::eyre!("invalid opcode: {word:?}"))?;
-            let opcode = op.get();
-            let imm_len = op.info().immediate_size();
-            if imm_len > 0 {
-                let next =
-                    words.next().ok_or_else(|| eyre::eyre!("missing immediate for opcode {op}"))?;
-                let imm = parse_imm_or_label(next)?;
+            let opc = OpCode::parse(word).ok_or_else(|| eyre::eyre!("invalid opcode: {word:?}"))?;
+            let opcode = opc.get();
+
+            // DUPN/SWAPN: accept a decoded stack index, encode to raw immediate.
+            if opcode == op::DUPN || opcode == op::SWAPN {
+                let next = words
+                    .next()
+                    .ok_or_else(|| eyre::eyre!("missing immediate for opcode {opc}"))?;
+                let n: u8 =
+                    next.parse().map_err(|_| eyre::eyre!("invalid {opc} immediate: {next:?}"))?;
+                let raw = encode_single(n)
+                    .ok_or_else(|| eyre::eyre!("{opc} index {n} out of valid range [17, 235]"))?;
                 items.push(Item::Inst(Inst {
                     opcode,
-                    imm: Some(imm),
-                    push_kind: PushKind::Fixed(imm_len),
+                    imm: Some(Imm::Number(U256::from(raw))),
+                    push_kind: PushKind::Fixed(1),
+                }));
+            // EXCHANGE: accept a `n,m` pair, encode to raw immediate.
+            } else if opcode == op::EXCHANGE {
+                let next = words
+                    .next()
+                    .ok_or_else(|| eyre::eyre!("missing immediate for opcode {opc}"))?;
+                let (n_str, m_str) = next
+                    .split_once(',')
+                    .ok_or_else(|| eyre::eyre!("EXCHANGE requires n,m format (e.g. `1,2`)"))?;
+                let n: u8 =
+                    n_str.parse().map_err(|_| eyre::eyre!("invalid EXCHANGE index: {n_str:?}"))?;
+                let m: u8 =
+                    m_str.parse().map_err(|_| eyre::eyre!("invalid EXCHANGE index: {m_str:?}"))?;
+                let raw = encode_pair(n, m)
+                    .ok_or_else(|| eyre::eyre!("EXCHANGE pair ({n}, {m}) cannot be encoded"))?;
+                items.push(Item::Inst(Inst {
+                    opcode,
+                    imm: Some(Imm::Number(U256::from(raw))),
+                    push_kind: PushKind::Fixed(1),
                 }));
             } else {
-                if let Some(next) = words.peek()
-                    && U256::from_str(next).is_ok()
-                {
-                    eyre::bail!("unexpected immediate for opcode {op}");
+                let imm_len = opc.info().immediate_size();
+                if imm_len > 0 {
+                    let next = words
+                        .next()
+                        .ok_or_else(|| eyre::eyre!("missing immediate for opcode {opc}"))?;
+                    let imm = parse_imm_or_label(next)?;
+                    items.push(Item::Inst(Inst {
+                        opcode,
+                        imm: Some(imm),
+                        push_kind: PushKind::Fixed(imm_len),
+                    }));
+                } else {
+                    if let Some(next) = words.peek()
+                        && U256::from_str(next).is_ok()
+                    {
+                        eyre::bail!("unexpected immediate for opcode {opc}");
+                    }
+                    items.push(Item::Inst(Inst { opcode, imm: None, push_kind: PushKind::None }));
                 }
-                items.push(Item::Inst(Inst { opcode, imm: None, push_kind: PushKind::None }));
             }
         }
     }
@@ -403,6 +440,51 @@ mod tests {
         )
         .unwrap();
         assert_eq!(code, vec![op::JUMPDEST, op::PUSH0, op::PUSH0, op::STOP]);
+    }
+
+    #[test]
+    fn dupn() {
+        // Decoded index 17 → raw byte 0x00.
+        assert_eq!(parse_asm("DUPN 17").unwrap(), vec![op::DUPN, 0x00]);
+        // Decoded index 108 → raw byte 128.
+        assert_eq!(parse_asm("DUPN 108").unwrap(), vec![op::DUPN, 128]);
+        // Index 16 is out of range.
+        assert!(parse_asm("DUPN 16").is_err());
+        // Index 0 is out of range.
+        assert!(parse_asm("DUPN 0").is_err());
+        // 236 is out of range.
+        assert!(parse_asm("DUPN 236").is_err());
+        // Non-numeric.
+        assert!(parse_asm("DUPN abc").is_err());
+    }
+
+    #[test]
+    fn swapn() {
+        assert_eq!(parse_asm("SWAPN 17").unwrap(), vec![op::SWAPN, 0x00]);
+        assert_eq!(parse_asm("SWAPN 108").unwrap(), vec![op::SWAPN, 128]);
+        assert!(parse_asm("SWAPN 16").is_err());
+        assert!(parse_asm("SWAPN 0").is_err());
+    }
+
+    #[test]
+    fn exchange() {
+        // (1, 2) → raw byte 0x01.
+        assert_eq!(parse_asm("EXCHANGE 1,2").unwrap(), vec![op::EXCHANGE, 0x01]);
+        // (1, 14) uses case 2 (q >= r).
+        assert!(parse_asm("EXCHANGE 1,14").is_ok());
+        // (2, 1) cannot be encoded.
+        assert!(parse_asm("EXCHANGE 2,1").is_err());
+        // (0, 1) is invalid (zero index).
+        assert!(parse_asm("EXCHANGE 0,1").is_err());
+        // Missing comma.
+        assert!(parse_asm("EXCHANGE 1").is_err());
+        // Non-numeric.
+        assert!(parse_asm("EXCHANGE a,b").is_err());
+    }
+
+    #[test]
+    fn slotnum() {
+        assert_eq!(parse_asm("SLOTNUM").unwrap(), vec![op::SLOTNUM]);
     }
 
     #[test]
