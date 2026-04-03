@@ -202,6 +202,8 @@ impl<'a> Iterator for Tokenizer<'a> {
 
 /// A macro definition: parameter names and body tokens.
 struct MacroDef<'a> {
+    /// Whether this is a function-like macro (invoked with parentheses).
+    is_fn: bool,
     params: Vec<&'a str>,
     body: Vec<Token<'a>>,
 }
@@ -212,6 +214,7 @@ fn builtin_macros() -> HashMap<&'static str, MacroDef<'static>> {
     m.insert(
         "RET_WORD",
         MacroDef {
+            is_fn: false,
             params: vec![],
             body: vec![
                 Token::Ident("PUSH0"),
@@ -236,7 +239,9 @@ fn preprocess(s: &str) -> Result<Vec<Token<'_>>> {
     let mut rest_start = Vec::new();
     for line in s.lines() {
         let trimmed = line.trim();
-        if let Some(after) = trimmed.strip_prefix("#define") {
+        if let Some(after) = trimmed.strip_prefix("#define")
+            && (after.is_empty() || after.starts_with(|c: char| c.is_ascii_whitespace()))
+        {
             parse_define(after, &mut macros)?;
         } else {
             // Record (start, end) byte offsets into `s` for non-directive lines.
@@ -265,29 +270,49 @@ fn parse_define<'a>(after: &'a str, macros: &mut HashMap<&'a str, MacroDef<'a>>)
 
     let name = match tok.next() {
         Some(Token::Ident(name)) => name,
-        _ => eyre::bail!("expected macro name after #define"),
+        Some(other) => eyre::bail!("expected macro name after #define, got {other:?}"),
+        None => eyre::bail!("expected macro name after #define"),
     };
 
-    // Optional parameter list: NAME(a, b).
+    // Function-like macro: NAME(a, b).
+    // Only if '(' immediately follows the name (no whitespace), matching C preprocessor semantics.
+    let is_fn = tok.peek_char() == Some('(');
+
+    let all_tokens: Vec<Token<'a>> = tok.collect();
+    let mut i = 0;
+
     let mut params = Vec::new();
-    if tok.peek_char() == Some('(') {
-        tok.next(); // consume '('
-        loop {
-            match tok.next() {
-                Some(Token::Ident(p)) => params.push(p),
-                Some(Token::RParen) => break,
-                _ => break,
+    if is_fn && matches!(all_tokens.get(i), Some(Token::LParen)) {
+        i += 1; // consume '('
+        if !matches!(all_tokens.get(i), Some(Token::RParen)) {
+            loop {
+                match all_tokens.get(i) {
+                    Some(Token::Ident(p)) => {
+                        params.push(*p);
+                        i += 1;
+                    }
+                    other => {
+                        eyre::bail!("expected parameter name in #define {name}, got {other:?}")
+                    }
+                }
+                match all_tokens.get(i) {
+                    Some(Token::RParen) => {
+                        i += 1;
+                        break;
+                    }
+                    Some(Token::Comma) => i += 1,
+                    other => eyre::bail!(
+                        "expected ',' or ')' in #define {name} parameter list, got {other:?}"
+                    ),
+                }
             }
-            match tok.next() {
-                Some(Token::Comma) => {}
-                Some(Token::RParen) => break,
-                _ => break,
-            }
+        } else {
+            i += 1; // consume ')'
         }
     }
 
-    let body: Vec<Token<'a>> = tok.collect();
-    macros.insert(name, MacroDef { params, body });
+    let body = all_tokens[i..].to_vec();
+    macros.insert(name, MacroDef { is_fn, params, body });
     Ok(())
 }
 
@@ -309,11 +334,14 @@ fn expand_macros<'a>(
             continue;
         };
 
-        if mac.params.is_empty() {
+        if !mac.is_fn {
+            // Object-like macro: simple body substitution.
             out.extend(mac.body.iter().cloned());
         } else {
-            // Consume `(arg1, arg2, ...)`.
+            // Function-like macro: consume `(arg1, arg2, ...)`.
             eyre::ensure!(iter.next() == Some(Token::LParen), "macro {name:?} expects arguments");
+
+            // Parse arguments, handling nested parens.
             let mut args: Vec<Vec<Token<'a>>> = vec![vec![]];
             let mut depth = 1u32;
             loop {
@@ -336,12 +364,23 @@ fn expand_macros<'a>(
                     _ => args.last_mut().unwrap().push(t),
                 }
             }
-            eyre::ensure!(
-                args.len() == mac.params.len(),
-                "macro {name:?} expects {} argument(s), got {}",
-                mac.params.len(),
-                args.len()
-            );
+
+            // Zero-arg function-like: `FOO()` produces args = [[]]; expect 0.
+            if mac.params.is_empty() {
+                eyre::ensure!(
+                    args.len() == 1 && args[0].is_empty(),
+                    "macro {name:?} takes no arguments"
+                );
+            } else {
+                eyre::ensure!(
+                    args.len() == mac.params.len(),
+                    "macro {name:?} expects {} argument(s), got {}",
+                    mac.params.len(),
+                    args.len()
+                );
+            }
+
+            // Substitute $param refs in the body.
             for body_tok in &mac.body {
                 if let Token::ParamRef(pname) = body_tok
                     && let Some(idx) = mac.params.iter().position(|p| p == pname)
@@ -944,5 +983,77 @@ mod tests {
         assert!(parse_asm("#define - STOP").is_err());
         // `#define` with no name at all.
         assert!(parse_asm("#define (a) STOP").is_err());
+    }
+
+    #[test]
+    fn define_no_space_after_keyword() {
+        // `#defineFOO` should not be treated as a directive.
+        assert!(parse_asm("#defineFOO STOP").is_err());
+    }
+
+    #[test]
+    fn define_zero_arg_fn() {
+        let code = parse_asm(
+            "
+            #define NOP() ADD
+            NOP()
+        ",
+        )
+        .unwrap();
+        assert_eq!(code, vec![op::ADD]);
+    }
+
+    #[test]
+    fn define_zero_arg_fn_bare_is_error() {
+        // Function-like macro requires parentheses.
+        assert!(
+            parse_asm(
+                "
+            #define NOP() ADD
+            NOP
+        "
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn define_zero_arg_fn_with_args_is_error() {
+        assert!(
+            parse_asm(
+                "
+            #define NOP() ADD
+            NOP(1)
+        "
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn define_malformed_param_list() {
+        // Missing closing paren.
+        assert!(parse_asm("#define FOO(a STOP").is_err());
+        // Missing comma between params.
+        assert!(parse_asm("#define FOO(a b) STOP").is_err());
+        // Number as param name.
+        assert!(parse_asm("#define FOO(1) STOP").is_err());
+        // Trailing comma.
+        assert!(parse_asm("#define FOO(a,) STOP").is_err());
+    }
+
+    #[test]
+    fn define_space_before_paren_is_object_like() {
+        // `#define FOO (a) STOP` — space before `(` makes it object-like with body `(a) STOP`.
+        // Using FOO should expand to `(a) STOP`, and `(` is not a valid opcode.
+        assert!(
+            parse_asm(
+                "
+            #define FOO (a) STOP
+            FOO
+        "
+            )
+            .is_err()
+        );
     }
 }
