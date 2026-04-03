@@ -268,7 +268,9 @@ impl BlockData {
 
     /// Returns the instruction range as `Range<usize>` for indexing into raw arrays.
     #[inline]
-    pub(crate) fn insts(&self) -> impl ExactSizeIterator<Item = Inst> + use<> {
+    pub(crate) fn insts(
+        &self,
+    ) -> impl DoubleEndedIterator<Item = Inst> + ExactSizeIterator + use<> {
         (self.insts.start.index()..self.insts.end.index()).map(Inst::from_usize)
     }
 }
@@ -1012,6 +1014,16 @@ pub(crate) mod tests {
 
     pub(crate) fn analyze_code(code: Vec<u8>) -> Bytecode<'static> {
         analyze_code_with(code, Default::default())
+    }
+
+    pub(crate) fn analyze_code_spec(code: Vec<u8>, spec_id: SpecId) -> Bytecode<'static> {
+        crate::tests::init_tracing();
+
+        eprintln!("{}", hex::encode(&code));
+        let mut bytecode = Bytecode::new(code, spec_id);
+        bytecode.analyze().unwrap();
+        eprintln!("{bytecode}");
+        bytecode
     }
 
     pub(crate) fn analyze_code_with(

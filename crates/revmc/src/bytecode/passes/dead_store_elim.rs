@@ -4,16 +4,25 @@
 //! by a later instruction or at the block exit). Instructions whose outputs are all dead and
 //! whose logic is safe to skip are marked [`InstFlags::SKIP_LOGIC`].
 //!
-//! DUP, SWAP, and POP require custom liveness transfer functions because generic `(inputs,
-//! outputs)` arity doesn't capture how they map stack slots:
-//! - SWAP permutes two positions without consuming or producing values.
-//! - DUP copies a single deep source to a new TOS.
+//! DUP, SWAP, POP, DUPN, SWAPN, and EXCHANGE require custom liveness transfer functions
+//! because generic `(inputs, outputs)` arity doesn't capture how they map stack slots:
+//! - SWAP/SWAPN permute two positions without consuming or producing values.
+//! - DUP/DUPN copy a single deep source to a new TOS.
+//! - EXCHANGE swaps two arbitrary non-TOS positions.
 //! - POP kills its input (makes the position dead) rather than reading it.
 
 use super::StackSection;
-use crate::bytecode::{Bytecode, Inst, InstFlags};
+use crate::bytecode::{Bytecode, InstFlags};
 use bitvec::vec::BitVec;
 use revm_bytecode::opcode as op;
+
+/// Decoded immediate for liveness transfer of DUPN/SWAPN/EXCHANGE.
+enum DecodedImm {
+    /// Single depth (DUPN, SWAPN).
+    Single(usize),
+    /// Pair of non-TOS indices (EXCHANGE).
+    Pair(usize, usize),
+}
 
 impl Bytecode<'_> {
     /// Intra-block dead store elimination.
@@ -67,11 +76,7 @@ impl Bytecode<'_> {
             }
 
             // Walk backward.
-            let insts_start = block.insts.start.index();
-            let insts_end = block.insts.end.index();
-            for raw in (insts_start..insts_end).rev() {
-                let idx = raw - insts_start;
-                let inst = Inst::from_usize(raw);
+            for (idx, inst) in block.insts().enumerate().rev() {
                 let data = &self.insts[inst];
                 if data.is_dead_code() || data.flags.contains(InstFlags::SKIP_LOGIC) {
                     continue;
@@ -80,6 +85,19 @@ impl Bytecode<'_> {
                 let opcode = data.opcode;
                 let (inp, out) = data.stack_io();
                 let h_before = heights[idx] as usize;
+
+                // Decode immediate for DUPN/SWAPN/EXCHANGE.
+                let imm = match opcode {
+                    op::DUPN | op::SWAPN => self
+                        .get_imm(data)
+                        .and_then(|b| crate::decode_single(b[0]))
+                        .map(|n| DecodedImm::Single(n as usize)),
+                    op::EXCHANGE => self
+                        .get_imm(data)
+                        .and_then(|b| crate::decode_pair(b[0]))
+                        .map(|(n, m)| DecodedImm::Pair(n as usize, m as usize)),
+                    _ => None,
+                };
 
                 // Check if all outputs are dead and the instruction can be skipped.
                 if out > 0
@@ -100,7 +118,7 @@ impl Bytecode<'_> {
                     }
                 }
 
-                transfer_liveness(&mut live, opcode, h_before, inp as usize, out as usize);
+                transfer_liveness(&mut live, opcode, h_before, inp as usize, out as usize, &imm);
             }
         }
 
@@ -181,45 +199,88 @@ fn can_skip_when_dead(opcode: u8) -> bool {
 /// Updates `live` to reflect liveness *before* the instruction executes, given
 /// `h_before` (the stack height before the instruction). All positions are guaranteed
 /// in-bounds since `live` is sized to the block's max stack height.
-fn transfer_liveness(live: &mut BitVec, opcode: u8, h_before: usize, inp: usize, out: usize) {
+///
+/// `imm` carries the decoded immediate for DUPN/SWAPN/EXCHANGE; `None` for all other opcodes.
+fn transfer_liveness(
+    live: &mut BitVec,
+    opcode: u8,
+    h_before: usize,
+    inp: usize,
+    out: usize,
+    imm: &Option<DecodedImm>,
+) {
     match opcode {
         op::SWAP1..=op::SWAP16 => {
             let depth = (opcode - op::SWAP1 + 1) as usize;
-            let tos = h_before - 1;
-            let other = tos - depth;
-            let (a, b) = (live[tos], live[other]);
-            live.set(tos, b);
-            live.set(other, a);
+            transfer_swap(live, h_before, depth);
         }
+        op::SWAPN => match imm {
+            Some(DecodedImm::Single(depth)) => transfer_swap(live, h_before, *depth),
+            _ => generic_transfer(live, h_before, inp, out),
+        },
         op::DUP1..=op::DUP16 => {
             let depth = (opcode - op::DUP1 + 1) as usize;
-            let new_tos = h_before;
-            let src = h_before - depth;
-            let new_tos_live = live[new_tos];
-            live.set(new_tos, false);
-            if new_tos_live {
-                live.set(src, true);
-            }
+            transfer_dup(live, h_before, depth);
         }
+        op::DUPN => match imm {
+            Some(DecodedImm::Single(depth)) => transfer_dup(live, h_before, *depth),
+            _ => generic_transfer(live, h_before, inp, out),
+        },
+        op::EXCHANGE => match imm {
+            Some(DecodedImm::Pair(n, m)) => {
+                let tos = h_before - 1;
+                let pos_a = tos - n;
+                let pos_b = tos - m;
+                let (a, b) = (live[pos_a], live[pos_b]);
+                live.set(pos_a, b);
+                live.set(pos_b, a);
+            }
+            _ => generic_transfer(live, h_before, inp, out),
+        },
         op::POP => {
             live.set(h_before - 1, false);
         }
-        _ => {
-            let write_base = h_before - inp;
-            for k in 0..out {
-                live.set(write_base + k, false);
-            }
-            for k in 0..inp {
-                live.set(h_before - inp + k, true);
-            }
-        }
+        _ => generic_transfer(live, h_before, inp, out),
+    }
+}
+
+/// Generic liveness transfer: kill all outputs, then mark all inputs as live.
+fn generic_transfer(live: &mut BitVec, h_before: usize, inp: usize, out: usize) {
+    let write_base = h_before - inp;
+    for k in 0..out {
+        live.set(write_base + k, false);
+    }
+    for k in 0..inp {
+        live.set(h_before - inp + k, true);
+    }
+}
+
+/// SWAP liveness: permute liveness of TOS and the swapped position.
+fn transfer_swap(live: &mut BitVec, h_before: usize, depth: usize) {
+    let tos = h_before - 1;
+    let other = tos - depth;
+    let (a, b) = (live[tos], live[other]);
+    live.set(tos, b);
+    live.set(other, a);
+}
+
+/// DUP liveness: the new TOS is killed; if it was live, the source becomes live.
+fn transfer_dup(live: &mut BitVec, h_before: usize, depth: usize) {
+    let new_tos = h_before;
+    let src = h_before - depth;
+    let new_tos_live = live[new_tos];
+    live.set(new_tos, false);
+    if new_tos_live {
+        live.set(src, true);
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::block_analysis::tests::{Inst, analyze_asm};
+    use super::super::block_analysis::tests::{Inst, analyze_asm, analyze_code_spec};
     use crate::bytecode::InstFlags;
+    use revm_bytecode::opcode as op;
+    use revm_primitives::hardfork::SpecId;
 
     #[test]
     fn push_pop() {
@@ -360,5 +421,67 @@ mod tests {
         ",
         );
         assert!(!bytecode.inst(Inst::from_usize(2)).flags.contains(InstFlags::SKIP_LOGIC));
+    }
+
+    /// Helper: builds bytecode with `n` PUSH0s followed by `suffix`, using AMSTERDAM spec.
+    fn eof_with_prefix(n: usize, suffix: &[u8]) -> crate::bytecode::Bytecode<'static> {
+        let mut code = vec![op::PUSH0; n];
+        code.extend_from_slice(suffix);
+        analyze_code_spec(code, SpecId::AMSTERDAM)
+    }
+
+    #[test]
+    fn swapn_preserves_liveness() {
+        // 18 × PUSH0 (insts 0..18), SWAPN 17 (inst 18), STOP (inst 19).
+        // SWAPN 17 needs TOS + 17 below = 18 items.
+        let bytecode = eof_with_prefix(18, &[op::SWAPN, 0x00, op::STOP]);
+        for i in 0..18 {
+            assert!(
+                !bytecode.inst(Inst::from_usize(i)).flags.contains(InstFlags::SKIP_LOGIC),
+                "PUSH0 at {i} should NOT be skipped"
+            );
+        }
+    }
+
+    #[test]
+    fn dupn_keeps_source_live() {
+        // 17 × PUSH0, DUPN 17 (dup bottom), POP, STOP.
+        // The DUP copy is popped but the source (inst 0) is still live at exit.
+        let bytecode = eof_with_prefix(17, &[op::DUPN, 0x00, op::POP, op::STOP]);
+        assert!(
+            !bytecode.inst(Inst::from_usize(0)).flags.contains(InstFlags::SKIP_LOGIC),
+            "source PUSH0 should NOT be skipped"
+        );
+    }
+
+    #[test]
+    fn dupn_dead_copy() {
+        // 17 × PUSH0, DUPN 17 (dup bottom), POP, STOP.
+        // The DUP copy is immediately popped. With precise DUPN liveness the source stays
+        // live (it's still on the exit stack), and the DUPN itself can't be eliminated
+        // because it's not in `can_skip_when_dead`. What we really test is that the
+        // transfer doesn't incorrectly kill the source position.
+        let bytecode = eof_with_prefix(17, &[op::DUPN, 0x00, op::POP, op::STOP]);
+        // All 17 original PUSH0s should remain live (they're on the exit stack).
+        for i in 0..17 {
+            assert!(
+                !bytecode.inst(Inst::from_usize(i)).flags.contains(InstFlags::SKIP_LOGIC),
+                "PUSH0 at {i} should NOT be skipped"
+            );
+        }
+    }
+
+    #[test]
+    fn exchange_preserves_liveness() {
+        // 18 × PUSH0, EXCHANGE 1,2 (swap positions 1 and 2 from TOS), STOP.
+        // EXCHANGE needs at least m+1 items. With (1,2): 3 items minimum, but we use 18
+        // to match the DUPN/SWAPN test shape and ensure all are live.
+        let bytecode = eof_with_prefix(18, &[op::EXCHANGE, 0x01, op::STOP]);
+        for i in 0..18 {
+            assert!(
+                !bytecode.inst(Inst::from_usize(i)).flags.contains(InstFlags::SKIP_LOGIC),
+                "PUSH0 at {i} should NOT be skipped"
+            );
+        }
     }
 }
