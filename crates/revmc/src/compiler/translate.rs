@@ -4,11 +4,11 @@ use super::default_attrs;
 use crate::{Backend, Builder, Bytecode, EvmContext, Inst, InstData, InstFlags, IntCC, Result};
 use oxc_index::IndexVec;
 use revm_bytecode::opcode as op;
-use revm_interpreter::{InputsImpl, InstructionResult};
+use revm_interpreter::InstructionResult;
 use revm_primitives::U256;
 use revmc_backend::{Attribute, BackendTypes, FunctionAttributeLocation, Pointer, TypeMethods};
 use revmc_builtins::{Builtin, Builtins, CallKind, CreateKind};
-use std::{fmt::Write, mem, sync::atomic::AtomicPtr};
+use std::{fmt::Write, mem};
 
 const STACK_CAP: usize = 1024;
 // const WORD_SIZE: usize = 32;
@@ -65,7 +65,6 @@ pub(super) struct FunctionCx<'a, B: Backend> {
     ptr_type: B::Type,
     isize_type: B::Type,
     word_type: B::Type,
-    address_type: B::Type,
     i8_type: B::Type,
 
     // Locals.
@@ -79,8 +78,6 @@ pub(super) struct FunctionCx<'a, B: Backend> {
     sp_arg: Option<B::Value>,
     /// The amount of gas remaining. `i64`. See `Gas`.
     gas_remaining: Pointer<B::Builder<'a>>,
-    /// The input. Constant throughout the function.
-    input: B::Value,
     /// The EVM context. Opaque pointer, only passed to builtins.
     ecx: B::Value,
     /// Stack length before the current instruction.
@@ -210,7 +207,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let isize_type = bcx.type_ptr_sized_int();
         let i8_type = bcx.type_int(8);
         let i64_type = bcx.type_int(64);
-        let address_type = bcx.type_int(160);
         let word_type = bcx.type_int(256);
 
         // Set up entry block.
@@ -276,14 +272,12 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
             ptr_type,
             isize_type,
-            address_type,
             word_type,
             i8_type,
             stack_len,
             stack,
             sp_arg: local_stack.then_some(sp_arg),
             gas_remaining,
-            input,
             ecx,
             len_before: zero,
             len_offset: 0,
@@ -696,41 +690,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             }};
         }
 
-        macro_rules! field {
-            // Gets the pointer to a field.
-            ($field:ident; @get $($paths:path),*; $($spec:tt).*) => {
-                self.get_field(self.$field, 0 $(+ mem::offset_of!($paths, $spec))*, stringify!($field.$($spec).*.addr))
-            };
-            // Gets and loads the pointer to a field.
-            // The value is loaded as a native-endian 256-bit integer.
-            // `@[endian]` is the endianness of the value. If native, omit it.
-            ($field:ident; @load $(@[endian = $endian:tt])? $ty:expr, $($paths:path),*; $($spec:tt).*) => {{
-                let ptr = field!($field; @get $($paths),*; $($spec).*);
-                // Use align=1 because the pointer comes from a byte-offset GEP and may not
-                // satisfy the type's natural alignment.
-                #[allow(unused_mut)]
-                let mut value = self.bcx.load_aligned($ty, ptr, 1, stringify!($field.$($spec).*));
-                $(
-                    if !cfg!(target_endian = $endian) {
-                        value = self.bcx.bswap(value);
-                    }
-                )?
-                value
-            }};
-            // Gets, loads, extends (if necessary), and pushes the value of a field to the stack.
-            // `@[endian]` is the endianness of the value. If native, omit it.
-            ($field:ident; @push $(@[endian = $endian:tt])? $ty:expr, $($rest:tt)*) => {{
-                let mut value = field!($field; @load $(@[endian = $endian])? $ty, $($rest)*);
-                if self.bcx.type_bit_width($ty) < 256 {
-                    value = self.bcx.zext(self.word_type, value);
-                }
-                self.push(value);
-            }};
-        }
-        macro_rules! input_field {
-            ($($tt:tt)*) => { field!(input; $($tt)*) };
-        }
-
         match data.opcode {
             op::STOP => goto_return!(build InstructionResult::Stop),
 
@@ -817,7 +776,9 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             }
 
             op::ADDRESS => {
-                input_field!(@push @[endian = "big"] self.address_type, InputsImpl; target_address)
+                let slot = self.sp_at_top();
+                let _ = self.call_builtin(Builtin::Address, &[self.ecx, slot]);
+                self.narrow_to_address(slot);
             }
             op::BALANCE => {
                 let sp = self.sp_after_inputs();
@@ -828,10 +789,13 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 let _ = self.call_builtin(Builtin::Origin, &[self.ecx, slot]);
             }
             op::CALLER => {
-                input_field!(@push @[endian = "big"] self.address_type, InputsImpl; caller_address)
+                let slot = self.sp_at_top();
+                let _ = self.call_builtin(Builtin::Caller, &[self.ecx, slot]);
+                self.narrow_to_address(slot);
             }
             op::CALLVALUE => {
-                input_field!(@push @[endian = "little"] self.word_type, InputsImpl; call_value)
+                let slot = self.sp_at_top();
+                let _ = self.call_builtin(Builtin::CallValue, &[self.ecx, slot]);
             }
             op::CALLDATALOAD => {
                 let sp = self.sp_after_inputs();
@@ -868,7 +832,9 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 self.call_fallible_builtin(Builtin::ExtCodeCopy, &[self.ecx, sp]);
             }
             op::RETURNDATASIZE => {
-                field!(ecx; @push self.isize_type, EvmContext<'_>, pf::Slice; return_data.len);
+                let size = self.call_builtin(Builtin::ReturnDataSize, &[self.ecx]).unwrap();
+                let size = self.bcx.zext(self.word_type, size);
+                self.push(size);
             }
             op::RETURNDATACOPY => {
                 let sp = self.sp_after_inputs();
@@ -1245,6 +1211,15 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     /// Gets a field at the given offset.
     fn get_field(&mut self, ptr: B::Value, offset: usize, name: &str) -> B::Value {
         get_field(&mut self.bcx, ptr, offset, name)
+    }
+
+    /// Narrows the i256 at `slot` to i160 via trunc+zext so LLVM knows the high bits are zero.
+    fn narrow_to_address(&mut self, slot: B::Value) {
+        let address_type = self.bcx.type_int(160);
+        let value = self.load_word(slot, "address.raw");
+        let narrow = self.bcx.ireduce(address_type, value);
+        let value = self.bcx.zext(self.word_type, narrow);
+        self.bcx.store(value, slot);
     }
 
     /// Loads the gas used.
@@ -1722,31 +1697,6 @@ impl<B: Backend> FunctionCx<'_, B> {
 #[allow(dead_code)]
 mod pf {
     use super::*;
-
-    pub(super) struct Bytes {
-        pub(super) ptr: *const u8,
-        pub(super) len: usize,
-        data: AtomicPtr<()>,
-        vtable: &'static Vtable,
-    }
-    const _: [(); mem::size_of::<revm_primitives::Bytes>()] = [(); mem::size_of::<Bytes>()];
-    struct Vtable {
-        /// fn(data, ptr, len)
-        clone: unsafe fn(&AtomicPtr<()>, *const u8, usize) -> Bytes,
-        /// fn(data, ptr, len)
-        ///
-        /// takes `Bytes` to value
-        to_vec: unsafe fn(&AtomicPtr<()>, *const u8, usize) -> Vec<u8>,
-        /// fn(data, ptr, len)
-        drop: unsafe fn(&mut AtomicPtr<()>, *const u8, usize),
-    }
-
-    #[repr(C)] // See core::ptr::metadata::PtrComponents
-    pub(super) struct Slice {
-        pub(super) ptr: *const u8,
-        pub(super) len: usize,
-    }
-    const _: [(); mem::size_of::<&'static [u8]>()] = [(); mem::size_of::<Slice>()];
 
     pub(super) struct Gas {
         /// The initial gas limit. This is constant throughout execution.

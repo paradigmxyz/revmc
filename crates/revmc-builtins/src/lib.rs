@@ -175,6 +175,26 @@ pub unsafe extern "C" fn __revmc_builtin_origin(ecx: &EvmContext<'_>, slot: &mut
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn __revmc_builtin_address(ecx: &EvmContext<'_>, slot: &mut EvmWord) {
+    *slot = EvmWord::from_be_bytes(ecx.input.target_address().into_word());
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __revmc_builtin_caller(ecx: &EvmContext<'_>, slot: &mut EvmWord) {
+    *slot = EvmWord::from_be_bytes(ecx.input.caller_address().into_word());
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __revmc_builtin_call_value(ecx: &EvmContext<'_>, slot: &mut EvmWord) {
+    *slot = ecx.input.call_value().into();
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __revmc_builtin_returndatasize(ecx: &EvmContext<'_>) -> usize {
+    ecx.return_data.len()
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn __revmc_builtin_calldataload(
     ecx: &EvmContext<'_>,
     offset_ptr: &mut EvmWord,
