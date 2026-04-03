@@ -1,0 +1,12 @@
+CALLVALUE
+DUP1
+AND
+PUSH0
+MSTORE
+PUSH1 0x20
+PUSH0
+RETURN
+
+; CHECK: load i256
+; CHECK-NOT: and
+; CHECK: @__revmc_builtin_mstore

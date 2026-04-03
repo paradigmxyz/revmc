@@ -1,0 +1,14 @@
+PUSH1 0x05
+CALLVALUE
+GT
+ISZERO
+PUSH0
+MSTORE
+PUSH1 0x20
+PUSH0
+RETURN
+
+; ISZERO(GT(callvalue, 5)) is folded into callvalue <= 5 (ult callvalue, 6).
+; CHECK: [[CMP:%.*]] = icmp ult i256 {{.*}}, 6
+; CHECK-NEXT: [[EXT:%.*]] = zext i1 [[CMP]] to i256
+; CHECK-NEXT: store i256 [[EXT]]
