@@ -427,6 +427,11 @@ pub unsafe extern "C" fn __revmc_builtin_blob_base_fee(ecx: &EvmContext<'_>, slo
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn __revmc_builtin_slot_num(ecx: &EvmContext<'_>, slot: &mut EvmWord) {
+    *slot = ecx.host.slot_num().into();
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn __revmc_builtin_sload(
     ecx: &mut EvmContext<'_>,
     index: &mut EvmWord,

@@ -108,26 +108,6 @@ tests! {
             expected_return: InstructionResult::OpcodeNotFound,
             expected_gas: 0,
         }),
-        unsupported_dupn(@raw {
-            bytecode: &[op::DUPN],
-            expected_return: InstructionResult::NotActivated,
-            expected_gas: 0,
-        }),
-        unsupported_swapn(@raw {
-            bytecode: &[op::SWAPN],
-            expected_return: InstructionResult::NotActivated,
-            expected_gas: 0,
-        }),
-        unsupported_exchange(@raw {
-            bytecode: &[op::EXCHANGE],
-            expected_return: InstructionResult::NotActivated,
-            expected_gas: 0,
-        }),
-        unsupported_slotnum(@raw {
-            bytecode: &[op::SLOTNUM],
-            expected_return: InstructionResult::NotActivated,
-            expected_gas: 0,
-        }),
         underflow1(@raw {
             bytecode: &[op::ADD],
             expected_return: InstructionResult::StackUnderflow,
@@ -210,6 +190,35 @@ tests! {
             expected_gas: GAS_WHAT_INTERPRETER_SAYS,
         }),
 
+        dupn_cancun(@raw {
+            bytecode: &[op::PUSH0, op::DUPN, 0x00],
+            spec_id: SpecId::CANCUN,
+            expected_return: InstructionResult::NotActivated,
+            expected_stack: STACK_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+        }),
+        swapn_cancun(@raw {
+            bytecode: &[op::PUSH0, op::SWAPN, 0x00],
+            spec_id: SpecId::CANCUN,
+            expected_return: InstructionResult::NotActivated,
+            expected_stack: STACK_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+        }),
+        exchange_cancun(@raw {
+            bytecode: &[op::PUSH0, op::EXCHANGE, 0x01],
+            spec_id: SpecId::CANCUN,
+            expected_return: InstructionResult::NotActivated,
+            expected_stack: STACK_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+        }),
+        slotnum_cancun(@raw {
+            bytecode: &[op::SLOTNUM],
+            spec_id: SpecId::CANCUN,
+            expected_return: InstructionResult::NotActivated,
+            expected_stack: STACK_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+        }),
+
         // EXP gas: pre-SPURIOUS_DRAGON exp_byte_gas=10, post=50.
         // power=0 → dynamic=0 for all specs.
         exp_zero_frontier(@raw {
@@ -278,6 +287,102 @@ tests! {
             bytecode: &[op::PUSH1, 1, op::PUSH1, 2, op::PUSH1, 3, op::PUSH1, 4, op::SWAP3],
             expected_stack: &[4_U256, 2_U256, 3_U256, 1_U256],
             expected_gas: 3 + 3 + 3 + 3 + 3,
+        }),
+
+        // DUPN 0x00: decode_single(0) = 17, duplicates 17th stack item.
+        dupn(@raw {
+            bytecode: &{
+                let mut code = [0u8; 21];
+                code[0] = op::PUSH1; code[1] = 1;   // bottom = 1
+                // 16 zeros on top
+                let mut i = 2;
+                while i < 18 {
+                    code[i] = op::PUSH0;
+                    i += 1;
+                }
+                code[18] = op::DUPN;
+                code[19] = 0x00; // n=17
+                code
+            },
+            spec_id: SpecId::AMSTERDAM,
+            expected_stack: &{
+                let mut s = [U256::ZERO; 18];
+                s[0] = 1_U256;  // duplicated from bottom
+                // s[1..17] = ZERO (the 16 pushed zeros)
+                s[17] = 1_U256; // original bottom
+                s
+            },
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+        }),
+
+        // SWAPN 0x00: decode_single(0) = 17, swaps top with 17th item.
+        swapn(@raw {
+            bytecode: &{
+                let mut code = [0u8; 23];
+                code[0] = op::PUSH1; code[1] = 1;   // bottom = 1
+                // 16 zeros on top
+                let mut i = 2;
+                while i < 18 {
+                    code[i] = op::PUSH0;
+                    i += 1;
+                }
+                code[18] = op::PUSH1; code[19] = 2; // top = 2
+                code[20] = op::SWAPN;
+                code[21] = 0x00; // n=17
+                code
+            },
+            spec_id: SpecId::AMSTERDAM,
+            expected_stack: &{
+                let mut s = [U256::ZERO; 18];
+                s[0] = 2_U256;  // swapped from top
+                // s[1..17] = ZERO
+                s[17] = 1_U256; // swapped from bottom
+                s
+            },
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+        }),
+
+        // EXCHANGE 0x01: decode_pair(1) = (1, 2), swaps 2nd and 3rd from top.
+        exchange_basic(@raw {
+            bytecode: &[op::PUSH1, 1, op::PUSH1, 2, op::PUSH1, 3, op::EXCHANGE, 0x01],
+            spec_id: SpecId::AMSTERDAM,
+            // stack before: [1, 2, 3] (3 on top)
+            // exchange(1, 2): swaps items at depth 1 and 2 (0-indexed from top)
+            // → swaps 2 and 1 → [2, 1, 3]
+            expected_stack: &[2_U256, 1_U256, 3_U256],
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+        }),
+
+        // SLOTNUM: pushes the slot number from the host.
+        slotnum(@raw {
+            bytecode: &[op::SLOTNUM],
+            spec_id: SpecId::AMSTERDAM,
+            expected_stack: &[U256::ZERO],
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+        }),
+
+        // Invalid immediate: 0x5B (91) is in the invalid range [91, 127] for decode_single.
+        dupn_invalid_imm(@raw {
+            bytecode: &[op::PUSH0, op::DUPN, 0x5B],
+            spec_id: SpecId::AMSTERDAM,
+            expected_return: InstructionResult::InvalidImmediateEncoding,
+            expected_stack: STACK_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+        }),
+        swapn_invalid_imm(@raw {
+            bytecode: &[op::PUSH0, op::SWAPN, 0x5B],
+            spec_id: SpecId::AMSTERDAM,
+            expected_return: InstructionResult::InvalidImmediateEncoding,
+            expected_stack: STACK_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+        }),
+        // Invalid immediate: 80 is in the invalid range [80, 127] for decode_pair.
+        exchange_invalid_imm(@raw {
+            bytecode: &[op::PUSH0, op::PUSH0, op::PUSH0, op::EXCHANGE, 80],
+            spec_id: SpecId::AMSTERDAM,
+            expected_return: InstructionResult::InvalidImmediateEncoding,
+            expected_stack: STACK_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
         }),
 
         overflow_analysis_edge_case(@raw {
