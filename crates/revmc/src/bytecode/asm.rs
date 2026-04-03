@@ -406,6 +406,27 @@ mod tests {
     }
 
     #[test]
+    fn amsterdam_opcodes() {
+        let cases: &[(&str, Vec<u8>)] = &[
+            ("DUPN 0x00", vec![op::DUPN, 0x00]),
+            ("SWAPN 0x00", vec![op::SWAPN, 0x00]),
+            ("EXCHANGE 0x01", vec![op::EXCHANGE, 0x01]),
+            ("SLOTNUM", vec![op::SLOTNUM]),
+            (
+                "PUSH1 1 PUSH1 2 PUSH1 3 EXCHANGE 0x01",
+                vec![op::PUSH1, 1, op::PUSH1, 2, op::PUSH1, 3, op::EXCHANGE, 0x01],
+            ),
+        ];
+        for (s, expected) in cases.iter() {
+            let code = match parse_asm(s) {
+                Ok(code) => code,
+                Err(e) => panic!("code: {s:?}\n\n err: {e}"),
+            };
+            assert_eq!(code, *expected, "{s:?}");
+        }
+    }
+
+    #[test]
     fn undefined_label() {
         assert!(parse_asm("PUSH %missing JUMP").is_err());
     }
