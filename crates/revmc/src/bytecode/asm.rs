@@ -452,6 +452,29 @@ fn parse_items<'a>(tokens: &[Token<'a>]) -> Result<Vec<Item<'a>>> {
                         imm: Some(imm),
                         push_kind: PushKind::Auto,
                     }));
+                } else if *word == "DUP" || *word == "SWAP" {
+                    let is_swap = *word == "SWAP";
+                    i += 1;
+                    let n = expect_number_u8(tokens, &mut i, word)?;
+                    eyre::ensure!(n >= 1, "{word} index must be >= 1, got {n}");
+                    if n <= 16 {
+                        let base = if is_swap { op::SWAP1 } else { op::DUP1 };
+                        items.push(Item::Inst(Inst {
+                            opcode: base + n - 1,
+                            imm: None,
+                            push_kind: PushKind::None,
+                        }));
+                    } else {
+                        let eof_op = if is_swap { op::SWAPN } else { op::DUPN };
+                        let raw = encode_single(n).ok_or_else(|| {
+                            eyre::eyre!("{word} index {n} out of valid range [1, 235]")
+                        })?;
+                        items.push(Item::Inst(Inst {
+                            opcode: eof_op,
+                            imm: Some(Imm::Number(U256::from(raw))),
+                            push_kind: PushKind::Fixed(1),
+                        }));
+                    }
                 } else {
                     let opc = OpCode::parse(word)
                         .ok_or_else(|| eyre::eyre!("invalid opcode: {word:?}"))?;
@@ -470,11 +493,6 @@ fn parse_items<'a>(tokens: &[Token<'a>]) -> Result<Vec<Item<'a>>> {
                         }));
                     } else if opcode == op::EXCHANGE {
                         let n = expect_number_u8(tokens, &mut i, opc)?;
-                        eyre::ensure!(
-                            i < tokens.len() && tokens[i] == Token::Comma,
-                            "EXCHANGE requires n,m format (e.g. `1,2`)"
-                        );
-                        i += 1;
                         let m = expect_number_u8(tokens, &mut i, opc)?;
                         let raw = encode_pair(n, m).ok_or_else(|| {
                             eyre::eyre!("EXCHANGE pair ({n}, {m}) cannot be encoded")
@@ -826,18 +844,39 @@ mod tests {
     }
 
     #[test]
+    fn dup_auto() {
+        // DUP 1..16 → DUP1..DUP16 (no immediate).
+        assert_eq!(parse_asm("DUP 1").unwrap(), vec![op::DUP1]);
+        assert_eq!(parse_asm("DUP 16").unwrap(), vec![op::DUP16]);
+        // DUP 17+ → DUPN with encoded immediate.
+        assert_eq!(parse_asm("DUP 17").unwrap(), vec![op::DUPN, 0x00]);
+        assert_eq!(parse_asm("DUP 108").unwrap(), vec![op::DUPN, 128]);
+        // DUP 0 is invalid.
+        assert!(parse_asm("DUP 0").is_err());
+        // DUP 236 is out of range.
+        assert!(parse_asm("DUP 236").is_err());
+    }
+
+    #[test]
+    fn swap_auto() {
+        // SWAP 1..16 → SWAP1..SWAP16 (no immediate).
+        assert_eq!(parse_asm("SWAP 1").unwrap(), vec![op::SWAP1]);
+        assert_eq!(parse_asm("SWAP 16").unwrap(), vec![op::SWAP16]);
+        // SWAP 17+ → SWAPN with encoded immediate.
+        assert_eq!(parse_asm("SWAP 17").unwrap(), vec![op::SWAPN, 0x00]);
+        assert_eq!(parse_asm("SWAP 108").unwrap(), vec![op::SWAPN, 128]);
+        // SWAP 0 is invalid.
+        assert!(parse_asm("SWAP 0").is_err());
+    }
+
+    #[test]
     fn dupn() {
-        // Decoded index 17 → raw byte 0x00.
+        // Explicit DUPN only accepts 17+.
         assert_eq!(parse_asm("DUPN 17").unwrap(), vec![op::DUPN, 0x00]);
-        // Decoded index 108 → raw byte 128.
         assert_eq!(parse_asm("DUPN 108").unwrap(), vec![op::DUPN, 128]);
-        // Index 16 is out of range.
         assert!(parse_asm("DUPN 16").is_err());
-        // Index 0 is out of range.
         assert!(parse_asm("DUPN 0").is_err());
-        // 236 is out of range.
         assert!(parse_asm("DUPN 236").is_err());
-        // Non-numeric.
         assert!(parse_asm("DUPN abc").is_err());
     }
 
@@ -851,18 +890,17 @@ mod tests {
 
     #[test]
     fn exchange() {
-        // (1, 2) → raw byte 0x01.
-        assert_eq!(parse_asm("EXCHANGE 1,2").unwrap(), vec![op::EXCHANGE, 0x01]);
-        // (1, 14) uses case 2 (q >= r).
-        assert!(parse_asm("EXCHANGE 1,14").is_ok());
+        // Two separate number tokens.
+        assert_eq!(parse_asm("EXCHANGE 1 2").unwrap(), vec![op::EXCHANGE, 0x01]);
+        assert!(parse_asm("EXCHANGE 1 14").is_ok());
         // (2, 1) cannot be encoded.
-        assert!(parse_asm("EXCHANGE 2,1").is_err());
+        assert!(parse_asm("EXCHANGE 2 1").is_err());
         // (0, 1) is invalid (zero index).
-        assert!(parse_asm("EXCHANGE 0,1").is_err());
-        // Missing comma.
+        assert!(parse_asm("EXCHANGE 0 1").is_err());
+        // Missing second operand.
         assert!(parse_asm("EXCHANGE 1").is_err());
         // Non-numeric.
-        assert!(parse_asm("EXCHANGE a,b").is_err());
+        assert!(parse_asm("EXCHANGE a b").is_err());
     }
 
     #[test]
