@@ -78,7 +78,11 @@ impl Bytecode<'_> {
             // Walk backward.
             for (idx, inst) in block.insts().enumerate().rev() {
                 let data = &self.insts[inst];
-                if data.is_dead_code() || data.flags.contains(InstFlags::SKIP_LOGIC) {
+                if data.is_dead_code()
+                    || data.flags.contains(InstFlags::SKIP_LOGIC)
+                    || data.flags.contains(InstFlags::DISABLED)
+                    || data.flags.contains(InstFlags::UNKNOWN)
+                {
                     continue;
                 }
 
