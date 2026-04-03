@@ -599,6 +599,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         self.gas_cost_imm(data.gas_section.gas_cost as u64);
 
         if data.flags.contains(InstFlags::SKIP_LOGIC) {
+            self.section_len_offset += effective_stack_diff(data);
             goto_return!("skipped");
         }
 
@@ -671,6 +672,33 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             if diff != 0 {
                 let len_changed = self.bcx.iadd_imm(self.len_before, diff as i64);
                 self.stack_len.store(&mut self.bcx, len_changed);
+            }
+        }
+
+        // If the output is a known constant and the opcode has no dynamic gas or side effects,
+        // skip the real logic and just write the result.
+        // The inputs are not loaded; we simply adjust the stack offset to consume them and
+        // push the folded constant. This turns e.g. `PUSH 3, PUSH 4, ADD` into a single
+        // store of `7`.
+        {
+            let (inp, out) = data.stack_io();
+            // Pure ops with a known-constant output: skip the opcode logic and just
+            // store the folded constant. Works for single-output arithmetic (ADD, MUL,
+            // ...) and DUP (which adds one new TOS without consuming its input).
+            // Excluded: EXP (dynamic gas), SWAP (modifies two stack positions).
+            if out >= 1
+                && opcode != op::EXP
+                && !matches!(opcode, op::SWAP1..=op::SWAP16)
+                && let Some(const_out) = self.bytecode.const_output(inst)
+            {
+                // We push exactly 1 value, so consume `inp + 1 - out` to match the
+                // real stack diff. For DUP (out = inp+1) this is 0; for ADD (out = 1)
+                // this equals inp.
+                self.len_offset -= (inp + 1 - out) as i8;
+                let value = self.bcx.iconst_256(const_out);
+                self.push(value);
+                self.section_len_offset += effective_stack_diff(data);
+                goto_return!("const output");
             }
         }
 
@@ -1174,11 +1202,15 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         assert_ne!(N, 0);
 
         std::array::from_fn(|i| {
+            // Compute the operand depth: how many values have been popped so far
+            // from this instruction (including any prior `pop()` calls).
+            let depth = (-self.len_offset) as usize;
             self.len_offset -= 1;
-            let offset = self.section_len_offset as i64 + self.len_offset as i64;
-            let sp = self.sp_from_section(offset);
             let name = b'a' + i as u8;
-            self.load_word(sp, std::str::from_utf8(&[name]).unwrap())
+            self.operand_value_or_load(depth, std::str::from_utf8(&[name]).unwrap(), |this| {
+                let offset = this.section_len_offset as i64 + this.len_offset as i64;
+                this.sp_from_section(offset)
+            })
         })
     }
 
@@ -1186,9 +1218,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     /// `n` cannot be `0`.
     fn dup(&mut self, n: usize) {
         assert_ne!(n, 0);
-        let sp = self.sp_from_top(n);
         let name = if self.config.debug { &format!("dup{n}") } else { "" };
-        let value = self.load_word(sp, name);
+        let value = self.operand_value_or_load(n - 1, name, |this| this.sp_from_top(n));
         self.push(value);
     }
 
@@ -1205,10 +1236,10 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         assert_ne!(m, 0);
         // Load a.
         let a_sp = self.sp_from_top(n + 1);
-        let a = self.load_word(a_sp, "swap.a");
+        let a = self.operand_value_or_load(n, "swap.a", |_| a_sp);
         // Load b.
         let b_sp = self.sp_from_top(n + m + 1);
-        let b = self.load_word(b_sp, "swap.b");
+        let b = self.operand_value_or_load(n + m, "swap.b", |_| b_sp);
         // Store.
         self.bcx.store(a, b_sp);
         self.bcx.store(b, a_sp);
@@ -1351,6 +1382,22 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     fn sp_from_top(&mut self, n: usize) -> B::Value {
         assert_ne!(n, 0);
         self.sp_from_section(self.section_len_offset as i64 - n as i64)
+    }
+
+    /// Returns the known constant value of a stack operand if available, otherwise loads from the
+    /// stack. `depth` 0 is TOS (first popped), 1 is second, etc.
+    fn operand_value_or_load(
+        &mut self,
+        depth: usize,
+        name: &str,
+        sp: impl FnOnce(&mut Self) -> B::Value,
+    ) -> B::Value {
+        let inst = self.current_inst.unwrap();
+        if let Some(c) = self.bytecode.const_operand(inst, depth) {
+            return self.bcx.iconst_256(c);
+        }
+        let sp = sp(self);
+        self.load_word(sp, name)
     }
 
     /// Builds a gas cost deduction for an immediate value.
