@@ -1,11 +1,7 @@
 CALLER
 PUSH20 0xffffffffffffffffffffffffffffffffffffffff
 AND
-PUSH0
-MSTORE
-PUSH1 0x20
-PUSH0
-RETURN
+RET_WORD
 
 ; CHECK: load i160
 ; CHECK: [[ADDR:%.*]] = zext i160 {{.*}} to i256

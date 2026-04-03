@@ -1,11 +1,7 @@
 CALLVALUE
 ISZERO
 ISZERO
-PUSH0
-MSTORE
-PUSH1 0x20
-PUSH0
-RETURN
+RET_WORD
 
 ; CHECK: [[VALUE:%.*value.*]] = load i256
 ; CHECK: [[NON_ZERO:%.*]] = icmp ne i256 [[VALUE]], 0
