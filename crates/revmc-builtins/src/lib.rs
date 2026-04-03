@@ -93,7 +93,7 @@ pub unsafe extern "C-unwind" fn __revmc_builtin_assert_spec_id(
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn __revmc_builtin_udiv(rev![a, b]: &mut [EvmWord; 2]) {
+pub unsafe extern "C" fn __revmc_builtin_div(rev![a, b]: &mut [EvmWord; 2]) {
     let divisor = b.to_u256();
     *b = if divisor.is_zero() { U256::ZERO } else { a.to_u256().wrapping_div(divisor) }.into();
 }
@@ -104,13 +104,13 @@ pub unsafe extern "C" fn __revmc_builtin_sdiv(rev![a, b]: &mut [EvmWord; 2]) {
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn __revmc_builtin_urem(rev![a, b]: &mut [EvmWord; 2]) {
+pub unsafe extern "C" fn __revmc_builtin_mod(rev![a, b]: &mut [EvmWord; 2]) {
     let divisor = b.to_u256();
     *b = if divisor.is_zero() { U256::ZERO } else { a.to_u256().wrapping_rem(divisor) }.into();
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn __revmc_builtin_srem(rev![a, b]: &mut [EvmWord; 2]) {
+pub unsafe extern "C" fn __revmc_builtin_smod(rev![a, b]: &mut [EvmWord; 2]) {
     *b = revm_interpreter::instructions::i256::i256_mod(a.to_u256(), b.to_u256()).into();
 }
 

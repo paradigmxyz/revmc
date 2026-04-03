@@ -698,7 +698,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             op::SUB => binop!(isub),
             op::DIV => {
                 let sp = self.sp_after_inputs();
-                let _ = self.call_builtin(Builtin::UDiv, &[sp]);
+                let _ = self.call_builtin(Builtin::Div, &[sp]);
             }
             op::SDIV => {
                 let sp = self.sp_after_inputs();
@@ -706,11 +706,11 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             }
             op::MOD => {
                 let sp = self.sp_after_inputs();
-                let _ = self.call_builtin(Builtin::URem, &[sp]);
+                let _ = self.call_builtin(Builtin::Mod, &[sp]);
             }
             op::SMOD => {
                 let sp = self.sp_after_inputs();
-                let _ = self.call_builtin(Builtin::SRem, &[sp]);
+                let _ = self.call_builtin(Builtin::SMod, &[sp]);
             }
             op::ADDMOD => {
                 let sp = self.sp_after_inputs();

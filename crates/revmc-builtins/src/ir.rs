@@ -160,9 +160,6 @@ macro_rules! builtins {
 
                 const LOG: u8 = LOG0;
                 const DORETURN: u8 = RETURN;
-                const UDIV: u8 = DIV;
-                const UREM: u8 = MOD;
-                const SREM: u8 = SMOD;
 
                 match self {
                     $(Self::$ident => [<$ident:upper>]),*
@@ -228,10 +225,10 @@ builtins! {
     Panic          = __revmc_builtin_panic(ptr, usize) None,
     AssertSpecId   = __revmc_builtin_assert_spec_id(@[ecx] ptr, u8) None,
 
-    UDiv           = __revmc_builtin_udiv(@[sp] ptr) None,
+    Div            = __revmc_builtin_div(@[sp] ptr) None,
     SDiv           = __revmc_builtin_sdiv(@[sp] ptr) None,
-    URem           = __revmc_builtin_urem(@[sp] ptr) None,
-    SRem           = __revmc_builtin_srem(@[sp] ptr) None,
+    Mod            = __revmc_builtin_mod(@[sp] ptr) None,
+    SMod           = __revmc_builtin_smod(@[sp] ptr) None,
     AddMod         = __revmc_builtin_addmod(@[sp] ptr) None,
     MulMod         = __revmc_builtin_mulmod(@[sp] ptr) None,
     Exp            = __revmc_builtin_exp(@[ecx] ptr, @[sp] ptr) Some(u8),
