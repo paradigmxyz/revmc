@@ -361,6 +361,30 @@ tests! {
             expected_gas: GAS_WHAT_INTERPRETER_SAYS,
         }),
 
+        // Invalid immediate: 0x5B (91) is in the invalid range [91, 127] for decode_single.
+        dupn_invalid_imm(@raw {
+            bytecode: &[op::PUSH0, op::DUPN, 0x5B],
+            spec_id: SpecId::AMSTERDAM,
+            expected_return: InstructionResult::InvalidImmediateEncoding,
+            expected_stack: STACK_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+        }),
+        swapn_invalid_imm(@raw {
+            bytecode: &[op::PUSH0, op::SWAPN, 0x5B],
+            spec_id: SpecId::AMSTERDAM,
+            expected_return: InstructionResult::InvalidImmediateEncoding,
+            expected_stack: STACK_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+        }),
+        // Invalid immediate: 80 is in the invalid range [80, 127] for decode_pair.
+        exchange_invalid_imm(@raw {
+            bytecode: &[op::PUSH0, op::PUSH0, op::PUSH0, op::EXCHANGE, 80],
+            spec_id: SpecId::AMSTERDAM,
+            expected_return: InstructionResult::InvalidImmediateEncoding,
+            expected_stack: STACK_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+        }),
+
         overflow_analysis_edge_case(@raw {
             bytecode: &[&[op::JUMPDEST][..], &[op::PUSH0; 1025][..], &[op::JUMPI][..]].concat(),
             expected_return: InstructionResult::StackOverflow,

@@ -1,7 +1,10 @@
 //! EVM to IR translation.
 
 use super::default_attrs;
-use crate::{Backend, Builder, Bytecode, EvmContext, Inst, InstData, InstFlags, IntCC, Result};
+use crate::{
+    Backend, Builder, Bytecode, EvmContext, Inst, InstData, InstFlags, IntCC, Result, decode_pair,
+    decode_single,
+};
 use oxc_index::IndexVec;
 use revm_bytecode::opcode as op;
 use revm_interpreter::{InputsImpl, InstructionResult};
@@ -1065,26 +1068,26 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
             op::DUP1..=op::DUP16 => self.dup((opcode - op::DUP1 + 1) as usize),
             op::DUPN => {
-                let imm = self.bytecode.get_imm(data).map(|b| b[0] as usize);
+                let imm = self.bytecode.get_imm(data).map(|b| b[0]);
                 match imm.and_then(decode_single) {
-                    Some(n) => self.dup(n),
+                    Some(n) => self.dup(n as usize),
                     None => goto_return!(fail InstructionResult::InvalidImmediateEncoding),
                 }
             }
 
             op::SWAP1..=op::SWAP16 => self.swap((opcode - op::SWAP1 + 1) as usize),
             op::SWAPN => {
-                let imm = self.bytecode.get_imm(data).map(|b| b[0] as usize);
+                let imm = self.bytecode.get_imm(data).map(|b| b[0]);
                 match imm.and_then(decode_single) {
-                    Some(n) => self.swap(n),
+                    Some(n) => self.swap(n as usize),
                     None => goto_return!(fail InstructionResult::InvalidImmediateEncoding),
                 }
             }
 
             op::EXCHANGE => {
-                let imm = self.bytecode.get_imm(data).map(|b| b[0] as usize);
+                let imm = self.bytecode.get_imm(data).map(|b| b[0]);
                 match imm.and_then(decode_pair) {
-                    Some((n, m)) => self.exchange(n, m - n),
+                    Some((n, m)) => self.exchange(n as usize, (m - n) as usize),
                     None => goto_return!(fail InstructionResult::InvalidImmediateEncoding),
                 }
             }
@@ -1802,33 +1805,6 @@ fn effective_stack_diff(data: &InstData) -> i32 {
         diff -= 1;
     }
     diff
-}
-
-/// Decodes a single stack index from a DUPN/SWAPN immediate byte.
-/// Mirrors `revm-interpreter`'s `decode_single`.
-fn decode_single(x: usize) -> Option<usize> {
-    if x <= 90 {
-        Some(x + 17)
-    } else if x >= 128 {
-        Some(x - 20)
-    } else {
-        None
-    }
-}
-
-/// Decodes a pair of stack indices from an EXCHANGE immediate byte.
-/// Mirrors `revm-interpreter`'s `decode_pair`.
-fn decode_pair(x: usize) -> Option<(usize, usize)> {
-    let k = if x <= 79 {
-        x
-    } else if x >= 128 {
-        x - 48
-    } else {
-        return None;
-    };
-    let q = k / 16;
-    let r = k % 16;
-    if q < r { Some((q + 1, r + 1)) } else { Some((r + 1, 29 - q)) }
 }
 
 fn get_field<B: Builder>(bcx: &mut B, ptr: B::Value, offset: usize, name: &str) -> B::Value {
