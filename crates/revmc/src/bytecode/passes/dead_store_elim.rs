@@ -11,7 +11,7 @@
 //! - POP kills its input (makes the position dead) rather than reading it.
 
 use super::StackSection;
-use crate::bytecode::{Bytecode, InstFlags};
+use crate::bytecode::{Bytecode, Inst, InstFlags};
 use bitvec::vec::BitVec;
 use revm_bytecode::opcode as op;
 
@@ -31,20 +31,18 @@ impl Bytecode<'_> {
 
         for bid in self.cfg.blocks.indices() {
             let block = &self.cfg.blocks[bid];
-            let insts = block.insts();
-
             // Compute the stack height at each instruction boundary by walking forward.
             // heights[i] = stack height *before* executing insts[i].
             // heights[insts.len()] = stack height after the last instruction.
             heights.clear();
             let entry_height = {
                 let section =
-                    StackSection::from_stack_io(insts.clone().map(|i| self.insts[i].stack_io()));
+                    StackSection::from_stack_io(block.insts().map(|i| self.insts[i].stack_io()));
                 section.inputs as i32
             };
             let mut max_height = entry_height;
             heights.push(entry_height);
-            for inst in insts.clone() {
+            for inst in block.insts() {
                 let data = &self.insts[inst];
                 let h = if data.is_dead_code() || data.flags.contains(InstFlags::SKIP_LOGIC) {
                     *heights.last().unwrap()
@@ -69,7 +67,11 @@ impl Bytecode<'_> {
             }
 
             // Walk backward.
-            for (idx, inst) in insts.clone().enumerate().rev() {
+            let insts_start = block.insts.start.index();
+            let insts_end = block.insts.end.index();
+            for raw in (insts_start..insts_end).rev() {
+                let idx = raw - insts_start;
+                let inst = Inst::from_usize(raw);
                 let data = &self.insts[inst];
                 if data.is_dead_code() || data.flags.contains(InstFlags::SKIP_LOGIC) {
                     continue;
@@ -86,11 +88,10 @@ impl Bytecode<'_> {
                     && !data.is_diverging()
                 {
                     let write_base = h_before - inp as usize;
-                    let all_dead = (0..out as usize)
-                        .all(|k| {
-                            let pos = write_base + k;
-                            pos < live.len() && !live[pos]
-                        });
+                    let all_dead = (0..out as usize).all(|k| {
+                        let pos = write_base + k;
+                        pos < live.len() && !live[pos]
+                    });
 
                     if all_dead {
                         self.insts[inst].flags |= InstFlags::SKIP_LOGIC;
@@ -151,7 +152,8 @@ fn can_skip_when_dead(opcode: u8) -> bool {
             | op::SAR
             | op::CLZ
             // Constants.
-            | op::PUSH0..=op::PUSH32
+            | op::PUSH0
+            ..=op::PUSH32
             | op::PC
             | op::CODESIZE
             // Call-constant environment reads (no dynamic gas, no host calls).
@@ -170,6 +172,7 @@ fn can_skip_when_dead(opcode: u8) -> bool {
             | op::CHAINID
             | op::BASEFEE
             | op::BLOBBASEFEE
+            | op::SLOTNUM
     )
 }
 

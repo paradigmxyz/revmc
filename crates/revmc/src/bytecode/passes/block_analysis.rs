@@ -268,9 +268,7 @@ impl BlockData {
 
     /// Returns the instruction range as `Range<usize>` for indexing into raw arrays.
     #[inline]
-    pub(crate) fn insts(
-        &self,
-    ) -> impl ExactSizeIterator<Item = Inst> + DoubleEndedIterator + Clone + use<> {
+    pub(crate) fn insts(&self) -> impl ExactSizeIterator<Item = Inst> + use<> {
         (self.insts.start.index()..self.insts.end.index()).map(Inst::from_usize)
     }
 }
@@ -470,7 +468,7 @@ impl Bytecode<'_> {
     #[instrument(level = "debug", skip_all)]
     pub(crate) fn rebuild_cfg(&mut self) {
         let finish_block = |cfg: &mut Cfg, start: usize, end: usize| {
-            assert!(start < end, "empty block range: {start}..{end}");
+            debug_assert!(start < end, "empty block range: {start}..{end}");
             let bid = cfg.blocks.push(BlockData {
                 insts: Inst::from_usize(start)..Inst::from_usize(end),
                 preds: SmallVec::new(),
@@ -915,6 +913,47 @@ impl Bytecode<'_> {
                     }
                     stack.swap(len - 1, len - 1 - depth);
                 }
+                op::DUPN => {
+                    let depth = self.get_imm(inst).and_then(|b| crate::decode_single(b[0]));
+                    match depth {
+                        Some(n) => {
+                            let n = n as usize;
+                            if stack.len() < n {
+                                return false;
+                            }
+                            stack.push(stack[stack.len() - n]);
+                        }
+                        None => return false,
+                    }
+                }
+                op::SWAPN => {
+                    let depth = self.get_imm(inst).and_then(|b| crate::decode_single(b[0]));
+                    match depth {
+                        Some(n) => {
+                            let n = n as usize;
+                            let len = stack.len();
+                            if len < n + 1 {
+                                return false;
+                            }
+                            stack.swap(len - 1, len - 1 - n);
+                        }
+                        None => return false,
+                    }
+                }
+                op::EXCHANGE => {
+                    let pair = self.get_imm(inst).and_then(|b| crate::decode_pair(b[0]));
+                    match pair {
+                        Some((n, m)) => {
+                            let (n, m) = (n as usize, m as usize);
+                            let len = stack.len();
+                            if len < m + 1 {
+                                return false;
+                            }
+                            stack.swap(len - 1 - n, len - 1 - m);
+                        }
+                        None => return false,
+                    }
+                }
                 _ => {
                     if stack.len() < inp {
                         return false;
@@ -1114,6 +1153,22 @@ pub(crate) mod tests {
         );
         assert_eq!(bytecode.const_output(Inst::from_usize(0)), Some(U256::ZERO));
         assert_eq!(bytecode.const_output(Inst::from_usize(1)), None);
+    }
+
+    /// DUPN, SWAPN, and EXCHANGE should propagate constants like their fixed counterparts.
+    #[test]
+    fn const_snapshot_eof_stack_ops() {
+        // DUPN/SWAPN min index is 17, so we need 17 values on the stack.
+        // 16 × PUSH0, PUSH1 0xAA, DUPN 17 (raw=0x00), STOP.
+        let mut code: Vec<u8> = vec![op::PUSH0; 16];
+        code.extend([op::PUSH1, 0xAA]); // inst 16: TOS = 0xAA
+        code.extend([op::DUPN, 0x00]); // inst 17: DUPN 17 (dup bottom = 0x00)
+        code.push(op::STOP); // inst 18
+        let bytecode = analyze_code(code);
+        // DUPN duplicates the 17th item (bottom PUSH0 = 0x00).
+        assert_eq!(bytecode.const_output(Inst::from_usize(17)), Some(U256::ZERO));
+        // The PUSH1 0xAA is still there.
+        assert_eq!(bytecode.const_output(Inst::from_usize(16)), Some(U256::from(0xAA)));
     }
 
     #[test]
@@ -1915,7 +1970,7 @@ mod tests_edge_cases {
     fn const_snapshot_loop_exp() {
         // tests/GeneralStateTests/VMTests/vmPerformance/loopExp.json
         let bytecode = analyze_hex(
-            "608060405234801561001057600080fd5b506004361061004c5760003560e01c806363ad973214610051578063a34f51e414610081578063dfaf4a87146100b1578063f078245b146100e1575b600080fd5b61006b60048036038101906100669190610275565b610111565b60405161007891906102d7565b60405180910390f35b61009b60048036038101906100969190610275565b610199565b6040516100a891906102d7565b60405180910390f35b6100cb60048036038101906100c69190610275565b6101cb565b6040516100d891906102d7565b60405180910390f35b6100fb60048036038101906100f69190610275565b610208565b60405161010891906102d7565b60405180910390f35b60008083905060005b838110156101865785820a915085820a915085820a915085820a915085820a915085820a915085820a915085820a915085820a915085820a915085820a915085820a915085820a915085820a915085820a915085820a915060108161017f9190610321565b905061011a565b5080600081905550809150509392505050565b6000805b828110156101b9576001816101b29190610321565b905061019d565b50826000819055508290509392505050565b60008083905060005b838110156101f55785820a91506001816101ee9190610321565b90506101d4565b5080600081905550809150509392505050565b6000805b82811015610228576010816102219190610321565b905061020c565b50826000819055508290509392505050565b600080fd5b6000819050919050565b6102528161023f565b811461025d57600080fd5b50565b60008135905061026f81610249565b92915050565b60008060006060848603121561028e5761028d61023a565b5b600061029c86828701610260565b93505060206102ad86828701610260565b92505060406102be86828701610260565b9150509250925092565b6102d18161023f565b82525050565b60006020820190506102ec60008301846102c8565b92915050565b7f4e487b7100000000000000000000000000000000000000000000000000000000600052601160045260246000fd5b600061032c8261023f565b91506103378361023f565b925082820190508082111561034f5761034e6102f2565b5b9291505056fea26469706673582212200b253a2b246ddfeb0f09ddf5ec7dc70e2235369b8a2f3f9b55e32a5ca01e04ff64736f6c63430008180033",
+            "608060405234801561001057600080fd5b506004361061004c5760003560e01c806363ad973214610051578063a34f51e414610081578063dfaf4a87146100b1578063f078245b146100e1575b600080fd5b61006b60048036038101906100669190610275565b610111565b60405161007891906102d7565b60405180910390f35b61009b60048036038101906100969190610275565b610199565b6040516100a891906102d7565b60405180910390f35b6100cb60048036038101906100c69190610275565b6101cb565b6040516100d891906102d7565b60405180910390f35b6100fb60048036038101906100f69190610275565b610208565b60405161010891906102d7565b60405180910390f35b60008083905060005b838110156101865785820a915085820a915085820a915085820a915085820a915085820a915085820a915085820a915085820a915085820a915085820a915085820a915085820a915085820a915085820a915085820a915060108161017f9190610321565b905061011a565b5080600081905550809150509392505050565b6000805b828110156101b9576001816101b29190610321565b905061019d565b508260008190555082905093925050505650565b60008083905060005b838110156101f55785820a91506001816101ee9190610321565b90506101d4565b5080600081905550809150509392505050565b6000805b82811015610228576010816102219190610321565b905061020c565b50826000819055508290509392505050565b600080fd5b6000819050919050565b6102528161023f565b811461025d57600080fd5b50565b60008135905061026f81610249565b92915050565b60008060006060848603121561028e5761028d61023a565b5b600061029c86828701610260565b93505060206102ad86828701610260565b92505060406102be86828701610260565b9150509250925092565b6102d18161023f565b82525050565b60006020820190506102ec60008301846102c8565b92915050565b7f4e487b71000000000000000000000000000000000000000000000000000000006000526011600452602460006000fd5b600061032c8261023f565b91506103378361023f565b9250828201905080821115610340f5761034e6102f2565b5b9291505056fea264697066735822122000b253a2b246ddfeb0f09ddf5ec7dc70e2235369b8a2f3f9b55e32a5ca01e04ff64736f6c63430008180033",
         );
 
         // simpleLoop LT at pc=416: counter (depth=0) is loop-variant.
@@ -1928,93 +1983,130 @@ mod tests_edge_cases {
         assert_eq!(bytecode.const_operand(lt_inst, 0), None);
     }
 
-    /// Suspect-block invalidation must preserve block-local constants.
+    /// Suspect-block invalidation must preserve block-local constants while
+    /// restoring cross-block values to Top.
     ///
-    /// When unresolved Top jumps exist, every reachable JUMPDEST block becomes
-    /// suspect. Previously, invalidation cleared ALL snapshots in suspect blocks,
-    /// losing block-local constants that don't depend on the incoming stack.
-    /// Now, invalidation restores snapshots from the block-local pass.
-    ///
-    /// The target block must be reachable via both a static edge (so the fixpoint
-    /// marks it `Known` and it becomes suspect) AND an opaque dynamic jump (so
-    /// `has_top_jump` is true and invalidation runs).
+    /// The target block receives 0xAA from a predecessor (cross-block) and also
+    /// has block-local PUSHes. Without restoration, the fixpoint's precise 0xAA
+    /// would persist unsoundly; with restoration, only block-local constants survive.
     #[test]
     fn suspect_block_preserves_local_const_operand() {
         let bytecode = analyze_asm(
             "
-            ; Static path to target (makes it Known in the fixpoint).
-            PUSH %target        ; inst 0
-            JUMP                ; inst 1: static jump to target
-            ; Opaque dynamic jump — triggers suspect invalidation.
-            JUMPDEST            ; inst 2
-            PUSH0               ; inst 3
-            CALLDATALOAD        ; inst 4: Top
-            JUMP                ; inst 5: unresolvable
-        target:
-            JUMPDEST            ; inst 6: reachable (Known) + JUMPDEST → suspect
-            PUSH1 0x03          ; inst 7
-            PUSH1 0x04          ; inst 8
-            ADD                 ; inst 9: 3 + 4 = 7, purely block-local
-            PUSH0               ; inst 10
-            MSTORE              ; inst 11
-            STOP                ; inst 12
-        ",
-        );
-        assert!(bytecode.has_dynamic_jumps);
-        // Block-local PUSH constants must survive invalidation.
-        assert_eq!(bytecode.const_operand(Inst::from_usize(9), 0), Some(U256::from(4)));
-        assert_eq!(bytecode.const_operand(Inst::from_usize(9), 1), Some(U256::from(3)));
-        // Block-local const-folded output must survive.
-        assert_eq!(bytecode.const_output(Inst::from_usize(9)), Some(U256::from(7)));
-        // MSTORE operands: TOS = 0, second = folded result (7).
-        assert_eq!(bytecode.const_operand(Inst::from_usize(11), 0), Some(U256::ZERO));
-        assert_eq!(bytecode.const_operand(Inst::from_usize(11), 1), Some(U256::from(7)));
-    }
+            PUSH1 0xAA          ; inst 0: inherited into target
+            CALLDATASIZE        ; inst 1: unknown condition
+            PUSH %target        ; inst 2
+            JUMPI               ; inst 3: target reachable, fallthrough reachable
 
-    /// Same as above but for const_output on a PUSH in a suspect block.
-    #[test]
-    fn suspect_block_preserves_local_const_output() {
-        let bytecode = analyze_asm(
-            "
-            PUSH %target        ; inst 0
-            JUMP                ; inst 1: static jump
-            JUMPDEST            ; inst 2
-            PUSH0               ; inst 3
-            MLOAD               ; inst 4: Top
-            JUMP                ; inst 5: unresolvable
+            PUSH0               ; inst 4
+            CALLDATALOAD        ; inst 5: Top
+            JUMP                ; inst 6: unresolved -> triggers suspect invalidation
+
         target:
-            JUMPDEST            ; inst 6: suspect
-            PUSH1 0xFF          ; inst 7: block-local constant
-            PUSH0               ; inst 8
-            MSTORE              ; inst 9
+            JUMPDEST            ; inst 7: suspect seed
+            PUSH0               ; inst 8: block-local constant
+            MSTORE              ; inst 9: offset=0 (local), value=inherited 0xAA
             STOP                ; inst 10
         ",
         );
         assert!(bytecode.has_dynamic_jumps);
-        assert_eq!(bytecode.const_output(Inst::from_usize(7)), Some(U256::from(0xFF)));
+        // Block-local constant survives.
         assert_eq!(bytecode.const_output(Inst::from_usize(8)), Some(U256::ZERO));
+        assert_eq!(bytecode.const_operand(Inst::from_usize(9), 0), Some(U256::ZERO));
+        // Cross-block value must be restored to Top.
+        assert_eq!(bytecode.const_operand(Inst::from_usize(9), 1), None);
+    }
+
+    /// Same as above but asserting const_output: block-local PUSH output survives,
+    /// but anything depending on cross-block values becomes None.
+    #[test]
+    fn suspect_block_preserves_local_const_output() {
+        let bytecode = analyze_asm(
+            "
+            PUSH1 0xAA          ; inst 0: inherited into target
+            CALLDATASIZE        ; inst 1
+            PUSH %target        ; inst 2
+            JUMPI               ; inst 3
+
+            PUSH0               ; inst 4
+            CALLDATALOAD        ; inst 5: Top
+            JUMP                ; inst 6: unresolvable
+
+        target:
+            JUMPDEST            ; inst 7: suspect seed
+            PUSH1 0x01          ; inst 8: block-local const output
+            ADD                 ; inst 9: 0xAA + 0x01 in fixpoint, Top + 0x01 after restore
+            STOP                ; inst 10
+        ",
+        );
+        assert!(bytecode.has_dynamic_jumps);
+        // Purely local push output preserved.
+        assert_eq!(bytecode.const_output(Inst::from_usize(8)), Some(U256::from(0x01)));
+        // ADD: local operand preserved, inherited operand restored to Top.
+        assert_eq!(bytecode.const_operand(Inst::from_usize(9), 0), Some(U256::from(0x01)));
+        assert_eq!(bytecode.const_operand(Inst::from_usize(9), 1), None);
+        assert_eq!(bytecode.const_output(Inst::from_usize(9)), None);
     }
 
     /// Fallthrough block after a JUMPI in a suspect JUMPDEST block becomes
     /// suspect via forward propagation. Block-local constants in the fallthrough
-    /// must still be preserved.
+    /// survive, but cross-block inherited values are restored to Top.
     #[test]
     fn suspect_jumpi_fallthrough_preserves_consts() {
         let bytecode = analyze_asm(
             "
-            ; Static path to target (makes it Known → suspect).
-            PUSH 0x69           ; inst 0: random value
-            CALLDATASIZE        ; inst 1: condition
+            PUSH1 0xAA          ; inst 0: inherited into target
+            CALLDATASIZE        ; inst 1: unknown condition
             PUSH %target        ; inst 2
             JUMPI               ; inst 3
-            ; Fallthrough block
+
+            PUSH0               ; inst 4
+            CALLDATALOAD        ; inst 5: Top
+            JUMP                ; inst 6: unresolved
+
+        target:
+            JUMPDEST            ; inst 7: suspect seed, entry stack [0xAA]
+            PUSH1 0x01          ; inst 8: always take
+            PUSH %after         ; inst 9
+            JUMPI               ; inst 10: leaves [0xAA] for after
+            STOP                ; inst 11
+
+        after:
+            JUMPDEST            ; inst 12: suspect via forward propagation
+            PUSH0               ; inst 13: block-local constant
+            MSTORE              ; inst 14: offset=0 (local), value=inherited 0xAA
+            STOP                ; inst 15
+        ",
+        );
+        assert!(bytecode.has_dynamic_jumps);
+        // Block-local constant in propagated-suspect fallthrough survives.
+        assert_eq!(bytecode.const_output(Inst::from_usize(13)), Some(U256::ZERO));
+        assert_eq!(bytecode.const_operand(Inst::from_usize(14), 0), Some(U256::ZERO));
+        // Cross-block inherited value restored to Top.
+        assert_eq!(bytecode.const_operand(Inst::from_usize(14), 1), None);
+    }
+
+    /// Non-suspect blocks must retain their fixpoint-derived snapshots even when
+    /// invalidation runs elsewhere. The fallthrough after a JUMPI is NOT a
+    /// JUMPDEST, so it is never suspect. Block-local constants, const-folded
+    /// results, and cross-block values resolved via the single-predecessor path
+    /// (MLOAD after MSTORE) must all be preserved.
+    #[test]
+    fn nonsuspect_fallthrough_keeps_fixpoint_snapshots() {
+        let bytecode = analyze_asm(
+            "
+            PUSH1 0x69          ; inst 0: cross-block value
+            CALLDATASIZE        ; inst 1: unknown condition
+            PUSH %target        ; inst 2
+            JUMPI               ; inst 3
+            ; Non-suspect fallthrough block (no JUMPDEST).
             PUSH1 0x0A          ; inst 4
             PUSH1 0x0B          ; inst 5
             ADD                 ; inst 6: 0x0A + 0x0B = 0x15, block-local
             PUSH0               ; inst 7
             MSTORE              ; inst 8
-            MLOAD               ; inst 9
-            PUSH 1              ; inst 10
+            MLOAD               ; inst 9: cross-block via single predecessor
+            PUSH1 0x01          ; inst 10
             MSTORE              ; inst 11
             STOP                ; inst 12
             ; Opaque dynamic jump — triggers suspect invalidation.
@@ -2029,7 +2121,7 @@ mod tests_edge_cases {
         ",
         );
         assert!(bytecode.has_dynamic_jumps);
-        // Fallthrough block: block-local constants must survive.
+        // Fallthrough block: block-local constants survive.
         // ADD
         assert_eq!(bytecode.const_operand(Inst::from_usize(6), 0), Some(U256::from(0x0B)));
         assert_eq!(bytecode.const_operand(Inst::from_usize(6), 1), Some(U256::from(0x0A)));
@@ -2037,11 +2129,9 @@ mod tests_edge_cases {
         // MSTORE 1
         assert_eq!(bytecode.const_operand(Inst::from_usize(8), 0), Some(U256::from(0)));
         assert_eq!(bytecode.const_operand(Inst::from_usize(8), 1), Some(U256::from(0x15)));
-        // MLOAD: the first block is its only predecessor so this can be resolved even if there are
-        // dynamic jumps in the contract, because there is no jumpdest (fallthrough).
+        // MLOAD: single predecessor (no JUMPDEST), so cross-block value resolves.
         assert_eq!(bytecode.const_operand(Inst::from_usize(9), 0), Some(U256::from(0x69)));
-
-        // Target block: block-local PUSH must survive.
+        // Target block: block-local PUSH survives.
         assert_eq!(bytecode.const_output(Inst::from_usize(18)), Some(U256::from(0x42)));
     }
 

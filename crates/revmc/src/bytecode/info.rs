@@ -154,10 +154,14 @@ const SPEC_GATED_OPCODES: &[(u8, SpecId)] = &[
     (op::CREATE2, SpecId::PETERSBURG),
     (op::STATICCALL, SpecId::BYZANTIUM),
     (op::REVERT, SpecId::BYZANTIUM),
+    (op::DUPN, SpecId::AMSTERDAM),
+    (op::SWAPN, SpecId::AMSTERDAM),
+    (op::EXCHANGE, SpecId::AMSTERDAM),
+    (op::SLOTNUM, SpecId::AMSTERDAM),
 ];
 
 /// Opcodes present in the upstream instruction table but not supported by revmc (e.g. EOF-only).
-const UNSUPPORTED_OPCODES: &[u8] = &[op::DUPN, op::SWAPN, op::EXCHANGE, op::SLOTNUM];
+const UNSUPPORTED_OPCODES: &[u8] = &[];
 
 fn make_map(spec_id: SpecId) -> [OpcodeInfo; 256] {
     let table = instruction_table_gas_changes_spec::<EthInterpreter, DummyHost>(spec_id);
@@ -301,12 +305,19 @@ mod tests {
         // Unknown opcode.
         assert!(cancun[0x0C].is_unknown());
 
-        // Unsupported (EOF-only) opcodes should be disabled, not unknown.
+        // AMSTERDAM-gated opcodes should be disabled on CANCUN.
         assert!(cancun[op::DUPN as usize].is_disabled());
         assert!(!cancun[op::DUPN as usize].is_unknown());
         assert!(cancun[op::SWAPN as usize].is_disabled());
         assert!(cancun[op::EXCHANGE as usize].is_disabled());
         assert!(cancun[op::SLOTNUM as usize].is_disabled());
+
+        // AMSTERDAM-gated opcodes should be enabled on AMSTERDAM.
+        let amsterdam = op_info_map(SpecId::AMSTERDAM);
+        assert!(!amsterdam[op::DUPN as usize].is_disabled());
+        assert!(!amsterdam[op::SWAPN as usize].is_disabled());
+        assert!(!amsterdam[op::EXCHANGE as usize].is_disabled());
+        assert!(!amsterdam[op::SLOTNUM as usize].is_disabled());
 
         // Spec-gated: PUSH0 disabled before Shanghai.
         let pre_shanghai = op_info_map(SpecId::MERGE);
