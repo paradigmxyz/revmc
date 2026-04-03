@@ -43,13 +43,13 @@ pub fn parse_asm(s: &str) -> Result<Vec<u8>> {
 
 /// A token produced by the tokenizer.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Token {
+enum Token<'a> {
     /// An identifier (opcode name, macro name, etc.).
-    Ident(String),
+    Ident(&'a str),
     /// A label definition (`name:`).
-    Label(String),
+    Label(&'a str),
     /// A label reference (`%name`).
-    LabelRef(String),
+    LabelRef(&'a str),
     /// A numeric literal.
     Number(U256),
     /// A comma.
@@ -59,7 +59,7 @@ enum Token {
     /// Closing parenthesis.
     RParen,
     /// A macro parameter reference (`$name`).
-    ParamRef(String),
+    ParamRef(&'a str),
     /// Unrecognized character.
     Unknown(char),
 }
@@ -102,24 +102,21 @@ impl<'a> Tokenizer<'a> {
     }
 
     /// Read a contiguous word of alphanumeric/underscore characters.
-    fn read_word(&mut self) -> String {
+    fn read_word(&mut self) -> &'a str {
         let rest = self.remaining();
         let end = rest.find(|c: char| !c.is_ascii_alphanumeric() && c != '_').unwrap_or(rest.len());
-        let word = rest[..end].to_string();
+        let word = &rest[..end];
         self.advance(end);
         word
     }
 
     /// Read a numeric literal (decimal or 0x hex).
-    fn read_number(&mut self) -> Token {
+    fn read_number(&mut self) -> Token<'a> {
         let rest = self.remaining();
         let end = if rest.starts_with("0x") || rest.starts_with("0X") {
-            2 + rest[2..]
-                .find(|c: char| !c.is_ascii_hexdigit())
-                .unwrap_or(rest.len() - 2)
+            2 + rest[2..].find(|c: char| !c.is_ascii_hexdigit()).unwrap_or(rest.len() - 2)
         } else {
-            rest.find(|c: char| !c.is_ascii_digit())
-                .unwrap_or(rest.len())
+            rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len())
         };
         let s = &rest[..end];
         self.advance(end);
@@ -130,10 +127,10 @@ impl<'a> Tokenizer<'a> {
     }
 }
 
-impl Iterator for Tokenizer<'_> {
-    type Item = Token;
+impl<'a> Iterator for Tokenizer<'a> {
+    type Item = Token<'a>;
 
-    fn next(&mut self) -> Option<Token> {
+    fn next(&mut self) -> Option<Token<'a>> {
         loop {
             self.skip_whitespace();
             let c = self.peek_char()?;
@@ -187,7 +184,7 @@ impl Iterator for Tokenizer<'_> {
 
                 ':' => {
                     self.advance(1);
-                    return Some(Token::Label(String::new()));
+                    return Some(Token::Label(""));
                 }
 
                 other => {
@@ -204,117 +201,110 @@ impl Iterator for Tokenizer<'_> {
 // ———————————————————————————————————————————————————————————————————————
 
 /// A macro definition: parameter names and body tokens.
-struct MacroDef {
-    params: Vec<String>,
-    body: Vec<Token>,
+struct MacroDef<'a> {
+    params: Vec<&'a str>,
+    body: Vec<Token<'a>>,
 }
 
 /// Builtin macros available in all assembly sources.
-fn builtin_macros() -> HashMap<String, MacroDef> {
+fn builtin_macros() -> HashMap<&'static str, MacroDef<'static>> {
     let mut m = HashMap::default();
     m.insert(
-        "RET_WORD".into(),
+        "RET_WORD",
         MacroDef {
             params: vec![],
             body: vec![
-                Token::Ident("PUSH0".into()),
-                Token::Ident("MSTORE".into()),
-                Token::Ident("PUSH1".into()),
+                Token::Ident("PUSH0"),
+                Token::Ident("MSTORE"),
+                Token::Ident("PUSH1"),
                 Token::Number(U256::from(0x20)),
-                Token::Ident("PUSH0".into()),
-                Token::Ident("RETURN".into()),
+                Token::Ident("PUSH0"),
+                Token::Ident("RETURN"),
             ],
         },
     );
     m
 }
 
-/// Preprocess source text: extract `#define` directives (line-scoped), tokenize everything
-/// with the char-by-char tokenizer, then expand macro invocations on the token stream.
-fn preprocess(s: &str) -> Result<Vec<Token>> {
+/// Preprocess source text: extract `#define` directives (line-scoped), tokenize the rest,
+/// then expand macro invocations on the token stream.
+fn preprocess(s: &str) -> Result<Vec<Token<'_>>> {
     let mut macros = builtin_macros();
 
-    // Extract #define lines and tokenize their bodies; collect remaining source.
-    let mut rest_lines = String::with_capacity(s.len());
+    // Extract #define lines (tokenize their bodies in-place); keep remaining lines.
+    // Note: `#define` bodies borrow from `s` since their source text lives in `s`.
+    let mut rest_start = Vec::new();
     for line in s.lines() {
         let trimmed = line.trim();
         if let Some(after) = trimmed.strip_prefix("#define") {
             parse_define(after, &mut macros)?;
         } else {
-            rest_lines.push_str(line);
-            rest_lines.push('\n');
+            // Record (start, end) byte offsets into `s` for non-directive lines.
+            let offset = trimmed.as_ptr() as usize - s.as_ptr() as usize;
+            rest_start.push((offset, offset + trimmed.len()));
         }
     }
 
-    // Tokenize the non-directive source.
-    let raw: Vec<Token> = Tokenizer::new(&rest_lines).collect();
+    // Tokenize non-directive lines (borrowing from `s`).
+    let mut raw = Vec::new();
+    for &(start, end) in &rest_start {
+        let line = &s[start..end];
+        raw.extend(Tokenizer::new(line));
+    }
 
     if macros.is_empty() {
         return Ok(raw);
     }
 
-    // Expand macro invocations.
     expand_macros(raw, &macros)
 }
 
 /// Parse a `#define` directive body (everything after `#define`) into the macro table.
-fn parse_define(after: &str, macros: &mut HashMap<String, MacroDef>) -> Result<()> {
-    let mut tokens = Tokenizer::new(after);
+fn parse_define<'a>(after: &'a str, macros: &mut HashMap<&'a str, MacroDef<'a>>) -> Result<()> {
+    let mut tok = Tokenizer::new(after);
 
-    let name = match tokens.next() {
+    let name = match tok.next() {
         Some(Token::Ident(name)) => name,
         _ => eyre::bail!("expected macro name after #define"),
     };
 
     // Optional parameter list: NAME(a, b).
     let mut params = Vec::new();
-    if tokens.peek_char() == Some('(') {
-        // The tokenizer already consumed the ident; '(' is next.
-        // But peek_char looks at the raw source. The ident was consumed, so pos is past it.
-        // Let's just check the next token.
-        if let Some(Token::LParen) = {
-            let saved = tokens.pos;
-            let tok = tokens.next();
-            if !matches!(tok, Some(Token::LParen)) {
-                tokens.pos = saved;
-                None::<Token>
-            } else {
-                tok
+    if tok.peek_char() == Some('(') {
+        tok.next(); // consume '('
+        loop {
+            match tok.next() {
+                Some(Token::Ident(p)) => params.push(p),
+                Some(Token::RParen) => break,
+                _ => break,
             }
-        } {
-            loop {
-                match tokens.next() {
-                    Some(Token::Ident(p)) => params.push(p),
-                    Some(Token::RParen) => break,
-                    _ => break,
-                }
-                match tokens.next() {
-                    Some(Token::Comma) => {}
-                    Some(Token::RParen) => break,
-                    _ => break,
-                }
+            match tok.next() {
+                Some(Token::Comma) => {}
+                Some(Token::RParen) => break,
+                _ => break,
             }
         }
     }
 
-    // Body: remaining tokens on this line.
-    let body: Vec<Token> = tokens.collect();
-
+    let body: Vec<Token<'a>> = tok.collect();
     macros.insert(name, MacroDef { params, body });
     Ok(())
 }
 
 /// Expand macro invocations in a token stream.
-fn expand_macros(tokens: Vec<Token>, macros: &HashMap<String, MacroDef>) -> Result<Vec<Token>> {
+fn expand_macros<'a>(
+    tokens: Vec<Token<'a>>,
+    macros: &HashMap<&str, MacroDef<'a>>,
+) -> Result<Vec<Token<'a>>> {
     let mut out = Vec::with_capacity(tokens.len());
     let mut iter = tokens.into_iter().peekable();
 
     while let Some(tok) = iter.next() {
-        let Token::Ident(ref name) = tok else {
+        let Token::Ident(name) = &tok else {
             out.push(tok);
             continue;
         };
-        let Some(mac) = macros.get(name.as_str()) else {
+        let Some(mac) = macros.get(name) else {
             out.push(tok);
             continue;
         };
@@ -324,7 +314,7 @@ fn expand_macros(tokens: Vec<Token>, macros: &HashMap<String, MacroDef>) -> Resu
         } else {
             // Consume `(arg1, arg2, ...)`.
             eyre::ensure!(iter.next() == Some(Token::LParen), "macro {name:?} expects arguments");
-            let mut args: Vec<Vec<Token>> = vec![vec![]];
+            let mut args: Vec<Vec<Token<'a>>> = vec![vec![]];
             let mut depth = 1u32;
             loop {
                 let t = iter
@@ -342,9 +332,7 @@ fn expand_macros(tokens: Vec<Token>, macros: &HashMap<String, MacroDef>) -> Resu
                         }
                         args.last_mut().unwrap().push(t);
                     }
-                    Token::Comma if depth == 1 => {
-                        args.push(vec![]);
-                    }
+                    Token::Comma if depth == 1 => args.push(vec![]),
                     _ => args.last_mut().unwrap().push(t),
                 }
             }
@@ -354,7 +342,6 @@ fn expand_macros(tokens: Vec<Token>, macros: &HashMap<String, MacroDef>) -> Resu
                 mac.params.len(),
                 args.len()
             );
-            // Substitute $param refs in the body.
             for body_tok in &mac.body {
                 if let Token::ParamRef(pname) = body_tok
                     && let Some(idx) = mac.params.iter().position(|p| p == pname)
@@ -374,26 +361,26 @@ fn expand_macros(tokens: Vec<Token>, macros: &HashMap<String, MacroDef>) -> Resu
 // ———————————————————————————————————————————————————————————————————————
 
 /// A parsed item from the source.
-enum Item {
+enum Item<'a> {
     /// A label definition (`name:`).
-    Label(String),
+    Label(&'a str),
     /// An instruction.
-    Inst(Inst),
+    Inst(Inst<'a>),
 }
 
 /// A parsed instruction.
-struct Inst {
+struct Inst<'a> {
     opcode: u8,
-    imm: Option<Imm>,
+    imm: Option<Imm<'a>>,
     push_kind: PushKind,
 }
 
 /// An immediate value.
-enum Imm {
+enum Imm<'a> {
     /// A numeric literal.
     Number(U256),
     /// A label reference (resolved during layout).
-    Label(String),
+    Label(&'a str),
 }
 
 /// How the push width is determined.
@@ -407,18 +394,18 @@ enum PushKind {
 }
 
 /// Parse a token stream into items.
-fn parse_items(tokens: &[Token]) -> Result<Vec<Item>> {
+fn parse_items<'a>(tokens: &[Token<'a>]) -> Result<Vec<Item<'a>>> {
     let mut items = Vec::new();
     let mut i = 0;
     while i < tokens.len() {
         match &tokens[i] {
             Token::Label(name) => {
                 eyre::ensure!(!name.is_empty(), "empty label name");
-                items.push(Item::Label(name.clone()));
+                items.push(Item::Label(name));
                 i += 1;
             }
             Token::Ident(word) => {
-                if word == "PUSH" {
+                if *word == "PUSH" {
                     i += 1;
                     let imm = expect_imm(tokens, &mut i, "PUSH")?;
                     items.push(Item::Inst(Inst {
@@ -448,7 +435,7 @@ fn parse_items(tokens: &[Token]) -> Result<Vec<Item>> {
                             i < tokens.len() && tokens[i] == Token::Comma,
                             "EXCHANGE requires n,m format (e.g. `1,2`)"
                         );
-                        i += 1; // comma
+                        i += 1;
                         let m = expect_number_u8(tokens, &mut i, opc)?;
                         let raw = encode_pair(n, m).ok_or_else(|| {
                             eyre::eyre!("EXCHANGE pair ({n}, {m}) cannot be encoded")
@@ -488,7 +475,11 @@ fn parse_items(tokens: &[Token]) -> Result<Vec<Item>> {
 }
 
 /// Consume the next token as a number and convert to u8.
-fn expect_number_u8(tokens: &[Token], i: &mut usize, ctx: impl std::fmt::Display) -> Result<u8> {
+fn expect_number_u8(
+    tokens: &[Token<'_>],
+    i: &mut usize,
+    ctx: impl std::fmt::Display,
+) -> Result<u8> {
     let tok = tokens.get(*i).ok_or_else(|| eyre::eyre!("missing immediate for opcode {ctx}"))?;
     *i += 1;
     match tok {
@@ -502,12 +493,16 @@ fn expect_number_u8(tokens: &[Token], i: &mut usize, ctx: impl std::fmt::Display
 }
 
 /// Consume the next token as an immediate (number or label ref).
-fn expect_imm(tokens: &[Token], i: &mut usize, ctx: impl std::fmt::Display) -> Result<Imm> {
+fn expect_imm<'a>(
+    tokens: &[Token<'a>],
+    i: &mut usize,
+    ctx: impl std::fmt::Display,
+) -> Result<Imm<'a>> {
     let tok = tokens.get(*i).ok_or_else(|| eyre::eyre!("missing immediate for opcode {ctx}"))?;
     *i += 1;
     match tok {
         Token::Number(n) => Ok(Imm::Number(*n)),
-        Token::LabelRef(name) => Ok(Imm::Label(name.clone())),
+        Token::LabelRef(name) => Ok(Imm::Label(name)),
         other => eyre::bail!("expected immediate for {ctx}, got {other:?}"),
     }
 }
@@ -547,7 +542,7 @@ fn min_push_width(val: usize) -> u8 {
 }
 
 /// Layout items with label resolution (fixed-point for auto-sized label pushes) and emit bytecode.
-fn layout_and_emit(items: &[Item]) -> Result<Vec<u8>> {
+fn layout_and_emit(items: &[Item<'_>]) -> Result<Vec<u8>> {
     let mut auto_label_indices = Vec::new();
     let mut has_any_label = false;
 
@@ -614,9 +609,8 @@ fn layout_and_emit(items: &[Item]) -> Result<Vec<u8>> {
             if let Item::Inst(inst) = &items[i]
                 && let Some(Imm::Label(name)) = &inst.imm
             {
-                let target_pc = *label_pcs
-                    .get(name.as_str())
-                    .ok_or_else(|| eyre::eyre!("undefined label: {name:?}"))?;
+                let target_pc =
+                    *label_pcs.get(name).ok_or_else(|| eyre::eyre!("undefined label: {name:?}"))?;
                 let needed = min_push_width(target_pc);
                 if needed > auto_widths[i] {
                     auto_widths[i] = needed;
@@ -668,20 +662,18 @@ fn layout_and_emit(items: &[Item]) -> Result<Vec<u8>> {
 }
 
 /// Resolve an immediate value, substituting label PCs.
-fn resolve_imm(imm: &Imm, label_pcs: &HashMap<&str, usize>) -> Result<U256> {
+fn resolve_imm(imm: &Imm<'_>, label_pcs: &HashMap<&str, usize>) -> Result<U256> {
     match imm {
         Imm::Number(n) => Ok(*n),
         Imm::Label(name) => {
-            let pc = label_pcs
-                .get(name.as_str())
-                .ok_or_else(|| eyre::eyre!("undefined label: {name:?}"))?;
+            let pc = label_pcs.get(name).ok_or_else(|| eyre::eyre!("undefined label: {name:?}"))?;
             Ok(U256::from(*pc))
         }
     }
 }
 
 /// Emit a single instruction (no-label fast path).
-fn emit_inst_no_labels(inst: &Inst, code: &mut Vec<u8>) -> Result<()> {
+fn emit_inst_no_labels(inst: &Inst<'_>, code: &mut Vec<u8>) -> Result<()> {
     match &inst.push_kind {
         PushKind::None => {
             code.push(inst.opcode);
