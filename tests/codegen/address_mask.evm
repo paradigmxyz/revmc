@@ -2,12 +2,12 @@ ADDRESS
 PUSH20 0xffffffffffffffffffffffffffffffffffffffff
 AND
 
-; The ADDRESS builtin writes a full i256, then we narrow to i160 via trunc+zext.
-; LLVM converts trunc+zext to an AND, then folds the redundant opcode AND away.
-; Only one AND should remain (from the narrowing), not two.
+; The ADDRESS builtin writes a full i256, then we re-load as i160 and zext.
+; LLVM sees the narrow typed load and knows the high bits are zero, so the
+; opcode AND with the 160-bit mask is redundant and gets folded away entirely.
 ; CHECK: call void @__revmc_builtin_address(
-; CHECK: [[RAW:%.*]] = load i256
-; CHECK: [[ADDR:%.*]] = and i256 [[RAW]]
+; CHECK: load i160
+; CHECK: [[ADDR:%.*]] = zext i160 {{.*}} to i256
 ; CHECK-NOT: and
 ; CHECK: store i256 [[ADDR]]
 ; CHECK: ret i8

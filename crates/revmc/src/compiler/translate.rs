@@ -1213,12 +1213,16 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         get_field(&mut self.bcx, ptr, offset, name)
     }
 
-    /// Narrows the i256 at `slot` to i160 via trunc+zext so LLVM knows the high bits are zero.
+    /// Re-loads the address at `slot` as i160 and zero-extends to i256.
+    ///
+    /// On little-endian the low 160 bits sit at byte offset 0, so a direct
+    /// `load i160` + `zext i256` gives LLVM a typed narrow load — no AND needed
+    /// to prove the high 96 bits are zero.
     fn narrow_to_address(&mut self, slot: B::Value) {
+        debug_assert!(cfg!(target_endian = "little"), "big-endian not yet supported");
         let address_type = self.bcx.type_int(160);
-        let value = self.load_word(slot, "address.raw");
-        let narrow = self.bcx.ireduce(address_type, value);
-        let value = self.bcx.zext(self.word_type, narrow);
+        let value = self.bcx.load(address_type, slot, "address");
+        let value = self.bcx.zext(self.word_type, value);
         self.bcx.store(value, slot);
     }
 
