@@ -913,6 +913,47 @@ impl Bytecode<'_> {
                     }
                     stack.swap(len - 1, len - 1 - depth);
                 }
+                op::DUPN => {
+                    let depth = self.get_imm(inst).and_then(|b| crate::decode_single(b[0]));
+                    match depth {
+                        Some(n) => {
+                            let n = n as usize;
+                            if stack.len() < n {
+                                return false;
+                            }
+                            stack.push(stack[stack.len() - n]);
+                        }
+                        None => return false,
+                    }
+                }
+                op::SWAPN => {
+                    let depth = self.get_imm(inst).and_then(|b| crate::decode_single(b[0]));
+                    match depth {
+                        Some(n) => {
+                            let n = n as usize;
+                            let len = stack.len();
+                            if len < n + 1 {
+                                return false;
+                            }
+                            stack.swap(len - 1, len - 1 - n);
+                        }
+                        None => return false,
+                    }
+                }
+                op::EXCHANGE => {
+                    let pair = self.get_imm(inst).and_then(|b| crate::decode_pair(b[0]));
+                    match pair {
+                        Some((n, m)) => {
+                            let (n, m) = (n as usize, m as usize);
+                            let len = stack.len();
+                            if len < m + 1 {
+                                return false;
+                            }
+                            stack.swap(len - 1 - n, len - 1 - m);
+                        }
+                        None => return false,
+                    }
+                }
                 _ => {
                     if stack.len() < inp {
                         return false;
@@ -1134,6 +1175,22 @@ pub(crate) mod tests {
         );
         assert_eq!(bytecode.const_output(Inst::from_usize(0)), Some(U256::ZERO));
         assert_eq!(bytecode.const_output(Inst::from_usize(1)), None);
+    }
+
+    /// DUPN, SWAPN, and EXCHANGE should propagate constants like their fixed counterparts.
+    #[test]
+    fn const_snapshot_eof_stack_ops() {
+        // DUPN/SWAPN min index is 17, so we need 17 values on the stack.
+        // 16 × PUSH0, PUSH1 0xAA, DUPN 17 (raw=0x00), STOP.
+        let mut code: Vec<u8> = vec![op::PUSH0; 16];
+        code.extend([op::PUSH1, 0xAA]); // inst 16: TOS = 0xAA
+        code.extend([op::DUPN, 0x00]); // inst 17: DUPN 17 (dup bottom = 0x00)
+        code.push(op::STOP); // inst 18
+        let bytecode = analyze_code(code);
+        // DUPN duplicates the 17th item (bottom PUSH0 = 0x00).
+        assert_eq!(bytecode.const_output(Inst::from_usize(17)), Some(U256::ZERO));
+        // The PUSH1 0xAA is still there.
+        assert_eq!(bytecode.const_output(Inst::from_usize(16)), Some(U256::from(0xAA)));
     }
 
     #[test]
