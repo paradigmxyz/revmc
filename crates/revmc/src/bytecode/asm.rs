@@ -60,8 +60,8 @@ enum Token<'a> {
     RParen,
     /// A macro parameter reference (`$name`).
     ParamRef(&'a str),
-    /// Unrecognized character.
-    Unknown(char),
+    /// Unrecognized input.
+    Unknown(&'a str),
 }
 
 /// Character-by-character tokenizer over source text.
@@ -122,7 +122,7 @@ impl<'a> Tokenizer<'a> {
         self.advance(end);
         match s.parse::<U256>() {
             Ok(n) => Token::Number(n),
-            Err(_) => Token::Unknown(s.chars().next().unwrap_or('?')),
+            Err(_) => Token::Unknown(s),
         }
     }
 }
@@ -139,20 +139,22 @@ impl<'a> Iterator for Tokenizer<'a> {
                 ';' => self.skip_line(),
 
                 '%' => {
+                    let start = self.pos;
                     self.advance(1);
                     let name = self.read_word();
                     return Some(if name.is_empty() {
-                        Token::Unknown('%')
+                        Token::Unknown(&self.src[start..self.pos])
                     } else {
                         Token::LabelRef(name)
                     });
                 }
 
                 '$' => {
+                    let start = self.pos;
                     self.advance(1);
                     let name = self.read_word();
                     return Some(if name.is_empty() {
-                        Token::Unknown('$')
+                        Token::Unknown(&self.src[start..self.pos])
                     } else {
                         Token::ParamRef(name)
                     });
@@ -187,9 +189,19 @@ impl<'a> Iterator for Tokenizer<'a> {
                     return Some(Token::Label(""));
                 }
 
-                other => {
-                    self.advance(other.len_utf8());
-                    return Some(Token::Unknown(other));
+                _ => {
+                    let start = self.pos;
+                    // Consume consecutive unrecognized characters.
+                    while let Some(c) = self.peek_char() {
+                        if c.is_ascii_whitespace()
+                            || c.is_ascii_alphanumeric()
+                            || matches!(c, '_' | ';' | '%' | '$' | ',' | '(' | ')' | ':')
+                        {
+                            break;
+                        }
+                        self.advance(c.len_utf8());
+                    }
+                    return Some(Token::Unknown(&self.src[start..self.pos]));
                 }
             }
         }
@@ -524,7 +536,7 @@ fn parse_items<'a>(tokens: &[Token<'a>]) -> Result<Vec<Item<'a>>> {
                     }
                 }
             }
-            Token::Unknown(c) => eyre::bail!("unexpected character: {c:?}"),
+            Token::Unknown(s) => eyre::bail!("unexpected token: {s:?}"),
             other => eyre::bail!("unexpected token: {other:?}"),
         }
     }
