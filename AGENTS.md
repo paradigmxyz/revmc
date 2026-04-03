@@ -72,10 +72,6 @@ Use `cargo r -- run --list` to see available benchmark names.
 
 - NEVER delete or modify `./tmp/` — it contains manually generated IR/asm dumps used for comparison.
 
-## Important
-
-- NEVER delete or modify `./tmp/` — it contains manually generated IR/asm dumps used for comparison.
-
 ## Code style
 
 - Never call `.index()` on an index type just to reconstruct the same type.
