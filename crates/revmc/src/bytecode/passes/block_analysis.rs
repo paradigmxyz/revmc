@@ -1976,93 +1976,130 @@ mod tests_edge_cases {
         assert_eq!(bytecode.const_operand(lt_inst, 0), None);
     }
 
-    /// Suspect-block invalidation must preserve block-local constants.
+    /// Suspect-block invalidation must preserve block-local constants while
+    /// restoring cross-block values to Top.
     ///
-    /// When unresolved Top jumps exist, every reachable JUMPDEST block becomes
-    /// suspect. Previously, invalidation cleared ALL snapshots in suspect blocks,
-    /// losing block-local constants that don't depend on the incoming stack.
-    /// Now, invalidation restores snapshots from the block-local pass.
-    ///
-    /// The target block must be reachable via both a static edge (so the fixpoint
-    /// marks it `Known` and it becomes suspect) AND an opaque dynamic jump (so
-    /// `has_top_jump` is true and invalidation runs).
+    /// The target block receives 0xAA from a predecessor (cross-block) and also
+    /// has block-local PUSHes. Without restoration, the fixpoint's precise 0xAA
+    /// would persist unsoundly; with restoration, only block-local constants survive.
     #[test]
     fn suspect_block_preserves_local_const_operand() {
         let bytecode = analyze_asm(
             "
-            ; Static path to target (makes it Known in the fixpoint).
-            PUSH %target        ; inst 0
-            JUMP                ; inst 1: static jump to target
-            ; Opaque dynamic jump — triggers suspect invalidation.
-            JUMPDEST            ; inst 2
-            PUSH0               ; inst 3
-            CALLDATALOAD        ; inst 4: Top
-            JUMP                ; inst 5: unresolvable
-        target:
-            JUMPDEST            ; inst 6: reachable (Known) + JUMPDEST → suspect
-            PUSH1 0x03          ; inst 7
-            PUSH1 0x04          ; inst 8
-            ADD                 ; inst 9: 3 + 4 = 7, purely block-local
-            PUSH0               ; inst 10
-            MSTORE              ; inst 11
-            STOP                ; inst 12
-        ",
-        );
-        assert!(bytecode.has_dynamic_jumps);
-        // Block-local PUSH constants must survive invalidation.
-        assert_eq!(bytecode.const_operand(Inst::from_usize(9), 0), Some(U256::from(4)));
-        assert_eq!(bytecode.const_operand(Inst::from_usize(9), 1), Some(U256::from(3)));
-        // Block-local const-folded output must survive.
-        assert_eq!(bytecode.const_output(Inst::from_usize(9)), Some(U256::from(7)));
-        // MSTORE operands: TOS = 0, second = folded result (7).
-        assert_eq!(bytecode.const_operand(Inst::from_usize(11), 0), Some(U256::ZERO));
-        assert_eq!(bytecode.const_operand(Inst::from_usize(11), 1), Some(U256::from(7)));
-    }
+            PUSH1 0xAA          ; inst 0: inherited into target
+            CALLDATASIZE        ; inst 1: unknown condition
+            PUSH %target        ; inst 2
+            JUMPI               ; inst 3: target reachable, fallthrough reachable
 
-    /// Same as above but for const_output on a PUSH in a suspect block.
-    #[test]
-    fn suspect_block_preserves_local_const_output() {
-        let bytecode = analyze_asm(
-            "
-            PUSH %target        ; inst 0
-            JUMP                ; inst 1: static jump
-            JUMPDEST            ; inst 2
-            PUSH0               ; inst 3
-            MLOAD               ; inst 4: Top
-            JUMP                ; inst 5: unresolvable
+            PUSH0               ; inst 4
+            CALLDATALOAD        ; inst 5: Top
+            JUMP                ; inst 6: unresolved -> triggers suspect invalidation
+
         target:
-            JUMPDEST            ; inst 6: suspect
-            PUSH1 0xFF          ; inst 7: block-local constant
-            PUSH0               ; inst 8
-            MSTORE              ; inst 9
+            JUMPDEST            ; inst 7: suspect seed
+            PUSH0               ; inst 8: block-local constant
+            MSTORE              ; inst 9: offset=0 (local), value=inherited 0xAA
             STOP                ; inst 10
         ",
         );
         assert!(bytecode.has_dynamic_jumps);
-        assert_eq!(bytecode.const_output(Inst::from_usize(7)), Some(U256::from(0xFF)));
+        // Block-local constant survives.
         assert_eq!(bytecode.const_output(Inst::from_usize(8)), Some(U256::ZERO));
+        assert_eq!(bytecode.const_operand(Inst::from_usize(9), 0), Some(U256::ZERO));
+        // Cross-block value must be restored to Top.
+        assert_eq!(bytecode.const_operand(Inst::from_usize(9), 1), None);
+    }
+
+    /// Same as above but asserting const_output: block-local PUSH output survives,
+    /// but anything depending on cross-block values becomes None.
+    #[test]
+    fn suspect_block_preserves_local_const_output() {
+        let bytecode = analyze_asm(
+            "
+            PUSH1 0xAA          ; inst 0: inherited into target
+            CALLDATASIZE        ; inst 1
+            PUSH %target        ; inst 2
+            JUMPI               ; inst 3
+
+            PUSH0               ; inst 4
+            CALLDATALOAD        ; inst 5: Top
+            JUMP                ; inst 6: unresolvable
+
+        target:
+            JUMPDEST            ; inst 7: suspect seed
+            PUSH1 0x01          ; inst 8: block-local const output
+            ADD                 ; inst 9: 0xAA + 0x01 in fixpoint, Top + 0x01 after restore
+            STOP                ; inst 10
+        ",
+        );
+        assert!(bytecode.has_dynamic_jumps);
+        // Purely local push output preserved.
+        assert_eq!(bytecode.const_output(Inst::from_usize(8)), Some(U256::from(0x01)));
+        // ADD: local operand preserved, inherited operand restored to Top.
+        assert_eq!(bytecode.const_operand(Inst::from_usize(9), 0), Some(U256::from(0x01)));
+        assert_eq!(bytecode.const_operand(Inst::from_usize(9), 1), None);
+        assert_eq!(bytecode.const_output(Inst::from_usize(9)), None);
     }
 
     /// Fallthrough block after a JUMPI in a suspect JUMPDEST block becomes
     /// suspect via forward propagation. Block-local constants in the fallthrough
-    /// must still be preserved.
+    /// survive, but cross-block inherited values are restored to Top.
     #[test]
     fn suspect_jumpi_fallthrough_preserves_consts() {
         let bytecode = analyze_asm(
             "
-            ; Static path to target (makes it Known → suspect).
-            PUSH 0x69           ; inst 0: random value
-            CALLDATASIZE        ; inst 1: condition
+            PUSH1 0xAA          ; inst 0: inherited into target
+            CALLDATASIZE        ; inst 1: unknown condition
             PUSH %target        ; inst 2
             JUMPI               ; inst 3
-            ; Fallthrough block
+
+            PUSH0               ; inst 4
+            CALLDATALOAD        ; inst 5: Top
+            JUMP                ; inst 6: unresolved
+
+        target:
+            JUMPDEST            ; inst 7: suspect seed, entry stack [0xAA]
+            PUSH1 0x01          ; inst 8: always take
+            PUSH %after         ; inst 9
+            JUMPI               ; inst 10: leaves [0xAA] for after
+            STOP                ; inst 11
+
+        after:
+            JUMPDEST            ; inst 12: suspect via forward propagation
+            PUSH0               ; inst 13: block-local constant
+            MSTORE              ; inst 14: offset=0 (local), value=inherited 0xAA
+            STOP                ; inst 15
+        ",
+        );
+        assert!(bytecode.has_dynamic_jumps);
+        // Block-local constant in propagated-suspect fallthrough survives.
+        assert_eq!(bytecode.const_output(Inst::from_usize(13)), Some(U256::ZERO));
+        assert_eq!(bytecode.const_operand(Inst::from_usize(14), 0), Some(U256::ZERO));
+        // Cross-block inherited value restored to Top.
+        assert_eq!(bytecode.const_operand(Inst::from_usize(14), 1), None);
+    }
+
+    /// Non-suspect blocks must retain their fixpoint-derived snapshots even when
+    /// invalidation runs elsewhere. The fallthrough after a JUMPI is NOT a
+    /// JUMPDEST, so it is never suspect. Block-local constants, const-folded
+    /// results, and cross-block values resolved via the single-predecessor path
+    /// (MLOAD after MSTORE) must all be preserved.
+    #[test]
+    fn nonsuspect_fallthrough_keeps_fixpoint_snapshots() {
+        let bytecode = analyze_asm(
+            "
+            PUSH1 0x69          ; inst 0: cross-block value
+            CALLDATASIZE        ; inst 1: unknown condition
+            PUSH %target        ; inst 2
+            JUMPI               ; inst 3
+            ; Non-suspect fallthrough block (no JUMPDEST).
             PUSH1 0x0A          ; inst 4
             PUSH1 0x0B          ; inst 5
             ADD                 ; inst 6: 0x0A + 0x0B = 0x15, block-local
             PUSH0               ; inst 7
             MSTORE              ; inst 8
-            MLOAD               ; inst 9
-            PUSH 1              ; inst 10
+            MLOAD               ; inst 9: cross-block via single predecessor
+            PUSH1 0x01          ; inst 10
             MSTORE              ; inst 11
             STOP                ; inst 12
             ; Opaque dynamic jump — triggers suspect invalidation.
@@ -2077,7 +2114,7 @@ mod tests_edge_cases {
         ",
         );
         assert!(bytecode.has_dynamic_jumps);
-        // Fallthrough block: block-local constants must survive.
+        // Fallthrough block: block-local constants survive.
         // ADD
         assert_eq!(bytecode.const_operand(Inst::from_usize(6), 0), Some(U256::from(0x0B)));
         assert_eq!(bytecode.const_operand(Inst::from_usize(6), 1), Some(U256::from(0x0A)));
@@ -2085,11 +2122,9 @@ mod tests_edge_cases {
         // MSTORE 1
         assert_eq!(bytecode.const_operand(Inst::from_usize(8), 0), Some(U256::from(0)));
         assert_eq!(bytecode.const_operand(Inst::from_usize(8), 1), Some(U256::from(0x15)));
-        // MLOAD: the first block is its only predecessor so this can be resolved even if there are
-        // dynamic jumps in the contract, because there is no jumpdest (fallthrough).
+        // MLOAD: single predecessor (no JUMPDEST), so cross-block value resolves.
         assert_eq!(bytecode.const_operand(Inst::from_usize(9), 0), Some(U256::from(0x69)));
-
-        // Target block: block-local PUSH must survive.
+        // Target block: block-local PUSH survives.
         assert_eq!(bytecode.const_output(Inst::from_usize(18)), Some(U256::from(0x42)));
     }
 
