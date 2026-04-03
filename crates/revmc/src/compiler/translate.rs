@@ -65,6 +65,7 @@ pub(super) struct FunctionCx<'a, B: Backend> {
     ptr_type: B::Type,
     isize_type: B::Type,
     word_type: B::Type,
+    address_type: B::Type,
     i8_type: B::Type,
 
     // Locals.
@@ -208,6 +209,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let i8_type = bcx.type_int(8);
         let i64_type = bcx.type_int(64);
         let word_type = bcx.type_int(256);
+        let address_type = bcx.type_int(160);
 
         // Set up entry block.
         let gas_ptr = bcx.fn_param(0);
@@ -273,6 +275,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             ptr_type,
             isize_type,
             word_type,
+            address_type,
             i8_type,
             stack_len,
             stack,
@@ -1220,8 +1223,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     /// to prove the high 96 bits are zero.
     fn narrow_to_address(&mut self, slot: B::Value) {
         debug_assert!(cfg!(target_endian = "little"), "big-endian not yet supported");
-        let address_type = self.bcx.type_int(160);
-        let value = self.bcx.load(address_type, slot, "address");
+        let value = self.bcx.load(self.address_type, slot, "address");
         let value = self.bcx.zext(self.word_type, value);
         self.bcx.store(value, slot);
     }
