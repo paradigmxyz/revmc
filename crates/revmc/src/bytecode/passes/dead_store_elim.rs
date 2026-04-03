@@ -176,62 +176,38 @@ fn can_skip_when_dead(opcode: u8) -> bool {
 /// Backward liveness transfer for a single instruction.
 ///
 /// Updates `live` to reflect liveness *before* the instruction executes, given
-/// `h_before` (the stack height before the instruction).
+/// `h_before` (the stack height before the instruction). All positions are guaranteed
+/// in-bounds since `live` is sized to the block's max stack height.
 fn transfer_liveness(live: &mut BitVec, opcode: u8, h_before: usize, inp: usize, out: usize) {
     match opcode {
         op::SWAP1..=op::SWAP16 => {
-            // SWAP exchanges TOS and TOS-depth. Propagate liveness from post-swap
-            // destination to pre-swap source.
             let depth = (opcode - op::SWAP1 + 1) as usize;
             let tos = h_before - 1;
             let other = tos - depth;
-            let tos_live = tos < live.len() && live[tos];
-            let other_live = other < live.len() && live[other];
-            if tos < live.len() {
-                live.set(tos, other_live);
-            }
-            if other < live.len() {
-                live.set(other, tos_live);
-            }
+            let (a, b) = (live[tos], live[other]);
+            live.set(tos, b);
+            live.set(other, a);
         }
         op::DUP1..=op::DUP16 => {
-            // DUP pushes a copy of stack[depth] as new TOS. The source is live iff
-            // it was already live as a pass-through OR the duplicated TOS is live.
             let depth = (opcode - op::DUP1 + 1) as usize;
             let new_tos = h_before;
             let src = h_before - depth;
-            let new_tos_live = new_tos < live.len() && live[new_tos];
-            let src_live = src < live.len() && live[src];
-            if new_tos < live.len() {
-                live.set(new_tos, false);
-            }
-            if src < live.len() {
-                live.set(src, src_live || new_tos_live);
+            let new_tos_live = live[new_tos];
+            live.set(new_tos, false);
+            if new_tos_live {
+                live.set(src, true);
             }
         }
         op::POP => {
-            // POP discards its input — kill the position to allow the producer to
-            // be eliminated.
-            let pos = h_before - 1;
-            if pos < live.len() {
-                live.set(pos, false);
-            }
+            live.set(h_before - 1, false);
         }
         _ => {
             let write_base = h_before - inp;
-            // Kill outputs.
             for k in 0..out {
-                let pos = write_base + k;
-                if pos < live.len() {
-                    live.set(pos, false);
-                }
+                live.set(write_base + k, false);
             }
-            // Gen inputs.
             for k in 0..inp {
-                let pos = h_before - inp + k;
-                if pos < live.len() {
-                    live.set(pos, true);
-                }
+                live.set(h_before - inp + k, true);
             }
         }
     }
