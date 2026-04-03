@@ -218,20 +218,30 @@ fn transfer_liveness(
             let depth = (opcode - op::SWAP1 + 1) as usize;
             transfer_swap(live, h_before, depth);
         }
-        op::SWAPN => match imm {
-            Some(DecodedImm::Single(depth)) => transfer_swap(live, h_before, *depth),
-            _ => generic_transfer(live, h_before, inp, out),
-        },
+        op::SWAPN => {
+            if let Some(DecodedImm::Single(depth)) = imm
+                && *depth < h_before
+            {
+                transfer_swap(live, h_before, *depth);
+            }
+            // Infeasible depth or decode failure: conservative no-op.
+        }
         op::DUP1..=op::DUP16 => {
             let depth = (opcode - op::DUP1 + 1) as usize;
             transfer_dup(live, h_before, depth);
         }
-        op::DUPN => match imm {
-            Some(DecodedImm::Single(depth)) => transfer_dup(live, h_before, *depth),
-            _ => generic_transfer(live, h_before, inp, out),
-        },
-        op::EXCHANGE => match imm {
-            Some(DecodedImm::Pair(n, m)) => {
+        op::DUPN => {
+            if let Some(DecodedImm::Single(depth)) = imm
+                && *depth >= 1
+                && *depth <= h_before
+            {
+                transfer_dup(live, h_before, *depth);
+            }
+        }
+        op::EXCHANGE => {
+            if let Some(DecodedImm::Pair(n, m)) = imm
+                && *m < h_before
+            {
                 let tos = h_before - 1;
                 let pos_a = tos - n;
                 let pos_b = tos - m;
@@ -239,8 +249,7 @@ fn transfer_liveness(
                 live.set(pos_a, b);
                 live.set(pos_b, a);
             }
-            _ => generic_transfer(live, h_before, inp, out),
-        },
+        }
         op::POP => {
             live.set(h_before - 1, false);
         }
@@ -487,5 +496,28 @@ mod tests {
                 "PUSH0 at {i} should NOT be skipped"
             );
         }
+    }
+
+    #[test]
+    fn dupn_underflow_no_panic() {
+        // DUPN 17 with only 2 items on the stack — infeasible depth must not panic analysis.
+        let mut code = vec![op::PUSH0; 2];
+        code.extend([op::DUPN, 0x00, op::STOP]);
+        let _ = analyze_code_spec(code, SpecId::AMSTERDAM);
+    }
+
+    #[test]
+    fn swapn_underflow_no_panic() {
+        // SWAPN 17 with only 2 items — infeasible depth must not panic analysis.
+        let mut code = vec![op::PUSH0; 2];
+        code.extend([op::SWAPN, 0x00, op::STOP]);
+        let _ = analyze_code_spec(code, SpecId::AMSTERDAM);
+    }
+
+    #[test]
+    fn exchange_underflow_no_panic() {
+        // EXCHANGE 1,2 with only 1 item — infeasible depth must not panic analysis.
+        let code = vec![op::PUSH0, op::EXCHANGE, 0x01, op::STOP];
+        let _ = analyze_code_spec(code, SpecId::AMSTERDAM);
     }
 }
