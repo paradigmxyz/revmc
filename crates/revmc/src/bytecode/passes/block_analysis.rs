@@ -987,7 +987,9 @@ impl Bytecode<'_> {
             }
 
             // Record post-instruction output snapshot.
-            if out > 0 {
+            // Skip SWAP/SWAPN/EXCHANGE: they modify two positions and have no single "output".
+            if out > 0 && !matches!(inst.opcode, op::SWAP1..=op::SWAP16 | op::SWAPN | op::EXCHANGE)
+            {
                 self.snapshots.outputs[i] = stack.last().copied();
             }
 
