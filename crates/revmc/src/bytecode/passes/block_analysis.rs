@@ -353,7 +353,7 @@ impl Bytecode<'_> {
     /// Returns PCR hints containing return edges discovered by context-sensitive
     /// call-string analysis.
     #[instrument(name = "pcr", level = "debug", skip_all)]
-    fn compute_pcr_hints(&self) -> Vec<PcrHint> {
+    fn compute_pcr_hints(&mut self) -> Vec<PcrHint> {
         if self.cfg.blocks.is_empty() || !self.has_dynamic_jumps {
             return Vec::new();
         }
@@ -879,9 +879,12 @@ impl Bytecode<'_> {
     /// For each block, simulates the stack effect to determine:
     /// - Whether the block is a private function call (static jump + pushed label).
     /// - Whether the block is a private function return (dynamic jump from stack).
-    fn compute_local_summaries(&self) -> IndexVec<Block, LocalBlockSummary> {
+    fn compute_local_summaries(&mut self) -> IndexVec<Block, LocalBlockSummary> {
         let mut summaries =
             IndexVec::from_vec(vec![LocalBlockSummary::default(); self.cfg.blocks.len()]);
+
+        let empty_sets = ConstSetInterner::new();
+        let mut stack = Vec::new();
 
         for bid in self.cfg.blocks.indices() {
             let block = &self.cfg.blocks[bid];
@@ -922,10 +925,28 @@ impl Bytecode<'_> {
             // The callee is the static jump target.
             let callee = Inst::from_usize(term.data as usize);
 
-            // Stack-simulate the block to find which PUSH values survive to exit.
-            // We track indices of values pushed by PUSH instructions in the block.
-            // A "label" is a pushed value that is a valid JUMPDEST pc.
-            if let Some(continuation) = self.find_surviving_label(block) {
+            // Interpret the block with Top inputs to find which values survive to exit.
+            // Reuses the same abstract interpreter as block_analysis_local.
+            let section =
+                StackSection::from_stack_io(block.insts().map(|i| self.insts[i].stack_io()));
+            stack.clear();
+            stack.resize(section.inputs as usize, AbsValue::Top);
+            if !self.interpret_block(block.insts(), &mut stack) {
+                continue;
+            }
+
+            // Find the deepest surviving label (the one pushed earliest, which is the
+            // continuation/return address in the standard PUSH ret_addr; PUSH func; JUMP
+            // pattern). In Solidity, the return address is typically pushed before the
+            // function arguments and callee address, so it ends up deeper in the stack.
+            let continuation = stack.iter().find_map(|v| {
+                if let JumpTarget::Const(inst) = self.resolve_jump_operand(*v, &empty_sets) {
+                    Some(inst)
+                } else {
+                    None
+                }
+            });
+            if let Some(continuation) = continuation {
                 summaries[bid].private_call = Some(PrivateCallInfo { callee, continuation });
             }
         }
@@ -945,73 +966,6 @@ impl Bytecode<'_> {
         }
 
         summaries
-    }
-
-    /// Simulate a block's stack to find the first pushed JUMPDEST label that survives
-    /// to exit (i.e., remains on the stack after all instructions execute).
-    ///
-    /// Returns the instruction index of the JUMPDEST target, if found.
-    fn find_surviving_label(&self, block: &BlockData) -> Option<Inst> {
-        // Track stack positions. Each entry is Some(inst_idx) if pushed by a PUSH
-        // in this block that targets a valid JUMPDEST, or None otherwise.
-        let mut stack: Vec<Option<Inst>> = Vec::new();
-
-        for i in block.insts() {
-            let inst = &self.insts[i];
-            if inst.is_dead_code() {
-                continue;
-            }
-            if inst.flags.contains(InstFlags::NOOP) {
-                continue;
-            }
-
-            let (inp, out) = inst.stack_io();
-            let inp = inp as usize;
-            let out = out as usize;
-
-            match inst.opcode {
-                op::PUSH0 => stack.push(None),
-                op::PUSH1..=op::PUSH32 => {
-                    let label = self.get_imm(inst).and_then(|imm| {
-                        // Only care about small values that could be valid PCs.
-                        if imm.len() > std::mem::size_of::<usize>() {
-                            return None;
-                        }
-                        let mut padded = [0u8; std::mem::size_of::<usize>()];
-                        padded[std::mem::size_of::<usize>() - imm.len()..].copy_from_slice(imm);
-                        let pc = usize::from_be_bytes(padded);
-                        if self.is_valid_jump(pc) { Some(self.pc_to_inst(pc)) } else { None }
-                    });
-                    stack.push(label);
-                }
-                op::POP => {
-                    stack.pop();
-                }
-                op::DUP1..=op::DUP16 => {
-                    let depth = (inst.opcode - op::DUP1 + 1) as usize;
-                    let val = stack.len().checked_sub(depth).and_then(|i| stack[i]);
-                    stack.push(val);
-                }
-                op::SWAP1..=op::SWAP16 => {
-                    let depth = (inst.opcode - op::SWAP1 + 1) as usize;
-                    let len = stack.len();
-                    if len > depth {
-                        stack.swap(len - 1, len - 1 - depth);
-                    }
-                }
-                _ => {
-                    let len = stack.len();
-                    stack.truncate(len.saturating_sub(inp));
-                    stack.resize(stack.len() + out, None);
-                }
-            }
-        }
-
-        // Find the deepest surviving label (the one pushed earliest, which is the
-        // continuation/return address in the standard PUSH ret_addr; PUSH func; JUMP pattern).
-        // In Solidity, the return address is typically pushed before the function arguments
-        // and callee address, so it ends up deeper in the stack.
-        stack.into_iter().flatten().next()
     }
 
     /// Resolve private function return jumps using context-sensitive graph traversal.
