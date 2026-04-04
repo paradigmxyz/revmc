@@ -398,6 +398,16 @@ mod tests {
         "PUSH0\n".repeat(n)
     }
 
+    /// Helper: `n` PUSH0 padding followed by `suffix` asm, analyzed with AMSTERDAM spec.
+    fn with_prefix(n: usize, suffix: &str) -> crate::bytecode::Bytecode<'static> {
+        analyze_asm_spec(&format!("{}{suffix}", push0s(n)), SpecId::AMSTERDAM)
+    }
+
+    /// Helper: `PUSH0 CALLDATALOAD` (dynamic value) + `n` PUSH0 padding + `suffix` asm.
+    fn with_dynamic_and_prefix(n: usize, suffix: &str) -> crate::bytecode::Bytecode<'static> {
+        analyze_asm_spec(&format!("PUSH0 CALLDATALOAD {}{suffix}", push0s(n)), SpecId::AMSTERDAM)
+    }
+
     #[test]
     fn push_pop() {
         let bytecode = analyze_asm(
@@ -573,8 +583,7 @@ mod tests {
     fn swapn_preserves_liveness() {
         // SWAPN brings a deep dynamic value to TOS where RET_WORD consumes it.
         // CDL at bottom, 17 × PUSH0 above → SWAP 17 swaps TOS with CDL.
-        let asm = format!("PUSH0 CALLDATALOAD {} SWAP 17 RET_WORD", push0s(17));
-        let bytecode = analyze_asm_spec(&asm, SpecId::AMSTERDAM);
+        let bytecode = with_dynamic_and_prefix(17, "SWAP 17 RET_WORD");
         assert!(
             !bytecode.inst(Inst::from_usize(1)).flags.contains(InstFlags::NOOP),
             "CALLDATALOAD should NOT be skipped (consumed via SWAPN + MSTORE)"
@@ -585,8 +594,7 @@ mod tests {
     fn dupn_keeps_source_live() {
         // DUPN copies a deep dynamic value to TOS. RET_WORD consumes the copy.
         // CDL at bottom, 16 × PUSH0 above → DUP 17 copies CDL to TOS.
-        let asm = format!("PUSH0 CALLDATALOAD {} DUP 17 RET_WORD", push0s(16));
-        let bytecode = analyze_asm_spec(&asm, SpecId::AMSTERDAM);
+        let bytecode = with_dynamic_and_prefix(16, "DUP 17 RET_WORD");
         assert!(
             !bytecode.inst(Inst::from_usize(1)).flags.contains(InstFlags::NOOP),
             "CALLDATALOAD should NOT be skipped"
@@ -770,8 +778,7 @@ mod tests {
     fn dupn_dead() {
         // 17 × PUSH0, DUP 17 (copies bottom), POP × 18, STOP — all dead.
         let pops = "POP\n".repeat(18);
-        let asm = format!("{} DUP 17 {} STOP", push0s(17), pops);
-        let bytecode = analyze_asm_spec(&asm, SpecId::AMSTERDAM);
+        let bytecode = with_prefix(17, &format!("DUP 17 {pops} STOP"));
         for i in 0..17 {
             assert!(
                 bytecode.inst(Inst::from_usize(i)).flags.contains(InstFlags::NOOP),
@@ -804,7 +811,7 @@ mod tests {
         // 1 × PUSH0, DUP 17 (depth=17 but only 1 literal push), POP, POP, STOP.
         // Block analysis inflates stack_in to satisfy DUPN's real depth, so from DSE's
         // perspective the immediate is valid and the instruction is eliminable.
-        let bytecode = analyze_asm_spec("PUSH0 DUP 17 POP POP STOP", SpecId::AMSTERDAM);
+        let bytecode = with_prefix(1, "DUP 17 POP POP STOP");
         assert!(
             bytecode.inst(Inst::from_usize(1)).flags.contains(InstFlags::NOOP),
             "DUPN with valid immediate should be skipped when dead"
@@ -815,8 +822,7 @@ mod tests {
     fn swapn_dead() {
         // 18 × PUSH0, SWAP 17 (depth=17), 18 × POP, STOP — all dead.
         let pops = "POP\n".repeat(18);
-        let asm = format!("{} SWAP 17 {} STOP", push0s(18), pops);
-        let bytecode = analyze_asm_spec(&asm, SpecId::AMSTERDAM);
+        let bytecode = with_prefix(18, &format!("SWAP 17 {pops} STOP"));
         for i in 0..18 {
             assert!(
                 bytecode.inst(Inst::from_usize(i)).flags.contains(InstFlags::NOOP),
@@ -832,8 +838,7 @@ mod tests {
     #[test]
     fn exchange_dead() {
         // 3 × PUSH0, EXCHANGE (1,2), 3 × POP, STOP — all dead.
-        let bytecode =
-            analyze_asm_spec("PUSH0 PUSH0 PUSH0 EXCHANGE 1 2 POP POP POP STOP", SpecId::AMSTERDAM);
+        let bytecode = with_prefix(3, "EXCHANGE 1 2 POP POP POP STOP");
         for i in 0..3 {
             assert!(
                 bytecode.inst(Inst::from_usize(i)).flags.contains(InstFlags::NOOP),
@@ -849,19 +854,19 @@ mod tests {
     #[test]
     fn dupn_underflow_no_panic() {
         // DUP 17 with only 2 items on the stack — infeasible depth must not panic analysis.
-        let _ = analyze_asm_spec("PUSH0 PUSH0 DUP 17 STOP", SpecId::AMSTERDAM);
+        let _ = with_prefix(2, "DUP 17 STOP");
     }
 
     #[test]
     fn swapn_underflow_no_panic() {
         // SWAP 17 with only 2 items — infeasible depth must not panic analysis.
-        let _ = analyze_asm_spec("PUSH0 PUSH0 SWAP 17 STOP", SpecId::AMSTERDAM);
+        let _ = with_prefix(2, "SWAP 17 STOP");
     }
 
     #[test]
     fn exchange_underflow_no_panic() {
         // EXCHANGE 1,2 with only 1 item — infeasible depth must not panic analysis.
-        let _ = analyze_asm_spec("PUSH0 EXCHANGE 1 2 STOP", SpecId::AMSTERDAM);
+        let _ = with_prefix(1, "EXCHANGE 1 2 STOP");
     }
 
     // --- Const-output dead store tests ---
