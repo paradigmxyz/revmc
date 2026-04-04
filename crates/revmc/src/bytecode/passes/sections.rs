@@ -90,6 +90,11 @@ impl GasSectionAnalysis {
         self.gas_cost += base_gas as u64;
     }
 
+    fn save_to_reset(&mut self, bytecode: &mut Bytecode<'_>, next_section_inst: Inst) {
+        self.save_to(bytecode, next_section_inst);
+        self.reset(next_section_inst);
+    }
+
     /// Saves the current gas section to the bytecode.
     fn save_to(&self, bytecode: &mut Bytecode<'_>, next_section_inst: Inst) {
         if self.start_inst >= bytecode.insts.len_idx() {
@@ -144,6 +149,11 @@ impl StackSectionAnalysis {
         self.max_growth = self.max_growth.max(self.diff);
     }
 
+    fn save_to_reset(&mut self, bytecode: &mut Bytecode<'_>, next_section_inst: Inst) {
+        self.save_to(bytecode, next_section_inst);
+        self.reset(next_section_inst);
+    }
+
     /// Saves the current stack section to the bytecode.
     fn save_to(&self, bytecode: &mut Bytecode<'_>, next_section_inst: Inst) {
         if self.start_inst >= bytecode.insts.len_idx() {
@@ -189,10 +199,8 @@ impl SectionsAnalysis {
     pub(crate) fn process(&mut self, bytecode: &mut Bytecode<'_>, inst: Inst) {
         // JUMPDEST starts both gas and stack sections.
         if bytecode.inst(inst).is_reachable_jumpdest(bytecode.has_dynamic_jumps()) {
-            self.gas.save_to(bytecode, inst);
-            self.gas.reset(inst);
-            self.stack.save_to(bytecode, inst);
-            self.stack.reset(inst);
+            self.stack.save_to_reset(bytecode, inst);
+            self.gas.save_to_reset(bytecode, inst);
         }
 
         let data = bytecode.inst(inst);
@@ -200,20 +208,14 @@ impl SectionsAnalysis {
         self.stack.process(inp, out);
         self.gas.process(data.base_gas);
 
-        let data = bytecode.inst(inst);
-
         // Instructions that require `gasleft` end only the gas section.
         // Branching and suspending instructions end both sections.
+        let next = inst + 1;
         if data.may_suspend() || data.is_branching() {
-            let next = inst + 1;
-            self.gas.save_to(bytecode, next);
-            self.gas.reset(next);
-            self.stack.save_to(bytecode, next);
-            self.stack.reset(next);
+            self.stack.save_to_reset(bytecode, next);
+            self.gas.save_to_reset(bytecode, next);
         } else if data.requires_gasleft(bytecode.spec_id) {
-            let next = inst + 1;
-            self.gas.save_to(bytecode, next);
-            self.gas.reset(next);
+            self.gas.save_to_reset(bytecode, next);
         }
     }
 
