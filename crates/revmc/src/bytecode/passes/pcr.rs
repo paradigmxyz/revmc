@@ -20,6 +20,39 @@ use tracing::{debug, instrument, trace};
 /// Maximum call-string depth for context-sensitive traversal.
 const MAX_CONTEXT_DEPTH: usize = 8;
 
+/// Call-string context: stack of caller block IDs, most recent first.
+type Context = SmallVec<[Block; 4]>;
+
+/// Context-sensitive worklist for the PCR graph traversal.
+///
+/// Tracks `(block, context)` pairs with per-block visited sets.
+struct ContextWorklist {
+    queue: VecDeque<(Block, Context)>,
+    /// Per-block set of visited contexts.
+    visited: IndexVec<Block, SmallVec<[Context; 2]>>,
+}
+
+impl ContextWorklist {
+    fn new(num_blocks: usize) -> Self {
+        Self {
+            queue: VecDeque::new(),
+            visited: IndexVec::from_vec(vec![SmallVec::new(); num_blocks]),
+        }
+    }
+
+    /// Enqueues `(block, ctx)` if not already visited with that context.
+    fn push(&mut self, block: Block, ctx: Context) {
+        if !self.visited[block].contains(&ctx) {
+            self.visited[block].push(ctx.clone());
+            self.queue.push_back((block, ctx));
+        }
+    }
+
+    fn pop(&mut self) -> Option<(Block, Context)> {
+        self.queue.pop_front()
+    }
+}
+
 /// Local per-block summary for private call/return detection.
 ///
 /// Computed by a single-pass stack simulation of each block, without any fixpoint.
@@ -150,17 +183,19 @@ impl Bytecode<'_> {
             }
         }
 
-        for (bid, summary) in summaries.iter_enumerated() {
-            if let Some(ref call) = summary.private_call {
-                trace!(
-                    %bid,
-                    callee = %call.callee,
-                    continuation = %call.continuation,
-                    "private call"
-                );
-            }
-            if summary.is_return {
-                trace!(%bid, "private return");
+        if enabled!(tracing::Level::TRACE) {
+            for (bid, summary) in summaries.iter_enumerated() {
+                if let Some(ref call) = summary.private_call {
+                    trace!(
+                        %bid,
+                        callee = %call.callee,
+                        continuation = %call.continuation,
+                        "private call"
+                    );
+                }
+                if summary.is_return {
+                    trace!(%bid, "private return");
+                }
             }
         }
 
@@ -179,32 +214,21 @@ impl Bytecode<'_> {
     ) -> Vec<PcrHint> {
         let num_blocks = self.cfg.blocks.len();
 
-        type Context = SmallVec<[Block; 4]>;
+        let mut wl = ContextWorklist::new(num_blocks);
 
-        // Per (block, context): set of visited states.
-        // We use a map from Block to set of contexts to avoid exponential blowup.
-        let mut visited: IndexVec<Block, SmallVec<[Context; 2]>> =
-            IndexVec::from_vec(vec![SmallVec::new(); num_blocks]);
-
-        // Per return-block: set of discovered continuation targets.
+        // Per return-block: discovered continuation targets.
         let mut return_targets: IndexVec<Block, SmallVec<[Inst; 4]>> =
             IndexVec::from_vec(vec![SmallVec::new(); num_blocks]);
-        // Return blocks that were reached from a non-call path (opaque caller or empty context).
+        // Return blocks reached from a non-call path (opaque caller or empty context).
         let mut tainted_returns: BitVec = BitVec::repeat(false, num_blocks);
 
-        // Worklist of (block, context) pairs.
-        let mut worklist: VecDeque<(Block, Context)> = VecDeque::new();
+        wl.push(Block::from_usize(0), SmallVec::new());
 
-        // Seed: entry block with empty context.
-        let empty_ctx: Context = SmallVec::new();
-        visited[Block::from_usize(0)].push(empty_ctx.clone());
-        worklist.push_back((Block::from_usize(0), empty_ctx));
-
-        let mut iterations = 0;
         let max_iterations = num_blocks * 64;
+        let mut iterations = 0;
         let mut converged = true;
 
-        while let Some((bid, ctx)) = worklist.pop_front() {
+        while let Some((bid, ctx)) = wl.pop() {
             iterations += 1;
             if iterations > max_iterations {
                 converged = false;
@@ -212,71 +236,53 @@ impl Bytecode<'_> {
             }
 
             let block = &self.cfg.blocks[bid];
-
             let summary = &summaries[bid];
 
             if let Some(ref call) = summary.private_call {
                 // Private function call: push caller onto context, follow to callee.
                 let mut new_ctx = ctx.clone();
                 if new_ctx.len() >= MAX_CONTEXT_DEPTH {
-                    // Truncate oldest entry (last element) to keep bounded.
                     new_ctx.pop();
                 }
                 new_ctx.insert(0, bid);
 
                 let callee_block = self.cfg.inst_to_block[call.callee];
 
-                // Follow to callee.
-                if let Some(callee_block) = callee_block
-                    && !visited[callee_block].contains(&new_ctx)
-                {
-                    visited[callee_block].push(new_ctx.clone());
-                    worklist.push_back((callee_block, new_ctx));
+                if let Some(callee_block) = callee_block {
+                    wl.push(callee_block, new_ctx);
                 }
 
                 // Also follow the fallthrough edge (for JUMPI terminators).
                 let term = &self.insts[block.terminator()];
                 if term.opcode == op::JUMPI {
                     for &succ in &block.succs {
-                        if callee_block != Some(succ) && !visited[succ].contains(&ctx) {
-                            visited[succ].push(ctx.clone());
-                            worklist.push_back((succ, ctx.clone()));
+                        if callee_block != Some(succ) {
+                            wl.push(succ, ctx.clone());
                         }
                     }
                 }
             } else if summary.is_return {
-                // Private function return: look up the context to find the caller
-                // that pushed the matching continuation address (CutToCaller).
+                // Private function return: pop the caller from the context
+                // to find the matching continuation address.
                 if let Some(caller_bid) = ctx.first().copied() {
                     if let Some(ref caller_call) = summaries[caller_bid].private_call {
                         let continuation = caller_call.continuation;
-
-                        // Record this return -> continuation edge.
                         return_targets[bid].push(continuation);
 
-                        // Pop the caller from context and continue at the continuation.
                         let new_ctx: Context = ctx[1..].into();
-                        if let Some(cont_block) = self.cfg.inst_to_block[continuation]
-                            && !visited[cont_block].contains(&new_ctx)
-                        {
-                            visited[cont_block].push(new_ctx.clone());
-                            worklist.push_back((cont_block, new_ctx));
+                        if let Some(cont_block) = self.cfg.inst_to_block[continuation] {
+                            wl.push(cont_block, new_ctx);
                         }
                     } else {
-                        // Caller in context doesn't have a call summary — context is stale.
                         tainted_returns.set(bid.index(), true);
                     }
                 } else {
-                    // Empty context: reached from a non-call path (e.g. opaque caller).
                     tainted_returns.set(bid.index(), true);
                 }
             } else {
                 // Normal block: propagate to all successors with same context.
                 for &succ in &block.succs {
-                    if !visited[succ].contains(&ctx) {
-                        visited[succ].push(ctx.clone());
-                        worklist.push_back((succ, ctx.clone()));
-                    }
+                    wl.push(succ, ctx.clone());
                 }
             }
         }
@@ -286,9 +292,7 @@ impl Bytecode<'_> {
             msg = if converged { "converged" } else { "did not converge" },
         );
 
-        // Convert return_targets to PCR hints.
-        // These are returned as hints — soundness is enforced downstream by the
-        // abstract interpreter's `invalidate_suspect_jumps`.
+        // Collect hints from resolved return targets.
         let mut hints = Vec::new();
         for (bid, targets) in return_targets.iter_enumerated() {
             if targets.is_empty() || tainted_returns[bid.index()] {
