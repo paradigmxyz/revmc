@@ -277,12 +277,12 @@ mod tests {
         assert_eq!(cancun[op::SWAP1 as usize].base_gas(), 3);
         assert_eq!(cancun[op::PUSH0 as usize].base_gas(), 2);
 
-        // LOG: base + n * LOGTOPIC.
+        // LOG: base gas only (topic + data cost charged dynamically in builtin).
         assert_eq!(cancun[op::LOG0 as usize].base_gas(), 375);
-        assert_eq!(cancun[op::LOG1 as usize].base_gas(), 750);
-        assert_eq!(cancun[op::LOG2 as usize].base_gas(), 1125);
-        assert_eq!(cancun[op::LOG3 as usize].base_gas(), 1500);
-        assert_eq!(cancun[op::LOG4 as usize].base_gas(), 1875);
+        assert_eq!(cancun[op::LOG1 as usize].base_gas(), 375);
+        assert_eq!(cancun[op::LOG2 as usize].base_gas(), 375);
+        assert_eq!(cancun[op::LOG3 as usize].base_gas(), 375);
+        assert_eq!(cancun[op::LOG4 as usize].base_gas(), 375);
         assert!(cancun[op::LOG0 as usize].is_dynamic());
 
         // Memory ops: dynamic with base cost 3.
