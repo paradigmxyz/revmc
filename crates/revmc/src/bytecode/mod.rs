@@ -290,16 +290,19 @@ impl<'a> Bytecode<'a> {
         self.block_analysis_local();
         self.mark_dead_code();
 
+        let local_snapshots = self.snapshots.clone();
+
         self.rebuild_cfg();
-        self.block_analysis();
+        self.block_analysis(&local_snapshots);
         self.dead_store_elim();
         self.mark_dead_code();
 
         if self.config.contains(AnalysisConfig::DEDUP) {
             self.rebuild_cfg();
-            self.dedup_blocks();
+            self.dedup_blocks(&local_snapshots);
             self.mark_dead_code();
         }
+        drop(local_snapshots);
 
         // Final rebuild so the CFG is consistent for sections analysis and DOT output.
         self.rebuild_cfg();
