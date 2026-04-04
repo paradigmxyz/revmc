@@ -215,14 +215,13 @@ impl Bytecode<'_> {
         let num_blocks = self.cfg.blocks.len();
 
         let mut wl = ContextWorklist::new(num_blocks);
+        wl.push(Block::from_usize(0), SmallVec::new());
 
         // Per return-block: discovered continuation targets.
         let mut return_targets: IndexVec<Block, SmallVec<[Inst; 4]>> =
             IndexVec::from_vec(vec![SmallVec::new(); num_blocks]);
         // Return blocks reached from a non-call path (opaque caller or empty context).
         let mut tainted_returns: BitVec = BitVec::repeat(false, num_blocks);
-
-        wl.push(Block::from_usize(0), SmallVec::new());
 
         let max_iterations = num_blocks * 64;
         let mut iterations = 0;
@@ -264,17 +263,15 @@ impl Bytecode<'_> {
             } else if summary.is_return {
                 // Private function return: pop the caller from the context
                 // to find the matching continuation address.
-                if let Some(caller_bid) = ctx.first().copied() {
-                    if let Some(ref caller_call) = summaries[caller_bid].private_call {
-                        let continuation = caller_call.continuation;
-                        return_targets[bid].push(continuation);
+                if let Some(caller_bid) = ctx.first().copied()
+                    && let Some(ref caller_call) = summaries[caller_bid].private_call
+                {
+                    let continuation = caller_call.continuation;
+                    return_targets[bid].push(continuation);
 
-                        let new_ctx: Context = ctx[1..].into();
-                        if let Some(cont_block) = self.cfg.inst_to_block[continuation] {
-                            wl.push(cont_block, new_ctx);
-                        }
-                    } else {
-                        tainted_returns.set(bid.index(), true);
+                    let new_ctx: Context = ctx[1..].into();
+                    if let Some(cont_block) = self.cfg.inst_to_block[continuation] {
+                        wl.push(cont_block, new_ctx);
                     }
                 } else {
                     tainted_returns.set(bid.index(), true);

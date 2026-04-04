@@ -28,8 +28,7 @@
 //! a transitive predecessor analysis invalidates suspect resolutions that may be based on
 //! incomplete information, ensuring that only sound jump targets are reported as resolved.
 
-use super::StackSection;
-use super::pcr::PcrHint;
+use super::{StackSection, pcr::PcrHint};
 use crate::{
     FxHashMap,
     bytecode::{Bytecode, Inst, InstFlags, Interner, U256Idx},
@@ -403,18 +402,17 @@ impl Bytecode<'_> {
             debug!(newly_resolved, "resolved jumps");
         }
 
-        // Always recompute dynamic jumps flag (dead-code jumps excluded).
         self.recompute_has_dynamic_jumps();
     }
 
-    /// Recomputes `has_dynamic_jumps` by scanning live instructions.
+    /// Recomputes the `has_dynamic_jumps` flag based on the current instruction set.
     pub(crate) fn recompute_has_dynamic_jumps(&mut self) {
-        let mut dynamic_jumps = self.insts.iter().filter(|inst| {
-            !inst.is_dead_code() && inst.is_jump() && !inst.flags.contains(InstFlags::STATIC_JUMP)
+        let mut unresolved = self.insts.iter().filter(|inst| {
+            inst.is_jump() && !inst.flags.contains(InstFlags::STATIC_JUMP) && !inst.is_dead_code()
         });
-        self.has_dynamic_jumps = dynamic_jumps.next().is_some();
+        self.has_dynamic_jumps = unresolved.next().is_some();
         if self.has_dynamic_jumps {
-            debug!(n = 1 + dynamic_jumps.count(), "unresolved dynamic jumps remain");
+            debug!(n = 1 + unresolved.count(), "unresolved dynamic jumps remain");
         }
     }
 
@@ -688,7 +686,11 @@ impl Bytecode<'_> {
     }
 
     /// Resolves a jump target from the snapshot operand recorded during the fixpoint.
-    pub(super) fn resolve_jump_operand(&self, operand: AbsValue, const_sets: &ConstSetInterner) -> JumpTarget {
+    pub(super) fn resolve_jump_operand(
+        &self,
+        operand: AbsValue,
+        const_sets: &ConstSetInterner,
+    ) -> JumpTarget {
         match operand {
             AbsValue::Const(idx) => {
                 let val = *self.u256_interner.borrow().get(idx);
