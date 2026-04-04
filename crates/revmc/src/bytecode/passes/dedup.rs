@@ -47,7 +47,7 @@ impl<'a> Bytecode<'a> {
         let mut key_to_blocks = HashMap::<DedupKey<'_>, SmallVec<[Block; 4]>>::default();
         let mut total_deduped = 0usize;
         loop {
-            let deduped = self.dedup_blocks_once(code, &mut key_to_blocks);
+            let deduped = self.dedup_blocks_once(code, &mut key_to_blocks, local_snapshots);
             total_deduped += deduped;
             if deduped == 0 {
                 break;
@@ -62,6 +62,7 @@ impl<'a> Bytecode<'a> {
         &mut self,
         code: &'b [u8],
         key_to_blocks: &mut HashMap<DedupKey<'b>, SmallVec<[Block; 4]>>,
+        local_snapshots: &Snapshots,
     ) -> usize {
         for bid in self.cfg.blocks.indices() {
             let block = &self.cfg.blocks[bid];
