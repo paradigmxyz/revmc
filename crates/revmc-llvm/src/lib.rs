@@ -134,6 +134,8 @@ pub struct EvmLlvmBackend {
     _tscx: Option<orc::ThreadSafeContext>,
     /// Non-owning context handle for JIT mode. See [`create_orc_context`].
     _cx_handle: Option<Box<ManuallyDrop<Context>>>,
+    /// Owned context for AOT mode. `None` in JIT mode.
+    _aot_cx: Option<Box<Context>>,
 
     /// LLVM debug info builder and compile unit, created lazily when `debug_file` is set.
     di_state: Option<DiState>,
@@ -455,6 +457,9 @@ impl fmt::Debug for DiState {
     }
 }
 
+// SAFETY: In JIT mode the LLVM context is owned by an ORC ThreadSafeContext.
+// In AOT mode the context is owned by `_aot_cx` (a Box<Context>).
+// Both travel with the backend, so no thread-local or shared state is referenced.
 unsafe impl Send for EvmLlvmBackend {}
 
 impl EvmLlvmBackend {
@@ -479,9 +484,13 @@ impl EvmLlvmBackend {
 
         // In JIT mode, ORC owns the context via a ThreadSafeContext so that modules can be
         // safely transferred to the JIT without double-ownership issues with the TLS context.
-        // In AOT mode, we use the thread-local context directly.
-        let (cx, tscx, cx_handle) = if aot {
-            (get_context(), None, None)
+        // In AOT mode, we use an owned Box<Context> so the backend is safely Send.
+        let (cx, tscx, cx_handle, aot_cx) = if aot {
+            let aot_cx = Box::new(Context::create());
+            // SAFETY: The Box provides a stable heap address. The context is valid as long as
+            // `_aot_cx` lives, and it is dropped after all LLVM objects due to field ordering.
+            let cx: &'static Context = unsafe { &*(&*aot_cx as *const Context) };
+            (cx, None, None, Some(aot_cx))
         } else {
             if !target.has_jit() {
                 return Err(eyre::eyre!("target {:?} does not support JIT", target.get_name()));
@@ -494,7 +503,7 @@ impl EvmLlvmBackend {
             }
 
             let (cx, tscx, cx_handle) = create_orc_context();
-            (cx, Some(tscx), Some(cx_handle))
+            (cx, Some(tscx), Some(cx_handle), None)
         };
 
         let module = create_module(cx, &machine, aot)?;
@@ -518,6 +527,7 @@ impl EvmLlvmBackend {
             orc: None,
             _tscx: tscx,
             _cx_handle: cx_handle,
+            _aot_cx: aot_cx,
             ty_void,
             ty_i1,
             ty_i8,
@@ -1875,14 +1885,6 @@ fn init_() -> Result<()> {
     Target::initialize_all(&config);
 
     Ok(())
-}
-
-fn get_context() -> &'static Context {
-    thread_local! {
-        static TLS_LLVM_CONTEXT: Context = Context::create();
-    }
-    // SAFETY: It can't be shared across threads anyway.
-    TLS_LLVM_CONTEXT.with(|cx| unsafe { core::mem::transmute(cx) })
 }
 
 fn create_module<'ctx>(
