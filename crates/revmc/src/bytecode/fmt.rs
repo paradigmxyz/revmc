@@ -408,6 +408,7 @@ fn abbreviate_hex(s: &str) -> Cow<'_, str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::GasParams;
     use revm_bytecode::opcode as op;
     use revm_primitives::hardfork::SpecId;
 
@@ -436,7 +437,7 @@ mod tests {
             op::POP,
             op::STOP,
         ];
-        let mut bytecode = Bytecode::new(code, SpecId::OSAKA);
+        let mut bytecode = Bytecode::new(code, SpecId::OSAKA, GasParams::new_spec(SpecId::OSAKA));
         bytecode.analyze().unwrap();
         bytecode
     }

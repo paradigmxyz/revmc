@@ -273,7 +273,9 @@ mod tests {
         let code =
             revm_primitives::hex::decode(include_str!("../../../../../data/weth.rt.hex").trim())
                 .unwrap();
-        let mut bytecode = crate::Bytecode::new(code, revm_primitives::hardfork::SpecId::CANCUN);
+        let spec_id = revm_primitives::hardfork::SpecId::CANCUN;
+        let mut bytecode =
+            crate::Bytecode::new(code, spec_id, crate::bytecode::GasParams::new_spec(spec_id));
         bytecode.config = AnalysisConfig::DEDUP;
         bytecode.analyze().unwrap();
 

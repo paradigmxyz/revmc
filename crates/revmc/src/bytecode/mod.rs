@@ -4,6 +4,7 @@ use crate::FxHashMap;
 use bitvec::vec::BitVec;
 use oxc_index::IndexVec;
 use revm_bytecode::opcode as op;
+pub(crate) use revm_context_interface::cfg::GasParams;
 use revm_primitives::{U256, hardfork::SpecId};
 use revmc_backend::Result;
 use smallvec::SmallVec;
@@ -86,6 +87,8 @@ pub struct Bytecode<'a> {
     jumpdests: BitVec,
     /// The [`SpecId`].
     pub(crate) spec_id: SpecId,
+    /// Gas parameters for dynamic gas folding. Defaults to `GasParams::new_spec(spec_id)`.
+    pub(crate) gas_params: GasParams,
     /// Whether the bytecode contains dynamic jumps.
     has_dynamic_jumps: bool,
     /// Whether the bytecode may suspend execution.
@@ -115,12 +118,16 @@ pub struct Bytecode<'a> {
 }
 
 impl<'a> Bytecode<'a> {
-    pub(crate) fn new(code: impl Into<Cow<'a, [u8]>>, spec_id: SpecId) -> Self {
-        Self::new_mono(code.into(), spec_id)
+    pub(crate) fn new(
+        code: impl Into<Cow<'a, [u8]>>,
+        spec_id: SpecId,
+        gas_params: GasParams,
+    ) -> Self {
+        Self::new_mono(code.into(), spec_id, gas_params)
     }
 
     #[instrument(name = "Bytecode::new", level = "debug", skip_all)]
-    fn new_mono(code: Cow<'a, [u8]>, spec_id: SpecId) -> Self {
+    fn new_mono(code: Cow<'a, [u8]>, spec_id: SpecId, gas_params: GasParams) -> Self {
         let mut insts = IndexVec::with_capacity(code.len() + 8);
         let mut jumpdests = BitVec::repeat(false, code.len());
         let mut pc_to_inst = FxHashMap::with_capacity_and_hasher(code.len(), Default::default());
@@ -170,6 +177,7 @@ impl<'a> Bytecode<'a> {
             insts,
             jumpdests,
             spec_id,
+            gas_params,
             has_dynamic_jumps: false,
             may_suspend: false,
             snapshots: Snapshots::default(),
@@ -332,9 +340,6 @@ impl<'a> Bytecode<'a> {
     /// construction (which accumulates `base_gas`).
     #[instrument(name = "fold_gas", level = "debug", skip_all)]
     fn fold_known_dynamic_gas(&mut self) {
-        use revm_context_interface::cfg::GasParams;
-
-        let gas = GasParams::new_spec(self.spec_id);
         for inst in self.insts.indices() {
             let data = &self.insts[inst];
             if data.is_dead_code() || data.opcode != op::EXP {
@@ -347,7 +352,7 @@ impl<'a> Bytecode<'a> {
             if exponent > U256::from(2) {
                 continue;
             }
-            let dynamic_cost = gas.exp_cost(exponent);
+            let dynamic_cost = self.gas_params.exp_cost(exponent);
             let data = &mut self.insts[inst];
             data.base_gas = data.base_gas.saturating_add(dynamic_cost as u16);
             trace!(%inst, %dynamic_cost, "folded EXP dynamic gas");
