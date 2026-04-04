@@ -293,6 +293,74 @@ mod tests {
     }
 
     #[test]
+    fn dedup_non_jumpdest_sstore_tail_no_stale_const() {
+        // Two non-JUMPDEST byte-identical `SSTORE ; JUMP` tails reached with different
+        // constant operands. After dedup the canonical SSTORE must NOT retain stale
+        // const_operand values from the global fixpoint.
+        let bytecode = analyze_asm_with(
+            "
+            PUSH0
+            CALLDATALOAD
+            PUSH1 0x20
+            CALLDATALOAD
+            PUSH %path_b
+            JUMPI
+
+            ; path A
+            PUSH1 0x11
+            PUSH1 0x01
+            PUSH0
+            PUSH %not_taken_a
+            JUMPI
+            SSTORE
+            JUMP
+
+        not_taken_a:
+            JUMPDEST
+            INVALID
+
+        path_b:
+            JUMPDEST
+            PUSH1 0x22
+            PUSH1 0x02
+            PUSH0
+            PUSH %not_taken_b
+            JUMPI
+            SSTORE
+            JUMP
+
+        not_taken_b:
+            JUMPDEST
+            INVALID
+
+        done:
+            JUMPDEST
+            STOP
+        ",
+            AnalysisConfig::DEDUP,
+        );
+
+        // The two SSTORE;JUMP tails are byte-identical and should be deduped.
+        assert_eq!(
+            bytecode.redirects.len(),
+            1,
+            "expected 1 redirect for 2 identical SSTORE;JUMP tails"
+        );
+
+        // The canonical SSTORE must NOT have stale const operands.
+        let canonical_start = *bytecode.redirects.values().next().unwrap();
+        // canonical_start is the SSTORE instruction.
+        assert!(
+            bytecode.const_operand(canonical_start, 0).is_none(),
+            "canonical SSTORE should have no const_operand[0] (key) after dedup",
+        );
+        assert!(
+            bytecode.const_operand(canonical_start, 1).is_none(),
+            "canonical SSTORE should have no const_operand[1] (value) after dedup",
+        );
+    }
+
+    #[test]
     fn dedup_invalidates_stale_const_snapshots() {
         // Two byte-identical RETURN tails reached with different incoming constants.
         // After dedup the canonical block must NOT retain stale const snapshots.
