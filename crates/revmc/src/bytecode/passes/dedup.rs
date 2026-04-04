@@ -411,10 +411,9 @@ mod tests {
     }
 
     #[test]
-    fn dedup_non_jumpdest_sstore_tail_no_stale_const() {
-        // Two non-JUMPDEST byte-identical `SSTORE ; JUMP` tails reached with different
-        // constant operands. After dedup the canonical SSTORE must NOT retain stale
-        // const_operand values from the global fixpoint.
+    fn dedup_skips_dynamic_jump_sstore_tail() {
+        // Two non-JUMPDEST byte-identical `SSTORE ; JUMP` tails with unresolved dynamic
+        // JUMP terminators must NOT be deduped.
         let bytecode = analyze_asm_with(
             "
             PUSH0
@@ -458,23 +457,9 @@ mod tests {
             AnalysisConfig::DEDUP,
         );
 
-        // The two SSTORE;JUMP tails are byte-identical and should be deduped.
-        assert_eq!(
-            bytecode.redirects.len(),
-            1,
-            "expected 1 redirect for 2 identical SSTORE;JUMP tails"
-        );
-
-        // The canonical SSTORE must NOT have stale const operands.
-        let canonical_start = *bytecode.redirects.values().next().unwrap();
-        // canonical_start is the SSTORE instruction.
         assert!(
-            bytecode.const_operand(canonical_start, 0).is_none(),
-            "canonical SSTORE should have no const_operand[0] (key) after dedup",
-        );
-        assert!(
-            bytecode.const_operand(canonical_start, 1).is_none(),
-            "canonical SSTORE should have no const_operand[1] (value) after dedup",
+            bytecode.redirects.is_empty(),
+            "should not dedup blocks ending in unresolved dynamic JUMP",
         );
     }
 
