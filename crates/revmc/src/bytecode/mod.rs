@@ -148,7 +148,7 @@ impl<'a> Bytecode<'a> {
         let mut jumpdests = BitVec::repeat(false, code.len());
         let mut pc_to_inst = FxHashMap::with_capacity_and_hasher(code.len(), Default::default());
         let op_infos = op_info_map(spec_id);
-        for (pc, Opcode { opcode, immediate: _ }) in OpcodesIter::new(&code, spec_id).with_pc() {
+        for (pc, Opcode { opcode, immediate }) in OpcodesIter::new(&code, spec_id).with_pc() {
             let inst: Inst = insts.next_idx();
             pc_to_inst.insert(pc as u32, inst);
 
@@ -168,6 +168,8 @@ impl<'a> Bytecode<'a> {
             }
             let base_gas = info.base_gas();
 
+            let stack_io = compute_stack_io(opcode, immediate);
+
             let gas_section = GasSection::default();
             let stack_section = StackSection::default();
 
@@ -175,6 +177,7 @@ impl<'a> Bytecode<'a> {
                 opcode,
                 flags,
                 base_gas,
+                stack_io,
                 data,
                 pc: pc as u32,
                 gas_section,
@@ -480,6 +483,8 @@ pub(crate) struct InstData {
     ///
     /// This may not be the final/full gas cost of the opcode as it may also have a dynamic cost.
     base_gas: u16,
+    /// Stack inputs and outputs, decoded from the immediate for `DUPN`/`SWAPN`/`EXCHANGE`.
+    stack_io: (u8, u8),
     /// Instruction-specific data:
     /// - if the instruction has immediate data, this is a packed offset+length into the bytecode;
     /// - `JUMP{,I} && STATIC_JUMP in kind`: the jump target, `Instr`;
@@ -513,7 +518,7 @@ impl InstData {
     /// Note that this may not be a valid instruction.
     #[inline]
     fn new(opcode: u8) -> Self {
-        Self { opcode, ..Default::default() }
+        Self { opcode, stack_io: stack_io(opcode), ..Default::default() }
     }
 
     /// Returns the length of the immediate data of this instruction.
@@ -525,7 +530,7 @@ impl InstData {
     /// Returns the number of input and output stack elements of this instruction.
     #[inline]
     pub(crate) fn stack_io(&self) -> (u8, u8) {
-        stack_io(self.opcode)
+        self.stack_io
     }
 
     /// Converts this instruction to a raw opcode. Note that the immediate data is not resolved.
