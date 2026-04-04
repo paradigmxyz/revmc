@@ -1,21 +1,4 @@
 //! EVM bytecode assembler.
-//!
-//! Assembles EVM mnemonics from a string into raw bytecode. Supports:
-//! - Standard EVM opcodes (`ADD`, `PUSH1 0x42`, etc.)
-//! - Auto-sized pushes (`PUSH 0x1234` picks the smallest encoding)
-//! - Labels: `name:` defines a label at the current PC, `PUSH %name` / `PUSHn %name` resolves to
-//!   the label's byte offset
-//! - Comments starting with `;`
-//!
-//! ```evm
-//! entry:
-//!   PUSH %target
-//!   JUMP
-//!
-//! target:
-//!   JUMPDEST
-//!   STOP
-//! ```
 
 use crate::{
     U256, encode_pair, encode_single,
@@ -23,20 +6,410 @@ use crate::{
 };
 use revm_bytecode::opcode::{self as op, OpCode};
 use revm_primitives::map::HashMap;
-use std::{cmp::Ordering, str::FromStr};
+use std::cmp::Ordering;
 
 /// Parse EVM assembly from a string into bytecode.
 ///
-/// Supports standard EVM opcodes (`ADD`, `PUSH1 0x42`, etc.), auto-sized pushes
-/// (`PUSH 0x1234` picks the smallest encoding), labels (`name:` / `PUSH %name`),
-/// and comments starting with `;`.
+/// Assembles EVM mnemonics from a string into raw bytecode. Supports:
+/// - Standard EVM opcodes (`ADD`, `PUSH1 0x42`, etc.)
+/// - Auto-sized pushes (`PUSH 0x1234` picks the smallest encoding)
+/// - Labels: `name:` defines a label at the current PC, `PUSH %name` / `PUSHn %name` resolves to
+///   the label's byte offset
+/// - Comments starting with `;`
+/// - C-style `#define` macros (textual expansion before parsing), with optional parameters
+///
+/// ```evm
+/// #define PUSH_TWO(a, b) PUSH $a PUSH $b
+///
+/// entry:
+///   PUSH_TWO(1, 2)
+///   ADD
+///   PUSH %target
+///   JUMP
+///
+/// target:
+///   JUMPDEST
+///   STOP
+/// ```
 pub fn parse_asm(s: &str) -> Result<Vec<u8>> {
-    let items = parse_items(s)?;
+    let tokens = preprocess(s)?;
+    let items = parse_items(&tokens)?;
     layout_and_emit(&items)
 }
 
-/// Comment character.
-const COM: char = ';';
+// ———————————————————————————————————————————————————————————————————————
+// Tokenizer
+// ———————————————————————————————————————————————————————————————————————
+
+/// A token produced by the tokenizer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Token<'a> {
+    /// An identifier (opcode name, macro name, etc.).
+    Ident(&'a str),
+    /// A label definition (`name:`).
+    Label(&'a str),
+    /// A label reference (`%name`).
+    LabelRef(&'a str),
+    /// A numeric literal.
+    Number(U256),
+    /// A comma.
+    Comma,
+    /// Opening parenthesis.
+    LParen,
+    /// Closing parenthesis.
+    RParen,
+    /// A macro parameter reference (`$name`).
+    ParamRef(&'a str),
+    /// Unrecognized input.
+    Unknown(&'a str),
+}
+
+/// Character-by-character tokenizer over source text.
+struct Tokenizer<'a> {
+    src: &'a str,
+    pos: usize,
+}
+
+impl<'a> Tokenizer<'a> {
+    fn new(src: &'a str) -> Self {
+        Self { src, pos: 0 }
+    }
+
+    fn remaining(&self) -> &'a str {
+        &self.src[self.pos..]
+    }
+
+    fn peek_char(&self) -> Option<char> {
+        self.remaining().chars().next()
+    }
+
+    fn advance(&mut self, n: usize) {
+        self.pos += n;
+    }
+
+    fn skip_whitespace(&mut self) {
+        let rest = self.remaining();
+        let trimmed = rest.trim_start_matches(|c: char| c.is_ascii_whitespace());
+        self.advance(rest.len() - trimmed.len());
+    }
+
+    fn skip_line(&mut self) {
+        if let Some(nl) = self.remaining().find('\n') {
+            self.advance(nl + 1);
+        } else {
+            self.pos = self.src.len();
+        }
+    }
+
+    /// Read a contiguous word of alphanumeric/underscore characters.
+    fn read_word(&mut self) -> &'a str {
+        let rest = self.remaining();
+        let end = rest.find(|c: char| !c.is_ascii_alphanumeric() && c != '_').unwrap_or(rest.len());
+        let word = &rest[..end];
+        self.advance(end);
+        word
+    }
+
+    /// Read a numeric literal (decimal or 0x hex).
+    fn read_number(&mut self) -> Token<'a> {
+        let rest = self.remaining();
+        let end = if rest.starts_with("0x") || rest.starts_with("0X") {
+            2 + rest[2..].find(|c: char| !c.is_ascii_hexdigit()).unwrap_or(rest.len() - 2)
+        } else {
+            rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len())
+        };
+        let s = &rest[..end];
+        self.advance(end);
+        match s.parse::<U256>() {
+            Ok(n) => Token::Number(n),
+            Err(_) => Token::Unknown(s),
+        }
+    }
+}
+
+impl<'a> Iterator for Tokenizer<'a> {
+    type Item = Token<'a>;
+
+    fn next(&mut self) -> Option<Token<'a>> {
+        loop {
+            self.skip_whitespace();
+            let c = self.peek_char()?;
+
+            match c {
+                ';' => self.skip_line(),
+
+                '%' => {
+                    let start = self.pos;
+                    self.advance(1);
+                    let name = self.read_word();
+                    return Some(if name.is_empty() {
+                        Token::Unknown(&self.src[start..self.pos])
+                    } else {
+                        Token::LabelRef(name)
+                    });
+                }
+
+                '$' => {
+                    let start = self.pos;
+                    self.advance(1);
+                    let name = self.read_word();
+                    return Some(if name.is_empty() {
+                        Token::Unknown(&self.src[start..self.pos])
+                    } else {
+                        Token::ParamRef(name)
+                    });
+                }
+
+                ',' => {
+                    self.advance(1);
+                    return Some(Token::Comma);
+                }
+                '(' => {
+                    self.advance(1);
+                    return Some(Token::LParen);
+                }
+                ')' => {
+                    self.advance(1);
+                    return Some(Token::RParen);
+                }
+
+                '0'..='9' => return Some(self.read_number()),
+
+                _ if c.is_ascii_alphabetic() || c == '_' => {
+                    let word = self.read_word();
+                    if self.peek_char() == Some(':') {
+                        self.advance(1);
+                        return Some(Token::Label(word));
+                    }
+                    return Some(Token::Ident(word));
+                }
+
+                ':' => {
+                    self.advance(1);
+                    return Some(Token::Label(""));
+                }
+
+                _ => {
+                    let start = self.pos;
+                    // Consume consecutive unrecognized characters.
+                    while let Some(c) = self.peek_char() {
+                        if c.is_ascii_whitespace()
+                            || c.is_ascii_alphanumeric()
+                            || matches!(c, '_' | ';' | '%' | '$' | ',' | '(' | ')' | ':')
+                        {
+                            break;
+                        }
+                        self.advance(c.len_utf8());
+                    }
+                    return Some(Token::Unknown(&self.src[start..self.pos]));
+                }
+            }
+        }
+    }
+}
+
+// ———————————————————————————————————————————————————————————————————————
+// Preprocessor (#define macros)
+// ———————————————————————————————————————————————————————————————————————
+
+/// A macro definition: parameter names and body tokens.
+struct MacroDef<'a> {
+    /// Whether this is a function-like macro (invoked with parentheses).
+    is_fn: bool,
+    params: Vec<&'a str>,
+    body: Vec<Token<'a>>,
+}
+
+/// Builtin macros available in all assembly sources.
+fn builtin_macros() -> HashMap<&'static str, MacroDef<'static>> {
+    let mut m = HashMap::default();
+    m.insert(
+        "RET_WORD",
+        MacroDef {
+            is_fn: false,
+            params: vec![],
+            body: vec![
+                Token::Ident("PUSH0"),
+                Token::Ident("MSTORE"),
+                Token::Ident("PUSH1"),
+                Token::Number(U256::from(0x20)),
+                Token::Ident("PUSH0"),
+                Token::Ident("RETURN"),
+            ],
+        },
+    );
+    m
+}
+
+/// Preprocess source text: extract `#define` directives (line-scoped), tokenize the rest,
+/// then expand macro invocations on the token stream.
+fn preprocess(s: &str) -> Result<Vec<Token<'_>>> {
+    let mut macros = builtin_macros();
+
+    // Extract #define lines (tokenize their bodies in-place); keep remaining lines.
+    // Note: `#define` bodies borrow from `s` since their source text lives in `s`.
+    let mut rest_start = Vec::new();
+    for line in s.lines() {
+        let trimmed = line.trim();
+        if let Some(after) = trimmed.strip_prefix("#define")
+            && (after.is_empty() || after.starts_with(|c: char| c.is_ascii_whitespace()))
+        {
+            parse_define(after, &mut macros)?;
+        } else {
+            // Record (start, end) byte offsets into `s` for non-directive lines.
+            let offset = trimmed.as_ptr() as usize - s.as_ptr() as usize;
+            rest_start.push((offset, offset + trimmed.len()));
+        }
+    }
+
+    // Tokenize non-directive lines (borrowing from `s`).
+    let mut raw = Vec::new();
+    for &(start, end) in &rest_start {
+        let line = &s[start..end];
+        raw.extend(Tokenizer::new(line));
+    }
+
+    if macros.is_empty() {
+        return Ok(raw);
+    }
+
+    expand_macros(raw, &macros)
+}
+
+/// Parse a `#define` directive body (everything after `#define`) into the macro table.
+fn parse_define<'a>(after: &'a str, macros: &mut HashMap<&'a str, MacroDef<'a>>) -> Result<()> {
+    let mut tok = Tokenizer::new(after);
+
+    let name = match tok.next() {
+        Some(Token::Ident(name)) => name,
+        Some(other) => eyre::bail!("expected macro name after #define, got {other:?}"),
+        None => eyre::bail!("expected macro name after #define"),
+    };
+
+    // Function-like macro: NAME(a, b).
+    // Only if '(' immediately follows the name (no whitespace), matching C preprocessor semantics.
+    let is_fn = tok.peek_char() == Some('(');
+
+    let all_tokens: Vec<Token<'a>> = tok.collect();
+    let mut i = 0;
+
+    let mut params = Vec::new();
+    if is_fn && matches!(all_tokens.get(i), Some(Token::LParen)) {
+        i += 1; // consume '('
+        if !matches!(all_tokens.get(i), Some(Token::RParen)) {
+            loop {
+                match all_tokens.get(i) {
+                    Some(Token::Ident(p)) => {
+                        params.push(*p);
+                        i += 1;
+                    }
+                    other => {
+                        eyre::bail!("expected parameter name in #define {name}, got {other:?}")
+                    }
+                }
+                match all_tokens.get(i) {
+                    Some(Token::RParen) => {
+                        i += 1;
+                        break;
+                    }
+                    Some(Token::Comma) => i += 1,
+                    other => eyre::bail!(
+                        "expected ',' or ')' in #define {name} parameter list, got {other:?}"
+                    ),
+                }
+            }
+        } else {
+            i += 1; // consume ')'
+        }
+    }
+
+    let body = all_tokens[i..].to_vec();
+    macros.insert(name, MacroDef { is_fn, params, body });
+    Ok(())
+}
+
+/// Expand macro invocations in a token stream.
+fn expand_macros<'a>(
+    tokens: Vec<Token<'a>>,
+    macros: &HashMap<&str, MacroDef<'a>>,
+) -> Result<Vec<Token<'a>>> {
+    let mut out = Vec::with_capacity(tokens.len());
+    let mut iter = tokens.into_iter().peekable();
+
+    while let Some(tok) = iter.next() {
+        let Token::Ident(name) = &tok else {
+            out.push(tok);
+            continue;
+        };
+        let Some(mac) = macros.get(name) else {
+            out.push(tok);
+            continue;
+        };
+
+        if !mac.is_fn {
+            // Object-like macro: simple body substitution.
+            out.extend(mac.body.iter().cloned());
+        } else {
+            // Function-like macro: consume `(arg1, arg2, ...)`.
+            eyre::ensure!(iter.next() == Some(Token::LParen), "macro {name:?} expects arguments");
+
+            // Parse arguments, handling nested parens.
+            let mut args: Vec<Vec<Token<'a>>> = vec![vec![]];
+            let mut depth = 1u32;
+            loop {
+                let t = iter
+                    .next()
+                    .ok_or_else(|| eyre::eyre!("unclosed '(' in macro invocation {name:?}"))?;
+                match &t {
+                    Token::LParen => {
+                        depth += 1;
+                        args.last_mut().unwrap().push(t);
+                    }
+                    Token::RParen => {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                        args.last_mut().unwrap().push(t);
+                    }
+                    Token::Comma if depth == 1 => args.push(vec![]),
+                    _ => args.last_mut().unwrap().push(t),
+                }
+            }
+
+            // Zero-arg function-like: `FOO()` produces args = [[]]; expect 0.
+            if mac.params.is_empty() {
+                eyre::ensure!(
+                    args.len() == 1 && args[0].is_empty(),
+                    "macro {name:?} takes no arguments"
+                );
+            } else {
+                eyre::ensure!(
+                    args.len() == mac.params.len(),
+                    "macro {name:?} expects {} argument(s), got {}",
+                    mac.params.len(),
+                    args.len()
+                );
+            }
+
+            // Substitute $param refs in the body.
+            for body_tok in &mac.body {
+                if let Token::ParamRef(pname) = body_tok
+                    && let Some(idx) = mac.params.iter().position(|p| p == pname)
+                {
+                    out.extend(args[idx].iter().cloned());
+                } else {
+                    out.push(body_tok.clone());
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+// ———————————————————————————————————————————————————————————————————————
+// Parser (tokens → items)
+// ———————————————————————————————————————————————————————————————————————
 
 /// A parsed item from the source.
 enum Item<'a> {
@@ -71,98 +444,141 @@ enum PushKind {
     Auto,
 }
 
-/// Parse source text into items.
-fn parse_items<'a>(s: &'a str) -> Result<Vec<Item<'a>>> {
+/// Parse a token stream into items.
+fn parse_items<'a>(tokens: &[Token<'a>]) -> Result<Vec<Item<'a>>> {
     let mut items = Vec::new();
-    let lines = s.lines().map(str::trim).filter(|s| !s.is_empty());
-    let words = lines.flat_map(|s| s.split_whitespace().take_while(|s| !s.starts_with(COM)));
-    let mut words = words.peekable();
-    while let Some(word) = words.next() {
-        // Label definition.
-        if let Some(name) = word.strip_suffix(':') {
-            eyre::ensure!(!name.is_empty(), "empty label name");
-            items.push(Item::Label(name));
-            continue;
-        }
-
-        if word == "PUSH" {
-            let next =
-                words.next().ok_or_else(|| eyre::eyre!("missing immediate for opcode PUSH"))?;
-            let imm = parse_imm_or_label(next)?;
-            items.push(Item::Inst(Inst { opcode: 0, imm: Some(imm), push_kind: PushKind::Auto }));
-        } else {
-            let opc = OpCode::parse(word).ok_or_else(|| eyre::eyre!("invalid opcode: {word:?}"))?;
-            let opcode = opc.get();
-
-            // DUPN/SWAPN: accept a decoded stack index, encode to raw immediate.
-            if opcode == op::DUPN || opcode == op::SWAPN {
-                let next = words
-                    .next()
-                    .ok_or_else(|| eyre::eyre!("missing immediate for opcode {opc}"))?;
-                let n: u8 =
-                    next.parse().map_err(|_| eyre::eyre!("invalid {opc} immediate: {next:?}"))?;
-                let raw = encode_single(n)
-                    .ok_or_else(|| eyre::eyre!("{opc} index {n} out of valid range [17, 235]"))?;
-                items.push(Item::Inst(Inst {
-                    opcode,
-                    imm: Some(Imm::Number(U256::from(raw))),
-                    push_kind: PushKind::Fixed(1),
-                }));
-            // EXCHANGE: accept a `n,m` pair, encode to raw immediate.
-            } else if opcode == op::EXCHANGE {
-                let next = words
-                    .next()
-                    .ok_or_else(|| eyre::eyre!("missing immediate for opcode {opc}"))?;
-                let (n_str, m_str) = next
-                    .split_once(',')
-                    .ok_or_else(|| eyre::eyre!("EXCHANGE requires n,m format (e.g. `1,2`)"))?;
-                let n: u8 =
-                    n_str.parse().map_err(|_| eyre::eyre!("invalid EXCHANGE index: {n_str:?}"))?;
-                let m: u8 =
-                    m_str.parse().map_err(|_| eyre::eyre!("invalid EXCHANGE index: {m_str:?}"))?;
-                let raw = encode_pair(n, m)
-                    .ok_or_else(|| eyre::eyre!("EXCHANGE pair ({n}, {m}) cannot be encoded"))?;
-                items.push(Item::Inst(Inst {
-                    opcode,
-                    imm: Some(Imm::Number(U256::from(raw))),
-                    push_kind: PushKind::Fixed(1),
-                }));
-            } else {
-                let imm_len = opc.info().immediate_size();
-                if imm_len > 0 {
-                    let next = words
-                        .next()
-                        .ok_or_else(|| eyre::eyre!("missing immediate for opcode {opc}"))?;
-                    let imm = parse_imm_or_label(next)?;
+    let mut i = 0;
+    while i < tokens.len() {
+        match &tokens[i] {
+            Token::Label(name) => {
+                eyre::ensure!(!name.is_empty(), "empty label name");
+                items.push(Item::Label(name));
+                i += 1;
+            }
+            Token::Ident(word) => {
+                if *word == "PUSH" {
+                    i += 1;
+                    let imm = expect_imm(tokens, &mut i, "PUSH")?;
                     items.push(Item::Inst(Inst {
-                        opcode,
+                        opcode: 0,
                         imm: Some(imm),
-                        push_kind: PushKind::Fixed(imm_len),
+                        push_kind: PushKind::Auto,
                     }));
-                } else {
-                    if let Some(next) = words.peek()
-                        && U256::from_str(next).is_ok()
-                    {
-                        eyre::bail!("unexpected immediate for opcode {opc}");
+                } else if *word == "DUP" || *word == "SWAP" {
+                    let is_swap = *word == "SWAP";
+                    i += 1;
+                    let n = expect_number_u8(tokens, &mut i, word)?;
+                    eyre::ensure!(n >= 1, "{word} index must be >= 1, got {n}");
+                    if n <= 16 {
+                        let base = if is_swap { op::SWAP1 } else { op::DUP1 };
+                        items.push(Item::Inst(Inst {
+                            opcode: base + n - 1,
+                            imm: None,
+                            push_kind: PushKind::None,
+                        }));
+                    } else {
+                        let eof_op = if is_swap { op::SWAPN } else { op::DUPN };
+                        let raw = encode_single(n).ok_or_else(|| {
+                            eyre::eyre!("{word} index {n} out of valid range [1, 235]")
+                        })?;
+                        items.push(Item::Inst(Inst {
+                            opcode: eof_op,
+                            imm: Some(Imm::Number(U256::from(raw))),
+                            push_kind: PushKind::Fixed(1),
+                        }));
                     }
-                    items.push(Item::Inst(Inst { opcode, imm: None, push_kind: PushKind::None }));
+                } else {
+                    let opc = OpCode::parse(word)
+                        .ok_or_else(|| eyre::eyre!("invalid opcode: {word:?}"))?;
+                    let opcode = opc.get();
+                    i += 1;
+
+                    if opcode == op::DUPN || opcode == op::SWAPN {
+                        let n = expect_number_u8(tokens, &mut i, opc)?;
+                        let raw = encode_single(n).ok_or_else(|| {
+                            eyre::eyre!("{opc} index {n} out of valid range [17, 235]")
+                        })?;
+                        items.push(Item::Inst(Inst {
+                            opcode,
+                            imm: Some(Imm::Number(U256::from(raw))),
+                            push_kind: PushKind::Fixed(1),
+                        }));
+                    } else if opcode == op::EXCHANGE {
+                        let n = expect_number_u8(tokens, &mut i, opc)?;
+                        let m = expect_number_u8(tokens, &mut i, opc)?;
+                        let raw = encode_pair(n, m).ok_or_else(|| {
+                            eyre::eyre!("EXCHANGE pair ({n}, {m}) cannot be encoded")
+                        })?;
+                        items.push(Item::Inst(Inst {
+                            opcode,
+                            imm: Some(Imm::Number(U256::from(raw))),
+                            push_kind: PushKind::Fixed(1),
+                        }));
+                    } else {
+                        let imm_len = opc.info().immediate_size();
+                        if imm_len > 0 {
+                            let imm = expect_imm(tokens, &mut i, opc)?;
+                            items.push(Item::Inst(Inst {
+                                opcode,
+                                imm: Some(imm),
+                                push_kind: PushKind::Fixed(imm_len),
+                            }));
+                        } else {
+                            if matches!(tokens.get(i), Some(Token::Number(_))) {
+                                eyre::bail!("unexpected immediate for opcode {opc}");
+                            }
+                            items.push(Item::Inst(Inst {
+                                opcode,
+                                imm: None,
+                                push_kind: PushKind::None,
+                            }));
+                        }
+                    }
                 }
             }
+            Token::Unknown(s) => eyre::bail!("unexpected token: {s:?}"),
+            other => eyre::bail!("unexpected token: {other:?}"),
         }
     }
     Ok(items)
 }
 
-/// Parse an immediate: `%name` is a label reference, otherwise a number.
-fn parse_imm_or_label<'a>(s: &'a str) -> Result<Imm<'a>> {
-    if let Some(name) = s.strip_prefix('%') {
-        eyre::ensure!(!name.is_empty(), "empty label reference");
-        Ok(Imm::Label(name))
-    } else {
-        let n: U256 = s.parse().map_err(|_| eyre::eyre!("invalid immediate: {s:?}"))?;
-        Ok(Imm::Number(n))
+/// Consume the next token as a number and convert to u8.
+fn expect_number_u8(
+    tokens: &[Token<'_>],
+    i: &mut usize,
+    ctx: impl std::fmt::Display,
+) -> Result<u8> {
+    let tok = tokens.get(*i).ok_or_else(|| eyre::eyre!("missing immediate for opcode {ctx}"))?;
+    *i += 1;
+    match tok {
+        Token::Number(n) => {
+            let v: u64 =
+                n.try_into().map_err(|_| eyre::eyre!("invalid {ctx} immediate: too large"))?;
+            u8::try_from(v).map_err(|_| eyre::eyre!("invalid {ctx} immediate: too large"))
+        }
+        _ => eyre::bail!("expected numeric immediate for {ctx}, got {tok:?}"),
     }
 }
+
+/// Consume the next token as an immediate (number or label ref).
+fn expect_imm<'a>(
+    tokens: &[Token<'a>],
+    i: &mut usize,
+    ctx: impl std::fmt::Display,
+) -> Result<Imm<'a>> {
+    let tok = tokens.get(*i).ok_or_else(|| eyre::eyre!("missing immediate for opcode {ctx}"))?;
+    *i += 1;
+    match tok {
+        Token::Number(n) => Ok(Imm::Number(*n)),
+        Token::LabelRef(name) => Ok(Imm::Label(name)),
+        other => eyre::bail!("expected immediate for {ctx}, got {other:?}"),
+    }
+}
+
+// ———————————————————————————————————————————————————————————————————————
+// Layout and emit
+// ———————————————————————————————————————————————————————————————————————
 
 /// Encode a U256 as big-endian bytes with optional fixed size.
 fn encode_imm(num: U256, size: Option<u8>) -> Result<Vec<u8>> {
@@ -196,7 +612,6 @@ fn min_push_width(val: usize) -> u8 {
 
 /// Layout items with label resolution (fixed-point for auto-sized label pushes) and emit bytecode.
 fn layout_and_emit(items: &[Item<'_>]) -> Result<Vec<u8>> {
-    // Collect auto-push-label indices for the fixpoint.
     let mut auto_label_indices = Vec::new();
     let mut has_any_label = false;
 
@@ -230,7 +645,6 @@ fn layout_and_emit(items: &[Item<'_>]) -> Result<Vec<u8>> {
     let mut label_pcs = HashMap::<&str, usize>::default();
 
     loop {
-        // Compute PCs with current widths.
         label_pcs.clear();
         let mut pc = 0usize;
         for (i, item) in items.iter().enumerate() {
@@ -239,7 +653,7 @@ fn layout_and_emit(items: &[Item<'_>]) -> Result<Vec<u8>> {
                     label_pcs.insert(name, pc);
                 }
                 Item::Inst(inst) => {
-                    pc += 1; // opcode byte
+                    pc += 1;
                     match &inst.push_kind {
                         PushKind::None => {}
                         PushKind::Fixed(n) => pc += *n as usize,
@@ -259,7 +673,6 @@ fn layout_and_emit(items: &[Item<'_>]) -> Result<Vec<u8>> {
             }
         }
 
-        // Check if any auto-width needs to grow.
         let mut changed = false;
         for &i in &auto_label_indices {
             if let Item::Inst(inst) = &items[i]
@@ -443,18 +856,39 @@ mod tests {
     }
 
     #[test]
+    fn dup_auto() {
+        // DUP 1..16 → DUP1..DUP16 (no immediate).
+        assert_eq!(parse_asm("DUP 1").unwrap(), vec![op::DUP1]);
+        assert_eq!(parse_asm("DUP 16").unwrap(), vec![op::DUP16]);
+        // DUP 17+ → DUPN with encoded immediate.
+        assert_eq!(parse_asm("DUP 17").unwrap(), vec![op::DUPN, 0x00]);
+        assert_eq!(parse_asm("DUP 108").unwrap(), vec![op::DUPN, 128]);
+        // DUP 0 is invalid.
+        assert!(parse_asm("DUP 0").is_err());
+        // DUP 236 is out of range.
+        assert!(parse_asm("DUP 236").is_err());
+    }
+
+    #[test]
+    fn swap_auto() {
+        // SWAP 1..16 → SWAP1..SWAP16 (no immediate).
+        assert_eq!(parse_asm("SWAP 1").unwrap(), vec![op::SWAP1]);
+        assert_eq!(parse_asm("SWAP 16").unwrap(), vec![op::SWAP16]);
+        // SWAP 17+ → SWAPN with encoded immediate.
+        assert_eq!(parse_asm("SWAP 17").unwrap(), vec![op::SWAPN, 0x00]);
+        assert_eq!(parse_asm("SWAP 108").unwrap(), vec![op::SWAPN, 128]);
+        // SWAP 0 is invalid.
+        assert!(parse_asm("SWAP 0").is_err());
+    }
+
+    #[test]
     fn dupn() {
-        // Decoded index 17 → raw byte 0x00.
+        // Explicit DUPN only accepts 17+.
         assert_eq!(parse_asm("DUPN 17").unwrap(), vec![op::DUPN, 0x00]);
-        // Decoded index 108 → raw byte 128.
         assert_eq!(parse_asm("DUPN 108").unwrap(), vec![op::DUPN, 128]);
-        // Index 16 is out of range.
         assert!(parse_asm("DUPN 16").is_err());
-        // Index 0 is out of range.
         assert!(parse_asm("DUPN 0").is_err());
-        // 236 is out of range.
         assert!(parse_asm("DUPN 236").is_err());
-        // Non-numeric.
         assert!(parse_asm("DUPN abc").is_err());
     }
 
@@ -468,18 +902,17 @@ mod tests {
 
     #[test]
     fn exchange() {
-        // (1, 2) → raw byte 0x01.
-        assert_eq!(parse_asm("EXCHANGE 1,2").unwrap(), vec![op::EXCHANGE, 0x01]);
-        // (1, 14) uses case 2 (q >= r).
-        assert!(parse_asm("EXCHANGE 1,14").is_ok());
+        // Two separate number tokens.
+        assert_eq!(parse_asm("EXCHANGE 1 2").unwrap(), vec![op::EXCHANGE, 0x01]);
+        assert!(parse_asm("EXCHANGE 1 14").is_ok());
         // (2, 1) cannot be encoded.
-        assert!(parse_asm("EXCHANGE 2,1").is_err());
+        assert!(parse_asm("EXCHANGE 2 1").is_err());
         // (0, 1) is invalid (zero index).
-        assert!(parse_asm("EXCHANGE 0,1").is_err());
-        // Missing comma.
+        assert!(parse_asm("EXCHANGE 0 1").is_err());
+        // Missing second operand.
         assert!(parse_asm("EXCHANGE 1").is_err());
         // Non-numeric.
-        assert!(parse_asm("EXCHANGE a,b").is_err());
+        assert!(parse_asm("EXCHANGE a b").is_err());
     }
 
     #[test]
@@ -500,5 +933,177 @@ mod tests {
     #[test]
     fn empty_label_ref() {
         assert!(parse_asm("PUSH % JUMP").is_err());
+    }
+
+    #[test]
+    fn define_macro() {
+        let code = parse_asm(
+            "
+            #define TWO PUSH 2
+            TWO
+            TWO
+            ADD
+        ",
+        )
+        .unwrap();
+        assert_eq!(code, vec![op::PUSH1, 2, op::PUSH1, 2, op::ADD]);
+    }
+
+    #[test]
+    fn builtin_ret_word() {
+        let code = parse_asm("CALLVALUE RET_WORD").unwrap();
+        assert_eq!(
+            code,
+            vec![op::CALLVALUE, op::PUSH0, op::MSTORE, op::PUSH1, 0x20, op::PUSH0, op::RETURN]
+        );
+    }
+
+    #[test]
+    fn define_override_builtin() {
+        let code = parse_asm(
+            "
+            #define RET_WORD STOP
+            RET_WORD
+        ",
+        )
+        .unwrap();
+        assert_eq!(code, vec![op::STOP]);
+    }
+
+    #[test]
+    fn define_with_args() {
+        let code = parse_asm(
+            "
+            #define PUSH_TWO(a, b) PUSH $a PUSH $b
+            PUSH_TWO(1, 2)
+            ADD
+        ",
+        )
+        .unwrap();
+        assert_eq!(code, vec![op::PUSH1, 1, op::PUSH1, 2, op::ADD]);
+    }
+
+    #[test]
+    fn define_single_arg() {
+        let code = parse_asm(
+            "
+            #define PUSH_AND_STORE(val) PUSH $val PUSH0 MSTORE
+            PUSH_AND_STORE(0x42)
+        ",
+        )
+        .unwrap();
+        assert_eq!(code, vec![op::PUSH1, 0x42, op::PUSH0, op::MSTORE]);
+    }
+
+    #[test]
+    fn define_missing_args() {
+        assert!(
+            parse_asm(
+                "
+            #define FOO(a) PUSH $a
+            FOO
+        "
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn define_wrong_arg_count() {
+        assert!(
+            parse_asm(
+                "
+            #define FOO(a, b) PUSH $a PUSH $b
+            FOO(1)
+        "
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn define_empty_name() {
+        assert!(parse_asm("#define").is_err());
+        assert!(parse_asm("#define  ").is_err());
+    }
+
+    #[test]
+    fn define_invalid_name() {
+        // `-` is tokenized as Unknown, so it can't be a macro name.
+        assert!(parse_asm("#define - STOP").is_err());
+        // `#define` with no name at all.
+        assert!(parse_asm("#define (a) STOP").is_err());
+    }
+
+    #[test]
+    fn define_no_space_after_keyword() {
+        // `#defineFOO` should not be treated as a directive.
+        assert!(parse_asm("#defineFOO STOP").is_err());
+    }
+
+    #[test]
+    fn define_zero_arg_fn() {
+        let code = parse_asm(
+            "
+            #define NOP() ADD
+            NOP()
+        ",
+        )
+        .unwrap();
+        assert_eq!(code, vec![op::ADD]);
+    }
+
+    #[test]
+    fn define_zero_arg_fn_bare_is_error() {
+        // Function-like macro requires parentheses.
+        assert!(
+            parse_asm(
+                "
+            #define NOP() ADD
+            NOP
+        "
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn define_zero_arg_fn_with_args_is_error() {
+        assert!(
+            parse_asm(
+                "
+            #define NOP() ADD
+            NOP(1)
+        "
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn define_malformed_param_list() {
+        // Missing closing paren.
+        assert!(parse_asm("#define FOO(a STOP").is_err());
+        // Missing comma between params.
+        assert!(parse_asm("#define FOO(a b) STOP").is_err());
+        // Number as param name.
+        assert!(parse_asm("#define FOO(1) STOP").is_err());
+        // Trailing comma.
+        assert!(parse_asm("#define FOO(a,) STOP").is_err());
+    }
+
+    #[test]
+    fn define_space_before_paren_is_object_like() {
+        // `#define FOO (a) STOP` — space before `(` makes it object-like with body `(a) STOP`.
+        // Using FOO should expand to `(a) STOP`, and `(` is not a valid opcode.
+        assert!(
+            parse_asm(
+                "
+            #define FOO (a) STOP
+            FOO
+        "
+            )
+            .is_err()
+        );
     }
 }
