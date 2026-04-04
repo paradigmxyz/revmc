@@ -26,6 +26,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             op::ADDMOD => self.peephole_addmod(),
             op::MULMOD => self.peephole_mulmod(),
             op::EXP => self.peephole_exp(),
+            op::BYTE => self.peephole_byte(),
+            op::SIGNEXTEND => self.peephole_signextend(),
             _ => false,
         }
     }
@@ -193,6 +195,35 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 self.push(one);
             }
             // Nonzero exponents require dynamic gas; cannot skip the builtin.
+            _ => return false,
+        }
+        true
+    }
+
+    /// BYTE index, value => value[index].
+    fn peephole_byte(&mut self) -> bool {
+        let [index, _value] = self.const_operands();
+        match index {
+            // BYTE(i, x) with i >= 32 => 0.
+            Some(i) if i >= U256::from(32) => {
+                self.pop_ignore(2);
+                let zero = self.bcx.iconst_256(U256::ZERO);
+                self.push(zero);
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    /// SIGNEXTEND ext, x => sign-extend x from (ext+1) bytes.
+    fn peephole_signextend(&mut self) -> bool {
+        let [ext, _x] = self.const_operands();
+        match ext {
+            // SIGNEXTEND(e, x) with e >= 31 => x (no-op, value already fills 32 bytes).
+            Some(e) if e >= U256::from(31) => {
+                let [_, x] = self.popn();
+                self.push(x);
+            }
             _ => return false,
         }
         true
