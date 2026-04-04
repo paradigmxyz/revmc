@@ -14,6 +14,52 @@ use revm_interpreter::{
 };
 use revm_primitives::{Address, B256, Bytes, U256, hardfork::SpecId, ruint};
 
+/// Resume point for compiled EVM code after a CALL/CREATE suspension.
+///
+/// Encoded as the interpreter's bytecode PC. `0` means no resume (initial state),
+/// values `1..=N` identify individual suspend points.
+///
+/// Since the number of suspend points cannot exceed the bytecode length, the stored
+/// PC always stays within the allocation.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(transparent)]
+#[doc(hidden)] // Not public API.
+pub struct ResumeAt(usize);
+
+impl ResumeAt {
+    /// Loads the resume point from the interpreter's current PC.
+    #[inline]
+    pub fn load(interpreter: &Interpreter) -> Self {
+        Self(interpreter.bytecode.pc())
+    }
+
+    /// Stores the resume point back into the interpreter's bytecode PC.
+    #[inline]
+    pub fn store(self, interpreter: &mut Interpreter) {
+        interpreter.bytecode.absolute_jump(self.0);
+    }
+
+    /// Returns the raw resume index.
+    #[inline]
+    pub const fn get(self) -> usize {
+        self.0
+    }
+}
+
+impl From<usize> for ResumeAt {
+    #[inline]
+    fn from(value: usize) -> Self {
+        Self(value)
+    }
+}
+
+impl PartialEq<usize> for ResumeAt {
+    #[inline]
+    fn eq(&self, other: &usize) -> bool {
+        self.0 == *other
+    }
+}
+
 /// The EVM bytecode compiler runtime context.
 ///
 /// This is a simple wrapper around the interpreter's resources, allowing the compiled function to
@@ -40,10 +86,9 @@ pub struct EvmContext<'a> {
     pub is_static: bool,
     /// The spec ID for the current execution.
     pub spec_id: SpecId,
-    /// An index that is used internally to keep track of where execution should resume.
-    /// `0` is the initial state.
-    #[doc(hidden)]
-    pub resume_at: usize,
+    /// Index that tracks where execution should resume after a CALL/CREATE suspension.
+    #[doc(hidden)] // Not public API.
+    pub resume_at: ResumeAt,
     /// The contract bytecode, for CODECOPY at runtime.
     pub bytecode: *const [u8],
 }
@@ -78,10 +123,9 @@ impl<'a> EvmContext<'a> {
         interpreter: &'a mut Interpreter,
         host: &'b mut dyn Host,
     ) -> (Self, &'a mut EvmStack, &'a mut usize) {
+        let resume_at = ResumeAt::load(interpreter);
         let (stack, stack_len) = EvmStack::from_interpreter_stack(&mut interpreter.stack);
-        let bytecode_slice = interpreter.bytecode.bytecode_slice();
-        let resume_at = ResumeAt::load(interpreter.bytecode.pc(), bytecode_slice);
-        let bytecode = bytecode_slice as *const [u8];
+        let bytecode = interpreter.bytecode.bytecode_slice() as *const [u8];
         let this = Self {
             memory: &mut interpreter.memory,
             input: &mut interpreter.input,
@@ -215,7 +259,6 @@ impl EvmCompilerFn {
             EvmContext::from_interpreter_with_stack(interpreter, host);
         let result = self.call(Some(stack), Some(stack_len), &mut ecx);
 
-        // Save resume_at (Copy usize) before ecx's borrow ends.
         let resume_at = ecx.resume_at;
 
         // Set the remaining gas to 0 if the result is `OutOfGas`,
@@ -230,12 +273,7 @@ impl EvmCompilerFn {
             interpreter.return_data.0.clear();
         }
 
-        // Persist the resume_at value in the interpreter's bytecode PC so that
-        // subsequent calls can correctly resume after a CALL/CREATE suspension.
-        // Offset by the bytecode length so the value survives the `ResumeAt::load` round-trip,
-        // which treats `pc < code.len()` as "no resume" (initial state).
-        let code_len = interpreter.bytecode.bytecode_slice().len();
-        interpreter.bytecode.absolute_jump(code_len + resume_at);
+        resume_at.store(interpreter);
 
         if let Some(action) = interpreter.bytecode.action.take() {
             action
@@ -721,17 +759,6 @@ impl EvmWord {
     #[inline]
     pub fn to_address(self) -> Address {
         Address::from_word(self.to_be_bytes())
-    }
-}
-
-/// Logic for handling the `resume_at` field.
-///
-/// This is stored in the bytecode's PC.
-struct ResumeAt;
-
-impl ResumeAt {
-    fn load(pc: usize, code: &[u8]) -> usize {
-        if pc < code.len() { 0 } else { pc - code.len() }
     }
 }
 
