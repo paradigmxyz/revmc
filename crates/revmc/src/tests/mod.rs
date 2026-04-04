@@ -1553,9 +1553,7 @@ tests! {
             expected_stack: STACK_WHAT_INTERPRETER_SAYS,
             expected_gas: GAS_WHAT_INTERPRETER_SAYS,
         }),
-    }
 
-    regressions {
         // Dedup merges two byte-identical MULTI_JUMP dispatcher blocks after their
         // target blocks are deduped, but only the canonical dispatcher's case PCs
         // were emitted in the switch. Valid PCs unique to the eliminated dispatcher
@@ -1566,6 +1564,9 @@ tests! {
             expected_return: InstructionResult::Stop,
             expected_gas: GAS_WHAT_INTERPRETER_SAYS,
         }),
+    }
+
+    regressions {
         // Mismatched costs in < BERLIN.
         // GeneralStateTests/stSolidityTest/TestKeywords.json
         st_solidity_keywords(@raw {
