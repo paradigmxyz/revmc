@@ -322,11 +322,12 @@ impl EvmStack {
     #[inline]
     pub fn from_interpreter_stack(stack: &mut revm_interpreter::Stack) -> (&mut Self, &mut usize) {
         debug_assert!(stack.data().capacity() >= Self::CAPACITY);
+        let expected_len = stack.len();
         unsafe {
             let data = Self::from_mut_ptr(stack.data_mut().as_mut_ptr().cast());
             // Vec { data: ptr, cap: usize, len: usize }
             let len = &mut *(stack.data_mut() as *mut Vec<_>).cast::<usize>().add(2);
-            debug_assert_eq!(stack.len(), *len);
+            debug_assert_eq!(expected_len, *len);
             (data, len)
         }
     }

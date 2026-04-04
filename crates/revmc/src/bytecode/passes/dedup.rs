@@ -11,16 +11,28 @@ use oxc_index::IndexVec;
 use revm_bytecode::opcode as op;
 use smallvec::SmallVec;
 
+/// Dedup key: raw bytecode bytes plus CFG successor blocks.
+///
+/// Raw bytes alone are insufficient for JUMP-terminated blocks because block analysis
+/// may resolve byte-identical copies to different static targets depending on incoming
+/// stack context (e.g. different return-address values).
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct DedupKey<'a> {
+    bytes: &'a [u8],
+    /// CFG successors for this block. Two byte-identical blocks are only merged when
+    /// their successor sets also match.
+    succs: SmallVec<[Block; 4]>,
+}
+
 impl<'a> Bytecode<'a> {
     /// Deduplicate structurally identical non-fallthrough blocks.
     ///
     /// Eligible blocks are those whose terminator cannot fall through (diverging instructions
     /// like REVERT/STOP/RETURN, or unconditional JUMP). For every group of byte-identical
-    /// blocks, keeps one canonical copy while marking the rest as dead code.
-    /// Predecessors that reach a dead duplicate via a static jump or multi-jump are
-    /// redirected to the canonical block. For predecessors that reach the duplicate via
-    /// fallthrough, a redirect entry is stored in [`Bytecode::redirects`] so the
-    /// translator can map the dead instruction to the canonical block's IR block.
+    /// blocks, keeps one canonical copy while marking them as dead code.
+    /// A redirect entry is stored in [`Bytecode::redirects`] so the translator can map
+    /// dead instructions to the canonical block's IR block. The CFG is rebuilt after each
+    /// iteration so successor/predecessor lists stay consistent.
     ///
     /// `local_snapshots` are the block-local snapshots computed by `block_analysis_local`
     /// (before the global fixpoint). After merging, the canonical block's snapshots are
@@ -28,29 +40,45 @@ impl<'a> Bytecode<'a> {
     /// and stale once multiple predecessors are merged.
     #[instrument(name = "dedup", level = "debug", skip_all)]
     pub(crate) fn dedup_blocks(&mut self, local_snapshots: &Snapshots) {
-        // Group eligible (diverging, non-dead) blocks by their raw bytecode content.
-        // We borrow `self.code` separately to avoid holding a `&self` borrow across mutations.
-        let code = &*self.code;
-        let mut key_to_blocks = HashMap::<&[u8], SmallVec<[Block; 4]>>::default();
+        // Borrow code separately so we can pass `&mut self` to `dedup_blocks_once`.
+        // SAFETY: `self.code` is not modified during dedup.
+        let code: &[u8] = unsafe { &*std::ptr::from_ref::<[u8]>(&self.code) };
+        let mut key_to_blocks = HashMap::<DedupKey<'_>, SmallVec<[Block; 4]>>::default();
+        let mut total_deduped = 0usize;
+        loop {
+            key_to_blocks.clear();
+            let deduped = self.dedup_blocks_once(code, &mut key_to_blocks, local_snapshots);
+            total_deduped += deduped;
+            if deduped == 0 {
+                break;
+            }
+            self.rebuild_cfg();
+        }
+        debug!(deduped = total_deduped, "finished");
+    }
+
+    /// Single dedup iteration. Returns the number of blocks deduped.
+    fn dedup_blocks_once<'b>(
+        &mut self,
+        code: &'b [u8],
+        key_to_blocks: &mut HashMap<DedupKey<'b>, SmallVec<[Block; 4]>>,
+        local_snapshots: &Snapshots,
+    ) -> usize {
         for bid in self.cfg.blocks.indices() {
             let block = &self.cfg.blocks[bid];
+            let term = &self.insts[block.terminator()];
+
             // Only dedup blocks whose terminator cannot fall through (diverging or
             // unconditional JUMP). JUMPI blocks fall through to position-dependent targets.
-            let term = &self.insts[block.terminator()];
             if term.can_fall_through() {
                 continue;
             }
 
-            // Reachable JUMPDESTs can only be deduped when:
-            // - all jumps are statically resolved (no dynamic jumps), AND
-            // - the block terminates execution (STOP/RETURN/REVERT/etc.), not JUMP.
-            // Blocks ending in JUMP cannot be deduped by raw bytes alone because
-            // block_analysis may have resolved different target sets for byte-identical
-            // copies (e.g. different return-address contexts).
+            // Reachable JUMPDESTs with dynamic jumps cannot be deduped because any
+            // JUMPDEST could be reached from an unresolved dynamic JUMP with an
+            // arbitrary stack context.
             let first = &self.insts[block.insts.start];
-            if first.is_reachable_jumpdest(self.has_dynamic_jumps)
-                && (self.has_dynamic_jumps || term.opcode == op::JUMP)
-            {
+            if self.has_dynamic_jumps && first.is_reachable_jumpdest(true) {
                 continue;
             }
 
@@ -60,11 +88,20 @@ impl<'a> Bytecode<'a> {
                 continue;
             }
 
+            // Skip unresolved dynamic JUMPs — any target is possible at runtime.
+            if term.opcode == op::JUMP && !term.flags.contains(InstFlags::STATIC_JUMP) {
+                continue;
+            }
+
             let bytes = block_bytes(code, &self.insts, block);
             if bytes.is_empty() {
                 continue;
             }
-            key_to_blocks.entry(bytes).or_default().push(bid);
+
+            key_to_blocks
+                .entry(DedupKey { bytes, succs: block.succs.clone() })
+                .or_default()
+                .push(bid);
         }
 
         let mut deduped = 0usize;
@@ -120,7 +157,7 @@ impl<'a> Bytecode<'a> {
             }
         }
 
-        debug!(deduped, "finished");
+        deduped
     }
 }
 
@@ -278,6 +315,87 @@ mod tests {
         );
 
         assert!(bytecode.redirects.is_empty(), "should not dedup blocks containing PC");
+    }
+
+    #[test]
+    fn dedup_jump_same_target() {
+        // Two byte-identical fallthrough JUMP tails resolved to the same target.
+        let bytecode = analyze_asm_with(
+            "
+            CALLDATASIZE
+            PUSH %path1
+            JUMPI
+            PUSH0
+            PUSH1 0xFF
+            JUMPI
+            PUSH %target
+            JUMP
+        path1:
+            JUMPDEST
+            PUSH0
+            PUSH1 0xFF
+            JUMPI
+            PUSH %target
+            JUMP
+        target:
+            JUMPDEST
+            STOP
+        ",
+            AnalysisConfig::DEDUP,
+        );
+        assert_eq!(bytecode.redirects.len(), 1, "same-target JUMP tails should be deduped");
+    }
+
+    #[test]
+    fn dedup_jump_different_targets() {
+        // Two byte-identical non-JUMPDEST JUMP tails with different resolved static targets.
+        // Must NOT be merged — the JUMP target is context-sensitive.
+        // Regression test for:
+        // revmc-dedup-non-jumpdest-fallthrough-jump-tail-static-target-confusion
+        let bytecode = analyze_asm_with(
+            "
+            CALLDATASIZE
+            PUSH %path1
+            JUMPI
+
+            PUSH %ret0
+            PUSH0
+            PUSH1 0xFF
+            JUMPI
+            PUSH1 0x42
+            SWAP1
+            JUMP
+
+        path1:
+            JUMPDEST
+            PUSH %ret1
+            PUSH0
+            PUSH1 0xFF
+            JUMPI
+            PUSH1 0x42
+            SWAP1
+            JUMP
+
+        ret0:
+            JUMPDEST
+            POP
+            PUSH1 0xAA
+            STOP
+
+        ret1:
+            JUMPDEST
+            POP
+            PUSH1 0xBB
+            STOP
+        ",
+            AnalysisConfig::DEDUP,
+        );
+
+        assert!(
+            bytecode.redirects.is_empty(),
+            "different-target JUMP tails must not be deduped, got {} redirect(s)",
+            bytecode.redirects.len(),
+        );
     }
 
     #[test]
