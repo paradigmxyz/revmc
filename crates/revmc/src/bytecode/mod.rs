@@ -75,6 +75,9 @@ impl Default for AnalysisConfig {
     }
 }
 
+/// Default compiler gas limit for compile-time evaluation (10 million gas).
+pub(crate) const DEFAULT_COMPILER_GAS_LIMIT: u64 = 10_000_000;
+
 /// EVM bytecode.
 #[doc(hidden)] // Not public API.
 pub struct Bytecode<'a> {
@@ -112,6 +115,17 @@ pub struct Bytecode<'a> {
     cfg: Cfg,
     /// Controls which analysis passes are enabled.
     pub(crate) config: AnalysisConfig,
+    /// Gas budget for compile-time evaluation of user-supplied bytecode.
+    ///
+    /// The compiler evaluates EVM operations at compile time during analysis passes. Without a
+    /// budget, adversarial bytecode (e.g. thousands of `EXP(U256::MAX, U256::MAX)`) can make
+    /// compilation arbitrarily slow. This limit uses the EVM gas schedule to bound work.
+    ///
+    /// When exhausted, further compile-time evaluation is skipped (values remain dynamic).
+    /// Defaults to 10 million gas.
+    pub(crate) compiler_gas_limit: u64,
+    /// Cumulative compiler gas consumed so far.
+    pub(crate) compiler_gas_used: u64,
 }
 
 impl<'a> Bytecode<'a> {
@@ -180,6 +194,8 @@ impl<'a> Bytecode<'a> {
             redirects: FxHashMap::default(),
             cfg: Cfg::default(),
             config: AnalysisConfig::default(),
+            compiler_gas_limit: 100_000,
+            compiler_gas_used: 0,
         }
     }
 
@@ -278,6 +294,12 @@ impl<'a> Bytecode<'a> {
         self.calc_may_suspend();
 
         self.construct_sections();
+
+        debug!(
+            compiler_gas_used = self.compiler_gas_used,
+            compiler_gas_limit = self.compiler_gas_limit,
+            "constant folding gas budget",
+        );
 
         Ok(())
     }

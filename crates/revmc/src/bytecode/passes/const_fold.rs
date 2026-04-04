@@ -10,6 +10,45 @@ use revm_interpreter::instructions::i256::{i256_cmp, i256_div, i256_mod};
 use revm_primitives::U256;
 use std::cmp::Ordering;
 
+/// Returns the compiler gas cost of constant-folding the given opcode with the given inputs.
+///
+/// Uses the real EVM gas schedule: most arithmetic is cheap (3–5 gas), but `EXP` costs
+/// `10 + 50 * byte_size(exponent)` which can be weaponised with large exponents.
+///
+/// Returns `None` for opcodes that `try_const_fold` does not handle.
+pub(crate) fn const_fold_gas(
+    opcode: u8,
+    inputs: &[AbsValue],
+    interner: &Interner<U256Idx, U256, alloy_primitives::map::FbBuildHasher<32>>,
+) -> Option<u64> {
+    let gas: u64 = match opcode {
+        op::CODESIZE | op::PC => 2,
+        op::ISZERO | op::NOT => 3,
+        op::CLZ => 3,
+        op::ADD | op::SUB => 3,
+        op::MUL | op::DIV | op::SDIV | op::MOD | op::SMOD => 5,
+        op::ADDMOD | op::MULMOD => 8,
+        op::SIGNEXTEND => 5,
+        op::LT | op::GT | op::SLT | op::SGT | op::EQ => 3,
+        op::AND | op::OR | op::XOR => 3,
+        op::BYTE | op::SHL | op::SHR | op::SAR => 3,
+        op::EXP => {
+            // EXP: 10 + 50 * byte_size(exponent).
+            // The exponent is the second operand (TOS - 1 in EVM stack order, inputs[0] here).
+            let exponent_bytes = match inputs.first() {
+                Some(&AbsValue::Const(idx)) => {
+                    let val = interner.get(idx);
+                    (256 - val.leading_zeros()).div_ceil(8)
+                }
+                _ => return None,
+            };
+            10 + 50 * exponent_bytes as u64
+        }
+        _ => return None,
+    };
+    Some(gas)
+}
+
 /// Try to constant-fold an instruction.
 ///
 /// `code_len` is the length of the bytecode (for `CODESIZE`).
@@ -376,5 +415,110 @@ mod tests {
         assert_eq!(const_fold(op::SAR, &[U256::from(256), U256::MAX]), Some(U256::MAX));
         // SAR(256, 1) = 0.
         assert_eq!(const_fold(op::SAR, &[U256::from(256), U256::from(1)]), Some(U256::ZERO));
+    }
+
+    /// Builds bytecode for N repetitions of `PUSH U256::MAX, PUSH U256::MAX, EXP, POP`.
+    fn build_exp_bomb(n: usize) -> Vec<u8> {
+        use std::fmt::Write;
+        let mut src = String::new();
+        for _ in 0..n {
+            writeln!(src, "PUSH {}", U256::MAX).unwrap();
+            writeln!(src, "PUSH {}", U256::MAX).unwrap();
+            writeln!(src, "EXP").unwrap();
+            writeln!(src, "POP").unwrap();
+        }
+        writeln!(src, "STOP").unwrap();
+        crate::parse_asm(&src).unwrap()
+    }
+
+    /// Adversarial input: many EXP(U256::MAX, U256::MAX) operations.
+    /// The gas limit must prevent the compiler from spending unbounded time on these.
+    #[test]
+    fn compiler_gas_limit_exp_bomb() {
+        use crate::bytecode::Bytecode;
+        use std::time::Instant;
+
+        crate::tests::init_tracing();
+
+        let code = build_exp_bomb(500);
+        let start = Instant::now();
+        let mut bytecode = Bytecode::new(code, revm_primitives::hardfork::SpecId::CANCUN);
+        bytecode.analyze().unwrap();
+        let elapsed = start.elapsed();
+
+        // With the default 10M gas budget, EXP(U256::MAX, U256::MAX) costs 10+50*32=1610 gas
+        // each, so we can fold ~6211 before hitting the limit. With 500 repetitions all should
+        // fold, but the point is the wall-clock bound.
+        assert!(
+            elapsed.as_secs() < 30,
+            "compilation took too long ({elapsed:?}), gas limit may not be working",
+        );
+        assert!(bytecode.compiler_gas_used <= bytecode.compiler_gas_limit);
+    }
+
+    /// Adversarial input: thousands of cheap EXP to exhaust gas via volume.
+    #[test]
+    fn compiler_gas_limit_cheap_exp_volume() {
+        use crate::bytecode::Bytecode;
+        use std::{fmt::Write, time::Instant};
+
+        crate::tests::init_tracing();
+
+        // 20K repetitions of EXP(base, small_exponent) — cheap per-op but high volume.
+        let mut src = String::new();
+        for _ in 0..20_000 {
+            writeln!(src, "PUSH {}", U256::MAX).unwrap();
+            writeln!(src, "PUSH 0xff").unwrap(); // 1 byte exponent = 60 gas
+            writeln!(src, "EXP").unwrap();
+            writeln!(src, "POP").unwrap();
+        }
+        writeln!(src, "STOP").unwrap();
+
+        let code = crate::parse_asm(&src).unwrap();
+        let start = Instant::now();
+        let mut bytecode = Bytecode::new(code, revm_primitives::hardfork::SpecId::CANCUN);
+        bytecode.analyze().unwrap();
+        let elapsed = start.elapsed();
+
+        assert!(elapsed.as_secs() < 30, "compilation took too long ({elapsed:?})",);
+        assert!(bytecode.compiler_gas_used <= bytecode.compiler_gas_limit);
+    }
+
+    /// Verify that setting compiler_gas_limit to 0 disables constant folding entirely.
+    #[test]
+    fn compiler_gas_limit_zero_disables_folding() {
+        use crate::bytecode::Bytecode;
+
+        crate::tests::init_tracing();
+
+        let src = "PUSH 2\nPUSH 3\nADD\nPUSH0\nMSTORE\nSTOP\n";
+        let code = crate::parse_asm(src).unwrap();
+        let mut bytecode = Bytecode::new(code, revm_primitives::hardfork::SpecId::CANCUN);
+        bytecode.compiler_gas_limit = 0;
+        bytecode.analyze().unwrap();
+
+        // With gas limit 0, no folding should occur.
+        assert_eq!(bytecode.compiler_gas_used, 0);
+        // inst layout: PUSH(0), PUSH(1), ADD(2), PUSH0(3), MSTORE(4), STOP(5).
+        // The ADD result should NOT be folded — operand 1 at MSTORE should be None.
+        assert!(bytecode.const_operand(Inst::from_usize(4), 1).is_none());
+    }
+
+    /// Verify that a very large gas limit allows all folding to proceed.
+    #[test]
+    fn compiler_gas_limit_unlimited() {
+        use crate::bytecode::Bytecode;
+
+        crate::tests::init_tracing();
+
+        let src = "PUSH 2\nPUSH 3\nADD\nPUSH0\nMSTORE\nSTOP\n";
+        let code = crate::parse_asm(src).unwrap();
+        let mut bytecode = Bytecode::new(code, revm_primitives::hardfork::SpecId::CANCUN);
+        bytecode.compiler_gas_limit = u64::MAX;
+        bytecode.analyze().unwrap();
+
+        assert!(bytecode.compiler_gas_used > 0);
+        // inst layout: PUSH(0), PUSH(1), ADD(2), PUSH0(3), MSTORE(4), STOP(5).
+        assert_eq!(bytecode.const_operand(Inst::from_usize(4), 1), Some(U256::from(5)));
     }
 }
