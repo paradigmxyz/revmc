@@ -805,13 +805,13 @@ pub unsafe extern "C" fn __revmc_builtin_selfdestruct(
     ecx: &mut EvmContext<'_>,
     target: &mut EvmWord,
 ) -> BuiltinResult {
-    ensure_non_staticcall!(ecx);
-
     // EIP-150: SELFDESTRUCT static gas is 5000 in Tangerine+.
     // Cannot use DYNAMIC_WITH_BASE_GAS because 5000 exceeds OpcodeInfo::MASK (4095).
     if ecx.spec_id.is_enabled_in(SpecId::TANGERINE) {
         gas!(ecx, 5000);
     }
+
+    ensure_non_staticcall!(ecx);
 
     let cold_load_gas = ecx.host.gas_params().selfdestruct_cold_cost();
     let skip_cold_load = ecx.gas.remaining() < cold_load_gas;
