@@ -386,10 +386,17 @@ fn transfer_dup(live: &mut BitVec, h_before: usize, depth: usize) {
 
 #[cfg(test)]
 mod tests {
-    use super::super::block_analysis::tests::{Inst, analyze_asm, analyze_code_spec};
+    use super::super::block_analysis::tests::{
+        Inst, analyze_asm, analyze_asm_spec, analyze_code_spec,
+    };
     use crate::bytecode::InstFlags;
     use revm_bytecode::opcode as op;
     use revm_primitives::hardfork::SpecId;
+
+    /// Helper: generates `"PUSH0\n"` repeated `n` times.
+    fn push0s(n: usize) -> String {
+        "PUSH0\n".repeat(n)
+    }
 
     #[test]
     fn push_pop() {
@@ -562,31 +569,12 @@ mod tests {
         assert!(!bytecode.inst(Inst::from_usize(2)).flags.contains(InstFlags::NOOP));
     }
 
-    /// Helper: builds bytecode with `n` PUSH0s followed by `suffix`, using AMSTERDAM spec.
-    fn with_prefix(n: usize, suffix: &[u8]) -> crate::bytecode::Bytecode<'static> {
-        let mut code = vec![op::PUSH0; n];
-        code.extend_from_slice(suffix);
-        analyze_code_spec(code, SpecId::AMSTERDAM)
-    }
-
-    /// Helper: builds bytecode with `PUSH0 CALLDATALOAD` (dynamic value) followed by
-    /// `n` PUSH0 padding, then `suffix`. The CALLDATALOAD result is at inst 1.
-    fn with_dynamic_and_prefix(n: usize, suffix: &[u8]) -> crate::bytecode::Bytecode<'static> {
-        let mut code = vec![op::PUSH0, op::CALLDATALOAD];
-        code.extend(std::iter::repeat_n(op::PUSH0, n));
-        code.extend_from_slice(suffix);
-        analyze_code_spec(code, SpecId::AMSTERDAM)
-    }
-
     #[test]
     fn swapn_preserves_liveness() {
-        // PUSH0+CALLDATALOAD (dynamic) + 17 × PUSH0 padding, SWAPN 17.
-        // SWAPN brings the deep dynamic value to TOS. RET_WORD stores TOS to memory
-        // and returns, so the CALLDATALOAD result is consumed.
-        let mut suffix = vec![op::SWAPN, 0x00]; // raw imm 0x00 = depth 17
-        // RET_WORD stores TOS to memory (17 items remain below, left dead on return).
-        suffix.extend([op::PUSH0, op::MSTORE, op::PUSH1, 0x20, op::PUSH0, op::RETURN]);
-        let bytecode = with_dynamic_and_prefix(17, &suffix);
+        // SWAPN brings a deep dynamic value to TOS where RET_WORD consumes it.
+        // CDL at bottom, 17 × PUSH0 above → SWAP 17 swaps TOS with CDL.
+        let asm = format!("PUSH0 CALLDATALOAD {} SWAP 17 RET_WORD", push0s(17));
+        let bytecode = analyze_asm_spec(&asm, SpecId::AMSTERDAM);
         assert!(
             !bytecode.inst(Inst::from_usize(1)).flags.contains(InstFlags::NOOP),
             "CALLDATALOAD should NOT be skipped (consumed via SWAPN + MSTORE)"
@@ -595,13 +583,10 @@ mod tests {
 
     #[test]
     fn dupn_keeps_source_live() {
-        // PUSH0+CALLDATALOAD (dynamic) + 16 × PUSH0, DUPN 17.
-        // DUPN copies the deep dynamic value to TOS. RET_WORD consumes TOS.
-        // The source at the bottom is still alive because it remains on the stack.
-        let mut suffix = vec![op::DUPN, 0x00]; // raw imm 0x00 = depth 17
-        // RET_WORD stores TOS (the copy) to memory.
-        suffix.extend([op::PUSH0, op::MSTORE, op::PUSH1, 0x20, op::PUSH0, op::RETURN]);
-        let bytecode = with_dynamic_and_prefix(16, &suffix);
+        // DUPN copies a deep dynamic value to TOS. RET_WORD consumes the copy.
+        // CDL at bottom, 16 × PUSH0 above → DUP 17 copies CDL to TOS.
+        let asm = format!("PUSH0 CALLDATALOAD {} DUP 17 RET_WORD", push0s(16));
+        let bytecode = analyze_asm_spec(&asm, SpecId::AMSTERDAM);
         assert!(
             !bytecode.inst(Inst::from_usize(1)).flags.contains(InstFlags::NOOP),
             "CALLDATALOAD should NOT be skipped"
@@ -611,17 +596,8 @@ mod tests {
     #[test]
     fn dupn_dead_copy() {
         // DUP copies a dynamic value, the copy is immediately POPped. The source
-        // remains on the stack and feeds RET_WORD. The DUP+POP pair should be
-        // eliminated, but the CALLDATALOAD (source) must stay live.
-        let bytecode = analyze_asm(
-            "
-            PUSH0           ; inst 0
-            CALLDATALOAD    ; inst 1: dynamic source
-            DUP1            ; inst 2: copy source to TOS
-            POP             ; inst 3: pop the copy
-            RET_WORD        ; inst 4..9: return source
-        ",
-        );
+        // remains on the stack and feeds RET_WORD.
+        let bytecode = analyze_asm("PUSH0 CALLDATALOAD DUP1 POP RET_WORD");
         assert!(
             bytecode.inst(Inst::from_usize(2)).flags.contains(InstFlags::NOOP),
             "DUP1 should be skipped (copy is dead)"
@@ -634,29 +610,14 @@ mod tests {
 
     #[test]
     fn exchange_preserves_liveness() {
-        // EXCHANGE swaps two non-TOS positions. After the exchange, SWAP2 brings the
-        // dynamic value to TOS where RET_WORD consumes it.
+        // EXCHANGE swaps two non-TOS positions. SWAP2 brings the dynamic value
+        // to TOS where RET_WORD consumes it.
         //
-        // [0, CDL, 0]  → EXCHANGE(1,2): swap pos 1 (CDL) and pos 0 (0) → [CDL, 0, 0]
-        // SWAP2: swap TOS (pos 2=0) and pos 0 (CDL) → [0, 0, CDL]
-        // RET_WORD: stores CDL to memory → CDL consumed.
-        let code = vec![
-            op::PUSH0,        // inst 0: padding at pos 0
-            op::PUSH0,        // inst 1: CDL offset
-            op::CALLDATALOAD, // inst 2: dynamic value at pos 1
-            op::PUSH0,        // inst 3: padding at pos 2 (TOS)
-            op::EXCHANGE,
-            0x01,      // inst 4: swap pos 1 and pos 0 → CDL moves to pos 0
-            op::SWAP2, // inst 5: bring CDL (pos 0) to TOS
-            // RET_WORD
-            op::PUSH0,
-            op::MSTORE,
-            op::PUSH1,
-            0x20,
-            op::PUSH0,
-            op::RETURN,
-        ];
-        let bytecode = analyze_code_spec(code, SpecId::AMSTERDAM);
+        // [0, CDL, 0]  → EXCHANGE(1,2) → [CDL, 0, 0]  → SWAP2 → [0, 0, CDL]
+        let bytecode = analyze_asm_spec(
+            "PUSH0 PUSH0 CALLDATALOAD PUSH0 EXCHANGE 1 2 SWAP2 RET_WORD",
+            SpecId::AMSTERDAM,
+        );
         assert!(
             !bytecode.inst(Inst::from_usize(2)).flags.contains(InstFlags::NOOP),
             "CALLDATALOAD should NOT be skipped (consumed via EXCHANGE + SWAP + MSTORE)"
@@ -807,11 +768,10 @@ mod tests {
 
     #[test]
     fn dupn_dead() {
-        // 17 × PUSH0, DUPN 17 (copies bottom), POP × 18, STOP — all dead.
-        let mut suffix = vec![op::DUPN, 0x00 /* DUPN imm=0x00 => depth 17 */];
-        suffix.extend(std::iter::repeat_n(op::POP, 18));
-        suffix.push(op::STOP);
-        let bytecode = with_prefix(17, &suffix);
+        // 17 × PUSH0, DUP 17 (copies bottom), POP × 18, STOP — all dead.
+        let pops = "POP\n".repeat(18);
+        let asm = format!("{} DUP 17 {} STOP", push0s(17), pops);
+        let bytecode = analyze_asm_spec(&asm, SpecId::AMSTERDAM);
         for i in 0..17 {
             assert!(
                 bytecode.inst(Inst::from_usize(i)).flags.contains(InstFlags::NOOP),
@@ -828,6 +788,7 @@ mod tests {
     fn dupn_invalid_imm_not_eliminated() {
         // PUSH0, DUPN 0x5b (invalid immediate), POP, STOP.
         // The invalid immediate must NOT be eliminated — it should fail at runtime.
+        // Raw bytes required: the asm parser rejects invalid immediates.
         let bytecode = analyze_code_spec(
             vec![op::PUSH0, op::DUPN, 0x5b, op::POP, op::STOP],
             SpecId::AMSTERDAM,
@@ -840,10 +801,10 @@ mod tests {
 
     #[test]
     fn dupn_underflow_still_eliminated() {
-        // 1 × PUSH0, DUPN 17 (depth=17 but only 1 literal push), POP, POP, STOP.
+        // 1 × PUSH0, DUP 17 (depth=17 but only 1 literal push), POP, POP, STOP.
         // Block analysis inflates stack_in to satisfy DUPN's real depth, so from DSE's
         // perspective the immediate is valid and the instruction is eliminable.
-        let bytecode = with_prefix(1, &[op::DUPN, 0x00, op::POP, op::POP, op::STOP]);
+        let bytecode = analyze_asm_spec("PUSH0 DUP 17 POP POP STOP", SpecId::AMSTERDAM);
         assert!(
             bytecode.inst(Inst::from_usize(1)).flags.contains(InstFlags::NOOP),
             "DUPN with valid immediate should be skipped when dead"
@@ -852,11 +813,10 @@ mod tests {
 
     #[test]
     fn swapn_dead() {
-        // 18 × PUSH0, SWAPN 17 (depth=17), 18 × POP, STOP — all dead.
-        let mut suffix = vec![op::SWAPN, 0x00];
-        suffix.extend(std::iter::repeat_n(op::POP, 18));
-        suffix.push(op::STOP);
-        let bytecode = with_prefix(18, &suffix);
+        // 18 × PUSH0, SWAP 17 (depth=17), 18 × POP, STOP — all dead.
+        let pops = "POP\n".repeat(18);
+        let asm = format!("{} SWAP 17 {} STOP", push0s(18), pops);
+        let bytecode = analyze_asm_spec(&asm, SpecId::AMSTERDAM);
         for i in 0..18 {
             assert!(
                 bytecode.inst(Inst::from_usize(i)).flags.contains(InstFlags::NOOP),
@@ -872,7 +832,8 @@ mod tests {
     #[test]
     fn exchange_dead() {
         // 3 × PUSH0, EXCHANGE (1,2), 3 × POP, STOP — all dead.
-        let bytecode = with_prefix(3, &[op::EXCHANGE, 0x01, op::POP, op::POP, op::POP, op::STOP]);
+        let bytecode =
+            analyze_asm_spec("PUSH0 PUSH0 PUSH0 EXCHANGE 1 2 POP POP POP STOP", SpecId::AMSTERDAM);
         for i in 0..3 {
             assert!(
                 bytecode.inst(Inst::from_usize(i)).flags.contains(InstFlags::NOOP),
@@ -887,25 +848,20 @@ mod tests {
 
     #[test]
     fn dupn_underflow_no_panic() {
-        // DUPN 17 with only 2 items on the stack — infeasible depth must not panic analysis.
-        let mut code = vec![op::PUSH0; 2];
-        code.extend([op::DUPN, 0x00, op::STOP]);
-        let _ = analyze_code_spec(code, SpecId::AMSTERDAM);
+        // DUP 17 with only 2 items on the stack — infeasible depth must not panic analysis.
+        let _ = analyze_asm_spec("PUSH0 PUSH0 DUP 17 STOP", SpecId::AMSTERDAM);
     }
 
     #[test]
     fn swapn_underflow_no_panic() {
-        // SWAPN 17 with only 2 items — infeasible depth must not panic analysis.
-        let mut code = vec![op::PUSH0; 2];
-        code.extend([op::SWAPN, 0x00, op::STOP]);
-        let _ = analyze_code_spec(code, SpecId::AMSTERDAM);
+        // SWAP 17 with only 2 items — infeasible depth must not panic analysis.
+        let _ = analyze_asm_spec("PUSH0 PUSH0 SWAP 17 STOP", SpecId::AMSTERDAM);
     }
 
     #[test]
     fn exchange_underflow_no_panic() {
         // EXCHANGE 1,2 with only 1 item — infeasible depth must not panic analysis.
-        let code = vec![op::PUSH0, op::EXCHANGE, 0x01, op::STOP];
-        let _ = analyze_code_spec(code, SpecId::AMSTERDAM);
+        let _ = analyze_asm_spec("PUSH0 EXCHANGE 1 2 STOP", SpecId::AMSTERDAM);
     }
 
     // --- Const-output dead store tests ---

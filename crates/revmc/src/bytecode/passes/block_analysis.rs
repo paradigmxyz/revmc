@@ -1086,6 +1086,10 @@ pub(crate) mod tests {
         analyze_code(crate::parse_asm(src).unwrap())
     }
 
+    pub(crate) fn analyze_asm_spec(src: &str, spec_id: SpecId) -> Bytecode<'static> {
+        analyze_code_spec(crate::parse_asm(src).unwrap(), spec_id)
+    }
+
     pub(crate) fn analyze_asm_with(
         src: &str,
         config: crate::bytecode::AnalysisConfig,
