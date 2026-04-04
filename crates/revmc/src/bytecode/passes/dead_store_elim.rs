@@ -141,11 +141,68 @@ impl Bytecode<'_> {
 /// (EXP), memory access (MLOAD, KECCAK256), storage/host reads (SLOAD, TLOAD, BALANCE,
 /// etc.), and MSIZE/GAS (position-dependent).
 fn can_skip_when_dead(opcode: u8) -> bool {
-    crate::is_inline_pure_op(opcode)
-        || crate::is_builtin_pure_op(opcode)
-        || crate::is_stack_shuffle(opcode)
-        || crate::is_push_or_const(opcode)
-        || crate::is_pure_env_read(opcode)
+    use revm_bytecode::opcode as op;
+    matches!(
+        opcode,
+        // Arithmetic (inline).
+        op::ADD
+            | op::MUL
+            | op::SUB
+            | op::SIGNEXTEND
+            // Arithmetic (builtin-delegated).
+            | op::DIV
+            | op::SDIV
+            | op::MOD
+            | op::SMOD
+            | op::ADDMOD
+            | op::MULMOD
+            // Comparison.
+            | op::LT
+            | op::GT
+            | op::SLT
+            | op::SGT
+            | op::EQ
+            | op::ISZERO
+            // Bitwise.
+            | op::AND
+            | op::OR
+            | op::XOR
+            | op::NOT
+            | op::BYTE
+            | op::SHL
+            | op::SHR
+            | op::SAR
+            | op::CLZ
+            // Stack shuffles.
+            | op::DUP1..=op::DUP16
+            | op::DUPN
+            | op::SWAP1..=op::SWAP16
+            | op::SWAPN
+            | op::EXCHANGE
+            // Constants / push.
+            | op::PUSH0..=op::PUSH32
+            | op::PC
+            | op::CODESIZE
+            // Pure environment reads (no dynamic gas, no side effects).
+            | op::ADDRESS
+            | op::ORIGIN
+            | op::CALLER
+            | op::CALLVALUE
+            | op::CALLDATALOAD
+            | op::CALLDATASIZE
+            | op::GASPRICE
+            | op::RETURNDATASIZE
+            | op::COINBASE
+            | op::TIMESTAMP
+            | op::NUMBER
+            | op::DIFFICULTY
+            | op::GASLIMIT
+            | op::CHAINID
+            | op::BASEFEE
+            | op::BLOBBASEFEE
+            | op::BLOBHASH
+            | op::SLOTNUM
+    )
 }
 
 /// Backward liveness transfer for a single instruction.
@@ -241,27 +298,19 @@ fn generic_transfer(
         return;
     }
     // Mark inputs live, skipping positions whose values are known constants.
-    // Only safe for opcodes whose codegen uses `operand_value_or_load` (inline
-    // arithmetic/comparison/bitwise); builtins (CALL, SLOAD, MSTORE, …) read
-    // operands directly from the stack pointer and ignore `const_operand`.
+    // Inline ops load constants via `operand_value_or_load`; builtin-delegated ops
+    // have their constant operands pre-written into the stack slots by `sp_after_inputs`.
+    // Both paths ensure the value is available at runtime, so DSE can uniformly kill
+    // const inputs for all skippable opcodes.
     for k in 0..inp {
         // input_snap is in stack order: [deepest, ..., TOS].
-        if can_skip_const_input(opcode)
+        if can_skip_when_dead(opcode)
             && input_snap.get(k).is_some_and(|v| matches!(v, AbsValue::Const(_)))
         {
             continue;
         }
         live.set(h_before - inp + k, true);
     }
-}
-
-/// Returns `true` if the opcode's codegen reads inputs via `operand_value_or_load`
-/// (which checks `const_operand` and uses an immediate for known constants).
-///
-/// Builtins (CALL, SLOAD, MSTORE, …) read operands directly from the stack pointer,
-/// bypassing `const_operand`, so we cannot skip their inputs even if known-constant.
-fn can_skip_const_input(opcode: u8) -> bool {
-    crate::is_inline_pure_op(opcode)
 }
 
 /// SWAP liveness: permute liveness of TOS and the swapped position.
@@ -873,8 +922,34 @@ mod tests {
     }
 
     #[test]
-    fn builtin_inputs_stay_live() {
-        // SLOAD reads operands via builtin (sp_after_inputs), not const_operand.
+    fn builtin_const_input_killed() {
+        // DIV(dynamic, 2): PUSH 2 feeds the divisor. DIV delegates to a builtin
+        // (sp_after_inputs), but codegen pre-writes constant operands into the stack
+        // slots, so DSE can safely kill the PUSH.
+        let bytecode = analyze_asm(
+            "
+            PUSH0           ; inst 0: offset for CALLDATALOAD
+            CALLDATALOAD    ; inst 1: dynamic value
+            PUSH1 0x02      ; inst 2: constant divisor
+            DIV             ; inst 3: dynamic / 2
+            PUSH0           ; inst 4
+            MSTORE          ; inst 5
+            STOP            ; inst 6
+        ",
+        );
+        assert!(
+            bytecode.inst(Inst::from_usize(2)).flags.contains(InstFlags::NOOP),
+            "PUSH 2 (divisor) should be skipped (builtin const input)"
+        );
+        assert!(
+            !bytecode.inst(Inst::from_usize(1)).flags.contains(InstFlags::NOOP),
+            "CALLDATALOAD should NOT be skipped"
+        );
+    }
+
+    #[test]
+    fn non_skippable_builtin_inputs_stay_live() {
+        // SLOAD has side effects and is not in can_skip_when_dead, so its inputs stay live.
         let bytecode = analyze_asm(
             "
             PUSH1 0x00      ; inst 0: storage key
@@ -886,7 +961,7 @@ mod tests {
         );
         assert!(
             !bytecode.inst(Inst::from_usize(0)).flags.contains(InstFlags::NOOP),
-            "PUSH 0 should NOT be skipped (SLOAD uses builtin)"
+            "PUSH 0 should NOT be skipped (SLOAD is not skippable)"
         );
     }
 }
