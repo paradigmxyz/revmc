@@ -31,7 +31,7 @@
 use super::{StackSection, pcr::PcrHint};
 use crate::{
     FxHashMap,
-    bytecode::{Bytecode, Inst, InstFlags, Interner, U256Idx},
+    bytecode::{Bytecode, Inst, InstData, InstFlags, Interner, U256Idx},
 };
 use bitvec::vec::BitVec;
 use either::Either;
@@ -160,6 +160,87 @@ impl ConstSetInterner {
             }
         }
     }
+}
+
+/// Applies stack-shuffling opcodes (POP, DUP, SWAP, DUPN, SWAPN, EXCHANGE) to an abstract stack.
+///
+/// Returns `Some(true)` if the opcode was handled, `Some(false)` on invalid stack underflow or
+/// decode failure, or `None` if the opcode is not a stack-shuffling instruction (caller handles
+/// PUSH and fallback).
+///
+/// `unknown` is pushed when DUPN/SWAPN/EXCHANGE access a slot beyond the tracked stack depth.
+pub(super) fn apply_stack_shuffle<T: Copy>(
+    inst: &InstData,
+    code: &[u8],
+    stack: &mut Vec<T>,
+    unknown: T,
+) -> Option<bool> {
+    match inst.opcode {
+        op::POP => {
+            if stack.pop().is_none() {
+                return Some(false);
+            }
+        }
+        op::DUP1..=op::DUP16 => {
+            let depth = (inst.opcode - op::DUP1 + 1) as usize;
+            if stack.len() < depth {
+                return Some(false);
+            }
+            stack.push(stack[stack.len() - depth]);
+        }
+        op::SWAP1..=op::SWAP16 => {
+            let depth = (inst.opcode - op::SWAP1 + 1) as usize;
+            let len = stack.len();
+            if len < depth + 1 {
+                return Some(false);
+            }
+            stack.swap(len - 1, len - 1 - depth);
+        }
+        op::DUPN => {
+            let imm = code.get(inst.pc as usize + 1).copied().unwrap_or(0);
+            let Some(n) = crate::decode_single(imm) else {
+                return Some(false);
+            };
+            let n = n as usize;
+            if stack.len() < n {
+                stack.push(unknown);
+            } else {
+                stack.push(stack[stack.len() - n]);
+            }
+        }
+        op::SWAPN => {
+            let imm = code.get(inst.pc as usize + 1).copied().unwrap_or(0);
+            let Some(n) = crate::decode_single(imm) else {
+                return Some(false);
+            };
+            let n = n as usize;
+            let len = stack.len();
+            if len < n + 1 {
+                if let Some(tos) = stack.last_mut() {
+                    *tos = unknown;
+                }
+            } else {
+                stack.swap(len - 1, len - 1 - n);
+            }
+        }
+        op::EXCHANGE => {
+            let imm = code.get(inst.pc as usize + 1).copied().unwrap_or(0);
+            let Some((n, m)) = crate::decode_pair(imm) else {
+                return Some(false);
+            };
+            let (n, m) = (n as usize, m as usize);
+            let len = stack.len();
+            if len < m + 1 {
+                if len > n {
+                    stack[len - 1 - n] = unknown;
+                }
+            } else {
+                stack.swap(len - 1 - n, len - 1 - m);
+            }
+        }
+        _ => return None,
+    }
+    Some(true)
 }
 
 /// Maximum abstract stack depth tracked by the analysis. Top-aligned joins across paths with
@@ -361,23 +442,28 @@ impl Bytecode<'_> {
             let Some(&operand) = self.snapshots.inputs[term_inst].last() else { continue };
             debug_assert!(!matches!(operand, AbsValue::ConstSet(_)));
             let target = self.resolve_jump_operand(operand, &empty_sets);
-            let JumpTarget::Const(target_inst) = target else { continue };
-
-            // Log non-adjacent resolutions (not simple PUSH+JUMP).
-            if trace_logs
-                && let is_adjacent = (term_inst > 0 && {
-                    let prev_inst = term_inst - 1;
-                    let prev = &self.insts[prev_inst];
-                    matches!(prev.opcode, op::PUSH0..=op::PUSH32)
-                        && !prev.is_dead_code()
-                        && block.insts.contains(&prev_inst)
-                })
-                && !is_adjacent
-            {
-                trace!(%term_inst, %target_inst, pc = self.insts[term_inst].pc, "resolved non-adjacent jump");
+            match target {
+                JumpTarget::Const(target_inst) => {
+                    // Log non-adjacent resolutions (not simple PUSH+JUMP).
+                    if trace_logs
+                        && let is_adjacent = (term_inst > 0 && {
+                            let prev_inst = term_inst - 1;
+                            let prev = &self.insts[prev_inst];
+                            matches!(prev.opcode, op::PUSH0..=op::PUSH32)
+                                && !prev.is_dead_code()
+                                && block.insts.contains(&prev_inst)
+                        })
+                        && !is_adjacent
+                    {
+                        trace!(%term_inst, %target_inst, pc = self.insts[term_inst].pc, "resolved non-adjacent jump");
+                    }
+                    resolved.push((term_inst, target));
+                }
+                JumpTarget::Invalid => {
+                    resolved.push((term_inst, target));
+                }
+                _ => {}
             }
-
-            resolved.push((term_inst, target));
         }
 
         let newly_resolved = self.commit_resolved_jumps(&resolved);
@@ -948,133 +1034,57 @@ impl Bytecode<'_> {
                 snap.extend_from_slice(&stack[start..]);
             }
 
-            match inst.opcode {
-                op::PUSH0 => {
-                    stack.push(AbsValue::Const(self.intern_u256(U256::ZERO)));
+            if let Some(ok) = apply_stack_shuffle(inst, &self.code, stack, AbsValue::Top) {
+                if !ok {
+                    return false;
                 }
-                op::PUSH1..=op::PUSH32 => {
-                    let value = self.get_push_value(inst);
-                    stack.push(AbsValue::Const(self.intern_u256(value)));
+            } else if matches!(inst.opcode, op::PUSH0) {
+                stack.push(AbsValue::Const(self.intern_u256(U256::ZERO)));
+            } else if matches!(inst.opcode, op::PUSH1..=op::PUSH32) {
+                let value = self.get_push_value(inst);
+                stack.push(AbsValue::Const(self.intern_u256(value)));
+            } else {
+                if stack.len() < inp {
+                    return false;
                 }
-                op::POP => {
-                    if stack.pop().is_none() {
-                        return false;
-                    }
-                }
-                op::DUP1..=op::DUP16 => {
-                    let depth = (inst.opcode - op::DUP1 + 1) as usize;
-                    if stack.len() < depth {
-                        return false;
-                    }
-                    stack.push(stack[stack.len() - depth]);
-                }
-                op::SWAP1..=op::SWAP16 => {
-                    let depth = (inst.opcode - op::SWAP1 + 1) as usize;
-                    let len = stack.len();
-                    if len < depth + 1 {
-                        return false;
-                    }
-                    stack.swap(len - 1, len - 1 - depth);
-                }
-                op::DUPN => {
-                    let depth = crate::decode_single(self.get_u8_imm(inst));
-                    match depth {
-                        Some(n) => {
-                            let n = n as usize;
-                            if stack.len() < n {
-                                // Depth exceeds the tracked abstract stack (truncated by
-                                // MAX_ABS_STACK_DEPTH). The slot is reachable at runtime
-                                // but unknown abstractly.
-                                stack.push(AbsValue::Top);
-                            } else {
-                                stack.push(stack[stack.len() - n]);
-                            }
-                        }
-                        None => return false,
-                    }
-                }
-                op::SWAPN => {
-                    let depth = crate::decode_single(self.get_u8_imm(inst));
-                    match depth {
-                        Some(n) => {
-                            let n = n as usize;
-                            let len = stack.len();
-                            if len < n + 1 {
-                                // Deep slot beyond tracked abstract stack; TOS becomes Top
-                                // and the deep slot (not tracked) is unchanged.
-                                if let Some(tos) = stack.last_mut() {
-                                    *tos = AbsValue::Top;
-                                }
-                            } else {
-                                stack.swap(len - 1, len - 1 - n);
-                            }
-                        }
-                        None => return false,
-                    }
-                }
-                op::EXCHANGE => {
-                    let pair = crate::decode_pair(self.get_u8_imm(inst));
-                    match pair {
-                        Some((n, m)) => {
-                            let (n, m) = (n as usize, m as usize);
-                            let len = stack.len();
-                            if len < m + 1 {
-                                // Deep slot beyond tracked abstract stack; the shallower
-                                // slot (if tracked) becomes Top.
-                                if len > n {
-                                    stack[len - 1 - n] = AbsValue::Top;
-                                }
-                            } else {
-                                stack.swap(len - 1 - n, len - 1 - m);
-                            }
-                        }
-                        None => return false,
-                    }
-                }
-                _ => {
-                    if stack.len() < inp {
-                        return false;
-                    }
 
-                    // Try constant folding for common arithmetic, respecting the gas budget.
-                    let result = if out > 0 && self.compiler_gas_used < self.compiler_gas_limit {
-                        let inputs_slice = &stack[stack.len() - inp..];
-                        let mut interner = self.u256_interner.borrow_mut();
+                // Try constant folding for common arithmetic, respecting the gas budget.
+                let result = if out > 0 && self.compiler_gas_used < self.compiler_gas_limit {
+                    let inputs_slice = &stack[stack.len() - inp..];
+                    let mut interner = self.u256_interner.borrow_mut();
 
-                        // Check gas cost before doing the actual fold.
-                        let gas =
-                            super::const_fold::const_fold_gas(inst.opcode, inputs_slice, &interner);
-                        if let Some(cost) = gas
-                            && self.compiler_gas_used.saturating_add(cost)
-                                <= self.compiler_gas_limit
-                        {
-                            let folded = super::const_fold::try_const_fold(
-                                inst,
-                                inputs_slice,
-                                &mut interner,
-                                self.code.len(),
-                            );
-                            if folded.is_some() {
-                                self.compiler_gas_used += cost;
-                            }
-                            folded
-                        } else {
-                            None
+                    // Check gas cost before doing the actual fold.
+                    let gas =
+                        super::const_fold::const_fold_gas(inst.opcode, inputs_slice, &interner);
+                    if let Some(cost) = gas
+                        && self.compiler_gas_used.saturating_add(cost) <= self.compiler_gas_limit
+                    {
+                        let folded = super::const_fold::try_const_fold(
+                            inst,
+                            inputs_slice,
+                            &mut interner,
+                            self.code.len(),
+                        );
+                        if folded.is_some() {
+                            self.compiler_gas_used += cost;
                         }
+                        folded
                     } else {
                         None
-                    };
-
-                    // Pop inputs.
-                    stack.truncate(stack.len() - inp);
-
-                    // Push outputs.
-                    if let Some(folded) = result {
-                        debug_assert_eq!(out, 1);
-                        stack.push(folded);
-                    } else {
-                        stack.resize(stack.len() + out, AbsValue::Top);
                     }
+                } else {
+                    None
+                };
+
+                // Pop inputs.
+                stack.truncate(stack.len() - inp);
+
+                // Push outputs.
+                if let Some(folded) = result {
+                    debug_assert_eq!(out, 1);
+                    stack.push(folded);
+                } else {
+                    stack.resize(stack.len() + out, AbsValue::Top);
                 }
             }
 

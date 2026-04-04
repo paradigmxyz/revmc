@@ -7,9 +7,9 @@
 
 use super::{
     StackSection,
-    block_analysis::{AbsValue, Block, BlockData, ConstSetInterner, JumpTarget},
+    block_analysis::{AbsValue, Block, ConstSetInterner, JumpTarget, apply_stack_shuffle},
 };
-use crate::bytecode::{Bytecode, Inst, InstData, InstFlags};
+use crate::bytecode::{Bytecode, Inst, InstFlags};
 use bitvec::vec::BitVec;
 use oxc_index::IndexVec;
 use revm_bytecode::opcode as op;
@@ -137,115 +137,25 @@ impl Bytecode<'_> {
                 continue;
             }
 
-            let (inp, out) = inst.stack_io();
-            let inp = inp as usize;
-
-            match inst.opcode {
-                op::PUSH0..=op::PUSH32 => {
+            if let Some(ok) = apply_stack_shuffle(inst, &self.code, stack, Provenance::Input) {
+                if !ok {
+                    return false;
+                }
+            } else if matches!(inst.opcode, op::PUSH0..=op::PUSH32) {
+                stack.push(Provenance::Local);
+            } else {
+                let (inp, out) = inst.stack_io();
+                let inp = inp as usize;
+                if stack.len() < inp {
+                    return false;
+                }
+                stack.truncate(stack.len() - inp);
+                for _ in 0..out {
                     stack.push(Provenance::Local);
-                }
-                op::POP => {
-                    if stack.pop().is_none() {
-                        return false;
-                    }
-                }
-                op::DUP1..=op::DUP16 => {
-                    let depth = (inst.opcode - op::DUP1 + 1) as usize;
-                    if stack.len() < depth {
-                        return false;
-                    }
-                    stack.push(stack[stack.len() - depth]);
-                }
-                op::SWAP1..=op::SWAP16 => {
-                    let depth = (inst.opcode - op::SWAP1 + 1) as usize;
-                    let len = stack.len();
-                    if len < depth + 1 {
-                        return false;
-                    }
-                    stack.swap(len - 1, len - 1 - depth);
-                }
-                op::DUPN => {
-                    let Some(n) = crate::decode_single(self.get_u8_imm(inst)) else {
-                        return false;
-                    };
-                    let n = n as usize;
-                    if stack.len() < n {
-                        stack.push(Provenance::Input);
-                    } else {
-                        stack.push(stack[stack.len() - n]);
-                    }
-                }
-                op::SWAPN => {
-                    let Some(n) = crate::decode_single(self.get_u8_imm(inst)) else {
-                        return false;
-                    };
-                    let n = n as usize;
-                    let len = stack.len();
-                    if len < n + 1 {
-                        if let Some(tos) = stack.last_mut() {
-                            *tos = Provenance::Input;
-                        }
-                    } else {
-                        stack.swap(len - 1, len - 1 - n);
-                    }
-                }
-                op::EXCHANGE => {
-                    let Some((n, m)) = crate::decode_pair(self.get_u8_imm(inst)) else {
-                        return false;
-                    };
-                    let (n, m) = (n as usize, m as usize);
-                    let len = stack.len();
-                    if len < m + 1 {
-                        if len > n {
-                            stack[len - 1 - n] = Provenance::Input;
-                        }
-                    } else {
-                        stack.swap(len - 1 - n, len - 1 - m);
-                    }
-                }
-                _ => {
-                    if stack.len() < inp {
-                        return false;
-                    }
-                    stack.truncate(stack.len() - inp);
-                    for _ in 0..out {
-                        stack.push(Provenance::Local);
-                    }
                 }
             }
         }
         true
-    }
-
-    /// Returns `true` if every live instruction in the block uses an opcode
-    /// safe for PCR return classification.
-    ///
-    /// Excludes transient storage (TLOAD/TSTORE), calls, creates, and other
-    /// opcodes that indicate shared utility blocks rather than Solidity-style
-    /// private function returns.
-    fn is_return_safe_block(insts: &IndexVec<Inst, InstData>, block: &BlockData) -> bool {
-        block.insts().all(|i| {
-            let inst = &insts[i];
-            if inst.is_dead_code() || inst.flags.contains(InstFlags::NOOP) {
-                return true;
-            }
-            !matches!(
-                inst.opcode,
-                op::TLOAD
-                    | op::TSTORE
-                    | op::CALL
-                    | op::CALLCODE
-                    | op::DELEGATECALL
-                    | op::STATICCALL
-                    | op::CREATE
-                    | op::CREATE2
-                    | op::SELFDESTRUCT
-                    | op::RETURN
-                    | op::REVERT
-                    | op::STOP
-                    | op::INVALID
-            )
-        })
     }
 
     /// Computes local per-block summaries for private call/return detection.
@@ -276,9 +186,8 @@ impl Bytecode<'_> {
             let section =
                 StackSection::from_stack_io(block.insts().map(|i| self.insts[i].stack_io()));
 
-            // Private function return: JUMP with no static target, the jump
-            // operand has entry-stack provenance (was passed by the caller),
-            // and the block contains only safe opcodes.
+            // Private function return: JUMP with no static target and the jump
+            // operand has entry-stack provenance (was passed by the caller).
             if !term.flags.contains(InstFlags::STATIC_JUMP) {
                 prov_stack.clear();
                 prov_stack.resize(section.inputs as usize, Provenance::Input);
@@ -287,7 +196,6 @@ impl Bytecode<'_> {
                 let pre_term = block.insts().take_while(|&i| i != term_inst);
                 if self.simulate_provenance(pre_term, &mut prov_stack)
                     && prov_stack.last() == Some(&Provenance::Input)
-                    && Self::is_return_safe_block(&self.insts, block)
                 {
                     summaries[bid].is_return = true;
                 }
@@ -350,6 +258,9 @@ impl Bytecode<'_> {
     /// Uses the local summaries to trace call-strings through the CFG. When a
     /// `PrivateFunctionReturn` block is reached, the call-string context reveals which
     /// caller pushed the return address, allowing the return edge to be materialized.
+    ///
+    /// Returns are tainted (suppressed) when they are reachable from opaque entry points
+    /// that PCR cannot model — ensuring soundness even with adversarial bytecode.
     #[instrument(name = "resolve_calls", level = "debug", skip_all)]
     fn resolve_private_calls(
         &self,
@@ -357,14 +268,17 @@ impl Bytecode<'_> {
     ) -> Vec<PcrHint> {
         let num_blocks = self.cfg.blocks.len();
 
+        // Compute opaque entry points: blocks that might be entered by edges PCR
+        // does not model, meaning return blocks reachable from them may have callers
+        // PCR cannot discover.
+        let tainted_returns = self.compute_opaque_taint(summaries);
+
         let mut wl = ContextWorklist::new(num_blocks);
         wl.push(Block::from_usize(0), SmallVec::new());
 
         // Per return-block: discovered continuation targets.
         let mut return_targets: IndexVec<Block, SmallVec<[Inst; 4]>> =
             IndexVec::from_vec(vec![SmallVec::new(); num_blocks]);
-        // Return blocks reached from a non-call path (opaque caller or empty context).
-        let mut tainted_returns: BitVec = BitVec::repeat(false, num_blocks);
 
         let max_iterations = num_blocks * 64;
         let mut iterations = 0;
@@ -418,9 +332,10 @@ impl Bytecode<'_> {
                     if let Some(cont_block) = self.cfg.inst_to_block[continuation] {
                         wl.push(cont_block, new_ctx);
                     }
-                } else {
-                    tainted_returns.set(bid.index(), true);
                 }
+                // Note: returns reached with empty/invalid context are not
+                // propagated further. Tainting is handled structurally by
+                // `compute_opaque_taint` instead.
             } else {
                 // Normal block: propagate to all successors with same context.
                 for &succ in &block.succs {
@@ -460,5 +375,102 @@ impl Bytecode<'_> {
         }
 
         hints
+    }
+
+    /// Computes which candidate return blocks are tainted by opaque entry points.
+    ///
+    /// An opaque entry is a block that might be entered by edges PCR cannot model
+    /// (unresolved dynamic jumps, non-private-call predecessors of callee blocks).
+    /// Any candidate return reachable from an opaque entry is tainted because PCR
+    /// might not have discovered all its callers.
+    fn compute_opaque_taint(&self, summaries: &IndexVec<Block, LocalBlockSummary>) -> BitVec {
+        let num_blocks = self.cfg.blocks.len();
+        let mut opaque: BitVec = BitVec::repeat(false, num_blocks);
+
+        // Collect callee blocks that are entered by detected private calls.
+        let mut private_call_preds: IndexVec<Block, SmallVec<[Block; 2]>> =
+            IndexVec::from_vec(vec![SmallVec::new(); num_blocks]);
+        // Whether any unmodeled dynamic jump exists (not a private call, not a return).
+        let mut has_unmodeled_jump = false;
+
+        for (bid, summary) in summaries.iter_enumerated() {
+            if let Some(ref call) = summary.private_call {
+                if let Some(callee_block) = self.cfg.inst_to_block[call.callee] {
+                    private_call_preds[callee_block].push(bid);
+                }
+            } else {
+                let term_inst = self.cfg.blocks[bid].terminator();
+                let term = &self.insts[term_inst];
+                if term.is_jump()
+                    && !term.flags.contains(InstFlags::STATIC_JUMP)
+                    && !summary.is_return
+                {
+                    has_unmodeled_jump = true;
+                }
+            }
+        }
+
+        // Seed A: callee blocks with non-private-call predecessors in the static CFG.
+        for bid in self.cfg.blocks.indices() {
+            if private_call_preds[bid].is_empty() {
+                continue;
+            }
+            let has_external_pred = self.cfg.blocks[bid]
+                .preds
+                .iter()
+                .any(|pred| !private_call_preds[bid].contains(pred));
+            if has_external_pred {
+                opaque.set(bid.index(), true);
+            }
+        }
+
+        // Seed B: if unmodeled dynamic jumps exist, any JUMPDEST block is a potential
+        // target (bytecode is user-controlled — any JUMPDEST can be jumped to).
+        if has_unmodeled_jump {
+            for bid in self.cfg.blocks.indices() {
+                if self.insts[self.cfg.blocks[bid].insts.start].is_jumpdest() {
+                    opaque.set(bid.index(), true);
+                }
+            }
+        }
+
+        // Propagate opaque flag forward through static CFG edges and private-call
+        // edges to find all candidate returns reachable from opaque entries.
+        let mut tainted: BitVec = BitVec::repeat(false, num_blocks);
+        let mut queue: VecDeque<Block> = VecDeque::new();
+        for bid in self.cfg.blocks.indices() {
+            if opaque[bid.index()] {
+                queue.push_back(bid);
+            }
+        }
+        while let Some(bid) = queue.pop_front() {
+            let summary = &summaries[bid];
+
+            if summary.is_return {
+                tainted.set(bid.index(), true);
+                // Don't propagate past return blocks — the return edge goes back
+                // to the caller's continuation, which has its own entry analysis.
+                continue;
+            }
+
+            // Follow static CFG successors.
+            for &succ in &self.cfg.blocks[bid].succs {
+                if !opaque[succ.index()] {
+                    opaque.set(succ.index(), true);
+                    queue.push_back(succ);
+                }
+            }
+
+            // Follow private-call edges into callees.
+            if let Some(ref call) = summary.private_call
+                && let Some(callee_block) = self.cfg.inst_to_block[call.callee]
+                && !opaque[callee_block.index()]
+            {
+                opaque.set(callee_block.index(), true);
+                queue.push_back(callee_block);
+            }
+        }
+
+        tainted
     }
 }
