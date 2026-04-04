@@ -142,14 +142,14 @@ impl<'a> Bytecode<'a> {
                 // be lost and fall into the default InvalidJump path at runtime.
                 let canonical_term = self.cfg.blocks[canonical].terminator();
                 let dup_term = dup_block.terminator();
-                if self.insts[dup_term].flags.contains(InstFlags::MULTI_JUMP) {
-                    if let Some(dup_targets) = self.multi_jump_targets.remove(&dup_term) {
-                        let canonical_targets =
-                            self.multi_jump_targets.get_mut(&canonical_term).unwrap();
-                        for t in dup_targets {
-                            if !canonical_targets.contains(&t) {
-                                canonical_targets.push(t);
-                            }
+                if self.insts[dup_term].flags.contains(InstFlags::MULTI_JUMP)
+                    && let Some(dup_targets) = self.multi_jump_targets.remove(&dup_term)
+                {
+                    let canonical_targets =
+                        self.multi_jump_targets.get_mut(&canonical_term).unwrap();
+                    for t in dup_targets {
+                        if !canonical_targets.contains(&t) {
+                            canonical_targets.push(t);
                         }
                     }
                 }
