@@ -24,9 +24,9 @@
 //!
 //! ## Soundness
 //!
-//! When unresolved `Top` jumps remain after the fixpoint, a transitive predecessor analysis
-//! invalidates suspect resolutions that may be reachable from those unresolved jumps, ensuring
-//! that only sound jump targets are reported as resolved.
+//! When the fixpoint does not converge (iteration cap reached) or unresolved `Top` jumps remain,
+//! a transitive predecessor analysis invalidates suspect resolutions that may be based on
+//! incomplete information, ensuring that only sound jump targets are reported as resolved.
 
 use super::StackSection;
 use crate::bytecode::{Bytecode, Inst, InstFlags, Interner, U256Idx};
@@ -596,7 +596,7 @@ impl Bytecode<'_> {
         }
 
         let mut const_sets = ConstSetInterner::new();
-        let discovered_edges = self.run_fixpoint(&mut block_states, &mut const_sets);
+        let (discovered_edges, converged) = self.run_fixpoint(&mut block_states, &mut const_sets);
 
         if jump_insts.is_empty() {
             return (Vec::new(), 0);
@@ -621,7 +621,9 @@ impl Bytecode<'_> {
         }
 
         // Invalidate resolutions that may be unsound due to incomplete analysis.
-        if has_top_jump {
+        // When the fixpoint didn't converge, partially-discovered ConstSets may be
+        // incomplete, so we must conservatively invalidate them too.
+        if has_top_jump || !converged {
             self.invalidate_suspect_jumps(
                 &mut jump_targets,
                 &block_states,
@@ -781,12 +783,12 @@ impl Bytecode<'_> {
 
     /// Run a worklist-based fixpoint to compute abstract block states.
     ///
-    /// Returns the discovered dynamic-jump target edges per block.
+    /// Returns `(discovered_edges, converged)`.
     fn run_fixpoint(
         &mut self,
         block_states: &mut IndexVec<Block, BlockState>,
         const_sets: &mut ConstSetInterner,
-    ) -> IndexVec<Block, SmallVec<[Block; 4]>> {
+    ) -> (IndexVec<Block, SmallVec<[Block; 4]>>, bool) {
         let num_blocks = self.cfg.blocks.len();
         let mut worklist = Worklist::new(num_blocks);
         worklist.push(Block::from_usize(0));
@@ -854,7 +856,7 @@ impl Bytecode<'_> {
             msg = if converged { "converged" } else { "did not converge" },
         );
 
-        discovered
+        (discovered, converged)
     }
 
     /// Interpret a sequence of instructions on the abstract stack.
@@ -916,7 +918,7 @@ impl Bytecode<'_> {
                     stack.swap(len - 1, len - 1 - depth);
                 }
                 op::DUPN => {
-                    let depth = self.get_imm(inst).and_then(|b| crate::decode_single(b[0]));
+                    let depth = crate::decode_single(self.get_u8_imm(inst));
                     match depth {
                         Some(n) => {
                             let n = n as usize;
@@ -929,7 +931,7 @@ impl Bytecode<'_> {
                     }
                 }
                 op::SWAPN => {
-                    let depth = self.get_imm(inst).and_then(|b| crate::decode_single(b[0]));
+                    let depth = crate::decode_single(self.get_u8_imm(inst));
                     match depth {
                         Some(n) => {
                             let n = n as usize;
@@ -943,7 +945,7 @@ impl Bytecode<'_> {
                     }
                 }
                 op::EXCHANGE => {
-                    let pair = self.get_imm(inst).and_then(|b| crate::decode_pair(b[0]));
+                    let pair = crate::decode_pair(self.get_u8_imm(inst));
                     match pair {
                         Some((n, m)) => {
                             let (n, m) = (n as usize, m as usize);
@@ -2227,5 +2229,69 @@ mod tests_edge_cases {
         ",
         );
         assert!(!bytecode.has_dynamic_jumps);
+    }
+
+    /// Many callers to a shared internal function through relay blocks.
+    /// When the fixpoint iteration cap is exceeded, partially-discovered
+    /// multi-target jumps must NOT be committed as closed MULTI_JUMPs.
+    #[test]
+    fn non_converged_multi_jump_stays_dynamic() {
+        // Generate bytecode with k call sites, b relay blocks, and one shared function.
+        // Each call site pushes a different return address and jumps through the relay
+        // chain into the shared function, which does PUSH1 0x42; SWAP1; JUMP.
+        // With enough callers and relays, the fixpoint cap is exceeded before all
+        // return addresses are discovered.
+        let k = 15;
+        let b = 31;
+        let mut lines = Vec::new();
+        lines.push("PUSH %call0".to_string());
+        lines.push("JUMP".to_string());
+        for i in 0..k {
+            lines.push(format!("call{i}:"));
+            lines.push("JUMPDEST".to_string());
+            lines.push(format!("PUSH %ret{i}"));
+            lines.push("PUSH %relay0".to_string());
+            lines.push("JUMP".to_string());
+
+            lines.push(format!("ret{i}:"));
+            lines.push("JUMPDEST".to_string());
+            lines.push("POP".to_string());
+            if i + 1 < k {
+                lines.push(format!("PUSH %call{}", i + 1));
+                lines.push("JUMP".to_string());
+            } else {
+                lines.push("STOP".to_string());
+            }
+        }
+        for i in 0..b {
+            lines.push(format!("relay{i}:"));
+            lines.push("JUMPDEST".to_string());
+            if i + 1 < b {
+                lines.push(format!("PUSH %relay{}", i + 1));
+            } else {
+                lines.push("PUSH %fn_entry".to_string());
+            }
+            lines.push("JUMP".to_string());
+        }
+        lines.push("fn_entry:".to_string());
+        lines.push("JUMPDEST".to_string());
+        lines.push("PUSH1 0x42".to_string());
+        lines.push("SWAP1".to_string());
+        lines.push("JUMP".to_string());
+
+        let bytecode = analyze_asm(&lines.join("\n"));
+
+        // The shared function's return JUMP must NOT be committed as a closed
+        // MULTI_JUMP when the fixpoint didn't converge — doing so would produce
+        // an incomplete switch table missing some valid return addresses.
+        let return_jump = bytecode
+            .iter_insts()
+            .find(|(_, d)| d.is_jump() && d.flags.contains(InstFlags::MULTI_JUMP));
+        assert!(return_jump.is_none(), "non-converged fixpoint must not commit partial MULTI_JUMP");
+        // It should remain dynamic instead.
+        assert!(
+            bytecode.has_dynamic_jumps,
+            "return jump should remain dynamic when fixpoint doesn't converge"
+        );
     }
 }

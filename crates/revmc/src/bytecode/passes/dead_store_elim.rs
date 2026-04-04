@@ -11,7 +11,7 @@
 //! - EXCHANGE swaps two arbitrary non-TOS positions.
 //! - POP kills its input (makes the position dead) rather than reading it.
 
-use super::StackSectionAnalysis;
+use super::{StackSectionAnalysis, block_analysis::AbsValue};
 use crate::bytecode::{Bytecode, InstFlags};
 use bitvec::vec::BitVec;
 use revm_bytecode::opcode as op;
@@ -89,13 +89,10 @@ impl Bytecode<'_> {
 
                 // Decode immediate for DUPN/SWAPN/EXCHANGE.
                 let imm = match opcode {
-                    op::DUPN | op::SWAPN => self
-                        .get_imm(data)
-                        .and_then(|b| crate::decode_single(b[0]))
-                        .map(DecodedImm::Single),
-                    op::EXCHANGE => self
-                        .get_imm(data)
-                        .and_then(|b| crate::decode_pair(b[0]))
+                    op::DUPN | op::SWAPN => {
+                        crate::decode_single(self.get_u8_imm(data)).map(DecodedImm::Single)
+                    }
+                    op::EXCHANGE => crate::decode_pair(self.get_u8_imm(data))
                         .map(|(n, m)| DecodedImm::Pair(n, m)),
                     _ => None,
                 };
@@ -111,7 +108,16 @@ impl Bytecode<'_> {
                     continue;
                 }
 
-                transfer_liveness(&mut live, opcode, h_before, inp as usize, out as usize, imm);
+                transfer_liveness(
+                    &mut live,
+                    opcode,
+                    h_before,
+                    inp as usize,
+                    out as usize,
+                    imm,
+                    &self.snapshots.inputs[inst],
+                    self.snapshots.outputs.get(inst).copied().flatten(),
+                );
             }
         }
 
@@ -134,17 +140,18 @@ impl Bytecode<'_> {
 fn can_skip_when_dead(opcode: u8) -> bool {
     matches!(
         opcode,
-        // Arithmetic.
+        // Arithmetic (inline).
         op::ADD
             | op::MUL
             | op::SUB
+            | op::SIGNEXTEND
+            // Arithmetic (builtin-delegated).
             | op::DIV
             | op::SDIV
             | op::MOD
             | op::SMOD
             | op::ADDMOD
             | op::MULMOD
-            | op::SIGNEXTEND
             // Comparison.
             | op::LT
             | op::GT
@@ -162,19 +169,14 @@ fn can_skip_when_dead(opcode: u8) -> bool {
             | op::SHR
             | op::SAR
             | op::CLZ
-            // Stack shuffles (no side effects, static gas).
-            // These use shuffle_all_dead for precise dead checks since their
-            // stack_io arities include pass-through slots.
-            | op::DUP1
-            ..=op::DUP16
+            // Stack shuffles.
+            | op::DUP1..=op::DUP16
             | op::DUPN
-            | op::SWAP1
-            ..=op::SWAP16
+            | op::SWAP1..=op::SWAP16
             | op::SWAPN
             | op::EXCHANGE
-            // Constants.
-            | op::PUSH0
-            ..=op::PUSH32
+            // Constants / push.
+            | op::PUSH0..=op::PUSH32
             | op::PC
             | op::CODESIZE
             // Pure environment reads (no dynamic gas, no side effects).
@@ -206,6 +208,12 @@ fn can_skip_when_dead(opcode: u8) -> bool {
 /// in-bounds since `live` is sized to the block's max stack height.
 ///
 /// `imm` carries the decoded immediate for DUPN/SWAPN/EXCHANGE; `None` for all other opcodes.
+///
+/// `input_snap` and `output` carry abstract interpretation snapshots. When the output is a
+/// known constant, codegen replaces the entire instruction with a constant push and none of
+/// the inputs need to be live. When individual inputs are known constants, codegen loads them
+/// as immediates (`const_operand`) so those stack positions don't need to be live either.
+#[allow(clippy::too_many_arguments)]
 fn transfer_liveness(
     live: &mut BitVec,
     opcode: u8,
@@ -213,6 +221,8 @@ fn transfer_liveness(
     inp: usize,
     out: usize,
     imm: Option<DecodedImm>,
+    input_snap: &[AbsValue],
+    output: Option<AbsValue>,
 ) {
     match opcode {
         op::SWAP1..=op::SWAP16 => {
@@ -254,17 +264,45 @@ fn transfer_liveness(
         op::POP => {
             live.set(h_before - 1, false);
         }
-        _ => generic_transfer(live, h_before, inp, out),
+        _ => generic_transfer(live, h_before, inp, out, input_snap, output),
     }
 }
 
 /// Generic liveness transfer: kill all outputs, then mark all inputs as live.
-fn generic_transfer(live: &mut BitVec, h_before: usize, inp: usize, out: usize) {
+///
+/// When the output is a known constant, codegen replaces the entire instruction with a
+/// constant push and never reads any inputs from the stack, so none of them need to be live.
+/// When individual inputs are known constants, codegen pre-writes them into the stack
+/// slots (via `operand_value_or_load` or `sp_after_inputs`), so those positions don't
+/// need to be live.
+fn generic_transfer(
+    live: &mut BitVec,
+    h_before: usize,
+    inp: usize,
+    out: usize,
+    input_snap: &[AbsValue],
+    output: Option<AbsValue>,
+) {
     let write_base = h_before - inp;
+    // Kill outputs.
     for k in 0..out {
         live.set(write_base + k, false);
     }
+    // If the output is a known constant, codegen replaces the entire instruction
+    // with a constant push — none of the inputs are read from the stack.
+    if out > 0 && matches!(output, Some(AbsValue::Const(_))) {
+        return;
+    }
+    // Mark inputs live, skipping positions whose values are known constants.
+    // Inline ops load constants via `operand_value_or_load`; builtin-delegated ops
+    // have their constant operands pre-written into the stack slots by `sp_after_inputs`.
+    // Both paths ensure the value is available at runtime, so const inputs can be
+    // killed for any opcode.
     for k in 0..inp {
+        // input_snap is in stack order: [deepest, ..., TOS].
+        if input_snap.get(k).is_some_and(|v| matches!(v, AbsValue::Const(_))) {
+            continue;
+        }
         live.set(h_before - inp + k, true);
     }
 }
@@ -300,14 +338,15 @@ fn all_outputs_dead(
             swap_all_dead(live, h_before, d as usize)
         }
         // DUP: only the new TOS is a real output.
-        (op::DUP1..=op::DUP16 | op::DUPN, _) => !live[h_before],
+        (op::DUP1..=op::DUP16, _) => !live[h_before],
+        (op::DUPN, Some(DecodedImm::Single(_))) => !live[h_before],
         // EXCHANGE: only the two exchanged non-TOS positions are written.
         (op::EXCHANGE, Some(DecodedImm::Pair(n, m))) if (m as usize) < h_before => {
             let tos = h_before - 1;
             !live[tos - n as usize] && !live[tos - m as usize]
         }
         // Infeasible immediates — conservatively not dead.
-        (op::SWAPN | op::EXCHANGE, _) => false,
+        (op::DUPN | op::SWAPN | op::EXCHANGE, _) => false,
         // Generic: all output positions must be dead.
         _ if out > 0 => {
             let write_base = h_before - inp;
@@ -390,9 +429,10 @@ mod tests {
             STOP
         ",
         );
+        // PUSH 1 feeds MSTORE's value input; known constant, so codegen pre-writes it.
         assert!(
-            !bytecode.inst(Inst::from_usize(0)).flags.contains(InstFlags::NOOP),
-            "PUSH 1 should NOT be skipped"
+            bytecode.inst(Inst::from_usize(0)).flags.contains(InstFlags::NOOP),
+            "PUSH 1 should be skipped (const input)"
         );
         assert!(
             bytecode.inst(Inst::from_usize(1)).flags.contains(InstFlags::NOOP),
@@ -420,7 +460,9 @@ mod tests {
     }
 
     #[test]
-    fn dup_keeps_source_live() {
+    fn dup_const_source_killed() {
+        // DUP copy is popped (dead), PUSH 0x42 feeds MSTORE which pre-writes
+        // constant operands, so the PUSH is dead.
         let bytecode = analyze_asm(
             "
             PUSH1 0x42
@@ -432,8 +474,8 @@ mod tests {
         ",
         );
         assert!(
-            !bytecode.inst(Inst::from_usize(0)).flags.contains(InstFlags::NOOP),
-            "PUSH should NOT be skipped"
+            bytecode.inst(Inst::from_usize(0)).flags.contains(InstFlags::NOOP),
+            "PUSH should be skipped (const input)"
         );
     }
 
@@ -683,15 +725,46 @@ mod tests {
 
     #[test]
     fn dupn_dead() {
-        // 1 × PUSH0, DUPN 17 (copies PUSH0), POP, POP, STOP — all dead.
-        let bytecode = with_prefix(1, &[op::DUPN, 0x00, op::POP, op::POP, op::STOP]);
+        // 17 × PUSH0, DUPN 17 (copies bottom), POP × 18, STOP — all dead.
+        let mut suffix = vec![op::DUPN, 0x00 /* DUPN imm=0x00 => depth 17 */];
+        suffix.extend(std::iter::repeat_n(op::POP, 18));
+        suffix.push(op::STOP);
+        let bytecode = with_prefix(17, &suffix);
+        for i in 0..17 {
+            assert!(
+                bytecode.inst(Inst::from_usize(i)).flags.contains(InstFlags::NOOP),
+                "PUSH0 at {i} should be skipped"
+            );
+        }
         assert!(
-            bytecode.inst(Inst::from_usize(0)).flags.contains(InstFlags::NOOP),
-            "PUSH0 should be skipped"
+            bytecode.inst(Inst::from_usize(17)).flags.contains(InstFlags::NOOP),
+            "DUPN should be skipped"
+        );
+    }
+
+    #[test]
+    fn dupn_invalid_imm_not_eliminated() {
+        // PUSH0, DUPN 0x5b (invalid immediate), POP, STOP.
+        // The invalid immediate must NOT be eliminated — it should fail at runtime.
+        let bytecode = analyze_code_spec(
+            vec![op::PUSH0, op::DUPN, 0x5b, op::POP, op::STOP],
+            SpecId::AMSTERDAM,
         );
         assert!(
+            !bytecode.inst(Inst::from_usize(1)).flags.contains(InstFlags::NOOP),
+            "DUPN with invalid immediate should NOT be skipped"
+        );
+    }
+
+    #[test]
+    fn dupn_underflow_still_eliminated() {
+        // 1 × PUSH0, DUPN 17 (depth=17 but only 1 literal push), POP, POP, STOP.
+        // Block analysis inflates stack_in to satisfy DUPN's real depth, so from DSE's
+        // perspective the immediate is valid and the instruction is eliminable.
+        let bytecode = with_prefix(1, &[op::DUPN, 0x00, op::POP, op::POP, op::STOP]);
+        assert!(
             bytecode.inst(Inst::from_usize(1)).flags.contains(InstFlags::NOOP),
-            "DUPN should be skipped"
+            "DUPN with valid immediate should be skipped when dead"
         );
     }
 
@@ -751,5 +824,169 @@ mod tests {
         // EXCHANGE 1,2 with only 1 item — infeasible depth must not panic analysis.
         let code = vec![op::PUSH0, op::EXCHANGE, 0x01, op::STOP];
         let _ = analyze_code_spec(code, SpecId::AMSTERDAM);
+    }
+
+    // --- Const-output dead store tests ---
+
+    #[test]
+    fn const_output_kills_all_inputs() {
+        // ADD(2, 3) = 5: const_output is Some, so ALL inputs are dead.
+        let bytecode = analyze_asm(
+            "
+            PUSH1 0x02      ; inst 0
+            PUSH1 0x03      ; inst 1
+            ADD             ; inst 2: folded to 5
+            PUSH0           ; inst 3
+            MSTORE          ; inst 4
+            STOP            ; inst 5
+        ",
+        );
+        for dead in [0, 1, 2, 3] {
+            assert!(bytecode.inst(Inst::from_usize(dead)).flags.contains(InstFlags::NOOP));
+        }
+        for not_dead in [4, 5] {
+            assert!(!bytecode.inst(Inst::from_usize(not_dead)).flags.contains(InstFlags::NOOP));
+        }
+    }
+
+    #[test]
+    fn const_output_chain() {
+        // Chained folds: ADD(2,3)=5 feeds MUL(5,4)=20.
+        // All four PUSHes and the ADD are dead.
+        let bytecode = analyze_asm(
+            "
+            PUSH1 0x02      ; inst 0
+            PUSH1 0x03      ; inst 1
+            ADD             ; inst 2: folded to 5
+            PUSH1 0x04      ; inst 3
+            MUL             ; inst 4: folded to 20
+            PUSH0           ; inst 5
+            MSTORE          ; inst 6
+            STOP            ; inst 7
+        ",
+        );
+        for (i, name) in [(0, "PUSH 2"), (1, "PUSH 3"), (2, "ADD"), (3, "PUSH 4")] {
+            assert!(
+                bytecode.inst(Inst::from_usize(i)).flags.contains(InstFlags::NOOP),
+                "{name} should be skipped"
+            );
+        }
+    }
+
+    #[test]
+    fn const_input_add_dynamic() {
+        // ADD(dynamic, 1): PUSH 1 is dead because ADD uses inline codegen (popn).
+        let bytecode = analyze_asm(
+            "
+            PUSH0           ; inst 0: offset for CALLDATALOAD
+            CALLDATALOAD    ; inst 1: dynamic value
+            PUSH1 0x01      ; inst 2: constant addend
+            ADD             ; inst 3: dynamic + 1
+            PUSH0           ; inst 4
+            MSTORE          ; inst 5
+            STOP            ; inst 6
+        ",
+        );
+        assert!(
+            bytecode.inst(Inst::from_usize(2)).flags.contains(InstFlags::NOOP),
+            "PUSH 1 (addend) should be skipped (const input)"
+        );
+        assert!(
+            !bytecode.inst(Inst::from_usize(1)).flags.contains(InstFlags::NOOP),
+            "CALLDATALOAD should NOT be skipped"
+        );
+    }
+
+    #[test]
+    fn const_input_add_zero() {
+        // ADD(dynamic, 0): PUSH0 feeds the constant 0 input.
+        let bytecode = analyze_asm(
+            "
+            PUSH0           ; inst 0: offset for CALLDATALOAD
+            CALLDATALOAD    ; inst 1: dynamic value
+            PUSH0           ; inst 2: constant 0
+            ADD             ; inst 3: dynamic + 0
+            PUSH0           ; inst 4
+            MSTORE          ; inst 5
+            STOP            ; inst 6
+        ",
+        );
+        assert!(
+            bytecode.inst(Inst::from_usize(2)).flags.contains(InstFlags::NOOP),
+            "PUSH0 (addend) should be skipped (const input)"
+        );
+        assert!(
+            !bytecode.inst(Inst::from_usize(1)).flags.contains(InstFlags::NOOP),
+            "CALLDATALOAD should NOT be skipped"
+        );
+    }
+
+    #[test]
+    fn const_input_both_sides() {
+        // ADD(0, dynamic): constant on the deeper side.
+        let bytecode = analyze_asm(
+            "
+            PUSH0           ; inst 0: constant 0 (deeper input to ADD)
+            PUSH0           ; inst 1: offset for CALLDATALOAD
+            CALLDATALOAD    ; inst 2: dynamic value (TOS input to ADD)
+            ADD             ; inst 3: 0 + dynamic
+            PUSH0           ; inst 4
+            MSTORE          ; inst 5
+            STOP            ; inst 6
+        ",
+        );
+        assert!(
+            bytecode.inst(Inst::from_usize(0)).flags.contains(InstFlags::NOOP),
+            "PUSH0 (deeper const input) should be skipped"
+        );
+        assert!(
+            !bytecode.inst(Inst::from_usize(2)).flags.contains(InstFlags::NOOP),
+            "CALLDATALOAD should NOT be skipped"
+        );
+    }
+
+    #[test]
+    fn builtin_const_input_killed() {
+        // DIV(dynamic, 2): PUSH 2 feeds the divisor. DIV delegates to a builtin
+        // (sp_after_inputs), but codegen pre-writes constant operands into the stack
+        // slots, so DSE can safely kill the PUSH.
+        let bytecode = analyze_asm(
+            "
+            PUSH0           ; inst 0: offset for CALLDATALOAD
+            CALLDATALOAD    ; inst 1: dynamic value
+            PUSH1 0x02      ; inst 2: constant divisor
+            DIV             ; inst 3: dynamic / 2
+            PUSH0           ; inst 4
+            MSTORE          ; inst 5
+            STOP            ; inst 6
+        ",
+        );
+        assert!(
+            bytecode.inst(Inst::from_usize(2)).flags.contains(InstFlags::NOOP),
+            "PUSH 2 (divisor) should be skipped (builtin const input)"
+        );
+        assert!(
+            !bytecode.inst(Inst::from_usize(1)).flags.contains(InstFlags::NOOP),
+            "CALLDATALOAD should NOT be skipped"
+        );
+    }
+
+    #[test]
+    fn sload_const_input_killed() {
+        // SLOAD's input is a known constant — codegen pre-writes it via sp_after_inputs,
+        // so the PUSH is dead.
+        let bytecode = analyze_asm(
+            "
+            PUSH1 0x00      ; inst 0: storage key
+            SLOAD           ; inst 1: read storage
+            PUSH0           ; inst 2
+            MSTORE          ; inst 3
+            STOP            ; inst 4
+        ",
+        );
+        assert!(
+            bytecode.inst(Inst::from_usize(0)).flags.contains(InstFlags::NOOP),
+            "PUSH 0 should be skipped (const input)"
+        );
     }
 }

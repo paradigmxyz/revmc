@@ -1306,8 +1306,8 @@ impl Builder for EvmLlvmBuilder<'_> {
     }
 
     fn iconst_256(&mut self, value: U256) -> Self::Value {
-        if value == U256::ZERO {
-            return self.ty_i256.const_zero().into();
+        if let Ok(low) = value.try_into() {
+            return self.ty_i256.const_int(low, false).into();
         }
 
         self.scratch.clear();

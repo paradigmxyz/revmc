@@ -49,14 +49,6 @@ type Incoming<B> = Vec<(<B as BackendTypes>::Value, <B as BackendTypes>::BasicBl
 #[allow(dead_code)]
 type SwitchTargets<B> = Vec<(u64, <B as BackendTypes>::BasicBlock)>;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ResumeKind {
-    /// Use `indirectbr`.
-    Blocks,
-    /// Use a switch over `0..N`.
-    Indexes,
-}
-
 pub(super) struct FunctionCx<'a, B: Backend> {
     // Configuration.
     config: FcxConfig,
@@ -65,7 +57,6 @@ pub(super) struct FunctionCx<'a, B: Backend> {
     pub(super) bcx: B::Builder<'a>,
 
     // Common types.
-    ptr_type: B::Type,
     isize_type: B::Type,
     pub(super) word_type: B::Type,
     address_type: B::Type,
@@ -124,8 +115,6 @@ pub(super) struct FunctionCx<'a, B: Backend> {
     /// The return block that all return instructions branch to.
     return_block: Option<B::BasicBlock>,
 
-    /// The kind of resume mechanism to use.
-    resume_kind: ResumeKind,
     /// `resume_block` switch values.
     resume_blocks: Vec<B::BasicBlock>,
     /// `suspend_block` incoming values.
@@ -207,7 +196,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         }
 
         // Get common types.
-        let ptr_type = bcx.type_ptr();
         let isize_type = bcx.type_ptr_sized_int();
         let i8_type = bcx.type_int(8);
         let i64_type = bcx.type_int(64);
@@ -275,7 +263,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let mut fx = FunctionCx {
             config,
 
-            ptr_type,
             isize_type,
             word_type,
             address_type,
@@ -305,7 +292,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             incoming_returns: Vec::new(),
             return_block: Some(return_block),
 
-            resume_kind: ResumeKind::Indexes,
             resume_blocks: Vec::new(),
             suspend_blocks: Vec::new(),
             suspend_block,
@@ -411,11 +397,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 )
             };
 
-            let kind = fx.resume_kind;
-            let resume_ty = match kind {
-                ResumeKind::Blocks => fx.ptr_type,
-                ResumeKind::Indexes => fx.isize_type,
-            };
+            let resume_ty = fx.isize_type;
 
             // Resume block: load the `resume_at` value and switch to the corresponding block.
             // Invalid values are treated as unreachable.
@@ -426,10 +408,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 fx.bcx.switch_to_block(post_entry_block);
                 let resume_at = get_ecx_resume_at_ptr(&mut fx);
                 let resume_at = fx.bcx.load_aligned(resume_ty, resume_at, 1, "ecx.resume_at");
-                let no_resume = match kind {
-                    ResumeKind::Blocks => fx.bcx.is_null(resume_at),
-                    ResumeKind::Indexes => fx.bcx.icmp_imm(IntCC::Equal, resume_at, 0),
-                };
+                let no_resume = fx.bcx.icmp_imm(IntCC::Equal, resume_at, 0);
                 fx.bcx.brif(no_resume, no_resume_block, resume_block);
 
                 fx.bcx.switch_to_block(no_resume_block);
@@ -441,25 +420,18 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 let stack_len = fx.bcx.load(fx.isize_type, stack_len_arg, "stack_len");
                 fx.stack_len.store(&mut fx.bcx, stack_len);
                 fx.copy_stack_from_arg(stack_len);
-                match kind {
-                    ResumeKind::Blocks => {
-                        fx.bcx.br_indirect(resume_at, &fx.resume_blocks);
-                    }
-                    ResumeKind::Indexes => {
-                        let default = fx.bcx.create_block_after(resume_block, "resume_invalid");
-                        fx.bcx.switch_to_block(default);
-                        fx.call_panic("invalid `resume_at` value");
+                let default = fx.bcx.create_block_after(resume_block, "resume_invalid");
+                fx.bcx.switch_to_block(default);
+                fx.call_panic("invalid `resume_at` value");
 
-                        fx.bcx.switch_to_block(resume_block);
-                        let targets = fx
-                            .resume_blocks
-                            .iter()
-                            .enumerate()
-                            .map(|(i, b)| (i as u64 + 1, *b))
-                            .collect::<Vec<_>>();
-                        fx.bcx.switch(resume_at, default, &targets, true);
-                    }
-                }
+                fx.bcx.switch_to_block(resume_block);
+                let targets = fx
+                    .resume_blocks
+                    .iter()
+                    .enumerate()
+                    .map(|(i, b)| (i as u64 + 1, *b))
+                    .collect::<Vec<_>>();
+                fx.bcx.switch(resume_at, default, &targets, true);
             }
 
             // Suspend block: store the `resume_at` value and return `Stop`.
@@ -669,7 +641,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             self.section_len_offset += diff;
             goto_return!("noop");
         }
-        if diff != 0 {
+        if diff != 0 || self.section_len_offset != 0 {
             let len_changed = self.bcx.iadd_imm(self.len_before, diff as i64);
             self.stack_len.store(&mut self.bcx, len_changed);
         }
@@ -1067,30 +1039,21 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             }
 
             op::DUP1..=op::DUP16 => self.dup((opcode - op::DUP1 + 1) as usize),
-            op::DUPN => {
-                let imm = self.bytecode.get_imm(data).map(|b| b[0]);
-                match imm.and_then(decode_single) {
-                    Some(n) => self.dup(n as usize),
-                    None => goto_return!(fail InstructionResult::InvalidImmediateEncoding),
-                }
-            }
+            op::DUPN => match decode_single(self.bytecode.get_u8_imm(data)) {
+                Some(n) => self.dup(n as usize),
+                None => goto_return!(fail InstructionResult::InvalidImmediateEncoding),
+            },
 
             op::SWAP1..=op::SWAP16 => self.swap((opcode - op::SWAP1 + 1) as usize),
-            op::SWAPN => {
-                let imm = self.bytecode.get_imm(data).map(|b| b[0]);
-                match imm.and_then(decode_single) {
-                    Some(n) => self.swap(n as usize),
-                    None => goto_return!(fail InstructionResult::InvalidImmediateEncoding),
-                }
-            }
+            op::SWAPN => match decode_single(self.bytecode.get_u8_imm(data)) {
+                Some(n) => self.swap(n as usize),
+                None => goto_return!(fail InstructionResult::InvalidImmediateEncoding),
+            },
 
-            op::EXCHANGE => {
-                let imm = self.bytecode.get_imm(data).map(|b| b[0]);
-                match imm.and_then(decode_pair) {
-                    Some((n, m)) => self.exchange(n as usize, (m - n) as usize),
-                    None => goto_return!(fail InstructionResult::InvalidImmediateEncoding),
-                }
-            }
+            op::EXCHANGE => match decode_pair(self.bytecode.get_u8_imm(data)) {
+                Some((n, m)) => self.exchange(n as usize, (m - n) as usize),
+                None => goto_return!(fail InstructionResult::InvalidImmediateEncoding),
+            },
 
             op::LOG0..=op::LOG4 => {
                 let n = opcode - op::LOG0;
@@ -1257,28 +1220,19 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     fn suspend(&mut self) {
         // Register the next instruction as the resume block.
         let idx = self.resume_blocks.len();
-        let value = self.add_resume_at(self.inst_entries[self.current_inst.unwrap() + 1]);
+        self.add_resume_at(self.inst_entries[self.current_inst.unwrap() + 1]);
 
         // Register the current block as the suspend block.
-        let value = match value {
-            Some(value) => value,
-            None => self.bcx.iconst(self.isize_type, idx as i64 + 1),
-        };
+        let value = self.bcx.iconst(self.isize_type, idx as i64 + 1);
         self.suspend_blocks.push((value, self.bcx.current_block().unwrap()));
 
         // Branch to the suspend block.
         self.bcx.br(self.suspend_block);
     }
 
-    /// Adds a resume point and returns its index.
-    fn add_resume_at(&mut self, block: B::BasicBlock) -> Option<B::Value> {
-        let value = self.bcx.block_addr(block);
-        if self.resume_blocks.is_empty() && self.resume_kind == ResumeKind::Indexes {
-            self.resume_kind =
-                if value.is_some() { ResumeKind::Blocks } else { ResumeKind::Indexes };
-        }
+    /// Adds a resume point.
+    fn add_resume_at(&mut self, block: B::BasicBlock) {
         self.resume_blocks.push(block);
-        value
     }
 
     /// Loads the word at the given pointer.
@@ -1355,9 +1309,28 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
     /// Returns the stack pointer after the input has been popped
     /// (`&stack[stack.len - op.input()]`).
+    ///
+    /// For any input whose value is a known constant, the constant is written into the
+    /// corresponding stack slot. This allows DSE to NOOP the producing PUSH even for
+    /// builtin-delegated opcodes that read operands directly from the stack pointer.
     fn sp_after_inputs(&mut self) -> B::Value {
+        let inst = self.current_inst.unwrap();
         let (inputs, _) = self.current_inst().stack_io();
-        self.sp_from_section(self.section_len_offset as i64 - inputs as i64)
+        let sp = self.sp_from_section(self.section_len_offset as i64 - inputs as i64);
+        for depth in 0..inputs as usize {
+            if let Some(c) = self.bytecode.const_operand(inst, depth) {
+                let value = self.bcx.iconst_256(c);
+                let slot_offset = (inputs as usize - 1 - depth) as i64;
+                let slot = if slot_offset == 0 {
+                    sp
+                } else {
+                    let offset = self.bcx.iconst(self.isize_type, slot_offset);
+                    self.bcx.gep(self.word_type, sp, &[offset], "sp.const")
+                };
+                self.bcx.store(value, slot);
+            }
+        }
+        sp
     }
 
     /// Returns a stack pointer offset from `section_start_sp`.
