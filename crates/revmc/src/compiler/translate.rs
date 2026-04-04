@@ -1283,6 +1283,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     /// On little-endian the low 160 bits sit at byte offset 0, so a direct
     /// `load i160` + `zext i256` gives LLVM a typed narrow load — no AND needed
     /// to prove the high 96 bits are zero.
+    #[allow(clippy::assertions_on_constants)]
     fn narrow_to_address(&mut self, slot: B::Value) {
         debug_assert!(cfg!(target_endian = "little"), "big-endian not yet supported");
         let value = self.bcx.load(self.address_type, slot, "address");
