@@ -73,21 +73,6 @@ impl<'a> Bytecode<'a> {
                     self.redirects.insert(inst, target);
                 }
             }
-            // Compress redirect chains so that earlier redirects (e.g. t2 -> t1) are
-            // updated when their target gets deduped in a later round (t1 -> t0).
-            // Without this, rebuild_cfg resolves edges only one hop, leaving stale
-            // intermediate targets in DedupKey.succs (preventing valid merges) and
-            // in translate.rs inst_entries (causing InvalidJump on valid bytecode).
-            for inst in self.redirects.keys().copied().collect::<Vec<_>>() {
-                let mut target = self.redirects[&inst];
-                let original = target;
-                while let Some(&next) = self.redirects.get(&target) {
-                    target = next;
-                }
-                if target != original {
-                    self.redirects.insert(inst, target);
-                }
-            }
             self.rebuild_cfg();
         }
         debug!(deduped = total_deduped, "finished");
