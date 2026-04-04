@@ -899,10 +899,8 @@ impl Bytecode<'_> {
                     stack.push(AbsValue::Const(self.intern_u256(U256::ZERO)));
                 }
                 op::PUSH1..=op::PUSH32 => {
-                    let val = self.get_imm(inst).map_or(AbsValue::Top, |imm| {
-                        AbsValue::Const(self.intern_u256(U256::from_be_slice(imm)))
-                    });
-                    stack.push(val);
+                    let value = self.get_push_value(inst);
+                    stack.push(AbsValue::Const(self.intern_u256(value)));
                 }
                 op::POP => {
                     if stack.pop().is_none() {
@@ -1075,7 +1073,7 @@ pub(crate) mod tests {
         crate::tests::init_tracing();
 
         eprintln!("{}", hex::encode(&code));
-        let mut bytecode = Bytecode::new(code, SpecId::CANCUN, None);
+        let mut bytecode = Bytecode::test(code);
         bytecode.config = config;
         bytecode.analyze().unwrap();
         eprintln!("{bytecode}");
@@ -1512,7 +1510,7 @@ pub(crate) mod tests {
             include_str!("../../../../../data/hash_10k.rt.hex").trim(),
         )
         .unwrap();
-        let mut bytecode = Bytecode::new(code, SpecId::CANCUN, None);
+        let mut bytecode = Bytecode::test(code);
         bytecode.analyze().unwrap();
         assert!(!bytecode.has_dynamic_jumps, "expected all jumps to be resolved");
     }

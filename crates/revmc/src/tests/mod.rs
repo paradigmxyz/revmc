@@ -447,6 +447,29 @@ tests! {
             expected_gas: GAS_WHAT_INTERPRETER_SAYS,
         }),
 
+        // Truncated PUSH2 at EOF: only 1 of 2 immediate bytes present.
+        // EVM spec right-pads with zeros: PUSH2 0x42 → 0x4200.
+        push2_truncated_eof(@raw {
+            bytecode: &[op::PUSH2, 0x42],
+            expected_return: RETURN_WHAT_INTERPRETER_SAYS,
+            expected_stack: &[U256::from(0x4200u64)],
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+        }),
+        // Truncated PUSH3 at EOF: only 2 of 3 immediate bytes present.
+        push3_truncated_eof(@raw {
+            bytecode: &[op::PUSH3, 0xAB, 0xCD],
+            expected_return: RETURN_WHAT_INTERPRETER_SAYS,
+            expected_stack: &[U256::from(0xABCD00u64)],
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+        }),
+        // PUSH1 with no immediate bytes at all.
+        push1_no_imm_eof(@raw {
+            bytecode: &[op::PUSH1],
+            expected_return: RETURN_WHAT_INTERPRETER_SAYS,
+            expected_stack: &[U256::ZERO],
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+        }),
+
         overflow_analysis_edge_case(@raw {
             bytecode: &[&[op::JUMPDEST][..], &[op::PUSH0; 1025][..], &[op::JUMPI][..]].concat(),
             expected_return: InstructionResult::StackOverflow,

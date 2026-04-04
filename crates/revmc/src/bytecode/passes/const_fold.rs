@@ -204,7 +204,7 @@ mod tests {
         passes::block_analysis::tests::{Inst, analyze_asm},
     };
     use revm_bytecode::opcode::OpCode;
-    use revm_primitives::{U256, hardfork::SpecId};
+    use revm_primitives::U256;
     use std::{fmt::Write, time::Instant};
 
     /// Builds bytecode that pushes operands, executes `opcode`, sinks the result
@@ -447,7 +447,7 @@ mod tests {
 
         let code = build_exp_bomb(500);
         let start = Instant::now();
-        let mut bytecode = Bytecode::new(code, SpecId::CANCUN, None);
+        let mut bytecode = Bytecode::test(code);
         bytecode.analyze().unwrap();
         let elapsed = start.elapsed();
 
@@ -482,13 +482,13 @@ mod tests {
 
         // With default (100k) gas limit.
         let start_limited = Instant::now();
-        let mut limited = Bytecode::new(code.clone(), SpecId::CANCUN, None);
+        let mut limited = Bytecode::test(code.clone());
         limited.analyze().unwrap();
         let elapsed_limited = start_limited.elapsed();
 
         // With unlimited gas.
         let start_unlimited = Instant::now();
-        let mut unlimited = Bytecode::new(code, SpecId::CANCUN, None);
+        let mut unlimited = Bytecode::test(code);
         unlimited.compiler_gas_limit = u64::MAX;
         unlimited.analyze().unwrap();
         let elapsed_unlimited = start_unlimited.elapsed();
@@ -522,7 +522,7 @@ mod tests {
 
         let code = crate::parse_asm(&src).unwrap();
         let start = Instant::now();
-        let mut bytecode = Bytecode::new(code, SpecId::CANCUN, None);
+        let mut bytecode = Bytecode::test(code);
         bytecode.analyze().unwrap();
         let elapsed = start.elapsed();
 
@@ -537,7 +537,7 @@ mod tests {
 
         let src = "PUSH 2\nPUSH 3\nADD\nPUSH0\nMSTORE\nSTOP\n";
         let code = crate::parse_asm(src).unwrap();
-        let mut bytecode = Bytecode::new(code, SpecId::CANCUN, None);
+        let mut bytecode = Bytecode::test(code);
         bytecode.compiler_gas_limit = 0;
         bytecode.analyze().unwrap();
 
@@ -555,7 +555,7 @@ mod tests {
 
         let src = "PUSH 2\nPUSH 3\nADD\nPUSH0\nMSTORE\nSTOP\n";
         let code = crate::parse_asm(src).unwrap();
-        let mut bytecode = Bytecode::new(code, SpecId::CANCUN, None);
+        let mut bytecode = Bytecode::test(code);
         bytecode.compiler_gas_limit = u64::MAX;
         bytecode.analyze().unwrap();
 

@@ -141,6 +141,11 @@ impl<'a> Bytecode<'a> {
         Self::new_mono(code.into(), spec_id, gas_params)
     }
 
+    #[cfg(test)]
+    pub(crate) fn test(code: impl Into<Cow<'a, [u8]>>) -> Self {
+        Self::new(code, crate::tests::DEF_SPEC, None)
+    }
+
     #[instrument(name = "Bytecode::new", level = "debug", skip_all)]
     fn new_mono(code: Cow<'a, [u8]>, spec_id: SpecId, gas_params: Option<GasParams>) -> Self {
         let gas_params = gas_params.unwrap_or_else(|| GasParams::new_spec(spec_id));
@@ -375,14 +380,38 @@ impl<'a> Bytecode<'a> {
     }
 
     /// Returns the immediate value of the given instruction data, if any.
-    /// Returns `None` if out of bounds too.
+    ///
+    /// For truncated immediates at EOF, returns the available bytes (which may be shorter than
+    /// `imm_len`). Returns `None` only when `imm_len` is 0 or `start` is completely out of bounds.
     pub(crate) fn get_imm(&self, data: &InstData) -> Option<&[u8]> {
         let imm_len = data.imm_len() as usize;
         if imm_len == 0 {
             return None;
         }
         let start = data.pc as usize + 1;
-        self.code.get(start..start + imm_len)
+        let end = (start + imm_len).min(self.code.len());
+        if start >= end {
+            return None;
+        }
+        Some(&self.code[start..end])
+    }
+
+    /// Returns the value of a PUSH instruction, right-padding truncated EOF immediates with zeros
+    /// per EVM spec.
+    pub(crate) fn get_push_value(&self, data: &InstData) -> U256 {
+        match self.get_imm(data) {
+            Some(slice) => {
+                let imm_len = data.imm_len() as usize;
+                if slice.len() == imm_len {
+                    U256::from_be_slice(slice)
+                } else {
+                    let mut padded = [0u8; 32];
+                    padded[..slice.len()].copy_from_slice(slice);
+                    U256::from_be_slice(&padded[..imm_len])
+                }
+            }
+            None => U256::ZERO,
+        }
     }
 
     /// Returns the first immediate byte, defaulting to `0` if truncated or missing.
@@ -694,5 +723,36 @@ mod tests {
     #[test]
     fn test_suspend_is_free() {
         assert_eq!(OPCODE_INFO[TEST_SUSPEND as usize], None);
+    }
+
+    #[test]
+    fn truncated_push_imm_right_pads_with_zeros() {
+        // PUSH2 followed by a single byte 0x42 — truncated at EOF.
+        // EVM spec: missing bytes are zero, so the value is 0x4200.
+        let code = [op::PUSH2, 0x42];
+        let bc = Bytecode::test(&code);
+        let data = bc.inst(Inst::from_usize(0));
+        assert_eq!(bc.get_imm(data), Some([0x42].as_slice()));
+        assert_eq!(bc.get_push_value(data), U256::from(0x4200));
+
+        // PUSH3 followed by two bytes — truncated at EOF.
+        let code = [op::PUSH3, 0xAB, 0xCD];
+        let bc = Bytecode::test(&code);
+        let data = bc.inst(Inst::from_usize(0));
+        assert_eq!(bc.get_imm(data), Some([0xAB, 0xCD].as_slice()));
+        assert_eq!(bc.get_push_value(data), U256::from(0xABCD00));
+
+        // PUSH1 with no immediate bytes at all.
+        let code = [op::PUSH1];
+        let bc = Bytecode::test(&code);
+        let data = bc.inst(Inst::from_usize(0));
+        assert_eq!(bc.get_imm(data), None);
+        assert_eq!(bc.get_push_value(data), U256::ZERO);
+
+        // Non-truncated PUSH2 — full immediate.
+        let code = [op::PUSH2, 0x42, 0xFF];
+        let bc = Bytecode::test(&code);
+        let data = bc.inst(Inst::from_usize(0));
+        assert_eq!(bc.get_push_value(data), U256::from(0x42FF));
     }
 }
