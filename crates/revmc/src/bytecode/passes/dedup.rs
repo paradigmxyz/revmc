@@ -11,17 +11,23 @@ use oxc_index::IndexVec;
 use revm_bytecode::opcode as op;
 use smallvec::SmallVec;
 
-/// Dedup key: raw bytecode bytes plus CFG successor blocks.
+/// Dedup key: raw bytecode bytes, CFG successor blocks, and terminator jump kind.
 ///
 /// Raw bytes alone are insufficient for JUMP-terminated blocks because block analysis
 /// may resolve byte-identical copies to different static targets depending on incoming
 /// stack context (e.g. different return-address values).
+///
+/// The `is_multi_jump` discriminator prevents MULTI_JUMP dispatcher blocks from
+/// colliding with STATIC_JUMP blocks that happen to share the same bytes and
+/// successor set.
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct DedupKey<'a> {
     bytes: &'a [u8],
     /// CFG successors for this block. Two byte-identical blocks are only merged when
     /// their successor sets also match.
     succs: SmallVec<[Block; 4]>,
+    /// Whether the block's terminator is a MULTI_JUMP.
+    is_multi_jump: bool,
 }
 
 impl<'a> Bytecode<'a> {
@@ -51,6 +57,19 @@ impl<'a> Bytecode<'a> {
             total_deduped += deduped;
             if deduped == 0 {
                 break;
+            }
+            // Flatten redirect chains so that earlier redirects (A -> B) are
+            // updated when B itself gets deduped to C in a later round.
+            let keys: SmallVec<[Inst; 16]> = self.redirects.keys().copied().collect();
+            for key in keys {
+                let mut target = self.redirects[&key];
+                while let Some(&next) = self.redirects.get(&target) {
+                    if next == target {
+                        break;
+                    }
+                    target = next;
+                }
+                self.redirects.insert(key, target);
             }
             self.rebuild_cfg();
         }
@@ -98,8 +117,9 @@ impl<'a> Bytecode<'a> {
                 continue;
             }
 
+            let is_multi_jump = term.flags.contains(InstFlags::MULTI_JUMP);
             key_to_blocks
-                .entry(DedupKey { bytes, succs: block.succs.clone() })
+                .entry(DedupKey { bytes, succs: block.succs.clone(), is_multi_jump })
                 .or_default()
                 .push(bid);
         }
