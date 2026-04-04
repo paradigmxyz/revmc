@@ -90,6 +90,8 @@ pub fn memory_gas_cost(num_words: usize) -> u64 {
 pub struct TestCase<'a> {
     pub bytecode: &'a [u8],
     pub spec_id: SpecId,
+    pub is_static: bool,
+    pub gas_limit: u64,
 
     pub modify_ecx: Option<fn(&mut EvmContext<'_>)>,
 
@@ -119,6 +121,8 @@ impl Default for TestCase<'_> {
         Self {
             bytecode: &[],
             spec_id: DEF_SPEC,
+            is_static: false,
+            gas_limit: DEF_GAS_LIMIT,
             modify_ecx: None,
             expected_return: InstructionResult::Stop,
             expected_stack: &[],
@@ -153,6 +157,8 @@ impl<'a> TestCase<'a> {
         Self {
             bytecode,
             spec_id,
+            is_static: false,
+            gas_limit: DEF_GAS_LIMIT,
             modify_ecx: None,
             expected_return: RETURN_WHAT_INTERPRETER_SAYS,
             expected_stack: STACK_WHAT_INTERPRETER_SAYS,
@@ -465,6 +471,8 @@ fn run_compiled_test_case(test_case: &TestCase<'_>, f: EvmCompilerFn) {
     let TestCase {
         bytecode,
         spec_id,
+        is_static,
+        gas_limit,
         modify_ecx,
         expected_return,
         expected_stack,
@@ -476,6 +484,12 @@ fn run_compiled_test_case(test_case: &TestCase<'_>, f: EvmCompilerFn) {
     } = *test_case;
 
     with_evm_context(bytecode, spec_id, |ecx, stack, stack_len| {
+        if is_static {
+            ecx.is_static = true;
+        }
+        if gas_limit != DEF_GAS_LIMIT {
+            *ecx.gas = Gas::new(gas_limit);
+        }
         if let Some(modify_ecx) = modify_ecx {
             modify_ecx(ecx);
         }
@@ -494,9 +508,9 @@ fn run_compiled_test_case(test_case: &TestCase<'_>, f: EvmCompilerFn) {
             SharedMemory::new(),
             ext_bytecode,
             input,
-            false,
+            is_static,
             spec_id,
-            DEF_GAS_LIMIT,
+            gas_limit,
         );
 
         let table = instruction_table_gas_changes_spec::<
