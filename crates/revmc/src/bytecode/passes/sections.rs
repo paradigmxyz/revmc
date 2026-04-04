@@ -275,3 +275,48 @@ fn exp_dynamic_gas(exponent: U256, spec_id: SpecId) -> u64 {
     let byte_len = (255 - exponent.leading_zeros() as u64) / 8 + 1;
     exp_byte_gas * byte_len
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bytecode::{Inst, passes::block_analysis::tests::analyze_asm};
+
+    /// Returns the gas section cost for the first non-dead instruction (the section head).
+    fn section_gas(src: &str) -> u32 {
+        let bytecode = analyze_asm(src);
+        bytecode.inst(Inst::from_usize(0)).gas_section.gas_cost
+    }
+
+    /// EXP with an asymmetric base/exponent: base is 1 byte (2), exponent is 2 bytes (256).
+    /// If the wrong operand were used for gas, the dynamic cost would be 50*1=50 instead of
+    /// 50*2=100, and the total would differ.
+    #[test]
+    fn exp_folded_gas_uses_exponent_not_base() {
+        // PUSH 256, PUSH 2, EXP, PUSH0, MSTORE, STOP
+        // Gas: PUSH(3) + PUSH(3) + EXP_base(10) + EXP_dynamic(50*2=100) + PUSH0(2) + MSTORE(3) +
+        // STOP(0)    = 3 + 3 + 10 + 100 + 2 + 3 + 0 = 121
+        let gas = section_gas("PUSH 256 PUSH 2 EXP PUSH0 MSTORE STOP");
+        assert_eq!(gas, 121, "dynamic gas must use exponent (256=2 bytes), not base (2=1 byte)");
+    }
+
+    /// EXP with zero exponent has no dynamic gas.
+    #[test]
+    fn exp_folded_gas_zero_exponent() {
+        // PUSH0(2) + PUSH(3) + EXP_base(10) + EXP_dynamic(0) + PUSH0(2) + MSTORE(3) + STOP(0) = 20
+        let gas = section_gas("PUSH 0 PUSH 2 EXP PUSH0 MSTORE STOP");
+        assert_eq!(gas, 20, "zero exponent should have no dynamic gas");
+    }
+
+    /// EXP with max exponent (32 bytes).
+    #[test]
+    fn exp_folded_gas_max_exponent() {
+        // PUSH U256::MAX (32 bytes), PUSH 2, EXP, PUSH0, MSTORE, STOP
+        // Gas: PUSH(3) + PUSH(3) + EXP_base(10) + EXP_dynamic(50*32=1600) + PUSH0(2) + MSTORE(3) +
+        // STOP(0)    = 3 + 3 + 10 + 1600 + 2 + 3 + 0 = 1621
+        let gas = section_gas(
+            "PUSH 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff \
+             PUSH 2 EXP PUSH0 MSTORE STOP",
+        );
+        assert_eq!(gas, 1621, "max exponent should cost 50*32=1600 dynamic gas");
+    }
+}
