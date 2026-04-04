@@ -194,9 +194,13 @@ pub(crate) fn try_const_fold(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bytecode::passes::block_analysis::tests::{Inst, analyze_asm};
+    use crate::bytecode::{
+        Bytecode,
+        passes::block_analysis::tests::{Inst, analyze_asm},
+    };
     use revm_bytecode::opcode::OpCode;
-    use revm_primitives::U256;
+    use revm_primitives::{U256, hardfork::SpecId};
+    use std::{fmt::Write, time::Instant};
 
     /// Builds bytecode that pushes operands, executes `opcode`, sinks the result
     /// with `PUSH0 MSTORE STOP`, analyzes it, and returns the folded result.
@@ -419,7 +423,6 @@ mod tests {
 
     /// Builds bytecode for N repetitions of `PUSH U256::MAX, PUSH U256::MAX, EXP, POP`.
     fn build_exp_bomb(n: usize) -> Vec<u8> {
-        use std::fmt::Write;
         let mut src = String::new();
         for _ in 0..n {
             writeln!(src, "PUSH {}", U256::MAX).unwrap();
@@ -435,14 +438,11 @@ mod tests {
     /// The gas limit must prevent the compiler from spending unbounded time on these.
     #[test]
     fn compiler_gas_limit_exp_bomb() {
-        use crate::bytecode::Bytecode;
-        use std::time::Instant;
-
         crate::tests::init_tracing();
 
         let code = build_exp_bomb(500);
         let start = Instant::now();
-        let mut bytecode = Bytecode::new(code, revm_primitives::hardfork::SpecId::CANCUN);
+        let mut bytecode = Bytecode::new(code, SpecId::CANCUN);
         bytecode.analyze().unwrap();
         let elapsed = start.elapsed();
 
@@ -459,9 +459,6 @@ mod tests {
     /// Adversarial input: thousands of cheap EXP to exhaust gas via volume.
     #[test]
     fn compiler_gas_limit_cheap_exp_volume() {
-        use crate::bytecode::Bytecode;
-        use std::{fmt::Write, time::Instant};
-
         crate::tests::init_tracing();
 
         // 20K repetitions of EXP(base, small_exponent) — cheap per-op but high volume.
@@ -476,7 +473,7 @@ mod tests {
 
         let code = crate::parse_asm(&src).unwrap();
         let start = Instant::now();
-        let mut bytecode = Bytecode::new(code, revm_primitives::hardfork::SpecId::CANCUN);
+        let mut bytecode = Bytecode::new(code, SpecId::CANCUN);
         bytecode.analyze().unwrap();
         let elapsed = start.elapsed();
 
@@ -487,13 +484,11 @@ mod tests {
     /// Verify that setting compiler_gas_limit to 0 disables constant folding entirely.
     #[test]
     fn compiler_gas_limit_zero_disables_folding() {
-        use crate::bytecode::Bytecode;
-
         crate::tests::init_tracing();
 
         let src = "PUSH 2\nPUSH 3\nADD\nPUSH0\nMSTORE\nSTOP\n";
         let code = crate::parse_asm(src).unwrap();
-        let mut bytecode = Bytecode::new(code, revm_primitives::hardfork::SpecId::CANCUN);
+        let mut bytecode = Bytecode::new(code, SpecId::CANCUN);
         bytecode.compiler_gas_limit = 0;
         bytecode.analyze().unwrap();
 
@@ -507,13 +502,11 @@ mod tests {
     /// Verify that a very large gas limit allows all folding to proceed.
     #[test]
     fn compiler_gas_limit_unlimited() {
-        use crate::bytecode::Bytecode;
-
         crate::tests::init_tracing();
 
         let src = "PUSH 2\nPUSH 3\nADD\nPUSH0\nMSTORE\nSTOP\n";
         let code = crate::parse_asm(src).unwrap();
-        let mut bytecode = Bytecode::new(code, revm_primitives::hardfork::SpecId::CANCUN);
+        let mut bytecode = Bytecode::new(code, SpecId::CANCUN);
         bytecode.compiler_gas_limit = u64::MAX;
         bytecode.analyze().unwrap();
 
