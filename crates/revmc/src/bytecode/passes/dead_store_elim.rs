@@ -101,30 +101,14 @@ impl Bytecode<'_> {
                 };
 
                 // Check if all outputs are dead and the instruction can be turned into a no-op.
-                //
-                // Stack shuffles (DUP, SWAP, DUPN, SWAPN, EXCHANGE) need a precise check
-                // because their stack_io arity includes pass-through slots that aren't
-                // actually written. E.g. SWAP15 has stack_io(16,16) but only mutates 2
-                // positions. The generic check would require all 16 to be dead.
-                if can_skip_when_dead(opcode) && !data.is_branching() && !data.is_diverging() {
-                    let all_dead =
-                        if let Some(dead) = shuffle_all_dead(&live, opcode, h_before, imm) {
-                            dead
-                        } else if out > 0 {
-                            let write_base = h_before - inp as usize;
-                            (0..out as usize).all(|k| {
-                                let pos = write_base + k;
-                                pos < live.len() && !live[pos]
-                            })
-                        } else {
-                            false
-                        };
-
-                    if all_dead {
-                        self.insts[inst].flags |= InstFlags::NOOP;
-                        eliminated += 1;
-                        continue;
-                    }
+                if can_skip_when_dead(opcode)
+                    && !data.is_branching()
+                    && !data.is_diverging()
+                    && all_outputs_dead(&live, opcode, h_before, inp as usize, out as usize, imm)
+                {
+                    self.insts[inst].flags |= InstFlags::NOOP;
+                    eliminated += 1;
+                    continue;
                 }
 
                 transfer_liveness(&mut live, opcode, h_before, inp as usize, out as usize, imm);
@@ -294,45 +278,52 @@ fn transfer_swap(live: &mut BitVec, h_before: usize, depth: usize) {
     live.set(other, a);
 }
 
-/// Checks whether all positions actually written by a stack shuffle are dead.
+/// Returns `true` if all positions actually written by the instruction are dead.
 ///
-/// Returns `Some(true/false)` for shuffle opcodes, `None` for non-shuffles.
-/// Stack shuffles have inflated `stack_io` arities that include pass-through slots
-/// (e.g. SWAP15 reports stack_io(16,16) but only writes 2 positions), so they need
-/// a precise check instead of the generic `out > 0` path.
-fn shuffle_all_dead(
+/// Stack shuffles need special handling because their `stack_io` arities include
+/// pass-through slots (e.g. SWAP15 reports `stack_io(16,16)` but only writes 2
+/// positions). All other opcodes use a generic check over their output range.
+fn all_outputs_dead(
     live: &BitVec,
     opcode: u8,
     h_before: usize,
+    inp: usize,
+    out: usize,
     imm: Option<DecodedImm>,
-) -> Option<bool> {
-    match opcode {
-        op::SWAP1..=op::SWAP16 => {
-            let depth = (opcode - op::SWAP1 + 1) as usize;
+) -> bool {
+    match (opcode, imm) {
+        // SWAP: only TOS and the deep slot are written.
+        (op::SWAP1..=op::SWAP16, _) => {
+            swap_all_dead(live, h_before, (opcode - op::SWAP1 + 1) as usize)
+        }
+        (op::SWAPN, Some(DecodedImm::Single(d))) if (d as usize) < h_before => {
+            swap_all_dead(live, h_before, d as usize)
+        }
+        // DUP: only the new TOS is a real output.
+        (op::DUP1..=op::DUP16 | op::DUPN, _) => !live[h_before],
+        // EXCHANGE: only the two exchanged non-TOS positions are written.
+        (op::EXCHANGE, Some(DecodedImm::Pair(n, m))) if (m as usize) < h_before => {
             let tos = h_before - 1;
-            Some(!live[tos] && !live[tos - depth])
+            !live[tos - n as usize] && !live[tos - m as usize]
         }
-        op::SWAPN => match imm {
-            Some(DecodedImm::Single(depth)) if (depth as usize) < h_before => {
-                let tos = h_before - 1;
-                Some(!live[tos] && !live[tos - depth as usize])
-            }
-            _ => Some(false),
-        },
-        op::DUP1..=op::DUP16 | op::DUPN => {
-            // DUP pushes a copy to new TOS; only that position is a real output.
-            // The source depth doesn't matter for the dead check.
-            Some(!live[h_before])
+        // Infeasible immediates — conservatively not dead.
+        (op::SWAPN | op::EXCHANGE, _) => false,
+        // Generic: all output positions must be dead.
+        _ if out > 0 => {
+            let write_base = h_before - inp;
+            (0..out).all(|k| {
+                let pos = write_base + k;
+                pos < live.len() && !live[pos]
+            })
         }
-        op::EXCHANGE => match imm {
-            Some(DecodedImm::Pair(n, m)) if (m as usize) < h_before => {
-                let tos = h_before - 1;
-                Some(!live[tos - n as usize] && !live[tos - m as usize])
-            }
-            _ => Some(false),
-        },
-        _ => None,
+        _ => false,
     }
+}
+
+/// SWAP dead check: both TOS and the swapped position must be dead.
+fn swap_all_dead(live: &BitVec, h_before: usize, depth: usize) -> bool {
+    let tos = h_before - 1;
+    !live[tos] && !live[tos - depth]
 }
 
 /// DUP liveness: the new TOS is killed; if it was live, the source becomes live.
