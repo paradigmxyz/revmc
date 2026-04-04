@@ -361,6 +361,31 @@ tests! {
             expected_gas: GAS_WHAT_INTERPRETER_SAYS,
         }),
 
+        // Insufficient stack depth: DUPN 0x00 decodes to depth 17, but only 1 item on stack.
+        dupn_underflow(@raw {
+            bytecode: &[op::PUSH0, op::DUPN, 0x00],
+            spec_id: SpecId::AMSTERDAM,
+            expected_return: InstructionResult::StackOverflow,
+            expected_stack: STACK_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+        }),
+        // Insufficient stack depth: SWAPN 0x00 decodes to depth 17, but only 1 item on stack.
+        swapn_underflow(@raw {
+            bytecode: &[op::PUSH0, op::SWAPN, 0x00],
+            spec_id: SpecId::AMSTERDAM,
+            expected_return: InstructionResult::StackOverflow,
+            expected_stack: STACK_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+        }),
+        // Insufficient stack depth: EXCHANGE 0x01 decodes to (1,2), but only 2 items on stack.
+        exchange_underflow(@raw {
+            bytecode: &[op::PUSH0, op::PUSH0, op::EXCHANGE, 0x01],
+            spec_id: SpecId::AMSTERDAM,
+            expected_return: InstructionResult::StackOverflow,
+            expected_stack: STACK_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+        }),
+
         // Invalid immediate: 0x5B (91) is in the invalid range [91, 127] for decode_single.
         dupn_invalid_imm(@raw {
             bytecode: &[op::PUSH0, op::DUPN, 0x5B],
