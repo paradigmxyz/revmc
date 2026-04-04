@@ -118,6 +118,7 @@ impl Bytecode<'_> {
                     inp as usize,
                     out as usize,
                     imm,
+                    &self.snapshots.inputs[inst],
                     self.snapshots.outputs.get(inst).copied().flatten(),
                 );
             }
@@ -215,9 +216,11 @@ fn can_skip_when_dead(opcode: u8) -> bool {
 ///
 /// `imm` carries the decoded immediate for DUPN/SWAPN/EXCHANGE; `None` for all other opcodes.
 ///
-/// `output` carries the abstract interpretation output snapshot. When the output is a known
-/// constant, codegen replaces the entire instruction with a constant push and none of the inputs
-/// need to be live.
+/// `input_snap` and `output` carry abstract interpretation snapshots. When the output is a
+/// known constant, codegen replaces the entire instruction with a constant push and none of
+/// the inputs need to be live. When individual inputs are known constants, codegen loads them
+/// as immediates (`const_operand`) so those stack positions don't need to be live either.
+#[allow(clippy::too_many_arguments)]
 fn transfer_liveness(
     live: &mut BitVec,
     opcode: u8,
@@ -225,6 +228,7 @@ fn transfer_liveness(
     inp: usize,
     out: usize,
     imm: Option<DecodedImm>,
+    input_snap: &[AbsValue],
     output: Option<AbsValue>,
 ) {
     match opcode {
@@ -267,7 +271,7 @@ fn transfer_liveness(
         op::POP => {
             live.set(h_before - 1, false);
         }
-        _ => generic_transfer(live, h_before, inp, out, output),
+        _ => generic_transfer(live, opcode, h_before, inp, out, input_snap, output),
     }
 }
 
@@ -275,11 +279,15 @@ fn transfer_liveness(
 ///
 /// When the output is a known constant, codegen replaces the entire instruction with a
 /// constant push and never reads any inputs from the stack, so none of them need to be live.
+/// When individual inputs are known constants, codegen loads them as immediates via
+/// `const_operand` so those stack positions don't need to be live either.
 fn generic_transfer(
     live: &mut BitVec,
+    opcode: u8,
     h_before: usize,
     inp: usize,
     out: usize,
+    input_snap: &[AbsValue],
     output: Option<AbsValue>,
 ) {
     let write_base = h_before - inp;
@@ -292,10 +300,53 @@ fn generic_transfer(
     if out > 0 && matches!(output, Some(AbsValue::Const(_))) {
         return;
     }
-    // Mark all inputs as live.
+    // Mark inputs live, skipping positions whose values are known constants.
+    // Only safe for opcodes whose codegen uses `operand_value_or_load` (inline
+    // arithmetic/comparison/bitwise); builtins (CALL, SLOAD, MSTORE, …) read
+    // operands directly from the stack pointer and ignore `const_operand`.
     for k in 0..inp {
+        // input_snap is in stack order: [deepest, ..., TOS].
+        if can_skip_const_input(opcode)
+            && input_snap.get(k).is_some_and(|v| matches!(v, AbsValue::Const(_)))
+        {
+            continue;
+        }
         live.set(h_before - inp + k, true);
     }
+}
+
+/// Returns `true` if the opcode's codegen reads inputs via `operand_value_or_load`
+/// (which checks `const_operand` and uses an immediate for known constants).
+///
+/// Builtins (CALL, SLOAD, MSTORE, …) read operands directly from the stack pointer,
+/// bypassing `const_operand`, so we cannot skip their inputs even if known-constant.
+fn can_skip_const_input(opcode: u8) -> bool {
+    matches!(
+        opcode,
+        // Arithmetic (inline codegen via popn/pop).
+        // Note: DIV, SDIV, MOD, SMOD, ADDMOD, MULMOD, EXP use builtins.
+        op::ADD
+            | op::MUL
+            | op::SUB
+            | op::SIGNEXTEND
+            // Comparison.
+            | op::LT
+            | op::GT
+            | op::SLT
+            | op::SGT
+            | op::EQ
+            | op::ISZERO
+            // Bitwise.
+            | op::AND
+            | op::OR
+            | op::XOR
+            | op::NOT
+            | op::BYTE
+            | op::SHL
+            | op::SHR
+            | op::SAR
+            | op::CLZ
+    )
 }
 
 /// SWAP liveness: permute liveness of TOS and the swapped position.
@@ -419,6 +470,7 @@ mod tests {
             STOP
         ",
         );
+        // MSTORE reads operands via builtin (sp_after_inputs), not const_operand.
         assert!(
             !bytecode.inst(Inst::from_usize(0)).flags.contains(InstFlags::NOOP),
             "PUSH 1 should NOT be skipped"
@@ -450,6 +502,8 @@ mod tests {
 
     #[test]
     fn dup_keeps_source_live() {
+        // DUP copy is popped (dead), but PUSH 0x42 feeds MSTORE which reads
+        // via builtin (not const_operand), so the PUSH must stay live.
         let bytecode = analyze_asm(
             "
             PUSH1 0x42
@@ -832,22 +886,92 @@ mod tests {
     }
 
     #[test]
-    fn const_output_partial_inputs_stay_live() {
-        // DIV(dynamic, 1): output is NOT const (dynamic numerator), so inputs stay live.
+    fn const_input_add_dynamic() {
+        // ADD(dynamic, 1): PUSH 1 is dead because ADD uses inline codegen (popn).
         let bytecode = analyze_asm(
             "
-            PUSH0           ; inst 0
-            CALLDATALOAD    ; inst 1: dynamic
-            PUSH1 0x01      ; inst 2: divisor
-            DIV             ; inst 3: dynamic / 1, output unknown
+            PUSH0           ; inst 0: offset for CALLDATALOAD
+            CALLDATALOAD    ; inst 1: dynamic value
+            PUSH1 0x01      ; inst 2: constant addend
+            ADD             ; inst 3: dynamic + 1
             PUSH0           ; inst 4
             MSTORE          ; inst 5
             STOP            ; inst 6
         ",
         );
         assert!(
+            bytecode.inst(Inst::from_usize(2)).flags.contains(InstFlags::NOOP),
+            "PUSH 1 (addend) should be skipped (const input)"
+        );
+        assert!(
+            !bytecode.inst(Inst::from_usize(1)).flags.contains(InstFlags::NOOP),
+            "CALLDATALOAD should NOT be skipped"
+        );
+    }
+
+    #[test]
+    fn const_input_add_zero() {
+        // ADD(dynamic, 0): PUSH0 feeds the constant 0 input.
+        let bytecode = analyze_asm(
+            "
+            PUSH0           ; inst 0: offset for CALLDATALOAD
+            CALLDATALOAD    ; inst 1: dynamic value
+            PUSH0           ; inst 2: constant 0
+            ADD             ; inst 3: dynamic + 0
+            PUSH0           ; inst 4
+            MSTORE          ; inst 5
+            STOP            ; inst 6
+        ",
+        );
+        assert!(
+            bytecode.inst(Inst::from_usize(2)).flags.contains(InstFlags::NOOP),
+            "PUSH0 (addend) should be skipped (const input)"
+        );
+        assert!(
+            !bytecode.inst(Inst::from_usize(1)).flags.contains(InstFlags::NOOP),
+            "CALLDATALOAD should NOT be skipped"
+        );
+    }
+
+    #[test]
+    fn const_input_both_sides() {
+        // ADD(0, dynamic): constant on the deeper side.
+        let bytecode = analyze_asm(
+            "
+            PUSH0           ; inst 0: constant 0 (deeper input to ADD)
+            PUSH0           ; inst 1: offset for CALLDATALOAD
+            CALLDATALOAD    ; inst 2: dynamic value (TOS input to ADD)
+            ADD             ; inst 3: 0 + dynamic
+            PUSH0           ; inst 4
+            MSTORE          ; inst 5
+            STOP            ; inst 6
+        ",
+        );
+        assert!(
+            bytecode.inst(Inst::from_usize(0)).flags.contains(InstFlags::NOOP),
+            "PUSH0 (deeper const input) should be skipped"
+        );
+        assert!(
             !bytecode.inst(Inst::from_usize(2)).flags.contains(InstFlags::NOOP),
-            "PUSH 1 should NOT be skipped (output not const)"
+            "CALLDATALOAD should NOT be skipped"
+        );
+    }
+
+    #[test]
+    fn builtin_inputs_stay_live() {
+        // SLOAD reads operands via builtin (sp_after_inputs), not const_operand.
+        let bytecode = analyze_asm(
+            "
+            PUSH1 0x00      ; inst 0: storage key
+            SLOAD           ; inst 1: read storage
+            PUSH0           ; inst 2
+            MSTORE          ; inst 3
+            STOP            ; inst 4
+        ",
+        );
+        assert!(
+            !bytecode.inst(Inst::from_usize(0)).flags.contains(InstFlags::NOOP),
+            "PUSH 0 should NOT be skipped (SLOAD uses builtin)"
         );
     }
 }
