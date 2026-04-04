@@ -2,7 +2,7 @@
 //!
 //! Walks each basic block backward to determine which stack positions are live (will be read
 //! by a later instruction or at the block exit). Instructions whose outputs are all dead and
-//! whose logic is safe to skip are marked [`InstFlags::SKIP_LOGIC`].
+//! whose logic is safe to eliminate are marked [`InstFlags::NOOP`].
 //!
 //! DUP, SWAP, POP, DUPN, SWAPN, and EXCHANGE require custom liveness transfer functions
 //! because generic `(inputs, outputs)` arity doesn't capture how they map stack slots:
@@ -17,11 +17,12 @@ use bitvec::vec::BitVec;
 use revm_bytecode::opcode as op;
 
 /// Decoded immediate for liveness transfer of DUPN/SWAPN/EXCHANGE.
+#[derive(Clone, Copy)]
 enum DecodedImm {
     /// Single depth (DUPN, SWAPN).
-    Single(usize),
+    Single(u8),
     /// Pair of non-TOS indices (EXCHANGE).
-    Pair(usize, usize),
+    Pair(u8, u8),
 }
 
 impl Bytecode<'_> {
@@ -29,7 +30,7 @@ impl Bytecode<'_> {
     ///
     /// Walks each block backward to determine which stack positions are live (will be read
     /// by a later instruction or at the block exit). Instructions that are safe to skip and
-    /// whose outputs are all dead are marked `SKIP_LOGIC`.
+    /// whose outputs are all dead are marked `NOOP`.
     #[instrument(name = "dse", level = "debug", skip_all)]
     pub(crate) fn dead_store_elim(&mut self) {
         let mut eliminated = 0u32;
@@ -53,7 +54,7 @@ impl Bytecode<'_> {
             heights.push(entry_height);
             for inst in block.insts() {
                 let data = &self.insts[inst];
-                let h = if data.is_dead_code() || data.flags.contains(InstFlags::SKIP_LOGIC) {
+                let h = if data.is_dead_code() || data.flags.contains(InstFlags::NOOP) {
                     *heights.last().unwrap()
                 } else {
                     let (inp, out) = data.stack_io();
@@ -79,7 +80,7 @@ impl Bytecode<'_> {
             for (idx, inst) in block.insts().enumerate().rev() {
                 let data = &self.insts[inst];
                 if data.is_dead_code()
-                    || data.flags.contains(InstFlags::SKIP_LOGIC)
+                    || data.flags.contains(InstFlags::NOOP)
                     || data.flags.contains(InstFlags::DISABLED)
                     || data.flags.contains(InstFlags::UNKNOWN)
                 {
@@ -95,15 +96,15 @@ impl Bytecode<'_> {
                     op::DUPN | op::SWAPN => self
                         .get_imm(data)
                         .and_then(|b| crate::decode_single(b[0]))
-                        .map(|n| DecodedImm::Single(n as usize)),
+                        .map(DecodedImm::Single),
                     op::EXCHANGE => self
                         .get_imm(data)
                         .and_then(|b| crate::decode_pair(b[0]))
-                        .map(|(n, m)| DecodedImm::Pair(n as usize, m as usize)),
+                        .map(|(n, m)| DecodedImm::Pair(n, m)),
                     _ => None,
                 };
 
-                // Check if all outputs are dead and the instruction can be skipped.
+                // Check if all outputs are dead and the instruction can be turned into a no-op.
                 if out > 0
                     && can_skip_when_dead(opcode)
                     && !data.is_branching()
@@ -116,13 +117,13 @@ impl Bytecode<'_> {
                     });
 
                     if all_dead {
-                        self.insts[inst].flags |= InstFlags::SKIP_LOGIC;
+                        self.insts[inst].flags |= InstFlags::NOOP;
                         eliminated += 1;
                         continue;
                     }
                 }
 
-                transfer_liveness(&mut live, opcode, h_before, inp as usize, out as usize, &imm);
+                transfer_liveness(&mut live, opcode, h_before, inp as usize, out as usize, imm);
             }
         }
 
@@ -135,8 +136,8 @@ impl Bytecode<'_> {
 /// Returns `true` if the opcode's logic is safe to skip when its outputs are dead.
 ///
 /// This covers opcodes with no side effects beyond stack I/O and no dynamic gas. When
-/// SKIP_LOGIC is set the instruction is still present (static gas is charged, stack
-/// length is adjusted), only the computation is skipped.
+/// NOOP is set the instruction is still present (static gas is charged, stack
+/// length is adjusted), only the computation is elided.
 ///
 /// Based on solc's `SemanticInformation::movable()` with additions for call-constant
 /// environment reads that are pure in EVM semantics. Excludes opcodes with dynamic gas
@@ -211,7 +212,7 @@ fn transfer_liveness(
     h_before: usize,
     inp: usize,
     out: usize,
-    imm: &Option<DecodedImm>,
+    imm: Option<DecodedImm>,
 ) {
     match opcode {
         op::SWAP1..=op::SWAP16 => {
@@ -220,9 +221,9 @@ fn transfer_liveness(
         }
         op::SWAPN => {
             if let Some(DecodedImm::Single(depth)) = imm
-                && *depth < h_before
+                && (depth as usize) < h_before
             {
-                transfer_swap(live, h_before, *depth);
+                transfer_swap(live, h_before, depth as usize);
             }
             // Infeasible depth or decode failure: conservative no-op.
         }
@@ -232,19 +233,19 @@ fn transfer_liveness(
         }
         op::DUPN => {
             if let Some(DecodedImm::Single(depth)) = imm
-                && *depth >= 1
-                && *depth <= h_before
+                && depth >= 1
+                && (depth as usize) <= h_before
             {
-                transfer_dup(live, h_before, *depth);
+                transfer_dup(live, h_before, depth as usize);
             }
         }
         op::EXCHANGE => {
             if let Some(DecodedImm::Pair(n, m)) = imm
-                && *m < h_before
+                && (m as usize) < h_before
             {
                 let tos = h_before - 1;
-                let pos_a = tos - n;
-                let pos_b = tos - m;
+                let pos_a = tos - n as usize;
+                let pos_b = tos - m as usize;
                 let (a, b) = (live[pos_a], live[pos_b]);
                 live.set(pos_a, b);
                 live.set(pos_b, a);
@@ -305,7 +306,7 @@ mod tests {
         ",
         );
         assert!(
-            bytecode.inst(Inst::from_usize(0)).flags.contains(InstFlags::SKIP_LOGIC),
+            bytecode.inst(Inst::from_usize(0)).flags.contains(InstFlags::NOOP),
             "PUSH should be skipped (dead store)"
         );
     }
@@ -323,7 +324,7 @@ mod tests {
         );
         for (i, name) in [(0, "PUSH 3"), (1, "PUSH 4"), (2, "ADD")] {
             assert!(
-                bytecode.inst(Inst::from_usize(i)).flags.contains(InstFlags::SKIP_LOGIC),
+                bytecode.inst(Inst::from_usize(i)).flags.contains(InstFlags::NOOP),
                 "{name} should be skipped"
             );
         }
@@ -342,11 +343,11 @@ mod tests {
         ",
         );
         assert!(
-            !bytecode.inst(Inst::from_usize(0)).flags.contains(InstFlags::SKIP_LOGIC),
+            !bytecode.inst(Inst::from_usize(0)).flags.contains(InstFlags::NOOP),
             "PUSH 1 should NOT be skipped"
         );
         assert!(
-            bytecode.inst(Inst::from_usize(1)).flags.contains(InstFlags::SKIP_LOGIC),
+            bytecode.inst(Inst::from_usize(1)).flags.contains(InstFlags::NOOP),
             "PUSH 2 should be skipped"
         );
     }
@@ -364,7 +365,7 @@ mod tests {
         );
         for i in 0..3 {
             assert!(
-                !bytecode.inst(Inst::from_usize(i)).flags.contains(InstFlags::SKIP_LOGIC),
+                !bytecode.inst(Inst::from_usize(i)).flags.contains(InstFlags::NOOP),
                 "PUSH at {i} should NOT be skipped"
             );
         }
@@ -383,7 +384,7 @@ mod tests {
         ",
         );
         assert!(
-            !bytecode.inst(Inst::from_usize(0)).flags.contains(InstFlags::SKIP_LOGIC),
+            !bytecode.inst(Inst::from_usize(0)).flags.contains(InstFlags::NOOP),
             "PUSH should NOT be skipped"
         );
     }
@@ -402,7 +403,7 @@ mod tests {
         ",
         );
         assert!(
-            bytecode.inst(Inst::from_usize(0)).flags.contains(InstFlags::SKIP_LOGIC),
+            bytecode.inst(Inst::from_usize(0)).flags.contains(InstFlags::NOOP),
             "PUSH should be skipped when both DUP copy and source are dead"
         );
     }
@@ -418,7 +419,7 @@ mod tests {
         ",
         );
         assert!(
-            bytecode.inst(Inst::from_usize(0)).flags.contains(InstFlags::SKIP_LOGIC),
+            bytecode.inst(Inst::from_usize(0)).flags.contains(InstFlags::NOOP),
             "ADDRESS should be skipped when dead"
         );
     }
@@ -433,7 +434,7 @@ mod tests {
             STOP
         ",
         );
-        assert!(!bytecode.inst(Inst::from_usize(2)).flags.contains(InstFlags::SKIP_LOGIC));
+        assert!(!bytecode.inst(Inst::from_usize(2)).flags.contains(InstFlags::NOOP));
     }
 
     /// Helper: builds bytecode with `n` PUSH0s followed by `suffix`, using AMSTERDAM spec.
@@ -450,7 +451,7 @@ mod tests {
         let bytecode = eof_with_prefix(18, &[op::SWAPN, 0x00, op::STOP]);
         for i in 0..18 {
             assert!(
-                !bytecode.inst(Inst::from_usize(i)).flags.contains(InstFlags::SKIP_LOGIC),
+                !bytecode.inst(Inst::from_usize(i)).flags.contains(InstFlags::NOOP),
                 "PUSH0 at {i} should NOT be skipped"
             );
         }
@@ -462,7 +463,7 @@ mod tests {
         // The DUP copy is popped but the source (inst 0) is still live at exit.
         let bytecode = eof_with_prefix(17, &[op::DUPN, 0x00, op::POP, op::STOP]);
         assert!(
-            !bytecode.inst(Inst::from_usize(0)).flags.contains(InstFlags::SKIP_LOGIC),
+            !bytecode.inst(Inst::from_usize(0)).flags.contains(InstFlags::NOOP),
             "source PUSH0 should NOT be skipped"
         );
     }
@@ -478,7 +479,7 @@ mod tests {
         // All 17 original PUSH0s should remain live (they're on the exit stack).
         for i in 0..17 {
             assert!(
-                !bytecode.inst(Inst::from_usize(i)).flags.contains(InstFlags::SKIP_LOGIC),
+                !bytecode.inst(Inst::from_usize(i)).flags.contains(InstFlags::NOOP),
                 "PUSH0 at {i} should NOT be skipped"
             );
         }
@@ -492,7 +493,7 @@ mod tests {
         let bytecode = eof_with_prefix(18, &[op::EXCHANGE, 0x01, op::STOP]);
         for i in 0..18 {
             assert!(
-                !bytecode.inst(Inst::from_usize(i)).flags.contains(InstFlags::SKIP_LOGIC),
+                !bytecode.inst(Inst::from_usize(i)).flags.contains(InstFlags::NOOP),
                 "PUSH0 at {i} should NOT be skipped"
             );
         }

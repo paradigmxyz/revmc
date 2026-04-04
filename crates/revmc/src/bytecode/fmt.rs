@@ -115,8 +115,8 @@ impl Bytecode<'_> {
                     .unwrap();
                 }
                 let flags = data.flags;
-                if flags.contains(InstFlags::SKIP_LOGIC) {
-                    comment.push_str(" skip");
+                if flags.contains(InstFlags::NOOP) {
+                    comment.push_str(" noop");
                 }
                 if flags.contains(InstFlags::DEAD_CODE) {
                     comment.push_str(" dead");

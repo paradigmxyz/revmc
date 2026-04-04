@@ -659,20 +659,16 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             }
         }
 
-        if data.flags.contains(InstFlags::SKIP_LOGIC) {
-            self.section_len_offset += effective_stack_diff(data);
-            goto_return!("skipped");
-        }
-
         // Update the stack length for this instruction.
-        // Note: `section_len_offset` is updated at the end of the function, after the opcode
-        // handler, so that push/pop/sp helpers see the pre-diff offset during codegen.
-        {
-            let diff = effective_stack_diff(data);
-            if diff != 0 {
-                let len_changed = self.bcx.iadd_imm(self.len_before, diff as i64);
-                self.stack_len.store(&mut self.bcx, len_changed);
-            }
+        let (inp, out) = data.stack_io();
+        let diff = effective_stack_diff(inp, out, data);
+        if data.flags.contains(InstFlags::NOOP) {
+            self.section_len_offset += diff;
+            goto_return!("noop");
+        }
+        if diff != 0 {
+            let len_changed = self.bcx.iadd_imm(self.len_before, diff as i64);
+            self.stack_len.store(&mut self.bcx, len_changed);
         }
 
         // If the output is a known constant and the opcode has no dynamic gas or side effects,
@@ -680,26 +676,23 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         // The inputs are not loaded; we simply adjust the stack offset to consume them and
         // push the folded constant. This turns e.g. `PUSH 3, PUSH 4, ADD` into a single
         // store of `7`.
+        // Pure ops with a known-constant output: skip the opcode logic and just
+        // store the folded constant. Works for single-output arithmetic (ADD, MUL,
+        // ...) and DUP (which adds one new TOS without consuming its input).
+        // Excluded: EXP (dynamic gas), SWAP (modifies two stack positions).
+        if out >= 1
+            && opcode != op::EXP
+            && !matches!(opcode, op::SWAP1..=op::SWAP16)
+            && let Some(const_out) = self.bytecode.const_output(inst)
         {
-            let (inp, out) = data.stack_io();
-            // Pure ops with a known-constant output: skip the opcode logic and just
-            // store the folded constant. Works for single-output arithmetic (ADD, MUL,
-            // ...) and DUP (which adds one new TOS without consuming its input).
-            // Excluded: EXP (dynamic gas), SWAP (modifies two stack positions).
-            if out >= 1
-                && opcode != op::EXP
-                && !matches!(opcode, op::SWAP1..=op::SWAP16)
-                && let Some(const_out) = self.bytecode.const_output(inst)
-            {
-                // We push exactly 1 value, so consume `inp + 1 - out` to match the
-                // real stack diff. For DUP (out = inp+1) this is 0; for ADD (out = 1)
-                // this equals inp.
-                self.len_offset -= (inp + 1 - out) as i8;
-                let value = self.bcx.iconst_256(const_out);
-                self.push(value);
-                self.section_len_offset += effective_stack_diff(data);
-                goto_return!("const output");
-            }
+            // We push exactly 1 value, so consume `inp + 1 - out` to match the
+            // real stack diff. For DUP (out = inp+1) this is 0; for ADD (out = 1)
+            // this equals inp.
+            self.len_offset -= (inp + 1 - out) as i8;
+            let value = self.bcx.iconst_256(const_out);
+            self.push(value);
+            self.section_len_offset += diff;
+            goto_return!("const output");
         }
 
         // Macro utils.
@@ -1171,7 +1164,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             _ => unreachable!("unimplemented instruction: {data:?}"),
         }
 
-        self.section_len_offset += effective_stack_diff(data);
+        self.section_len_offset += diff;
         goto_return!("normal exit");
     }
 
@@ -1844,8 +1837,7 @@ mod pf {
 }
 
 /// Computes the effective stack diff for an instruction, matching the codegen semantics.
-fn effective_stack_diff(data: &InstData) -> i32 {
-    let (inp, out) = data.stack_io();
+fn effective_stack_diff(inp: u8, out: u8, data: &InstData) -> i32 {
     let mut diff = out as i32 - inp as i32;
     // Suspending ops return one value pushed by the caller after resume.
     if data.may_suspend() {
