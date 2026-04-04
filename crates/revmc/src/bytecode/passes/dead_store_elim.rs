@@ -599,9 +599,8 @@ mod tests {
         ",
         );
         //        PUSH A, PUSH B, PUSH C, SWAP2, POP, SWAP1, POP, STOP
-        for (i, alive) in [false, true, false, false, true, true, true, true]
-            .into_iter()
-            .enumerate()
+        for (i, alive) in
+            [false, true, false, false, true, true, true, true].into_iter().enumerate()
         {
             assert_eq!(
                 !bytecode.inst(Inst::from_usize(i)).flags.contains(InstFlags::NOOP),
