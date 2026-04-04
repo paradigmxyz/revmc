@@ -17,11 +17,3 @@ pub const fn sload_cost(spec_id: SpecId, is_cold: bool) -> u64 {
         50
     }
 }
-
-// These are overridden to only account for the dynamic cost.
-
-/// `LOG` opcode cost calculation.
-#[inline]
-pub const fn dyn_log_cost(len: u64) -> Option<u64> {
-    LOGDATA.checked_mul(len)
-}
