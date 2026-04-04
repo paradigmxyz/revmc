@@ -137,6 +137,23 @@ impl<'a> Bytecode<'a> {
                     self.insts[canonical_first_inst].data = 1;
                 }
 
+                // Merge multi-jump targets from the duplicate into the canonical block.
+                // Without this, valid case PCs unique to the duplicate dispatcher would
+                // be lost and fall into the default InvalidJump path at runtime.
+                let canonical_term = self.cfg.blocks[canonical].terminator();
+                let dup_term = dup_block.terminator();
+                if self.insts[dup_term].flags.contains(InstFlags::MULTI_JUMP) {
+                    if let Some(dup_targets) = self.multi_jump_targets.remove(&dup_term) {
+                        let canonical_targets =
+                            self.multi_jump_targets.get_mut(&canonical_term).unwrap();
+                        for t in dup_targets {
+                            if !canonical_targets.contains(&t) {
+                                canonical_targets.push(t);
+                            }
+                        }
+                    }
+                }
+
                 // Redirect predecessors that reach the duplicate via static jumps.
                 for &pred in &dup_block.preds {
                     let term_inst = self.cfg.blocks[pred].terminator();
@@ -148,11 +165,11 @@ impl<'a> Bytecode<'a> {
                     if is_static {
                         self.insts[term_inst].data = canonical_first_inst.index() as u32;
                     }
-                    // Multi-jump targets are NOT rewritten: each target carries a
-                    // distinct PC that callers may push as a return address. The
-                    // `inst_entries` redirect (translate.rs) already maps the dead
-                    // instruction's IR entry to the canonical one, so the switch
-                    // correctly emits cases for both PCs pointing to the same IR block.
+                    // Multi-jump target PCs are not rewritten here: each carries a
+                    // distinct PC that callers push as a return address. The targets
+                    // were already merged into the canonical block above, and
+                    // `inst_entries` redirects (translate.rs) map the dead
+                    // instruction's IR entry to the canonical one.
                 }
             }
         }
@@ -460,6 +477,92 @@ mod tests {
         assert!(
             bytecode.redirects.is_empty(),
             "should not dedup blocks ending in unresolved dynamic JUMP",
+        );
+    }
+
+    #[test]
+    fn dedup_multi_jump_source_merges_targets() {
+        // Two byte-identical MULTI_JUMP dispatcher blocks (dispatcher_a, dispatcher_b)
+        // each route to two identical JUMPDEST+STOP return blocks. After the return
+        // blocks are deduped, the two dispatchers become identical in (bytes, succs).
+        // Dedup must merge their multi_jump_targets so the canonical switch emits cases
+        // for ALL valid return PCs.
+        let bytecode = analyze_asm_with(
+            "
+            ; Branch on first calldata word.
+            PUSH0
+            CALLDATALOAD
+            PUSH %path_b
+            JUMPI
+
+            ; Branch on second calldata word.
+            PUSH1 0x20
+            CALLDATALOAD
+            PUSH %path_a1
+            JUMPI
+            PUSH %ret0
+            PUSH %dispatcher_a
+            JUMP
+        path_a1:
+            JUMPDEST
+            PUSH %ret1
+            PUSH %dispatcher_a
+            JUMP
+
+        path_b:
+            JUMPDEST
+            PUSH1 0x20
+            CALLDATALOAD
+            PUSH %path_b1
+            JUMPI
+            PUSH %ret2
+            PUSH %dispatcher_b
+            JUMP
+        path_b1:
+            JUMPDEST
+            PUSH %ret3
+            PUSH %dispatcher_b
+            JUMP
+
+        ret0:
+            JUMPDEST
+            STOP
+        ret1:
+            JUMPDEST
+            STOP
+        ret2:
+            JUMPDEST
+            STOP
+        ret3:
+            JUMPDEST
+            STOP
+
+        dispatcher_a:
+            JUMPDEST
+            JUMP
+        dispatcher_b:
+            JUMPDEST
+            JUMP
+        ",
+            AnalysisConfig::DEDUP,
+        );
+
+        // The four STOP blocks are deduped (3 redirects), and one dispatcher is deduped
+        // (1 redirect) = 4 total.
+        assert_eq!(bytecode.redirects.len(), 4);
+
+        // Find the canonical dispatcher's multi_jump_targets — it must contain all 4
+        // original return PCs (possibly redirected to the canonical STOP inst).
+        let canonical_dispatcher_term = bytecode
+            .multi_jump_targets
+            .keys()
+            .find(|&&inst| !bytecode.insts[inst].is_dead_code())
+            .expect("should have a live MULTI_JUMP dispatcher");
+        let targets = &bytecode.multi_jump_targets[canonical_dispatcher_term];
+        assert_eq!(
+            targets.len(),
+            4,
+            "canonical dispatcher should have 4 multi-jump targets (merged), got {targets:?}",
         );
     }
 
