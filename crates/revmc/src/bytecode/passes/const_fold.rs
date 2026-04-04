@@ -188,6 +188,11 @@ pub(crate) fn try_const_fold(
 
         _ => return None,
     };
+    debug_assert!(
+        const_fold_gas(inst.opcode, inputs, interner).is_some(),
+        "try_const_fold handled opcode {} but const_fold_gas did not",
+        inst.opcode,
+    );
     Some(AbsValue::Const(interner.intern(result)))
 }
 
@@ -557,5 +562,43 @@ mod tests {
         assert!(bytecode.compiler_gas_used > 0);
         // inst layout: PUSH(0), PUSH(1), ADD(2), PUSH0(3), MSTORE(4), STOP(5).
         assert_eq!(bytecode.const_operand(Inst::from_usize(4), 1), Some(U256::from(5)));
+    }
+
+    /// Exhaustively verify that `const_fold_gas` and `try_const_fold` agree on which opcodes
+    /// they handle. For every opcode, if `try_const_fold` returns `Some` then `const_fold_gas`
+    /// must also return `Some`, and vice versa.
+    #[test]
+    fn const_fold_gas_sync() {
+        let mut interner = crate::bytecode::Interner::new();
+        let one = interner.intern(U256::from(1));
+        let two = interner.intern(U256::from(2));
+        let three = interner.intern(U256::from(3));
+        let c1 = AbsValue::Const(one);
+        let c2 = AbsValue::Const(two);
+        let c3 = AbsValue::Const(three);
+
+        for opcode in 0..=u8::MAX {
+            let inst = crate::InstData { opcode, pc: 0, ..crate::InstData::new(opcode) };
+            let (inp, _) = inst.stack_io();
+
+            let inputs: &[AbsValue] = match inp {
+                0 => &[],
+                1 => &[c1],
+                2 => &[c1, c2],
+                3 => &[c1, c2, c3],
+                _ => continue,
+            };
+
+            let gas = const_fold_gas(opcode, inputs, &interner);
+            let fold = try_const_fold(&inst, inputs, &mut interner, 100);
+
+            assert_eq!(
+                gas.is_some(),
+                fold.is_some(),
+                "const_fold_gas and try_const_fold disagree on opcode {opcode:#04x} ({}): \
+                 gas={gas:?}, fold={fold:?}",
+                revm_bytecode::opcode::OpCode::new(opcode).map_or("unknown", |o| o.as_str()),
+            );
+        }
     }
 }
