@@ -9,6 +9,8 @@ use revmc_backend::Result;
 use smallvec::SmallVec;
 use std::{borrow::Cow, cell::RefCell};
 
+pub(crate) use revm_context_interface::cfg::GasParams;
+
 mod passes;
 use passes::{Cfg, GasSection, SectionsAnalysis, Snapshots, StackSection};
 
@@ -89,6 +91,8 @@ pub struct Bytecode<'a> {
     jumpdests: BitVec,
     /// The [`SpecId`].
     pub(crate) spec_id: SpecId,
+    /// Gas parameters for dynamic gas folding. Defaults to `GasParams::new_spec(spec_id)`.
+    pub(crate) gas_params: GasParams,
     /// Whether the bytecode contains dynamic jumps.
     has_dynamic_jumps: bool,
     /// Whether the bytecode may suspend execution.
@@ -129,12 +133,17 @@ pub struct Bytecode<'a> {
 }
 
 impl<'a> Bytecode<'a> {
-    pub(crate) fn new(code: impl Into<Cow<'a, [u8]>>, spec_id: SpecId) -> Self {
-        Self::new_mono(code.into(), spec_id)
+    pub(crate) fn new(
+        code: impl Into<Cow<'a, [u8]>>,
+        spec_id: SpecId,
+        gas_params: Option<GasParams>,
+    ) -> Self {
+        Self::new_mono(code.into(), spec_id, gas_params)
     }
 
     #[instrument(name = "Bytecode::new", level = "debug", skip_all)]
-    fn new_mono(code: Cow<'a, [u8]>, spec_id: SpecId) -> Self {
+    fn new_mono(code: Cow<'a, [u8]>, spec_id: SpecId, gas_params: Option<GasParams>) -> Self {
+        let gas_params = gas_params.unwrap_or_else(|| GasParams::new_spec(spec_id));
         let mut insts = IndexVec::with_capacity(code.len() + 8);
         let mut jumpdests = BitVec::repeat(false, code.len());
         let mut pc_to_inst = FxHashMap::with_capacity_and_hasher(code.len(), Default::default());
@@ -184,6 +193,7 @@ impl<'a> Bytecode<'a> {
             insts,
             jumpdests,
             spec_id,
+            gas_params,
             has_dynamic_jumps: false,
             may_suspend: false,
             snapshots: Snapshots::default(),

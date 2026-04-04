@@ -62,12 +62,12 @@ pub(super) struct FunctionCx<'a, B: Backend> {
     config: FcxConfig,
 
     /// The backend's function builder.
-    bcx: B::Builder<'a>,
+    pub(super) bcx: B::Builder<'a>,
 
     // Common types.
     ptr_type: B::Type,
     isize_type: B::Type,
-    word_type: B::Type,
+    pub(super) word_type: B::Type,
     address_type: B::Type,
     i8_type: B::Type,
 
@@ -101,13 +101,13 @@ pub(super) struct FunctionCx<'a, B: Backend> {
     section_len_offset: i32,
 
     /// The bytecode being translated.
-    bytecode: &'a Bytecode<'a>,
+    pub(super) bytecode: &'a Bytecode<'a>,
     /// Instruction index to 1-based line number in bytecode.txt (for debug info).
     inst_lines: IndexVec<Inst, u32>,
     /// All entry blocks for each instruction.
     inst_entries: IndexVec<Inst, B::BasicBlock>,
     /// The current instruction being translated.
-    current_inst: Option<Inst>,
+    pub(super) current_inst: Option<Inst>,
 
     // Basic blocks are `None` when outside of a main function.
     /// `dynamic_jump_table` incoming values.
@@ -695,6 +695,11 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             goto_return!("const output");
         }
 
+        if self.try_peephole(data) {
+            self.section_len_offset += diff;
+            goto_return!("peephole");
+        }
+
         // Macro utils.
         macro_rules! unop {
             ($op:ident) => {{
@@ -950,13 +955,13 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 let is_invalid = data.flags.contains(InstFlags::INVALID_JUMP);
                 if is_invalid && opcode == op::JUMP {
                     // Pop and discard the target; it's always on the stack.
-                    let _ = self.pop();
+                    self.pop_ignore(1);
                     self.build_fail_imm(InstructionResult::InvalidJump);
                 } else {
                     let target = if is_invalid {
                         debug_assert_eq!(*data, op::JUMPI);
                         // The jump target is invalid, but we still need to pop it.
-                        let _ = self.pop();
+                        self.pop_ignore(1);
                         self.return_block.unwrap()
                     } else if data.flags.contains(InstFlags::MULTI_JUMP) {
                         let target_value = self.pop();
@@ -986,7 +991,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                         goto_return!(no_branch);
                     } else if data.flags.contains(InstFlags::STATIC_JUMP) {
                         // Pop and discard the target; it's always on the stack.
-                        let _ = self.pop();
+                        self.pop_ignore(1);
                         let target_inst = Inst::from_usize(data.data as usize);
                         debug_assert_eq!(
                             *self.bytecode.inst(target_inst),
@@ -1143,7 +1148,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     }
 
     /// Pushes a 256-bit value onto the stack.
-    fn push(&mut self, value: B::Value) {
+    pub(super) fn push(&mut self, value: B::Value) {
         self.pushn(&[value]);
     }
 
@@ -1157,6 +1162,18 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         }
     }
 
+    /// Returns the known constant values of the topmost `N` stack operands, in the same order
+    /// as [`popn`](Self::popn): index 0 is TOS, index 1 is second from top, etc.
+    pub(super) fn const_operands<const N: usize>(&self) -> [Option<U256>; N] {
+        let inst = self.current_inst.unwrap();
+        std::array::from_fn(|i| self.bytecode.const_operand(inst, i))
+    }
+
+    /// Consumes the topmost `n` elements from the stack without loading them.
+    pub(super) fn pop_ignore(&mut self, n: usize) {
+        self.len_offset -= n as i8;
+    }
+
     /// Removes the topmost element from the stack and returns it.
     fn pop(&mut self) -> B::Value {
         self.popn::<1>()[0]
@@ -1165,7 +1182,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     /// Removes the topmost `N` elements from the stack and returns them.
     ///
     /// If `load` is `false`, returns just the pointers.
-    fn popn<const N: usize>(&mut self) -> [B::Value; N] {
+    pub(super) fn popn<const N: usize>(&mut self) -> [B::Value; N] {
         assert_ne!(N, 0);
 
         std::array::from_fn(|i| {

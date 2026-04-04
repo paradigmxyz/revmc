@@ -1039,7 +1039,7 @@ pub(crate) mod tests {
         crate::tests::init_tracing();
 
         eprintln!("{}", hex::encode(&code));
-        let mut bytecode = Bytecode::new(code, spec_id);
+        let mut bytecode = Bytecode::new(code, spec_id, None);
         bytecode.analyze().unwrap();
         eprintln!("{bytecode}");
         bytecode
@@ -1052,7 +1052,7 @@ pub(crate) mod tests {
         crate::tests::init_tracing();
 
         eprintln!("{}", hex::encode(&code));
-        let mut bytecode = Bytecode::new(code, SpecId::CANCUN);
+        let mut bytecode = Bytecode::new(code, SpecId::CANCUN, None);
         bytecode.config = config;
         bytecode.analyze().unwrap();
         eprintln!("{bytecode}");
@@ -1438,7 +1438,7 @@ pub(crate) mod tests {
             include_str!("../../../../../data/hash_10k.rt.hex").trim(),
         )
         .unwrap();
-        let mut bytecode = Bytecode::new(code, SpecId::CANCUN);
+        let mut bytecode = Bytecode::new(code, SpecId::CANCUN, None);
         bytecode.analyze().unwrap();
         assert!(!bytecode.has_dynamic_jumps, "expected all jumps to be resolved");
     }

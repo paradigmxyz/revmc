@@ -1,7 +1,7 @@
 use crate::bytecode::{Bytecode, Inst, InstFlags};
 use core::fmt;
 use revm_bytecode::opcode as op;
-use revm_primitives::{U256, hardfork::SpecId};
+use revm_primitives::U256;
 
 /// A gas section tracks the total base gas cost of a sequence of instructions.
 ///
@@ -222,14 +222,14 @@ impl SectionsAnalysis {
         self.stack.process(inp, out);
         self.gas.process(data.base_gas);
 
-        // When EXP is constant-folded, its dynamic gas (which depends on the exponent's byte
-        // size) is known at compile time. Add it to the section so the builtin call can be
-        // skipped entirely during translation.
+        // When EXP's builtin will be skipped — either because both operands are known
+        // (const_output) or because the exponent is known and handled by a peephole (≤ 2) —
+        // fold the dynamic gas into the section statically.
         if data.opcode == op::EXP
-            && bytecode.const_output(inst).is_some()
             && let Some(exponent) = bytecode.const_operand(inst, 1)
+            && (bytecode.const_output(inst).is_some() || exponent <= U256::from(2))
         {
-            self.gas.process_extra(exp_dynamic_gas(exponent, bytecode.spec_id));
+            self.gas.process_extra(bytecode.gas_params.exp_cost(exponent));
         }
 
         // Instructions that require `gasleft` end only the gas section.
@@ -264,16 +264,6 @@ impl SectionsAnalysis {
             debug!(count, max_len, "sections");
         }
     }
-}
-
-/// Computes the dynamic gas cost of `EXP` from a known exponent value.
-fn exp_dynamic_gas(exponent: U256, spec_id: SpecId) -> u64 {
-    if exponent.is_zero() {
-        return 0;
-    }
-    let exp_byte_gas: u64 = if spec_id.is_enabled_in(SpecId::SPURIOUS_DRAGON) { 50 } else { 10 };
-    let byte_len = (255 - exponent.leading_zeros() as u64) / 8 + 1;
-    exp_byte_gas * byte_len
 }
 
 #[cfg(test)]
