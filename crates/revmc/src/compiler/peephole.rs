@@ -7,7 +7,6 @@
 use super::translate::FunctionCx;
 use crate::{Backend, Builder, InstData, IntCC};
 use revm_bytecode::opcode as op;
-use revm_context_interface::cfg::GasParams;
 use revm_primitives::U256;
 
 /// i256 INT_MIN: 1 << 255.
@@ -214,12 +213,12 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
     /// EXP base, exp => base ** exp.
     ///
-    /// For nonzero exponents, the dynamic gas cost is computed at compile time from the
-    /// known spec_id and charged via `gas_cost_imm`.
+    /// Dynamic gas is folded into `base_gas` by `Bytecode::fold_known_dynamic_gas` when
+    /// the exponent is a compile-time constant, so the section gas check already covers it.
     fn peephole_exp(&mut self) -> bool {
         let [_base, exponent] = self.const_operands();
         match exponent {
-            // x ** 0 => 1 (dynamic gas = 0).
+            // x ** 0 => 1.
             Some(U256::ZERO) => {
                 self.pop_ignore(2);
                 let one = self.bcx.iconst_256(U256::from(1));
@@ -227,13 +226,11 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             }
             // x ** 1 => x.
             Some(U256::ONE) => {
-                self.exp_dynamic_gas(U256::ONE);
                 let [a, _] = self.popn();
                 self.push(a);
             }
             // x ** 2 => x * x.
             Some(e) if e == U256::from(2) => {
-                self.exp_dynamic_gas(U256::from(2));
                 let [a, _] = self.popn();
                 let r = self.bcx.imul(a, a);
                 self.push(r);
@@ -241,13 +238,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             _ => return false,
         }
         true
-    }
-
-    /// Charges the dynamic gas for EXP with a compile-time-known exponent.
-    fn exp_dynamic_gas(&mut self, exponent: U256) {
-        let gas = GasParams::new_spec(self.bytecode.spec_id);
-        let cost = gas.exp_cost(exponent);
-        self.gas_cost_imm(cost);
     }
 
     /// SIGNEXTEND ext, x => sign-extend x from (ext+1) bytes.

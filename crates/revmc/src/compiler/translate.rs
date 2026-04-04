@@ -1401,7 +1401,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     }
 
     /// Builds a gas cost deduction for an immediate value.
-    pub(super) fn gas_cost_imm(&mut self, cost: u64) {
+    fn gas_cost_imm(&mut self, cost: u64) {
         if !self.config.gas_metering || cost == 0 {
             return;
         }

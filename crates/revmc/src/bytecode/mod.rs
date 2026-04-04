@@ -276,6 +276,7 @@ impl<'a> Bytecode<'a> {
         self.rebuild_cfg();
 
         self.calc_may_suspend();
+        self.fold_known_dynamic_gas();
 
         self.construct_sections();
 
@@ -322,6 +323,35 @@ impl<'a> Bytecode<'a> {
     fn calc_may_suspend(&mut self) {
         let may_suspend = self.iter_insts().any(|(_, data)| data.may_suspend());
         self.may_suspend = may_suspend;
+    }
+
+    /// Folds known dynamic gas costs into `base_gas` for instructions where the operands
+    /// are compile-time constants (e.g. EXP with a known exponent).
+    ///
+    /// Must run after block analysis (which provides const operands) and before section
+    /// construction (which accumulates `base_gas`).
+    #[instrument(name = "fold_gas", level = "debug", skip_all)]
+    fn fold_known_dynamic_gas(&mut self) {
+        use revm_context_interface::cfg::GasParams;
+
+        let gas = GasParams::new_spec(self.spec_id);
+        for inst in self.insts.indices() {
+            let data = &self.insts[inst];
+            if data.is_dead_code() || data.opcode != op::EXP {
+                continue;
+            }
+            // EXP operand 1 (second from TOS) is the exponent.
+            // Only fold for exponents that the peephole in `peephole.rs` handles,
+            // otherwise the builtin would double-charge.
+            let Some(exponent) = self.const_operand(inst, 1) else { continue };
+            if exponent > U256::from(2) {
+                continue;
+            }
+            let dynamic_cost = gas.exp_cost(exponent);
+            let data = &mut self.insts[inst];
+            data.base_gas = data.base_gas.saturating_add(dynamic_cost as u16);
+            trace!(%inst, %dynamic_cost, "folded EXP dynamic gas");
+        }
     }
 
     /// Constructs the sections in the bytecode.
