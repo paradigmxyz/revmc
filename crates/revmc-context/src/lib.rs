@@ -219,27 +219,6 @@ impl EvmCompilerFn {
         self.0
     }
 
-    /// Calls the function by re-using the interpreter's resources and memory.
-    ///
-    /// See [`call_with_interpreter_and_memory`](Self::call_with_interpreter_and_memory) for more
-    /// information.
-    ///
-    /// # Safety
-    ///
-    /// The caller must ensure that the function is safe to call.
-    #[inline]
-    pub unsafe fn call_with_interpreter_and_memory(
-        self,
-        interpreter: &mut Interpreter,
-        memory: &mut SharedMemory,
-        host: &mut dyn Host,
-    ) -> InterpreterAction {
-        interpreter.memory = core::mem::replace(memory, SharedMemory::invalid());
-        let result = self.call_with_interpreter(interpreter, host);
-        *memory = core::mem::replace(&mut interpreter.memory, SharedMemory::invalid());
-        result
-    }
-
     /// Calls the function by re-using the interpreter's resources.
     ///
     /// This behaves similarly to `Interpreter::run_plain`, returning an [`InstructionResult`]
