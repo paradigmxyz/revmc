@@ -11,6 +11,22 @@ use oxc_index::IndexVec;
 use revm_bytecode::opcode as op;
 use smallvec::SmallVec;
 
+/// Dedup key: raw bytecode bytes plus resolved jump-target metadata.
+///
+/// Raw bytes alone are insufficient for JUMP-terminated blocks because block analysis
+/// may resolve byte-identical copies to different static targets depending on incoming
+/// stack context (e.g. different return-address values).
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct DedupKey<'a> {
+    bytes: &'a [u8],
+    /// Discriminant for JUMP terminators. For non-JUMP terminators this is always `None`.
+    /// - `STATIC_JUMP`: `Some([target_inst])`
+    /// - `INVALID_JUMP`: `Some([])`  (all invalid jumps are equivalent)
+    /// - `MULTI_JUMP`: `Some(sorted_targets)`
+    /// - unresolved dynamic: not inserted (block is skipped)
+    jump_targets: Option<SmallVec<[Inst; 4]>>,
+}
+
 impl<'a> Bytecode<'a> {
     /// Deduplicate structurally identical non-fallthrough blocks.
     ///
@@ -23,10 +39,11 @@ impl<'a> Bytecode<'a> {
     /// translator can map the dead instruction to the canonical block's IR block.
     #[instrument(name = "dedup", level = "debug", skip_all)]
     pub(crate) fn dedup_blocks(&mut self) {
-        // Group eligible (diverging, non-dead) blocks by their raw bytecode content.
+        // Group eligible (diverging, non-dead) blocks by their raw bytecode content
+        // plus resolved jump-target metadata.
         // We borrow `self.code` separately to avoid holding a `&self` borrow across mutations.
         let code = &*self.code;
-        let mut key_to_blocks = HashMap::<&[u8], SmallVec<[Block; 4]>>::default();
+        let mut key_to_blocks = HashMap::<DedupKey<'_>, SmallVec<[Block; 4]>>::default();
         for bid in self.cfg.blocks.indices() {
             let block = &self.cfg.blocks[bid];
             // Only dedup blocks whose terminator cannot fall through (diverging or
@@ -36,16 +53,11 @@ impl<'a> Bytecode<'a> {
                 continue;
             }
 
-            // Reachable JUMPDESTs can only be deduped when:
-            // - all jumps are statically resolved (no dynamic jumps), AND
-            // - the block terminates execution (STOP/RETURN/REVERT/etc.), not JUMP.
-            // Blocks ending in JUMP cannot be deduped by raw bytes alone because
-            // block_analysis may have resolved different target sets for byte-identical
-            // copies (e.g. different return-address contexts).
+            // Reachable JUMPDESTs with dynamic jumps cannot be deduped because any
+            // JUMPDEST could be reached from an unresolved dynamic JUMP with an
+            // arbitrary stack context.
             let first = &self.insts[block.insts.start];
-            if first.is_reachable_jumpdest(self.has_dynamic_jumps)
-                && (self.has_dynamic_jumps || term.opcode == op::JUMP)
-            {
+            if self.has_dynamic_jumps && first.is_reachable_jumpdest(true) {
                 continue;
             }
 
@@ -59,7 +71,28 @@ impl<'a> Bytecode<'a> {
             if bytes.is_empty() {
                 continue;
             }
-            key_to_blocks.entry(bytes).or_default().push(bid);
+
+            // For JUMP terminators, include the resolved target(s) in the key so that
+            // byte-identical blocks with different static targets are not merged.
+            let jump_targets = if term.opcode == op::JUMP {
+                if term.flags.contains(InstFlags::INVALID_JUMP) {
+                    Some(SmallVec::new())
+                } else if term.flags.contains(InstFlags::MULTI_JUMP) {
+                    let mut targets: SmallVec<[Inst; 4]> =
+                        self.multi_jump_targets(block.terminator()).unwrap_or_default().into();
+                    targets.sort_unstable();
+                    Some(targets)
+                } else if term.flags.contains(InstFlags::STATIC_JUMP) {
+                    Some(SmallVec::from_elem(Inst::from_usize(term.data as usize), 1))
+                } else {
+                    // Unresolved dynamic JUMP — skip, can't safely dedup.
+                    continue;
+                }
+            } else {
+                None
+            };
+
+            key_to_blocks.entry(DedupKey { bytes, jump_targets }).or_default().push(bid);
         }
 
         let mut deduped = 0usize;
@@ -266,6 +299,87 @@ mod tests {
         );
 
         assert!(bytecode.redirects.is_empty(), "should not dedup blocks containing PC");
+    }
+
+    #[test]
+    fn dedup_jump_same_target() {
+        // Two byte-identical fallthrough JUMP tails resolved to the same target.
+        let bytecode = analyze_asm_with(
+            "
+            CALLDATASIZE
+            PUSH %path1
+            JUMPI
+            PUSH0
+            PUSH1 0xFF
+            JUMPI
+            PUSH %target
+            JUMP
+        path1:
+            JUMPDEST
+            PUSH0
+            PUSH1 0xFF
+            JUMPI
+            PUSH %target
+            JUMP
+        target:
+            JUMPDEST
+            STOP
+        ",
+            AnalysisConfig::DEDUP,
+        );
+        assert_eq!(bytecode.redirects.len(), 1, "same-target JUMP tails should be deduped");
+    }
+
+    #[test]
+    fn dedup_jump_different_targets() {
+        // Two byte-identical non-JUMPDEST JUMP tails with different resolved static targets.
+        // Must NOT be merged — the JUMP target is context-sensitive.
+        // Regression test for:
+        // revmc-dedup-non-jumpdest-fallthrough-jump-tail-static-target-confusion
+        let bytecode = analyze_asm_with(
+            "
+            CALLDATASIZE
+            PUSH %path1
+            JUMPI
+
+            PUSH %ret0
+            PUSH0
+            PUSH1 0xFF
+            JUMPI
+            PUSH1 0x42
+            SWAP1
+            JUMP
+
+        path1:
+            JUMPDEST
+            PUSH %ret1
+            PUSH0
+            PUSH1 0xFF
+            JUMPI
+            PUSH1 0x42
+            SWAP1
+            JUMP
+
+        ret0:
+            JUMPDEST
+            POP
+            PUSH1 0xAA
+            STOP
+
+        ret1:
+            JUMPDEST
+            POP
+            PUSH1 0xBB
+            STOP
+        ",
+            AnalysisConfig::DEDUP,
+        );
+
+        assert!(
+            bytecode.redirects.is_empty(),
+            "different-target JUMP tails must not be deduped, got {} redirect(s)",
+            bytecode.redirects.len(),
+        );
     }
 
     #[test]
