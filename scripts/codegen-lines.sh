@@ -54,10 +54,12 @@ fmt_pct() {
 collect "$DUMP_DIR"
 
 if [[ -n "$COMPARE_REV" ]]; then
-    BASE_DIR=$(mktemp -d)
-    trap 'git worktree remove --force "$BASE_DIR" 2>/dev/null; rm -rf "$BASE_DIR"' EXIT
-    git worktree add --detach --quiet "$BASE_DIR" "$COMPARE_REV" 2>/dev/null
-    (cd "$BASE_DIR" && collect "$BASE_DIR/.dump")
+    BASE_DUMP="$DUMP_DIR.base"
+    BASE_WORKTREE=$(mktemp -d)
+    trap 'git worktree remove --force "$BASE_WORKTREE" 2>/dev/null; rm -rf "$BASE_WORKTREE"' EXIT
+    git worktree add --detach --quiet "$BASE_WORKTREE" "$COMPARE_REV" 2>/dev/null
+    (cd "$BASE_WORKTREE" && collect "$BASE_DUMP")
+    echo "Base dump saved to: $BASE_DUMP" >&2
 
     printf "%-22s %18s %18s %18s\n" "" "unopt.ll" "opt.ll" "opt.s"
     printf "%-22s %8s %9s %8s %9s %8s %9s\n" \
@@ -69,9 +71,9 @@ if [[ -n "$COMPARE_REV" ]]; then
         bu=$(line_count "$DUMP_DIR/$bench/unopt.ll")
         bo=$(line_count "$DUMP_DIR/$bench/opt.ll")
         ba=$(line_count "$DUMP_DIR/$bench/opt.s")
-        mu=$(line_count "$BASE_DIR/.dump/$bench/unopt.ll")
-        mo=$(line_count "$BASE_DIR/.dump/$bench/opt.ll")
-        ma=$(line_count "$BASE_DIR/.dump/$bench/opt.s")
+        mu=$(line_count "$BASE_DUMP/$bench/unopt.ll")
+        mo=$(line_count "$BASE_DUMP/$bench/opt.ll")
+        ma=$(line_count "$BASE_DUMP/$bench/opt.s")
 
         printf "%-22s %6d %5s %5s  %6d %5s %5s  %6d %5s %5s\n" \
             "$bench" "$mu" "$(fmt_diff "$mu" "$bu")" "$(fmt_pct "$mu" "$bu")" \

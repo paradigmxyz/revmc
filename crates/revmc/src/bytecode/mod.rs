@@ -263,6 +263,7 @@ impl<'a> Bytecode<'a> {
 
         self.rebuild_cfg();
         self.block_analysis();
+        self.dead_store_elim();
         self.mark_dead_code();
 
         if self.config.contains(AnalysisConfig::DEDUP) {
@@ -617,8 +618,8 @@ bitflags::bitflags! {
         /// Always returns [`InstructionResult::NotFound`] at runtime.
         const UNKNOWN = 1 << 4;
 
-        /// Skip generating instruction logic, but keep the gas calculation.
-        const SKIP_LOGIC = 1 << 5;
+        /// Instruction is a no-op: skip generating logic, but keep the gas calculation.
+        const NOOP = 1 << 5;
         /// This instruction starts a new stack section.
         const STACK_SECTION_HEAD = 1 << 6;
         /// Don't generate any code.

@@ -141,6 +141,12 @@ impl Default for StackSectionAnalysis {
 }
 
 impl StackSectionAnalysis {
+    /// Returns the cumulative stack delta so far.
+    #[inline]
+    pub(crate) fn diff(&self) -> i32 {
+        self.diff
+    }
+
     /// Accumulates a single instruction's stack I/O.
     #[inline]
     pub(crate) fn process(&mut self, inputs: u8, outputs: u8) {
