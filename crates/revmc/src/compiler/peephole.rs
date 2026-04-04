@@ -255,7 +255,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         true
     }
 
-    /// BYTE index, value => value[index].
+    /// BYTE index, value => `value[index]`.
     fn peephole_byte(&mut self) -> bool {
         let [index, _value] = self.const_operands();
         match index {
