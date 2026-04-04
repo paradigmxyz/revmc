@@ -7,7 +7,7 @@
 
 use super::{
     StackSection,
-    block_analysis::{AbsValue, Block, ConstSetInterner, JumpTarget, apply_stack_shuffle},
+    block_analysis::{AbsValue, Block, ConstSetInterner, JumpTarget},
 };
 use crate::bytecode::{Bytecode, Inst, InstFlags};
 use bitvec::vec::BitVec;
@@ -137,7 +137,7 @@ impl Bytecode<'_> {
                 continue;
             }
 
-            if let Some(ok) = apply_stack_shuffle(inst, &self.code, stack, Provenance::Input) {
+            if let Some(ok) = self.apply_stack_shuffle(inst, stack, Provenance::Input) {
                 if !ok {
                     return false;
                 }
@@ -186,16 +186,19 @@ impl Bytecode<'_> {
             let section =
                 StackSection::from_stack_io(block.insts().map(|i| self.insts[i].stack_io()));
 
-            // Private function return: JUMP with no static target and the jump
-            // operand has entry-stack provenance (was passed by the caller).
+            // Private function return: dynamic jump whose destination operand
+            // has entry-stack provenance (was passed by the caller).
             if !term.flags.contains(InstFlags::STATIC_JUMP) {
                 prov_stack.clear();
                 prov_stack.resize(section.inputs as usize, Provenance::Input);
-                // Simulate up to (but not including) the terminator JUMP, then
-                // check if TOS has entry-stack provenance.
+                // Simulate up to (but not including) the terminator, then check
+                // the destination operand's provenance. For JUMP the destination
+                // is TOS; for JUMPI it is second-from-top (TOS is the condition).
                 let pre_term = block.insts().take_while(|&i| i != term_inst);
+                let (term_inp, _) = term.stack_io();
                 if self.simulate_provenance(pre_term, &mut prov_stack)
-                    && prov_stack.last() == Some(&Provenance::Input)
+                    && let Some(idx) = prov_stack.len().checked_sub(term_inp as usize)
+                    && prov_stack.get(idx) == Some(&Provenance::Input)
                 {
                     summaries[bid].is_return = true;
                 }

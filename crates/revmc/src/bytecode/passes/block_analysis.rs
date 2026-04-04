@@ -31,7 +31,7 @@
 use super::{StackSection, pcr::PcrHint};
 use crate::{
     FxHashMap,
-    bytecode::{Bytecode, Inst, InstData, InstFlags, Interner, U256Idx},
+    bytecode::{Bytecode, Inst, InstFlags, Interner, U256Idx},
 };
 use bitvec::vec::BitVec;
 use either::Either;
@@ -160,87 +160,6 @@ impl ConstSetInterner {
             }
         }
     }
-}
-
-/// Applies stack-shuffling opcodes (POP, DUP, SWAP, DUPN, SWAPN, EXCHANGE) to an abstract stack.
-///
-/// Returns `Some(true)` if the opcode was handled, `Some(false)` on invalid stack underflow or
-/// decode failure, or `None` if the opcode is not a stack-shuffling instruction (caller handles
-/// PUSH and fallback).
-///
-/// `unknown` is pushed when DUPN/SWAPN/EXCHANGE access a slot beyond the tracked stack depth.
-pub(super) fn apply_stack_shuffle<T: Copy>(
-    inst: &InstData,
-    code: &[u8],
-    stack: &mut Vec<T>,
-    unknown: T,
-) -> Option<bool> {
-    match inst.opcode {
-        op::POP => {
-            if stack.pop().is_none() {
-                return Some(false);
-            }
-        }
-        op::DUP1..=op::DUP16 => {
-            let depth = (inst.opcode - op::DUP1 + 1) as usize;
-            if stack.len() < depth {
-                return Some(false);
-            }
-            stack.push(stack[stack.len() - depth]);
-        }
-        op::SWAP1..=op::SWAP16 => {
-            let depth = (inst.opcode - op::SWAP1 + 1) as usize;
-            let len = stack.len();
-            if len < depth + 1 {
-                return Some(false);
-            }
-            stack.swap(len - 1, len - 1 - depth);
-        }
-        op::DUPN => {
-            let imm = code.get(inst.pc as usize + 1).copied().unwrap_or(0);
-            let Some(n) = crate::decode_single(imm) else {
-                return Some(false);
-            };
-            let n = n as usize;
-            if stack.len() < n {
-                stack.push(unknown);
-            } else {
-                stack.push(stack[stack.len() - n]);
-            }
-        }
-        op::SWAPN => {
-            let imm = code.get(inst.pc as usize + 1).copied().unwrap_or(0);
-            let Some(n) = crate::decode_single(imm) else {
-                return Some(false);
-            };
-            let n = n as usize;
-            let len = stack.len();
-            if len < n + 1 {
-                if let Some(tos) = stack.last_mut() {
-                    *tos = unknown;
-                }
-            } else {
-                stack.swap(len - 1, len - 1 - n);
-            }
-        }
-        op::EXCHANGE => {
-            let imm = code.get(inst.pc as usize + 1).copied().unwrap_or(0);
-            let Some((n, m)) = crate::decode_pair(imm) else {
-                return Some(false);
-            };
-            let (n, m) = (n as usize, m as usize);
-            let len = stack.len();
-            if len < m + 1 {
-                if len > n {
-                    stack[len - 1 - n] = unknown;
-                }
-            } else {
-                stack.swap(len - 1 - n, len - 1 - m);
-            }
-        }
-        _ => return None,
-    }
-    Some(true)
 }
 
 /// Maximum abstract stack depth tracked by the analysis. Top-aligned joins across paths with
@@ -1034,7 +953,7 @@ impl Bytecode<'_> {
                 snap.extend_from_slice(&stack[start..]);
             }
 
-            if let Some(ok) = apply_stack_shuffle(inst, &self.code, stack, AbsValue::Top) {
+            if let Some(ok) = self.apply_stack_shuffle(inst, stack, AbsValue::Top) {
                 if !ok {
                     return false;
                 }
