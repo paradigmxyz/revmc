@@ -58,19 +58,6 @@ impl<'a> Bytecode<'a> {
             if deduped == 0 {
                 break;
             }
-            // Flatten redirect chains so that earlier redirects (A -> B) are
-            // updated when B itself gets deduped to C in a later round.
-            let keys: SmallVec<[Inst; 16]> = self.redirects.keys().copied().collect();
-            for key in keys {
-                let mut target = self.redirects[&key];
-                while let Some(&next) = self.redirects.get(&target) {
-                    if next == target {
-                        break;
-                    }
-                    target = next;
-                }
-                self.redirects.insert(key, target);
-            }
             self.rebuild_cfg();
         }
         debug!(deduped = total_deduped, "finished");
