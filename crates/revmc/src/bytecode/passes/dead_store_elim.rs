@@ -267,7 +267,7 @@ fn transfer_liveness(
         op::POP => {
             live.set(h_before - 1, false);
         }
-        _ => generic_transfer(live, opcode, h_before, inp, out, input_snap, output),
+        _ => generic_transfer(live, h_before, inp, out, input_snap, output),
     }
 }
 
@@ -275,11 +275,11 @@ fn transfer_liveness(
 ///
 /// When the output is a known constant, codegen replaces the entire instruction with a
 /// constant push and never reads any inputs from the stack, so none of them need to be live.
-/// When individual inputs are known constants, codegen loads them as immediates via
-/// `const_operand` so those stack positions don't need to be live either.
+/// When individual inputs are known constants, codegen pre-writes them into the stack
+/// slots (via `operand_value_or_load` or `sp_after_inputs`), so those positions don't
+/// need to be live.
 fn generic_transfer(
     live: &mut BitVec,
-    opcode: u8,
     h_before: usize,
     inp: usize,
     out: usize,
@@ -299,13 +299,11 @@ fn generic_transfer(
     // Mark inputs live, skipping positions whose values are known constants.
     // Inline ops load constants via `operand_value_or_load`; builtin-delegated ops
     // have their constant operands pre-written into the stack slots by `sp_after_inputs`.
-    // Both paths ensure the value is available at runtime, so DSE can uniformly kill
-    // const inputs for all skippable opcodes.
+    // Both paths ensure the value is available at runtime, so const inputs can be
+    // killed for any opcode.
     for k in 0..inp {
         // input_snap is in stack order: [deepest, ..., TOS].
-        if can_skip_when_dead(opcode)
-            && input_snap.get(k).is_some_and(|v| matches!(v, AbsValue::Const(_)))
-        {
+        if input_snap.get(k).is_some_and(|v| matches!(v, AbsValue::Const(_))) {
             continue;
         }
         live.set(h_before - inp + k, true);
@@ -433,10 +431,10 @@ mod tests {
             STOP
         ",
         );
-        // MSTORE reads operands via builtin (sp_after_inputs), not const_operand.
+        // PUSH 1 feeds MSTORE's value input; known constant, so codegen pre-writes it.
         assert!(
-            !bytecode.inst(Inst::from_usize(0)).flags.contains(InstFlags::NOOP),
-            "PUSH 1 should NOT be skipped"
+            bytecode.inst(Inst::from_usize(0)).flags.contains(InstFlags::NOOP),
+            "PUSH 1 should be skipped (const input)"
         );
         assert!(
             bytecode.inst(Inst::from_usize(1)).flags.contains(InstFlags::NOOP),
@@ -464,9 +462,9 @@ mod tests {
     }
 
     #[test]
-    fn dup_keeps_source_live() {
-        // DUP copy is popped (dead), but PUSH 0x42 feeds MSTORE which reads
-        // via builtin (not const_operand), so the PUSH must stay live.
+    fn dup_const_source_killed() {
+        // DUP copy is popped (dead), PUSH 0x42 feeds MSTORE which pre-writes
+        // constant operands, so the PUSH is dead.
         let bytecode = analyze_asm(
             "
             PUSH1 0x42
@@ -478,8 +476,8 @@ mod tests {
         ",
         );
         assert!(
-            !bytecode.inst(Inst::from_usize(0)).flags.contains(InstFlags::NOOP),
-            "PUSH should NOT be skipped"
+            bytecode.inst(Inst::from_usize(0)).flags.contains(InstFlags::NOOP),
+            "PUSH should be skipped (const input)"
         );
     }
 
@@ -814,14 +812,12 @@ mod tests {
             STOP            ; inst 5
         ",
         );
-        assert!(
-            bytecode.inst(Inst::from_usize(0)).flags.contains(InstFlags::NOOP),
-            "PUSH 2 should be skipped (const output from ADD)"
-        );
-        assert!(
-            bytecode.inst(Inst::from_usize(1)).flags.contains(InstFlags::NOOP),
-            "PUSH 3 should be skipped (const output from ADD)"
-        );
+        for dead in [0, 1, 2, 3] {
+            assert!(bytecode.inst(Inst::from_usize(dead)).flags.contains(InstFlags::NOOP));
+        }
+        for not_dead in [4, 5] {
+            assert!(!bytecode.inst(Inst::from_usize(not_dead)).flags.contains(InstFlags::NOOP));
+        }
     }
 
     #[test]
@@ -947,8 +943,9 @@ mod tests {
     }
 
     #[test]
-    fn non_skippable_builtin_inputs_stay_live() {
-        // SLOAD has side effects and is not in can_skip_when_dead, so its inputs stay live.
+    fn sload_const_input_killed() {
+        // SLOAD's input is a known constant — codegen pre-writes it via sp_after_inputs,
+        // so the PUSH is dead.
         let bytecode = analyze_asm(
             "
             PUSH1 0x00      ; inst 0: storage key
@@ -959,8 +956,8 @@ mod tests {
         ",
         );
         assert!(
-            !bytecode.inst(Inst::from_usize(0)).flags.contains(InstFlags::NOOP),
-            "PUSH 0 should NOT be skipped (SLOAD is not skippable)"
+            bytecode.inst(Inst::from_usize(0)).flags.contains(InstFlags::NOOP),
+            "PUSH 0 should be skipped (const input)"
         );
     }
 }

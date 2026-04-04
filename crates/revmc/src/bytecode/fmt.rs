@@ -451,26 +451,26 @@ mod tests {
                ; spec_id=Osaka has_dynamic_jumps=false may_suspend=true
 
 bb0:           ; stack_in=0 max_growth=1
-  PUSH1 0x03   ; ic= 0 pc= 0 gas=11
+  PUSH1 0x03   ; ic= 0 pc= 0 gas=11 noop
   JUMP bb1     ; ic= 1 pc= 2
 
 bb1:           ; stack_in=0 max_growth=2
   JUMPDEST     ; ic= 2 pc= 3 gas=7 reachable
-  PUSH1 0x01   ; ic= 3 pc= 4
-  PUSH1 0x00   ; ic= 4 pc= 6
+  PUSH1 0x01   ; ic= 3 pc= 4 noop
+  PUSH1 0x00   ; ic= 4 pc= 6 noop
   SSTORE       ; ic= 5 pc= 8
-  PUSH1 0x01   ; ic= 6 pc= 9 gas=16
-  PUSH1 0x03   ; ic= 7 pc=11
+  PUSH1 0x01   ; ic= 6 pc= 9 gas=16 noop
+  PUSH1 0x03   ; ic= 7 pc=11 noop
   JUMPI bb1    ; ic= 8 pc=13
 
 bb2:           ; stack_in=0 max_growth=7
-  PUSH1 0x00   ; ic= 9 pc=14 gas=121
-  PUSH1 0x00   ; ic=10 pc=16
-  PUSH1 0x00   ; ic=11 pc=18
-  PUSH1 0x00   ; ic=12 pc=20
-  PUSH1 0x00   ; ic=13 pc=22
-  PUSH1 0x42   ; ic=14 pc=24
-  PUSH2 0xffff ; ic=15 pc=26
+  PUSH1 0x00   ; ic= 9 pc=14 gas=121 noop
+  PUSH1 0x00   ; ic=10 pc=16 noop
+  PUSH1 0x00   ; ic=11 pc=18 noop
+  PUSH1 0x00   ; ic=12 pc=20 noop
+  PUSH1 0x00   ; ic=13 pc=22 noop
+  PUSH1 0x42   ; ic=14 pc=24 noop
+  PUSH2 0xffff ; ic=15 pc=26 noop
   CALL         ; ic=16 pc=29 suspends
   POP          ; ic=17 pc=30 gas=2 stack_in=1 max_growth=0
   STOP         ; ic=18 pc=31
