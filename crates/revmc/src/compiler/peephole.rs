@@ -34,6 +34,10 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     }
 
     /// DIV a, b => a / b.
+    ///
+    /// General constant divisors could use native LLVM `udiv`, but i256 division
+    /// generates very bloated code (~100+ instructions for the reciprocal multiply),
+    /// so we only emit native ops for powers of two where LLVM lowers to `lshr`.
     fn peephole_div(&mut self) -> bool {
         let [dividend, divisor] = self.const_operands();
         match divisor {
@@ -67,6 +71,9 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     }
 
     /// SDIV a, b => signed(a) / signed(b), rounded toward zero.
+    ///
+    /// Pow2 cases are intentionally skipped: signed division rounds toward zero while
+    /// arithmetic shift right rounds toward negative infinity, so the semantics differ.
     fn peephole_sdiv(&mut self) -> bool {
         let [dividend, divisor] = self.const_operands();
         match divisor {
@@ -108,6 +115,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     }
 
     /// MOD a, b => a % b.
+    ///
+    /// Same as DIV: only pow2 moduli use native `urem` (LLVM lowers to `and`).
     fn peephole_mod(&mut self) -> bool {
         let [dividend, modulus] = self.const_operands();
         match modulus {
