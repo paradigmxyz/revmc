@@ -1220,27 +1220,19 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     fn suspend(&mut self) {
         // Register the next instruction as the resume block.
         let idx = self.resume_blocks.len();
-        let value = self.add_resume_at(self.inst_entries[self.current_inst.unwrap() + 1]);
+        self.add_resume_at(self.inst_entries[self.current_inst.unwrap() + 1]);
 
         // Register the current block as the suspend block.
-        let value = match value {
-            Some(value) => value,
-            None => self.bcx.iconst(self.isize_type, idx as i64 + 1),
-        };
+        let value = self.bcx.iconst(self.isize_type, idx as i64 + 1);
         self.suspend_blocks.push((value, self.bcx.current_block().unwrap()));
 
         // Branch to the suspend block.
         self.bcx.br(self.suspend_block);
     }
 
-    /// Adds a resume point and returns its index.
-    fn add_resume_at(&mut self, block: B::BasicBlock) -> Option<B::Value> {
-        // Always use index-based resume (ResumeKind::Indexes).
-        // Block-address resume (ResumeKind::Blocks) stores native pointers in `ecx.resume_at`,
-        // which is unsound when round-tripped through `call_with_interpreter` because
-        // `absolute_jump`/`pc()` treat the value as a bytecode offset.
+    /// Adds a resume point.
+    fn add_resume_at(&mut self, block: B::BasicBlock) {
         self.resume_blocks.push(block);
-        None
     }
 
     /// Loads the word at the given pointer.
