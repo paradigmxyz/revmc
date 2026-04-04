@@ -68,6 +68,11 @@ impl Bytecode<'_> {
             live.resize(exit_height.max(0) as usize, true);
             live.resize(max_height.max(0) as usize, false);
 
+            // Nothing to do.
+            if live.is_empty() {
+                continue;
+            }
+
             // Walk backward.
             for (idx, inst) in block.insts().enumerate().rev() {
                 let data = &self.insts[inst];
