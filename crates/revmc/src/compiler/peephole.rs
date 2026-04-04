@@ -1,8 +1,8 @@
 //! Peephole optimizations applied during translation.
 //!
 //! These fire when abstract interpretation has proven one or more operands are constant,
-//! replacing expensive opaque builtins (DIV, MOD, SDIV, SMOD) with native LLVM operations
-//! that it can optimize further (e.g. pow2 udiv → lshr, pow2 urem → and).
+//! replacing expensive opaque builtins (DIV, MOD, SDIV, SMOD, ADDMOD, MULMOD) with native
+//! LLVM operations that it can optimize further (e.g. pow2 udiv → lshr, pow2 urem → and).
 
 use super::translate::FunctionCx;
 use crate::{Backend, Builder, InstData, IntCC};
@@ -23,6 +23,9 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             op::SDIV => self.peephole_sdiv(),
             op::MOD => self.peephole_mod(),
             op::SMOD => self.peephole_smod(),
+            op::ADDMOD => self.peephole_addmod(),
+            op::MULMOD => self.peephole_mulmod(),
+            op::EXP => self.peephole_exp(),
             _ => false,
         }
     }
@@ -124,6 +127,72 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 let zero = self.bcx.iconst_256(U256::ZERO);
                 self.push(zero);
             }
+            _ => return false,
+        }
+        true
+    }
+
+    /// ADDMOD a, b, N => (a + b) % N.
+    fn peephole_addmod(&mut self) -> bool {
+        let [a, b, modulus] = self.const_operands();
+        match modulus {
+            // (a + b) % 0 => 0, (a + b) % 1 => 0.
+            Some(U256::ZERO) | Some(U256::ONE) => {
+                self.pop_ignore(3);
+                let zero = self.bcx.iconst_256(U256::ZERO);
+                self.push(zero);
+            }
+            _ => match (a, b) {
+                // (0 + 0) % N => 0.
+                (Some(U256::ZERO), Some(U256::ZERO)) => {
+                    self.pop_ignore(3);
+                    let zero = self.bcx.iconst_256(U256::ZERO);
+                    self.push(zero);
+                }
+                _ => return false,
+            },
+        }
+        true
+    }
+
+    /// MULMOD a, b, N => (a * b) % N.
+    fn peephole_mulmod(&mut self) -> bool {
+        let [a, b, modulus] = self.const_operands();
+        match modulus {
+            // (a * b) % 0 => 0, (a * b) % 1 => 0.
+            Some(U256::ZERO) | Some(U256::ONE) => {
+                self.pop_ignore(3);
+                let zero = self.bcx.iconst_256(U256::ZERO);
+                self.push(zero);
+            }
+            _ => {
+                // a * 0 => 0, 0 * b => 0.
+                if a == Some(U256::ZERO) || b == Some(U256::ZERO) {
+                    self.pop_ignore(3);
+                    let zero = self.bcx.iconst_256(U256::ZERO);
+                    self.push(zero);
+                } else {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// EXP base, exp => base ** exp.
+    ///
+    /// Only handles cases where the dynamic gas cost is zero (exp=0), since computing
+    /// the dynamic gas for nonzero exponents requires runtime spec information.
+    fn peephole_exp(&mut self) -> bool {
+        let [_base, exponent] = self.const_operands();
+        match exponent {
+            // x ** 0 => 1 (dynamic gas = 0).
+            Some(U256::ZERO) => {
+                self.pop_ignore(2);
+                let one = self.bcx.iconst_256(U256::from(1));
+                self.push(one);
+            }
+            // Nonzero exponents require dynamic gas; cannot skip the builtin.
             _ => return false,
         }
         true
