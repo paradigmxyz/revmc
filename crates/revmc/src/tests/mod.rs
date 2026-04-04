@@ -410,6 +410,43 @@ tests! {
             expected_gas: GAS_WHAT_INTERPRETER_SAYS,
         }),
 
+        // Truncated trailing DUPN at EOF: immediate byte missing, zero-padded to 0x00.
+        // decode_single(0) = 17, so this is DUPN(17) with 17 items on stack → succeeds.
+        dupn_truncated_eof(@raw {
+            bytecode: &{
+                let mut code = [0u8; 18];
+                let mut i = 0;
+                while i < 17 {
+                    code[i] = op::PUSH0;
+                    i += 1;
+                }
+                code[17] = op::DUPN; // no immediate byte
+                code
+            },
+            spec_id: SpecId::AMSTERDAM,
+            expected_return: RETURN_WHAT_INTERPRETER_SAYS,
+            expected_stack: STACK_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+        }),
+        // Truncated trailing SWAPN at EOF: immediate byte missing, zero-padded to 0x00.
+        // decode_single(0) = 17, so this is SWAPN(17) with 18 items on stack → succeeds.
+        swapn_truncated_eof(@raw {
+            bytecode: &{
+                let mut code = [0u8; 19];
+                let mut i = 0;
+                while i < 18 {
+                    code[i] = op::PUSH0;
+                    i += 1;
+                }
+                code[18] = op::SWAPN; // no immediate byte
+                code
+            },
+            spec_id: SpecId::AMSTERDAM,
+            expected_return: RETURN_WHAT_INTERPRETER_SAYS,
+            expected_stack: STACK_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+        }),
+
         overflow_analysis_edge_case(@raw {
             bytecode: &[&[op::JUMPDEST][..], &[op::PUSH0; 1025][..], &[op::JUMPI][..]].concat(),
             expected_return: InstructionResult::StackOverflow,

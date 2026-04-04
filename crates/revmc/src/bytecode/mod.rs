@@ -382,6 +382,15 @@ impl<'a> Bytecode<'a> {
         self.code.get(start..start + imm_len)
     }
 
+    /// Returns the first immediate byte, defaulting to `0` if truncated or missing.
+    ///
+    /// This matches upstream `revm-bytecode` legacy analysis which zero-pads incomplete
+    /// trailing immediates.
+    pub(crate) fn get_u8_imm(&self, data: &InstData) -> u8 {
+        let start = data.pc as usize + 1;
+        self.code.get(start).copied().unwrap_or(0)
+    }
+
     /// Returns `true` if the given program counter is a valid jump destination.
     fn is_valid_jump(&self, pc: usize) -> bool {
         self.jumpdests.get(pc).as_deref().copied() == Some(true)

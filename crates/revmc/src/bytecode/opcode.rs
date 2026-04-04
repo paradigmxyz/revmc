@@ -171,16 +171,17 @@ pub const fn stack_io(op: u8) -> (u8, u8) {
 /// Returns the real `(inputs, outputs)` stack I/O for an opcode, decoding the immediate for
 /// `DUPN`, `SWAPN`, and `EXCHANGE` whose opcode-table entries are placeholders.
 pub(crate) fn compute_stack_io(op: u8, immediate: Option<&[u8]>) -> (u8, u8) {
+    let imm_u8 = || immediate.map_or(0, |b| b[0]);
     match op {
-        op::DUPN => match immediate.and_then(|b| decode_single(b[0])) {
+        op::DUPN => match decode_single(imm_u8()) {
             Some(n) => (n, n + 1),
             None => stack_io(op),
         },
-        op::SWAPN => match immediate.and_then(|b| decode_single(b[0])) {
+        op::SWAPN => match decode_single(imm_u8()) {
             Some(n) => (n + 1, n + 1),
             None => stack_io(op),
         },
-        op::EXCHANGE => match immediate.and_then(|b| decode_pair(b[0])) {
+        op::EXCHANGE => match decode_pair(imm_u8()) {
             Some((_n, m)) => (m + 1, m + 1),
             None => stack_io(op),
         },
