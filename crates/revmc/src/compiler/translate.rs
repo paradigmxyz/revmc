@@ -595,6 +595,14 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         // Pay static gas for the current section.
         self.gas_cost_imm(data.gas_section.gas_cost as u64);
 
+        // NOOPs that aren't section heads need no codegen beyond gas.
+        let (inp, out) = data.stack_io();
+        let diff = effective_stack_diff(inp, out, data);
+        if data.flags.contains(InstFlags::NOOP) && !data.is_stack_section_head() {
+            self.section_len_offset += diff;
+            goto_return!("noop");
+        }
+
         // Compute len_before for this instruction.
         // At section heads: load from the alloca once and reset the section offset.
         // Within a section: derive from section_start_len + compile-time offset.
@@ -656,9 +664,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             }
         }
 
-        // Update the stack length for this instruction.
-        let (inp, out) = data.stack_io();
-        let diff = effective_stack_diff(inp, out, data);
+        // NOOP section head: still needs bounds check above, but skip the rest.
         if data.flags.contains(InstFlags::NOOP) {
             self.section_len_offset += diff;
             goto_return!("noop");
