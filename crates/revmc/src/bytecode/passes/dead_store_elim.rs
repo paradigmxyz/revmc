@@ -141,7 +141,6 @@ impl Bytecode<'_> {
 /// (EXP), memory access (MLOAD, KECCAK256), storage/host reads (SLOAD, TLOAD, BALANCE,
 /// etc.), and MSIZE/GAS (position-dependent).
 fn can_skip_when_dead(opcode: u8) -> bool {
-    use revm_bytecode::opcode as op;
     matches!(
         opcode,
         // Arithmetic (inline).
