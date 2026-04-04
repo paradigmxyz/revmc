@@ -30,8 +30,18 @@ for bench in "${BENCHES[@]}"; do
     non_adj=$(echo "$output" | { rg -c 'resolved non-adjacent jump' || echo 0; })
     pcr_res=$(echo "$output" | { rg -c 'resolved via PCR hint' || echo 0; })
     fixpt_res=$(echo "$output" | { rg -o 'ba:.*newly_resolved=(\d+)' -r '$1' | tail -1 || echo 0; })
-    # Use the last post-resolution "unresolved" line (skip the initial pre-resolution count).
-    unresolved=$(echo "$output" | { rg -o '(local_jumps|ba):.*unresolved dynamic jumps remain n=(\d+)' -r '$2' | tail -1 || echo 0; })
+    # Use BA's unresolved count if it exists, else local_jumps. Prefer BA
+    # because it's the final pass; when BA resolves everything, no BA
+    # "unresolved" line is logged, so we get 0.
+    ba_unres=$(echo "$output" | { rg -o 'analyze:ba: .*unresolved dynamic jumps remain n=(\d+)' -r '$1' | tail -1 || true; })
+    ba_ran=$(echo "$output" | { rg -c 'analyze:ba:' || echo 0; })
+    if [ -n "$ba_unres" ]; then
+        unresolved=$ba_unres
+    elif [ "$ba_ran" -gt 0 ]; then
+        unresolved=0
+    else
+        unresolved=$(echo "$output" | { rg -o 'local_jumps:.*unresolved dynamic jumps remain n=(\d+)' -r '$1' | tail -1 || echo 0; })
+    fi
     total=$((local_res + fixpt_res + unresolved))
 
     printf "%-25s %6d %6d %6d %6d %6d %10d\n" "$bench" "$local_res" "$non_adj" "$pcr_res" "$fixpt_res" "$unresolved" "$total"

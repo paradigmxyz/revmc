@@ -7,9 +7,9 @@
 
 use super::{
     StackSection,
-    block_analysis::{AbsValue, Block, ConstSetInterner, JumpTarget},
+    block_analysis::{AbsValue, Block, BlockData, ConstSetInterner, JumpTarget},
 };
-use crate::bytecode::{Bytecode, Inst, InstFlags};
+use crate::bytecode::{Bytecode, Inst, InstData, InstFlags};
 use bitvec::vec::BitVec;
 use oxc_index::IndexVec;
 use revm_bytecode::opcode as op;
@@ -19,6 +19,19 @@ use tracing::{debug, instrument, trace};
 
 /// Maximum call-string depth for context-sensitive traversal.
 const MAX_CONTEXT_DEPTH: usize = 8;
+
+/// Stack value provenance for return detection.
+///
+/// Tracks whether a stack slot originated from the block's entry stack or was
+/// produced in-block. Only entry-stack provenance (`Input`) qualifies a dynamic
+/// JUMP as a private function return.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Provenance {
+    /// Value from the block's entry stack.
+    Input,
+    /// Value produced in-block (PUSH, arithmetic, memory/storage load, etc.).
+    Local,
+}
 
 /// Call-string context: stack of caller block IDs, most recent first.
 type Context = SmallVec<[Block; 8]>;
@@ -65,7 +78,7 @@ struct LocalBlockSummary {
     /// and the block also pushes a valid JUMPDEST label that survives to exit.
     private_call: Option<PrivateCallInfo>,
     /// Whether this block is a private function return: the terminator is a JUMP
-    /// with no `STATIC_JUMP` flag (target comes from the stack).
+    /// whose operand has entry-stack provenance (passed by the caller).
     is_return: bool,
 }
 
@@ -106,17 +119,148 @@ impl Bytecode<'_> {
         hints
     }
 
+    /// Simulates stack provenance through a block's instructions.
+    ///
+    /// Entry-stack slots start as `Input`; all in-block-produced values are `Local`.
+    /// Stack-motion opcodes (DUP, SWAP, POP, PUSH) preserve or introduce provenance;
+    /// all other opcodes pop their inputs and push `Local` outputs.
+    ///
+    /// Returns `false` if the simulation encounters an invalid stack underflow.
+    fn simulate_provenance(
+        &self,
+        insts: impl IntoIterator<Item = Inst>,
+        stack: &mut Vec<Provenance>,
+    ) -> bool {
+        for i in insts {
+            let inst = &self.insts[i];
+            if inst.is_dead_code() || inst.flags.contains(InstFlags::NOOP) {
+                continue;
+            }
+
+            let (inp, out) = inst.stack_io();
+            let inp = inp as usize;
+
+            match inst.opcode {
+                op::PUSH0..=op::PUSH32 => {
+                    stack.push(Provenance::Local);
+                }
+                op::POP => {
+                    if stack.pop().is_none() {
+                        return false;
+                    }
+                }
+                op::DUP1..=op::DUP16 => {
+                    let depth = (inst.opcode - op::DUP1 + 1) as usize;
+                    if stack.len() < depth {
+                        return false;
+                    }
+                    stack.push(stack[stack.len() - depth]);
+                }
+                op::SWAP1..=op::SWAP16 => {
+                    let depth = (inst.opcode - op::SWAP1 + 1) as usize;
+                    let len = stack.len();
+                    if len < depth + 1 {
+                        return false;
+                    }
+                    stack.swap(len - 1, len - 1 - depth);
+                }
+                op::DUPN => {
+                    let Some(n) = crate::decode_single(self.get_u8_imm(inst)) else {
+                        return false;
+                    };
+                    let n = n as usize;
+                    if stack.len() < n {
+                        stack.push(Provenance::Input);
+                    } else {
+                        stack.push(stack[stack.len() - n]);
+                    }
+                }
+                op::SWAPN => {
+                    let Some(n) = crate::decode_single(self.get_u8_imm(inst)) else {
+                        return false;
+                    };
+                    let n = n as usize;
+                    let len = stack.len();
+                    if len < n + 1 {
+                        if let Some(tos) = stack.last_mut() {
+                            *tos = Provenance::Input;
+                        }
+                    } else {
+                        stack.swap(len - 1, len - 1 - n);
+                    }
+                }
+                op::EXCHANGE => {
+                    let Some((n, m)) = crate::decode_pair(self.get_u8_imm(inst)) else {
+                        return false;
+                    };
+                    let (n, m) = (n as usize, m as usize);
+                    let len = stack.len();
+                    if len < m + 1 {
+                        if len > n {
+                            stack[len - 1 - n] = Provenance::Input;
+                        }
+                    } else {
+                        stack.swap(len - 1 - n, len - 1 - m);
+                    }
+                }
+                _ => {
+                    if stack.len() < inp {
+                        return false;
+                    }
+                    stack.truncate(stack.len() - inp);
+                    for _ in 0..out {
+                        stack.push(Provenance::Local);
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    /// Returns `true` if every live instruction in the block uses an opcode
+    /// safe for PCR return classification.
+    ///
+    /// Excludes transient storage (TLOAD/TSTORE), calls, creates, and other
+    /// opcodes that indicate shared utility blocks rather than Solidity-style
+    /// private function returns.
+    fn is_return_safe_block(insts: &IndexVec<Inst, InstData>, block: &BlockData) -> bool {
+        block.insts().all(|i| {
+            let inst = &insts[i];
+            if inst.is_dead_code() || inst.flags.contains(InstFlags::NOOP) {
+                return true;
+            }
+            !matches!(
+                inst.opcode,
+                op::TLOAD
+                    | op::TSTORE
+                    | op::CALL
+                    | op::CALLCODE
+                    | op::DELEGATECALL
+                    | op::STATICCALL
+                    | op::CREATE
+                    | op::CREATE2
+                    | op::SELFDESTRUCT
+                    | op::RETURN
+                    | op::REVERT
+                    | op::STOP
+                    | op::INVALID
+            )
+        })
+    }
+
     /// Computes local per-block summaries for private call/return detection.
     ///
-    /// For each block, simulates the stack effect to determine:
+    /// For each block, uses provenance-based stack simulation to determine:
     /// - Whether the block is a private function call (static jump + pushed label).
-    /// - Whether the block is a private function return (dynamic jump from stack).
+    /// - Whether the block is a private function return (dynamic jump whose operand has entry-stack
+    ///   provenance, i.e. the target was passed by the caller).
     fn compute_local_summaries(&mut self) -> IndexVec<Block, LocalBlockSummary> {
         let mut summaries =
             IndexVec::from_vec(vec![LocalBlockSummary::default(); self.cfg.blocks.len()]);
 
         let empty_sets = ConstSetInterner::new();
-        let mut stack = Vec::new();
+        let mut abs_stack = Vec::new();
+        let mut prov_stack = Vec::new();
 
         for bid in self.cfg.blocks.indices() {
             let block = &self.cfg.blocks[bid];
@@ -128,26 +272,23 @@ impl Bytecode<'_> {
                 continue;
             }
 
-            // Private function return: JUMP with no static target, and the block
-            // only does stack manipulation (the jump target comes from the entry
-            // stack, not from memory/storage/computation).
+            // Compute the block's entry stack size and simulate provenance.
+            let section =
+                StackSection::from_stack_io(block.insts().map(|i| self.insts[i].stack_io()));
+
+            // Private function return: JUMP with no static target, the jump
+            // operand has entry-stack provenance (was passed by the caller),
+            // and the block contains only safe opcodes.
             if !term.flags.contains(InstFlags::STATIC_JUMP) {
-                let is_pure_return = block.insts().all(|i| {
-                    let inst = &self.insts[i];
-                    if inst.is_dead_code() || inst.flags.contains(InstFlags::NOOP) {
-                        return true;
-                    }
-                    matches!(
-                        inst.opcode,
-                        op::JUMPDEST
-                            | op::JUMP
-                            | op::POP
-                            | op::DUP1..=op::DUP16
-                            | op::SWAP1..=op::SWAP16
-                            | op::PUSH0..=op::PUSH32
-                    )
-                });
-                if is_pure_return {
+                prov_stack.clear();
+                prov_stack.resize(section.inputs as usize, Provenance::Input);
+                // Simulate up to (but not including) the terminator JUMP, then
+                // check if TOS has entry-stack provenance.
+                let pre_term = block.insts().take_while(|&i| i != term_inst);
+                if self.simulate_provenance(pre_term, &mut prov_stack)
+                    && prov_stack.last() == Some(&Provenance::Input)
+                    && Self::is_return_safe_block(&self.insts, block)
+                {
                     summaries[bid].is_return = true;
                 }
                 continue;
@@ -163,11 +304,9 @@ impl Bytecode<'_> {
 
             // Interpret the block with Top inputs to find which values survive to exit.
             // Reuses the same abstract interpreter as block_analysis_local.
-            let section =
-                StackSection::from_stack_io(block.insts().map(|i| self.insts[i].stack_io()));
-            stack.clear();
-            stack.resize(section.inputs as usize, AbsValue::Top);
-            if !self.interpret_block(block.insts(), &mut stack) {
+            abs_stack.clear();
+            abs_stack.resize(section.inputs as usize, AbsValue::Top);
+            if !self.interpret_block(block.insts(), &mut abs_stack) {
                 continue;
             }
 
@@ -175,7 +314,7 @@ impl Bytecode<'_> {
             // continuation/return address in the standard PUSH ret_addr; PUSH func; JUMP
             // pattern). In Solidity, the return address is typically pushed before the
             // function arguments and callee address, so it ends up deeper in the stack.
-            let continuation = stack.iter().find_map(|v| {
+            let continuation = abs_stack.iter().find_map(|v| {
                 if let JumpTarget::Const(inst) = self.resolve_jump_operand(*v, &empty_sets) {
                     Some(inst)
                 } else {
