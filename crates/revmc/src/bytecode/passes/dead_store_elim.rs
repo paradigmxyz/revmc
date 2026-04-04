@@ -187,7 +187,7 @@ fn can_skip_when_dead(opcode: u8) -> bool {
             ..=op::PUSH32
             | op::PC
             | op::CODESIZE
-            // Call-constant environment reads (no dynamic gas, no host calls).
+            // Pure environment reads (no dynamic gas, no side effects).
             | op::ADDRESS
             | op::ORIGIN
             | op::CALLER
