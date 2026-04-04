@@ -29,11 +29,10 @@ impl<'a> Bytecode<'a> {
     ///
     /// Eligible blocks are those whose terminator cannot fall through (diverging instructions
     /// like REVERT/STOP/RETURN, or unconditional JUMP). For every group of byte-identical
-    /// blocks, keeps one canonical copy while marking the rest as dead code.
-    /// Predecessors that reach a dead duplicate via a static jump or multi-jump are
-    /// redirected to the canonical block. For predecessors that reach the duplicate via
-    /// fallthrough, a redirect entry is stored in [`Bytecode::redirects`] so the
-    /// translator can map the dead instruction to the canonical block's IR block.
+    /// blocks, keeps one canonical copy while marking them as dead code.
+    /// A redirect entry is stored in [`Bytecode::redirects`] so the translator can map
+    /// dead instructions to the canonical block's IR block. The CFG is rebuilt after each
+    /// iteration so successor/predecessor lists stay consistent.
     ///
     /// `local_snapshots` are the block-local snapshots computed by `block_analysis_local`
     /// (before the global fixpoint). After merging, the canonical block's snapshots are
@@ -52,6 +51,7 @@ impl<'a> Bytecode<'a> {
             if deduped == 0 {
                 break;
             }
+            self.rebuild_cfg();
             key_to_blocks.clear();
         }
         debug!(deduped = total_deduped, "finished");
@@ -66,15 +66,11 @@ impl<'a> Bytecode<'a> {
     ) -> usize {
         for bid in self.cfg.blocks.indices() {
             let block = &self.cfg.blocks[bid];
+            let term = &self.insts[block.terminator()];
+
             // Only dedup blocks whose terminator cannot fall through (diverging or
             // unconditional JUMP). JUMPI blocks fall through to position-dependent targets.
-            let term = &self.insts[block.terminator()];
             if term.can_fall_through() {
-                continue;
-            }
-
-            // Skip already-dead blocks (from a previous iteration).
-            if self.insts[block.insts.start].flags.contains(InstFlags::DEAD_CODE) {
                 continue;
             }
 
@@ -141,11 +137,8 @@ impl<'a> Bytecode<'a> {
                     self.insts[canonical_first_inst].data = 1;
                 }
 
-                // Redirect predecessors that reach the duplicate via static jumps,
-                // and update their CFG successor lists so the next iteration sees
-                // the canonical target in the dedup key.
-                let preds = std::mem::take(&mut self.cfg.blocks[dup].preds);
-                for &pred in &preds {
+                // Redirect predecessors that reach the duplicate via static jumps.
+                for &pred in &dup_block.preds {
                     let term_inst = self.cfg.blocks[pred].terminator();
                     let term = &self.insts[term_inst];
                     let is_static = term.is_static_jump()
@@ -155,19 +148,12 @@ impl<'a> Bytecode<'a> {
                     if is_static {
                         self.insts[term_inst].data = canonical_first_inst.index() as u32;
                     }
-                    // Update CFG successor: replace dup → canonical.
-                    for succ in &mut self.cfg.blocks[pred].succs {
-                        if *succ == dup {
-                            *succ = canonical;
-                        }
-                    }
                     // Multi-jump targets are NOT rewritten: each target carries a
                     // distinct PC that callers may push as a return address. The
                     // `inst_entries` redirect (translate.rs) already maps the dead
                     // instruction's IR entry to the canonical one, so the switch
                     // correctly emits cases for both PCs pointing to the same IR block.
                 }
-                self.cfg.blocks[dup].preds = preds;
             }
         }
 
