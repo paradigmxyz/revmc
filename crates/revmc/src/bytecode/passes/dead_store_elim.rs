@@ -11,6 +11,7 @@
 //! - EXCHANGE swaps two arbitrary non-TOS positions.
 //! - POP kills its input (makes the position dead) rather than reading it.
 
+use super::StackSectionAnalysis;
 use crate::bytecode::{Bytecode, InstFlags};
 use bitvec::vec::BitVec;
 use revm_bytecode::opcode as op;
@@ -43,31 +44,24 @@ impl Bytecode<'_> {
             // Compute the stack height at each instruction boundary by walking forward.
             // heights[i] = stack height *before* executing insts[i].
             // heights[insts.len()] = stack height after the last instruction.
-            //
-            // `inputs` tracks how many stack slots must exist before the block (minimum
-            // entry height). `diff` is the running cumulative stack delta. `max_growth`
-            // is the peak of `diff`, so the overall max height is `inputs + max_growth`.
-            let mut inputs = 0i32;
-            let mut diff = 0i32;
-            let mut max_growth = 0i32;
+            let mut stack = StackSectionAnalysis::default();
             heights.clear();
             heights.push(0); // placeholder; patched to entry_height below.
             for inst in block.insts() {
                 let (inp, out) = self.insts[inst].stack_io();
-                inputs = inputs.max(inp as i32 - diff);
-                diff += out as i32 - inp as i32;
-                max_growth = max_growth.max(diff);
-                heights.push(diff);
+                stack.process(inp, out);
+                heights.push(stack.diff());
             }
 
             // Shift all heights so that heights[0] == entry_height.
-            let entry_height = inputs;
+            let section = stack.section();
+            let entry_height = section.inputs as i32;
             for h in &mut heights {
                 *h += entry_height;
             }
 
             let exit_height = *heights.last().unwrap();
-            let max_height = entry_height + max_growth;
+            let max_height = entry_height + section.max_growth as i32;
             let live_len = max_height.max(0) as usize;
 
             // At the block exit, all stack positions are conservatively live.
