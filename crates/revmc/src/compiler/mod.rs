@@ -298,7 +298,7 @@ impl<B: Backend> EvmCompiler<B> {
     /// Sets the gas budget for compile-time evaluation of user-supplied bytecode.
     ///
     /// The compiler evaluates EVM operations at compile time during analysis passes. Without a
-    /// budget, adversarial bytecode (e.g. many `EXP(U256::MAX, U256::MAX)`) can make compilation
+    /// budget, adversarial bytecode (e.g. many `EXP`) can make compilation
     /// arbitrarily slow. This limit uses the EVM gas schedule to bound work.
     ///
     /// When the budget is exhausted, further evaluation is skipped and values remain dynamic.
