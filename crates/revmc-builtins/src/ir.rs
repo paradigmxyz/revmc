@@ -160,9 +160,6 @@ macro_rules! builtins {
 
                 const LOG: u8 = LOG0;
                 const DORETURN: u8 = RETURN;
-                const UDIV: u8 = DIV;
-                const UREM: u8 = MOD;
-                const SREM: u8 = SMOD;
 
                 match self {
                     $(Self::$ident => [<$ident:upper>]),*
@@ -228,16 +225,19 @@ builtins! {
     Panic          = __revmc_builtin_panic(ptr, usize) None,
     AssertSpecId   = __revmc_builtin_assert_spec_id(@[ecx] ptr, u8) None,
 
-    UDiv           = __revmc_builtin_udiv(@[sp] ptr) None,
-    URem           = __revmc_builtin_urem(@[sp] ptr) None,
+    Div            = __revmc_builtin_div(@[sp] ptr) None,
     SDiv           = __revmc_builtin_sdiv(@[sp] ptr) None,
-    SRem           = __revmc_builtin_srem(@[sp] ptr) None,
+    Mod            = __revmc_builtin_mod(@[sp] ptr) None,
+    SMod           = __revmc_builtin_smod(@[sp] ptr) None,
     AddMod         = __revmc_builtin_addmod(@[sp] ptr) None,
     MulMod         = __revmc_builtin_mulmod(@[sp] ptr) None,
     Exp            = __revmc_builtin_exp(@[ecx] ptr, @[sp] ptr) Some(u8),
     Keccak256      = __revmc_builtin_keccak256(@[ecx] ptr, @[sp] ptr) Some(u8),
+    Address        = __revmc_builtin_address(@[ecx_ro] ptr, @[sp] ptr) None,
     Balance        = __revmc_builtin_balance(@[ecx] ptr, @[sp] ptr) Some(u8),
     Origin         = __revmc_builtin_origin(@[ecx_ro] ptr, @[sp] ptr) None,
+    Caller         = __revmc_builtin_caller(@[ecx_ro] ptr, @[sp] ptr) None,
+    CallValue      = __revmc_builtin_call_value(@[ecx_ro] ptr, @[sp] ptr) None,
     CallDataLoad   = __revmc_builtin_calldataload(@[ecx_ro] ptr, @[sp] ptr) None,
     CallDataSize   = __revmc_builtin_calldatasize(@[ecx_ro] ptr) Some(usize),
     CallDataCopy   = __revmc_builtin_calldatacopy(@[ecx] ptr, @[sp] ptr) Some(u8),
@@ -245,6 +245,7 @@ builtins! {
     GasPrice       = __revmc_builtin_gas_price(@[ecx_ro] ptr, @[sp] ptr) None,
     ExtCodeSize    = __revmc_builtin_extcodesize(@[ecx] ptr, @[sp] ptr) Some(u8),
     ExtCodeCopy    = __revmc_builtin_extcodecopy(@[ecx] ptr, @[sp] ptr) Some(u8),
+    ReturnDataSize = __revmc_builtin_returndatasize(@[ecx_ro] ptr) Some(usize),
     ReturnDataCopy = __revmc_builtin_returndatacopy(@[ecx] ptr, @[sp] ptr) Some(u8),
     ExtCodeHash    = __revmc_builtin_extcodehash(@[ecx] ptr, @[sp] ptr) Some(u8),
     BlockHash      = __revmc_builtin_blockhash(@[ecx] ptr, @[sp] ptr) Some(u8),
@@ -259,11 +260,14 @@ builtins! {
     BlobHash       = __revmc_builtin_blob_hash(@[ecx_ro] ptr, @[sp] ptr) None,
     BlobBaseFee    = __revmc_builtin_blob_base_fee(@[ecx_ro] ptr, @[sp] ptr) None,
     SlotNum        = __revmc_builtin_slot_num(@[ecx_ro] ptr, @[sp] ptr) None,
+    Mload          = __revmc_builtin_mload(@[ecx] ptr, @[sp] ptr) Some(u8),
+    Mstore         = __revmc_builtin_mstore(@[ecx] ptr, @[sp] ptr) Some(u8),
+    Mstore8        = __revmc_builtin_mstore8(@[ecx] ptr, @[sp] ptr) Some(u8),
     Sload          = __revmc_builtin_sload(@[ecx] ptr, @[sp] ptr) Some(u8),
     Sstore         = __revmc_builtin_sstore(@[ecx] ptr, @[sp] ptr) Some(u8),
     Msize          = __revmc_builtin_msize(@[ecx_ro] ptr) Some(usize),
-    Tstore         = __revmc_builtin_tstore(@[ecx] ptr, @[sp] ptr) Some(u8),
     Tload          = __revmc_builtin_tload(@[ecx] ptr, @[sp] ptr) None,
+    Tstore         = __revmc_builtin_tstore(@[ecx] ptr, @[sp] ptr) Some(u8),
     Mcopy          = __revmc_builtin_mcopy(@[ecx] ptr, @[sp] ptr) Some(u8),
     Log            = __revmc_builtin_log(@[ecx] ptr, @[sp_dyn] ptr, u8) Some(u8),
 
@@ -271,8 +275,4 @@ builtins! {
     Call           = __revmc_builtin_call(@[ecx] ptr, @[sp_dyn] ptr, u8) Some(u8),
     DoReturn       = __revmc_builtin_do_return(@[ecx] ptr, @[sp] ptr, u8) Some(u8),
     SelfDestruct   = __revmc_builtin_selfdestruct(@[ecx] ptr, @[sp] ptr) Some(u8),
-
-    Mload          = __revmc_builtin_mload(@[ecx] ptr, @[sp] ptr) Some(u8),
-    Mstore         = __revmc_builtin_mstore(@[ecx] ptr, @[sp] ptr) Some(u8),
-    Mstore8        = __revmc_builtin_mstore8(@[ecx] ptr, @[sp] ptr) Some(u8),
 }
