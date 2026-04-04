@@ -12,7 +12,7 @@
 //! - POP kills its input (makes the position dead) rather than reading it.
 
 use super::{StackSectionAnalysis, block_analysis::AbsValue};
-use crate::bytecode::{Bytecode, InstFlags};
+use crate::bytecode::{AnalysisConfig, Bytecode, InstFlags};
 use bitvec::vec::BitVec;
 use revm_bytecode::opcode as op;
 
@@ -34,6 +34,7 @@ impl Bytecode<'_> {
     #[instrument(name = "dse", level = "debug", skip_all)]
     pub(crate) fn dead_store_elim(&mut self) {
         let mut eliminated = 0u32;
+        let inspect_stack = self.config.contains(AnalysisConfig::INSPECT_STACK);
 
         // Reusable buffers hoisted out of the per-block loop.
         let mut heights = Vec::new();
@@ -63,9 +64,16 @@ impl Bytecode<'_> {
             let exit_height = *heights.last().unwrap();
             let max_height = entry_height + section.max_growth as i32;
 
-            // At the block exit, all stack positions are conservatively live.
+            // If the block's terminator diverges, no successor will read the stack,
+            // so all exit positions are dead. Unless `inspect_stack` is set (the caller
+            // observes every store) or the block contains a suspending instruction
+            // (the function can be re-entered and the caller reads the stack).
+            let has_suspend = block.insts().any(|i| self.insts[i].may_suspend());
+            let term_diverges =
+                !inspect_stack && !has_suspend && self.insts[block.terminator()].is_diverging();
+
             live.clear();
-            live.resize(exit_height.max(0) as usize, true);
+            live.resize(exit_height.max(0) as usize, !term_diverges);
             live.resize(max_height.max(0) as usize, false);
 
             // Nothing to do.
@@ -378,8 +386,10 @@ fn transfer_dup(live: &mut BitVec, h_before: usize, depth: usize) {
 
 #[cfg(test)]
 mod tests {
-    use super::super::block_analysis::tests::{Inst, analyze_asm, analyze_code_spec};
-    use crate::bytecode::InstFlags;
+    use super::super::block_analysis::tests::{
+        Inst, analyze_asm, analyze_asm_with, analyze_code_spec,
+    };
+    use crate::bytecode::{AnalysisConfig, InstFlags};
     use revm_bytecode::opcode as op;
     use revm_primitives::hardfork::SpecId;
 
@@ -442,6 +452,28 @@ mod tests {
 
     #[test]
     fn swap_preserves_liveness() {
+        // Use INSPECT_STACK so the exit stack is conservatively live despite STOP.
+        let bytecode = analyze_asm_with(
+            "
+            PUSH1 0x01
+            PUSH1 0x02
+            PUSH1 0x03
+            SWAP2
+            STOP
+        ",
+            AnalysisConfig::INSPECT_STACK,
+        );
+        for i in 0..3 {
+            assert!(
+                !bytecode.inst(Inst::from_usize(i)).flags.contains(InstFlags::NOOP),
+                "PUSH at {i} should NOT be skipped"
+            );
+        }
+    }
+
+    #[test]
+    fn swap_dead_with_diverging_terminator() {
+        // Without INSPECT_STACK, STOP makes exit stack dead; SWAP + PUSHes are all dead.
         let bytecode = analyze_asm(
             "
             PUSH1 0x01
@@ -451,10 +483,10 @@ mod tests {
             STOP
         ",
         );
-        for i in 0..3 {
+        for i in 0..4 {
             assert!(
-                !bytecode.inst(Inst::from_usize(i)).flags.contains(InstFlags::NOOP),
-                "PUSH at {i} should NOT be skipped"
+                bytecode.inst(Inst::from_usize(i)).flags.contains(InstFlags::NOOP),
+                "inst at {i} should be skipped (exit stack dead)"
             );
         }
     }
@@ -534,11 +566,20 @@ mod tests {
         analyze_code_spec(code, SpecId::AMSTERDAM)
     }
 
+    /// Like [`with_prefix`], but with `INSPECT_STACK` set so exit stack is conservatively live.
+    fn with_prefix_inspect(n: usize, suffix: &[u8]) -> crate::bytecode::Bytecode<'static> {
+        use super::super::block_analysis::tests::analyze_code_with;
+        let mut code = vec![op::PUSH0; n];
+        code.extend_from_slice(suffix);
+        analyze_code_with(code, AnalysisConfig::INSPECT_STACK)
+    }
+
     #[test]
     fn swapn_preserves_liveness() {
         // 18 × PUSH0 (insts 0..18), SWAPN 17 (inst 18), STOP (inst 19).
         // SWAPN 17 needs TOS + 17 below = 18 items.
-        let bytecode = with_prefix(18, &[op::SWAPN, 0x00, op::STOP]);
+        // INSPECT_STACK keeps the exit stack live despite the diverging STOP.
+        let bytecode = with_prefix_inspect(18, &[op::SWAPN, 0x00, op::STOP]);
         for i in 0..18 {
             assert!(
                 !bytecode.inst(Inst::from_usize(i)).flags.contains(InstFlags::NOOP),
@@ -551,7 +592,8 @@ mod tests {
     fn dupn_keeps_source_live() {
         // 17 × PUSH0, DUPN 17 (dup bottom), POP, STOP.
         // The DUP copy is popped but the source (inst 0) is still live at exit.
-        let bytecode = with_prefix(17, &[op::DUPN, 0x00, op::POP, op::STOP]);
+        // INSPECT_STACK keeps the exit stack live despite the diverging STOP.
+        let bytecode = with_prefix_inspect(17, &[op::DUPN, 0x00, op::POP, op::STOP]);
         assert!(
             !bytecode.inst(Inst::from_usize(0)).flags.contains(InstFlags::NOOP),
             "source PUSH0 should NOT be skipped"
@@ -563,7 +605,8 @@ mod tests {
         // 17 × PUSH0, DUPN 17 (dup bottom), POP, STOP.
         // The DUP copy is immediately popped. The source stays live (it's on the exit
         // stack), so the transfer must not incorrectly kill the source position.
-        let bytecode = with_prefix(17, &[op::DUPN, 0x00, op::POP, op::STOP]);
+        // INSPECT_STACK keeps the exit stack live despite the diverging STOP.
+        let bytecode = with_prefix_inspect(17, &[op::DUPN, 0x00, op::POP, op::STOP]);
         for i in 0..17 {
             assert!(
                 !bytecode.inst(Inst::from_usize(i)).flags.contains(InstFlags::NOOP),
@@ -577,7 +620,8 @@ mod tests {
         // 18 × PUSH0, EXCHANGE 1,2 (swap positions 1 and 2 from TOS), STOP.
         // EXCHANGE needs at least m+1 items. With (1,2): 3 items minimum, but we use 18
         // to match the DUPN/SWAPN test shape and ensure all are live.
-        let bytecode = with_prefix(18, &[op::EXCHANGE, 0x01, op::STOP]);
+        // INSPECT_STACK keeps the exit stack live despite the diverging STOP.
+        let bytecode = with_prefix_inspect(18, &[op::EXCHANGE, 0x01, op::STOP]);
         for i in 0..18 {
             assert!(
                 !bytecode.inst(Inst::from_usize(i)).flags.contains(InstFlags::NOOP),
@@ -628,7 +672,8 @@ mod tests {
         // At SWAP2: TOS (pos 2) and pos 0 are both dead, but pos 1 (pass-through) is live.
         // The precise check correctly eliminates SWAP2. The generic out>0 check would
         // require all 3 output positions to be dead and miss this.
-        let bytecode = analyze_asm(
+        // INSPECT_STACK keeps the exit stack live despite the diverging STOP.
+        let bytecode = analyze_asm_with(
             "
             PUSH1 0x01  ; [A]
             PUSH1 0x02  ; [A, B]
@@ -639,6 +684,7 @@ mod tests {
             POP         ; [B]
             STOP
         ",
+            AnalysisConfig::INSPECT_STACK,
         );
         //        PUSH A, PUSH B, PUSH C, SWAP2, POP, SWAP1, POP, STOP
         for (i, alive) in
