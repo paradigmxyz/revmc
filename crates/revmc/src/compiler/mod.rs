@@ -303,7 +303,7 @@ impl<B: Backend> EvmCompiler<B> {
     ///
     /// When the budget is exhausted, further evaluation is skipped and values remain dynamic.
     ///
-    /// Defaults to 10 million gas. Set to `0` to disable compile-time evaluation entirely, or
+    /// Defaults to 100k gas. Set to `0` to disable compile-time evaluation entirely, or
     /// `u64::MAX` to disable the limit.
     pub fn set_compiler_gas_limit(&mut self, limit: u64) {
         self.compiler_gas_limit = limit;

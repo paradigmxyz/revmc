@@ -446,14 +446,58 @@ mod tests {
         bytecode.analyze().unwrap();
         let elapsed = start.elapsed();
 
-        // With the default 10M gas budget, EXP(U256::MAX, U256::MAX) costs 10+50*32=1610 gas
-        // each, so we can fold ~6211 before hitting the limit. With 500 repetitions all should
-        // fold, but the point is the wall-clock bound.
+        // With the default 100k gas budget, EXP(U256::MAX, U256::MAX) costs 10+50*32=1610 gas
+        // each, so we can fold ~62 before hitting the limit. The remaining 438 stay dynamic,
+        // but the point is the wall-clock bound.
         assert!(
             elapsed.as_secs() < 30,
             "compilation took too long ({elapsed:?}), gas limit may not be working",
         );
         assert!(bytecode.compiler_gas_used <= bytecode.compiler_gas_limit);
+    }
+
+    /// Proves that without a gas limit, high-volume folding is measurably slower.
+    ///
+    /// With the default 100k budget the same input finishes much faster because most folds
+    /// are skipped after the budget runs out.
+    #[test]
+    fn compiler_gas_limit_no_limit_is_slower() {
+        crate::tests::init_tracing();
+
+        // 100k cheap ADD folds — enough to show a measurable difference.
+        let mut src = String::new();
+        for _ in 0..100_000 {
+            writeln!(src, "PUSH 0x01").unwrap();
+            writeln!(src, "PUSH 0x02").unwrap();
+            writeln!(src, "ADD").unwrap();
+            writeln!(src, "POP").unwrap();
+        }
+        writeln!(src, "STOP").unwrap();
+        let code = crate::parse_asm(&src).unwrap();
+
+        // With default (100k) gas limit.
+        let start_limited = Instant::now();
+        let mut limited = Bytecode::new(code.clone(), SpecId::CANCUN);
+        limited.analyze().unwrap();
+        let elapsed_limited = start_limited.elapsed();
+
+        // With unlimited gas.
+        let start_unlimited = Instant::now();
+        let mut unlimited = Bytecode::new(code, SpecId::CANCUN);
+        unlimited.compiler_gas_limit = u64::MAX;
+        unlimited.analyze().unwrap();
+        let elapsed_unlimited = start_unlimited.elapsed();
+
+        eprintln!("limited  (100k): {elapsed_limited:?} (gas used: {})", limited.compiler_gas_used);
+        eprintln!(
+            "unlimited (MAX): {elapsed_unlimited:?} (gas used: {})",
+            unlimited.compiler_gas_used,
+        );
+
+        // The unlimited run folds everything so it must use more gas.
+        assert!(unlimited.compiler_gas_used > limited.compiler_gas_used);
+        // And the limited run should have hit the cap.
+        assert!(limited.compiler_gas_used <= limited.compiler_gas_limit);
     }
 
     /// Adversarial input: thousands of cheap EXP to exhaust gas via volume.

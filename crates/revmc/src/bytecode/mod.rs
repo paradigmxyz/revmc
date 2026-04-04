@@ -75,8 +75,8 @@ impl Default for AnalysisConfig {
     }
 }
 
-/// Default compiler gas limit for compile-time evaluation (10 million gas).
-pub(crate) const DEFAULT_COMPILER_GAS_LIMIT: u64 = 10_000_000;
+/// Default compiler gas limit for compile-time evaluation (100k gas).
+pub(crate) const DEFAULT_COMPILER_GAS_LIMIT: u64 = 100_000;
 
 /// EVM bytecode.
 #[doc(hidden)] // Not public API.
@@ -122,7 +122,7 @@ pub struct Bytecode<'a> {
     /// compilation arbitrarily slow. This limit uses the EVM gas schedule to bound work.
     ///
     /// When exhausted, further compile-time evaluation is skipped (values remain dynamic).
-    /// Defaults to 10 million gas.
+    /// Defaults to 100k gas.
     pub(crate) compiler_gas_limit: u64,
     /// Cumulative compiler gas consumed so far.
     pub(crate) compiler_gas_used: u64,
