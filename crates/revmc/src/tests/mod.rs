@@ -1292,6 +1292,21 @@ tests! {
                 assert_eq!(host.selfdestructs, [(DEF_ADDR, Address::with_last_byte(0x69))]);
             }),
         }),
+        // Static-context SELFDESTRUCT: gas < 5000 → OOG before static-call check.
+        selfdestruct_static_oog(@raw {
+            bytecode: &[op::PUSH1, 0x01, op::SELFDESTRUCT],
+            is_static: true,
+            gas_limit: 4000,
+            expected_return: InstructionResult::OutOfGas,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+        }),
+        // Static-context SELFDESTRUCT: gas >= 5000 → charges 5000, then StateChangeDuringStaticCall.
+        selfdestruct_static_enough_gas(@raw {
+            bytecode: &[op::PUSH1, 0x01, op::SELFDESTRUCT],
+            is_static: true,
+            expected_return: InstructionResult::StateChangeDuringStaticCall,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+        }),
     }
 
     // Tests for CALL gas accounting fix.
