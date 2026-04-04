@@ -1,0 +1,10 @@
+CALLER
+PUSH20 0xffffffffffffffffffffffffffffffffffffffff
+AND
+RET_WORD
+
+; CHECK: load i160
+; CHECK: [[ADDR:%.*]] = zext i160 {{.*}} to i256
+; CHECK-NOT: and
+; CHECK: store i256 [[ADDR]]
+; CHECK: @__revmc_builtin_mstore

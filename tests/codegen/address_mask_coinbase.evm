@@ -1,0 +1,9 @@
+COINBASE
+PUSH20 0xffffffffffffffffffffffffffffffffffffffff
+AND
+RET_WORD
+
+; COINBASE is an opaque builtin, so LLVM cannot eliminate the mask.
+; CHECK: call void @__revmc_builtin_coinbase
+; CHECK: and i256
+; CHECK: @__revmc_builtin_mstore

@@ -51,7 +51,7 @@ crate::bytecode::impl_index_display!(ConstSetIdx, "{}");
 pub(crate) type OperandSnapshot = SmallVec<[AbsValue; 4]>;
 
 /// Bundles input and output snapshots for recording during abstract interpretation.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct Snapshots {
     /// Pre-instruction input operand snapshots.
     pub(crate) inputs: IndexVec<Inst, OperandSnapshot>,
@@ -372,8 +372,11 @@ impl Bytecode<'_> {
     /// Also computes and stores per-instruction stack snapshots for constant propagation.
     #[instrument(name = "ba", level = "debug", skip_all)]
     pub(crate) fn block_analysis(&mut self) {
+        // Save local snapshots so that suspect-block invalidation can restore
+        // block-local constants instead of clearing to empty.
+        let local_snapshots = self.snapshots.clone();
         self.init_snapshots();
-        let (resolved, count) = self.run_abstract_interp();
+        let (resolved, count) = self.run_abstract_interp(&local_snapshots);
 
         if count > 0 {
             let newly_resolved = self.commit_resolved_jumps(&resolved);
@@ -571,7 +574,10 @@ impl Bytecode<'_> {
     ///
     /// Returns a list of (jump_inst, resolved_target) pairs and the count of resolvable jumps.
     /// Stack snapshots are recorded into `self.snapshots` during the fixpoint.
-    fn run_abstract_interp(&mut self) -> (Vec<(Inst, JumpTarget)>, usize) {
+    fn run_abstract_interp(
+        &mut self,
+        local_snapshots: &Snapshots,
+    ) -> (Vec<(Inst, JumpTarget)>, usize) {
         let num_blocks = self.cfg.blocks.len();
 
         // Initialize block states. Entry block starts with an empty stack.
@@ -614,7 +620,12 @@ impl Bytecode<'_> {
 
         // Invalidate resolutions that may be unsound due to incomplete analysis.
         if has_top_jump {
-            self.invalidate_suspect_jumps(&mut jump_targets, &block_states, &discovered_edges);
+            self.invalidate_suspect_jumps(
+                &mut jump_targets,
+                &block_states,
+                &discovered_edges,
+                local_snapshots,
+            );
         }
 
         let count = jump_targets
@@ -692,20 +703,23 @@ impl Bytecode<'_> {
         }
     }
 
-    /// Invalidates jump resolutions that may be unsound due to unresolved `Top` jumps.
+    /// Invalidates jump resolutions and operand snapshots that may be unsound due to
+    /// unresolved `Top` jumps.
     ///
     /// When unresolved dynamic jumps remain, any reachable `JUMPDEST` block could
     /// potentially be reached by those jumps with an arbitrary stack state. This means
-    /// resolutions derived from the fixpoint may be based on incomplete information.
+    /// resolutions and snapshots derived from the fixpoint may be based on incomplete
+    /// information.
     ///
     /// The conservative rule: seed every reachable `JUMPDEST` block as suspect,
     /// propagate forward through the CFG and discovered edges, and invalidate all
-    /// resolved jumps in suspect blocks.
+    /// resolved jumps and operand snapshots in suspect blocks.
     fn invalidate_suspect_jumps(
-        &self,
+        &mut self,
         jump_targets: &mut [(Inst, JumpTarget)],
         block_states: &IndexVec<Block, BlockState>,
         discovered_edges: &IndexVec<Block, SmallVec<[Block; 4]>>,
+        local_snapshots: &Snapshots,
     ) {
         let num_blocks = self.cfg.blocks.len();
 
@@ -745,6 +759,20 @@ impl Bytecode<'_> {
                 && suspect[bid.index()]
             {
                 *target = JumpTarget::Top;
+            }
+        }
+
+        // Restore block-local snapshots in suspect blocks: the fixpoint may have recorded
+        // precise values that are unsound because undiscovered edges (from Top jumps)
+        // could bring in different stack states. However, block-local constants (computed
+        // by block_analysis_local without depending on the incoming stack) are always valid.
+        for bid in self.cfg.blocks.indices() {
+            if !suspect[bid.index()] {
+                continue;
+            }
+            for inst in self.cfg.blocks[bid].insts() {
+                self.snapshots.inputs[inst].clone_from(&local_snapshots.inputs[inst]);
+                self.snapshots.outputs[inst] = local_snapshots.outputs[inst];
             }
         }
     }
@@ -885,6 +913,47 @@ impl Bytecode<'_> {
                     }
                     stack.swap(len - 1, len - 1 - depth);
                 }
+                op::DUPN => {
+                    let depth = self.get_imm(inst).and_then(|b| crate::decode_single(b[0]));
+                    match depth {
+                        Some(n) => {
+                            let n = n as usize;
+                            if stack.len() < n {
+                                return false;
+                            }
+                            stack.push(stack[stack.len() - n]);
+                        }
+                        None => return false,
+                    }
+                }
+                op::SWAPN => {
+                    let depth = self.get_imm(inst).and_then(|b| crate::decode_single(b[0]));
+                    match depth {
+                        Some(n) => {
+                            let n = n as usize;
+                            let len = stack.len();
+                            if len < n + 1 {
+                                return false;
+                            }
+                            stack.swap(len - 1, len - 1 - n);
+                        }
+                        None => return false,
+                    }
+                }
+                op::EXCHANGE => {
+                    let pair = self.get_imm(inst).and_then(|b| crate::decode_pair(b[0]));
+                    match pair {
+                        Some((n, m)) => {
+                            let (n, m) = (n as usize, m as usize);
+                            let len = stack.len();
+                            if len < m + 1 {
+                                return false;
+                            }
+                            stack.swap(len - 1 - n, len - 1 - m);
+                        }
+                        None => return false,
+                    }
+                }
                 _ => {
                     if stack.len() < inp {
                         return false;
@@ -919,6 +988,11 @@ impl Bytecode<'_> {
             if out > 0 {
                 self.snapshots.outputs[i] = stack.last().copied();
             }
+
+            #[cfg(test)]
+            if inst.opcode == crate::TEST_SUSPEND {
+                stack.fill(AbsValue::Top);
+            }
         }
 
         true
@@ -931,7 +1005,7 @@ pub(crate) mod tests {
     pub(crate) use crate::bytecode::Inst;
     use revm_primitives::{hardfork::SpecId, hex};
 
-    fn analyze_hex(hex: &str) -> Bytecode<'static> {
+    pub(crate) fn analyze_hex(hex: &str) -> Bytecode<'static> {
         let code = hex::decode(hex.trim()).unwrap();
         analyze_code(code)
     }
@@ -1027,8 +1101,8 @@ pub(crate) mod tests {
         // inst 4: MSTORE     -> pops 2
         // inst 5: JUMPDEST
         // inst 6: STOP
-        #[rustfmt::skip]
-        let bytecode = analyze_asm("
+        let bytecode = analyze_asm(
+            "
             PUSH1 0x42
             PUSH1 0x01
             ADD
@@ -1036,7 +1110,8 @@ pub(crate) mod tests {
             MSTORE
             JUMPDEST
             STOP
-        ");
+        ",
+        );
         // At inst 2 (ADD), operand 0 (TOS) = 0x01, operand 1 = 0x42.
         assert_eq!(bytecode.const_operand(Inst::from_usize(2), 0), Some(U256::from(0x01)));
         assert_eq!(bytecode.const_operand(Inst::from_usize(2), 1), Some(U256::from(0x42)));
@@ -1048,14 +1123,15 @@ pub(crate) mod tests {
     #[test]
     fn const_operand_dynamic() {
         // CALLDATALOAD pushes an unknown value -> const_operand should return None.
-        #[rustfmt::skip]
-        let bytecode = analyze_asm("
+        let bytecode = analyze_asm(
+            "
             PUSH0
             CALLDATALOAD
             PUSH0
             MSTORE
             STOP
-        ");
+        ",
+        );
         // At inst 3 (MSTORE), operand 0 (TOS) = 0x00, operand 1 = unknown (CALLDATALOAD result).
         assert_eq!(bytecode.const_operand(Inst::from_usize(3), 0), Some(U256::ZERO));
         assert_eq!(bytecode.const_operand(Inst::from_usize(3), 1), None);
@@ -1069,15 +1145,16 @@ pub(crate) mod tests {
         // PUSH0      -> output[0] = 0x00
         // MSTORE     -> no outputs
         // STOP
-        #[rustfmt::skip]
-        let bytecode = analyze_asm("
+        let bytecode = analyze_asm(
+            "
             PUSH1 0x42
             PUSH1 0x01
             ADD
             PUSH0
             MSTORE
             STOP
-        ");
+        ",
+        );
         assert_eq!(bytecode.const_output(Inst::from_usize(0)), Some(U256::from(0x42)));
         assert_eq!(bytecode.const_output(Inst::from_usize(1)), Some(U256::from(0x01)));
         assert_eq!(bytecode.const_output(Inst::from_usize(2)), Some(U256::from(0x43)));
@@ -1089,14 +1166,31 @@ pub(crate) mod tests {
     #[test]
     fn const_output_dynamic() {
         // CALLDATALOAD pushes an unknown -> output should be None.
-        #[rustfmt::skip]
-        let bytecode = analyze_asm("
+        let bytecode = analyze_asm(
+            "
             PUSH0
             CALLDATALOAD
             STOP
-        ");
+        ",
+        );
         assert_eq!(bytecode.const_output(Inst::from_usize(0)), Some(U256::ZERO));
         assert_eq!(bytecode.const_output(Inst::from_usize(1)), None);
+    }
+
+    /// DUPN, SWAPN, and EXCHANGE should propagate constants like their fixed counterparts.
+    #[test]
+    fn const_snapshot_eof_stack_ops() {
+        // DUPN/SWAPN min index is 17, so we need 17 values on the stack.
+        // 16 × PUSH0, PUSH1 0xAA, DUPN 17 (raw=0x00), STOP.
+        let mut code: Vec<u8> = vec![op::PUSH0; 16];
+        code.extend([op::PUSH1, 0xAA]); // inst 16: TOS = 0xAA
+        code.extend([op::DUPN, 0x00]); // inst 17: DUPN 17 (dup bottom = 0x00)
+        code.push(op::STOP); // inst 18
+        let bytecode = analyze_code(code);
+        // DUPN duplicates the 17th item (bottom PUSH0 = 0x00).
+        assert_eq!(bytecode.const_output(Inst::from_usize(17)), Some(U256::ZERO));
+        // The PUSH1 0xAA is still there.
+        assert_eq!(bytecode.const_output(Inst::from_usize(16)), Some(U256::from(0xAA)));
     }
 
     #[test]
@@ -1105,8 +1199,8 @@ pub(crate) mod tests {
         // block_analysis_local. Here CALLDATALOAD produces an opaque jump target,
         // so the JUMP stays dynamic, but the block's other instructions should
         // still have snapshots populated.
-        #[rustfmt::skip]
-        let bytecode = analyze_asm("
+        let bytecode = analyze_asm(
+            "
             PUSH1 0x42          ; inst 0
             PUSH1 0x01          ; inst 1
             ADD                 ; inst 2: 0x42 + 0x01 = 0x43
@@ -1123,7 +1217,8 @@ pub(crate) mod tests {
             PUSH1 0x02          ; inst 11
             SUB                 ; inst 12
             STOP                ; inst 13
-        ");
+        ",
+        );
         // The JUMP at inst 5 should remain dynamic.
         assert!(bytecode.has_dynamic_jumps, "expected unresolved dynamic jump");
         let jump = bytecode.inst(Inst::from_usize(5));
@@ -1152,8 +1247,8 @@ pub(crate) mod tests {
     fn multi_target_jump() {
         // Internal function called from two sites with different return addresses.
         // The return JUMP at the end should resolve to Multi([ret1, ret2]).
-        #[rustfmt::skip]
-        let bytecode = analyze_asm("
+        let bytecode = analyze_asm(
+            "
             ; Call site 1.
             PUSH %ret1          ; push return address
             PUSH %func          ; push function entry
@@ -1175,7 +1270,8 @@ pub(crate) mod tests {
             PUSH1 0x42          ; push a result
             SWAP1               ; swap result and return address
             JUMP                ; return (dynamic)
-        ");
+        ",
+        );
 
         // The return JUMP (last inst before STOP's block) should be multi-target.
         let return_jump = bytecode
@@ -1215,8 +1311,8 @@ pub(crate) mod tests {
     /// so the return jump is correctly invalidated.
     #[test]
     fn known_jumpdest_unsound_resolution() {
-        #[rustfmt::skip]
-        let bytecode = analyze_asm("
+        let bytecode = analyze_asm(
+            "
             ; Call site 1.
             PUSH %ret1              ; pc=0
             PUSH %fn_entry          ; pc=2
@@ -1244,7 +1340,8 @@ pub(crate) mod tests {
             PUSH1 0x42              ; pc=21: result
             SWAP1                   ; pc=23: swap result and return addr
             JUMP                    ; pc=24: return (UNSOUND: resolved to Multi)
-        ");
+        ",
+        );
 
         // The return JUMP at pc=24 should NOT be resolved — the opaque jump at
         // pc=16 can reach fn_entry with any return address. But the current
@@ -1272,8 +1369,8 @@ pub(crate) mod tests {
         // wrapper's final JUMP (at ret_w) must recover the outer return address
         // from deep in the stack — which the analysis currently cannot resolve
         // because the top-aligned join pads it to Top.
-        #[rustfmt::skip]
-        let bytecode = analyze_asm("
+        let bytecode = analyze_asm(
+            "
             ; Call site 1: direct call to inner.
             PUSH %ret1              ; pc=0
             PUSH %inner             ; pc=2
@@ -1315,7 +1412,8 @@ pub(crate) mod tests {
             PUSH1 0x42              ; pc=33: push result
             SWAP1                   ; pc=35
             JUMP                    ; pc=36: jump to ret_addr
-        ");
+        ",
+        );
 
         // The wrapper return JUMP (pc=30) remains dynamic because the outer
         // return address is lost to Top during the top-aligned join.
@@ -1345,8 +1443,8 @@ mod tests_edge_cases {
     /// resolve to Multi with three targets.
     #[test]
     fn multi_target_jump_three_callers() {
-        #[rustfmt::skip]
-        let bytecode = analyze_asm("
+        let bytecode = analyze_asm(
+            "
             ; Call site 1.
             PUSH %ret1
             PUSH %func
@@ -1375,7 +1473,8 @@ mod tests_edge_cases {
             PUSH1 0x42
             SWAP1
             JUMP
-        ");
+        ",
+        );
 
         let return_jump = bytecode
             .iter_insts()
@@ -1397,8 +1496,8 @@ mod tests_edge_cases {
         // PUSH0      -> [0xAA, 0xAA, 0xBB, 0x00]
         // MSTORE     -> pops (0x00, 0xBB), leaves [0xAA, 0xAA]
         // STOP
-        #[rustfmt::skip]
-        let bytecode = analyze_asm("
+        let bytecode = analyze_asm(
+            "
             PUSH1 0xAA          ; inst 0
             PUSH1 0xBB          ; inst 1
             DUP2                ; inst 2
@@ -1406,7 +1505,8 @@ mod tests_edge_cases {
             PUSH0               ; inst 4
             MSTORE              ; inst 5
             STOP                ; inst 6
-        ");
+        ",
+        );
         // DUP2 output should be 0xAA.
         assert_eq!(bytecode.const_output(Inst::from_usize(2)), Some(U256::from(0xAA)));
         // At MSTORE (inst 5): TOS = 0x00, second = 0xBB (swapped back).
@@ -1417,8 +1517,8 @@ mod tests_edge_cases {
     /// JUMPI with a constant condition should still record both operands.
     #[test]
     fn jumpi_const_condition_snapshot() {
-        #[rustfmt::skip]
-        let bytecode = analyze_asm("
+        let bytecode = analyze_asm(
+            "
             PUSH1 0x01              ; inst 0: condition = 1 (always taken)
             PUSH %target            ; inst 1: target
             JUMPI                   ; inst 2: static JUMPI
@@ -1426,7 +1526,8 @@ mod tests_edge_cases {
         target:
             JUMPDEST                ; inst 4: target
             STOP                    ; inst 5
-        ");
+        ",
+        );
         // The JUMPI should be resolved as static.
         assert!(!bytecode.has_dynamic_jumps);
     }
@@ -1440,8 +1541,8 @@ mod tests_edge_cases {
         //
         // The stack grows by 1 each iteration (net +1 from PUSH before the loop jump).
         // The abstract stack should clamp to MAX_ABS_STACK_DEPTH without conflict.
-        #[rustfmt::skip]
-        let bytecode = analyze_asm("
+        let bytecode = analyze_asm(
+            "
             PUSH1 0x42              ; pc=0: initial value
             PUSH1 0x01              ; pc=2: another
         loop_header:
@@ -1449,7 +1550,8 @@ mod tests_edge_cases {
             PUSH1 0x01              ; push each iteration
             PUSH %loop_header       ; loop target
             JUMP                    ; back-edge
-        ");
+        ",
+        );
         // Should converge without panicking.
         // The JUMP should be static (resolved by adjacent PUSH+JUMP).
         assert!(!bytecode.has_dynamic_jumps);
@@ -1459,8 +1561,8 @@ mod tests_edge_cases {
     /// jump target. This tests the edge case where block.len() == 1.
     #[test]
     fn single_inst_block_jump_target() {
-        #[rustfmt::skip]
-        let bytecode = analyze_asm("
+        let bytecode = analyze_asm(
+            "
             PUSH %target            ; pc=0
             JUMP                    ; static jump
             INVALID
@@ -1468,7 +1570,8 @@ mod tests_edge_cases {
         target:
             JUMPDEST                ; single-inst block
             STOP
-        ");
+        ",
+        );
         assert!(!bytecode.has_dynamic_jumps);
     }
 
@@ -1477,8 +1580,8 @@ mod tests_edge_cases {
     fn invalid_jump_target() {
         // The dynamic jump target points to a non-JUMPDEST instruction.
         // The function pushes a constant that isn't a valid JUMPDEST pc.
-        #[rustfmt::skip]
-        let bytecode = analyze_asm("
+        let bytecode = analyze_asm(
+            "
             PUSH1 0xFF              ; pc=0: push invalid target
             PUSH %func              ; pc=2: push function entry
             JUMP                    ; pc=4: -> func
@@ -1486,7 +1589,8 @@ mod tests_edge_cases {
         func:
             JUMPDEST
             JUMP                    ; jump to 0xFF (invalid)
-        ");
+        ",
+        );
         // The dynamic JUMP at pc=6 should be resolved as invalid.
         let jump_inst = bytecode
             .iter_insts()
@@ -1498,8 +1602,8 @@ mod tests_edge_cases {
     /// Both branches push the same constant, so the merge should preserve it.
     #[test]
     fn diamond_cfg_same_const() {
-        #[rustfmt::skip]
-        let bytecode = analyze_asm("
+        let bytecode = analyze_asm(
+            "
             PUSH1 0x42              ; push same const on both paths
             PUSH0                   ; condition (always false)
             PUSH %then_pc           ; then target
@@ -1518,7 +1622,8 @@ mod tests_edge_cases {
             PUSH0
             MSTORE                  ; MSTORE(0, 0x42)
             STOP
-        ");
+        ",
+        );
         // At the merge MSTORE, the value (operand 1) should still be 0x42
         // since both branches had the same constant on the stack.
         let mstore = bytecode.iter_insts().find(|(_, d)| d.opcode == op::MSTORE).unwrap().0;
@@ -1529,8 +1634,8 @@ mod tests_edge_cases {
     /// yield None (Top) for const_operand.
     #[test]
     fn diamond_cfg_different_const() {
-        #[rustfmt::skip]
-        let bytecode = analyze_asm("
+        let bytecode = analyze_asm(
+            "
             PUSH0                   ; condition
             PUSH %then_pc
             JUMPI                   ; branch
@@ -1551,7 +1656,8 @@ mod tests_edge_cases {
             PUSH0
             MSTORE                  ; MSTORE(0, ???)
             STOP
-        ");
+        ",
+        );
         // At the merge MSTORE, the value (operand 1) should be None
         // since the two branches push different constants.
         let mstore = bytecode.iter_insts().find(|(_, d)| d.opcode == op::MSTORE).unwrap().0;
@@ -1563,8 +1669,8 @@ mod tests_edge_cases {
     /// Top jump must not be filtered out by the `is_private_return` check.
     #[test]
     fn trampoline_private_return_unsound() {
-        #[rustfmt::skip]
-        let bytecode = analyze_asm("
+        let bytecode = analyze_asm(
+            "
             ; Entry: branch to opaque path or call site 1.
             PUSH0                       ; pc=0
             CALLDATALOAD                ; pc=1
@@ -1602,7 +1708,8 @@ mod tests_edge_cases {
             PUSH1 0x42                  ; pc=29
             SWAP1                       ; pc=31
             JUMP                        ; pc=32: return
-        ");
+        ",
+        );
 
         // The fn return JUMP at pc=32 must NOT be resolved — the trampoline
         // can reach fn_entry with any return address.
@@ -1618,8 +1725,8 @@ mod tests_edge_cases {
     /// be invalidated when a Top jump exists, just like JUMP-based returns.
     #[test]
     fn jumpi_return_unsound() {
-        #[rustfmt::skip]
-        let bytecode = analyze_asm("
+        let bytecode = analyze_asm(
+            "
             ; Call site 1.
             PUSH %ret1              ; pc=0
             PUSH %fn_entry          ; pc=2
@@ -1650,7 +1757,8 @@ mod tests_edge_cases {
             SWAP1                   ; pc=26: [result, 1, ret_addr]
             JUMPI                   ; pc=27: conditional return (always taken)
             STOP                    ; pc=28: fallthrough (dead)
-        ");
+        ",
+        );
 
         // The JUMPI at pc=27 should NOT be resolved — opaque jump can reach
         // fn_entry with any return address.
@@ -1667,8 +1775,8 @@ mod tests_edge_cases {
     /// return jump must not be resolved because the return address is Top.
     #[test]
     fn opaque_return_addr_caller_unsound() {
-        #[rustfmt::skip]
-        let bytecode = analyze_asm("
+        let bytecode = analyze_asm(
+            "
             ; Entry: branch to opaque caller or fallthrough.
             PUSH0                       ; pc=0
             CALLDATALOAD                ; pc=1
@@ -1702,7 +1810,8 @@ mod tests_edge_cases {
             PUSH1 0x42                  ; pc=27
             SWAP1                       ; pc=29
             JUMP                        ; pc=30: return
-        ");
+        ",
+        );
 
         // The return JUMP at pc=30 must NOT be resolved — the opaque caller
         // at pc=25 reaches fn_entry with an arbitrary return address.
@@ -1712,6 +1821,382 @@ mod tests_edge_cases {
             !rj.flags.contains(InstFlags::STATIC_JUMP),
             "unsound: return jump should not be resolved with opaque caller"
         );
+    }
+
+    /// Loop counter (inline increment) must be Top after fixpoint.
+    #[test]
+    fn const_snapshot_loop_counter_inline() {
+        let bytecode = analyze_asm(
+            "
+            PUSH1 0x00          ; inst 0: i = 0
+        loop:
+            JUMPDEST            ; inst 1
+            DUP1                ; inst 2
+            PUSH1 0x0a          ; inst 3
+            LT                  ; inst 4
+            ISZERO              ; inst 5
+            PUSH %exit          ; inst 6
+            JUMPI               ; inst 7
+            PUSH1 0x01          ; inst 8
+            ADD                 ; inst 9: i++
+            PUSH %loop          ; inst 10
+            JUMP                ; inst 11
+        exit:
+            JUMPDEST            ; inst 12
+            POP                 ; inst 13
+            STOP                ; inst 14
+        ",
+        );
+
+        // DUP1 at inst 2: counter is loop-variant.
+        assert_eq!(bytecode.const_operand(Inst::from_usize(2), 0), None);
+        // ADD at inst 9: TOS=1 (const), second=counter (Top).
+        assert_eq!(bytecode.const_operand(Inst::from_usize(9), 0), Some(U256::from(1)));
+        assert_eq!(bytecode.const_operand(Inst::from_usize(9), 1), None);
+    }
+
+    /// Loop counter incremented via single-caller subroutine must be Top.
+    #[test]
+    fn const_snapshot_loop_counter_subroutine() {
+        let bytecode = analyze_asm(
+            "
+            PUSH1 0x00
+        loop:
+            JUMPDEST            ; inst 1
+            DUP1                ; inst 2
+            PUSH1 0x0a
+            LT
+            ISZERO
+            PUSH %exit
+            JUMPI
+            ; call add_fn(counter, 1) -> counter'
+            PUSH1 0x01
+            DUP2
+            PUSH %ret
+            SWAP2
+            SWAP1
+            PUSH %add_fn
+            JUMP
+        ret:
+            JUMPDEST
+            SWAP1
+            POP
+            PUSH %loop
+            JUMP
+        exit:
+            JUMPDEST
+            POP
+            STOP
+        add_fn:
+            JUMPDEST
+            PUSH1 0x00
+            DUP3
+            DUP3
+            ADD
+            SWAP1
+            POP
+            DUP1
+            DUP3
+            GT
+            ISZERO
+            PUSH %add_ok
+            JUMPI
+            INVALID
+        add_ok:
+            JUMPDEST
+            SWAP3
+            SWAP2
+            POP
+            POP
+            JUMP
+        ",
+        );
+
+        assert_eq!(bytecode.const_operand(Inst::from_usize(2), 0), None);
+    }
+
+    /// Loop counter incremented via multi-caller subroutine must be Top.
+    #[test]
+    fn const_snapshot_loop_counter_multi_caller() {
+        let bytecode = analyze_asm(
+            "
+            ; Caller 1 (outside loop) to make add_fn multi-target.
+            PUSH1 0x02
+            PUSH1 0x03
+            PUSH %ret_outer
+            SWAP2
+            SWAP1
+            PUSH %add_fn
+            JUMP
+        ret_outer:
+            JUMPDEST            ; inst 7
+            POP
+            PUSH1 0x00          ; i = 0
+        loop:
+            JUMPDEST            ; inst 10
+            DUP1                ; inst 11
+            PUSH1 0x0a
+            LT
+            ISZERO
+            PUSH %exit
+            JUMPI
+            ; Caller 2 (inside loop).
+            PUSH1 0x01
+            DUP2
+            PUSH %ret_loop
+            SWAP2
+            SWAP1
+            PUSH %add_fn
+            JUMP
+        ret_loop:
+            JUMPDEST
+            SWAP1
+            POP
+            PUSH %loop
+            JUMP
+        exit:
+            JUMPDEST
+            POP
+            STOP
+        add_fn:
+            JUMPDEST
+            PUSH1 0x00
+            DUP3
+            DUP3
+            ADD
+            SWAP1
+            POP
+            DUP1
+            DUP3
+            GT
+            ISZERO
+            PUSH %add_ok
+            JUMPI
+            INVALID
+        add_ok:
+            JUMPDEST
+            SWAP3
+            SWAP2
+            POP
+            POP
+            JUMP
+        ",
+        );
+
+        // DUP1 at inst 11: counter is loop-variant.
+        assert_eq!(bytecode.const_operand(Inst::from_usize(11), 0), None);
+    }
+
+    /// loopExp statetest: loop counters through checked_add subroutine must be Top.
+    #[test]
+    fn const_snapshot_loop_exp() {
+        // tests/GeneralStateTests/VMTests/vmPerformance/loopExp.json
+        let bytecode = analyze_hex(
+            "608060405234801561001057600080fd5b506004361061004c5760003560e01c806363ad973214610051578063a34f51e414610081578063dfaf4a87146100b1578063f078245b146100e1575b600080fd5b61006b60048036038101906100669190610275565b610111565b60405161007891906102d7565b60405180910390f35b61009b60048036038101906100969190610275565b610199565b6040516100a891906102d7565b60405180910390f35b6100cb60048036038101906100c69190610275565b6101cb565b6040516100d891906102d7565b60405180910390f35b6100fb60048036038101906100f69190610275565b610208565b60405161010891906102d7565b60405180910390f35b60008083905060005b838110156101865785820a915085820a915085820a915085820a915085820a915085820a915085820a915085820a915085820a915085820a915085820a915085820a915085820a915085820a915085820a915085820a915060108161017f9190610321565b905061011a565b5080600081905550809150509392505050565b6000805b828110156101b9576001816101b29190610321565b905061019d565b508260008190555082905093925050505650565b60008083905060005b838110156101f55785820a91506001816101ee9190610321565b90506101d4565b5080600081905550809150509392505050565b6000805b82811015610228576010816102219190610321565b905061020c565b50826000819055508290509392505050565b600080fd5b6000819050919050565b6102528161023f565b811461025d57600080fd5b50565b60008135905061026f81610249565b92915050565b60008060006060848603121561028e5761028d61023a565b5b600061029c86828701610260565b93505060206102ad86828701610260565b92505060406102be86828701610260565b9150509250925092565b6102d18161023f565b82525050565b60006020820190506102ec60008301846102c8565b92915050565b7f4e487b71000000000000000000000000000000000000000000000000000000006000526011600452602460006000fd5b600061032c8261023f565b91506103378361023f565b9250828201905080821115610340f5761034e6102f2565b5b9291505056fea264697066735822122000b253a2b246ddfeb0f09ddf5ec7dc70e2235369b8a2f3f9b55e32a5ca01e04ff64736f6c63430008180033",
+        );
+
+        // simpleLoop LT at pc=416: counter (depth=0) is loop-variant.
+        let lt_inst = bytecode
+            .insts
+            .iter_enumerated()
+            .find(|(_, inst)| inst.opcode == op::LT && inst.pc == 416)
+            .map(|(i, _)| i)
+            .expect("LT at pc=416 not found");
+        assert_eq!(bytecode.const_operand(lt_inst, 0), None);
+    }
+
+    /// Suspect-block invalidation must preserve block-local constants while
+    /// restoring cross-block values to Top.
+    ///
+    /// The target block receives 0xAA from a predecessor (cross-block) and also
+    /// has block-local PUSHes. Without restoration, the fixpoint's precise 0xAA
+    /// would persist unsoundly; with restoration, only block-local constants survive.
+    #[test]
+    fn suspect_block_preserves_local_const_operand() {
+        let bytecode = analyze_asm(
+            "
+            PUSH1 0xAA          ; inst 0: inherited into target
+            CALLDATASIZE        ; inst 1: unknown condition
+            PUSH %target        ; inst 2
+            JUMPI               ; inst 3: target reachable, fallthrough reachable
+
+            PUSH0               ; inst 4
+            CALLDATALOAD        ; inst 5: Top
+            JUMP                ; inst 6: unresolved -> triggers suspect invalidation
+
+        target:
+            JUMPDEST            ; inst 7: suspect seed
+            PUSH0               ; inst 8: block-local constant
+            MSTORE              ; inst 9: offset=0 (local), value=inherited 0xAA
+            STOP                ; inst 10
+        ",
+        );
+        assert!(bytecode.has_dynamic_jumps);
+        // Block-local constant survives.
+        assert_eq!(bytecode.const_output(Inst::from_usize(8)), Some(U256::ZERO));
+        assert_eq!(bytecode.const_operand(Inst::from_usize(9), 0), Some(U256::ZERO));
+        // Cross-block value must be restored to Top.
+        assert_eq!(bytecode.const_operand(Inst::from_usize(9), 1), None);
+    }
+
+    /// Same as above but asserting const_output: block-local PUSH output survives,
+    /// but anything depending on cross-block values becomes None.
+    #[test]
+    fn suspect_block_preserves_local_const_output() {
+        let bytecode = analyze_asm(
+            "
+            PUSH1 0xAA          ; inst 0: inherited into target
+            CALLDATASIZE        ; inst 1
+            PUSH %target        ; inst 2
+            JUMPI               ; inst 3
+
+            PUSH0               ; inst 4
+            CALLDATALOAD        ; inst 5: Top
+            JUMP                ; inst 6: unresolvable
+
+        target:
+            JUMPDEST            ; inst 7: suspect seed
+            PUSH1 0x01          ; inst 8: block-local const output
+            ADD                 ; inst 9: 0xAA + 0x01 in fixpoint, Top + 0x01 after restore
+            STOP                ; inst 10
+        ",
+        );
+        assert!(bytecode.has_dynamic_jumps);
+        // Purely local push output preserved.
+        assert_eq!(bytecode.const_output(Inst::from_usize(8)), Some(U256::from(0x01)));
+        // ADD: local operand preserved, inherited operand restored to Top.
+        assert_eq!(bytecode.const_operand(Inst::from_usize(9), 0), Some(U256::from(0x01)));
+        assert_eq!(bytecode.const_operand(Inst::from_usize(9), 1), None);
+        assert_eq!(bytecode.const_output(Inst::from_usize(9)), None);
+    }
+
+    /// Fallthrough block after a JUMPI in a suspect JUMPDEST block becomes
+    /// suspect via forward propagation. Block-local constants in the fallthrough
+    /// survive, but cross-block inherited values are restored to Top.
+    #[test]
+    fn suspect_jumpi_fallthrough_preserves_consts() {
+        let bytecode = analyze_asm(
+            "
+            PUSH1 0xAA          ; inst 0: inherited into target
+            CALLDATASIZE        ; inst 1: unknown condition
+            PUSH %target        ; inst 2
+            JUMPI               ; inst 3
+
+            PUSH0               ; inst 4
+            CALLDATALOAD        ; inst 5: Top
+            JUMP                ; inst 6: unresolved
+
+        target:
+            JUMPDEST            ; inst 7: suspect seed, entry stack [0xAA]
+            PUSH1 0x01          ; inst 8: always take
+            PUSH %after         ; inst 9
+            JUMPI               ; inst 10: leaves [0xAA] for after
+            STOP                ; inst 11
+
+        after:
+            JUMPDEST            ; inst 12: suspect via forward propagation
+            PUSH0               ; inst 13: block-local constant
+            MSTORE              ; inst 14: offset=0 (local), value=inherited 0xAA
+            STOP                ; inst 15
+        ",
+        );
+        assert!(bytecode.has_dynamic_jumps);
+        // Block-local constant in propagated-suspect fallthrough survives.
+        assert_eq!(bytecode.const_output(Inst::from_usize(13)), Some(U256::ZERO));
+        assert_eq!(bytecode.const_operand(Inst::from_usize(14), 0), Some(U256::ZERO));
+        // Cross-block inherited value restored to Top.
+        assert_eq!(bytecode.const_operand(Inst::from_usize(14), 1), None);
+    }
+
+    /// Non-suspect blocks must retain their fixpoint-derived snapshots even when
+    /// invalidation runs elsewhere. The fallthrough after a JUMPI is NOT a
+    /// JUMPDEST, so it is never suspect. Block-local constants, const-folded
+    /// results, and cross-block values resolved via the single-predecessor path
+    /// (MLOAD after MSTORE) must all be preserved.
+    #[test]
+    fn nonsuspect_fallthrough_keeps_fixpoint_snapshots() {
+        let bytecode = analyze_asm(
+            "
+            PUSH1 0x69          ; inst 0: cross-block value
+            CALLDATASIZE        ; inst 1: unknown condition
+            PUSH %target        ; inst 2
+            JUMPI               ; inst 3
+            ; Non-suspect fallthrough block (no JUMPDEST).
+            PUSH1 0x0A          ; inst 4
+            PUSH1 0x0B          ; inst 5
+            ADD                 ; inst 6: 0x0A + 0x0B = 0x15, block-local
+            PUSH0               ; inst 7
+            MSTORE              ; inst 8
+            MLOAD               ; inst 9: cross-block via single predecessor
+            PUSH1 0x01          ; inst 10
+            MSTORE              ; inst 11
+            STOP                ; inst 12
+            ; Opaque dynamic jump — triggers suspect invalidation.
+            JUMPDEST            ; inst 13
+            PUSH0               ; inst 14
+            CALLDATALOAD        ; inst 15: Top
+            JUMP                ; inst 16: unresolvable
+        target:
+            JUMPDEST            ; inst 17: suspect seed
+            PUSH1 0x42          ; inst 18
+            STOP                ; inst 19
+        ",
+        );
+        assert!(bytecode.has_dynamic_jumps);
+        // Fallthrough block: block-local constants survive.
+        // ADD
+        assert_eq!(bytecode.const_operand(Inst::from_usize(6), 0), Some(U256::from(0x0B)));
+        assert_eq!(bytecode.const_operand(Inst::from_usize(6), 1), Some(U256::from(0x0A)));
+        assert_eq!(bytecode.const_output(Inst::from_usize(6)), Some(U256::from(0x15)));
+        // MSTORE 1
+        assert_eq!(bytecode.const_operand(Inst::from_usize(8), 0), Some(U256::from(0)));
+        assert_eq!(bytecode.const_operand(Inst::from_usize(8), 1), Some(U256::from(0x15)));
+        // MLOAD: single predecessor (no JUMPDEST), so cross-block value resolves.
+        assert_eq!(bytecode.const_operand(Inst::from_usize(9), 0), Some(U256::from(0x69)));
+        // Target block: block-local PUSH survives.
+        assert_eq!(bytecode.const_output(Inst::from_usize(18)), Some(U256::from(0x42)));
+    }
+
+    /// JUMPI in a suspect JUMPDEST block: the fallthrough block inherits
+    /// suspect status via forward propagation. Incoming stack values from the
+    /// predecessor become Top (block-local pass doesn't see cross-block flow),
+    /// while block-local PUSHes in the fallthrough are preserved.
+    #[test]
+    fn suspect_jumpi_fallthrough_mixed_operands() {
+        let bytecode = analyze_asm(
+            "
+            ; Jump into the suspect JUMPDEST block with a value on the stack.
+            PUSH1 0xAA          ; inst 0: will be on stack at entry to target
+            PUSH %target        ; inst 1
+            JUMP                ; inst 2: static jump
+            ; Opaque dynamic jump — triggers suspect invalidation.
+            JUMPDEST            ; inst 3
+            PUSH0               ; inst 4
+            CALLDATALOAD        ; inst 5: Top
+            JUMP                ; inst 6: unresolvable
+        target:
+            ; Suspect JUMPDEST block with JUMPI.
+            ; Entry stack: [0xAA] (from pred, but unknown to block-local pass).
+            JUMPDEST            ; inst 7: suspect seed
+            PUSH1 0x01          ; inst 8: condition
+            PUSH %after         ; inst 9
+            JUMPI               ; inst 10: pops condition+target, [0xAA] remains
+            STOP                ; inst 11
+        after:
+            ; Fallthrough/target of JUMPI — suspect via propagation.
+            ; Entry stack: [0xAA] (inherited, but Top in block-local pass).
+            JUMPDEST            ; inst 12
+            PUSH1 0xBB          ; inst 13: block-local
+            ADD                 ; inst 14: 0xAA + 0xBB — depth 1 is incoming
+            STOP                ; inst 15
+        ",
+        );
+        assert!(bytecode.has_dynamic_jumps);
+        // ADD at inst 14: TOS (depth 0) = 0xBB (block-local), depth 1 = Top
+        // (incoming from suspect predecessor, block-local pass saw it as Top).
+        assert_eq!(bytecode.const_operand(Inst::from_usize(14), 0), Some(U256::from(0xBB)));
+        assert_eq!(bytecode.const_operand(Inst::from_usize(14), 1), None);
+        assert_eq!(bytecode.const_output(Inst::from_usize(14)), None);
     }
 
     /// Bytecode that is just STOP — minimal edge case.
@@ -1724,13 +2209,14 @@ mod tests_edge_cases {
     /// A dynamic jump in dead code should not cause `has_dynamic_jumps` to be true.
     #[test]
     fn dead_code_dynamic_jump() {
-        #[rustfmt::skip]
-        let bytecode = analyze_asm("
+        let bytecode = analyze_asm(
+            "
             STOP
             PUSH0
             CALLDATALOAD
             JUMP
-        ");
+        ",
+        );
         assert!(!bytecode.has_dynamic_jumps);
     }
 }

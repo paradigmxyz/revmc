@@ -1,6 +1,7 @@
 ADDRESS
 PUSH20 0xffffffffffffffffffffffffffffffffffffffff
 AND
+RET_WORD
 
 ; The ADDRESS builtin writes a full i256, then we re-load as i160 and zext.
 ; LLVM sees the narrow typed load and knows the high bits are zero, so the
@@ -10,4 +11,4 @@ AND
 ; CHECK: [[ADDR:%.*]] = zext i160 {{.*}} to i256
 ; CHECK-NOT: and
 ; CHECK: store i256 [[ADDR]]
-; CHECK: ret i8
+; CHECK: @__revmc_builtin_mstore
