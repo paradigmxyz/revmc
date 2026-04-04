@@ -101,24 +101,14 @@ impl Bytecode<'_> {
                 };
 
                 // Check if all outputs are dead and the instruction can be turned into a no-op.
-                if can_skip_when_dead(opcode) && !data.is_branching() && !data.is_diverging() {
-                    let all_dead = if out > 0 {
-                        let write_base = h_before - inp as usize;
-                        (0..out as usize).all(|k| {
-                            let pos = write_base + k;
-                            pos < live.len() && !live[pos]
-                        })
-                    } else {
-                        // SWAPN/EXCHANGE have stack_io(0,0); check the positions
-                        // they actually write using the decoded immediate.
-                        shuffle_all_dead(&live, opcode, h_before, imm)
-                    };
-
-                    if all_dead {
-                        self.insts[inst].flags |= InstFlags::NOOP;
-                        eliminated += 1;
-                        continue;
-                    }
+                if can_skip_when_dead(opcode)
+                    && !data.is_branching()
+                    && !data.is_diverging()
+                    && all_outputs_dead(&live, opcode, h_before, inp as usize, out as usize, imm)
+                {
+                    self.insts[inst].flags |= InstFlags::NOOP;
+                    eliminated += 1;
+                    continue;
                 }
 
                 transfer_liveness(&mut live, opcode, h_before, inp as usize, out as usize, imm);
@@ -173,8 +163,8 @@ fn can_skip_when_dead(opcode: u8) -> bool {
             | op::SAR
             | op::CLZ
             // Stack shuffles (no side effects, static gas).
-            // SWAPN and EXCHANGE have stack_io(0,0) so the out>0 gate excludes
-            // them; they need shuffle_all_dead below.
+            // These use shuffle_all_dead for precise dead checks since their
+            // stack_io arities include pass-through slots.
             | op::DUP1
             ..=op::DUP16
             | op::DUPN
@@ -288,28 +278,52 @@ fn transfer_swap(live: &mut BitVec, h_before: usize, depth: usize) {
     live.set(other, a);
 }
 
-/// Checks whether all positions written by a SWAPN/EXCHANGE are dead.
+/// Returns `true` if all positions actually written by the instruction are dead.
 ///
-/// These have `stack_io(0, 0)` so the generic `out > 0` check doesn't apply.
-/// Returns `false` conservatively when the immediate couldn't be decoded.
-fn shuffle_all_dead(live: &BitVec, opcode: u8, h_before: usize, imm: Option<DecodedImm>) -> bool {
+/// Stack shuffles need special handling because their `stack_io` arities include
+/// pass-through slots (e.g. SWAP15 reports `stack_io(16,16)` but only writes 2
+/// positions). All other opcodes use a generic check over their output range.
+fn all_outputs_dead(
+    live: &BitVec,
+    opcode: u8,
+    h_before: usize,
+    inp: usize,
+    out: usize,
+    imm: Option<DecodedImm>,
+) -> bool {
     match (opcode, imm) {
-        (op::SWAPN, Some(DecodedImm::Single(depth))) => {
-            if (depth as usize) >= h_before {
-                return false;
-            }
-            let tos = h_before - 1;
-            !live[tos] && !live[tos - depth as usize]
+        // SWAP: only TOS and the deep slot are written.
+        (op::SWAP1..=op::SWAP16, _) => {
+            swap_all_dead(live, h_before, (opcode - op::SWAP1 + 1) as usize)
         }
-        (op::EXCHANGE, Some(DecodedImm::Pair(n, m))) => {
-            if (m as usize) >= h_before {
-                return false;
-            }
+        (op::SWAPN, Some(DecodedImm::Single(d))) if (d as usize) < h_before => {
+            swap_all_dead(live, h_before, d as usize)
+        }
+        // DUP: only the new TOS is a real output.
+        (op::DUP1..=op::DUP16 | op::DUPN, _) => !live[h_before],
+        // EXCHANGE: only the two exchanged non-TOS positions are written.
+        (op::EXCHANGE, Some(DecodedImm::Pair(n, m))) if (m as usize) < h_before => {
             let tos = h_before - 1;
             !live[tos - n as usize] && !live[tos - m as usize]
         }
+        // Infeasible immediates — conservatively not dead.
+        (op::SWAPN | op::EXCHANGE, _) => false,
+        // Generic: all output positions must be dead.
+        _ if out > 0 => {
+            let write_base = h_before - inp;
+            (0..out).all(|k| {
+                let pos = write_base + k;
+                pos < live.len() && !live[pos]
+            })
+        }
         _ => false,
     }
+}
+
+/// SWAP dead check: both TOS and the swapped position must be dead.
+fn swap_all_dead(live: &BitVec, h_before: usize, depth: usize) -> bool {
+    let tos = h_before - 1;
+    !live[tos] && !live[tos - depth]
 }
 
 /// DUP liveness: the new TOS is killed; if it was live, the source becomes live.
@@ -563,6 +577,35 @@ mod tests {
             assert!(
                 bytecode.inst(Inst::from_usize(i)).flags.contains(InstFlags::NOOP),
                 "{name} should be skipped"
+            );
+        }
+    }
+
+    #[test]
+    fn swap_dead_with_live_passthrough() {
+        // At SWAP2: TOS (pos 2) and pos 0 are both dead, but pos 1 (pass-through) is live.
+        // The precise check correctly eliminates SWAP2. The generic out>0 check would
+        // require all 3 output positions to be dead and miss this.
+        let bytecode = analyze_asm(
+            "
+            PUSH1 0x01  ; [A]
+            PUSH1 0x02  ; [A, B]
+            PUSH1 0x03  ; [A, B, C]
+            SWAP2       ; [C, B, A]
+            POP         ; [C, B]
+            SWAP1       ; [B, C]
+            POP         ; [B]
+            STOP
+        ",
+        );
+        //        PUSH A, PUSH B, PUSH C, SWAP2, POP, SWAP1, POP, STOP
+        for (i, alive) in
+            [false, true, false, false, true, true, true, true].into_iter().enumerate()
+        {
+            assert_eq!(
+                !bytecode.inst(Inst::from_usize(i)).flags.contains(InstFlags::NOOP),
+                alive,
+                "inst {i}"
             );
         }
     }

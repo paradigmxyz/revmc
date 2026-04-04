@@ -682,10 +682,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         // Pure ops with a known-constant output: skip the opcode logic and just
         // store the folded constant. Works for single-output arithmetic (ADD, MUL,
         // ...) and DUP (which adds one new TOS without consuming its input).
-        // Excluded: EXP (dynamic gas), SWAP (modifies two stack positions).
         if out >= 1
-            && opcode != op::EXP
-            && !matches!(opcode, op::SWAP1..=op::SWAP16)
             && let Some(const_out) = self.bytecode.const_output(inst)
         {
             // We push exactly 1 value, so consume `inp + 1 - out` to match the
