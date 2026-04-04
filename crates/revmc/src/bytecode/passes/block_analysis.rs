@@ -608,8 +608,10 @@ impl Bytecode<'_> {
         let mut const_sets = ConstSetInterner::new();
         let (discovered_edges, converged) = self.run_fixpoint(&mut block_states, &mut const_sets);
 
-        if jump_insts.is_empty() {
-            return (Vec::new(), 0);
+        // On non-convergence, all fixpoint-derived snapshots are potentially stale.
+        // Restore the safe block-local snapshots computed by `block_analysis_local`.
+        if !converged {
+            self.snapshots.restore_from(self.insts.indices(), local_snapshots);
         }
 
         // After convergence, resolve each dynamic jump from its snapshot operand.
