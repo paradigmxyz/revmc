@@ -39,6 +39,19 @@ impl<'a> Bytecode<'a> {
     /// translator can map the dead instruction to the canonical block's IR block.
     #[instrument(name = "dedup", level = "debug", skip_all)]
     pub(crate) fn dedup_blocks(&mut self) {
+        let mut total_deduped = 0usize;
+        loop {
+            let deduped = self.dedup_blocks_once();
+            total_deduped += deduped;
+            if deduped == 0 {
+                break;
+            }
+        }
+        debug!(deduped = total_deduped, "finished");
+    }
+
+    /// Single dedup iteration. Returns the number of blocks deduped.
+    fn dedup_blocks_once(&mut self) -> usize {
         // Group eligible (diverging, non-dead) blocks by their raw bytecode content
         // plus resolved jump-target metadata.
         // We borrow `self.code` separately to avoid holding a `&self` borrow across mutations.
@@ -50,6 +63,11 @@ impl<'a> Bytecode<'a> {
             // unconditional JUMP). JUMPI blocks fall through to position-dependent targets.
             let term = &self.insts[block.terminator()];
             if term.can_fall_through() {
+                continue;
+            }
+
+            // Skip already-dead blocks (from a previous iteration).
+            if self.insts[block.insts.start].flags.contains(InstFlags::DEAD_CODE) {
                 continue;
             }
 
@@ -141,7 +159,7 @@ impl<'a> Bytecode<'a> {
             }
         }
 
-        debug!(deduped, "finished");
+        deduped
     }
 }
 
