@@ -79,8 +79,7 @@ impl<'a> Bytecode<'a> {
             // fixpoint may have recorded context-specific constants that become stale
             // once the canonical block serves multiple predecessors after merging.
             // Block-local constants (computed without incoming stack state) remain valid.
-            self.snapshots
-                .restore_from(self.cfg.blocks[canonical].insts(), local_snapshots);
+            self.snapshots.restore_from(self.cfg.blocks[canonical].insts(), local_snapshots);
 
             for &dup in dups {
                 deduped += 1;
