@@ -204,7 +204,6 @@ impl EvmCompilerFn {
     /// # Safety
     ///
     /// The caller must ensure that the function is safe to call.
-    #[inline]
     pub unsafe fn call_with_interpreter(
         self,
         interpreter: &mut Interpreter,
@@ -233,7 +232,10 @@ impl EvmCompilerFn {
 
         // Persist the resume_at value in the interpreter's bytecode PC so that
         // subsequent calls can correctly resume after a CALL/CREATE suspension.
-        interpreter.bytecode.absolute_jump(resume_at);
+        // Offset by the bytecode length so the value survives the `ResumeAt::load` round-trip,
+        // which treats `pc < code.len()` as "no resume" (initial state).
+        let code_len = interpreter.bytecode.bytecode_slice().len();
+        interpreter.bytecode.absolute_jump(code_len + resume_at);
 
         if let Some(action) = interpreter.bytecode.action.take() {
             action
@@ -702,7 +704,7 @@ struct ResumeAt;
 
 impl ResumeAt {
     fn load(pc: usize, code: &[u8]) -> usize {
-        if pc < code.len() { 0 } else { pc }
+        if pc < code.len() { 0 } else { pc - code.len() }
     }
 }
 
