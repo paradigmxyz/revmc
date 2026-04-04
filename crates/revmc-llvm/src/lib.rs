@@ -38,7 +38,8 @@ use std::{
     borrow::Cow,
     cell::Cell,
     ffi::CString,
-    fmt, iter,
+    fmt::{self, Write},
+    iter,
     mem::ManuallyDrop,
     path::Path,
     sync::{
@@ -149,6 +150,7 @@ pub struct EvmLlvmBackend {
 
     aot: bool,
     backend_config: BackendConfig,
+    scratch: String,
     /// Separate from `function_names` to have always increasing IDs.
     function_counter: u32,
     /// Persistent mapping from function ID to symbol name.
@@ -534,6 +536,7 @@ impl EvmLlvmBackend {
             ty_ptr,
             aot,
             backend_config: config,
+            scratch: String::new(),
             function_counter: 0,
             function_names: FxHashMap::default(),
             di_state: None,
@@ -1307,7 +1310,9 @@ impl Builder for EvmLlvmBuilder<'_> {
             return self.ty_i256.const_zero().into();
         }
 
-        self.ty_i256.const_int_from_string(&value.to_string(), StringRadix::Decimal).unwrap().into()
+        self.scratch.clear();
+        write!(self.scratch, "{value:x}").unwrap();
+        self.ty_i256.const_int_from_string(&self.scratch, StringRadix::Hexadecimal).unwrap().into()
     }
 
     fn str_const(&mut self, value: &str) -> Self::Value {
