@@ -583,32 +583,32 @@ mod tests {
 
     #[test]
     fn swap_dead_with_live_passthrough() {
-        // [A, B, C] → SWAP2 → [C, B, A] → POP → [C, B] → SWAP1 → [B, C] → POP → [B].
         // At SWAP2: TOS (pos 2) and pos 0 are both dead, but pos 1 (pass-through) is live.
         // The precise check correctly eliminates SWAP2. The generic out>0 check would
         // require all 3 output positions to be dead and miss this.
         let bytecode = analyze_asm(
             "
-            PUSH1 0x01
-            PUSH1 0x02
-            PUSH1 0x03
-            SWAP2
-            POP
-            SWAP1
-            POP
+            PUSH1 0x01  ; [A]
+            PUSH1 0x02  ; [A, B]
+            PUSH1 0x03  ; [A, B, C]
+            SWAP2       ; [C, B, A]
+            POP         ; [C, B]
+            SWAP1       ; [B, C]
+            POP         ; [B]
             STOP
         ",
         );
-        // SWAP2 should be eliminated: both swapped positions (TOS=2, pos 0) are dead.
-        assert!(
-            bytecode.inst(Inst::from_usize(3)).flags.contains(InstFlags::NOOP),
-            "SWAP2 should be skipped (both swapped positions dead, passthrough live)"
-        );
-        // PUSH 0x02 is live: it's the pass-through at pos 1 that ends up on the exit stack.
-        assert!(
-            !bytecode.inst(Inst::from_usize(1)).flags.contains(InstFlags::NOOP),
-            "PUSH 0x02 should NOT be skipped"
-        );
+        //        PUSH A, PUSH B, PUSH C, SWAP2, POP, SWAP1, POP, STOP
+        for (i, alive) in [false, true, false, false, true, true, true, true]
+            .into_iter()
+            .enumerate()
+        {
+            assert_eq!(
+                !bytecode.inst(Inst::from_usize(i)).flags.contains(InstFlags::NOOP),
+                alive,
+                "inst {i}"
+            );
+        }
     }
 
     #[test]
