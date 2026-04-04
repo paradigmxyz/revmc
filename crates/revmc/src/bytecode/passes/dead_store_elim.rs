@@ -62,14 +62,11 @@ impl Bytecode<'_> {
 
             let exit_height = *heights.last().unwrap();
             let max_height = entry_height + section.max_growth as i32;
-            let live_len = max_height.max(0) as usize;
 
             // At the block exit, all stack positions are conservatively live.
             live.clear();
-            live.resize(live_len, false);
-            for i in 0..exit_height.max(0) as usize {
-                live.set(i, true);
-            }
+            live.resize(exit_height.max(0) as usize, true);
+            live.resize(max_height.max(0) as usize, false);
 
             // Walk backward.
             for (idx, inst) in block.insts().enumerate().rev() {
