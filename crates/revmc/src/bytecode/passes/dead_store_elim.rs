@@ -101,18 +101,24 @@ impl Bytecode<'_> {
                 };
 
                 // Check if all outputs are dead and the instruction can be turned into a no-op.
+                //
+                // Stack shuffles (DUP, SWAP, DUPN, SWAPN, EXCHANGE) need a precise check
+                // because their stack_io arity includes pass-through slots that aren't
+                // actually written. E.g. SWAP15 has stack_io(16,16) but only mutates 2
+                // positions. The generic check would require all 16 to be dead.
                 if can_skip_when_dead(opcode) && !data.is_branching() && !data.is_diverging() {
-                    let all_dead = if out > 0 {
-                        let write_base = h_before - inp as usize;
-                        (0..out as usize).all(|k| {
-                            let pos = write_base + k;
-                            pos < live.len() && !live[pos]
-                        })
-                    } else {
-                        // SWAPN/EXCHANGE have stack_io(0,0); check the positions
-                        // they actually write using the decoded immediate.
-                        shuffle_all_dead(&live, opcode, h_before, imm)
-                    };
+                    let all_dead =
+                        if let Some(dead) = shuffle_all_dead(&live, opcode, h_before, imm) {
+                            dead
+                        } else if out > 0 {
+                            let write_base = h_before - inp as usize;
+                            (0..out as usize).all(|k| {
+                                let pos = write_base + k;
+                                pos < live.len() && !live[pos]
+                            })
+                        } else {
+                            false
+                        };
 
                     if all_dead {
                         self.insts[inst].flags |= InstFlags::NOOP;
@@ -173,8 +179,8 @@ fn can_skip_when_dead(opcode: u8) -> bool {
             | op::SAR
             | op::CLZ
             // Stack shuffles (no side effects, static gas).
-            // SWAPN and EXCHANGE have stack_io(0,0) so the out>0 gate excludes
-            // them; they need shuffle_all_dead below.
+            // These use shuffle_all_dead for precise dead checks since their
+            // stack_io arities include pass-through slots.
             | op::DUP1
             ..=op::DUP16
             | op::DUPN
@@ -288,27 +294,44 @@ fn transfer_swap(live: &mut BitVec, h_before: usize, depth: usize) {
     live.set(other, a);
 }
 
-/// Checks whether all positions written by a SWAPN/EXCHANGE are dead.
+/// Checks whether all positions actually written by a stack shuffle are dead.
 ///
-/// These have `stack_io(0, 0)` so the generic `out > 0` check doesn't apply.
-/// Returns `false` conservatively when the immediate couldn't be decoded.
-fn shuffle_all_dead(live: &BitVec, opcode: u8, h_before: usize, imm: Option<DecodedImm>) -> bool {
-    match (opcode, imm) {
-        (op::SWAPN, Some(DecodedImm::Single(depth))) => {
-            if (depth as usize) >= h_before {
-                return false;
-            }
+/// Returns `Some(true/false)` for shuffle opcodes, `None` for non-shuffles.
+/// Stack shuffles have inflated `stack_io` arities that include pass-through slots
+/// (e.g. SWAP15 reports stack_io(16,16) but only writes 2 positions), so they need
+/// a precise check instead of the generic `out > 0` path.
+fn shuffle_all_dead(
+    live: &BitVec,
+    opcode: u8,
+    h_before: usize,
+    imm: Option<DecodedImm>,
+) -> Option<bool> {
+    match opcode {
+        op::SWAP1..=op::SWAP16 => {
+            let depth = (opcode - op::SWAP1 + 1) as usize;
             let tos = h_before - 1;
-            !live[tos] && !live[tos - depth as usize]
+            Some(!live[tos] && !live[tos - depth])
         }
-        (op::EXCHANGE, Some(DecodedImm::Pair(n, m))) => {
-            if (m as usize) >= h_before {
-                return false;
+        op::SWAPN => match imm {
+            Some(DecodedImm::Single(depth)) if (depth as usize) < h_before => {
+                let tos = h_before - 1;
+                Some(!live[tos] && !live[tos - depth as usize])
             }
-            let tos = h_before - 1;
-            !live[tos - n as usize] && !live[tos - m as usize]
+            _ => Some(false),
+        },
+        op::DUP1..=op::DUP16 | op::DUPN => {
+            // DUP pushes a copy to new TOS; only that position is a real output.
+            // The source depth doesn't matter for the dead check.
+            Some(!live[h_before])
         }
-        _ => false,
+        op::EXCHANGE => match imm {
+            Some(DecodedImm::Pair(n, m)) if (m as usize) < h_before => {
+                let tos = h_before - 1;
+                Some(!live[tos - n as usize] && !live[tos - m as usize])
+            }
+            _ => Some(false),
+        },
+        _ => None,
     }
 }
 
@@ -565,6 +588,36 @@ mod tests {
                 "{name} should be skipped"
             );
         }
+    }
+
+    #[test]
+    fn swap_dead_with_live_passthrough() {
+        // [A, B, C] → SWAP2 → [C, B, A] → POP → [C, B] → SWAP1 → [B, C] → POP → [B].
+        // At SWAP2: TOS (pos 2) and pos 0 are both dead, but pos 1 (pass-through) is live.
+        // The precise check correctly eliminates SWAP2. The generic out>0 check would
+        // require all 3 output positions to be dead and miss this.
+        let bytecode = analyze_asm(
+            "
+            PUSH1 0x01
+            PUSH1 0x02
+            PUSH1 0x03
+            SWAP2
+            POP
+            SWAP1
+            POP
+            STOP
+        ",
+        );
+        // SWAP2 should be eliminated: both swapped positions (TOS=2, pos 0) are dead.
+        assert!(
+            bytecode.inst(Inst::from_usize(3)).flags.contains(InstFlags::NOOP),
+            "SWAP2 should be skipped (both swapped positions dead, passthrough live)"
+        );
+        // PUSH 0x02 is live: it's the pass-through at pos 1 that ends up on the exit stack.
+        assert!(
+            !bytecode.inst(Inst::from_usize(1)).flags.contains(InstFlags::NOOP),
+            "PUSH 0x02 should NOT be skipped"
+        );
     }
 
     #[test]
