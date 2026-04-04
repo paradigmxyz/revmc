@@ -278,7 +278,6 @@ fn exp_dynamic_gas(exponent: U256, spec_id: SpecId) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::bytecode::{Inst, passes::block_analysis::tests::analyze_asm};
 
     /// Returns the gas section cost for the first non-dead instruction (the section head).
