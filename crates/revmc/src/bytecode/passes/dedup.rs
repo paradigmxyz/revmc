@@ -411,6 +411,59 @@ mod tests {
     }
 
     #[test]
+    fn dedup_skips_dynamic_jump_sstore_tail() {
+        // Two non-JUMPDEST byte-identical `SSTORE ; JUMP` tails with unresolved dynamic
+        // JUMP terminators must NOT be deduped.
+        let bytecode = analyze_asm_with(
+            "
+            PUSH0
+            CALLDATALOAD
+            PUSH1 0x20
+            CALLDATALOAD
+            PUSH %path_b
+            JUMPI
+
+            ; path A
+            PUSH1 0x11
+            PUSH1 0x01
+            PUSH0
+            PUSH %not_taken_a
+            JUMPI
+            SSTORE
+            JUMP
+
+        not_taken_a:
+            JUMPDEST
+            INVALID
+
+        path_b:
+            JUMPDEST
+            PUSH1 0x22
+            PUSH1 0x02
+            PUSH0
+            PUSH %not_taken_b
+            JUMPI
+            SSTORE
+            JUMP
+
+        not_taken_b:
+            JUMPDEST
+            INVALID
+
+        done:
+            JUMPDEST
+            STOP
+        ",
+            AnalysisConfig::DEDUP,
+        );
+
+        assert!(
+            bytecode.redirects.is_empty(),
+            "should not dedup blocks ending in unresolved dynamic JUMP",
+        );
+    }
+
+    #[test]
     fn dedup_invalidates_stale_const_snapshots() {
         // Two byte-identical RETURN tails reached with different incoming constants.
         // After dedup the canonical block must NOT retain stale const snapshots.
