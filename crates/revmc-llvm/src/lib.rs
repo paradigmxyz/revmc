@@ -35,7 +35,6 @@ use revmc_backend::{
     TypeMethods, U256, eyre, format_bytes,
 };
 use std::{
-    borrow::Cow,
     cell::Cell,
     ffi::CString,
     fmt::{self, Write},
@@ -460,19 +459,12 @@ unsafe impl Send for EvmLlvmBackend {}
 
 impl EvmLlvmBackend {
     /// Creates a new LLVM backend for the host machine.
-    ///
-    /// Use [`new_for_target`](Self::new_for_target) to create a backend for a specific target.
-    pub fn new(aot: bool) -> Result<Self> {
-        Self::new_for_target(aot, &revmc_backend::Target::Native)
-    }
-
-    /// Creates a new LLVM backend for the given target.
     #[instrument(name = "new_llvm_backend", level = "debug", skip_all)]
-    pub fn new_for_target(aot: bool, target: &revmc_backend::Target) -> Result<Self> {
+    pub fn new(aot: bool) -> Result<Self> {
         let config = BackendConfig::default();
         init()?;
 
-        let target_info = TargetInfo::new(target)?;
+        let target_info = TargetInfo::new();
         let target = &target_info.target;
         let machine = target
             .create_target_machine(
@@ -1032,27 +1024,15 @@ impl Clone for TargetInfo {
 }
 
 impl TargetInfo {
-    fn new(target: &revmc_backend::Target) -> Result<Cow<'static, Self>> {
-        match target {
-            revmc_backend::Target::Native => {
-                static HOST_TARGET_INFO: OnceLock<TargetInfo> = OnceLock::new();
-                Ok(Cow::Borrowed(HOST_TARGET_INFO.get_or_init(|| {
-                    let triple = TargetMachine::get_default_triple();
-                    let target = Target::from_triple(&triple).unwrap();
-                    let cpu = TargetMachine::get_host_cpu_name().to_string_lossy().into_owned();
-                    let features =
-                        TargetMachine::get_host_cpu_features().to_string_lossy().into_owned();
-                    Self { target, triple, cpu, features }
-                })))
-            }
-            revmc_backend::Target::Triple { triple, cpu, features } => {
-                let triple = TargetTriple::create(triple);
-                let target = Target::from_triple(&triple).map_err(error_msg)?;
-                let cpu = cpu.as_ref().cloned().unwrap_or_default();
-                let features = features.as_ref().cloned().unwrap_or_default();
-                Ok(Cow::Owned(Self { target, triple, cpu, features }))
-            }
-        }
+    fn new() -> &'static Self {
+        static HOST_TARGET_INFO: OnceLock<TargetInfo> = OnceLock::new();
+        HOST_TARGET_INFO.get_or_init(|| {
+            let triple = TargetMachine::get_default_triple();
+            let target = Target::from_triple(&triple).unwrap();
+            let cpu = TargetMachine::get_host_cpu_name().to_string_lossy().into_owned();
+            let features = TargetMachine::get_host_cpu_features().to_string_lossy().into_owned();
+            Self { target, triple, cpu, features }
+        })
     }
 }
 

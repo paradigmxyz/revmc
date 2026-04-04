@@ -69,16 +69,6 @@ pub(crate) struct RunArgs {
     #[arg(long, conflicts_with = "interpret")]
     jit_only: bool,
 
-    /// Target triple.
-    #[arg(long, default_value = "native")]
-    target: String,
-    /// Target CPU.
-    #[arg(long)]
-    target_cpu: Option<String>,
-    /// Target features.
-    #[arg(long)]
-    target_features: Option<String>,
-
     /// Compile only, do not link.
     #[arg(long, requires = "aot")]
     no_link: bool,
@@ -155,8 +145,7 @@ impl RunArgs {
         let Bench { bytecode, calldata, stack_input, .. } = bench_entry.clone();
 
         // Build the compiler.
-        let target = revmc::Target::new(self.target, self.target_cpu, self.target_features);
-        let backend = EvmLlvmBackend::new_for_target(self.aot, &target)?;
+        let backend = EvmLlvmBackend::new(self.aot)?;
         let mut compiler = EvmCompiler::new(backend);
         compiler.set_opt_level(self.opt_level);
         let out_dir = if self.out_dir.is_some() {

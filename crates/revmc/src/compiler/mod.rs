@@ -345,7 +345,6 @@ impl<B: Backend> EvmCompiler<B> {
         input: impl Into<EvmCompilerInput<'a>>,
         spec_id: SpecId,
     ) -> Result<B::FuncId> {
-        ensure!(cfg!(target_endian = "little"), "only little-endian is supported");
         ensure!(!self.finalized, "cannot compile more functions after finalizing the module");
         let bytecode = self.parse(input.into(), spec_id)?;
         self.translate_inner(name, &bytecode)
@@ -466,6 +465,7 @@ impl<B: Backend> EvmCompiler<B> {
     #[instrument(name = "translate", level = "debug", skip_all)]
     #[doc(hidden)] // Not public API.
     pub fn translate_inner(&mut self, name: &str, bytecode: &Bytecode<'_>) -> Result<B::FuncId> {
+        ensure!(cfg!(target_endian = "little"), "only little-endian is supported");
         let _t = self.remarks.time(|r| &r.translate);
         ensure!(self.backend.function_name_is_unique(name), "function name `{name}` is not unique");
 
