@@ -916,7 +916,7 @@ impl Bytecode<'_> {
                     stack.swap(len - 1, len - 1 - depth);
                 }
                 op::DUPN => {
-                    let depth = self.get_imm(inst).and_then(|b| crate::decode_single(b[0]));
+                    let depth = crate::decode_single(self.get_u8_imm(inst));
                     match depth {
                         Some(n) => {
                             let n = n as usize;
@@ -929,7 +929,7 @@ impl Bytecode<'_> {
                     }
                 }
                 op::SWAPN => {
-                    let depth = self.get_imm(inst).and_then(|b| crate::decode_single(b[0]));
+                    let depth = crate::decode_single(self.get_u8_imm(inst));
                     match depth {
                         Some(n) => {
                             let n = n as usize;
@@ -943,7 +943,7 @@ impl Bytecode<'_> {
                     }
                 }
                 op::EXCHANGE => {
-                    let pair = self.get_imm(inst).and_then(|b| crate::decode_pair(b[0]));
+                    let pair = crate::decode_pair(self.get_u8_imm(inst));
                     match pair {
                         Some((n, m)) => {
                             let (n, m) = (n as usize, m as usize);

@@ -89,13 +89,10 @@ impl Bytecode<'_> {
 
                 // Decode immediate for DUPN/SWAPN/EXCHANGE.
                 let imm = match opcode {
-                    op::DUPN | op::SWAPN => self
-                        .get_imm(data)
-                        .and_then(|b| crate::decode_single(b[0]))
-                        .map(DecodedImm::Single),
-                    op::EXCHANGE => self
-                        .get_imm(data)
-                        .and_then(|b| crate::decode_pair(b[0]))
+                    op::DUPN | op::SWAPN => {
+                        crate::decode_single(self.get_u8_imm(data)).map(DecodedImm::Single)
+                    }
+                    op::EXCHANGE => crate::decode_pair(self.get_u8_imm(data))
                         .map(|(n, m)| DecodedImm::Pair(n, m)),
                     _ => None,
                 };

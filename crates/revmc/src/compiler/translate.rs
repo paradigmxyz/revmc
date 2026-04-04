@@ -1039,30 +1039,21 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             }
 
             op::DUP1..=op::DUP16 => self.dup((opcode - op::DUP1 + 1) as usize),
-            op::DUPN => {
-                let imm = self.bytecode.get_imm(data).map(|b| b[0]);
-                match imm.and_then(decode_single) {
-                    Some(n) => self.dup(n as usize),
-                    None => goto_return!(fail InstructionResult::InvalidImmediateEncoding),
-                }
-            }
+            op::DUPN => match decode_single(self.bytecode.get_u8_imm(data)) {
+                Some(n) => self.dup(n as usize),
+                None => goto_return!(fail InstructionResult::InvalidImmediateEncoding),
+            },
 
             op::SWAP1..=op::SWAP16 => self.swap((opcode - op::SWAP1 + 1) as usize),
-            op::SWAPN => {
-                let imm = self.bytecode.get_imm(data).map(|b| b[0]);
-                match imm.and_then(decode_single) {
-                    Some(n) => self.swap(n as usize),
-                    None => goto_return!(fail InstructionResult::InvalidImmediateEncoding),
-                }
-            }
+            op::SWAPN => match decode_single(self.bytecode.get_u8_imm(data)) {
+                Some(n) => self.swap(n as usize),
+                None => goto_return!(fail InstructionResult::InvalidImmediateEncoding),
+            },
 
-            op::EXCHANGE => {
-                let imm = self.bytecode.get_imm(data).map(|b| b[0]);
-                match imm.and_then(decode_pair) {
-                    Some((n, m)) => self.exchange(n as usize, (m - n) as usize),
-                    None => goto_return!(fail InstructionResult::InvalidImmediateEncoding),
-                }
-            }
+            op::EXCHANGE => match decode_pair(self.bytecode.get_u8_imm(data)) {
+                Some((n, m)) => self.exchange(n as usize, (m - n) as usize),
+                None => goto_return!(fail InstructionResult::InvalidImmediateEncoding),
+            },
 
             op::LOG0..=op::LOG4 => {
                 let n = opcode - op::LOG0;
