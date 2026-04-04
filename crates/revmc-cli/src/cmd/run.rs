@@ -292,7 +292,7 @@ impl RunArgs {
             let (mut ecx, stack, stack_len) =
                 EvmContext::from_interpreter_with_stack(&mut interpreter, &mut host);
             for (i, input) in stack_input.iter().enumerate() {
-                stack.as_mut_slice()[i] = (*input).into();
+                stack.set(i, (*input).into());
             }
             *stack_len = stack_input.len();
             let ret = unsafe { f.call_noinline(Some(stack), Some(stack_len), &mut ecx) };
@@ -329,7 +329,7 @@ impl RunArgs {
                     let (mut ecx, stack, stack_len) =
                         EvmContext::from_interpreter_with_stack(&mut interpreter, &mut host);
                     for (i, input) in stack_input.iter().enumerate() {
-                        stack.as_mut_slice()[i] = (*input).into();
+                        stack.set(i, (*input).into());
                     }
                     *stack_len = stack_input.len();
                     let r = unsafe { f.call_noinline(Some(stack), Some(stack_len), &mut ecx) };

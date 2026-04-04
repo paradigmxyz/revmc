@@ -65,7 +65,7 @@ fn run_opaque_zero_div_test<B: Backend>(
         let r = unsafe { f.call(Some(stack), Some(stack_len), ecx) };
         assert_eq!(r, InstructionResult::Stop, "{name}: unexpected return");
         assert_eq!(*stack_len, 1, "{name}: expected 1 stack element");
-        let actual = stack.as_slice()[0].to_u256();
+        let actual = unsafe { stack.as_slice(*stack_len)[0].to_u256() };
         assert_eq!(
             actual,
             U256::ZERO,
