@@ -174,7 +174,7 @@ fn can_skip_when_dead(opcode: u8) -> bool {
             | op::CLZ
             // Stack shuffles (no side effects, static gas).
             // SWAPN and EXCHANGE have stack_io(0,0) so the out>0 gate excludes
-            // them; they need eof_shuffle_all_dead below.
+            // them; they need shuffle_all_dead below.
             | op::DUP1
             ..=op::DUP16
             | op::DUPN
@@ -472,7 +472,7 @@ mod tests {
     }
 
     /// Helper: builds bytecode with `n` PUSH0s followed by `suffix`, using AMSTERDAM spec.
-    fn eof_with_prefix(n: usize, suffix: &[u8]) -> crate::bytecode::Bytecode<'static> {
+    fn with_prefix(n: usize, suffix: &[u8]) -> crate::bytecode::Bytecode<'static> {
         let mut code = vec![op::PUSH0; n];
         code.extend_from_slice(suffix);
         analyze_code_spec(code, SpecId::AMSTERDAM)
@@ -482,7 +482,7 @@ mod tests {
     fn swapn_preserves_liveness() {
         // 18 × PUSH0 (insts 0..18), SWAPN 17 (inst 18), STOP (inst 19).
         // SWAPN 17 needs TOS + 17 below = 18 items.
-        let bytecode = eof_with_prefix(18, &[op::SWAPN, 0x00, op::STOP]);
+        let bytecode = with_prefix(18, &[op::SWAPN, 0x00, op::STOP]);
         for i in 0..18 {
             assert!(
                 !bytecode.inst(Inst::from_usize(i)).flags.contains(InstFlags::NOOP),
@@ -495,7 +495,7 @@ mod tests {
     fn dupn_keeps_source_live() {
         // 17 × PUSH0, DUPN 17 (dup bottom), POP, STOP.
         // The DUP copy is popped but the source (inst 0) is still live at exit.
-        let bytecode = eof_with_prefix(17, &[op::DUPN, 0x00, op::POP, op::STOP]);
+        let bytecode = with_prefix(17, &[op::DUPN, 0x00, op::POP, op::STOP]);
         assert!(
             !bytecode.inst(Inst::from_usize(0)).flags.contains(InstFlags::NOOP),
             "source PUSH0 should NOT be skipped"
@@ -507,7 +507,7 @@ mod tests {
         // 17 × PUSH0, DUPN 17 (dup bottom), POP, STOP.
         // The DUP copy is immediately popped. The source stays live (it's on the exit
         // stack), so the transfer must not incorrectly kill the source position.
-        let bytecode = eof_with_prefix(17, &[op::DUPN, 0x00, op::POP, op::STOP]);
+        let bytecode = with_prefix(17, &[op::DUPN, 0x00, op::POP, op::STOP]);
         for i in 0..17 {
             assert!(
                 !bytecode.inst(Inst::from_usize(i)).flags.contains(InstFlags::NOOP),
@@ -521,7 +521,7 @@ mod tests {
         // 18 × PUSH0, EXCHANGE 1,2 (swap positions 1 and 2 from TOS), STOP.
         // EXCHANGE needs at least m+1 items. With (1,2): 3 items minimum, but we use 18
         // to match the DUPN/SWAPN test shape and ensure all are live.
-        let bytecode = eof_with_prefix(18, &[op::EXCHANGE, 0x01, op::STOP]);
+        let bytecode = with_prefix(18, &[op::EXCHANGE, 0x01, op::STOP]);
         for i in 0..18 {
             assert!(
                 !bytecode.inst(Inst::from_usize(i)).flags.contains(InstFlags::NOOP),
@@ -641,7 +641,7 @@ mod tests {
     #[test]
     fn dupn_dead() {
         // 1 × PUSH0, DUPN 17 (copies PUSH0), POP, POP, STOP — all dead.
-        let bytecode = eof_with_prefix(1, &[op::DUPN, 0x00, op::POP, op::POP, op::STOP]);
+        let bytecode = with_prefix(1, &[op::DUPN, 0x00, op::POP, op::POP, op::STOP]);
         assert!(
             bytecode.inst(Inst::from_usize(0)).flags.contains(InstFlags::NOOP),
             "PUSH0 should be skipped"
@@ -658,7 +658,7 @@ mod tests {
         let mut suffix = vec![op::SWAPN, 0x00];
         suffix.extend(std::iter::repeat_n(op::POP, 18));
         suffix.push(op::STOP);
-        let bytecode = eof_with_prefix(18, &suffix);
+        let bytecode = with_prefix(18, &suffix);
         for i in 0..18 {
             assert!(
                 bytecode.inst(Inst::from_usize(i)).flags.contains(InstFlags::NOOP),
@@ -674,8 +674,7 @@ mod tests {
     #[test]
     fn exchange_dead() {
         // 3 × PUSH0, EXCHANGE (1,2), 3 × POP, STOP — all dead.
-        let bytecode =
-            eof_with_prefix(3, &[op::EXCHANGE, 0x01, op::POP, op::POP, op::POP, op::STOP]);
+        let bytecode = with_prefix(3, &[op::EXCHANGE, 0x01, op::POP, op::POP, op::POP, op::STOP]);
         for i in 0..3 {
             assert!(
                 bytecode.inst(Inst::from_usize(i)).flags.contains(InstFlags::NOOP),
