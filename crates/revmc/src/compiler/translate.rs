@@ -1031,9 +1031,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 self.push(value);
             }
             op::PUSH1..=op::PUSH32 => {
-                // NOTE: This can be None if the bytecode is invalid.
-                let imm = self.bytecode.get_imm(data);
-                let value = imm.map(U256::from_be_slice).unwrap_or_default();
+                let value = self.bytecode.get_push_value(data);
                 let value = self.bcx.iconst_256(value);
                 self.push(value);
             }
