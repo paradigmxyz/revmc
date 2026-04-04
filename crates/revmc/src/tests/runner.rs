@@ -624,7 +624,7 @@ fn run_compiled_test_case(test_case: &TestCase<'_>, f: EvmCompilerFn) {
         }
 
         let actual_stack =
-            stack.as_slice().iter().take(*stack_len).map(|x| x.to_u256()).collect::<Vec<_>>();
+            unsafe { stack.as_slice(*stack_len).iter().map(|x| x.to_u256()).collect::<Vec<_>>() };
 
         // On EVM halt all available gas is consumed, so resulting stack, memory, and gas do not
         // matter. We do less work than the interpreter by bailing out earlier due to sections.

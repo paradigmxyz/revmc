@@ -387,29 +387,55 @@ impl EvmStack {
         self.0.as_mut_ptr().cast()
     }
 
-    /// Returns a slice of the stack.
+    /// Returns a slice of the initialized portion of the stack.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that the first `len` slots are initialized.
     #[inline]
-    pub fn as_slice(&self) -> &[EvmWord] {
-        // SAFETY: EvmWord is repr(C) and same layout as B256.
-        unsafe { core::slice::from_raw_parts(self.as_ptr(), Self::CAPACITY) }
+    pub unsafe fn as_slice(&self, len: usize) -> &[EvmWord] {
+        assert!(len <= Self::CAPACITY);
+        unsafe { core::slice::from_raw_parts(self.as_ptr(), len) }
     }
 
-    /// Returns a mutable slice of the stack.
+    /// Returns a mutable slice of the initialized portion of the stack.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that the first `len` slots are initialized.
     #[inline]
-    pub fn as_mut_slice(&mut self) -> &mut [EvmWord] {
-        // SAFETY: EvmWord is repr(C) and same layout as B256.
-        unsafe { core::slice::from_raw_parts_mut(self.as_mut_ptr(), Self::CAPACITY) }
+    pub unsafe fn as_mut_slice(&mut self, len: usize) -> &mut [EvmWord] {
+        assert!(len <= Self::CAPACITY);
+        unsafe { core::slice::from_raw_parts_mut(self.as_mut_ptr(), len) }
+    }
+
+    /// Sets the value at the given index.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the index is out of bounds.
+    #[inline]
+    pub fn set(&mut self, index: usize, value: EvmWord) {
+        self.0[index] = MaybeUninit::new(value);
     }
 
     /// Returns the word at the given index as a reference.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that the slot at `index` is initialized.
     #[inline]
-    pub fn get(&self, index: usize) -> Option<&EvmWord> {
+    pub unsafe fn get(&self, index: usize) -> Option<&EvmWord> {
         self.0.get(index).map(|slot| unsafe { slot.assume_init_ref() })
     }
 
     /// Returns the word at the given index as a mutable reference.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that the slot at `index` is initialized.
     #[inline]
-    pub fn get_mut(&mut self, index: usize) -> Option<&mut EvmWord> {
+    pub unsafe fn get_mut(&mut self, index: usize) -> Option<&mut EvmWord> {
         self.0.get_mut(index).map(|slot| unsafe { slot.assume_init_mut() })
     }
 

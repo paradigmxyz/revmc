@@ -18,16 +18,6 @@ macro_rules! gas {
     };
 }
 
-#[collapse_debuginfo(yes)]
-macro_rules! gas_opt {
-    ($ecx:expr, $gas:expr) => {
-        match $gas {
-            Some(gas) => gas!($ecx, gas),
-            None => return Err(InstructionResult::OutOfGas.into()),
-        }
-    };
-}
-
 /// Mirrors revm's `berlin_load_account!` macro.
 /// Loads account info with the cold-load-skip optimization: if remaining gas
 /// is less than the cold cost, skip the DB load and return OOG immediately.
