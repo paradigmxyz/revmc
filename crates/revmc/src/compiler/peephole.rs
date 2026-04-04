@@ -27,8 +27,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             op::ADDMOD => self.peephole_addmod(),
             op::MULMOD => self.peephole_mulmod(),
             op::EXP => self.peephole_exp(),
-            op::BYTE => self.peephole_byte(),
             op::SIGNEXTEND => self.peephole_signextend(),
+            op::BYTE => self.peephole_byte(),
             _ => false,
         }
     }
@@ -135,6 +135,27 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         true
     }
 
+    /// SMOD a, b => signed(a) % signed(b). Result sign matches dividend.
+    fn peephole_smod(&mut self) -> bool {
+        let [dividend, modulus] = self.const_operands();
+        match modulus {
+            // x % 0 => 0, x % 1 => 0, x % -1 => 0.
+            Some(U256::ZERO) | Some(U256::ONE) | Some(U256::MAX) => {
+                self.pop_ignore(2);
+                let zero = self.bcx.iconst_256(U256::ZERO);
+                self.push(zero);
+            }
+            // 0 % x => 0 (EVM: 0 % 0 = 0).
+            _ if dividend == Some(U256::ZERO) => {
+                self.pop_ignore(2);
+                let zero = self.bcx.iconst_256(U256::ZERO);
+                self.push(zero);
+            }
+            _ => return false,
+        }
+        true
+    }
+
     /// ADDMOD a, b, N => (a + b) % N.
     fn peephole_addmod(&mut self) -> bool {
         let [a, b, modulus] = self.const_operands();
@@ -220,21 +241,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         self.gas_cost_imm(cost);
     }
 
-    /// BYTE index, value => value[index].
-    fn peephole_byte(&mut self) -> bool {
-        let [index, _value] = self.const_operands();
-        match index {
-            // BYTE(i, x) with i >= 32 => 0.
-            Some(i) if i >= U256::from(32) => {
-                self.pop_ignore(2);
-                let zero = self.bcx.iconst_256(U256::ZERO);
-                self.push(zero);
-            }
-            _ => return false,
-        }
-        true
-    }
-
     /// SIGNEXTEND ext, x => sign-extend x from (ext+1) bytes.
     fn peephole_signextend(&mut self) -> bool {
         let [ext, _x] = self.const_operands();
@@ -249,18 +255,12 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         true
     }
 
-    /// SMOD a, b => signed(a) % signed(b). Result sign matches dividend.
-    fn peephole_smod(&mut self) -> bool {
-        let [dividend, modulus] = self.const_operands();
-        match modulus {
-            // x % 0 => 0, x % 1 => 0, x % -1 => 0.
-            Some(U256::ZERO) | Some(U256::ONE) | Some(U256::MAX) => {
-                self.pop_ignore(2);
-                let zero = self.bcx.iconst_256(U256::ZERO);
-                self.push(zero);
-            }
-            // 0 % x => 0 (EVM: 0 % 0 = 0).
-            _ if dividend == Some(U256::ZERO) => {
+    /// BYTE index, value => value[index].
+    fn peephole_byte(&mut self) -> bool {
+        let [index, _value] = self.const_operands();
+        match index {
+            // BYTE(i, x) with i >= 32 => 0.
+            Some(i) if i >= U256::from(32) => {
                 self.pop_ignore(2);
                 let zero = self.bcx.iconst_256(U256::ZERO);
                 self.push(zero);
