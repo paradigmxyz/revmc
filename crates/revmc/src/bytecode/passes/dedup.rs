@@ -11,7 +11,7 @@ use oxc_index::IndexVec;
 use revm_bytecode::opcode as op;
 use smallvec::SmallVec;
 
-/// Dedup key: raw bytecode bytes plus resolved jump-target metadata.
+/// Dedup key: raw bytecode bytes plus CFG successor blocks.
 ///
 /// Raw bytes alone are insufficient for JUMP-terminated blocks because block analysis
 /// may resolve byte-identical copies to different static targets depending on incoming
@@ -19,12 +19,9 @@ use smallvec::SmallVec;
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct DedupKey<'a> {
     bytes: &'a [u8],
-    /// Discriminant for JUMP terminators. For non-JUMP terminators this is always `None`.
-    /// - `STATIC_JUMP`: `Some([target_inst])`
-    /// - `INVALID_JUMP`: `Some([])`  (all invalid jumps are equivalent)
-    /// - `MULTI_JUMP`: `Some(sorted_targets)`
-    /// - unresolved dynamic: not inserted (block is skipped)
-    jump_targets: Option<SmallVec<[Inst; 4]>>,
+    /// CFG successors for this block. Two byte-identical blocks are only merged when
+    /// their successor sets also match.
+    succs: SmallVec<[Block; 4]>,
 }
 
 impl<'a> Bytecode<'a> {
@@ -85,32 +82,20 @@ impl<'a> Bytecode<'a> {
                 continue;
             }
 
+            // Skip unresolved dynamic JUMPs — any target is possible at runtime.
+            if term.opcode == op::JUMP && !term.flags.contains(InstFlags::STATIC_JUMP) {
+                continue;
+            }
+
             let bytes = block_bytes(code, &self.insts, block);
             if bytes.is_empty() {
                 continue;
             }
 
-            // For JUMP terminators, include the resolved target(s) in the key so that
-            // byte-identical blocks with different static targets are not merged.
-            let jump_targets = if term.opcode == op::JUMP {
-                if term.flags.contains(InstFlags::INVALID_JUMP) {
-                    Some(SmallVec::new())
-                } else if term.flags.contains(InstFlags::MULTI_JUMP) {
-                    let mut targets: SmallVec<[Inst; 4]> =
-                        self.multi_jump_targets(block.terminator()).unwrap_or_default().into();
-                    targets.sort_unstable();
-                    Some(targets)
-                } else if term.flags.contains(InstFlags::STATIC_JUMP) {
-                    Some(SmallVec::from_elem(Inst::from_usize(term.data as usize), 1))
-                } else {
-                    // Unresolved dynamic JUMP — skip, can't safely dedup.
-                    continue;
-                }
-            } else {
-                None
-            };
-
-            key_to_blocks.entry(DedupKey { bytes, jump_targets }).or_default().push(bid);
+            key_to_blocks
+                .entry(DedupKey { bytes, succs: block.succs.clone() })
+                .or_default()
+                .push(bid);
         }
 
         let mut deduped = 0usize;
@@ -139,8 +124,11 @@ impl<'a> Bytecode<'a> {
                     self.insts[canonical_first_inst].data = 1;
                 }
 
-                // Redirect predecessors that reach the duplicate via static jumps.
-                for &pred in &dup_block.preds {
+                // Redirect predecessors that reach the duplicate via static jumps,
+                // and update their CFG successor lists so the next iteration sees
+                // the canonical target in the dedup key.
+                let preds = std::mem::take(&mut self.cfg.blocks[dup].preds);
+                for &pred in &preds {
                     let term_inst = self.cfg.blocks[pred].terminator();
                     let term = &self.insts[term_inst];
                     let is_static = term.is_static_jump()
@@ -150,12 +138,19 @@ impl<'a> Bytecode<'a> {
                     if is_static {
                         self.insts[term_inst].data = canonical_first_inst.index() as u32;
                     }
+                    // Update CFG successor: replace dup → canonical.
+                    for succ in &mut self.cfg.blocks[pred].succs {
+                        if *succ == dup {
+                            *succ = canonical;
+                        }
+                    }
                     // Multi-jump targets are NOT rewritten: each target carries a
                     // distinct PC that callers may push as a return address. The
                     // `inst_entries` redirect (translate.rs) already maps the dead
                     // instruction's IR entry to the canonical one, so the switch
                     // correctly emits cases for both PCs pointing to the same IR block.
                 }
+                self.cfg.blocks[dup].preds = preds;
             }
         }
 
