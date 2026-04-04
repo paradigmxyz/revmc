@@ -83,6 +83,8 @@ pub struct EvmCompiler<B: Backend> {
     dump_assembly: bool,
     dump_unopt_assembly: bool,
 
+    compiler_gas_limit: u64,
+
     remarks: Remarks,
     finalized: bool,
 }
@@ -98,6 +100,7 @@ impl<B: Backend> EvmCompiler<B> {
             builtins: Builtins::new(),
             dump_assembly: true,
             dump_unopt_assembly: false,
+            compiler_gas_limit: crate::bytecode::DEFAULT_COMPILER_GAS_LIMIT,
             remarks: Remarks::default(),
             finalized: false,
         }
@@ -292,6 +295,20 @@ impl<B: Backend> EvmCompiler<B> {
         self.config.stack_bound_checks = yes;
     }
 
+    /// Sets the gas budget for compile-time evaluation of user-supplied bytecode.
+    ///
+    /// The compiler evaluates EVM operations at compile time during analysis passes. Without a
+    /// budget, adversarial bytecode (e.g. many `EXP`) can make compilation
+    /// arbitrarily slow. This limit uses the EVM gas schedule to bound work.
+    ///
+    /// When the budget is exhausted, further evaluation is skipped and values remain dynamic.
+    ///
+    /// Defaults to 100k gas. Set to `0` to disable compile-time evaluation entirely, or
+    /// `u64::MAX` to disable the limit.
+    pub fn set_compiler_gas_limit(&mut self, limit: u64) {
+        self.compiler_gas_limit = limit;
+    }
+
     /// Sets whether to track gas costs.
     ///
     /// Disabling this will greatly improves compilation speed and performance, at the cost of not
@@ -427,6 +444,7 @@ impl<B: Backend> EvmCompiler<B> {
         let EvmCompilerInput::Code(bytecode) = input;
 
         let mut bytecode = Bytecode::new(bytecode, spec_id);
+        bytecode.compiler_gas_limit = self.compiler_gas_limit;
         bytecode.analyze()?;
         if let Some(dump_dir) = &self.dump_dir() {
             Self::dump_bytecode(dump_dir, &bytecode)?;

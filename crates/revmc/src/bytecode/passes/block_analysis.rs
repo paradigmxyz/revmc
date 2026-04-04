@@ -961,14 +961,31 @@ impl Bytecode<'_> {
                         return false;
                     }
 
-                    // Try constant folding for common arithmetic.
-                    let result = if out > 0 {
-                        super::const_fold::try_const_fold(
-                            inst,
-                            &stack[stack.len() - inp..],
-                            &mut self.u256_interner.borrow_mut(),
-                            self.code.len(),
-                        )
+                    // Try constant folding for common arithmetic, respecting the gas budget.
+                    let result = if out > 0 && self.compiler_gas_used < self.compiler_gas_limit {
+                        let inputs_slice = &stack[stack.len() - inp..];
+                        let mut interner = self.u256_interner.borrow_mut();
+
+                        // Check gas cost before doing the actual fold.
+                        let gas =
+                            super::const_fold::const_fold_gas(inst.opcode, inputs_slice, &interner);
+                        if let Some(cost) = gas
+                            && self.compiler_gas_used.saturating_add(cost)
+                                <= self.compiler_gas_limit
+                        {
+                            let folded = super::const_fold::try_const_fold(
+                                inst,
+                                inputs_slice,
+                                &mut interner,
+                                self.code.len(),
+                            );
+                            if folded.is_some() {
+                                self.compiler_gas_used += cost;
+                            }
+                            folded
+                        } else {
+                            None
+                        }
                     } else {
                         None
                     };
