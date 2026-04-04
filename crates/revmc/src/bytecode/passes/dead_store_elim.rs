@@ -338,14 +338,15 @@ fn all_outputs_dead(
             swap_all_dead(live, h_before, d as usize)
         }
         // DUP: only the new TOS is a real output.
-        (op::DUP1..=op::DUP16 | op::DUPN, _) => !live[h_before],
+        (op::DUP1..=op::DUP16, _) => !live[h_before],
+        (op::DUPN, Some(DecodedImm::Single(_))) => !live[h_before],
         // EXCHANGE: only the two exchanged non-TOS positions are written.
         (op::EXCHANGE, Some(DecodedImm::Pair(n, m))) if (m as usize) < h_before => {
             let tos = h_before - 1;
             !live[tos - n as usize] && !live[tos - m as usize]
         }
         // Infeasible immediates — conservatively not dead.
-        (op::SWAPN | op::EXCHANGE, _) => false,
+        (op::DUPN | op::SWAPN | op::EXCHANGE, _) => false,
         // Generic: all output positions must be dead.
         _ if out > 0 => {
             let write_base = h_before - inp;
@@ -724,15 +725,46 @@ mod tests {
 
     #[test]
     fn dupn_dead() {
-        // 1 × PUSH0, DUPN 17 (copies PUSH0), POP, POP, STOP — all dead.
-        let bytecode = with_prefix(1, &[op::DUPN, 0x00, op::POP, op::POP, op::STOP]);
+        // 17 × PUSH0, DUPN 17 (copies bottom), POP × 18, STOP — all dead.
+        let mut suffix = vec![op::DUPN, 0x00 /* DUPN imm=0x00 => depth 17 */];
+        suffix.extend(std::iter::repeat_n(op::POP, 18));
+        suffix.push(op::STOP);
+        let bytecode = with_prefix(17, &suffix);
+        for i in 0..17 {
+            assert!(
+                bytecode.inst(Inst::from_usize(i)).flags.contains(InstFlags::NOOP),
+                "PUSH0 at {i} should be skipped"
+            );
+        }
         assert!(
-            bytecode.inst(Inst::from_usize(0)).flags.contains(InstFlags::NOOP),
-            "PUSH0 should be skipped"
+            bytecode.inst(Inst::from_usize(17)).flags.contains(InstFlags::NOOP),
+            "DUPN should be skipped"
+        );
+    }
+
+    #[test]
+    fn dupn_invalid_imm_not_eliminated() {
+        // PUSH0, DUPN 0x5b (invalid immediate), POP, STOP.
+        // The invalid immediate must NOT be eliminated — it should fail at runtime.
+        let bytecode = analyze_code_spec(
+            vec![op::PUSH0, op::DUPN, 0x5b, op::POP, op::STOP],
+            SpecId::AMSTERDAM,
         );
         assert!(
+            !bytecode.inst(Inst::from_usize(1)).flags.contains(InstFlags::NOOP),
+            "DUPN with invalid immediate should NOT be skipped"
+        );
+    }
+
+    #[test]
+    fn dupn_underflow_still_eliminated() {
+        // 1 × PUSH0, DUPN 17 (depth=17 but only 1 literal push), POP, POP, STOP.
+        // Block analysis inflates stack_in to satisfy DUPN's real depth, so from DSE's
+        // perspective the immediate is valid and the instruction is eliminable.
+        let bytecode = with_prefix(1, &[op::DUPN, 0x00, op::POP, op::POP, op::STOP]);
+        assert!(
             bytecode.inst(Inst::from_usize(1)).flags.contains(InstFlags::NOOP),
-            "DUPN should be skipped"
+            "DUPN with valid immediate should be skipped when dead"
         );
     }
 

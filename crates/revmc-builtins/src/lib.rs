@@ -585,7 +585,7 @@ pub unsafe extern "C" fn __revmc_builtin_log(
     let sp = sp.add(n as usize);
     read_words!(sp, offset, len);
     let len = try_into_usize!(len);
-    gas_opt!(ecx, gas::dyn_log_cost(len as u64));
+    gas!(ecx, ecx.host.gas_params().log_cost(n, len as u64));
     let data = if len != 0 {
         let offset = try_into_usize!(offset);
         ensure_memory(ecx, offset, len)?;
