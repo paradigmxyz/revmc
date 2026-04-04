@@ -36,24 +36,28 @@ impl<'a> Bytecode<'a> {
     /// translator can map the dead instruction to the canonical block's IR block.
     #[instrument(name = "dedup", level = "debug", skip_all)]
     pub(crate) fn dedup_blocks(&mut self) {
+        // Borrow code separately so we can pass `&mut self` to `dedup_blocks_once`.
+        // SAFETY: `self.code` is not modified during dedup.
+        let code: &[u8] = unsafe { &*std::ptr::from_ref::<[u8]>(&self.code) };
+        let mut key_to_blocks = HashMap::<DedupKey<'_>, SmallVec<[Block; 4]>>::default();
         let mut total_deduped = 0usize;
         loop {
-            let deduped = self.dedup_blocks_once();
+            let deduped = self.dedup_blocks_once(code, &mut key_to_blocks);
             total_deduped += deduped;
             if deduped == 0 {
                 break;
             }
+            key_to_blocks.clear();
         }
         debug!(deduped = total_deduped, "finished");
     }
 
     /// Single dedup iteration. Returns the number of blocks deduped.
-    fn dedup_blocks_once(&mut self) -> usize {
-        // Group eligible (diverging, non-dead) blocks by their raw bytecode content
-        // plus resolved jump-target metadata.
-        // We borrow `self.code` separately to avoid holding a `&self` borrow across mutations.
-        let code = &*self.code;
-        let mut key_to_blocks = HashMap::<DedupKey<'_>, SmallVec<[Block; 4]>>::default();
+    fn dedup_blocks_once<'b>(
+        &mut self,
+        code: &'b [u8],
+        key_to_blocks: &mut HashMap<DedupKey<'b>, SmallVec<[Block; 4]>>,
+    ) -> usize {
         for bid in self.cfg.blocks.indices() {
             let block = &self.cfg.blocks[bid];
             // Only dedup blocks whose terminator cannot fall through (diverging or
