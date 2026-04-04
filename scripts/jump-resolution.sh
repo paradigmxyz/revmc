@@ -30,8 +30,8 @@ for bench in "${BENCHES[@]}"; do
     non_adj=$(echo "$output" | { rg -c 'resolved non-adjacent jump' || echo 0; })
     pcr_res=$(echo "$output" | { rg -c 'resolved via PCR hint' || echo 0; })
     fixpt_res=$(echo "$output" | { rg -o 'ba:.*newly_resolved=(\d+)' -r '$1' | tail -1 || echo 0; })
-    # Use the last "unresolved" line (after all passes).
-    unresolved=$(echo "$output" | { rg -o 'unresolved dynamic jumps remain n=(\d+)' -r '$1' | tail -1 || echo 0; })
+    # Use the last post-resolution "unresolved" line (skip the initial pre-resolution count).
+    unresolved=$(echo "$output" | { rg -o '(local_jumps|ba):.*unresolved dynamic jumps remain n=(\d+)' -r '$2' | tail -1 || echo 0; })
     total=$((local_res + fixpt_res + unresolved))
 
     printf "%-25s %6d %6d %6d %6d %6d %10d\n" "$bench" "$local_res" "$non_adj" "$pcr_res" "$fixpt_res" "$unresolved" "$total"

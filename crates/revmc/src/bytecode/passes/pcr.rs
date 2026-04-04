@@ -21,7 +21,7 @@ use tracing::{debug, instrument, trace};
 const MAX_CONTEXT_DEPTH: usize = 8;
 
 /// Call-string context: stack of caller block IDs, most recent first.
-type Context = SmallVec<[Block; 4]>;
+type Context = SmallVec<[Block; 8]>;
 
 /// Context-sensitive worklist for the PCR graph traversal.
 ///
@@ -153,8 +153,12 @@ impl Bytecode<'_> {
                 continue;
             }
 
-            // Private function call: STATIC_JUMP + a pushed label surviving to exit.
-            // The callee is the static jump target.
+            // Private function call: single-target STATIC_JUMP + a pushed label
+            // surviving to exit. Skip multi-target or invalid jumps since `term.data`
+            // is not a valid callee for those.
+            if term.flags.intersects(InstFlags::MULTI_JUMP | InstFlags::INVALID_JUMP) {
+                continue;
+            }
             let callee = Inst::from_usize(term.data as usize);
 
             // Interpret the block with Top inputs to find which values survive to exit.
@@ -267,7 +271,9 @@ impl Bytecode<'_> {
                     && let Some(ref caller_call) = summaries[caller_bid].private_call
                 {
                     let continuation = caller_call.continuation;
-                    return_targets[bid].push(continuation);
+                    if !return_targets[bid].contains(&continuation) {
+                        return_targets[bid].push(continuation);
+                    }
 
                     let new_ctx: Context = ctx[1..].into();
                     if let Some(cont_block) = self.cfg.inst_to_block[continuation] {
@@ -288,6 +294,12 @@ impl Bytecode<'_> {
             "{msg} after {iterations} iterations (max={max_iterations})",
             msg = if converged { "converged" } else { "did not converge" },
         );
+
+        // Partial exploration can miss valid continuations, making the subset
+        // unsound. Discard all hints on non-convergence.
+        if !converged {
+            return Vec::new();
+        }
 
         // Collect hints from resolved return targets.
         let mut hints = Vec::new();

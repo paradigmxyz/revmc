@@ -646,7 +646,8 @@ impl Bytecode<'_> {
             };
 
             // If the fixpoint left this jump unresolved, try the PCR hint.
-            if matches!(target, JumpTarget::Top | JumpTarget::Bottom)
+            // Only for Top (reachable but unknown); Bottom means unreachable.
+            if matches!(target, JumpTarget::Top)
                 && let Some(hint) = pcr_map.get(&jump_inst)
             {
                 target = if hint.targets.len() == 1 {
