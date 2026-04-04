@@ -1,9 +1,9 @@
-ADDRESS
+ORIGIN
 PUSH20 0xffffffffffffffffffffffffffffffffffffffff
 AND
 RET_WORD
 
-; CHECK: call void @__revmc_builtin_address(
+; CHECK: call void @__revmc_builtin_origin(
 ; CHECK-NOT: and
 ; CHECK: load i160
 ; CHECK-NOT: and

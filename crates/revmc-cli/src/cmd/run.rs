@@ -18,9 +18,15 @@ use std::{
 #[derive(Parser)]
 pub(crate) struct RunArgs {
     /// Benchmark name, "custom", path to a file, or a symbol to load from a shared object.
-    bench_name: String,
+    ///
+    /// Use `--list` to see all available benchmark names.
+    bench_name: Option<String>,
     #[arg(default_value = "1")]
     n_iters: u64,
+
+    /// List available benchmark names and exit.
+    #[arg(long)]
+    list: bool,
 
     #[arg(long)]
     code: Option<String>,
@@ -63,16 +69,6 @@ pub(crate) struct RunArgs {
     #[arg(long, conflicts_with = "interpret")]
     jit_only: bool,
 
-    /// Target triple.
-    #[arg(long, default_value = "native")]
-    target: String,
-    /// Target CPU.
-    #[arg(long)]
-    target_cpu: Option<String>,
-    /// Target features.
-    #[arg(long)]
-    target_features: Option<String>,
-
     /// Compile only, do not link.
     #[arg(long, requires = "aot")]
     no_link: bool,
@@ -89,24 +85,35 @@ pub(crate) struct RunArgs {
     no_gas: bool,
     #[arg(long)]
     no_len_checks: bool,
-    /// Inspect the stack length after the function has been executed.
+    /// Inspect the stack after the function has been executed.
     #[arg(long)]
-    inspect_stack_length: bool,
+    inspect_stack: bool,
     #[arg(long, default_value = "1000000000")]
     gas_limit: u64,
 }
 
 impl RunArgs {
     pub(crate) fn run(self) -> Result<()> {
+        if self.list {
+            for b in get_benches() {
+                println!("{}", b.name);
+            }
+            return Ok(());
+        }
+
+        let Some(bench_name) = self.bench_name.clone() else {
+            return Err(eyre!("missing <BENCH_NAME>; use `--list` to see available benchmarks"));
+        };
+
         // Resolve bench entry first (before any partial moves of self).
-        let bench_entry = if self.bench_name == "custom" {
+        let bench_entry = if bench_name == "custom" {
             Bench {
                 name: "custom",
                 bytecode: read_code(self.code.as_deref(), self.code_path.as_deref())?,
                 ..Default::default()
             }
-        } else if Path::new(&self.bench_name).exists() {
-            let path = Path::new(&self.bench_name);
+        } else if Path::new(&bench_name).exists() {
+            let path = Path::new(&bench_name);
             ensure!(path.is_file(), "argument must be a file");
             ensure!(self.code.is_none(), "--code is not allowed with a file argument");
             ensure!(self.code_path.is_none(), "--code-path is not allowed with a file argument");
@@ -116,13 +123,13 @@ impl RunArgs {
                 ..Default::default()
             }
         } else {
-            match get_benches().into_iter().find(|b| b.name == self.bench_name) {
+            match get_benches().into_iter().find(|b| b.name == bench_name) {
                 Some(b) => b,
                 None => {
                     if self.load.is_some() {
-                        Bench { name: self.bench_name.clone().leak(), ..Default::default() }
+                        Bench { name: bench_name.clone().leak(), ..Default::default() }
                     } else {
-                        return Err(eyre!("unknown benchmark: {}", self.bench_name));
+                        return Err(eyre!("unknown benchmark: {bench_name}"));
                     }
                 }
             }
@@ -138,8 +145,7 @@ impl RunArgs {
         let Bench { bytecode, calldata, stack_input, .. } = bench_entry.clone();
 
         // Build the compiler.
-        let target = revmc::Target::new(self.target, self.target_cpu, self.target_features);
-        let backend = EvmLlvmBackend::new_for_target(self.aot, &target)?;
+        let backend = EvmLlvmBackend::new(self.aot)?;
         let mut compiler = EvmCompiler::new(backend);
         compiler.set_opt_level(self.opt_level);
         let out_dir = if self.out_dir.is_some() {
@@ -174,7 +180,7 @@ impl RunArgs {
         let mut host = BenchHost::new(spec_id);
         host.apply_bench(&bench_entry);
 
-        compiler.inspect_stack_length(self.inspect_stack_length || !stack_input.is_empty());
+        compiler.inspect_stack(self.inspect_stack || !stack_input.is_empty());
 
         let bytecode = compiler.parse(bytecode_slice.into(), spec_id)?;
         if self.display || self.parse_only {
@@ -193,9 +199,9 @@ impl RunArgs {
         let mut load = self.load;
         if self.aot {
             let out_dir = if let Some(out_dir) = compiler.out_dir() {
-                out_dir.join(&self.bench_name)
+                out_dir.join(&bench_name)
             } else {
-                let dir = std::env::temp_dir().join("revmc-cli").join(&self.bench_name);
+                let dir = std::env::temp_dir().join("revmc-cli").join(&bench_name);
                 std::fs::create_dir_all(&dir)?;
                 dir
             };
@@ -275,7 +281,7 @@ impl RunArgs {
             let (mut ecx, stack, stack_len) =
                 EvmContext::from_interpreter_with_stack(&mut interpreter, &mut host);
             for (i, input) in stack_input.iter().enumerate() {
-                stack.as_mut_slice()[i] = (*input).into();
+                stack.set(i, (*input).into());
             }
             *stack_len = stack_input.len();
             let ret = unsafe { f.call_noinline(Some(stack), Some(stack_len), &mut ecx) };
@@ -312,7 +318,7 @@ impl RunArgs {
                     let (mut ecx, stack, stack_len) =
                         EvmContext::from_interpreter_with_stack(&mut interpreter, &mut host);
                     for (i, input) in stack_input.iter().enumerate() {
-                        stack.as_mut_slice()[i] = (*input).into();
+                        stack.set(i, (*input).into());
                     }
                     *stack_len = stack_input.len();
                     let r = unsafe { f.call_noinline(Some(stack), Some(stack_len), &mut ecx) };

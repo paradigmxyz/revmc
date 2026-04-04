@@ -154,10 +154,14 @@ const SPEC_GATED_OPCODES: &[(u8, SpecId)] = &[
     (op::CREATE2, SpecId::PETERSBURG),
     (op::STATICCALL, SpecId::BYZANTIUM),
     (op::REVERT, SpecId::BYZANTIUM),
+    (op::DUPN, SpecId::AMSTERDAM),
+    (op::SWAPN, SpecId::AMSTERDAM),
+    (op::EXCHANGE, SpecId::AMSTERDAM),
+    (op::SLOTNUM, SpecId::AMSTERDAM),
 ];
 
 /// Opcodes present in the upstream instruction table but not supported by revmc (e.g. EOF-only).
-const UNSUPPORTED_OPCODES: &[u8] = &[op::DUPN, op::SWAPN, op::EXCHANGE, op::SLOTNUM];
+const UNSUPPORTED_OPCODES: &[u8] = &[];
 
 fn make_map(spec_id: SpecId) -> [OpcodeInfo; 256] {
     let table = instruction_table_gas_changes_spec::<EthInterpreter, DummyHost>(spec_id);
@@ -172,8 +176,10 @@ fn make_map(spec_id: SpecId) -> [OpcodeInfo; 256] {
             continue;
         }
 
-        // Skip opcodes not supported by revmc (e.g. EOF-only).
+        // Mark opcodes not supported by revmc (e.g. EOF-only) as disabled rather than
+        // unknown, so they return `NotActivated` instead of `OpcodeNotFound` at runtime.
         if UNSUPPORTED_OPCODES.contains(&op) {
+            map[op as usize].set_disabled();
             continue;
         }
 
@@ -183,13 +189,6 @@ fn make_map(spec_id: SpecId) -> [OpcodeInfo; 256] {
         // Fully dynamic opcodes have their entire gas cost handled in builtins.
         let gas = if is_fully_dynamic {
             0u16
-        } else if (op::LOG0..=op::LOG4).contains(&op) {
-            // LOG opcodes: upstream only uses the base LOG cost as static gas and handles
-            // per-topic cost dynamically. revmc deducts the full static portion
-            // (base + n * LOGTOPIC) upfront, so add the per-topic cost here.
-            let n_topics = (op - op::LOG0) as u64;
-            let static_gas = table[op as usize].static_gas();
-            (static_gas + n_topics * revm_interpreter::instructions::gas::LOGTOPIC) as u16
         } else {
             let static_gas = table[op as usize].static_gas();
             assert!(
@@ -278,12 +277,12 @@ mod tests {
         assert_eq!(cancun[op::SWAP1 as usize].base_gas(), 3);
         assert_eq!(cancun[op::PUSH0 as usize].base_gas(), 2);
 
-        // LOG: base + n * LOGTOPIC.
+        // LOG: base gas only (topic + data cost charged dynamically in builtin).
         assert_eq!(cancun[op::LOG0 as usize].base_gas(), 375);
-        assert_eq!(cancun[op::LOG1 as usize].base_gas(), 750);
-        assert_eq!(cancun[op::LOG2 as usize].base_gas(), 1125);
-        assert_eq!(cancun[op::LOG3 as usize].base_gas(), 1500);
-        assert_eq!(cancun[op::LOG4 as usize].base_gas(), 1875);
+        assert_eq!(cancun[op::LOG1 as usize].base_gas(), 375);
+        assert_eq!(cancun[op::LOG2 as usize].base_gas(), 375);
+        assert_eq!(cancun[op::LOG3 as usize].base_gas(), 375);
+        assert_eq!(cancun[op::LOG4 as usize].base_gas(), 375);
         assert!(cancun[op::LOG0 as usize].is_dynamic());
 
         // Memory ops: dynamic with base cost 3.
@@ -298,6 +297,20 @@ mod tests {
 
         // Unknown opcode.
         assert!(cancun[0x0C].is_unknown());
+
+        // AMSTERDAM-gated opcodes should be disabled on CANCUN.
+        assert!(cancun[op::DUPN as usize].is_disabled());
+        assert!(!cancun[op::DUPN as usize].is_unknown());
+        assert!(cancun[op::SWAPN as usize].is_disabled());
+        assert!(cancun[op::EXCHANGE as usize].is_disabled());
+        assert!(cancun[op::SLOTNUM as usize].is_disabled());
+
+        // AMSTERDAM-gated opcodes should be enabled on AMSTERDAM.
+        let amsterdam = op_info_map(SpecId::AMSTERDAM);
+        assert!(!amsterdam[op::DUPN as usize].is_disabled());
+        assert!(!amsterdam[op::SWAPN as usize].is_disabled());
+        assert!(!amsterdam[op::EXCHANGE as usize].is_disabled());
+        assert!(!amsterdam[op::SLOTNUM as usize].is_disabled());
 
         // Spec-gated: PUSH0 disabled before Shanghai.
         let pre_shanghai = op_info_map(SpecId::MERGE);

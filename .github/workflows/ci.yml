@@ -31,7 +31,7 @@ jobs:
             runner: depot-ubuntu-latest
             arch: x64
           - os: macos
-            runner: depot-macos-latest
+            runner: macos-latest
             arch: arm64
     steps:
       - uses: actions/checkout@v4
@@ -42,9 +42,10 @@ jobs:
         if: ${{ matrix.os == 'macos' }}
         run: |
           v=${{ env.LLVM_VERSION }}
-          brew install "llvm@${v}"
-          echo "LLVM_SYS_${v}1_PREFIX=$(brew --prefix llvm@${v})" >> $GITHUB_ENV
-          echo "/opt/homebrew/opt/llvm@${v}/bin" >> $GITHUB_PATH
+          HOMEBREW_NO_AUTO_UPDATE=1 brew install "llvm@${v}"
+          prefix="$(brew --prefix llvm@${v})"
+          echo "LLVM_SYS_${v}1_PREFIX=${prefix}" >> $GITHUB_ENV
+          echo "${prefix}/bin" >> $GITHUB_PATH
       - name: llvm-config
         run: llvm-config --version --bindir --libdir
       - uses: dtolnay/rust-toolchain@master
@@ -65,11 +66,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ["ubuntu"] # TODO: macos
+        os: ["ubuntu", "macos"]
         mode: [interpreter, jit, aot]
+        exclude:
+          - os: macos
+            mode: aot
         include:
           - os: ubuntu
             runner: depot-ubuntu-latest-8
+          - os: macos
+            runner: depot-macos-latest
     steps:
       - uses: actions/checkout@v4
       - name: Checkout ethereum/tests
@@ -81,9 +87,10 @@ jobs:
         if: ${{ matrix.os == 'macos' }}
         run: |
           v=${{ env.LLVM_VERSION }}
-          brew install "llvm@${v}"
-          echo "LLVM_SYS_${v}1_PREFIX=$(brew --prefix llvm@${v})" >> $GITHUB_ENV
-          echo "/opt/homebrew/opt/llvm@${v}/bin" >> $GITHUB_PATH
+          HOMEBREW_NO_AUTO_UPDATE=1 brew install "llvm@${v}"
+          prefix="$(brew --prefix llvm@${v})"
+          echo "LLVM_SYS_${v}1_PREFIX=${prefix}" >> $GITHUB_ENV
+          echo "${prefix}/bin" >> $GITHUB_PATH
       - uses: dtolnay/rust-toolchain@stable
       - uses: mozilla-actions/sccache-action@v0.0.9
       - uses: Swatinem/rust-cache@v2
