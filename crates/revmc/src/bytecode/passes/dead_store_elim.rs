@@ -54,12 +54,8 @@ impl Bytecode<'_> {
             heights.push(entry_height);
             for inst in block.insts() {
                 let data = &self.insts[inst];
-                let h = if data.is_dead_code() || data.flags.contains(InstFlags::NOOP) {
-                    *heights.last().unwrap()
-                } else {
-                    let (inp, out) = data.stack_io();
-                    heights.last().unwrap() - inp as i32 + out as i32
-                };
+                let (inp, out) = data.stack_io();
+                let h = heights.last().unwrap() - inp as i32 + out as i32;
                 if h > max_height {
                     max_height = h;
                 }
@@ -79,8 +75,7 @@ impl Bytecode<'_> {
             // Walk backward.
             for (idx, inst) in block.insts().enumerate().rev() {
                 let data = &self.insts[inst];
-                if data.is_dead_code()
-                    || data.flags.contains(InstFlags::NOOP)
+                if data.flags.contains(InstFlags::NOOP)
                     || data.flags.contains(InstFlags::DISABLED)
                     || data.flags.contains(InstFlags::UNKNOWN)
                 {
