@@ -178,7 +178,6 @@ fn can_skip_when_dead(opcode: u8) -> bool {
             | op::SAR
             | op::CLZ
             // Stack shuffles.
-            | op::POP
             | op::DUP1..=op::DUP16
             | op::DUPN
             | op::SWAP1..=op::SWAP16
@@ -354,8 +353,6 @@ fn all_outputs_dead(
             let tos = h_before - 1;
             !live[tos - n as usize] && !live[tos - m as usize]
         }
-        // POP: dead when TOS (the value being popped) is already dead.
-        (op::POP, _) => !live[h_before - 1],
         // Infeasible immediates — conservatively not dead.
         (op::DUPN | op::SWAPN | op::EXCHANGE, _) => false,
         // Generic: all output positions must be dead.
@@ -424,10 +421,6 @@ mod tests {
             bytecode.inst(Inst::from_usize(0)).flags.contains(InstFlags::NOOP),
             "PUSH should be skipped (dead store)"
         );
-        assert!(
-            bytecode.inst(Inst::from_usize(1)).flags.contains(InstFlags::NOOP),
-            "POP should be skipped (input is dead)"
-        );
     }
 
     #[test]
@@ -441,7 +434,7 @@ mod tests {
             STOP
         ",
         );
-        for (i, name) in [(0, "PUSH 3"), (1, "PUSH 4"), (2, "ADD"), (3, "POP")] {
+        for (i, name) in [(0, "PUSH 3"), (1, "PUSH 4"), (2, "ADD")] {
             assert!(
                 bytecode.inst(Inst::from_usize(i)).flags.contains(InstFlags::NOOP),
                 "{name} should be skipped"
@@ -698,7 +691,7 @@ mod tests {
         ",
         );
         //       PUSH0, CDL_A, PUSH_20, CDL_B, PUSH_40, CDL_C, SWAP2, POP, SWAP1, POP
-        for (i, alive) in [false, false, false, true, false, false, false, false, true, false]
+        for (i, alive) in [false, false, false, true, false, false, false, true, true, true]
             .into_iter()
             .enumerate()
         {

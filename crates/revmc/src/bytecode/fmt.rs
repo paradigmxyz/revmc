@@ -472,7 +472,7 @@ bb2:           ; stack_in=0 max_growth=7
   PUSH1 0x42   ; ic=14 pc=24 noop
   PUSH2 0xffff ; ic=15 pc=26 noop
   CALL         ; ic=16 pc=29 suspends
-  POP          ; ic=17 pc=30 gas=2 stack_in=1 max_growth=0 noop
+  POP          ; ic=17 pc=30 gas=2 stack_in=1 max_growth=0
   STOP         ; ic=18 pc=31
 
 "#]]
