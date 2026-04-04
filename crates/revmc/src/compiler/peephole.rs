@@ -213,8 +213,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
     /// EXP base, exp => base ** exp.
     ///
-    /// Dynamic gas is folded into `base_gas` by `Bytecode::fold_known_dynamic_gas` when
-    /// the exponent is a compile-time constant, so the section gas check already covers it.
+    /// Dynamic gas is folded into the section gas cost by `SectionsAnalysis` when the
+    /// exponent is a compile-time constant, so the section gas check already covers it.
     fn peephole_exp(&mut self) -> bool {
         let [_base, exponent] = self.const_operands();
         match exponent {

@@ -21,6 +21,7 @@ use std::{
 };
 
 mod peephole;
+
 mod translate;
 use translate::{FcxConfig, FunctionCx};
 
