@@ -101,16 +101,18 @@ impl Bytecode<'_> {
                 };
 
                 // Check if all outputs are dead and the instruction can be turned into a no-op.
-                if out > 0
-                    && can_skip_when_dead(opcode)
-                    && !data.is_branching()
-                    && !data.is_diverging()
-                {
-                    let write_base = h_before - inp as usize;
-                    let all_dead = (0..out as usize).all(|k| {
-                        let pos = write_base + k;
-                        pos < live.len() && !live[pos]
-                    });
+                if can_skip_when_dead(opcode) && !data.is_branching() && !data.is_diverging() {
+                    let all_dead = if out > 0 {
+                        let write_base = h_before - inp as usize;
+                        (0..out as usize).all(|k| {
+                            let pos = write_base + k;
+                            pos < live.len() && !live[pos]
+                        })
+                    } else {
+                        // SWAPN/EXCHANGE have stack_io(0,0); check the positions
+                        // they actually write using the decoded immediate.
+                        shuffle_all_dead(&live, opcode, h_before, imm)
+                    };
 
                     if all_dead {
                         self.insts[inst].flags |= InstFlags::NOOP;
@@ -170,12 +172,22 @@ fn can_skip_when_dead(opcode: u8) -> bool {
             | op::SHR
             | op::SAR
             | op::CLZ
+            // Stack shuffles (no side effects, static gas).
+            // SWAPN and EXCHANGE have stack_io(0,0) so the out>0 gate excludes
+            // them; they need shuffle_all_dead below.
+            | op::DUP1
+            ..=op::DUP16
+            | op::DUPN
+            | op::SWAP1
+            ..=op::SWAP16
+            | op::SWAPN
+            | op::EXCHANGE
             // Constants.
             | op::PUSH0
             ..=op::PUSH32
             | op::PC
             | op::CODESIZE
-            // Call-constant environment reads (no dynamic gas, no host calls).
+            // Pure environment reads (no dynamic gas, no side effects).
             | op::ADDRESS
             | op::ORIGIN
             | op::CALLER
@@ -183,6 +195,7 @@ fn can_skip_when_dead(opcode: u8) -> bool {
             | op::CALLDATALOAD
             | op::CALLDATASIZE
             | op::GASPRICE
+            | op::RETURNDATASIZE
             | op::COINBASE
             | op::TIMESTAMP
             | op::NUMBER
@@ -191,6 +204,7 @@ fn can_skip_when_dead(opcode: u8) -> bool {
             | op::CHAINID
             | op::BASEFEE
             | op::BLOBBASEFEE
+            | op::BLOBHASH
             | op::SLOTNUM
     )
 }
@@ -272,6 +286,30 @@ fn transfer_swap(live: &mut BitVec, h_before: usize, depth: usize) {
     let (a, b) = (live[tos], live[other]);
     live.set(tos, b);
     live.set(other, a);
+}
+
+/// Checks whether all positions written by a SWAPN/EXCHANGE are dead.
+///
+/// These have `stack_io(0, 0)` so the generic `out > 0` check doesn't apply.
+/// Returns `false` conservatively when the immediate couldn't be decoded.
+fn shuffle_all_dead(live: &BitVec, opcode: u8, h_before: usize, imm: Option<DecodedImm>) -> bool {
+    match (opcode, imm) {
+        (op::SWAPN, Some(DecodedImm::Single(depth))) => {
+            if (depth as usize) >= h_before {
+                return false;
+            }
+            let tos = h_before - 1;
+            !live[tos] && !live[tos - depth as usize]
+        }
+        (op::EXCHANGE, Some(DecodedImm::Pair(n, m))) => {
+            if (m as usize) >= h_before {
+                return false;
+            }
+            let tos = h_before - 1;
+            !live[tos - n as usize] && !live[tos - m as usize]
+        }
+        _ => false,
+    }
 }
 
 /// DUP liveness: the new TOS is killed; if it was live, the source becomes live.
@@ -434,7 +472,7 @@ mod tests {
     }
 
     /// Helper: builds bytecode with `n` PUSH0s followed by `suffix`, using AMSTERDAM spec.
-    fn eof_with_prefix(n: usize, suffix: &[u8]) -> crate::bytecode::Bytecode<'static> {
+    fn with_prefix(n: usize, suffix: &[u8]) -> crate::bytecode::Bytecode<'static> {
         let mut code = vec![op::PUSH0; n];
         code.extend_from_slice(suffix);
         analyze_code_spec(code, SpecId::AMSTERDAM)
@@ -444,7 +482,7 @@ mod tests {
     fn swapn_preserves_liveness() {
         // 18 × PUSH0 (insts 0..18), SWAPN 17 (inst 18), STOP (inst 19).
         // SWAPN 17 needs TOS + 17 below = 18 items.
-        let bytecode = eof_with_prefix(18, &[op::SWAPN, 0x00, op::STOP]);
+        let bytecode = with_prefix(18, &[op::SWAPN, 0x00, op::STOP]);
         for i in 0..18 {
             assert!(
                 !bytecode.inst(Inst::from_usize(i)).flags.contains(InstFlags::NOOP),
@@ -457,7 +495,7 @@ mod tests {
     fn dupn_keeps_source_live() {
         // 17 × PUSH0, DUPN 17 (dup bottom), POP, STOP.
         // The DUP copy is popped but the source (inst 0) is still live at exit.
-        let bytecode = eof_with_prefix(17, &[op::DUPN, 0x00, op::POP, op::STOP]);
+        let bytecode = with_prefix(17, &[op::DUPN, 0x00, op::POP, op::STOP]);
         assert!(
             !bytecode.inst(Inst::from_usize(0)).flags.contains(InstFlags::NOOP),
             "source PUSH0 should NOT be skipped"
@@ -467,12 +505,9 @@ mod tests {
     #[test]
     fn dupn_dead_copy() {
         // 17 × PUSH0, DUPN 17 (dup bottom), POP, STOP.
-        // The DUP copy is immediately popped. With precise DUPN liveness the source stays
-        // live (it's still on the exit stack), and the DUPN itself can't be eliminated
-        // because it's not in `can_skip_when_dead`. What we really test is that the
-        // transfer doesn't incorrectly kill the source position.
-        let bytecode = eof_with_prefix(17, &[op::DUPN, 0x00, op::POP, op::STOP]);
-        // All 17 original PUSH0s should remain live (they're on the exit stack).
+        // The DUP copy is immediately popped. The source stays live (it's on the exit
+        // stack), so the transfer must not incorrectly kill the source position.
+        let bytecode = with_prefix(17, &[op::DUPN, 0x00, op::POP, op::STOP]);
         for i in 0..17 {
             assert!(
                 !bytecode.inst(Inst::from_usize(i)).flags.contains(InstFlags::NOOP),
@@ -486,13 +521,170 @@ mod tests {
         // 18 × PUSH0, EXCHANGE 1,2 (swap positions 1 and 2 from TOS), STOP.
         // EXCHANGE needs at least m+1 items. With (1,2): 3 items minimum, but we use 18
         // to match the DUPN/SWAPN test shape and ensure all are live.
-        let bytecode = eof_with_prefix(18, &[op::EXCHANGE, 0x01, op::STOP]);
+        let bytecode = with_prefix(18, &[op::EXCHANGE, 0x01, op::STOP]);
         for i in 0..18 {
             assert!(
                 !bytecode.inst(Inst::from_usize(i)).flags.contains(InstFlags::NOOP),
                 "PUSH0 at {i} should NOT be skipped"
             );
         }
+    }
+
+    #[test]
+    fn dup_dead() {
+        // DUP1 with both source and copy dead should be eliminated along with its producer.
+        let bytecode = analyze_asm(
+            "
+            PUSH1 0x42
+            DUP1
+            POP
+            POP
+            STOP
+        ",
+        );
+        assert!(bytecode.inst(Inst::from_usize(0)).flags.contains(InstFlags::NOOP));
+        assert!(bytecode.inst(Inst::from_usize(1)).flags.contains(InstFlags::NOOP));
+    }
+
+    #[test]
+    fn swap_dead() {
+        // SWAP1 with both positions dead should be eliminated.
+        let bytecode = analyze_asm(
+            "
+            PUSH1 0x01
+            PUSH1 0x02
+            SWAP1
+            POP
+            POP
+            STOP
+        ",
+        );
+        for (i, name) in [(0, "PUSH 1"), (1, "PUSH 2"), (2, "SWAP1")] {
+            assert!(
+                bytecode.inst(Inst::from_usize(i)).flags.contains(InstFlags::NOOP),
+                "{name} should be skipped"
+            );
+        }
+    }
+
+    #[test]
+    fn returndatasize_dead() {
+        let bytecode = analyze_asm(
+            "
+            RETURNDATASIZE
+            POP
+            STOP
+        ",
+        );
+        assert!(
+            bytecode.inst(Inst::from_usize(0)).flags.contains(InstFlags::NOOP),
+            "RETURNDATASIZE should be skipped when dead"
+        );
+    }
+
+    #[test]
+    fn returndatasize_live() {
+        // RETURNDATASIZE used as MSTORE offset — output is live, must NOT be eliminated.
+        let bytecode = analyze_asm(
+            "
+            PUSH0
+            RETURNDATASIZE
+            MSTORE
+            STOP
+        ",
+        );
+        assert!(
+            !bytecode.inst(Inst::from_usize(1)).flags.contains(InstFlags::NOOP),
+            "RETURNDATASIZE should NOT be skipped when live"
+        );
+    }
+
+    #[test]
+    fn blobhash_dead() {
+        // BLOBHASH(0) with output popped — eliminable.
+        let bytecode = analyze_asm(
+            "
+            PUSH0
+            BLOBHASH
+            POP
+            STOP
+        ",
+        );
+        assert!(
+            bytecode.inst(Inst::from_usize(0)).flags.contains(InstFlags::NOOP),
+            "PUSH0 should be skipped"
+        );
+        assert!(
+            bytecode.inst(Inst::from_usize(1)).flags.contains(InstFlags::NOOP),
+            "BLOBHASH should be skipped when dead"
+        );
+    }
+
+    #[test]
+    fn blobhash_live() {
+        // BLOBHASH(0) stored to memory — output is live.
+        let bytecode = analyze_asm(
+            "
+            PUSH0
+            BLOBHASH
+            PUSH0
+            MSTORE
+            STOP
+        ",
+        );
+        assert!(
+            !bytecode.inst(Inst::from_usize(1)).flags.contains(InstFlags::NOOP),
+            "BLOBHASH should NOT be skipped when live"
+        );
+    }
+
+    #[test]
+    fn dupn_dead() {
+        // 1 × PUSH0, DUPN 17 (copies PUSH0), POP, POP, STOP — all dead.
+        let bytecode = with_prefix(1, &[op::DUPN, 0x00, op::POP, op::POP, op::STOP]);
+        assert!(
+            bytecode.inst(Inst::from_usize(0)).flags.contains(InstFlags::NOOP),
+            "PUSH0 should be skipped"
+        );
+        assert!(
+            bytecode.inst(Inst::from_usize(1)).flags.contains(InstFlags::NOOP),
+            "DUPN should be skipped"
+        );
+    }
+
+    #[test]
+    fn swapn_dead() {
+        // 18 × PUSH0, SWAPN 17 (depth=17), 18 × POP, STOP — all dead.
+        let mut suffix = vec![op::SWAPN, 0x00];
+        suffix.extend(std::iter::repeat_n(op::POP, 18));
+        suffix.push(op::STOP);
+        let bytecode = with_prefix(18, &suffix);
+        for i in 0..18 {
+            assert!(
+                bytecode.inst(Inst::from_usize(i)).flags.contains(InstFlags::NOOP),
+                "PUSH0 at {i} should be skipped"
+            );
+        }
+        assert!(
+            bytecode.inst(Inst::from_usize(18)).flags.contains(InstFlags::NOOP),
+            "SWAPN should be skipped"
+        );
+    }
+
+    #[test]
+    fn exchange_dead() {
+        // 3 × PUSH0, EXCHANGE (1,2), 3 × POP, STOP — all dead.
+        let bytecode = with_prefix(3, &[op::EXCHANGE, 0x01, op::POP, op::POP, op::POP, op::STOP]);
+        for i in 0..3 {
+            assert!(
+                bytecode.inst(Inst::from_usize(i)).flags.contains(InstFlags::NOOP),
+                "PUSH0 at {i} should be skipped"
+            );
+        }
+        assert!(
+            bytecode.inst(Inst::from_usize(3)).flags.contains(InstFlags::NOOP),
+            "EXCHANGE should be skipped"
+        );
     }
 
     #[test]
