@@ -59,6 +59,16 @@ pub(crate) struct Snapshots {
     pub(crate) outputs: IndexVec<Inst, Option<AbsValue>>,
 }
 
+impl Snapshots {
+    /// Restores snapshots for the given instructions from a previously saved copy.
+    pub(crate) fn restore_from(&mut self, insts: impl Iterator<Item = Inst>, saved: &Self) {
+        for inst in insts {
+            self.inputs[inst].clone_from(&saved.inputs[inst]);
+            self.outputs[inst] = saved.outputs[inst];
+        }
+    }
+}
+
 /// Abstract value on the stack.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum AbsValue {
@@ -153,6 +163,9 @@ impl ConstSetInterner {
 /// differing stack heights pad the shorter stack with `Top` at the bottom; on CFG cycles this
 /// padding can grow without bound. Clamping discards only those bottom `Top` entries, so no
 /// precision is lost.
+///
+/// Instructions that access deeper than this (e.g. Amsterdam DUPN/SWAPN up to depth 236)
+/// treat the out-of-range slot as `Top` rather than aborting block interpretation.
 const MAX_ABS_STACK_DEPTH: usize = 64;
 
 /// Abstract state at the entry of a block.
@@ -183,8 +196,8 @@ impl BlockState {
                 let mut changed = false;
 
                 // Clamp to MAX_ABS_STACK_DEPTH by only joining the top portion;
-                // elements below that are unreachable by any EVM instruction (max
-                // depth is DUP16/SWAP16 = 16) and discarding them preserves soundness.
+                // elements below that are unreachable by any EVM instruction and
+                // discarding them preserves soundness.
                 let join_len = new_len.min(MAX_ABS_STACK_DEPTH);
 
                 // Resize existing to join_len: pad at bottom with Top or truncate.
@@ -373,12 +386,9 @@ impl Bytecode<'_> {
     ///
     /// Also computes and stores per-instruction stack snapshots for constant propagation.
     #[instrument(name = "ba", level = "debug", skip_all)]
-    pub(crate) fn block_analysis(&mut self) {
-        // Save local snapshots so that suspect-block invalidation can restore
-        // block-local constants instead of clearing to empty.
-        let local_snapshots = self.snapshots.clone();
+    pub(crate) fn block_analysis(&mut self, local_snapshots: &Snapshots) {
         self.init_snapshots();
-        let (resolved, count) = self.run_abstract_interp(&local_snapshots);
+        let (resolved, count) = self.run_abstract_interp(local_snapshots);
 
         if count > 0 {
             let newly_resolved = self.commit_resolved_jumps(&resolved);
@@ -774,10 +784,7 @@ impl Bytecode<'_> {
             if !suspect[bid.index()] {
                 continue;
             }
-            for inst in self.cfg.blocks[bid].insts() {
-                self.snapshots.inputs[inst].clone_from(&local_snapshots.inputs[inst]);
-                self.snapshots.outputs[inst] = local_snapshots.outputs[inst];
-            }
+            self.snapshots.restore_from(self.cfg.blocks[bid].insts(), local_snapshots);
         }
     }
 
@@ -923,9 +930,13 @@ impl Bytecode<'_> {
                         Some(n) => {
                             let n = n as usize;
                             if stack.len() < n {
-                                return false;
+                                // Depth exceeds the tracked abstract stack (truncated by
+                                // MAX_ABS_STACK_DEPTH). The slot is reachable at runtime
+                                // but unknown abstractly.
+                                stack.push(AbsValue::Top);
+                            } else {
+                                stack.push(stack[stack.len() - n]);
                             }
-                            stack.push(stack[stack.len() - n]);
                         }
                         None => return false,
                     }
@@ -937,9 +948,14 @@ impl Bytecode<'_> {
                             let n = n as usize;
                             let len = stack.len();
                             if len < n + 1 {
-                                return false;
+                                // Deep slot beyond tracked abstract stack; TOS becomes Top
+                                // and the deep slot (not tracked) is unchanged.
+                                if let Some(tos) = stack.last_mut() {
+                                    *tos = AbsValue::Top;
+                                }
+                            } else {
+                                stack.swap(len - 1, len - 1 - n);
                             }
-                            stack.swap(len - 1, len - 1 - n);
                         }
                         None => return false,
                     }
@@ -951,9 +967,14 @@ impl Bytecode<'_> {
                             let (n, m) = (n as usize, m as usize);
                             let len = stack.len();
                             if len < m + 1 {
-                                return false;
+                                // Deep slot beyond tracked abstract stack; the shallower
+                                // slot (if tracked) becomes Top.
+                                if len > n {
+                                    stack[len - 1 - n] = AbsValue::Top;
+                                }
+                            } else {
+                                stack.swap(len - 1 - n, len - 1 - m);
                             }
-                            stack.swap(len - 1 - n, len - 1 - m);
                         }
                         None => return false,
                     }
@@ -1432,6 +1453,57 @@ pub(crate) mod tests {
         // also invalidates the inner return JUMP — any reachable JUMPDEST
         // (including inner's entry) is suspect.
         assert!(bytecode.has_dynamic_jumps, "expected dynamic jumps to remain");
+    }
+
+    /// Regression test: deep DUPN on Amsterdam must not cause the abstract interpreter to
+    /// abort a block and leave a reachable JUMP as Bottom → INVALID_JUMP.
+    #[test]
+    fn amsterdam_deep_dupn_jump_not_invalid() {
+        // Build a stack with 70 items, where the deepest is the final JUMP target.
+        // A dispatcher JUMP is resolvable; a later JUMP in a block that uses DUPN 70
+        // must also be correctly resolved (not marked INVALID_JUMP).
+        let code = crate::parse_asm(
+            "
+            PUSH %target
+            ; 69 × PUSH0
+            PUSH0 PUSH0 PUSH0 PUSH0 PUSH0 PUSH0 PUSH0 PUSH0 PUSH0 PUSH0
+            PUSH0 PUSH0 PUSH0 PUSH0 PUSH0 PUSH0 PUSH0 PUSH0 PUSH0 PUSH0
+            PUSH0 PUSH0 PUSH0 PUSH0 PUSH0 PUSH0 PUSH0 PUSH0 PUSH0 PUSH0
+            PUSH0 PUSH0 PUSH0 PUSH0 PUSH0 PUSH0 PUSH0 PUSH0 PUSH0 PUSH0
+            PUSH0 PUSH0 PUSH0 PUSH0 PUSH0 PUSH0 PUSH0 PUSH0 PUSH0 PUSH0
+            PUSH0 PUSH0 PUSH0 PUSH0 PUSH0 PUSH0 PUSH0 PUSH0 PUSH0 PUSH0
+            PUSH0 PUSH0 PUSH0 PUSH0 PUSH0 PUSH0 PUSH0 PUSH0 PUSH0
+            PUSH %resolved
+            PUSH %dispatcher
+            JUMP
+        dispatcher:
+            JUMPDEST
+            JUMP
+        resolved:
+            JUMPDEST
+            DUPN 70
+            POP
+        problem:
+            JUMPDEST
+            DUPN 70
+            JUMP
+        target:
+            JUMPDEST
+            STOP
+        ",
+        )
+        .unwrap();
+        let bytecode = analyze_code_spec(code, SpecId::AMSTERDAM);
+
+        // The "problem" JUMP must NOT be marked INVALID_JUMP.
+        let jumps: Vec<_> = bytecode.iter_insts().filter(|(_, d)| d.opcode == op::JUMP).collect();
+        for &(inst, data) in &jumps {
+            assert!(
+                !data.flags.contains(InstFlags::INVALID_JUMP),
+                "JUMP inst={inst} pc={} incorrectly marked INVALID_JUMP",
+                data.pc,
+            );
+        }
     }
 
     #[test]
