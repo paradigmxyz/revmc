@@ -29,7 +29,7 @@
 //! that only sound jump targets are reported as resolved.
 
 use super::StackSection;
-use crate::bytecode::{Bytecode, GasParams, Inst, InstFlags, Interner, U256Idx};
+use crate::bytecode::{Bytecode, Inst, InstFlags, Interner, U256Idx};
 use bitvec::vec::BitVec;
 use either::Either;
 use oxc_index::IndexVec;
@@ -1020,7 +1020,7 @@ pub(crate) mod tests {
         crate::tests::init_tracing();
 
         eprintln!("{}", hex::encode(&code));
-        let mut bytecode = Bytecode::new(code, spec_id, GasParams::new_spec(spec_id));
+        let mut bytecode = Bytecode::new(code, spec_id, None);
         bytecode.analyze().unwrap();
         eprintln!("{bytecode}");
         bytecode
@@ -1033,7 +1033,7 @@ pub(crate) mod tests {
         crate::tests::init_tracing();
 
         eprintln!("{}", hex::encode(&code));
-        let mut bytecode = Bytecode::new(code, SpecId::CANCUN, GasParams::new_spec(SpecId::CANCUN));
+        let mut bytecode = Bytecode::new(code, SpecId::CANCUN, None);
         bytecode.config = config;
         bytecode.analyze().unwrap();
         eprintln!("{bytecode}");
@@ -1419,7 +1419,7 @@ pub(crate) mod tests {
             include_str!("../../../../../data/hash_10k.rt.hex").trim(),
         )
         .unwrap();
-        let mut bytecode = Bytecode::new(code, SpecId::CANCUN, GasParams::new_spec(SpecId::CANCUN));
+        let mut bytecode = Bytecode::new(code, SpecId::CANCUN, None);
         bytecode.analyze().unwrap();
         assert!(!bytecode.has_dynamic_jumps, "expected all jumps to be resolved");
     }

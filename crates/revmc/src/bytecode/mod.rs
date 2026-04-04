@@ -121,13 +121,14 @@ impl<'a> Bytecode<'a> {
     pub(crate) fn new(
         code: impl Into<Cow<'a, [u8]>>,
         spec_id: SpecId,
-        gas_params: GasParams,
+        gas_params: Option<GasParams>,
     ) -> Self {
         Self::new_mono(code.into(), spec_id, gas_params)
     }
 
     #[instrument(name = "Bytecode::new", level = "debug", skip_all)]
-    fn new_mono(code: Cow<'a, [u8]>, spec_id: SpecId, gas_params: GasParams) -> Self {
+    fn new_mono(code: Cow<'a, [u8]>, spec_id: SpecId, gas_params: Option<GasParams>) -> Self {
+        let gas_params = gas_params.unwrap_or_else(|| GasParams::new_spec(spec_id));
         let mut insts = IndexVec::with_capacity(code.len() + 8);
         let mut jumpdests = BitVec::repeat(false, code.len());
         let mut pc_to_inst = FxHashMap::with_capacity_and_hasher(code.len(), Default::default());

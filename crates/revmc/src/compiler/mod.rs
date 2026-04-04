@@ -441,8 +441,7 @@ impl<B: Backend> EvmCompiler<B> {
         let _t = self.remarks.time(|r| &r.parse);
         let EvmCompilerInput::Code(bytecode) = input;
 
-        let gas_params = self.gas_params.clone().unwrap_or_else(|| GasParams::new_spec(spec_id));
-        let mut bytecode = Bytecode::new(bytecode, spec_id, gas_params);
+        let mut bytecode = Bytecode::new(bytecode, spec_id, self.gas_params.clone());
         bytecode.analyze()?;
         if let Some(dump_dir) = &self.dump_dir() {
             Self::dump_bytecode(dump_dir, &bytecode)?;
