@@ -49,14 +49,6 @@ type Incoming<B> = Vec<(<B as BackendTypes>::Value, <B as BackendTypes>::BasicBl
 #[allow(dead_code)]
 type SwitchTargets<B> = Vec<(u64, <B as BackendTypes>::BasicBlock)>;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ResumeKind {
-    /// Use `indirectbr`.
-    Blocks,
-    /// Use a switch over `0..N`.
-    Indexes,
-}
-
 pub(super) struct FunctionCx<'a, B: Backend> {
     // Configuration.
     config: FcxConfig,
@@ -65,7 +57,6 @@ pub(super) struct FunctionCx<'a, B: Backend> {
     pub(super) bcx: B::Builder<'a>,
 
     // Common types.
-    ptr_type: B::Type,
     isize_type: B::Type,
     pub(super) word_type: B::Type,
     address_type: B::Type,
@@ -124,8 +115,6 @@ pub(super) struct FunctionCx<'a, B: Backend> {
     /// The return block that all return instructions branch to.
     return_block: Option<B::BasicBlock>,
 
-    /// The kind of resume mechanism to use.
-    resume_kind: ResumeKind,
     /// `resume_block` switch values.
     resume_blocks: Vec<B::BasicBlock>,
     /// `suspend_block` incoming values.
@@ -207,7 +196,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         }
 
         // Get common types.
-        let ptr_type = bcx.type_ptr();
         let isize_type = bcx.type_ptr_sized_int();
         let i8_type = bcx.type_int(8);
         let i64_type = bcx.type_int(64);
@@ -275,7 +263,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let mut fx = FunctionCx {
             config,
 
-            ptr_type,
             isize_type,
             word_type,
             address_type,
@@ -305,7 +292,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             incoming_returns: Vec::new(),
             return_block: Some(return_block),
 
-            resume_kind: ResumeKind::Indexes,
             resume_blocks: Vec::new(),
             suspend_blocks: Vec::new(),
             suspend_block,
@@ -411,11 +397,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 )
             };
 
-            let kind = fx.resume_kind;
-            let resume_ty = match kind {
-                ResumeKind::Blocks => fx.ptr_type,
-                ResumeKind::Indexes => fx.isize_type,
-            };
+            let resume_ty = fx.isize_type;
 
             // Resume block: load the `resume_at` value and switch to the corresponding block.
             // Invalid values are treated as unreachable.
@@ -426,10 +408,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 fx.bcx.switch_to_block(post_entry_block);
                 let resume_at = get_ecx_resume_at_ptr(&mut fx);
                 let resume_at = fx.bcx.load_aligned(resume_ty, resume_at, 1, "ecx.resume_at");
-                let no_resume = match kind {
-                    ResumeKind::Blocks => fx.bcx.is_null(resume_at),
-                    ResumeKind::Indexes => fx.bcx.icmp_imm(IntCC::Equal, resume_at, 0),
-                };
+                let no_resume = fx.bcx.icmp_imm(IntCC::Equal, resume_at, 0);
                 fx.bcx.brif(no_resume, no_resume_block, resume_block);
 
                 fx.bcx.switch_to_block(no_resume_block);
@@ -441,25 +420,18 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 let stack_len = fx.bcx.load(fx.isize_type, stack_len_arg, "stack_len");
                 fx.stack_len.store(&mut fx.bcx, stack_len);
                 fx.copy_stack_from_arg(stack_len);
-                match kind {
-                    ResumeKind::Blocks => {
-                        fx.bcx.br_indirect(resume_at, &fx.resume_blocks);
-                    }
-                    ResumeKind::Indexes => {
-                        let default = fx.bcx.create_block_after(resume_block, "resume_invalid");
-                        fx.bcx.switch_to_block(default);
-                        fx.call_panic("invalid `resume_at` value");
+                let default = fx.bcx.create_block_after(resume_block, "resume_invalid");
+                fx.bcx.switch_to_block(default);
+                fx.call_panic("invalid `resume_at` value");
 
-                        fx.bcx.switch_to_block(resume_block);
-                        let targets = fx
-                            .resume_blocks
-                            .iter()
-                            .enumerate()
-                            .map(|(i, b)| (i as u64 + 1, *b))
-                            .collect::<Vec<_>>();
-                        fx.bcx.switch(resume_at, default, &targets, true);
-                    }
-                }
+                fx.bcx.switch_to_block(resume_block);
+                let targets = fx
+                    .resume_blocks
+                    .iter()
+                    .enumerate()
+                    .map(|(i, b)| (i as u64 + 1, *b))
+                    .collect::<Vec<_>>();
+                fx.bcx.switch(resume_at, default, &targets, true);
             }
 
             // Suspend block: store the `resume_at` value and return `Stop`.
@@ -1272,13 +1244,12 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
     /// Adds a resume point and returns its index.
     fn add_resume_at(&mut self, block: B::BasicBlock) -> Option<B::Value> {
-        let value = self.bcx.block_addr(block);
-        if self.resume_blocks.is_empty() && self.resume_kind == ResumeKind::Indexes {
-            self.resume_kind =
-                if value.is_some() { ResumeKind::Blocks } else { ResumeKind::Indexes };
-        }
+        // Always use index-based resume (ResumeKind::Indexes).
+        // Block-address resume (ResumeKind::Blocks) stores native pointers in `ecx.resume_at`,
+        // which is unsound when round-tripped through `call_with_interpreter` because
+        // `absolute_jump`/`pc()` treat the value as a bytecode offset.
         self.resume_blocks.push(block);
-        value
+        None
     }
 
     /// Loads the word at the given pointer.
