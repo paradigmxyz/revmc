@@ -170,6 +170,13 @@ fn can_skip_when_dead(opcode: u8) -> bool {
             | op::SHR
             | op::SAR
             | op::CLZ
+            // Stack shuffles (no side effects, static gas).
+            // EOF variants (DUPN, SWAPN, EXCHANGE) are excluded because their
+            // stack_io is (0,0) — the NOOP mechanism relies on accurate diff.
+            | op::DUP1
+            ..=op::DUP16
+            | op::SWAP1
+            ..=op::SWAP16
             // Constants.
             | op::PUSH0
             ..=op::PUSH32
@@ -183,6 +190,7 @@ fn can_skip_when_dead(opcode: u8) -> bool {
             | op::CALLDATALOAD
             | op::CALLDATASIZE
             | op::GASPRICE
+            | op::RETURNDATASIZE
             | op::COINBASE
             | op::TIMESTAMP
             | op::NUMBER
@@ -191,6 +199,7 @@ fn can_skip_when_dead(opcode: u8) -> bool {
             | op::CHAINID
             | op::BASEFEE
             | op::BLOBBASEFEE
+            | op::BLOBHASH
             | op::SLOTNUM
     )
 }
@@ -467,12 +476,9 @@ mod tests {
     #[test]
     fn dupn_dead_copy() {
         // 17 × PUSH0, DUPN 17 (dup bottom), POP, STOP.
-        // The DUP copy is immediately popped. With precise DUPN liveness the source stays
-        // live (it's still on the exit stack), and the DUPN itself can't be eliminated
-        // because it's not in `can_skip_when_dead`. What we really test is that the
-        // transfer doesn't incorrectly kill the source position.
+        // The DUP copy is immediately popped. The source stays live (it's on the exit
+        // stack), so the transfer must not incorrectly kill the source position.
         let bytecode = eof_with_prefix(17, &[op::DUPN, 0x00, op::POP, op::STOP]);
-        // All 17 original PUSH0s should remain live (they're on the exit stack).
         for i in 0..17 {
             assert!(
                 !bytecode.inst(Inst::from_usize(i)).flags.contains(InstFlags::NOOP),
@@ -493,6 +499,58 @@ mod tests {
                 "PUSH0 at {i} should NOT be skipped"
             );
         }
+    }
+
+    #[test]
+    fn dup_dead() {
+        // DUP1 with both source and copy dead should be eliminated along with its producer.
+        let bytecode = analyze_asm(
+            "
+            PUSH1 0x42
+            DUP1
+            POP
+            POP
+            STOP
+        ",
+        );
+        assert!(bytecode.inst(Inst::from_usize(0)).flags.contains(InstFlags::NOOP));
+        assert!(bytecode.inst(Inst::from_usize(1)).flags.contains(InstFlags::NOOP));
+    }
+
+    #[test]
+    fn swap_dead() {
+        // SWAP1 with both positions dead should be eliminated.
+        let bytecode = analyze_asm(
+            "
+            PUSH1 0x01
+            PUSH1 0x02
+            SWAP1
+            POP
+            POP
+            STOP
+        ",
+        );
+        for (i, name) in [(0, "PUSH 1"), (1, "PUSH 2"), (2, "SWAP1")] {
+            assert!(
+                bytecode.inst(Inst::from_usize(i)).flags.contains(InstFlags::NOOP),
+                "{name} should be skipped"
+            );
+        }
+    }
+
+    #[test]
+    fn returndatasize_dead() {
+        let bytecode = analyze_asm(
+            "
+            RETURNDATASIZE
+            POP
+            STOP
+        ",
+        );
+        assert!(
+            bytecode.inst(Inst::from_usize(0)).flags.contains(InstFlags::NOOP),
+            "RETURNDATASIZE should be skipped when dead"
+        );
     }
 
     #[test]
