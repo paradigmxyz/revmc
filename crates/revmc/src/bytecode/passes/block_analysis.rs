@@ -1195,7 +1195,7 @@ pub(crate) mod tests {
         code.extend([op::PUSH1, 0xAA]); // inst 16: TOS = 0xAA
         code.extend([op::DUPN, 0x00]); // inst 17: DUPN 17 (dup bottom = 0x00)
         code.push(op::STOP); // inst 18
-        let bytecode = analyze_code(code);
+        let bytecode = analyze_code_spec(code, SpecId::AMSTERDAM);
         // DUPN duplicates the 17th item (bottom PUSH0 = 0x00).
         assert_eq!(bytecode.const_output(Inst::from_usize(17)), Some(U256::ZERO));
         // The PUSH1 0xAA is still there.

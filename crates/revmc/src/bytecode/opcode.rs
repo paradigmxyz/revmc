@@ -1,5 +1,5 @@
 use crate::{OpcodeInfo, op_info_map};
-use revm_bytecode::opcode::OPCODE_INFO;
+use revm_bytecode::{opcode as op, opcode::OPCODE_INFO};
 use revm_primitives::hardfork::SpecId;
 use std::{fmt, slice};
 
@@ -165,6 +165,26 @@ pub const fn stack_io(op: u8) -> (u8, u8) {
         (info.inputs(), info.outputs())
     } else {
         (0, 0)
+    }
+}
+
+/// Returns the real `(inputs, outputs)` stack I/O for an opcode, decoding the immediate for
+/// `DUPN`, `SWAPN`, and `EXCHANGE` whose opcode-table entries are placeholders.
+pub(crate) fn compute_stack_io(op: u8, immediate: Option<&[u8]>) -> (u8, u8) {
+    match op {
+        op::DUPN => match immediate.and_then(|b| decode_single(b[0])) {
+            Some(n) => (n, n + 1),
+            None => stack_io(op),
+        },
+        op::SWAPN => match immediate.and_then(|b| decode_single(b[0])) {
+            Some(n) => (n + 1, n + 1),
+            None => stack_io(op),
+        },
+        op::EXCHANGE => match immediate.and_then(|b| decode_pair(b[0])) {
+            Some((_n, m)) => (m + 1, m + 1),
+            None => stack_io(op),
+        },
+        _ => stack_io(op),
     }
 }
 
