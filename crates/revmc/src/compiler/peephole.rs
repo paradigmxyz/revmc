@@ -7,6 +7,7 @@
 use super::translate::FunctionCx;
 use crate::{Backend, Builder, InstData, IntCC};
 use revm_bytecode::opcode as op;
+use revm_context_interface::cfg::GasParams;
 use revm_primitives::U256;
 
 /// i256 INT_MIN: 1 << 255.
@@ -183,8 +184,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
     /// EXP base, exp => base ** exp.
     ///
-    /// Only handles cases where the dynamic gas cost is zero (exp=0), since computing
-    /// the dynamic gas for nonzero exponents requires runtime spec information.
+    /// For nonzero exponents, the dynamic gas cost is computed at compile time from the
+    /// known spec_id and charged via `gas_cost_imm`.
     fn peephole_exp(&mut self) -> bool {
         let [_base, exponent] = self.const_operands();
         match exponent {
@@ -194,10 +195,29 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 let one = self.bcx.iconst_256(U256::from(1));
                 self.push(one);
             }
-            // Nonzero exponents require dynamic gas; cannot skip the builtin.
+            // x ** 1 => x.
+            Some(U256::ONE) => {
+                self.exp_dynamic_gas(U256::ONE);
+                let [a, _] = self.popn();
+                self.push(a);
+            }
+            // x ** 2 => x * x.
+            Some(e) if e == U256::from(2) => {
+                self.exp_dynamic_gas(U256::from(2));
+                let [a, _] = self.popn();
+                let r = self.bcx.imul(a, a);
+                self.push(r);
+            }
             _ => return false,
         }
         true
+    }
+
+    /// Charges the dynamic gas for EXP with a compile-time-known exponent.
+    fn exp_dynamic_gas(&mut self, exponent: U256) {
+        let gas = GasParams::new_spec(self.bytecode.spec_id);
+        let cost = gas.exp_cost(exponent);
+        self.gas_cost_imm(cost);
     }
 
     /// BYTE index, value => value[index].
