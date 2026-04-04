@@ -386,10 +386,8 @@ fn transfer_dup(live: &mut BitVec, h_before: usize, depth: usize) {
 
 #[cfg(test)]
 mod tests {
-    use super::super::block_analysis::tests::{
-        Inst, analyze_asm, analyze_asm_with, analyze_code_spec,
-    };
-    use crate::bytecode::{AnalysisConfig, InstFlags};
+    use super::super::block_analysis::tests::{Inst, analyze_asm, analyze_code_spec};
+    use crate::bytecode::InstFlags;
     use revm_bytecode::opcode as op;
     use revm_primitives::hardfork::SpecId;
 
@@ -452,28 +450,33 @@ mod tests {
 
     #[test]
     fn swap_preserves_liveness() {
-        // Use INSPECT_STACK so the exit stack is conservatively live despite STOP.
-        let bytecode = analyze_asm_with(
+        // SWAP1 swaps TOS and TOS-1. TOS is consumed by RET_WORD.
+        // Uses CALLDATALOAD for dynamic values to prevent const-input DSE.
+        let bytecode = analyze_asm(
             "
-            PUSH1 0x01
-            PUSH1 0x02
-            PUSH1 0x03
-            SWAP2
-            STOP
+            PUSH0           ; inst 0
+            CALLDATALOAD    ; inst 1: dynamic A
+            PUSH1 0x20      ; inst 2
+            CALLDATALOAD    ; inst 3: dynamic B
+            SWAP1           ; inst 4: [B, A]
+            POP             ; inst 5: [B]
+            RET_WORD        ; inst 6..11: return B
         ",
-            AnalysisConfig::INSPECT_STACK,
         );
-        for i in 0..3 {
-            assert!(
-                !bytecode.inst(Inst::from_usize(i)).flags.contains(InstFlags::NOOP),
-                "PUSH at {i} should NOT be skipped"
-            );
-        }
+        // A is swapped to TOS then popped → dead. B is consumed by RET_WORD → live.
+        assert!(
+            bytecode.inst(Inst::from_usize(1)).flags.contains(InstFlags::NOOP),
+            "CALLDATALOAD A should be skipped (dead after swap+pop)"
+        );
+        assert!(
+            !bytecode.inst(Inst::from_usize(3)).flags.contains(InstFlags::NOOP),
+            "CALLDATALOAD B should NOT be skipped (consumed by RET_WORD)"
+        );
     }
 
     #[test]
     fn swap_dead_with_diverging_terminator() {
-        // Without INSPECT_STACK, STOP makes exit stack dead; SWAP + PUSHes are all dead.
+        // All values left on the stack at STOP are dead.
         let bytecode = analyze_asm(
             "
             PUSH1 0x01
@@ -566,68 +569,98 @@ mod tests {
         analyze_code_spec(code, SpecId::AMSTERDAM)
     }
 
-    /// Like [`with_prefix`], but with `INSPECT_STACK` set so exit stack is conservatively live.
-    fn with_prefix_inspect(n: usize, suffix: &[u8]) -> crate::bytecode::Bytecode<'static> {
-        use super::super::block_analysis::tests::analyze_code_with;
-        let mut code = vec![op::PUSH0; n];
+    /// Helper: builds bytecode with `PUSH0 CALLDATALOAD` (dynamic value) followed by
+    /// `n` PUSH0 padding, then `suffix`. The CALLDATALOAD result is at inst 1.
+    fn with_dynamic_and_prefix(n: usize, suffix: &[u8]) -> crate::bytecode::Bytecode<'static> {
+        let mut code = vec![op::PUSH0, op::CALLDATALOAD];
+        code.extend(std::iter::repeat_n(op::PUSH0, n));
         code.extend_from_slice(suffix);
-        analyze_code_with(code, AnalysisConfig::INSPECT_STACK)
+        analyze_code_spec(code, SpecId::AMSTERDAM)
     }
 
     #[test]
     fn swapn_preserves_liveness() {
-        // 18 × PUSH0 (insts 0..18), SWAPN 17 (inst 18), STOP (inst 19).
-        // SWAPN 17 needs TOS + 17 below = 18 items.
-        // INSPECT_STACK keeps the exit stack live despite the diverging STOP.
-        let bytecode = with_prefix_inspect(18, &[op::SWAPN, 0x00, op::STOP]);
-        for i in 0..18 {
-            assert!(
-                !bytecode.inst(Inst::from_usize(i)).flags.contains(InstFlags::NOOP),
-                "PUSH0 at {i} should NOT be skipped"
-            );
-        }
+        // PUSH0+CALLDATALOAD (dynamic) + 17 × PUSH0 padding, SWAPN 17.
+        // SWAPN brings the deep dynamic value to TOS. RET_WORD stores TOS to memory
+        // and returns, so the CALLDATALOAD result is consumed.
+        let mut suffix = vec![op::SWAPN, 0x00]; // raw imm 0x00 = depth 17
+        // RET_WORD stores TOS to memory (17 items remain below, left dead on return).
+        suffix.extend([op::PUSH0, op::MSTORE, op::PUSH1, 0x20, op::PUSH0, op::RETURN]);
+        let bytecode = with_dynamic_and_prefix(17, &suffix);
+        assert!(
+            !bytecode.inst(Inst::from_usize(1)).flags.contains(InstFlags::NOOP),
+            "CALLDATALOAD should NOT be skipped (consumed via SWAPN + MSTORE)"
+        );
     }
 
     #[test]
     fn dupn_keeps_source_live() {
-        // 17 × PUSH0, DUPN 17 (dup bottom), POP, STOP.
-        // The DUP copy is popped but the source (inst 0) is still live at exit.
-        // INSPECT_STACK keeps the exit stack live despite the diverging STOP.
-        let bytecode = with_prefix_inspect(17, &[op::DUPN, 0x00, op::POP, op::STOP]);
+        // PUSH0+CALLDATALOAD (dynamic) + 16 × PUSH0, DUPN 17.
+        // DUPN copies the deep dynamic value to TOS. RET_WORD consumes TOS.
+        // The source at the bottom is still alive because it remains on the stack.
+        let mut suffix = vec![op::DUPN, 0x00]; // raw imm 0x00 = depth 17
+        // RET_WORD stores TOS (the copy) to memory.
+        suffix.extend([op::PUSH0, op::MSTORE, op::PUSH1, 0x20, op::PUSH0, op::RETURN]);
+        let bytecode = with_dynamic_and_prefix(16, &suffix);
         assert!(
-            !bytecode.inst(Inst::from_usize(0)).flags.contains(InstFlags::NOOP),
-            "source PUSH0 should NOT be skipped"
+            !bytecode.inst(Inst::from_usize(1)).flags.contains(InstFlags::NOOP),
+            "CALLDATALOAD should NOT be skipped"
         );
     }
 
     #[test]
     fn dupn_dead_copy() {
-        // 17 × PUSH0, DUPN 17 (dup bottom), POP, STOP.
-        // The DUP copy is immediately popped. The source stays live (it's on the exit
-        // stack), so the transfer must not incorrectly kill the source position.
-        // INSPECT_STACK keeps the exit stack live despite the diverging STOP.
-        let bytecode = with_prefix_inspect(17, &[op::DUPN, 0x00, op::POP, op::STOP]);
-        for i in 0..17 {
-            assert!(
-                !bytecode.inst(Inst::from_usize(i)).flags.contains(InstFlags::NOOP),
-                "PUSH0 at {i} should NOT be skipped"
-            );
-        }
+        // DUP copies a dynamic value, the copy is immediately POPped. The source
+        // remains on the stack and feeds RET_WORD. The DUP+POP pair should be
+        // eliminated, but the CALLDATALOAD (source) must stay live.
+        let bytecode = analyze_asm(
+            "
+            PUSH0           ; inst 0
+            CALLDATALOAD    ; inst 1: dynamic source
+            DUP1            ; inst 2: copy source to TOS
+            POP             ; inst 3: pop the copy
+            RET_WORD        ; inst 4..9: return source
+        ",
+        );
+        assert!(
+            bytecode.inst(Inst::from_usize(2)).flags.contains(InstFlags::NOOP),
+            "DUP1 should be skipped (copy is dead)"
+        );
+        assert!(
+            !bytecode.inst(Inst::from_usize(1)).flags.contains(InstFlags::NOOP),
+            "CALLDATALOAD should NOT be skipped"
+        );
     }
 
     #[test]
     fn exchange_preserves_liveness() {
-        // 18 × PUSH0, EXCHANGE 1,2 (swap positions 1 and 2 from TOS), STOP.
-        // EXCHANGE needs at least m+1 items. With (1,2): 3 items minimum, but we use 18
-        // to match the DUPN/SWAPN test shape and ensure all are live.
-        // INSPECT_STACK keeps the exit stack live despite the diverging STOP.
-        let bytecode = with_prefix_inspect(18, &[op::EXCHANGE, 0x01, op::STOP]);
-        for i in 0..18 {
-            assert!(
-                !bytecode.inst(Inst::from_usize(i)).flags.contains(InstFlags::NOOP),
-                "PUSH0 at {i} should NOT be skipped"
-            );
-        }
+        // EXCHANGE swaps two non-TOS positions. After the exchange, SWAP2 brings the
+        // dynamic value to TOS where RET_WORD consumes it.
+        //
+        // [0, CDL, 0]  → EXCHANGE(1,2): swap pos 1 (CDL) and pos 0 (0) → [CDL, 0, 0]
+        // SWAP2: swap TOS (pos 2=0) and pos 0 (CDL) → [0, 0, CDL]
+        // RET_WORD: stores CDL to memory → CDL consumed.
+        let code = vec![
+            op::PUSH0,        // inst 0: padding at pos 0
+            op::PUSH0,        // inst 1: CDL offset
+            op::CALLDATALOAD, // inst 2: dynamic value at pos 1
+            op::PUSH0,        // inst 3: padding at pos 2 (TOS)
+            op::EXCHANGE,
+            0x01,      // inst 4: swap pos 1 and pos 0 → CDL moves to pos 0
+            op::SWAP2, // inst 5: bring CDL (pos 0) to TOS
+            // RET_WORD
+            op::PUSH0,
+            op::MSTORE,
+            op::PUSH1,
+            0x20,
+            op::PUSH0,
+            op::RETURN,
+        ];
+        let bytecode = analyze_code_spec(code, SpecId::AMSTERDAM);
+        assert!(
+            !bytecode.inst(Inst::from_usize(2)).flags.contains(InstFlags::NOOP),
+            "CALLDATALOAD should NOT be skipped (consumed via EXCHANGE + SWAP + MSTORE)"
+        );
     }
 
     #[test]
@@ -672,23 +705,26 @@ mod tests {
         // At SWAP2: TOS (pos 2) and pos 0 are both dead, but pos 1 (pass-through) is live.
         // The precise check correctly eliminates SWAP2. The generic out>0 check would
         // require all 3 output positions to be dead and miss this.
-        // INSPECT_STACK keeps the exit stack live despite the diverging STOP.
-        let bytecode = analyze_asm_with(
+        // Uses CALLDATALOAD for dynamic values to prevent const-input DSE.
+        let bytecode = analyze_asm(
             "
-            PUSH1 0x01  ; [A]
-            PUSH1 0x02  ; [A, B]
-            PUSH1 0x03  ; [A, B, C]
-            SWAP2       ; [C, B, A]
-            POP         ; [C, B]
-            SWAP1       ; [B, C]
-            POP         ; [B]
-            STOP
+            PUSH0           ; inst 0
+            CALLDATALOAD    ; inst 1: dynamic A
+            PUSH1 0x20      ; inst 2
+            CALLDATALOAD    ; inst 3: dynamic B
+            PUSH1 0x40      ; inst 4
+            CALLDATALOAD    ; inst 5: dynamic C
+            SWAP2           ; inst 6: [C, B, A]
+            POP             ; inst 7: [C, B]
+            SWAP1           ; inst 8: [B, C]
+            POP             ; inst 9: [B]
+            RET_WORD        ; inst 10..15: return B
         ",
-            AnalysisConfig::INSPECT_STACK,
         );
-        //        PUSH A, PUSH B, PUSH C, SWAP2, POP, SWAP1, POP, STOP
-        for (i, alive) in
-            [false, true, false, false, true, true, true, true].into_iter().enumerate()
+        //       PUSH0, CDL_A, PUSH_20, CDL_B, PUSH_40, CDL_C, SWAP2, POP, SWAP1, POP
+        for (i, alive) in [false, false, false, true, false, false, false, true, true, true]
+            .into_iter()
+            .enumerate()
         {
             assert_eq!(
                 !bytecode.inst(Inst::from_usize(i)).flags.contains(InstFlags::NOOP),
