@@ -63,23 +63,16 @@ impl StackSection {
 
     /// Compute a stack section from an iterator of `(inputs, outputs)` pairs.
     pub(crate) fn from_stack_io(iter: impl IntoIterator<Item = (u8, u8)>) -> Self {
-        let mut inputs = 0i32;
-        let mut diff = 0i32;
-        let mut max_growth = 0i32;
+        let mut analysis = StackSectionAnalysis::default();
         for (inp, out) in iter {
-            inputs = inputs.max(inp as i32 - diff);
-            diff += out as i32 - inp as i32;
-            max_growth = max_growth.max(diff);
+            analysis.process(inp, out);
         }
-        Self {
-            inputs: inputs.max(0).try_into().unwrap_or(u16::MAX),
-            max_growth: max_growth.try_into().unwrap_or(i16::MAX),
-        }
+        analysis.section()
     }
 }
 
 /// Gas section analysis state.
-struct GasSectionAnalysis {
+pub(crate) struct GasSectionAnalysis {
     gas_cost: u64,
     start_inst: Inst,
 }
@@ -91,6 +84,17 @@ impl Default for GasSectionAnalysis {
 }
 
 impl GasSectionAnalysis {
+    /// Accumulates a base gas cost.
+    #[inline]
+    pub(crate) fn process(&mut self, base_gas: u16) {
+        self.gas_cost += base_gas as u64;
+    }
+
+    fn save_to_reset(&mut self, bytecode: &mut Bytecode<'_>, next_section_inst: Inst) {
+        self.save_to(bytecode, next_section_inst);
+        self.reset(next_section_inst);
+    }
+
     /// Saves the current gas section to the bytecode.
     fn save_to(&self, bytecode: &mut Bytecode<'_>, next_section_inst: Inst) {
         if self.start_inst >= bytecode.insts.len_idx() {
@@ -112,18 +116,18 @@ impl GasSectionAnalysis {
     }
 
     /// Resets the analysis for a new section.
-    fn reset(&mut self, inst: Inst) {
+    pub(crate) fn reset(&mut self, inst: Inst) {
         *self = Self { start_inst: inst, ..Default::default() };
     }
 
     /// Returns the current gas section.
-    fn section(&self) -> GasSection {
+    pub(crate) fn section(&self) -> GasSection {
         GasSection { gas_cost: self.gas_cost.try_into().unwrap_or(u32::MAX) }
     }
 }
 
 /// Stack section analysis state.
-struct StackSectionAnalysis {
+pub(crate) struct StackSectionAnalysis {
     inputs: i32,
     diff: i32,
     max_growth: i32,
@@ -137,6 +141,19 @@ impl Default for StackSectionAnalysis {
 }
 
 impl StackSectionAnalysis {
+    /// Accumulates a single instruction's stack I/O.
+    #[inline]
+    pub(crate) fn process(&mut self, inputs: u8, outputs: u8) {
+        self.inputs = self.inputs.max(inputs as i32 - self.diff);
+        self.diff += outputs as i32 - inputs as i32;
+        self.max_growth = self.max_growth.max(self.diff);
+    }
+
+    fn save_to_reset(&mut self, bytecode: &mut Bytecode<'_>, next_section_inst: Inst) {
+        self.save_to(bytecode, next_section_inst);
+        self.reset(next_section_inst);
+    }
+
     /// Saves the current stack section to the bytecode.
     fn save_to(&self, bytecode: &mut Bytecode<'_>, next_section_inst: Inst) {
         if self.start_inst >= bytecode.insts.len_idx() {
@@ -157,12 +174,12 @@ impl StackSectionAnalysis {
     }
 
     /// Resets the analysis for a new section.
-    fn reset(&mut self, inst: Inst) {
+    pub(crate) fn reset(&mut self, inst: Inst) {
         *self = Self { start_inst: inst, ..Default::default() };
     }
 
     /// Returns the current stack section.
-    fn section(&self) -> StackSection {
+    pub(crate) fn section(&self) -> StackSection {
         StackSection {
             inputs: self.inputs.try_into().unwrap_or(u16::MAX),
             max_growth: self.max_growth.try_into().unwrap_or(i16::MAX),
@@ -182,35 +199,23 @@ impl SectionsAnalysis {
     pub(crate) fn process(&mut self, bytecode: &mut Bytecode<'_>, inst: Inst) {
         // JUMPDEST starts both gas and stack sections.
         if bytecode.inst(inst).is_reachable_jumpdest(bytecode.has_dynamic_jumps()) {
-            self.gas.save_to(bytecode, inst);
-            self.gas.reset(inst);
-            self.stack.save_to(bytecode, inst);
-            self.stack.reset(inst);
+            self.stack.save_to_reset(bytecode, inst);
+            self.gas.save_to_reset(bytecode, inst);
         }
 
         let data = bytecode.inst(inst);
         let (inp, out) = data.stack_io();
-        let stack_diff = out as i32 - inp as i32;
-        self.stack.inputs = self.stack.inputs.max(inp as i32 - self.stack.diff);
-        self.stack.diff += stack_diff;
-        self.stack.max_growth = self.stack.max_growth.max(self.stack.diff);
-
-        self.gas.gas_cost += data.base_gas as u64;
-
-        let data = bytecode.inst(inst);
+        self.stack.process(inp, out);
+        self.gas.process(data.base_gas);
 
         // Instructions that require `gasleft` end only the gas section.
         // Branching and suspending instructions end both sections.
+        let next = inst + 1;
         if data.may_suspend() || data.is_branching() {
-            let next = inst + 1;
-            self.gas.save_to(bytecode, next);
-            self.gas.reset(next);
-            self.stack.save_to(bytecode, next);
-            self.stack.reset(next);
+            self.stack.save_to_reset(bytecode, next);
+            self.gas.save_to_reset(bytecode, next);
         } else if data.requires_gasleft(bytecode.spec_id) {
-            let next = inst + 1;
-            self.gas.save_to(bytecode, next);
-            self.gas.reset(next);
+            self.gas.save_to_reset(bytecode, next);
         }
     }
 
