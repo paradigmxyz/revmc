@@ -436,7 +436,7 @@ mod tests {
             op::POP,
             op::STOP,
         ];
-        let mut bytecode = Bytecode::new(code, SpecId::OSAKA);
+        let mut bytecode = Bytecode::new(code, SpecId::OSAKA, None);
         bytecode.analyze().unwrap();
         bytecode
     }

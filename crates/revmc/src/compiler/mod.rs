@@ -1,6 +1,8 @@
 //! EVM bytecode compiler implementation.
 
-use crate::{Backend, Builder, Bytecode, EvmCompilerFn, EvmContext, EvmStack, FxHashMap, Result};
+use crate::{
+    Backend, Builder, Bytecode, EvmCompilerFn, EvmContext, EvmStack, FxHashMap, GasParams, Result,
+};
 use revm_interpreter::{Gas, InputsImpl};
 use revm_primitives::{Bytes, hardfork::SpecId};
 use revmc_backend::{
@@ -18,10 +20,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-// TODO: Get rid of `cfg!(target_endian)` calls.
-
-// TODO: Test on big-endian hardware.
-// It probably doesn't work when loading Rust U256 into native endianness.
+mod peephole;
 
 mod translate;
 use translate::{FcxConfig, FunctionCx};
@@ -79,6 +78,7 @@ pub struct EvmCompiler<B: Backend> {
     out_dir: Option<PathBuf>,
     config: FcxConfig,
     builtins: Builtins<B>,
+    gas_params: Option<GasParams>,
 
     dump_assembly: bool,
     dump_unopt_assembly: bool,
@@ -98,6 +98,7 @@ impl<B: Backend> EvmCompiler<B> {
             out_dir: None,
             config: FcxConfig::default(),
             builtins: Builtins::new(),
+            gas_params: None,
             dump_assembly: true,
             dump_unopt_assembly: false,
             compiler_gas_limit: crate::bytecode::DEFAULT_COMPILER_GAS_LIMIT,
@@ -324,6 +325,16 @@ impl<B: Backend> EvmCompiler<B> {
         self.config.gas_metering = yes;
     }
 
+    /// Sets custom gas parameters.
+    ///
+    /// Overrides the default gas schedule derived from the spec_id.
+    /// Useful for custom chains or hardforks with non-standard gas costs.
+    ///
+    /// Defaults to `GasParams::new_spec(spec_id)`.
+    pub fn set_gas_params(&mut self, gas_params: GasParams) {
+        self.gas_params = Some(gas_params);
+    }
+
     /// Translates the given EVM bytecode into an internal function.
     ///
     /// NOTE: `name` must be unique for each function, as it is used as the name of the final
@@ -443,7 +454,7 @@ impl<B: Backend> EvmCompiler<B> {
         let _t = self.remarks.time(|r| &r.parse);
         let EvmCompilerInput::Code(bytecode) = input;
 
-        let mut bytecode = Bytecode::new(bytecode, spec_id);
+        let mut bytecode = Bytecode::new(bytecode, spec_id, self.gas_params.clone());
         bytecode.compiler_gas_limit = self.compiler_gas_limit;
         bytecode.analyze()?;
         if let Some(dump_dir) = &self.dump_dir() {

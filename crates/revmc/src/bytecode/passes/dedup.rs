@@ -273,7 +273,8 @@ mod tests {
         let code =
             revm_primitives::hex::decode(include_str!("../../../../../data/weth.rt.hex").trim())
                 .unwrap();
-        let mut bytecode = crate::Bytecode::new(code, revm_primitives::hardfork::SpecId::CANCUN);
+        let mut bytecode =
+            crate::Bytecode::new(code, revm_primitives::hardfork::SpecId::CANCUN, None);
         bytecode.config = AnalysisConfig::DEDUP;
         bytecode.analyze().unwrap();
 
