@@ -5,8 +5,10 @@
 //! returned as *hints* that are seeded into the abstract interpreter's fixpoint
 //! to improve jump resolution.
 
-use super::block_analysis::{AbsValue, Block, ConstSetInterner, JumpTarget};
-use super::StackSection;
+use super::{
+    StackSection,
+    block_analysis::{AbsValue, Block, ConstSetInterner, JumpTarget},
+};
 use crate::bytecode::{Bytecode, Inst, InstFlags};
 use bitvec::vec::BitVec;
 use oxc_index::IndexVec;
@@ -14,6 +16,9 @@ use revm_bytecode::opcode as op;
 use smallvec::SmallVec;
 use std::collections::VecDeque;
 use tracing::{debug, instrument, trace};
+
+/// Maximum call-string depth for context-sensitive traversal.
+const MAX_CONTEXT_DEPTH: usize = 8;
 
 /// Local per-block summary for private call/return detection.
 ///
@@ -63,12 +68,12 @@ impl Bytecode<'_> {
         let hints = self.resolve_private_calls(&summaries);
 
         if !hints.is_empty() {
-            debug!(n = hints.len(), "PCR hints for fixpoint");
+            debug!(n = hints.len(), "hints for fixpoint");
         }
         hints
     }
 
-    /// Compute local per-block summaries for private call/return detection.
+    /// Computes local per-block summaries for private call/return detection.
     ///
     /// For each block, simulates the stack effect to determine:
     /// - Whether the block is a private function call (static jump + pushed label).
@@ -162,13 +167,11 @@ impl Bytecode<'_> {
         summaries
     }
 
-    /// Resolve private function return jumps using context-sensitive graph traversal.
+    /// Resolves private function return jumps using context-sensitive graph traversal.
     ///
     /// Uses the local summaries to trace call-strings through the CFG. When a
     /// `PrivateFunctionReturn` block is reached, the call-string context reveals which
     /// caller pushed the return address, allowing the return edge to be materialized.
-    ///
-    /// Returns resolved jump targets for return blocks.
     #[instrument(name = "resolve_calls", level = "debug", skip_all)]
     fn resolve_private_calls(
         &self,
@@ -176,10 +179,6 @@ impl Bytecode<'_> {
     ) -> Vec<PcrHint> {
         let num_blocks = self.cfg.blocks.len();
 
-        // Maximum call-string depth. Each entry is a caller block ID.
-        const MAX_CONTEXT_DEPTH: usize = 8;
-
-        // Context = call-string (stack of caller block IDs, most recent first).
         type Context = SmallVec<[Block; 4]>;
 
         // Per (block, context): set of visited states.
@@ -203,11 +202,12 @@ impl Bytecode<'_> {
 
         let mut iterations = 0;
         let max_iterations = num_blocks * 64;
+        let mut converged = true;
 
         while let Some((bid, ctx)) = worklist.pop_front() {
             iterations += 1;
             if iterations > max_iterations {
-                debug!("resolve_private_calls: did not converge after {iterations} iterations");
+                converged = false;
                 break;
             }
 
@@ -224,8 +224,10 @@ impl Bytecode<'_> {
                 }
                 new_ctx.insert(0, bid);
 
+                let callee_block = self.cfg.inst_to_block[call.callee];
+
                 // Follow to callee.
-                if let Some(callee_block) = self.cfg.inst_to_block[call.callee]
+                if let Some(callee_block) = callee_block
                     && !visited[callee_block].contains(&new_ctx)
                 {
                     visited[callee_block].push(new_ctx.clone());
@@ -236,10 +238,7 @@ impl Bytecode<'_> {
                 let term = &self.insts[block.terminator()];
                 if term.opcode == op::JUMPI {
                     for &succ in &block.succs {
-                        if let Some(callee_block) = self.cfg.inst_to_block[call.callee]
-                            && succ != callee_block
-                            && !visited[succ].contains(&ctx)
-                        {
+                        if callee_block != Some(succ) && !visited[succ].contains(&ctx) {
                             visited[succ].push(ctx.clone());
                             worklist.push_back((succ, ctx.clone()));
                         }
@@ -282,7 +281,10 @@ impl Bytecode<'_> {
             }
         }
 
-        debug!("resolve_private_calls: converged after {iterations} iterations");
+        debug!(
+            "{msg} after {iterations} iterations (max={max_iterations})",
+            msg = if converged { "converged" } else { "did not converge" },
+        );
 
         // Convert return_targets to PCR hints.
         // These are returned as hints — soundness is enforced downstream by the
