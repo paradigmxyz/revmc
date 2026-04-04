@@ -1309,6 +1309,9 @@ impl Builder for EvmLlvmBuilder<'_> {
         if value == U256::ZERO {
             return self.ty_i256.const_zero().into();
         }
+        if let Ok(low) = value.try_into() {
+            return self.ty_i256.const_int(low, false).into();
+        }
 
         self.scratch.clear();
         write!(self.scratch, "{value:x}").unwrap();
