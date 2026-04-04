@@ -821,6 +821,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             op::ORIGIN => {
                 let slot = self.sp_at_top();
                 let _ = self.call_builtin(Builtin::Origin, &[self.ecx, slot]);
+                self.narrow_to_address(slot);
             }
             op::CALLER => {
                 let slot = self.sp_at_top();
@@ -885,6 +886,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             op::COINBASE => {
                 let slot = self.sp_at_top();
                 let _ = self.call_builtin(Builtin::Coinbase, &[self.ecx, slot]);
+                self.narrow_to_address(slot);
             }
             op::TIMESTAMP => {
                 let slot = self.sp_at_top();
