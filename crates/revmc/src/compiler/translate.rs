@@ -958,13 +958,13 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 let is_invalid = data.flags.contains(InstFlags::INVALID_JUMP);
                 if is_invalid && opcode == op::JUMP {
                     // Pop and discard the target; it's always on the stack.
-                    let _ = self.pop();
+                    self.pop_ignore(1);
                     self.build_fail_imm(InstructionResult::InvalidJump);
                 } else {
                     let target = if is_invalid {
                         debug_assert_eq!(*data, op::JUMPI);
                         // The jump target is invalid, but we still need to pop it.
-                        let _ = self.pop();
+                        self.pop_ignore(1);
                         self.return_block.unwrap()
                     } else if data.flags.contains(InstFlags::MULTI_JUMP) {
                         let target_value = self.pop();
@@ -994,7 +994,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                         goto_return!(no_branch);
                     } else if data.flags.contains(InstFlags::STATIC_JUMP) {
                         // Pop and discard the target; it's always on the stack.
-                        let _ = self.pop();
+                        self.pop_ignore(1);
                         let target_inst = Inst::from_usize(data.data as usize);
                         debug_assert_eq!(
                             *self.bytecode.inst(target_inst),
