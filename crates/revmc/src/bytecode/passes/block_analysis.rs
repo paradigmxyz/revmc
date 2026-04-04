@@ -642,7 +642,7 @@ impl Bytecode<'_> {
         assert_ne!(cfg.blocks.len(), 0, "should always build at least one block");
     }
 
-    ////// Run worklist-based abstract interpretation over the CFG.
+    /// Run worklist-based abstract interpretation over the CFG.
     ///
     /// Returns a list of (jump_inst, resolved_target) pairs and the count of resolvable jumps.
     /// Stack snapshots are recorded into `self.snapshots` during the fixpoint.
