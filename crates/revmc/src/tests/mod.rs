@@ -1540,6 +1540,16 @@ tests! {
     }
 
     regressions {
+        // Dedup merges two byte-identical MULTI_JUMP dispatcher blocks after their
+        // target blocks are deduped, but only the canonical dispatcher's case PCs
+        // were emitted in the switch. Valid PCs unique to the eliminated dispatcher
+        // fell into InvalidJump. DEF_CD has nonzero words, so the bytecode takes the
+        // path through the second dispatcher (the one that gets deduped away).
+        dedup_multi_jump_dispatcher(@raw {
+            bytecode: &hex!("5f3560165760203560105760286030565b602a6030565b602035602257602c6032565b602e6032565b005b005b005b005b565b56"),
+            expected_return: InstructionResult::Stop,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+        }),
         // Mismatched costs in < BERLIN.
         // GeneralStateTests/stSolidityTest/TestKeywords.json
         st_solidity_keywords(@raw {
