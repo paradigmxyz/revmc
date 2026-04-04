@@ -108,26 +108,6 @@ tests! {
             expected_return: InstructionResult::OpcodeNotFound,
             expected_gas: 0,
         }),
-        unsupported_dupn(@raw {
-            bytecode: &[op::DUPN],
-            expected_return: InstructionResult::NotActivated,
-            expected_gas: 0,
-        }),
-        unsupported_swapn(@raw {
-            bytecode: &[op::SWAPN],
-            expected_return: InstructionResult::NotActivated,
-            expected_gas: 0,
-        }),
-        unsupported_exchange(@raw {
-            bytecode: &[op::EXCHANGE],
-            expected_return: InstructionResult::NotActivated,
-            expected_gas: 0,
-        }),
-        unsupported_slotnum(@raw {
-            bytecode: &[op::SLOTNUM],
-            expected_return: InstructionResult::NotActivated,
-            expected_gas: 0,
-        }),
         underflow1(@raw {
             bytecode: &[op::ADD],
             expected_return: InstructionResult::StackUnderflow,
@@ -150,13 +130,12 @@ tests! {
             expected_stack: &[U256::ZERO],
             expected_gas: 5,
         }),
-        // LLVM is slow on this, but it passes.
-        // overflow_not0(@raw {
-        //     bytecode: &[op::PUSH0; 1023],
-        //     expected_return: InstructionResult::Stop,
-        //     expected_stack: &[0_U256; 1023],
-        //     expected_gas: 2 * 1023,
-        // }),
+        overflow_not0(@raw {
+            bytecode: &[op::PUSH0; 1023],
+            expected_return: InstructionResult::Stop,
+            expected_stack: &[0_U256; 1023],
+            expected_gas: 2 * 1023,
+        }),
         overflow_not1(@raw {
             bytecode: &[op::PUSH0; 1024],
             expected_return: InstructionResult::Stop,
@@ -206,6 +185,35 @@ tests! {
         clz_arrow_glacier(@raw {
             bytecode: &[op::MSIZE, op::CLZ],
             spec_id: SpecId::ARROW_GLACIER,
+            expected_return: InstructionResult::NotActivated,
+            expected_stack: STACK_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+        }),
+
+        dupn_cancun(@raw {
+            bytecode: &[op::PUSH0, op::DUPN, 0x00],
+            spec_id: SpecId::CANCUN,
+            expected_return: InstructionResult::NotActivated,
+            expected_stack: STACK_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+        }),
+        swapn_cancun(@raw {
+            bytecode: &[op::PUSH0, op::SWAPN, 0x00],
+            spec_id: SpecId::CANCUN,
+            expected_return: InstructionResult::NotActivated,
+            expected_stack: STACK_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+        }),
+        exchange_cancun(@raw {
+            bytecode: &[op::PUSH0, op::EXCHANGE, 0x01],
+            spec_id: SpecId::CANCUN,
+            expected_return: InstructionResult::NotActivated,
+            expected_stack: STACK_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+        }),
+        slotnum_cancun(@raw {
+            bytecode: &[op::SLOTNUM],
+            spec_id: SpecId::CANCUN,
             expected_return: InstructionResult::NotActivated,
             expected_stack: STACK_WHAT_INTERPRETER_SAYS,
             expected_gas: GAS_WHAT_INTERPRETER_SAYS,
@@ -279,6 +287,187 @@ tests! {
             bytecode: &[op::PUSH1, 1, op::PUSH1, 2, op::PUSH1, 3, op::PUSH1, 4, op::SWAP3],
             expected_stack: &[4_U256, 2_U256, 3_U256, 1_U256],
             expected_gas: 3 + 3 + 3 + 3 + 3,
+        }),
+
+        // DUPN 0x00: decode_single(0) = 17, duplicates 17th stack item.
+        dupn(@raw {
+            bytecode: &{
+                let mut code = [0u8; 21];
+                code[0] = op::PUSH1; code[1] = 1;   // bottom = 1
+                // 16 zeros on top
+                let mut i = 2;
+                while i < 18 {
+                    code[i] = op::PUSH0;
+                    i += 1;
+                }
+                code[18] = op::DUPN;
+                code[19] = 0x00; // n=17
+                code
+            },
+            spec_id: SpecId::AMSTERDAM,
+            expected_stack: &{
+                let mut s = [U256::ZERO; 18];
+                s[0] = 1_U256;  // duplicated from bottom
+                // s[1..17] = ZERO (the 16 pushed zeros)
+                s[17] = 1_U256; // original bottom
+                s
+            },
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+        }),
+
+        // SWAPN 0x00: decode_single(0) = 17, swaps top with 17th item.
+        swapn(@raw {
+            bytecode: &{
+                let mut code = [0u8; 23];
+                code[0] = op::PUSH1; code[1] = 1;   // bottom = 1
+                // 16 zeros on top
+                let mut i = 2;
+                while i < 18 {
+                    code[i] = op::PUSH0;
+                    i += 1;
+                }
+                code[18] = op::PUSH1; code[19] = 2; // top = 2
+                code[20] = op::SWAPN;
+                code[21] = 0x00; // n=17
+                code
+            },
+            spec_id: SpecId::AMSTERDAM,
+            expected_stack: &{
+                let mut s = [U256::ZERO; 18];
+                s[0] = 2_U256;  // swapped from top
+                // s[1..17] = ZERO
+                s[17] = 1_U256; // swapped from bottom
+                s
+            },
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+        }),
+
+        // EXCHANGE 0x01: decode_pair(1) = (1, 2), swaps 2nd and 3rd from top.
+        exchange_basic(@raw {
+            bytecode: &[op::PUSH1, 1, op::PUSH1, 2, op::PUSH1, 3, op::EXCHANGE, 0x01],
+            spec_id: SpecId::AMSTERDAM,
+            // stack before: [1, 2, 3] (3 on top)
+            // exchange(1, 2): swaps items at depth 1 and 2 (0-indexed from top)
+            // → swaps 2 and 1 → [2, 1, 3]
+            expected_stack: &[2_U256, 1_U256, 3_U256],
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+        }),
+
+        // SLOTNUM: pushes the slot number from the host.
+        slotnum(@raw {
+            bytecode: &[op::SLOTNUM],
+            spec_id: SpecId::AMSTERDAM,
+            expected_stack: &[U256::ZERO],
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+        }),
+
+        // Insufficient stack depth: DUPN 0x00 decodes to depth 17, but only 1 item on stack.
+        dupn_underflow(@raw {
+            bytecode: &[op::PUSH0, op::DUPN, 0x00],
+            spec_id: SpecId::AMSTERDAM,
+            expected_return: InstructionResult::StackOverflow,
+            expected_stack: STACK_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+        }),
+        // Insufficient stack depth: SWAPN 0x00 decodes to depth 17, but only 1 item on stack.
+        swapn_underflow(@raw {
+            bytecode: &[op::PUSH0, op::SWAPN, 0x00],
+            spec_id: SpecId::AMSTERDAM,
+            expected_return: InstructionResult::StackOverflow,
+            expected_stack: STACK_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+        }),
+        // Insufficient stack depth: EXCHANGE 0x01 decodes to (1,2), but only 2 items on stack.
+        exchange_underflow(@raw {
+            bytecode: &[op::PUSH0, op::PUSH0, op::EXCHANGE, 0x01],
+            spec_id: SpecId::AMSTERDAM,
+            expected_return: InstructionResult::StackOverflow,
+            expected_stack: STACK_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+        }),
+
+        // Invalid immediate: 0x5B (91) is in the invalid range [91, 127] for decode_single.
+        dupn_invalid_imm(@raw {
+            bytecode: &[op::PUSH0, op::DUPN, 0x5B],
+            spec_id: SpecId::AMSTERDAM,
+            expected_return: InstructionResult::InvalidImmediateEncoding,
+            expected_stack: STACK_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+        }),
+        swapn_invalid_imm(@raw {
+            bytecode: &[op::PUSH0, op::SWAPN, 0x5B],
+            spec_id: SpecId::AMSTERDAM,
+            expected_return: InstructionResult::InvalidImmediateEncoding,
+            expected_stack: STACK_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+        }),
+        // Invalid immediate: 80 is in the invalid range [80, 127] for decode_pair.
+        exchange_invalid_imm(@raw {
+            bytecode: &[op::PUSH0, op::PUSH0, op::PUSH0, op::EXCHANGE, 80],
+            spec_id: SpecId::AMSTERDAM,
+            expected_return: InstructionResult::InvalidImmediateEncoding,
+            expected_stack: STACK_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+        }),
+
+        // Truncated trailing DUPN at EOF: immediate byte missing, zero-padded to 0x00.
+        // decode_single(0) = 17, so this is DUPN(17) with 17 items on stack → succeeds.
+        dupn_truncated_eof(@raw {
+            bytecode: &{
+                let mut code = [0u8; 18];
+                let mut i = 0;
+                while i < 17 {
+                    code[i] = op::PUSH0;
+                    i += 1;
+                }
+                code[17] = op::DUPN; // no immediate byte
+                code
+            },
+            spec_id: SpecId::AMSTERDAM,
+            expected_return: RETURN_WHAT_INTERPRETER_SAYS,
+            expected_stack: STACK_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+        }),
+        // Truncated trailing SWAPN at EOF: immediate byte missing, zero-padded to 0x00.
+        // decode_single(0) = 17, so this is SWAPN(17) with 18 items on stack → succeeds.
+        swapn_truncated_eof(@raw {
+            bytecode: &{
+                let mut code = [0u8; 19];
+                let mut i = 0;
+                while i < 18 {
+                    code[i] = op::PUSH0;
+                    i += 1;
+                }
+                code[18] = op::SWAPN; // no immediate byte
+                code
+            },
+            spec_id: SpecId::AMSTERDAM,
+            expected_return: RETURN_WHAT_INTERPRETER_SAYS,
+            expected_stack: STACK_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+        }),
+
+        // Truncated PUSH2 at EOF: only 1 of 2 immediate bytes present.
+        // EVM spec right-pads with zeros: PUSH2 0x42 → 0x4200.
+        push2_truncated_eof(@raw {
+            bytecode: &[op::PUSH2, 0x42],
+            expected_return: RETURN_WHAT_INTERPRETER_SAYS,
+            expected_stack: &[U256::from(0x4200u64)],
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+        }),
+        // Truncated PUSH3 at EOF: only 2 of 3 immediate bytes present.
+        push3_truncated_eof(@raw {
+            bytecode: &[op::PUSH3, 0xAB, 0xCD],
+            expected_return: RETURN_WHAT_INTERPRETER_SAYS,
+            expected_stack: &[U256::from(0xABCD00u64)],
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+        }),
+        // PUSH1 with no immediate bytes at all.
+        push1_no_imm_eof(@raw {
+            bytecode: &[op::PUSH1],
+            expected_return: RETURN_WHAT_INTERPRETER_SAYS,
+            expected_stack: &[U256::ZERO],
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
         }),
 
         overflow_analysis_edge_case(@raw {
@@ -395,6 +584,10 @@ tests! {
         div3(op::DIV, 2_U256, 2_U256 => 1_U256),
         div4(op::DIV, 3_U256, 2_U256 => 1_U256),
         div5(op::DIV, 4_U256, 2_U256 => 2_U256),
+        div_by_one(op::DIV, 42_U256, 1_U256 => 42_U256),
+        div_pow2_4(op::DIV, 100_U256, 4_U256 => 25_U256),
+        div_pow2_256(op::DIV, 512_U256, 256_U256 => 2_U256),
+        div_zero_dividend(op::DIV, 0_U256, 42_U256 => 0_U256),
         div_by_zero1(op::DIV, 0_U256, 0_U256 => 0_U256),
         div_by_zero2(op::DIV, 32_U256, 0_U256 => 0_U256),
 
@@ -403,6 +596,10 @@ tests! {
         rem3(op::MOD, 2_U256, 2_U256 => 0_U256),
         rem4(op::MOD, 3_U256, 2_U256 => 1_U256),
         rem5(op::MOD, 4_U256, 2_U256 => 0_U256),
+        rem_by_one(op::MOD, 42_U256, 1_U256 => 0_U256),
+        rem_pow2_4(op::MOD, 100_U256, 4_U256 => 0_U256),
+        rem_pow2_256(op::MOD, 513_U256, 256_U256 => 1_U256),
+        rem_zero_dividend(op::MOD, 0_U256, 42_U256 => 0_U256),
         rem_by_zero1(op::MOD, 0_U256, 0_U256 => 0_U256),
         rem_by_zero2(op::MOD, 32_U256, 0_U256 => 0_U256),
 
@@ -417,23 +614,35 @@ tests! {
         sdiv_min_by_minus_1(op::SDIV, I256_MIN, -1_U256 => I256_MIN),
         sdiv_max1(op::SDIV, I256_MAX, 1_U256 => I256_MAX),
         sdiv_max2(op::SDIV, I256_MAX, -1_U256 => -I256_MAX),
+        sdiv_by_int_min(op::SDIV, I256_MIN, I256_MIN => 1_U256),
+        sdiv_nonmin_by_int_min(op::SDIV, 42_U256, I256_MIN => 0_U256),
+        sdiv_zero_dividend(op::SDIV, 0_U256, 42_U256 => 0_U256),
 
         srem1(op::SMOD, 32_U256, 32_U256 => 0_U256),
         srem2(op::SMOD, 1_U256, 2_U256 => 1_U256),
         srem3(op::SMOD, 2_U256, 2_U256 => 0_U256),
         srem4(op::SMOD, 3_U256, 2_U256 => 1_U256),
         srem5(op::SMOD, 4_U256, 2_U256 => 0_U256),
+        srem_by_one(op::SMOD, 42_U256, 1_U256 => 0_U256),
+        srem_by_minus_one(op::SMOD, 42_U256, -1_U256 => 0_U256),
+        srem_zero_dividend(op::SMOD, 0_U256, 42_U256 => 0_U256),
         srem_by_zero1(op::SMOD, 0_U256, 0_U256 => 0_U256),
         srem_by_zero2(op::SMOD, 32_U256, 0_U256 => 0_U256),
 
+        addmod_mod_zero(op::ADDMOD, 1_U256, 2_U256, 0_U256 => 0_U256),
+        addmod_mod_one(op::ADDMOD, 5_U256, 3_U256, 1_U256 => 0_U256),
+        addmod_both_zero(op::ADDMOD, 0_U256, 0_U256, 42_U256 => 0_U256),
         addmod1(op::ADDMOD, 1_U256, 2_U256, 3_U256 => 0_U256),
         addmod2(op::ADDMOD, 1_U256, 2_U256, 4_U256 => 3_U256),
         addmod3(op::ADDMOD, 1_U256, 2_U256, 2_U256 => 1_U256),
         addmod4(op::ADDMOD, 32_U256, 32_U256, 69_U256 => 64_U256),
 
+        mulmod_mod_zero(op::MULMOD, 3_U256, 4_U256, 0_U256 => 0_U256),
         mulmod1(op::MULMOD, 0_U256, 0_U256, 1_U256 => 0_U256),
         mulmod2(op::MULMOD, 69_U256, 0_U256, 1_U256 => 0_U256),
         mulmod3(op::MULMOD, 0_U256, 1_U256, 2_U256 => 0_U256),
+        mulmod_a_zero(op::MULMOD, 0_U256, 5_U256, 7_U256 => 0_U256),
+        mulmod_b_zero(op::MULMOD, 5_U256, 0_U256, 7_U256 => 0_U256),
         mulmod4(op::MULMOD, 69_U256, 1_U256, 2_U256 => 1_U256),
         mulmod5(op::MULMOD, 69_U256, 1_U256, 30_U256 => 9_U256),
         mulmod6(op::MULMOD, 69_U256, 2_U256, 100_U256 => 38_U256),
@@ -462,6 +671,9 @@ tests! {
         signextend9(op::SIGNEXTEND, 1_U256, 0x8000_U256 => -0x8000_U256),
         signextend9_extra(op::SIGNEXTEND, 1_U256, 0x118000_U256 => -0x8000_U256),
         signextend10(op::SIGNEXTEND, 1_U256, 0xffff_U256 => U256::MAX),
+        signextend_noop_31(op::SIGNEXTEND, 31_U256, 0x42_U256 => 0x42_U256),
+        signextend_noop_32(op::SIGNEXTEND, 32_U256, 0x42_U256 => 0x42_U256),
+        signextend_noop_max(op::SIGNEXTEND, U256::MAX, 0x42_U256 => 0x42_U256),
     }
 
     cmp {
@@ -1102,6 +1314,21 @@ tests! {
             assert_host: Some(|host| {
                 assert_eq!(host.selfdestructs, [(DEF_ADDR, Address::with_last_byte(0x69))]);
             }),
+        }),
+        // Static-context SELFDESTRUCT: gas < 5000 → OOG before static-call check.
+        selfdestruct_static_oog(@raw {
+            bytecode: &[op::PUSH1, 0x01, op::SELFDESTRUCT],
+            is_static: true,
+            gas_limit: 4000,
+            expected_return: InstructionResult::OutOfGas,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+        }),
+        // Static-context SELFDESTRUCT: gas >= 5000 → charges 5000, then StateChangeDuringStaticCall.
+        selfdestruct_static_enough_gas(@raw {
+            bytecode: &[op::PUSH1, 0x01, op::SELFDESTRUCT],
+            is_static: true,
+            expected_return: InstructionResult::StateChangeDuringStaticCall,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
         }),
     }
 

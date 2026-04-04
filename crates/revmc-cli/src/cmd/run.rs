@@ -69,16 +69,6 @@ pub(crate) struct RunArgs {
     #[arg(long, conflicts_with = "interpret")]
     jit_only: bool,
 
-    /// Target triple.
-    #[arg(long, default_value = "native")]
-    target: String,
-    /// Target CPU.
-    #[arg(long)]
-    target_cpu: Option<String>,
-    /// Target features.
-    #[arg(long)]
-    target_features: Option<String>,
-
     /// Compile only, do not link.
     #[arg(long, requires = "aot")]
     no_link: bool,
@@ -95,9 +85,9 @@ pub(crate) struct RunArgs {
     no_gas: bool,
     #[arg(long)]
     no_len_checks: bool,
-    /// Inspect the stack length after the function has been executed.
+    /// Inspect the stack after the function has been executed.
     #[arg(long)]
-    inspect_stack_length: bool,
+    inspect_stack: bool,
     #[arg(long, default_value = "1000000000")]
     gas_limit: u64,
 }
@@ -155,8 +145,7 @@ impl RunArgs {
         let Bench { bytecode, calldata, stack_input, .. } = bench_entry.clone();
 
         // Build the compiler.
-        let target = revmc::Target::new(self.target, self.target_cpu, self.target_features);
-        let backend = EvmLlvmBackend::new_for_target(self.aot, &target)?;
+        let backend = EvmLlvmBackend::new(self.aot)?;
         let mut compiler = EvmCompiler::new(backend);
         compiler.set_opt_level(self.opt_level);
         let out_dir = if self.out_dir.is_some() {
@@ -191,7 +180,7 @@ impl RunArgs {
         let mut host = BenchHost::new(spec_id);
         host.apply_bench(&bench_entry);
 
-        compiler.inspect_stack_length(self.inspect_stack_length || !stack_input.is_empty());
+        compiler.inspect_stack(self.inspect_stack || !stack_input.is_empty());
 
         let bytecode = compiler.parse(bytecode_slice.into(), spec_id)?;
         if self.display || self.parse_only {
@@ -292,7 +281,7 @@ impl RunArgs {
             let (mut ecx, stack, stack_len) =
                 EvmContext::from_interpreter_with_stack(&mut interpreter, &mut host);
             for (i, input) in stack_input.iter().enumerate() {
-                stack.as_mut_slice()[i] = (*input).into();
+                stack.set(i, (*input).into());
             }
             *stack_len = stack_input.len();
             let ret = unsafe { f.call_noinline(Some(stack), Some(stack_len), &mut ecx) };
@@ -329,7 +318,7 @@ impl RunArgs {
                     let (mut ecx, stack, stack_len) =
                         EvmContext::from_interpreter_with_stack(&mut interpreter, &mut host);
                     for (i, input) in stack_input.iter().enumerate() {
-                        stack.as_mut_slice()[i] = (*input).into();
+                        stack.set(i, (*input).into());
                     }
                     *stack_len = stack_input.len();
                     let r = unsafe { f.call_noinline(Some(stack), Some(stack_len), &mut ecx) };

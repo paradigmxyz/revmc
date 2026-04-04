@@ -31,7 +31,7 @@ matrix_tests!(
         use revm_bytecode::opcode as op;
 
         let spec_id = SpecId::CANCUN;
-        compiler.inspect_stack_length(true);
+        compiler.inspect_stack(true);
 
         // First function: PUSH1 42, STOP.
         let bytecode1: &[u8] = &[op::PUSH1, 42];
@@ -50,7 +50,7 @@ matrix_tests!(
             let r = unsafe { f1.call(Some(stack), Some(stack_len), ecx) };
             assert_eq!(r, InstructionResult::Stop);
             assert_eq!(*stack_len, 1);
-            assert_eq!(stack.as_slice()[0].to_u256(), U256::from(42));
+            assert_eq!(unsafe { stack.as_slice(*stack_len) }[0].to_u256(), U256::from(42));
         });
 
         // Second function works.
@@ -58,7 +58,7 @@ matrix_tests!(
             let r = unsafe { f2.call(Some(stack), Some(stack_len), ecx) };
             assert_eq!(r, InstructionResult::Stop);
             assert_eq!(*stack_len, 1);
-            assert_eq!(stack.as_slice()[0].to_u256(), U256::from(3));
+            assert_eq!(unsafe { stack.as_slice(*stack_len) }[0].to_u256(), U256::from(3));
         });
     }
 );
@@ -75,7 +75,7 @@ fn jit_and_verify<B: Backend>(
     code: &[u8],
     expected: U256,
 ) -> B::FuncId {
-    compiler.inspect_stack_length(true);
+    compiler.inspect_stack(true);
     let id = compiler.translate(name, code, super::DEF_SPEC).unwrap();
     let f = unsafe { compiler.jit_function(id) }.unwrap();
 
@@ -83,7 +83,11 @@ fn jit_and_verify<B: Backend>(
         let r = unsafe { f.call(Some(stack), Some(stack_len), ecx) };
         assert_eq!(r, InstructionResult::Stop, "{name}: unexpected return");
         assert_eq!(*stack_len, 1, "{name}: expected 1 stack element");
-        assert_eq!(stack.as_slice()[0].to_u256(), expected, "{name}: wrong value");
+        assert_eq!(
+            unsafe { stack.as_slice(*stack_len) }[0].to_u256(),
+            expected,
+            "{name}: wrong value"
+        );
     });
     id
 }

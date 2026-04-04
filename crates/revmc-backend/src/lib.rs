@@ -27,9 +27,9 @@ pub fn format_bytes(bytes: usize) -> impl std::fmt::Display {
         if bytes < 1024 {
             write!(f, "{bytes} B")
         } else if bytes < 1024 * 1024 {
-            write!(f, "{:.1} KiB", bytes as f64 / 1024.0)
+            write!(f, "{:.1} KiB ({bytes} B)", bytes as f64 / 1024.0)
         } else {
-            write!(f, "{:.1} MiB", bytes as f64 / (1024.0 * 1024.0))
+            write!(f, "{:.1} MiB ({bytes} B)", bytes as f64 / (1024.0 * 1024.0))
         }
     })
 }

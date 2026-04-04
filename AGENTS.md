@@ -8,10 +8,9 @@ cargo fmt --all                            # format
 cargo docs                                 # check docs
 
 cargo nextest run --workspace              # test all
-cargo nextest run -p revmc "test_name"     # test single
-cargo nextest run -p revmc "statetest"     # test statetests
-SUBDIR=stRevertTest cargo nextest run -p revmc "statetest" # test single statetest
-
+cargo nextest run "test_name"              # test single
+cargo nextest run "statetest"              # test statetests
+SUBDIR=stRevertTest cargo nextest run "statetest" # test single statetest
 ```
 
 ## Architecture
@@ -63,11 +62,25 @@ RUST_LOG=debug cargo r -- run usdc_proxy --display |& rg 'jump|JUMP'
 To get a summary across all benchmarks:
 
 ```bash
-./scripts/jump-resolution.sh              # all benchmarks
+./scripts/jump-resolution.sh                  # all benchmarks
 ./scripts/jump-resolution.sh usdc_proxy weth  # specific benchmarks
 ```
 
 Use `cargo r -- run --list` to see available benchmark names.
+
+## Comparing codegen output
+
+To compare LLVM IR and assembly line counts against another revision:
+
+```bash
+./scripts/codegen-lines.sh /tmp/dump --diff main                # all benchmarks vs main
+./scripts/codegen-lines.sh /tmp/dump --diff main usdc_proxy     # specific benchmarks
+./scripts/codegen-lines.sh /tmp/dump                            # line counts only (no diff)
+```
+
+## Important
+
+- NEVER delete or modify `./tmp/` — it contains manually generated IR/asm dumps used for comparison.
 
 ## Code style
 

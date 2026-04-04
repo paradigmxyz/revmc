@@ -45,7 +45,12 @@ pub fn read_code_string(contents: &[u8], ext: Option<&str>) -> Result<Vec<u8>> {
         revmc::parse_asm(utf8()?)
     } else if contents.is_ascii() {
         let s = utf8()?;
-        revmc::parse_asm(s).or_else(|_| hex::decode(s).wrap_err("given code is not valid hex"))
+        revmc::parse_asm(s).or_else(|e1| match hex::decode(s) {
+            Ok(b) => Ok(b),
+            Err(e2) => {
+                Err(eyre::eyre!("input is not valid EVM bytecode or hex:\n1. {e1}\n2. {e2}"))
+            }
+        })
     } else {
         Err(eyre!("could not determine bytecode type"))
     }

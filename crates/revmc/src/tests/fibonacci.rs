@@ -20,19 +20,19 @@ fn run_fibonacci_test<B: Backend>(compiler: &mut EvmCompiler<B>, input: u16, dyn
     let code = mk_fibonacci_code(input, dynamic);
 
     unsafe { compiler.clear() }.unwrap();
-    compiler.inspect_stack_length(true);
+    compiler.inspect_stack(true);
     let f = unsafe { compiler.jit("fib", &code, DEF_SPEC) }.unwrap();
 
     with_evm_context(&code, DEF_SPEC, |ecx, stack, stack_len| {
         if dynamic {
-            stack.as_mut_slice()[0] = U256::from(input).into();
+            stack.set(0, U256::from(input).into());
             *stack_len = 1;
         }
         let r = unsafe { f.call(Some(stack), Some(stack_len), ecx) };
         assert_eq!(r, InstructionResult::Stop);
         // Apparently the code does `fibonacci(input + 1)`.
         assert_eq!(*stack_len, 1);
-        assert_eq!(stack.as_slice()[0].to_u256(), fibonacci_rust(input + 1));
+        assert_eq!(unsafe { stack.as_slice(*stack_len) }[0].to_u256(), fibonacci_rust(input + 1));
     });
 }
 

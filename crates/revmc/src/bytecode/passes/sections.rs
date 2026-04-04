@@ -1,5 +1,7 @@
-use crate::bytecode::{Bytecode, Inst};
+use crate::bytecode::{Bytecode, Inst, InstFlags};
 use core::fmt;
+use revm_bytecode::opcode as op;
+use revm_primitives::U256;
 
 /// A gas section tracks the total base gas cost of a sequence of instructions.
 ///
@@ -63,23 +65,16 @@ impl StackSection {
 
     /// Compute a stack section from an iterator of `(inputs, outputs)` pairs.
     pub(crate) fn from_stack_io(iter: impl IntoIterator<Item = (u8, u8)>) -> Self {
-        let mut inputs = 0i32;
-        let mut diff = 0i32;
-        let mut max_growth = 0i32;
+        let mut analysis = StackSectionAnalysis::default();
         for (inp, out) in iter {
-            inputs = inputs.max(inp as i32 - diff);
-            diff += out as i32 - inp as i32;
-            max_growth = max_growth.max(diff);
+            analysis.process(inp, out);
         }
-        Self {
-            inputs: inputs.max(0).try_into().unwrap_or(u16::MAX),
-            max_growth: max_growth.try_into().unwrap_or(i16::MAX),
-        }
+        analysis.section()
     }
 }
 
 /// Gas section analysis state.
-struct GasSectionAnalysis {
+pub(crate) struct GasSectionAnalysis {
     gas_cost: u64,
     start_inst: Inst,
 }
@@ -91,6 +86,23 @@ impl Default for GasSectionAnalysis {
 }
 
 impl GasSectionAnalysis {
+    /// Accumulates a base gas cost.
+    #[inline]
+    pub(crate) fn process(&mut self, base_gas: u16) {
+        self.gas_cost += base_gas as u64;
+    }
+
+    /// Accumulates extra gas (e.g. pre-computed dynamic gas for folded instructions).
+    #[inline]
+    pub(crate) fn process_extra(&mut self, gas: u64) {
+        self.gas_cost += gas;
+    }
+
+    fn save_to_reset(&mut self, bytecode: &mut Bytecode<'_>, next_section_inst: Inst) {
+        self.save_to(bytecode, next_section_inst);
+        self.reset(next_section_inst);
+    }
+
     /// Saves the current gas section to the bytecode.
     fn save_to(&self, bytecode: &mut Bytecode<'_>, next_section_inst: Inst) {
         if self.start_inst >= bytecode.insts.len_idx() {
@@ -112,18 +124,18 @@ impl GasSectionAnalysis {
     }
 
     /// Resets the analysis for a new section.
-    fn reset(&mut self, inst: Inst) {
+    pub(crate) fn reset(&mut self, inst: Inst) {
         *self = Self { start_inst: inst, ..Default::default() };
     }
 
     /// Returns the current gas section.
-    fn section(&self) -> GasSection {
+    pub(crate) fn section(&self) -> GasSection {
         GasSection { gas_cost: self.gas_cost.try_into().unwrap_or(u32::MAX) }
     }
 }
 
 /// Stack section analysis state.
-struct StackSectionAnalysis {
+pub(crate) struct StackSectionAnalysis {
     inputs: i32,
     diff: i32,
     max_growth: i32,
@@ -137,33 +149,51 @@ impl Default for StackSectionAnalysis {
 }
 
 impl StackSectionAnalysis {
+    /// Returns the cumulative stack delta so far.
+    #[inline]
+    pub(crate) fn diff(&self) -> i32 {
+        self.diff
+    }
+
+    /// Accumulates a single instruction's stack I/O.
+    #[inline]
+    pub(crate) fn process(&mut self, inputs: u8, outputs: u8) {
+        self.inputs = self.inputs.max(inputs as i32 - self.diff);
+        self.diff += outputs as i32 - inputs as i32;
+        self.max_growth = self.max_growth.max(self.diff);
+    }
+
+    fn save_to_reset(&mut self, bytecode: &mut Bytecode<'_>, next_section_inst: Inst) {
+        self.save_to(bytecode, next_section_inst);
+        self.reset(next_section_inst);
+    }
+
     /// Saves the current stack section to the bytecode.
     fn save_to(&self, bytecode: &mut Bytecode<'_>, next_section_inst: Inst) {
         if self.start_inst >= bytecode.insts.len_idx() {
             return;
         }
         let section = self.section();
-        if !section.is_empty() {
-            trace!(
-                inst = %self.start_inst,
-                len = %(next_section_inst - self.start_inst),
-                ?section,
-                "saving stack"
-            );
-            let mut insts = bytecode.insts[self.start_inst..].iter_mut();
-            if let Some(inst) = insts.find(|inst| !inst.is_dead_code()) {
-                inst.stack_section = section;
-            }
+        trace!(
+            inst = %self.start_inst,
+            len = %(next_section_inst - self.start_inst),
+            ?section,
+            "saving stack"
+        );
+        let mut insts = bytecode.insts[self.start_inst..].iter_mut();
+        if let Some(inst) = insts.find(|inst| !inst.is_dead_code()) {
+            inst.flags |= InstFlags::STACK_SECTION_HEAD;
+            inst.stack_section = section;
         }
     }
 
     /// Resets the analysis for a new section.
-    fn reset(&mut self, inst: Inst) {
+    pub(crate) fn reset(&mut self, inst: Inst) {
         *self = Self { start_inst: inst, ..Default::default() };
     }
 
     /// Returns the current stack section.
-    fn section(&self) -> StackSection {
+    pub(crate) fn section(&self) -> StackSection {
         StackSection {
             inputs: self.inputs.try_into().unwrap_or(u16::MAX),
             max_growth: self.max_growth.try_into().unwrap_or(i16::MAX),
@@ -183,35 +213,33 @@ impl SectionsAnalysis {
     pub(crate) fn process(&mut self, bytecode: &mut Bytecode<'_>, inst: Inst) {
         // JUMPDEST starts both gas and stack sections.
         if bytecode.inst(inst).is_reachable_jumpdest(bytecode.has_dynamic_jumps()) {
-            self.gas.save_to(bytecode, inst);
-            self.gas.reset(inst);
-            self.stack.save_to(bytecode, inst);
-            self.stack.reset(inst);
+            self.stack.save_to_reset(bytecode, inst);
+            self.gas.save_to_reset(bytecode, inst);
         }
 
         let data = bytecode.inst(inst);
         let (inp, out) = data.stack_io();
-        let stack_diff = out as i32 - inp as i32;
-        self.stack.inputs = self.stack.inputs.max(inp as i32 - self.stack.diff);
-        self.stack.diff += stack_diff;
-        self.stack.max_growth = self.stack.max_growth.max(self.stack.diff);
+        self.stack.process(inp, out);
+        self.gas.process(data.base_gas);
 
-        self.gas.gas_cost += data.base_gas as u64;
-
-        let data = bytecode.inst(inst);
+        // When EXP's builtin will be skipped — either because both operands are known
+        // (const_output) or because the exponent is known and handled by a peephole (≤ 2) —
+        // fold the dynamic gas into the section statically.
+        if data.opcode == op::EXP
+            && let Some(exponent) = bytecode.const_operand(inst, 1)
+            && (bytecode.const_output(inst).is_some() || exponent <= U256::from(2))
+        {
+            self.gas.process_extra(bytecode.gas_params.exp_cost(exponent));
+        }
 
         // Instructions that require `gasleft` end only the gas section.
         // Branching and suspending instructions end both sections.
+        let next = inst + 1;
         if data.may_suspend() || data.is_branching() {
-            let next = inst + 1;
-            self.gas.save_to(bytecode, next);
-            self.gas.reset(next);
-            self.stack.save_to(bytecode, next);
-            self.stack.reset(next);
+            self.stack.save_to_reset(bytecode, next);
+            self.gas.save_to_reset(bytecode, next);
         } else if data.requires_gasleft(bytecode.spec_id) {
-            let next = inst + 1;
-            self.gas.save_to(bytecode, next);
-            self.gas.reset(next);
+            self.gas.save_to_reset(bytecode, next);
         }
     }
 
@@ -225,7 +253,7 @@ impl SectionsAnalysis {
             let mut current = Inst::from_usize(0);
             let mut count = 0usize;
             for (inst, data) in bytecode.iter_insts() {
-                if data.stack_section.is_empty() {
+                if !data.is_stack_section_head() {
                     continue;
                 }
                 let len = inst.index() - current.index();
@@ -235,5 +263,49 @@ impl SectionsAnalysis {
             }
             debug!(count, max_len, "sections");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::bytecode::{Inst, passes::block_analysis::tests::analyze_asm};
+
+    /// Returns the gas section cost for the first non-dead instruction (the section head).
+    fn section_gas(src: &str) -> u32 {
+        let bytecode = analyze_asm(src);
+        bytecode.inst(Inst::from_usize(0)).gas_section.gas_cost
+    }
+
+    /// EXP with an asymmetric base/exponent: base is 1 byte (2), exponent is 2 bytes (256).
+    /// If the wrong operand were used for gas, the dynamic cost would be 50*1=50 instead of
+    /// 50*2=100, and the total would differ.
+    #[test]
+    fn exp_folded_gas_uses_exponent_not_base() {
+        // PUSH 256, PUSH 2, EXP, PUSH0, MSTORE, STOP
+        // Gas: PUSH(3) + PUSH(3) + EXP_base(10) + EXP_dynamic(50*2=100) + PUSH0(2) + MSTORE(3) +
+        // STOP(0)    = 3 + 3 + 10 + 100 + 2 + 3 + 0 = 121
+        let gas = section_gas("PUSH 256 PUSH 2 EXP PUSH0 MSTORE STOP");
+        assert_eq!(gas, 121, "dynamic gas must use exponent (256=2 bytes), not base (2=1 byte)");
+    }
+
+    /// EXP with zero exponent has no dynamic gas.
+    #[test]
+    fn exp_folded_gas_zero_exponent() {
+        // PUSH0(2) + PUSH(3) + EXP_base(10) + EXP_dynamic(0) + PUSH0(2) + MSTORE(3) + STOP(0) = 20
+        let gas = section_gas("PUSH 0 PUSH 2 EXP PUSH0 MSTORE STOP");
+        assert_eq!(gas, 20, "zero exponent should have no dynamic gas");
+    }
+
+    /// EXP with max exponent (32 bytes).
+    #[test]
+    fn exp_folded_gas_max_exponent() {
+        // PUSH U256::MAX (32 bytes), PUSH 2, EXP, PUSH0, MSTORE, STOP
+        // Gas: PUSH(3) + PUSH(3) + EXP_base(10) + EXP_dynamic(50*32=1600) + PUSH0(2) + MSTORE(3) +
+        // STOP(0)    = 3 + 3 + 10 + 1600 + 2 + 3 + 0 = 1621
+        let gas = section_gas(
+            "PUSH 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff \
+             PUSH 2 EXP PUSH0 MSTORE STOP",
+        );
+        assert_eq!(gas, 1621, "max exponent should cost 50*32=1600 dynamic gas");
     }
 }

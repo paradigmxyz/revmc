@@ -9,6 +9,8 @@ use revmc_backend::Result;
 use smallvec::SmallVec;
 use std::{borrow::Cow, cell::RefCell};
 
+pub(crate) use revm_context_interface::cfg::GasParams;
+
 mod passes;
 use passes::{Cfg, GasSection, SectionsAnalysis, Snapshots, StackSection};
 
@@ -62,6 +64,9 @@ bitflags::bitflags! {
     pub(crate) struct AnalysisConfig: u8 {
         /// Run block deduplication.
         const DEDUP = 1 << 0;
+        /// The stack is observable outside the function (`inspect_stack` mode).
+        /// When set, DSE must not assume diverging terminators kill the stack.
+        const INSPECT_STACK = 1 << 1;
 
         /// All passes enabled.
         const ALL = Self::DEDUP.bits();
@@ -75,6 +80,9 @@ impl Default for AnalysisConfig {
     }
 }
 
+/// Default compiler gas limit for compile-time evaluation (100k gas).
+pub(crate) const DEFAULT_COMPILER_GAS_LIMIT: u64 = 100_000;
+
 /// EVM bytecode.
 #[doc(hidden)] // Not public API.
 pub struct Bytecode<'a> {
@@ -86,6 +94,8 @@ pub struct Bytecode<'a> {
     jumpdests: BitVec,
     /// The [`SpecId`].
     pub(crate) spec_id: SpecId,
+    /// Gas parameters for dynamic gas folding. Defaults to `GasParams::new_spec(spec_id)`.
+    pub(crate) gas_params: GasParams,
     /// Whether the bytecode contains dynamic jumps.
     has_dynamic_jumps: bool,
     /// Whether the bytecode may suspend execution.
@@ -112,20 +122,41 @@ pub struct Bytecode<'a> {
     cfg: Cfg,
     /// Controls which analysis passes are enabled.
     pub(crate) config: AnalysisConfig,
+    /// Gas budget for compile-time evaluation of user-supplied bytecode.
+    ///
+    /// The compiler evaluates EVM operations at compile time during analysis passes. Without a
+    /// budget, adversarial bytecode (e.g. thousands of `EXP(U256::MAX, U256::MAX)`) can make
+    /// compilation arbitrarily slow. This limit uses the EVM gas schedule to bound work.
+    ///
+    /// When exhausted, further compile-time evaluation is skipped (values remain dynamic).
+    /// Defaults to 100k gas.
+    pub(crate) compiler_gas_limit: u64,
+    /// Cumulative compiler gas consumed so far.
+    pub(crate) compiler_gas_used: u64,
 }
 
 impl<'a> Bytecode<'a> {
-    pub(crate) fn new(code: impl Into<Cow<'a, [u8]>>, spec_id: SpecId) -> Self {
-        Self::new_mono(code.into(), spec_id)
+    pub(crate) fn new(
+        code: impl Into<Cow<'a, [u8]>>,
+        spec_id: SpecId,
+        gas_params: Option<GasParams>,
+    ) -> Self {
+        Self::new_mono(code.into(), spec_id, gas_params)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test(code: impl Into<Cow<'a, [u8]>>) -> Self {
+        Self::new(code, crate::tests::DEF_SPEC, None)
     }
 
     #[instrument(name = "Bytecode::new", level = "debug", skip_all)]
-    fn new_mono(code: Cow<'a, [u8]>, spec_id: SpecId) -> Self {
+    fn new_mono(code: Cow<'a, [u8]>, spec_id: SpecId, gas_params: Option<GasParams>) -> Self {
+        let gas_params = gas_params.unwrap_or_else(|| GasParams::new_spec(spec_id));
         let mut insts = IndexVec::with_capacity(code.len() + 8);
         let mut jumpdests = BitVec::repeat(false, code.len());
         let mut pc_to_inst = FxHashMap::with_capacity_and_hasher(code.len(), Default::default());
         let op_infos = op_info_map(spec_id);
-        for (pc, Opcode { opcode, immediate: _ }) in OpcodesIter::new(&code, spec_id).with_pc() {
+        for (pc, Opcode { opcode, immediate }) in OpcodesIter::new(&code, spec_id).with_pc() {
             let inst: Inst = insts.next_idx();
             pc_to_inst.insert(pc as u32, inst);
 
@@ -145,6 +176,8 @@ impl<'a> Bytecode<'a> {
             }
             let base_gas = info.base_gas();
 
+            let stack_io = compute_stack_io(opcode, immediate);
+
             let gas_section = GasSection::default();
             let stack_section = StackSection::default();
 
@@ -152,6 +185,7 @@ impl<'a> Bytecode<'a> {
                 opcode,
                 flags,
                 base_gas,
+                stack_io,
                 data,
                 pc: pc as u32,
                 gas_section,
@@ -170,6 +204,7 @@ impl<'a> Bytecode<'a> {
             insts,
             jumpdests,
             spec_id,
+            gas_params,
             has_dynamic_jumps: false,
             may_suspend: false,
             snapshots: Snapshots::default(),
@@ -180,6 +215,8 @@ impl<'a> Bytecode<'a> {
             redirects: FxHashMap::default(),
             cfg: Cfg::default(),
             config: AnalysisConfig::default(),
+            compiler_gas_limit: 100_000,
+            compiler_gas_used: 0,
         }
     }
 
@@ -261,15 +298,19 @@ impl<'a> Bytecode<'a> {
         self.block_analysis_local();
         self.mark_dead_code();
 
+        let local_snapshots = self.snapshots.clone();
+
         self.rebuild_cfg();
-        self.block_analysis();
+        self.block_analysis(&local_snapshots);
+        self.dead_store_elim();
         self.mark_dead_code();
 
         if self.config.contains(AnalysisConfig::DEDUP) {
             self.rebuild_cfg();
-            self.dedup_blocks();
+            self.dedup_blocks(&local_snapshots);
             self.mark_dead_code();
         }
+        drop(local_snapshots);
 
         // Final rebuild so the CFG is consistent for sections analysis and DOT output.
         self.rebuild_cfg();
@@ -277,6 +318,12 @@ impl<'a> Bytecode<'a> {
         self.calc_may_suspend();
 
         self.construct_sections();
+
+        debug!(
+            compiler_gas_used = self.compiler_gas_used,
+            compiler_gas_limit = self.compiler_gas_limit,
+            "constant folding gas budget",
+        );
 
         Ok(())
     }
@@ -336,14 +383,47 @@ impl<'a> Bytecode<'a> {
     }
 
     /// Returns the immediate value of the given instruction data, if any.
-    /// Returns `None` if out of bounds too.
+    ///
+    /// For truncated immediates at EOF, returns the available bytes (which may be shorter than
+    /// `imm_len`). Returns `None` only when `imm_len` is 0 or `start` is completely out of bounds.
     pub(crate) fn get_imm(&self, data: &InstData) -> Option<&[u8]> {
         let imm_len = data.imm_len() as usize;
         if imm_len == 0 {
             return None;
         }
         let start = data.pc as usize + 1;
-        self.code.get(start..start + imm_len)
+        let end = (start + imm_len).min(self.code.len());
+        if start >= end {
+            return None;
+        }
+        Some(&self.code[start..end])
+    }
+
+    /// Returns the value of a PUSH instruction, right-padding truncated EOF immediates with zeros
+    /// per EVM spec.
+    pub(crate) fn get_push_value(&self, data: &InstData) -> U256 {
+        match self.get_imm(data) {
+            Some(slice) => {
+                let imm_len = data.imm_len() as usize;
+                if slice.len() == imm_len {
+                    U256::from_be_slice(slice)
+                } else {
+                    let mut padded = [0u8; 32];
+                    padded[..slice.len()].copy_from_slice(slice);
+                    U256::from_be_slice(&padded[..imm_len])
+                }
+            }
+            None => U256::ZERO,
+        }
+    }
+
+    /// Returns the first immediate byte, defaulting to `0` if truncated or missing.
+    ///
+    /// This matches upstream `revm-bytecode` legacy analysis which zero-pads incomplete
+    /// trailing immediates.
+    pub(crate) fn get_u8_imm(&self, data: &InstData) -> u8 {
+        let start = data.pc as usize + 1;
+        self.code.get(start).copied().unwrap_or(0)
     }
 
     /// Returns `true` if the given program counter is a valid jump destination.
@@ -447,6 +527,8 @@ pub(crate) struct InstData {
     ///
     /// This may not be the final/full gas cost of the opcode as it may also have a dynamic cost.
     base_gas: u16,
+    /// Stack inputs and outputs, decoded from the immediate for `DUPN`/`SWAPN`/`EXCHANGE`.
+    stack_io: (u8, u8),
     /// Instruction-specific data:
     /// - if the instruction has immediate data, this is a packed offset+length into the bytecode;
     /// - `JUMP{,I} && STATIC_JUMP in kind`: the jump target, `Instr`;
@@ -480,7 +562,7 @@ impl InstData {
     /// Note that this may not be a valid instruction.
     #[inline]
     fn new(opcode: u8) -> Self {
-        Self { opcode, ..Default::default() }
+        Self { opcode, stack_io: stack_io(opcode), ..Default::default() }
     }
 
     /// Returns the length of the immediate data of this instruction.
@@ -492,7 +574,7 @@ impl InstData {
     /// Returns the number of input and output stack elements of this instruction.
     #[inline]
     pub(crate) fn stack_io(&self) -> (u8, u8) {
-        stack_io(self.opcode)
+        self.stack_io
     }
 
     /// Converts this instruction to a raw opcode. Note that the immediate data is not resolved.
@@ -531,6 +613,12 @@ impl InstData {
     #[inline]
     pub(crate) const fn is_reachable_jumpdest(&self, has_dynamic_jumps: bool) -> bool {
         self.is_jumpdest() && (has_dynamic_jumps || self.data == 1)
+    }
+
+    /// Returns `true` if this instruction starts a new stack section.
+    #[inline]
+    pub(crate) fn is_stack_section_head(&self) -> bool {
+        self.flags.contains(InstFlags::STACK_SECTION_HEAD)
     }
 
     /// Returns `true` if this instruction is dead code.
@@ -611,8 +699,10 @@ bitflags::bitflags! {
         /// Always returns [`InstructionResult::NotFound`] at runtime.
         const UNKNOWN = 1 << 4;
 
-        /// Skip generating instruction logic, but keep the gas calculation.
-        const SKIP_LOGIC = 1 << 5;
+        /// Instruction is a no-op: skip generating logic, but keep the gas calculation.
+        const NOOP = 1 << 5;
+        /// This instruction starts a new stack section.
+        const STACK_SECTION_HEAD = 1 << 6;
         /// Don't generate any code.
         const DEAD_CODE = 1 << 7;
     }
@@ -636,5 +726,36 @@ mod tests {
     #[test]
     fn test_suspend_is_free() {
         assert_eq!(OPCODE_INFO[TEST_SUSPEND as usize], None);
+    }
+
+    #[test]
+    fn truncated_push_imm_right_pads_with_zeros() {
+        // PUSH2 followed by a single byte 0x42 — truncated at EOF.
+        // EVM spec: missing bytes are zero, so the value is 0x4200.
+        let code = [op::PUSH2, 0x42];
+        let bc = Bytecode::test(&code);
+        let data = bc.inst(Inst::from_usize(0));
+        assert_eq!(bc.get_imm(data), Some([0x42].as_slice()));
+        assert_eq!(bc.get_push_value(data), U256::from(0x4200));
+
+        // PUSH3 followed by two bytes — truncated at EOF.
+        let code = [op::PUSH3, 0xAB, 0xCD];
+        let bc = Bytecode::test(&code);
+        let data = bc.inst(Inst::from_usize(0));
+        assert_eq!(bc.get_imm(data), Some([0xAB, 0xCD].as_slice()));
+        assert_eq!(bc.get_push_value(data), U256::from(0xABCD00));
+
+        // PUSH1 with no immediate bytes at all.
+        let code = [op::PUSH1];
+        let bc = Bytecode::test(&code);
+        let data = bc.inst(Inst::from_usize(0));
+        assert_eq!(bc.get_imm(data), None);
+        assert_eq!(bc.get_push_value(data), U256::ZERO);
+
+        // Non-truncated PUSH2 — full immediate.
+        let code = [op::PUSH2, 0x42, 0xFF];
+        let bc = Bytecode::test(&code);
+        let data = bc.inst(Inst::from_usize(0));
+        assert_eq!(bc.get_push_value(data), U256::from(0x42FF));
     }
 }

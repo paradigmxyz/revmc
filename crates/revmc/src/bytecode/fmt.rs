@@ -15,10 +15,22 @@ impl Bytecode<'_> {
         let mut lines: Vec<(String, String)> = Vec::new();
         let mut inst_lines = IndexVec::<Inst, u32>::from_vec(vec![0u32; self.insts.len()]);
 
+        // Compute field widths for aligned ic=/pc= columns.
+        let (max_ic, max_pc) = self
+            .cfg
+            .blocks
+            .iter()
+            .flat_map(|b| {
+                b.insts().filter(|&i| !self.inst(i).is_dead_code()).map(|i| (i, self.inst(i).pc))
+            })
+            .fold((0u32, 0u32), |(mi, mp), (i, p)| (mi.max(i.index() as u32), mp.max(p)));
+        let ic_width = decimal_width(max_ic);
+        let pc_width = decimal_width(max_pc);
+
         lines.push((
             String::new(),
             format!(
-                "spec_id={}, has_dynamic_jumps={}, may_suspend={}",
+                "spec_id={} has_dynamic_jumps={} may_suspend={}",
                 self.spec_id, self.has_dynamic_jumps, self.may_suspend,
             ),
         ));
@@ -36,10 +48,10 @@ impl Bytecode<'_> {
             let first = self.inst(block.insts.start);
             let mut header = format!("{bid}:");
             let mut comment = String::new();
-            if !first.stack_section.is_empty() {
+            if first.is_stack_section_head() {
                 write!(
                     comment,
-                    "stack_in={}, max_growth={}",
+                    "stack_in={} max_growth={}",
                     first.stack_section.inputs, first.stack_section.max_growth,
                 )
                 .unwrap();
@@ -87,43 +99,45 @@ impl Bytecode<'_> {
                     }
                 }
 
-                // Comment with pc and flags/behavior.
-                let mut comment = format!("pc={}", data.pc);
+                // Comment with ic, pc, and flags/behavior.
+                let mut comment = String::new();
+                write!(comment, "ic={:>ic_width$}", inst.index()).unwrap();
+                write!(comment, " pc={:>pc_width$}", data.pc).unwrap();
                 if !data.gas_section.is_empty() {
-                    write!(comment, ", gas={}", data.gas_section.gas_cost).unwrap();
+                    write!(comment, " gas={}", data.gas_section.gas_cost).unwrap();
                 }
-                if inst != block.insts.start && !data.stack_section.is_empty() {
+                if inst != block.insts.start && data.is_stack_section_head() {
                     write!(
                         comment,
-                        ", stack_in={}, max_growth={}",
+                        " stack_in={} max_growth={}",
                         data.stack_section.inputs, data.stack_section.max_growth,
                     )
                     .unwrap();
                 }
                 let flags = data.flags;
-                if flags.contains(InstFlags::SKIP_LOGIC) {
-                    comment.push_str(", skip");
+                if flags.contains(InstFlags::NOOP) {
+                    comment.push_str(" noop");
                 }
                 if flags.contains(InstFlags::DEAD_CODE) {
-                    comment.push_str(", dead");
+                    comment.push_str(" dead");
                 }
                 if flags.contains(InstFlags::DISABLED) {
-                    comment.push_str(", disabled");
+                    comment.push_str(" disabled");
                 }
                 if flags.contains(InstFlags::UNKNOWN) {
-                    comment.push_str(", unknown");
+                    comment.push_str(" unknown");
                 }
                 if flags.contains(InstFlags::INVALID_JUMP) {
-                    comment.push_str(", invalid_jump");
+                    comment.push_str(" invalid_jump");
                 }
                 if flags.contains(InstFlags::MULTI_JUMP) {
-                    comment.push_str(", multi_jump");
+                    comment.push_str(" multi_jump");
                 }
                 if data.may_suspend() {
-                    comment.push_str(", suspends");
+                    comment.push_str(" suspends");
                 }
                 if data.is_reachable_jumpdest(self.has_dynamic_jumps) {
-                    comment.push_str(", reachable");
+                    comment.push_str(" reachable");
                 }
 
                 lines.push((text, comment));
@@ -266,7 +280,7 @@ impl<'a> Bytecode<'a> {
                  label=\"{bid}",
             )?;
 
-            if !first.stack_section.is_empty() {
+            if first.is_stack_section_head() {
                 write!(
                     w,
                     " [in={} growth={}]",
@@ -281,7 +295,7 @@ impl<'a> Bytecode<'a> {
                     continue;
                 }
                 // Show stack section header for mid-block section boundaries.
-                if inst != block.insts.start && !data.stack_section.is_empty() {
+                if inst != block.insts.start && data.is_stack_section_head() {
                     write!(
                         w,
                         "--- [in={} growth={}]\\l",
@@ -363,6 +377,10 @@ impl<'a> Bytecode<'a> {
     }
 }
 
+fn decimal_width(n: u32) -> usize {
+    if n == 0 { 1 } else { n.ilog10() as usize + 1 }
+}
+
 /// Abbreviates hex strings with repeated leading byte pairs.
 /// E.g. `"PUSH32 0xffffffffff...ffe0"` → `"PUSH32 0xff..ffe0"`.
 fn abbreviate_hex(s: &str) -> Cow<'_, str> {
@@ -418,7 +436,7 @@ mod tests {
             op::POP,
             op::STOP,
         ];
-        let mut bytecode = Bytecode::new(code, SpecId::OSAKA);
+        let mut bytecode = Bytecode::new(code, SpecId::OSAKA, None);
         bytecode.analyze().unwrap();
         bytecode
     }
@@ -430,32 +448,32 @@ mod tests {
         snapbox::assert_data_eq!(
             actual,
             snapbox::str![[r#"
-               ; spec_id=Osaka, has_dynamic_jumps=false, may_suspend=true
+               ; spec_id=Osaka has_dynamic_jumps=false may_suspend=true
 
-bb0:           ; stack_in=0, max_growth=1
-  PUSH1 0x03   ; pc=0, gas=11
-  JUMP bb1     ; pc=2
+bb0:           ; stack_in=0 max_growth=1
+  PUSH1 0x03   ; ic= 0 pc= 0 gas=11 noop
+  JUMP bb1     ; ic= 1 pc= 2
 
-bb1:           ; stack_in=0, max_growth=2
-  JUMPDEST     ; pc=3, gas=7, reachable
-  PUSH1 0x01   ; pc=4
-  PUSH1 0x00   ; pc=6
-  SSTORE       ; pc=8
-  PUSH1 0x01   ; pc=9, gas=16
-  PUSH1 0x03   ; pc=11
-  JUMPI bb1    ; pc=13
+bb1:           ; stack_in=0 max_growth=2
+  JUMPDEST     ; ic= 2 pc= 3 gas=7 reachable
+  PUSH1 0x01   ; ic= 3 pc= 4 noop
+  PUSH1 0x00   ; ic= 4 pc= 6 noop
+  SSTORE       ; ic= 5 pc= 8
+  PUSH1 0x01   ; ic= 6 pc= 9 gas=16 noop
+  PUSH1 0x03   ; ic= 7 pc=11 noop
+  JUMPI bb1    ; ic= 8 pc=13
 
-bb2:           ; stack_in=0, max_growth=7
-  PUSH1 0x00   ; pc=14, gas=121
-  PUSH1 0x00   ; pc=16
-  PUSH1 0x00   ; pc=18
-  PUSH1 0x00   ; pc=20
-  PUSH1 0x00   ; pc=22
-  PUSH1 0x42   ; pc=24
-  PUSH2 0xffff ; pc=26
-  CALL         ; pc=29, suspends
-  POP          ; pc=30, gas=2, stack_in=1, max_growth=0
-  STOP         ; pc=31
+bb2:           ; stack_in=0 max_growth=7
+  PUSH1 0x00   ; ic= 9 pc=14 gas=121 noop
+  PUSH1 0x00   ; ic=10 pc=16 noop
+  PUSH1 0x00   ; ic=11 pc=18 noop
+  PUSH1 0x00   ; ic=12 pc=20 noop
+  PUSH1 0x00   ; ic=13 pc=22 noop
+  PUSH1 0x42   ; ic=14 pc=24 noop
+  PUSH2 0xffff ; ic=15 pc=26 noop
+  CALL         ; ic=16 pc=29 suspends
+  POP          ; ic=17 pc=30 gas=2 stack_in=1 max_growth=0
+  STOP         ; ic=18 pc=31
 
 "#]]
         );
