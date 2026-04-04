@@ -583,6 +583,62 @@ mod tests {
     }
 
     #[test]
+    fn returndatasize_live() {
+        // RETURNDATASIZE used as MSTORE offset — output is live, must NOT be eliminated.
+        let bytecode = analyze_asm(
+            "
+            PUSH0
+            RETURNDATASIZE
+            MSTORE
+            STOP
+        ",
+        );
+        assert!(
+            !bytecode.inst(Inst::from_usize(1)).flags.contains(InstFlags::NOOP),
+            "RETURNDATASIZE should NOT be skipped when live"
+        );
+    }
+
+    #[test]
+    fn blobhash_dead() {
+        // BLOBHASH(0) with output popped — eliminable.
+        let bytecode = analyze_asm(
+            "
+            PUSH0
+            BLOBHASH
+            POP
+            STOP
+        ",
+        );
+        assert!(
+            bytecode.inst(Inst::from_usize(0)).flags.contains(InstFlags::NOOP),
+            "PUSH0 should be skipped"
+        );
+        assert!(
+            bytecode.inst(Inst::from_usize(1)).flags.contains(InstFlags::NOOP),
+            "BLOBHASH should be skipped when dead"
+        );
+    }
+
+    #[test]
+    fn blobhash_live() {
+        // BLOBHASH(0) stored to memory — output is live.
+        let bytecode = analyze_asm(
+            "
+            PUSH0
+            BLOBHASH
+            PUSH0
+            MSTORE
+            STOP
+        ",
+        );
+        assert!(
+            !bytecode.inst(Inst::from_usize(1)).flags.contains(InstFlags::NOOP),
+            "BLOBHASH should NOT be skipped when live"
+        );
+    }
+
+    #[test]
     fn dupn_dead() {
         // 1 × PUSH0, DUPN 17 (copies PUSH0), POP, POP, STOP — all dead.
         let bytecode = eof_with_prefix(1, &[op::DUPN, 0x00, op::POP, op::POP, op::STOP]);
