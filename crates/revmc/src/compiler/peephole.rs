@@ -10,7 +10,7 @@ use revm_bytecode::opcode as op;
 use revm_primitives::U256;
 
 /// i256 INT_MIN: 1 << 255.
-const INT_MIN: U256 = U256::from_limbs([0, 0, 0, 1 << 63]);
+const INT_MIN: U256 = U256::ONE.wrapping_shl(255);
 
 impl<'a, B: Backend> FunctionCx<'a, B> {
     /// Tries to emit optimized inline code for an instruction whose operands are partially known.
