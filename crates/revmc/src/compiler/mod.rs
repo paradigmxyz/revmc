@@ -2,6 +2,7 @@
 
 use crate::{
     Backend, Builder, Bytecode, EvmCompilerFn, EvmContext, EvmStack, FxHashMap, GasParams, Result,
+    bytecode::AnalysisConfig,
 };
 use revm_interpreter::{Gas, InputsImpl};
 use revm_primitives::{Bytes, hardfork::SpecId};
@@ -455,6 +456,7 @@ impl<B: Backend> EvmCompiler<B> {
 
         let mut bytecode = Bytecode::new(bytecode, spec_id, self.gas_params.clone());
         bytecode.compiler_gas_limit = self.compiler_gas_limit;
+        bytecode.config.set(AnalysisConfig::INSPECT_STACK, self.config.inspect_stack);
         bytecode.analyze()?;
         if let Some(dump_dir) = &self.dump_dir() {
             Self::dump_bytecode(dump_dir, &bytecode)?;

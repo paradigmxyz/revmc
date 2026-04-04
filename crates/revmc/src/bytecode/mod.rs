@@ -64,6 +64,9 @@ bitflags::bitflags! {
     pub(crate) struct AnalysisConfig: u8 {
         /// Run block deduplication.
         const DEDUP = 1 << 0;
+        /// The stack is observable outside the function (`inspect_stack` mode).
+        /// When set, DSE must not assume diverging terminators kill the stack.
+        const INSPECT_STACK = 1 << 1;
 
         /// All passes enabled.
         const ALL = Self::DEDUP.bits();

@@ -12,7 +12,7 @@
 //! - POP kills its input (makes the position dead) rather than reading it.
 
 use super::{StackSectionAnalysis, block_analysis::AbsValue};
-use crate::bytecode::{Bytecode, InstFlags};
+use crate::bytecode::{AnalysisConfig, Bytecode, InstFlags};
 use bitvec::vec::BitVec;
 use revm_bytecode::opcode as op;
 
@@ -34,6 +34,7 @@ impl Bytecode<'_> {
     #[instrument(name = "dse", level = "debug", skip_all)]
     pub(crate) fn dead_store_elim(&mut self) {
         let mut eliminated = 0u32;
+        let inspect_stack = self.config.contains(AnalysisConfig::INSPECT_STACK);
 
         // Reusable buffers hoisted out of the per-block loop.
         let mut heights = Vec::new();
@@ -63,9 +64,16 @@ impl Bytecode<'_> {
             let exit_height = *heights.last().unwrap();
             let max_height = entry_height + section.max_growth as i32;
 
-            // At the block exit, all stack positions are conservatively live.
+            // If the block's terminator diverges, no successor will read the stack,
+            // so all exit positions are dead. Unless `inspect_stack` is set (the caller
+            // observes every store) or the block contains a suspending instruction
+            // (the function can be re-entered and the caller reads the stack).
+            let has_suspend = block.insts().any(|i| self.insts[i].may_suspend());
+            let term_diverges =
+                !inspect_stack && !has_suspend && self.insts[block.terminator()].is_diverging();
+
             live.clear();
-            live.resize(exit_height.max(0) as usize, true);
+            live.resize(exit_height.max(0) as usize, !term_diverges);
             live.resize(max_height.max(0) as usize, false);
 
             // Nothing to do.
@@ -378,10 +386,27 @@ fn transfer_dup(live: &mut BitVec, h_before: usize, depth: usize) {
 
 #[cfg(test)]
 mod tests {
-    use super::super::block_analysis::tests::{Inst, analyze_asm, analyze_code_spec};
+    use super::super::block_analysis::tests::{
+        Inst, analyze_asm, analyze_asm_spec, analyze_code_spec,
+    };
     use crate::bytecode::InstFlags;
     use revm_bytecode::opcode as op;
     use revm_primitives::hardfork::SpecId;
+
+    /// Helper: generates `"PUSH0\n"` repeated `n` times.
+    fn push0s(n: usize) -> String {
+        "PUSH0\n".repeat(n)
+    }
+
+    /// Helper: `n` PUSH0 padding followed by `suffix` asm, analyzed with AMSTERDAM spec.
+    fn with_prefix(n: usize, suffix: &str) -> crate::bytecode::Bytecode<'static> {
+        analyze_asm_spec(&format!("{}{suffix}", push0s(n)), SpecId::AMSTERDAM)
+    }
+
+    /// Helper: `PUSH0 CALLDATALOAD` (dynamic value) + `n` PUSH0 padding + `suffix` asm.
+    fn with_dynamic_and_prefix(n: usize, suffix: &str) -> crate::bytecode::Bytecode<'static> {
+        analyze_asm_spec(&format!("PUSH0 CALLDATALOAD {}{suffix}", push0s(n)), SpecId::AMSTERDAM)
+    }
 
     #[test]
     fn push_pop() {
@@ -442,6 +467,33 @@ mod tests {
 
     #[test]
     fn swap_preserves_liveness() {
+        // SWAP1 swaps TOS and TOS-1. TOS is consumed by RET_WORD.
+        // Uses CALLDATALOAD for dynamic values to prevent const-input DSE.
+        let bytecode = analyze_asm(
+            "
+            PUSH0           ; inst 0
+            CALLDATALOAD    ; inst 1: dynamic A
+            PUSH1 0x20      ; inst 2
+            CALLDATALOAD    ; inst 3: dynamic B
+            SWAP1           ; inst 4: [B, A]
+            POP             ; inst 5: [B]
+            RET_WORD        ; inst 6..11: return B
+        ",
+        );
+        // A is swapped to TOS then popped → dead. B is consumed by RET_WORD → live.
+        assert!(
+            bytecode.inst(Inst::from_usize(1)).flags.contains(InstFlags::NOOP),
+            "CALLDATALOAD A should be skipped (dead after swap+pop)"
+        );
+        assert!(
+            !bytecode.inst(Inst::from_usize(3)).flags.contains(InstFlags::NOOP),
+            "CALLDATALOAD B should NOT be skipped (consumed by RET_WORD)"
+        );
+    }
+
+    #[test]
+    fn swap_dead_with_diverging_terminator() {
+        // All values left on the stack at STOP are dead.
         let bytecode = analyze_asm(
             "
             PUSH1 0x01
@@ -451,10 +503,10 @@ mod tests {
             STOP
         ",
         );
-        for i in 0..3 {
+        for i in 0..4 {
             assert!(
-                !bytecode.inst(Inst::from_usize(i)).flags.contains(InstFlags::NOOP),
-                "PUSH at {i} should NOT be skipped"
+                bytecode.inst(Inst::from_usize(i)).flags.contains(InstFlags::NOOP),
+                "inst at {i} should be skipped (exit stack dead)"
             );
         }
     }
@@ -527,63 +579,57 @@ mod tests {
         assert!(!bytecode.inst(Inst::from_usize(2)).flags.contains(InstFlags::NOOP));
     }
 
-    /// Helper: builds bytecode with `n` PUSH0s followed by `suffix`, using AMSTERDAM spec.
-    fn with_prefix(n: usize, suffix: &[u8]) -> crate::bytecode::Bytecode<'static> {
-        let mut code = vec![op::PUSH0; n];
-        code.extend_from_slice(suffix);
-        analyze_code_spec(code, SpecId::AMSTERDAM)
-    }
-
     #[test]
     fn swapn_preserves_liveness() {
-        // 18 × PUSH0 (insts 0..18), SWAPN 17 (inst 18), STOP (inst 19).
-        // SWAPN 17 needs TOS + 17 below = 18 items.
-        let bytecode = with_prefix(18, &[op::SWAPN, 0x00, op::STOP]);
-        for i in 0..18 {
-            assert!(
-                !bytecode.inst(Inst::from_usize(i)).flags.contains(InstFlags::NOOP),
-                "PUSH0 at {i} should NOT be skipped"
-            );
-        }
+        // SWAPN brings a deep dynamic value to TOS where RET_WORD consumes it.
+        // CDL at bottom, 17 × PUSH0 above → SWAP 17 swaps TOS with CDL.
+        let bytecode = with_dynamic_and_prefix(17, "SWAP 17 RET_WORD");
+        assert!(
+            !bytecode.inst(Inst::from_usize(1)).flags.contains(InstFlags::NOOP),
+            "CALLDATALOAD should NOT be skipped (consumed via SWAPN + MSTORE)"
+        );
     }
 
     #[test]
     fn dupn_keeps_source_live() {
-        // 17 × PUSH0, DUPN 17 (dup bottom), POP, STOP.
-        // The DUP copy is popped but the source (inst 0) is still live at exit.
-        let bytecode = with_prefix(17, &[op::DUPN, 0x00, op::POP, op::STOP]);
+        // DUPN copies a deep dynamic value to TOS. RET_WORD consumes the copy.
+        // CDL at bottom, 16 × PUSH0 above → DUP 17 copies CDL to TOS.
+        let bytecode = with_dynamic_and_prefix(16, "DUP 17 RET_WORD");
         assert!(
-            !bytecode.inst(Inst::from_usize(0)).flags.contains(InstFlags::NOOP),
-            "source PUSH0 should NOT be skipped"
+            !bytecode.inst(Inst::from_usize(1)).flags.contains(InstFlags::NOOP),
+            "CALLDATALOAD should NOT be skipped"
         );
     }
 
     #[test]
     fn dupn_dead_copy() {
-        // 17 × PUSH0, DUPN 17 (dup bottom), POP, STOP.
-        // The DUP copy is immediately popped. The source stays live (it's on the exit
-        // stack), so the transfer must not incorrectly kill the source position.
-        let bytecode = with_prefix(17, &[op::DUPN, 0x00, op::POP, op::STOP]);
-        for i in 0..17 {
-            assert!(
-                !bytecode.inst(Inst::from_usize(i)).flags.contains(InstFlags::NOOP),
-                "PUSH0 at {i} should NOT be skipped"
-            );
-        }
+        // DUP copies a dynamic value, the copy is immediately POPped. The source
+        // remains on the stack and feeds RET_WORD.
+        let bytecode = analyze_asm("PUSH0 CALLDATALOAD DUP1 POP RET_WORD");
+        assert!(
+            bytecode.inst(Inst::from_usize(2)).flags.contains(InstFlags::NOOP),
+            "DUP1 should be skipped (copy is dead)"
+        );
+        assert!(
+            !bytecode.inst(Inst::from_usize(1)).flags.contains(InstFlags::NOOP),
+            "CALLDATALOAD should NOT be skipped"
+        );
     }
 
     #[test]
     fn exchange_preserves_liveness() {
-        // 18 × PUSH0, EXCHANGE 1,2 (swap positions 1 and 2 from TOS), STOP.
-        // EXCHANGE needs at least m+1 items. With (1,2): 3 items minimum, but we use 18
-        // to match the DUPN/SWAPN test shape and ensure all are live.
-        let bytecode = with_prefix(18, &[op::EXCHANGE, 0x01, op::STOP]);
-        for i in 0..18 {
-            assert!(
-                !bytecode.inst(Inst::from_usize(i)).flags.contains(InstFlags::NOOP),
-                "PUSH0 at {i} should NOT be skipped"
-            );
-        }
+        // EXCHANGE swaps two non-TOS positions. SWAP2 brings the dynamic value
+        // to TOS where RET_WORD consumes it.
+        //
+        // [0, CDL, 0]  → EXCHANGE(1,2) → [CDL, 0, 0]  → SWAP2 → [0, 0, CDL]
+        let bytecode = analyze_asm_spec(
+            "PUSH0 PUSH0 CALLDATALOAD PUSH0 EXCHANGE 1 2 SWAP2 RET_WORD",
+            SpecId::AMSTERDAM,
+        );
+        assert!(
+            !bytecode.inst(Inst::from_usize(2)).flags.contains(InstFlags::NOOP),
+            "CALLDATALOAD should NOT be skipped (consumed via EXCHANGE + SWAP + MSTORE)"
+        );
     }
 
     #[test]
@@ -628,21 +674,26 @@ mod tests {
         // At SWAP2: TOS (pos 2) and pos 0 are both dead, but pos 1 (pass-through) is live.
         // The precise check correctly eliminates SWAP2. The generic out>0 check would
         // require all 3 output positions to be dead and miss this.
+        // Uses CALLDATALOAD for dynamic values to prevent const-input DSE.
         let bytecode = analyze_asm(
             "
-            PUSH1 0x01  ; [A]
-            PUSH1 0x02  ; [A, B]
-            PUSH1 0x03  ; [A, B, C]
-            SWAP2       ; [C, B, A]
-            POP         ; [C, B]
-            SWAP1       ; [B, C]
-            POP         ; [B]
-            STOP
+            PUSH0           ; inst 0
+            CALLDATALOAD    ; inst 1: dynamic A
+            PUSH1 0x20      ; inst 2
+            CALLDATALOAD    ; inst 3: dynamic B
+            PUSH1 0x40      ; inst 4
+            CALLDATALOAD    ; inst 5: dynamic C
+            SWAP2           ; inst 6: [C, B, A]
+            POP             ; inst 7: [C, B]
+            SWAP1           ; inst 8: [B, C]
+            POP             ; inst 9: [B]
+            RET_WORD        ; inst 10..15: return B
         ",
         );
-        //        PUSH A, PUSH B, PUSH C, SWAP2, POP, SWAP1, POP, STOP
-        for (i, alive) in
-            [false, true, false, false, true, true, true, true].into_iter().enumerate()
+        //       PUSH0, CDL_A, PUSH_20, CDL_B, PUSH_40, CDL_C, SWAP2, POP, SWAP1, POP
+        for (i, alive) in [false, false, false, true, false, false, false, true, true, true]
+            .into_iter()
+            .enumerate()
         {
             assert_eq!(
                 !bytecode.inst(Inst::from_usize(i)).flags.contains(InstFlags::NOOP),
@@ -725,11 +776,9 @@ mod tests {
 
     #[test]
     fn dupn_dead() {
-        // 17 × PUSH0, DUPN 17 (copies bottom), POP × 18, STOP — all dead.
-        let mut suffix = vec![op::DUPN, 0x00 /* DUPN imm=0x00 => depth 17 */];
-        suffix.extend(std::iter::repeat_n(op::POP, 18));
-        suffix.push(op::STOP);
-        let bytecode = with_prefix(17, &suffix);
+        // 17 × PUSH0, DUP 17 (copies bottom), POP × 18, STOP — all dead.
+        let pops = "POP\n".repeat(18);
+        let bytecode = with_prefix(17, &format!("DUP 17 {pops} STOP"));
         for i in 0..17 {
             assert!(
                 bytecode.inst(Inst::from_usize(i)).flags.contains(InstFlags::NOOP),
@@ -746,6 +795,7 @@ mod tests {
     fn dupn_invalid_imm_not_eliminated() {
         // PUSH0, DUPN 0x5b (invalid immediate), POP, STOP.
         // The invalid immediate must NOT be eliminated — it should fail at runtime.
+        // Raw bytes required: the asm parser rejects invalid immediates.
         let bytecode = analyze_code_spec(
             vec![op::PUSH0, op::DUPN, 0x5b, op::POP, op::STOP],
             SpecId::AMSTERDAM,
@@ -758,10 +808,10 @@ mod tests {
 
     #[test]
     fn dupn_underflow_still_eliminated() {
-        // 1 × PUSH0, DUPN 17 (depth=17 but only 1 literal push), POP, POP, STOP.
+        // 1 × PUSH0, DUP 17 (depth=17 but only 1 literal push), POP, POP, STOP.
         // Block analysis inflates stack_in to satisfy DUPN's real depth, so from DSE's
         // perspective the immediate is valid and the instruction is eliminable.
-        let bytecode = with_prefix(1, &[op::DUPN, 0x00, op::POP, op::POP, op::STOP]);
+        let bytecode = with_prefix(1, "DUP 17 POP POP STOP");
         assert!(
             bytecode.inst(Inst::from_usize(1)).flags.contains(InstFlags::NOOP),
             "DUPN with valid immediate should be skipped when dead"
@@ -770,11 +820,9 @@ mod tests {
 
     #[test]
     fn swapn_dead() {
-        // 18 × PUSH0, SWAPN 17 (depth=17), 18 × POP, STOP — all dead.
-        let mut suffix = vec![op::SWAPN, 0x00];
-        suffix.extend(std::iter::repeat_n(op::POP, 18));
-        suffix.push(op::STOP);
-        let bytecode = with_prefix(18, &suffix);
+        // 18 × PUSH0, SWAP 17 (depth=17), 18 × POP, STOP — all dead.
+        let pops = "POP\n".repeat(18);
+        let bytecode = with_prefix(18, &format!("SWAP 17 {pops} STOP"));
         for i in 0..18 {
             assert!(
                 bytecode.inst(Inst::from_usize(i)).flags.contains(InstFlags::NOOP),
@@ -790,7 +838,7 @@ mod tests {
     #[test]
     fn exchange_dead() {
         // 3 × PUSH0, EXCHANGE (1,2), 3 × POP, STOP — all dead.
-        let bytecode = with_prefix(3, &[op::EXCHANGE, 0x01, op::POP, op::POP, op::POP, op::STOP]);
+        let bytecode = with_prefix(3, "EXCHANGE 1 2 POP POP POP STOP");
         for i in 0..3 {
             assert!(
                 bytecode.inst(Inst::from_usize(i)).flags.contains(InstFlags::NOOP),
@@ -805,25 +853,20 @@ mod tests {
 
     #[test]
     fn dupn_underflow_no_panic() {
-        // DUPN 17 with only 2 items on the stack — infeasible depth must not panic analysis.
-        let mut code = vec![op::PUSH0; 2];
-        code.extend([op::DUPN, 0x00, op::STOP]);
-        let _ = analyze_code_spec(code, SpecId::AMSTERDAM);
+        // DUP 17 with only 2 items on the stack — infeasible depth must not panic analysis.
+        let _ = with_prefix(2, "DUP 17 STOP");
     }
 
     #[test]
     fn swapn_underflow_no_panic() {
-        // SWAPN 17 with only 2 items — infeasible depth must not panic analysis.
-        let mut code = vec![op::PUSH0; 2];
-        code.extend([op::SWAPN, 0x00, op::STOP]);
-        let _ = analyze_code_spec(code, SpecId::AMSTERDAM);
+        // SWAP 17 with only 2 items — infeasible depth must not panic analysis.
+        let _ = with_prefix(2, "SWAP 17 STOP");
     }
 
     #[test]
     fn exchange_underflow_no_panic() {
         // EXCHANGE 1,2 with only 1 item — infeasible depth must not panic analysis.
-        let code = vec![op::PUSH0, op::EXCHANGE, 0x01, op::STOP];
-        let _ = analyze_code_spec(code, SpecId::AMSTERDAM);
+        let _ = with_prefix(1, "EXCHANGE 1 2 STOP");
     }
 
     // --- Const-output dead store tests ---
