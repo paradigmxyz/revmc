@@ -168,6 +168,92 @@ pub const fn stack_io(op: u8) -> (u8, u8) {
     }
 }
 
+/// Returns `true` if the opcode is a pure arithmetic, comparison, or bitwise operation
+/// with no side effects beyond stack I/O and static gas.
+///
+/// This is the subset that uses inline codegen (`popn`/`pop` → `operand_value_or_load`)
+/// and supports both dead-store elimination and const-input skipping.
+///
+/// Excludes DIV, SDIV, MOD, SMOD, ADDMOD, MULMOD, and EXP which delegate to builtins.
+pub(crate) fn is_inline_pure_op(op: u8) -> bool {
+    use revm_bytecode::opcode as op;
+    matches!(
+        op,
+        // Arithmetic (inline codegen via popn/pop).
+        op::ADD
+            | op::MUL
+            | op::SUB
+            | op::SIGNEXTEND
+            // Comparison.
+            | op::LT
+            | op::GT
+            | op::SLT
+            | op::SGT
+            | op::EQ
+            | op::ISZERO
+            // Bitwise.
+            | op::AND
+            | op::OR
+            | op::XOR
+            | op::NOT
+            | op::BYTE
+            | op::SHL
+            | op::SHR
+            | op::SAR
+            | op::CLZ
+    )
+}
+
+/// Returns `true` if the opcode is a pure arithmetic operation that delegates to a builtin.
+///
+/// These ops have no side effects and static gas (except EXP), but their codegen reads
+/// operands directly from the stack pointer via `sp_after_inputs()`.
+pub(crate) fn is_builtin_pure_op(op: u8) -> bool {
+    use revm_bytecode::opcode as op;
+    matches!(op, op::DIV | op::SDIV | op::MOD | op::SMOD | op::ADDMOD | op::MULMOD)
+}
+
+/// Returns `true` if the opcode is a stack shuffle (DUP, SWAP, EXCHANGE).
+pub(crate) fn is_stack_shuffle(op: u8) -> bool {
+    use revm_bytecode::opcode as op;
+    matches!(
+        op,
+        op::DUP1..=op::DUP16 | op::DUPN | op::SWAP1..=op::SWAP16 | op::SWAPN | op::EXCHANGE
+    )
+}
+
+/// Returns `true` if the opcode is a constant/push instruction.
+pub(crate) fn is_push_or_const(op: u8) -> bool {
+    use revm_bytecode::opcode as op;
+    matches!(op, op::PUSH0..=op::PUSH32 | op::PC | op::CODESIZE)
+}
+
+/// Returns `true` if the opcode is a pure environment read with no dynamic gas or side effects.
+pub(crate) fn is_pure_env_read(op: u8) -> bool {
+    use revm_bytecode::opcode as op;
+    matches!(
+        op,
+        op::ADDRESS
+            | op::ORIGIN
+            | op::CALLER
+            | op::CALLVALUE
+            | op::CALLDATALOAD
+            | op::CALLDATASIZE
+            | op::GASPRICE
+            | op::RETURNDATASIZE
+            | op::COINBASE
+            | op::TIMESTAMP
+            | op::NUMBER
+            | op::DIFFICULTY
+            | op::GASLIMIT
+            | op::CHAINID
+            | op::BASEFEE
+            | op::BLOBBASEFEE
+            | op::BLOBHASH
+            | op::SLOTNUM
+    )
+}
+
 /// Decodes a DUPN/SWAPN immediate byte into a stack index.
 ///
 /// Returns `None` if the immediate is in the invalid range `[91, 127]`.

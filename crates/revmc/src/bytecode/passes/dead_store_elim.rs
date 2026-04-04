@@ -141,71 +141,11 @@ impl Bytecode<'_> {
 /// (EXP), memory access (MLOAD, KECCAK256), storage/host reads (SLOAD, TLOAD, BALANCE,
 /// etc.), and MSIZE/GAS (position-dependent).
 fn can_skip_when_dead(opcode: u8) -> bool {
-    matches!(
-        opcode,
-        // Arithmetic.
-        op::ADD
-            | op::MUL
-            | op::SUB
-            | op::DIV
-            | op::SDIV
-            | op::MOD
-            | op::SMOD
-            | op::ADDMOD
-            | op::MULMOD
-            | op::SIGNEXTEND
-            // Comparison.
-            | op::LT
-            | op::GT
-            | op::SLT
-            | op::SGT
-            | op::EQ
-            | op::ISZERO
-            // Bitwise.
-            | op::AND
-            | op::OR
-            | op::XOR
-            | op::NOT
-            | op::BYTE
-            | op::SHL
-            | op::SHR
-            | op::SAR
-            | op::CLZ
-            // Stack shuffles (no side effects, static gas).
-            // These use shuffle_all_dead for precise dead checks since their
-            // stack_io arities include pass-through slots.
-            | op::DUP1
-            ..=op::DUP16
-            | op::DUPN
-            | op::SWAP1
-            ..=op::SWAP16
-            | op::SWAPN
-            | op::EXCHANGE
-            // Constants.
-            | op::PUSH0
-            ..=op::PUSH32
-            | op::PC
-            | op::CODESIZE
-            // Pure environment reads (no dynamic gas, no side effects).
-            | op::ADDRESS
-            | op::ORIGIN
-            | op::CALLER
-            | op::CALLVALUE
-            | op::CALLDATALOAD
-            | op::CALLDATASIZE
-            | op::GASPRICE
-            | op::RETURNDATASIZE
-            | op::COINBASE
-            | op::TIMESTAMP
-            | op::NUMBER
-            | op::DIFFICULTY
-            | op::GASLIMIT
-            | op::CHAINID
-            | op::BASEFEE
-            | op::BLOBBASEFEE
-            | op::BLOBHASH
-            | op::SLOTNUM
-    )
+    crate::is_inline_pure_op(opcode)
+        || crate::is_builtin_pure_op(opcode)
+        || crate::is_stack_shuffle(opcode)
+        || crate::is_push_or_const(opcode)
+        || crate::is_pure_env_read(opcode)
 }
 
 /// Backward liveness transfer for a single instruction.
@@ -321,32 +261,7 @@ fn generic_transfer(
 /// Builtins (CALL, SLOAD, MSTORE, …) read operands directly from the stack pointer,
 /// bypassing `const_operand`, so we cannot skip their inputs even if known-constant.
 fn can_skip_const_input(opcode: u8) -> bool {
-    matches!(
-        opcode,
-        // Arithmetic (inline codegen via popn/pop).
-        // Note: DIV, SDIV, MOD, SMOD, ADDMOD, MULMOD, EXP use builtins.
-        op::ADD
-            | op::MUL
-            | op::SUB
-            | op::SIGNEXTEND
-            // Comparison.
-            | op::LT
-            | op::GT
-            | op::SLT
-            | op::SGT
-            | op::EQ
-            | op::ISZERO
-            // Bitwise.
-            | op::AND
-            | op::OR
-            | op::XOR
-            | op::NOT
-            | op::BYTE
-            | op::SHL
-            | op::SHR
-            | op::SAR
-            | op::CLZ
-    )
+    crate::is_inline_pure_op(opcode)
 }
 
 /// SWAP liveness: permute liveness of TOS and the swapped position.
