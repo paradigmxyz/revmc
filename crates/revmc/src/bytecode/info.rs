@@ -189,13 +189,6 @@ fn make_map(spec_id: SpecId) -> [OpcodeInfo; 256] {
         // Fully dynamic opcodes have their entire gas cost handled in builtins.
         let gas = if is_fully_dynamic {
             0u16
-        } else if (op::LOG0..=op::LOG4).contains(&op) {
-            // LOG opcodes: upstream only uses the base LOG cost as static gas and handles
-            // per-topic cost dynamically. revmc deducts the full static portion
-            // (base + n * LOGTOPIC) upfront, so add the per-topic cost here.
-            let n_topics = (op - op::LOG0) as u64;
-            let static_gas = table[op as usize].static_gas();
-            (static_gas + n_topics * revm_interpreter::instructions::gas::LOGTOPIC) as u16
         } else {
             let static_gas = table[op as usize].static_gas();
             assert!(
