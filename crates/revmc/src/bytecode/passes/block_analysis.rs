@@ -59,6 +59,16 @@ pub(crate) struct Snapshots {
     pub(crate) outputs: IndexVec<Inst, Option<AbsValue>>,
 }
 
+impl Snapshots {
+    /// Restores snapshots for the given instructions from a previously saved copy.
+    pub(crate) fn restore_from(&mut self, insts: impl Iterator<Item = Inst>, saved: &Self) {
+        for inst in insts {
+            self.inputs[inst].clone_from(&saved.inputs[inst]);
+            self.outputs[inst] = saved.outputs[inst];
+        }
+    }
+}
+
 /// Abstract value on the stack.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum AbsValue {
@@ -373,12 +383,9 @@ impl Bytecode<'_> {
     ///
     /// Also computes and stores per-instruction stack snapshots for constant propagation.
     #[instrument(name = "ba", level = "debug", skip_all)]
-    pub(crate) fn block_analysis(&mut self) {
-        // Save local snapshots so that suspect-block invalidation can restore
-        // block-local constants instead of clearing to empty.
-        let local_snapshots = self.snapshots.clone();
+    pub(crate) fn block_analysis(&mut self, local_snapshots: &Snapshots) {
         self.init_snapshots();
-        let (resolved, count) = self.run_abstract_interp(&local_snapshots);
+        let (resolved, count) = self.run_abstract_interp(local_snapshots);
 
         if count > 0 {
             let newly_resolved = self.commit_resolved_jumps(&resolved);
@@ -774,10 +781,7 @@ impl Bytecode<'_> {
             if !suspect[bid.index()] {
                 continue;
             }
-            for inst in self.cfg.blocks[bid].insts() {
-                self.snapshots.inputs[inst].clone_from(&local_snapshots.inputs[inst]);
-                self.snapshots.outputs[inst] = local_snapshots.outputs[inst];
-            }
+            self.snapshots.restore_from(self.cfg.blocks[bid].insts(), local_snapshots);
         }
     }
 

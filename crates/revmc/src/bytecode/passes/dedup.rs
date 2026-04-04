@@ -4,7 +4,7 @@
 //! and eliminates duplicates by marking them as dead code and redirecting predecessors to a
 //! single canonical copy.
 
-use super::block_analysis::{Block, BlockData};
+use super::block_analysis::{Block, BlockData, Snapshots};
 use crate::bytecode::{Bytecode, Inst, InstData, InstFlags};
 use alloy_primitives::map::HashMap;
 use oxc_index::IndexVec;
@@ -21,8 +21,13 @@ impl<'a> Bytecode<'a> {
     /// redirected to the canonical block. For predecessors that reach the duplicate via
     /// fallthrough, a redirect entry is stored in [`Bytecode::redirects`] so the
     /// translator can map the dead instruction to the canonical block's IR block.
+    ///
+    /// `local_snapshots` are the block-local snapshots computed by `block_analysis_local`
+    /// (before the global fixpoint). After merging, the canonical block's snapshots are
+    /// restored to these local values because the global snapshots may be context-specific
+    /// and stale once multiple predecessors are merged.
     #[instrument(name = "dedup", level = "debug", skip_all)]
-    pub(crate) fn dedup_blocks(&mut self) {
+    pub(crate) fn dedup_blocks(&mut self, local_snapshots: &Snapshots) {
         // Group eligible (diverging, non-dead) blocks by their raw bytecode content.
         // We borrow `self.code` separately to avoid holding a `&self` borrow across mutations.
         let code = &*self.code;
@@ -69,6 +74,14 @@ impl<'a> Bytecode<'a> {
             }
             let (&canonical, dups) = group.split_first().unwrap();
             let canonical_first_inst = self.cfg.blocks[canonical].insts.start;
+
+            // Restore block-local snapshots for the canonical block. The global
+            // fixpoint may have recorded context-specific constants that become stale
+            // once the canonical block serves multiple predecessors after merging.
+            // Block-local constants (computed without incoming stack state) remain valid.
+            self.snapshots
+                .restore_from(self.cfg.blocks[canonical].insts(), local_snapshots);
+
             for &dup in dups {
                 deduped += 1;
                 trace!("deduped: {from} -> {to}", from = dup, to = canonical);
@@ -279,5 +292,61 @@ mod tests {
         bytecode.analyze().unwrap();
 
         assert_eq!(bytecode.redirects.len(), 13);
+    }
+
+    #[test]
+    fn dedup_invalidates_stale_const_snapshots() {
+        // Two byte-identical RETURN tails reached with different incoming constants.
+        // After dedup the canonical block must NOT retain stale const snapshots.
+        let bytecode = analyze_asm_with(
+            "
+            CALLDATASIZE
+            PUSH %path1
+            JUMPI
+
+            PUSH1 0xAA
+            PUSH %tail0
+            JUMP
+
+        path1:
+            JUMPDEST
+            PUSH1 0xBB
+            PUSH %tail1
+            JUMP
+
+        tail0:
+            JUMPDEST
+            PUSH1 0x01
+            ADD
+            PUSH0
+            MSTORE
+            PUSH1 0x20
+            PUSH0
+            RETURN
+
+        tail1:
+            JUMPDEST
+            PUSH1 0x01
+            ADD
+            PUSH0
+            MSTORE
+            PUSH1 0x20
+            PUSH0
+            RETURN
+        ",
+            AnalysisConfig::DEDUP,
+        );
+
+        // Dedup should have merged the two tails.
+        assert_eq!(bytecode.redirects.len(), 1);
+
+        // The canonical block's ADD must not carry a stale const_output
+        // (it would be 0xAB from the first context, but the second expects 0xBC).
+        let canonical_start = *bytecode.redirects.values().next().unwrap();
+        let add_inst = canonical_start + 2; // JUMPDEST, PUSH1, ADD
+        assert!(
+            bytecode.const_output(add_inst).is_none(),
+            "canonical ADD should have no const_output after dedup (was stale)",
+        );
     }
 }
