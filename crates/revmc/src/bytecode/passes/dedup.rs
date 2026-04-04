@@ -46,13 +46,13 @@ impl<'a> Bytecode<'a> {
         let mut key_to_blocks = HashMap::<DedupKey<'_>, SmallVec<[Block; 4]>>::default();
         let mut total_deduped = 0usize;
         loop {
+            key_to_blocks.clear();
             let deduped = self.dedup_blocks_once(code, &mut key_to_blocks, local_snapshots);
             total_deduped += deduped;
             if deduped == 0 {
                 break;
             }
             self.rebuild_cfg();
-            key_to_blocks.clear();
         }
         debug!(deduped = total_deduped, "finished");
     }
