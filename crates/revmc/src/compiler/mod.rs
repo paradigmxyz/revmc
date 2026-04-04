@@ -20,11 +20,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-// TODO: Get rid of `cfg!(target_endian)` calls.
-
-// TODO: Test on big-endian hardware.
-// It probably doesn't work when loading Rust U256 into native endianness.
-
 mod peephole;
 mod translate;
 use translate::{FcxConfig, FunctionCx};
