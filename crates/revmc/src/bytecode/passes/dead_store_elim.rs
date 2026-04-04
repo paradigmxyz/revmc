@@ -11,7 +11,7 @@
 //! - EXCHANGE swaps two arbitrary non-TOS positions.
 //! - POP kills its input (makes the position dead) rather than reading it.
 
-use super::StackSectionAnalysis;
+use super::{StackSectionAnalysis, block_analysis::AbsValue};
 use crate::bytecode::{Bytecode, InstFlags};
 use bitvec::vec::BitVec;
 use revm_bytecode::opcode as op;
@@ -111,7 +111,15 @@ impl Bytecode<'_> {
                     continue;
                 }
 
-                transfer_liveness(&mut live, opcode, h_before, inp as usize, out as usize, imm);
+                transfer_liveness(
+                    &mut live,
+                    opcode,
+                    h_before,
+                    inp as usize,
+                    out as usize,
+                    imm,
+                    self.snapshots.outputs.get(inst).copied().flatten(),
+                );
             }
         }
 
@@ -206,6 +214,10 @@ fn can_skip_when_dead(opcode: u8) -> bool {
 /// in-bounds since `live` is sized to the block's max stack height.
 ///
 /// `imm` carries the decoded immediate for DUPN/SWAPN/EXCHANGE; `None` for all other opcodes.
+///
+/// `output` carries the abstract interpretation output snapshot. When the output is a known
+/// constant, codegen replaces the entire instruction with a constant push and none of the inputs
+/// need to be live.
 fn transfer_liveness(
     live: &mut BitVec,
     opcode: u8,
@@ -213,6 +225,7 @@ fn transfer_liveness(
     inp: usize,
     out: usize,
     imm: Option<DecodedImm>,
+    output: Option<AbsValue>,
 ) {
     match opcode {
         op::SWAP1..=op::SWAP16 => {
@@ -254,16 +267,32 @@ fn transfer_liveness(
         op::POP => {
             live.set(h_before - 1, false);
         }
-        _ => generic_transfer(live, h_before, inp, out),
+        _ => generic_transfer(live, h_before, inp, out, output),
     }
 }
 
 /// Generic liveness transfer: kill all outputs, then mark all inputs as live.
-fn generic_transfer(live: &mut BitVec, h_before: usize, inp: usize, out: usize) {
+///
+/// When the output is a known constant, codegen replaces the entire instruction with a
+/// constant push and never reads any inputs from the stack, so none of them need to be live.
+fn generic_transfer(
+    live: &mut BitVec,
+    h_before: usize,
+    inp: usize,
+    out: usize,
+    output: Option<AbsValue>,
+) {
     let write_base = h_before - inp;
+    // Kill outputs.
     for k in 0..out {
         live.set(write_base + k, false);
     }
+    // If the output is a known constant, codegen replaces the entire instruction
+    // with a constant push — none of the inputs are read from the stack.
+    if out > 0 && matches!(output, Some(AbsValue::Const(_))) {
+        return;
+    }
+    // Mark all inputs as live.
     for k in 0..inp {
         live.set(h_before - inp + k, true);
     }
@@ -751,5 +780,74 @@ mod tests {
         // EXCHANGE 1,2 with only 1 item — infeasible depth must not panic analysis.
         let code = vec![op::PUSH0, op::EXCHANGE, 0x01, op::STOP];
         let _ = analyze_code_spec(code, SpecId::AMSTERDAM);
+    }
+
+    // --- Const-output dead store tests ---
+
+    #[test]
+    fn const_output_kills_all_inputs() {
+        // ADD(2, 3) = 5: const_output is Some, so ALL inputs are dead.
+        let bytecode = analyze_asm(
+            "
+            PUSH1 0x02      ; inst 0
+            PUSH1 0x03      ; inst 1
+            ADD             ; inst 2: folded to 5
+            PUSH0           ; inst 3
+            MSTORE          ; inst 4
+            STOP            ; inst 5
+        ",
+        );
+        assert!(
+            bytecode.inst(Inst::from_usize(0)).flags.contains(InstFlags::NOOP),
+            "PUSH 2 should be skipped (const output from ADD)"
+        );
+        assert!(
+            bytecode.inst(Inst::from_usize(1)).flags.contains(InstFlags::NOOP),
+            "PUSH 3 should be skipped (const output from ADD)"
+        );
+    }
+
+    #[test]
+    fn const_output_chain() {
+        // Chained folds: ADD(2,3)=5 feeds MUL(5,4)=20.
+        // All four PUSHes and the ADD are dead.
+        let bytecode = analyze_asm(
+            "
+            PUSH1 0x02      ; inst 0
+            PUSH1 0x03      ; inst 1
+            ADD             ; inst 2: folded to 5
+            PUSH1 0x04      ; inst 3
+            MUL             ; inst 4: folded to 20
+            PUSH0           ; inst 5
+            MSTORE          ; inst 6
+            STOP            ; inst 7
+        ",
+        );
+        for (i, name) in [(0, "PUSH 2"), (1, "PUSH 3"), (2, "ADD"), (3, "PUSH 4")] {
+            assert!(
+                bytecode.inst(Inst::from_usize(i)).flags.contains(InstFlags::NOOP),
+                "{name} should be skipped"
+            );
+        }
+    }
+
+    #[test]
+    fn const_output_partial_inputs_stay_live() {
+        // DIV(dynamic, 1): output is NOT const (dynamic numerator), so inputs stay live.
+        let bytecode = analyze_asm(
+            "
+            PUSH0           ; inst 0
+            CALLDATALOAD    ; inst 1: dynamic
+            PUSH1 0x01      ; inst 2: divisor
+            DIV             ; inst 3: dynamic / 1, output unknown
+            PUSH0           ; inst 4
+            MSTORE          ; inst 5
+            STOP            ; inst 6
+        ",
+        );
+        assert!(
+            !bytecode.inst(Inst::from_usize(2)).flags.contains(InstFlags::NOOP),
+            "PUSH 1 should NOT be skipped (output not const)"
+        );
     }
 }

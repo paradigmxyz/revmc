@@ -669,7 +669,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             self.section_len_offset += diff;
             goto_return!("noop");
         }
-        if diff != 0 {
+        if diff != 0 || self.section_len_offset != 0 {
             let len_changed = self.bcx.iadd_imm(self.len_before, diff as i64);
             self.stack_len.store(&mut self.bcx, len_changed);
         }
