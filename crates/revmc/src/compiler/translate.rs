@@ -669,7 +669,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             self.section_len_offset += diff;
             goto_return!("noop");
         }
-        if diff != 0 {
+        if diff != 0 || self.section_len_offset != 0 {
             let len_changed = self.bcx.iadd_imm(self.len_before, diff as i64);
             self.stack_len.store(&mut self.bcx, len_changed);
         }
@@ -1355,9 +1355,28 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
     /// Returns the stack pointer after the input has been popped
     /// (`&stack[stack.len - op.input()]`).
+    ///
+    /// For any input whose value is a known constant, the constant is written into the
+    /// corresponding stack slot. This allows DSE to NOOP the producing PUSH even for
+    /// builtin-delegated opcodes that read operands directly from the stack pointer.
     fn sp_after_inputs(&mut self) -> B::Value {
+        let inst = self.current_inst.unwrap();
         let (inputs, _) = self.current_inst().stack_io();
-        self.sp_from_section(self.section_len_offset as i64 - inputs as i64)
+        let sp = self.sp_from_section(self.section_len_offset as i64 - inputs as i64);
+        for depth in 0..inputs as usize {
+            if let Some(c) = self.bytecode.const_operand(inst, depth) {
+                let value = self.bcx.iconst_256(c);
+                let slot_offset = (inputs as usize - 1 - depth) as i64;
+                let slot = if slot_offset == 0 {
+                    sp
+                } else {
+                    let offset = self.bcx.iconst(self.isize_type, slot_offset);
+                    self.bcx.gep(self.word_type, sp, &[offset], "sp.const")
+                };
+                self.bcx.store(value, slot);
+            }
+        }
+        sp
     }
 
     /// Returns a stack pointer offset from `section_start_sp`.
