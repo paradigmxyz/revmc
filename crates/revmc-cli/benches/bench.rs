@@ -164,7 +164,7 @@ fn run_bytecode_bench(c: &mut Criterion, bench: &revmc_cli::Bench) {
                 || {
                     let mut stack = EvmStack::new();
                     for (i, input) in def.stack_input.iter().enumerate() {
-                        stack.as_mut_slice()[i] = (*input).into();
+                        stack.set(i, (*input).into());
                     }
                     (new_interpreter(), stack)
                 },
