@@ -2364,4 +2364,137 @@ mod tests_edge_cases {
             "return jump should remain dynamic when fixpoint doesn't converge"
         );
     }
+
+    /// Context truncation at MAX_CONTEXT_DEPTH must taint the return block.
+    ///
+    /// Builds a call chain deeper than MAX_CONTEXT_DEPTH where the innermost
+    /// function is shared with a direct caller on a separate path. When the
+    /// context is truncated, the shared function's return block is reached with
+    /// empty context (the oldest caller was evicted), so PCR must suppress the
+    /// hint to avoid emitting an incomplete target set.
+    #[test]
+    fn pcr_context_truncation_taints_return() {
+        // entry ─JUMPI─> extra_caller ─> shared_fn ─return─> ret_extra
+        //   └─fallthrough─> f0 -> f1 -> ... -> f(depth-1) -> shared_fn ─return─> ...
+        //
+        // The chain path has depth > MAX_CONTEXT_DEPTH, so the context is
+        // truncated before reaching shared_fn. shared_fn's return is then
+        // reached with empty context from that path.
+        let depth = 12; // > MAX_CONTEXT_DEPTH (8)
+        let mut lines = Vec::new();
+
+        // Entry: branch to extra_caller or fallthrough to chain.
+        lines.push("PUSH0".to_string());
+        lines.push("CALLDATALOAD".to_string());
+        lines.push("PUSH %extra_caller".to_string());
+        lines.push("JUMPI".to_string());
+
+        // Fallthrough: call f0.
+        lines.push("PUSH %ret_entry".to_string());
+        lines.push("PUSH %f0".to_string());
+        lines.push("JUMP".to_string());
+        lines.push("ret_entry:".to_string());
+        lines.push("JUMPDEST".to_string());
+        lines.push("POP".to_string());
+        lines.push("STOP".to_string());
+
+        // Chain: f0 calls f1, ..., f(depth-1) calls shared_fn.
+        for i in 0..depth {
+            lines.push(format!("f{i}:"));
+            lines.push("JUMPDEST".to_string());
+            let callee =
+                if i + 1 < depth { format!("f{}", i + 1) } else { "shared_fn".to_string() };
+            lines.push(format!("PUSH %ret_f{i}"));
+            lines.push(format!("PUSH %{callee}"));
+            lines.push("JUMP".to_string());
+            lines.push(format!("ret_f{i}:"));
+            lines.push("JUMPDEST".to_string());
+            lines.push("SWAP1".to_string());
+            lines.push("JUMP".to_string());
+        }
+
+        // Extra direct caller of shared_fn (reachable from entry via JUMPI).
+        lines.push("extra_caller:".to_string());
+        lines.push("JUMPDEST".to_string());
+        lines.push("PUSH %ret_extra".to_string());
+        lines.push("PUSH %shared_fn".to_string());
+        lines.push("JUMP".to_string());
+        lines.push("ret_extra:".to_string());
+        lines.push("JUMPDEST".to_string());
+        lines.push("POP".to_string());
+        lines.push("STOP".to_string());
+
+        // Shared function: push result and return via entry-stack address.
+        lines.push("shared_fn:".to_string());
+        lines.push("JUMPDEST".to_string());
+        lines.push("PUSH1 0x42".to_string());
+        lines.push("SWAP1".to_string());
+        lines.push("JUMP".to_string());
+
+        let asm = lines.join("\n");
+        let bytecode = analyze_asm(&asm);
+
+        // shared_fn's return JUMP must NOT be resolved as a single STATIC_JUMP
+        // because context truncation may have hidden valid callers.
+        let shared_fn_return = bytecode
+            .iter_insts()
+            .rev()
+            .find(|(_, d)| d.is_jump() && !d.flags.contains(InstFlags::DEAD_CODE));
+        let (_, rj) = shared_fn_return.unwrap();
+        assert!(
+            !rj.flags.contains(InstFlags::STATIC_JUMP) || rj.flags.contains(InstFlags::MULTI_JUMP),
+            "context truncation: shared return should not be resolved to a single target"
+        );
+    }
+
+    /// JUMPI where only the condition (not the destination) has Input provenance
+    /// must NOT be classified as a private return.
+    #[test]
+    fn jumpi_condition_input_not_return() {
+        let bytecode = analyze_asm(
+            "
+            ; Call site 1.
+            PUSH %ret1
+            PUSH %fn_entry
+            JUMP
+        ret1:
+            JUMPDEST
+            POP
+            ; Call site 2.
+            PUSH %ret2
+            PUSH %fn_entry
+            JUMP
+        ret2:
+            JUMPDEST
+            POP
+            STOP
+
+            ; Function that uses JUMPI where the CONDITION comes from the entry
+            ; stack (Input provenance) but the DESTINATION is a local constant.
+            ; This must NOT be classified as a private return.
+        fn_entry:
+            JUMPDEST            ; stack: [ret_addr]
+            PUSH %local_target  ; stack: [ret_addr, local_target]
+            SWAP1               ; stack: [local_target, ret_addr]
+            JUMPI               ; pops (dest=local_target, cond=ret_addr)
+            STOP                ; fallthrough
+        local_target:
+            JUMPDEST
+            STOP
+        ",
+        );
+
+        // The JUMPI should be resolved as a static jump to local_target
+        // (not classified as a return). If PCR wrongly checks the condition's
+        // provenance instead of the destination's, it would see Input and
+        // classify this as a return.
+        let fn_jumpi = bytecode
+            .iter_insts()
+            .find(|(_, d)| d.opcode == op::JUMPI && !d.flags.contains(InstFlags::DEAD_CODE));
+        let (_, ji) = fn_jumpi.unwrap();
+        assert!(
+            ji.flags.contains(InstFlags::STATIC_JUMP),
+            "JUMPI with local destination should be resolved as static, not classified as return"
+        );
+    }
 }

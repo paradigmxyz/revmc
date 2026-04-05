@@ -191,14 +191,9 @@ impl Bytecode<'_> {
             if !term.flags.contains(InstFlags::STATIC_JUMP) {
                 prov_stack.clear();
                 prov_stack.resize(section.inputs as usize, Provenance::Input);
-                // Simulate up to (but not including) the terminator, then check
-                // the destination operand's provenance. For JUMP the destination
-                // is TOS; for JUMPI it is second-from-top (TOS is the condition).
                 let pre_term = block.insts().take_while(|&i| i != term_inst);
-                let (term_inp, _) = term.stack_io();
                 if self.simulate_provenance(pre_term, &mut prov_stack)
-                    && let Some(idx) = prov_stack.len().checked_sub(term_inp as usize)
-                    && prov_stack.get(idx) == Some(&Provenance::Input)
+                    && prov_stack.last().copied() == Some(Provenance::Input)
                 {
                     summaries[bid].is_return = true;
                 }
@@ -283,6 +278,12 @@ impl Bytecode<'_> {
         let mut return_targets: IndexVec<Block, SmallVec<[Inst; 4]>> =
             IndexVec::from_vec(vec![SmallVec::new(); num_blocks]);
 
+        // Per return-block: whether it was reached with an empty or invalid context
+        // (no matching caller). This can happen due to MAX_CONTEXT_DEPTH truncation
+        // or non-call paths into callee blocks. Such returns may have callers PCR
+        // cannot discover, so their hints must be suppressed.
+        let mut context_tainted: BitVec = BitVec::repeat(false, num_blocks);
+
         let max_iterations = num_blocks * 64;
         let mut iterations = 0;
         let mut converged = true;
@@ -335,10 +336,11 @@ impl Bytecode<'_> {
                     if let Some(cont_block) = self.cfg.inst_to_block[continuation] {
                         wl.push(cont_block, new_ctx);
                     }
+                } else {
+                    // Return reached with empty or invalid context — PCR may not
+                    // have discovered all callers (e.g. due to context truncation).
+                    context_tainted.set(bid.index(), true);
                 }
-                // Note: returns reached with empty/invalid context are not
-                // propagated further. Tainting is handled structurally by
-                // `compute_opaque_taint` instead.
             } else {
                 // Normal block: propagate to all successors with same context.
                 for &succ in &block.succs {
@@ -361,7 +363,7 @@ impl Bytecode<'_> {
         // Collect hints from resolved return targets.
         let mut hints = Vec::new();
         for (bid, targets) in return_targets.iter_enumerated() {
-            if targets.is_empty() || tainted_returns[bid.index()] {
+            if targets.is_empty() || tainted_returns[bid.index()] || context_tainted[bid.index()] {
                 continue;
             }
             let term_inst = self.cfg.blocks[bid].terminator();

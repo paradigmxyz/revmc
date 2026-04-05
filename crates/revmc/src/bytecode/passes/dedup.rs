@@ -52,6 +52,20 @@ impl<'a> Bytecode<'a> {
             if deduped == 0 {
                 break;
             }
+            // Compress redirect chains so that earlier redirects (e.g. A→B) are
+            // updated when their target gets deduped in a later round (B→C).
+            // Without this, rebuild_cfg resolves edges only one hop, leaving stale
+            // intermediate targets.
+            for inst in self.redirects.keys().copied().collect::<Vec<_>>() {
+                let mut target = self.redirects[&inst];
+                let original = target;
+                while let Some(&next) = self.redirects.get(&target) {
+                    target = next;
+                }
+                if target != original {
+                    self.redirects.insert(inst, target);
+                }
+            }
             self.rebuild_cfg();
         }
         debug!(deduped = total_deduped, "finished");

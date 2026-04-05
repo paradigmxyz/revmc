@@ -1539,6 +1539,18 @@ tests! {
         }),
     }
 
+    dedup {
+        // Transitive redirect chains in dedup caused MULTI_JUMP case PCs to resolve to
+        // stale dead entry blocks, producing InvalidJump on valid bytecode.
+        transitive_redirect_multi_jump(@raw {
+            bytecode: &hex!("3660095760266020565b3460155760286022602a565b60286024602a56fefefe5b565b565b565b005b005b56"),
+            spec_id: SpecId::CANCUN,
+            expected_return: RETURN_WHAT_INTERPRETER_SAYS,
+            expected_stack: STACK_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+        }),
+    }
+
     regressions {
         // Mismatched costs in < BERLIN.
         // GeneralStateTests/stSolidityTest/TestKeywords.json
