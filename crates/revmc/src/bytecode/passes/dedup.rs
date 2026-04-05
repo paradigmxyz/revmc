@@ -421,6 +421,7 @@ mod tests {
         bytecode.config = AnalysisConfig::DEDUP;
         bytecode.analyze().unwrap();
 
+        assert!(!bytecode.has_dynamic_jumps());
         assert_eq!(bytecode.redirects.len(), 20);
     }
 

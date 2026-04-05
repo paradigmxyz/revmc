@@ -31,13 +31,15 @@
 use super::{StackSection, pcr::PcrHint};
 use crate::{
     FxHashMap,
-    bytecode::{Bytecode, Inst, InstFlags, Interner, U256Idx},
+    bytecode::{
+        Bytecode, Inst, InstFlags, Interner, U256Idx,
+        passes::const_fold::{const_fold_gas, try_const_fold},
+    },
 };
 use bitvec::vec::BitVec;
 use either::Either;
 use oxc_index::IndexVec;
 use revm_bytecode::opcode as op;
-use revm_primitives::U256;
 use smallvec::SmallVec;
 use std::{cmp::Ordering, collections::VecDeque, ops::Range};
 
@@ -647,14 +649,14 @@ impl Bytecode<'_> {
             // If the fixpoint left this jump unresolved, try the PCR hint.
             // Only for Top (reachable but unknown); Bottom means unreachable.
             if matches!(target, JumpTarget::Top)
-                && let Some(hint) = pcr_map.get(&jump_inst)
+                && let Some(&hint) = pcr_map.get(&jump_inst)
             {
                 target = if hint.targets.len() == 1 {
                     JumpTarget::Const(hint.targets[0])
                 } else {
                     JumpTarget::Multi(hint.targets.clone())
                 };
-                trace!(%jump_inst, n = hint.targets.len(), "resolved via PCR hint");
+                trace!(%jump_inst, ?hint.targets, "resolved via PCR hint");
             }
 
             if matches!(target, JumpTarget::Top) {
@@ -951,9 +953,7 @@ impl Bytecode<'_> {
                 if !ok {
                     return false;
                 }
-            } else if matches!(inst.opcode, op::PUSH0) {
-                stack.push(AbsValue::Const(self.intern_u256(U256::ZERO)));
-            } else if matches!(inst.opcode, op::PUSH1..=op::PUSH32) {
+            } else if matches!(inst.opcode, op::PUSH0..=op::PUSH32) {
                 let value = self.get_push_value(inst);
                 stack.push(AbsValue::Const(self.intern_u256(value)));
             } else {
@@ -962,29 +962,14 @@ impl Bytecode<'_> {
                 }
 
                 // Try constant folding for common arithmetic, respecting the gas budget.
-                let result = if out > 0 && self.compiler_gas_used < self.compiler_gas_limit {
-                    let inputs_slice = &stack[stack.len() - inp..];
-                    let mut interner = self.u256_interner.borrow_mut();
-
-                    // Check gas cost before doing the actual fold.
-                    let gas =
-                        super::const_fold::const_fold_gas(inst.opcode, inputs_slice, &interner);
-                    if let Some(cost) = gas
-                        && self.compiler_gas_used.saturating_add(cost) <= self.compiler_gas_limit
-                    {
-                        let folded = super::const_fold::try_const_fold(
-                            inst,
-                            inputs_slice,
-                            &mut interner,
-                            self.code.len(),
-                        );
-                        if folded.is_some() {
-                            self.compiler_gas_used += cost;
-                        }
-                        folded
-                    } else {
-                        None
-                    }
+                let result = if out > 0
+                    && !self.out_of_compiler_gas()
+                    && let inputs_slice = &stack[stack.len() - inp..]
+                    && let mut interner = self.u256_interner.borrow_mut()
+                    && let Some(cost) = const_fold_gas(inst.opcode, inputs_slice, &interner)
+                    && pay_compiler_gas(&mut self.compiler_gas_used, self.compiler_gas_limit, cost)
+                {
+                    try_const_fold(inst, inputs_slice, &mut interner, self.code.len())
                 } else {
                     None
                 };
@@ -1016,6 +1001,15 @@ impl Bytecode<'_> {
 
         true
     }
+
+    fn out_of_compiler_gas(&self) -> bool {
+        self.compiler_gas_used > self.compiler_gas_limit
+    }
+}
+
+fn pay_compiler_gas(gas: &mut u64, limit: u64, cost: u64) -> bool {
+    *gas = gas.saturating_add(cost);
+    *gas <= limit
 }
 
 #[cfg(test)]
