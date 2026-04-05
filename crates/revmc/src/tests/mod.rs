@@ -1542,11 +1542,26 @@ tests! {
     dedup {
         // Transitive redirect chains in dedup caused MULTI_JUMP case PCs to resolve to
         // stale dead entry blocks, producing InvalidJump on valid bytecode.
+        // Dedup creates t2->t1, t1->t0, u1->u0. The live `fn` block has a MULTI_JUMP
+        // dispatching to t0/t1/t2. Without transitive compression, t2's inst_entry
+        // pointed at the dead t1 block instead of canonical t0.
+        // Path: entry -> path1 -> path2 -> fn -> t2 -> u1 -> STOP
         transitive_redirect_multi_jump(@raw {
             bytecode: &hex!("3660095760266020565b3460155760286022602a565b60286024602a56fefefe5b565b565b565b005b005b56"),
             spec_id: SpecId::CANCUN,
             expected_return: RETURN_WHAT_INTERPRETER_SAYS,
             expected_stack: STACK_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+        }),
+
+        // Dedup merges two byte-identical MULTI_JUMP dispatcher blocks after their
+        // target blocks are deduped, but only the canonical dispatcher's case PCs
+        // were emitted in the switch. Valid PCs unique to the eliminated dispatcher
+        // fell into InvalidJump. DEF_CD has nonzero words, so the bytecode takes the
+        // path through the second dispatcher (the one that gets deduped away).
+        dedup_multi_jump_dispatcher(@raw {
+            bytecode: &hex!("5f3560165760203560105760286030565b602a6030565b602035602257602c6032565b602e6032565b005b005b005b005b565b56"),
+            expected_return: InstructionResult::Stop,
             expected_gas: GAS_WHAT_INTERPRETER_SAYS,
         }),
     }
