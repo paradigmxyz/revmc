@@ -1016,7 +1016,7 @@ fn pay_compiler_gas(gas: &mut u64, limit: u64, cost: u64) -> bool {
 pub(crate) mod tests {
     use super::*;
     pub(crate) use crate::bytecode::Inst;
-    use revm_primitives::{hardfork::SpecId, hex};
+    pub(crate) use revm_primitives::{U256, hardfork::SpecId, hex};
 
     pub(crate) fn analyze_hex(hex: &str) -> Bytecode<'static> {
         let code = hex::decode(hex.trim()).unwrap();
@@ -2361,6 +2361,7 @@ mod tests_edge_cases {
     /// empty context (the oldest caller was evicted), so PCR must suppress the
     /// hint to avoid emitting an incomplete target set.
     #[test]
+    #[allow(clippy::vec_init_then_push)]
     fn pcr_context_truncation_taints_return() {
         // entry ─JUMPI─> extra_caller ─> shared_fn ─return─> ret_extra
         //   └─fallthrough─> f0 -> f1 -> ... -> f(depth-1) -> shared_fn ─return─> ...
