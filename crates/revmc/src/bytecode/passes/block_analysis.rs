@@ -361,28 +361,22 @@ impl Bytecode<'_> {
             let Some(&operand) = self.snapshots.inputs[term_inst].last() else { continue };
             debug_assert!(!matches!(operand, AbsValue::ConstSet(_)));
             let target = self.resolve_jump_operand(operand, &empty_sets);
-            match target {
-                JumpTarget::Const(target_inst) => {
-                    // Log non-adjacent resolutions (not simple PUSH+JUMP).
-                    if trace_logs
-                        && let is_adjacent = (term_inst > 0 && {
-                            let prev_inst = term_inst - 1;
-                            let prev = &self.insts[prev_inst];
-                            matches!(prev.opcode, op::PUSH0..=op::PUSH32)
-                                && !prev.is_dead_code()
-                                && block.insts.contains(&prev_inst)
-                        })
-                        && !is_adjacent
-                    {
-                        trace!(%term_inst, %target_inst, pc = self.insts[term_inst].pc, "resolved non-adjacent jump");
-                    }
-                    resolved.push((term_inst, target));
-                }
-                JumpTarget::Invalid => {
-                    resolved.push((term_inst, target));
-                }
-                _ => {}
+
+            // Log non-adjacent resolutions (not simple PUSH+JUMP).
+            if trace_logs
+                && let is_adjacent = (term_inst > 0 && {
+                    let prev_inst = term_inst - 1;
+                    let prev = &self.insts[prev_inst];
+                    matches!(prev.opcode, op::PUSH0..=op::PUSH32)
+                        && !prev.is_dead_code()
+                        && block.insts.contains(&prev_inst)
+                })
+                && !is_adjacent
+            {
+                trace!(%term_inst, ?target, pc = self.insts[term_inst].pc, "resolved non-adjacent jump");
             }
+
+            resolved.push((term_inst, target));
         }
 
         let newly_resolved = self.commit_resolved_jumps(&resolved);
