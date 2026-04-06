@@ -362,6 +362,9 @@ impl Bytecode<'_> {
 
             let Some(&operand) = self.snapshots.inputs[term_inst].last() else { continue };
             debug_assert!(!matches!(operand, AbsValue::ConstSet(_)));
+            if operand == AbsValue::Top {
+                continue;
+            }
             let target = self.resolve_jump_operand(operand, &empty_sets);
 
             // Log non-adjacent resolutions (not simple PUSH+JUMP).
