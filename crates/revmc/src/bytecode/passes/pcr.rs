@@ -312,7 +312,12 @@ impl Bytecode<'_> {
                     wl.push(callee_block, new_ctx);
                 }
 
-                // Also follow the fallthrough edge (for JUMPI terminators).
+                // Also follow the continuation edge with the original context.
+                // For JUMPI: the fallthrough is a CFG successor.
+                // For JUMP: the continuation is not a CFG successor (it's only reached
+                // when the callee returns), but we follow it optimistically to ensure
+                // the traversal explores post-call blocks even when the callee's return
+                // is not yet resolved (e.g., the callee always reverts on some paths).
                 let term = &self.insts[block.terminator()];
                 if term.opcode == op::JUMPI {
                     for &succ in &block.succs {
@@ -320,6 +325,9 @@ impl Bytecode<'_> {
                             wl.push(succ, ctx.clone());
                         }
                     }
+                }
+                if let Some(cont_block) = self.cfg.inst_to_block[call.continuation] {
+                    wl.push(cont_block, ctx.clone());
                 }
             } else if summary.is_return {
                 // Private function return: pop the caller from the context
