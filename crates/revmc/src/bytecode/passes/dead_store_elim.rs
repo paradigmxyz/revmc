@@ -425,6 +425,10 @@ mod tests {
             bytecode.inst(Inst::from_usize(0)).flags.contains(InstFlags::NOOP),
             "PUSH should be skipped (dead store)"
         );
+        assert!(
+            bytecode.inst(Inst::from_usize(1)).flags.contains(InstFlags::NOOP),
+            "POP should be skipped (input dead)"
+        );
     }
 
     #[test]
@@ -438,7 +442,7 @@ mod tests {
             STOP
         ",
         );
-        for (i, name) in [(0, "PUSH 3"), (1, "PUSH 4"), (2, "ADD")] {
+        for (i, name) in [(0, "PUSH 3"), (1, "PUSH 4"), (2, "ADD"), (3, "POP")] {
             assert!(
                 bytecode.inst(Inst::from_usize(i)).flags.contains(InstFlags::NOOP),
                 "{name} should be skipped"
@@ -1034,6 +1038,133 @@ mod tests {
         assert!(
             bytecode.inst(Inst::from_usize(0)).flags.contains(InstFlags::NOOP),
             "PUSH 0 should be skipped (const input)"
+        );
+    }
+
+    // --- POP DSE tests ---
+
+    #[test]
+    fn pop_dead_at_diverging_exit() {
+        // POP's input is dead because STOP diverges.
+        let bytecode = analyze_asm(
+            "
+            PUSH1 0x42      ; inst 0
+            PUSH1 0x69      ; inst 1
+            POP             ; inst 2: input dead (exit diverges)
+            POP             ; inst 3: input dead
+            STOP            ; inst 4
+        ",
+        );
+        for (i, name) in [(0, "PUSH 0x42"), (1, "PUSH 0x69"), (2, "POP"), (3, "POP")] {
+            assert!(
+                bytecode.inst(Inst::from_usize(i)).flags.contains(InstFlags::NOOP),
+                "{name} at {i} should be skipped"
+            );
+        }
+    }
+
+    #[test]
+    fn pop_live_input_not_eliminated() {
+        // POP's input is live because it was produced by CALLDATALOAD and the
+        // position feeds a later MSTORE (via the stack layout). POP cannot be
+        // eliminated here because the value it discards is needed.
+        let bytecode = analyze_asm(
+            "
+            PUSH0           ; inst 0
+            CALLDATALOAD    ; inst 1: dynamic value
+            DUP1            ; inst 2: copy
+            POP             ; inst 3: pops the copy (dead)
+            PUSH0           ; inst 4
+            MSTORE          ; inst 5: stores the original
+            STOP            ; inst 6
+        ",
+        );
+        assert!(
+            bytecode.inst(Inst::from_usize(2)).flags.contains(InstFlags::NOOP),
+            "DUP1 should be skipped (copy is dead)"
+        );
+        assert!(
+            bytecode.inst(Inst::from_usize(3)).flags.contains(InstFlags::NOOP),
+            "POP should be skipped (input is dead copy)"
+        );
+        assert!(
+            !bytecode.inst(Inst::from_usize(1)).flags.contains(InstFlags::NOOP),
+            "CALLDATALOAD should NOT be skipped (feeds MSTORE)"
+        );
+    }
+
+    #[test]
+    fn pop_after_suspend() {
+        // Regression test for stale stack_len bug: CALL suspends and creates a
+        // section boundary. POP immediately after CALL is NOOP'd because its
+        // input (the CALL success flag) feeds only a dead POP+STOP sequence.
+        // The codegen must still update the stack_len alloca for the section head
+        // reload to see the correct height.
+        let bytecode = analyze_code_spec(
+            vec![
+                op::PUSH1,
+                0x00, // ret length
+                op::PUSH1,
+                0x00, // ret offset
+                op::PUSH1,
+                0x00, // args length
+                op::PUSH1,
+                0x00, // args offset
+                op::PUSH1,
+                0x00, // value
+                op::PUSH1,
+                0x69,     // address
+                op::GAS,  // gas
+                op::CALL, // inst 7: suspends, pushes success flag
+                op::POP,  // inst 8: pops success flag
+                op::STOP, // inst 9
+            ],
+            SpecId::CANCUN,
+        );
+        assert!(
+            bytecode.inst(Inst::from_usize(8)).flags.contains(InstFlags::NOOP),
+            "POP after CALL should be NOOP'd (success flag is dead)"
+        );
+    }
+
+    #[test]
+    fn pop_after_suspend_with_dup() {
+        // CALL → POP → DUP6: the POP (NOOP'd) decrements the stack. DUP6 must
+        // see the correct height after the POP, otherwise it reads the wrong slot.
+        // This is the pattern from precompsEIP2929Cancun.json that exposed the bug.
+        let bytecode = analyze_code_spec(
+            vec![
+                op::PUSH1,
+                0x00, // ret length
+                op::PUSH1,
+                0x00, // ret offset
+                op::PUSH1,
+                0x00, // args length
+                op::PUSH1,
+                0x00, // args offset
+                op::PUSH1,
+                0x00, // value
+                op::PUSH1,
+                0x69,     // address
+                op::GAS,  // gas
+                op::CALL, // suspends, pushes success
+                op::POP,  // pops success (NOOP'd)
+                op::PUSH1,
+                0x42,       // push marker
+                op::PUSH0,  //
+                op::MSTORE, // store marker to memory
+                op::STOP,
+            ],
+            SpecId::CANCUN,
+        );
+        assert!(
+            bytecode.inst(Inst::from_usize(8)).flags.contains(InstFlags::NOOP),
+            "POP after CALL should be NOOP'd"
+        );
+        // MSTORE after POP must NOT be eliminated.
+        assert!(
+            !bytecode.inst(Inst::from_usize(11)).flags.contains(InstFlags::NOOP),
+            "MSTORE should NOT be skipped"
         );
     }
 }

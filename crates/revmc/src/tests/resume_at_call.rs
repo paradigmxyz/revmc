@@ -23,6 +23,7 @@ use revm_primitives::{Bytes, U256};
 matrix_tests!(call_then_push = |compiler| run_call_then_push(compiler));
 matrix_tests!(call_then_return = |compiler| run_call_then_return(compiler));
 matrix_tests!(call_returndatasize = |compiler| run_call_returndatasize(compiler));
+matrix_tests!(call_pop_dse_dup = |compiler| run_call_pop_dse_dup(compiler));
 
 /// Contract: PUSH args → CALL → PUSH1 0x42 → STOP
 ///
@@ -253,6 +254,89 @@ fn run_call_returndatasize<B: Backend>(compiler: &mut EvmCompiler<B>) {
                 value,
                 U256::from(7),
                 "RETURNDATASIZE should be 7 after CALL with 7-byte return data"
+            );
+        }
+        other => panic!("expected Return after resume, got {other:?}"),
+    }
+}
+
+/// Regression test for stale `stack_len` after NOOP'd POP at a section boundary.
+///
+/// Contract: PUSH 0xAA → CALL args → CALL → POP → DUP1 → MSTORE → RETURN
+///
+/// DSE marks POP as NOOP (the success flag is dead). POP has a nonzero stack
+/// diff (-1), so the codegen must still store the updated `stack_len` to the
+/// alloca. Without the fix, the section head after CALL would reload a stale
+/// length, causing DUP1 to read the wrong slot.
+fn run_call_pop_dse_dup<B: Backend>(compiler: &mut EvmCompiler<B>) {
+    #[rustfmt::skip]
+    let bytecode: &[u8] = &[
+        op::PUSH1, 0xAA, // marker value
+        // CALL arguments
+        op::PUSH1, 0,    // ret length
+        op::PUSH1, 0,    // ret offset
+        op::PUSH1, 0,    // args length
+        op::PUSH1, 0,    // args offset
+        op::PUSH1, 0,    // value
+        op::PUSH1, 0x69, // address
+        op::GAS,         // gas
+        op::CALL,        // suspends; pushes success flag
+        // -- resume (new section) --
+        op::POP,         // discard success flag (NOOP'd by DSE)
+        // Stack: [0xAA]
+        op::DUP1,        // [0xAA, 0xAA]
+        op::PUSH0,       // [0xAA, 0xAA, 0]
+        op::MSTORE,      // mem[0] = 0xAA
+        op::POP,         // discard remaining 0xAA
+        op::PUSH1, 32,   // return size
+        op::PUSH0,       // return offset
+        op::RETURN,
+    ];
+
+    unsafe { compiler.clear() }.unwrap();
+    compiler.inspect_stack(true);
+    let f = unsafe { compiler.jit("pop_dse_dup", bytecode, DEF_SPEC) }.unwrap();
+
+    let mut host = TestHost::new();
+    let input = InputsImpl {
+        target_address: DEF_ADDR,
+        bytecode_address: None,
+        caller_address: DEF_CALLER,
+        input: CallInput::Bytes(Bytes::from_static(DEF_CD)),
+        call_value: DEF_VALUE,
+    };
+    let bytecode_obj = revm_bytecode::Bytecode::new_raw(Bytes::copy_from_slice(bytecode));
+    let ext_bytecode = ExtBytecode::new(bytecode_obj);
+    let mut interpreter =
+        Interpreter::new(SharedMemory::new(), ext_bytecode, input, false, DEF_SPEC, DEF_GAS_LIMIT);
+
+    // First call: suspends at CALL.
+    let action = unsafe { f.call_with_interpreter(&mut interpreter, &mut host) };
+    let return_memory_offset = match &action {
+        InterpreterAction::NewFrame(FrameInput::Call(call_inputs)) => {
+            Some(call_inputs.return_memory_offset.clone())
+        }
+        other => panic!("expected NewFrame(Call), got {other:?}"),
+    };
+
+    let call_result = InterpreterResult {
+        result: InstructionResult::Stop,
+        output: Bytes::new(),
+        gas: Gas::new(0),
+    };
+    insert_call_outcome_test(&mut interpreter, call_result, return_memory_offset);
+
+    // Second call: resume → POP (noop) → DUP1 → MSTORE → RETURN.
+    let action = unsafe { f.call_with_interpreter(&mut interpreter, &mut host) };
+    match &action {
+        InterpreterAction::Return(result) => {
+            assert_eq!(result.result, InstructionResult::Return);
+            assert_eq!(result.output.len(), 32);
+            let value = U256::from_be_slice(&result.output);
+            assert_eq!(
+                value,
+                U256::from(0xAA),
+                "DUP1 should read 0xAA (the value below the POP'd success flag)"
             );
         }
         other => panic!("expected Return after resume, got {other:?}"),
