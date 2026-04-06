@@ -32,7 +32,7 @@ use super::StackSection;
 use crate::bytecode::{Bytecode, Inst, InstFlags, Interner, U256Idx};
 use bitvec::vec::BitVec;
 use either::Either;
-use oxc_index::IndexVec;
+use oxc_index::{IndexVec, index_vec};
 use revm_bytecode::opcode as op;
 use revm_primitives::U256;
 use smallvec::SmallVec;
@@ -594,7 +594,7 @@ impl Bytecode<'_> {
 
         // Initialize block states. Entry block starts with an empty stack.
         let mut block_states: IndexVec<Block, BlockState> =
-            IndexVec::from_vec(vec![BlockState::Bottom; num_blocks]);
+            index_vec![BlockState::Bottom; num_blocks];
         block_states[Block::from_usize(0)] = BlockState::Known(Vec::new());
 
         // Collect unresolved jumps.

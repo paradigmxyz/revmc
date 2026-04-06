@@ -1,5 +1,5 @@
 use super::{Bytecode, Inst, InstData, InstFlags, bitvec_as_bytes, passes::block_analysis::Block};
-use oxc_index::IndexVec;
+use oxc_index::{IndexVec, index_vec};
 use revm_bytecode::opcode as op;
 use revm_primitives::hex;
 use std::{borrow::Cow, fmt, fmt::Write};
@@ -13,7 +13,7 @@ impl Bytecode<'_> {
     /// Collects formatted lines and builds the inst-to-line map stored in `self.inst_lines`.
     fn collect_lines(&self) -> Vec<(String, String)> {
         let mut lines: Vec<(String, String)> = Vec::new();
-        let mut inst_lines = IndexVec::<Inst, u32>::from_vec(vec![0u32; self.insts.len()]);
+        let mut inst_lines: IndexVec<Inst, u32> = index_vec![0u32; self.insts.len()];
 
         // Compute field widths for aligned ic=/pc= columns.
         let (max_ic, max_pc) = self
