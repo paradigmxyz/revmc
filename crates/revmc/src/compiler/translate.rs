@@ -567,11 +567,10 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         // Pay static gas for the current section.
         self.gas_cost_imm(data.gas_section.gas_cost as u64);
 
-        // NOOPs that aren't section heads need no codegen beyond gas.
+        // NOOPs with zero stack diff that aren't section heads need no codegen beyond gas.
         let (inp, out) = data.stack_io();
         let diff = effective_stack_diff(inp, out, data);
-        if data.flags.contains(InstFlags::NOOP) && !data.is_stack_section_head() {
-            self.section_len_offset += diff;
+        if data.flags.contains(InstFlags::NOOP) && diff == 0 && !data.is_stack_section_head() {
             goto_return!("noop");
         }
 
@@ -636,14 +635,19 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             }
         }
 
-        // NOOP section head: still needs bounds check above, but skip the rest.
-        if data.flags.contains(InstFlags::NOOP) {
-            self.section_len_offset += diff;
-            goto_return!("noop");
-        }
+        // Store updated stack length. This must happen before the NOOP check so that
+        // NOOPs with nonzero diff (e.g. POP) keep the alloca up-to-date for the next
+        // section head.
         if diff != 0 || self.section_len_offset != 0 {
             let len_changed = self.bcx.iadd_imm(self.len_before, diff as i64);
             self.stack_len.store(&mut self.bcx, len_changed);
+        }
+
+        // NOOP: section heads still needed the bounds check and stack_len store above,
+        // but can skip the opcode logic.
+        if data.flags.contains(InstFlags::NOOP) {
+            self.section_len_offset += diff;
+            goto_return!("noop");
         }
 
         // If the output is a known constant and the opcode has no dynamic gas or side effects,
@@ -1578,7 +1582,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
     /// Adds a comment to the current instruction.
     fn add_comment(&mut self, comment: &str) {
-        if comment.is_empty() {
+        if comment.is_empty() || !self.config.comments {
             return;
         }
         self.bcx.add_comment_to_current_inst(comment);

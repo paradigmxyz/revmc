@@ -183,6 +183,8 @@ fn can_skip_when_dead(opcode: u8) -> bool {
             | op::SWAP1..=op::SWAP16
             | op::SWAPN
             | op::EXCHANGE
+            // POP.
+            | op::POP
             // Constants / push.
             | op::PUSH0..=op::PUSH32
             | op::PC
@@ -353,6 +355,8 @@ fn all_outputs_dead(
             let tos = h_before - 1;
             !live[tos - n as usize] && !live[tos - m as usize]
         }
+        // POP: dead when its input is already dead.
+        (op::POP, _) => !live[h_before - 1],
         // Infeasible immediates — conservatively not dead.
         (op::DUPN | op::SWAPN | op::EXCHANGE, _) => false,
         // Generic: all output positions must be dead.
@@ -691,7 +695,7 @@ mod tests {
         ",
         );
         //       PUSH0, CDL_A, PUSH_20, CDL_B, PUSH_40, CDL_C, SWAP2, POP, SWAP1, POP
-        for (i, alive) in [false, false, false, true, false, false, false, true, true, true]
+        for (i, alive) in [false, false, false, true, false, false, false, false, true, false]
             .into_iter()
             .enumerate()
         {
