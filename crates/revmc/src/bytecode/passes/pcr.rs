@@ -116,12 +116,7 @@ impl Bytecode<'_> {
         }
 
         let summaries = self.compute_local_summaries();
-        let hints = self.resolve_private_calls(&summaries);
-
-        if !hints.is_empty() {
-            debug!(n = hints.len(), "hints for fixpoint");
-        }
-        hints
+        self.resolve_private_calls(&summaries)
     }
 
     /// Simulates stack provenance through a block's instructions.
@@ -381,24 +376,49 @@ impl Bytecode<'_> {
             return Vec::new();
         }
 
-        // Collect hints from resolved return targets.
+        // Collect hints from resolved return targets, tracking suppression reasons.
         let mut hints = Vec::new();
-        for (bid, targets) in return_targets.iter_enumerated() {
-            if targets.is_empty() || tainted_returns[bid.index()] || context_tainted[bid.index()] {
+        let mut n_opaque = 0usize;
+        let mut n_context = 0usize;
+        let mut n_unreachable = 0usize;
+        for (bid, summary) in summaries.iter_enumerated() {
+            if !matches!(summary, LocalBlockSummary::Return) {
                 continue;
             }
             let term_inst = self.cfg.blocks[bid].terminator();
             if self.insts[term_inst].flags.contains(InstFlags::STATIC_JUMP) {
                 continue;
             }
-            trace!(
-                %bid,
-                term = %term_inst,
-                n_targets = targets.len(),
-                "resolved private return"
-            );
+            let targets = &return_targets[bid];
+            let pc = self.insts[term_inst].pc;
+            if targets.is_empty() {
+                n_unreachable += 1;
+                trace!(%bid, %term_inst, pc, "suppressed: unreachable by traversal");
+                continue;
+            }
+            if tainted_returns[bid.index()] {
+                n_opaque += 1;
+                trace!(%bid, %term_inst, pc, "suppressed: opaque taint");
+                continue;
+            }
+            if context_tainted[bid.index()] {
+                n_context += 1;
+                trace!(%bid, %term_inst, pc, "suppressed: context taint");
+                continue;
+            }
+            trace!(%bid, %term_inst, pc, n_targets = targets.len(), "resolved");
             hints.push(PcrHint { jump_inst: term_inst, targets: targets.clone() });
         }
+
+        debug!(
+            n_calls = summaries.iter().filter(|s| matches!(s, LocalBlockSummary::Call(_))).count(),
+            n_returns = n_opaque + n_context + n_unreachable + hints.len(),
+            resolved = hints.len(),
+            n_opaque,
+            n_context,
+            n_unreachable,
+            "summary"
+        );
 
         hints
     }
@@ -439,7 +459,9 @@ impl Bytecode<'_> {
             }
         }
 
-        // Seed A: callee blocks with non-private-call predecessors in the static CFG.
+        // Callee entries reachable by non-call predecessors: a fallthrough or
+        // conditional branch can enter the function without pushing a return
+        // address, so PCR may miss that caller.
         for bid in self.cfg.blocks.indices() {
             if private_call_preds[bid].is_empty() {
                 continue;
@@ -449,13 +471,13 @@ impl Bytecode<'_> {
                 .iter()
                 .any(|pred| !private_call_preds[bid].contains(pred));
             if has_external_pred {
-                trace!(%bid, "opaque seed A: callee has non-call predecessor");
+                trace!(%bid, "opaque: callee has non-call predecessor");
                 opaque.set(bid.index(), true);
             }
         }
 
-        // Seed B: if unmodeled dynamic jumps exist, any JUMPDEST block is a potential
-        // target (bytecode is user-controlled — any JUMPDEST can be jumped to).
+        // Unmodeled dynamic jumps can target any JUMPDEST (bytecode is
+        // user-controlled), so every JUMPDEST block is a potential opaque entry.
         if has_unmodeled_jump {
             for bid in self.cfg.blocks.indices() {
                 if self.insts[self.cfg.blocks[bid].insts.start].is_jumpdest() {

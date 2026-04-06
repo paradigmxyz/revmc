@@ -423,10 +423,10 @@ impl Bytecode<'_> {
     /// Commits resolved jump targets by setting flags and data on the corresponding instructions.
     ///
     /// Returns the number of newly resolved jumps.
-    fn commit_resolved_jumps(&mut self, resolved: &[(Inst, JumpTarget)]) -> u32 {
+    fn commit_resolved_jumps(&mut self, resolved: &[(Inst, JumpTarget)]) -> usize {
         let has_top_jump = resolved.iter().any(|(_, t)| matches!(t, JumpTarget::Top));
 
-        let mut newly_resolved = 0u32;
+        let mut newly_resolved = 0usize;
         for &(jump_inst, ref target) in resolved {
             // Skip if already resolved by block_analysis_local.
             if self.insts[jump_inst].flags.contains(InstFlags::STATIC_JUMP) {
@@ -814,6 +814,7 @@ impl Bytecode<'_> {
             }
         }
 
+        let mut n_invalidated = 0usize;
         for (inst, target) in jump_targets.iter_mut() {
             if !matches!(target, JumpTarget::Const(_) | JumpTarget::Multi(_) | JumpTarget::Invalid)
             {
@@ -822,8 +823,13 @@ impl Bytecode<'_> {
             if let Some(bid) = self.cfg.inst_to_block[*inst]
                 && suspect[bid.index()]
             {
+                trace!(%bid, jump_inst = %*inst, "invalidated suspect jump");
                 *target = JumpTarget::Top;
+                n_invalidated += 1;
             }
+        }
+        if n_invalidated > 0 {
+            debug!(n_invalidated, "invalidated suspect jumps");
         }
 
         // Restore block-local snapshots in suspect blocks: the fixpoint may have recorded
