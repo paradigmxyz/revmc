@@ -33,7 +33,7 @@ enum Provenance {
     Local,
 }
 
-/// Call-string context: stack of caller block IDs, most recent first.
+/// Call-string context: stack of caller block IDs, most recent last.
 type Context = SmallVec<[Block; 8]>;
 
 /// Context-sensitive worklist for the PCR graph traversal.
@@ -71,15 +71,20 @@ impl ContextWorklist {
 /// Computed by a single-pass stack simulation of each block, without any fixpoint.
 /// These properties mirror gigahorse's `PrivateFunctionCall` and `PrivateFunctionReturn`
 /// relations from `local_components.dl`.
+///
+/// A block is at most one of: a private call, a private return, or normal. The detection
+/// code branches on `STATIC_JUMP` making the two cases mutually exclusive.
 #[derive(Clone, Debug, Default)]
-struct LocalBlockSummary {
-    /// If this block is a private function call: `(callee_inst, continuation_inst)`.
-    /// Detected when the block's terminator is a `STATIC_JUMP` (adjacent PUSH+JUMP)
+enum LocalBlockSummary {
+    /// Block is not a private call or return.
+    #[default]
+    Normal,
+    /// Private function call: the block's terminator is a single-target `STATIC_JUMP`
     /// and the block also pushes a valid JUMPDEST label that survives to exit.
-    private_call: Option<PrivateCallInfo>,
-    /// Whether this block is a private function return: the terminator is a JUMP
-    /// whose operand has entry-stack provenance (passed by the caller).
-    is_return: bool,
+    Call(PrivateCallInfo),
+    /// Private function return: the terminator is a dynamic JUMP whose operand has
+    /// entry-stack provenance (was passed by the caller).
+    Return,
 }
 
 /// Information about a private function call detected in a block.
@@ -102,7 +107,7 @@ pub(super) struct PcrHint {
 impl Bytecode<'_> {
     /// Computes private call/return hints for the abstract interpreter.
     ///
-    /// Returns PCR hints containing return edges discovered by context-sensitive
+    /// Returns resolved return-edge hints discovered by context-sensitive
     /// call-string analysis.
     #[instrument(name = "pcr", level = "debug", skip_all)]
     pub(super) fn compute_pcr_hints(&mut self) -> Vec<PcrHint> {
@@ -195,7 +200,7 @@ impl Bytecode<'_> {
                 if self.simulate_provenance(pre_term, &mut prov_stack)
                     && prov_stack.last().copied() == Some(Provenance::Input)
                 {
-                    summaries[bid].is_return = true;
+                    summaries[bid] = LocalBlockSummary::Return;
                 }
                 continue;
             }
@@ -216,10 +221,9 @@ impl Bytecode<'_> {
                 continue;
             }
 
-            // Find the deepest surviving label (the one pushed earliest, which is the
-            // continuation/return address in the standard PUSH ret_addr; PUSH func; JUMP
-            // pattern). In Solidity, the return address is typically pushed before the
-            // function arguments and callee address, so it ends up deeper in the stack.
+            // Find the deepest surviving label (closest to stack bottom). In the
+            // standard Solidity `PUSH ret_addr; PUSH args...; PUSH func; JUMP`
+            // pattern the return address is pushed first and ends up deepest.
             let continuation = abs_stack.iter().find_map(|v| {
                 if let JumpTarget::Const(inst) = self.resolve_jump_operand(*v, &empty_sets) {
                     Some(inst)
@@ -228,22 +232,25 @@ impl Bytecode<'_> {
                 }
             });
             if let Some(continuation) = continuation {
-                summaries[bid].private_call = Some(PrivateCallInfo { callee, continuation });
+                summaries[bid] = LocalBlockSummary::Call(PrivateCallInfo { callee, continuation });
             }
         }
 
         if enabled!(tracing::Level::TRACE) {
             for (bid, summary) in summaries.iter_enumerated() {
-                if let Some(ref call) = summary.private_call {
-                    trace!(
-                        %bid,
-                        callee = %call.callee,
-                        continuation = %call.continuation,
-                        "private call"
-                    );
-                }
-                if summary.is_return {
-                    trace!(%bid, "private return");
+                match summary {
+                    LocalBlockSummary::Call(call) => {
+                        trace!(
+                            %bid,
+                            callee = %call.callee,
+                            continuation = %call.continuation,
+                            "private call"
+                        );
+                    }
+                    LocalBlockSummary::Return => {
+                        trace!(%bid, "private return");
+                    }
+                    LocalBlockSummary::Normal => {}
                 }
             }
         }
@@ -298,61 +305,67 @@ impl Bytecode<'_> {
             let block = &self.cfg.blocks[bid];
             let summary = &summaries[bid];
 
-            if let Some(ref call) = summary.private_call {
-                // Private function call: push caller onto context, follow to callee.
-                let mut new_ctx = ctx.clone();
-                if new_ctx.len() >= MAX_CONTEXT_DEPTH {
-                    new_ctx.pop();
-                }
-                new_ctx.insert(0, bid);
+            match summary {
+                LocalBlockSummary::Call(call) => {
+                    // Private function call: push caller onto context, follow to callee.
+                    let mut new_ctx = ctx.clone();
+                    if new_ctx.len() >= MAX_CONTEXT_DEPTH {
+                        new_ctx.remove(0);
+                    }
+                    new_ctx.push(bid);
 
-                let callee_block = self.cfg.inst_to_block[call.callee];
+                    let callee_block = self.cfg.inst_to_block[call.callee];
 
-                if let Some(callee_block) = callee_block {
-                    wl.push(callee_block, new_ctx);
-                }
+                    if let Some(callee_block) = callee_block {
+                        wl.push(callee_block, new_ctx);
+                    }
 
-                // Also follow the continuation edge with the original context.
-                // For JUMPI: the fallthrough is a CFG successor.
-                // For JUMP: the continuation is not a CFG successor (it's only reached
-                // when the callee returns), but we follow it optimistically to ensure
-                // the traversal explores post-call blocks even when the callee's return
-                // is not yet resolved (e.g., the callee always reverts on some paths).
-                let term = &self.insts[block.terminator()];
-                if term.opcode == op::JUMPI {
-                    for &succ in &block.succs {
-                        if callee_block != Some(succ) {
-                            wl.push(succ, ctx.clone());
+                    // Also follow the continuation edge with the original context.
+                    // For JUMPI: the fallthrough is a CFG successor.
+                    // For JUMP: the continuation is not a CFG successor (it's only
+                    // reached when the callee returns), but we follow it optimistically
+                    // to ensure the traversal explores post-call blocks even when the
+                    // callee's return is not yet resolved (e.g., the callee always
+                    // reverts on some paths).
+                    let term = &self.insts[block.terminator()];
+                    if term.opcode == op::JUMPI {
+                        for &succ in &block.succs {
+                            if callee_block != Some(succ) {
+                                wl.push(succ, ctx.clone());
+                            }
                         }
                     }
-                }
-                if let Some(cont_block) = self.cfg.inst_to_block[call.continuation] {
-                    wl.push(cont_block, ctx.clone());
-                }
-            } else if summary.is_return {
-                // Private function return: pop the caller from the context
-                // to find the matching continuation address.
-                if let Some(caller_bid) = ctx.first().copied()
-                    && let Some(ref caller_call) = summaries[caller_bid].private_call
-                {
-                    let continuation = caller_call.continuation;
-                    if !return_targets[bid].contains(&continuation) {
-                        return_targets[bid].push(continuation);
+                    if let Some(cont_block) = self.cfg.inst_to_block[call.continuation] {
+                        wl.push(cont_block, ctx.clone());
                     }
+                }
+                LocalBlockSummary::Return => {
+                    // Private function return: pop the caller from the context
+                    // to find the matching continuation address.
+                    if let Some(caller_bid) = ctx.last().copied()
+                        && let Some(LocalBlockSummary::Call(caller_call)) =
+                            summaries.get(caller_bid)
+                    {
+                        let continuation = caller_call.continuation;
+                        if !return_targets[bid].contains(&continuation) {
+                            return_targets[bid].push(continuation);
+                        }
 
-                    let new_ctx: Context = ctx[1..].into();
-                    if let Some(cont_block) = self.cfg.inst_to_block[continuation] {
-                        wl.push(cont_block, new_ctx);
+                        let new_ctx: Context = ctx[..ctx.len() - 1].into();
+                        if let Some(cont_block) = self.cfg.inst_to_block[continuation] {
+                            wl.push(cont_block, new_ctx);
+                        }
+                    } else {
+                        // Return reached with empty or invalid context — PCR may not
+                        // have discovered all callers (e.g. due to context truncation).
+                        context_tainted.set(bid.index(), true);
                     }
-                } else {
-                    // Return reached with empty or invalid context — PCR may not
-                    // have discovered all callers (e.g. due to context truncation).
-                    context_tainted.set(bid.index(), true);
                 }
-            } else {
-                // Normal block: propagate to all successors with same context.
-                for &succ in &block.succs {
-                    wl.push(succ, ctx.clone());
+                LocalBlockSummary::Normal => {
+                    // Normal block: propagate to all successors with same context.
+                    for &succ in &block.succs {
+                        wl.push(succ, ctx.clone());
+                    }
                 }
             }
         }
@@ -407,18 +420,21 @@ impl Bytecode<'_> {
         let mut has_unmodeled_jump = false;
 
         for (bid, summary) in summaries.iter_enumerated() {
-            if let Some(ref call) = summary.private_call {
-                if let Some(callee_block) = self.cfg.inst_to_block[call.callee] {
-                    private_call_preds[callee_block].push(bid);
+            match summary {
+                LocalBlockSummary::Call(call) => {
+                    if let Some(callee_block) = self.cfg.inst_to_block[call.callee] {
+                        private_call_preds[callee_block].push(bid);
+                    }
                 }
-            } else {
-                let term_inst = self.cfg.blocks[bid].terminator();
-                let term = &self.insts[term_inst];
-                if term.is_jump()
-                    && !term.flags.contains(InstFlags::STATIC_JUMP)
-                    && !summary.is_return
-                {
-                    has_unmodeled_jump = true;
+                LocalBlockSummary::Return | LocalBlockSummary::Normal => {
+                    let term_inst = self.cfg.blocks[bid].terminator();
+                    let term = &self.insts[term_inst];
+                    if term.is_jump()
+                        && !term.flags.contains(InstFlags::STATIC_JUMP)
+                        && !matches!(summary, LocalBlockSummary::Return)
+                    {
+                        has_unmodeled_jump = true;
+                    }
                 }
             }
         }
@@ -433,6 +449,7 @@ impl Bytecode<'_> {
                 .iter()
                 .any(|pred| !private_call_preds[bid].contains(pred));
             if has_external_pred {
+                trace!(%bid, "opaque seed A: callee has non-call predecessor");
                 opaque.set(bid.index(), true);
             }
         }
@@ -459,8 +476,9 @@ impl Bytecode<'_> {
         while let Some(bid) = queue.pop_front() {
             let summary = &summaries[bid];
 
-            if summary.is_return {
+            if matches!(summary, LocalBlockSummary::Return) {
                 tainted.set(bid.index(), true);
+                trace!(%bid, "tainted return");
                 // Don't propagate past return blocks — the return edge goes back
                 // to the caller's continuation, which has its own entry analysis.
                 continue;
@@ -475,7 +493,7 @@ impl Bytecode<'_> {
             }
 
             // Follow private-call edges into callees.
-            if let Some(ref call) = summary.private_call
+            if let Some(LocalBlockSummary::Call(call)) = summaries.get(bid)
                 && let Some(callee_block) = self.cfg.inst_to_block[call.callee]
                 && !opaque[callee_block.index()]
             {

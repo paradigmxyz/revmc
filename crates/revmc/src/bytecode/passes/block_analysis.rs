@@ -593,7 +593,7 @@ impl Bytecode<'_> {
         assert_ne!(cfg.blocks.len(), 0, "should always build at least one block");
     }
 
-    /// Run worklist-based abstract interpretation over the CFG.
+    /// Runs worklist-based abstract interpretation over the CFG.
     ///
     /// Returns a list of (jump_inst, resolved_target) pairs and the count of resolvable jumps.
     /// Stack snapshots are recorded into `self.snapshots` during the fixpoint.
@@ -671,6 +671,14 @@ impl Bytecode<'_> {
         // Invalidate resolutions that may be unsound due to incomplete analysis.
         // When the fixpoint didn't converge, partially-discovered ConstSets may be
         // incomplete, so we must conservatively invalidate them too.
+        //
+        // NOTE: even when all remaining Top jumps are private returns, global
+        // invalidation is still required because opaque-tainted returns can land on
+        // any JUMPDEST with an unknown stack state. Skipping invalidation for
+        // private-return-only Top jumps is empirically unsound (curve_stableswap).
+        // A narrower strategy would require every remaining Top jump to have a
+        // proven complete target superset, which needs more precise PCR taint
+        // analysis.
         if has_top_jump || !converged {
             self.invalidate_suspect_jumps(
                 &mut jump_targets,
