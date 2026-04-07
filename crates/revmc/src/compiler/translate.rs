@@ -308,10 +308,14 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 "gas metering is enabled",
             );
             fx.pointer_panic_with_bool(
-                !local_stack,
+                !local_stack || bytecode.may_suspend(),
                 sp_arg,
                 "stack pointer",
-                "local stack is disabled",
+                if !local_stack {
+                    "local stack is disabled"
+                } else {
+                    "bytecode suspends execution"
+                },
             );
             fx.pointer_panic_with_bool(
                 config.inspect_stack || bytecode.may_suspend(),

@@ -268,9 +268,10 @@ impl EvmCompilerFn {
     /// Calls the function.
     ///
     /// Arguments:
-    /// - `stack`: Pointer to the stack. Must be `Some` if `local_stack` is set to `false`.
+    /// - `stack`: Pointer to the stack. Must be `Some` if `local_stack` is set to `false`, or if
+    ///   the bytecode may suspend (contains `CALL`/`CREATE`-family opcodes).
     /// - `stack_len`: Pointer to the stack length. Must be `Some` if `inspect_stack` is set to
-    ///   `true`.
+    ///   `true`, or if the bytecode may suspend.
     /// - `ecx`: The context object.
     ///
     /// These conditions are enforced at runtime if `debug_assertions` is set to `true`.
