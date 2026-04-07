@@ -1,3 +1,6 @@
+[profile.default]
+slow-timeout = { period = "300s", terminate-after = 1 }
+
 [test-groups.statetest]
 max-threads = 1
 

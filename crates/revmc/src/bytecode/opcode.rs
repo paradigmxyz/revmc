@@ -1,5 +1,5 @@
 use crate::{OpcodeInfo, op_info_map};
-use revm_bytecode::opcode::OPCODE_INFO;
+use revm_bytecode::{opcode as op, opcode::OPCODE_INFO};
 use revm_primitives::hardfork::SpecId;
 use std::{fmt, slice};
 
@@ -10,6 +10,21 @@ use std::{fmt, slice};
 pub struct OpcodesIterWithPc<'a> {
     iter: OpcodesIter<'a>,
     pc: usize,
+}
+
+impl OpcodesIterWithPc<'_> {
+    /// Rewinds the iterator by `n` bytes so that the next call to [`Iterator::next`] re-yields
+    /// them as fresh opcodes.
+    ///
+    /// # Safety
+    ///
+    /// `n` must not exceed the number of bytes already consumed.
+    pub(crate) unsafe fn rewind(&mut self, n: usize) {
+        // SAFETY: the caller guarantees n ≤ bytes consumed, so `remaining` was originally
+        // part of a larger contiguous slice that started at least `n` bytes earlier.
+        unsafe { self.iter.rewind(n) };
+        self.pc -= n;
+    }
 }
 
 impl<'a> Iterator for OpcodesIterWithPc<'a> {
@@ -88,6 +103,22 @@ impl<'a> OpcodesIter<'a> {
     #[inline]
     pub fn into_inner(self) -> slice::Iter<'a, u8> {
         self.iter
+    }
+
+    /// Rewinds the iterator by `n` bytes so that the next call to [`Iterator::next`] re-yields
+    /// them as fresh opcodes.
+    ///
+    /// # Safety
+    ///
+    /// `n` must not exceed the number of bytes already consumed.
+    pub(crate) unsafe fn rewind(&mut self, n: usize) {
+        let inner = self.inner_mut();
+        let remaining = inner.as_slice();
+        // SAFETY: the caller guarantees n ≤ bytes consumed, so `remaining` was originally
+        // part of a larger contiguous slice that started at least `n` bytes earlier.
+        let rewound =
+            unsafe { std::slice::from_raw_parts(remaining.as_ptr().sub(n), remaining.len() + n) };
+        *inner = rewound.iter();
     }
 }
 
@@ -168,6 +199,94 @@ pub const fn stack_io(op: u8) -> (u8, u8) {
     }
 }
 
+/// Returns the real `(inputs, outputs)` stack I/O for an opcode, decoding the immediate for
+/// `DUPN`, `SWAPN`, and `EXCHANGE` whose opcode-table entries are placeholders.
+pub(crate) fn compute_stack_io(op: u8, immediate: Option<&[u8]>) -> (u8, u8) {
+    let imm_u8 = || immediate.map_or(0, |b| b[0]);
+    match op {
+        op::DUPN => decode_single(imm_u8()).map(|n| (n, n + 1)),
+        op::SWAPN => decode_single(imm_u8()).map(|n| (n + 1, n + 1)),
+        op::EXCHANGE => decode_pair(imm_u8()).map(|(_n, m)| (m + 1, m + 1)),
+        _ => None,
+    }
+    .unwrap_or_else(|| stack_io(op))
+}
+
+/// Decodes a DUPN/SWAPN immediate byte into a stack index.
+///
+/// Returns `None` if the immediate is in the invalid range `[91, 127]`.
+pub fn decode_single(x: u8) -> Option<u8> {
+    let x = x as u16;
+    if x <= 90 {
+        Some((x + 17) as u8)
+    } else if x >= 128 {
+        Some((x - 20) as u8)
+    } else {
+        None
+    }
+}
+
+/// Encodes a stack index into a DUPN/SWAPN immediate byte.
+///
+/// Returns `None` if the index is outside the valid range `[17, 235]`.
+pub fn encode_single(n: u8) -> Option<u8> {
+    match n {
+        17..=107 => Some(n - 17),
+        108..=235 => Some(n.wrapping_add(20)),
+        _ => None,
+    }
+}
+
+/// Decodes an EXCHANGE immediate byte into a pair of stack indices `(n, m)`.
+///
+/// Returns `None` if the immediate is in the invalid range `[80, 127]`.
+pub fn decode_pair(x: u8) -> Option<(u8, u8)> {
+    let k = if x <= 79 {
+        x as u16
+    } else if x >= 128 {
+        x as u16 - 48
+    } else {
+        return None;
+    };
+    let q = (k / 16) as u8;
+    let r = (k % 16) as u8;
+    if q < r { Some((q + 1, r + 1)) } else { Some((r + 1, 29 - q)) }
+}
+
+/// Encodes a pair of stack indices into an EXCHANGE immediate byte.
+///
+/// Returns `None` if the pair cannot be encoded.
+pub fn encode_pair(n: u8, m: u8) -> Option<u8> {
+    if n == 0 || m == 0 {
+        return None;
+    }
+    let try_encode_k = |k: u16| -> Option<u8> {
+        if k <= 79 {
+            Some(k as u8)
+        } else if (80..=207).contains(&k) {
+            Some((k + 48) as u8)
+        } else {
+            None
+        }
+    };
+
+    // Case 1: q < r → n = q+1, m = r+1.
+    // Requires n < m AND m <= 16 (so r = m-1 fits in one base-16 digit).
+    if n < m && m <= 16 {
+        let k = (n - 1) as u16 * 16 + (m - 1) as u16;
+        return try_encode_k(k);
+    }
+
+    // Case 2: q >= r → n = r+1, m = 29-q.
+    // Requires n+m <= 30 AND n <= 16 (so r = n-1 fits in one base-16 digit).
+    if n <= 16 && n.checked_add(m).is_some_and(|s| s <= 30) {
+        let k = (29 - m) as u16 * 16 + (n - 1) as u16;
+        return try_encode_k(k);
+    }
+
+    None
+}
+
 /// Returns a string representation of the given bytecode.
 pub fn format_bytecode(bytecode: &[u8], spec_id: SpecId) -> String {
     let mut w = String::new();
@@ -229,5 +348,60 @@ mod tests {
         let bytecode = [op::PUSH0, op::PUSH1, 0x69, op::PUSH2, 0x01, 0x02];
         let s = format_bytecode(&bytecode, DEF_SPEC);
         assert_eq!(s, "PUSH0 PUSH1 0x69 PUSH2 0x0102");
+    }
+
+    #[test]
+    fn encode_decode_single_roundtrip() {
+        for x in 0..=255u8 {
+            if let Some(n) = decode_single(x) {
+                assert_eq!(encode_single(n), Some(x), "roundtrip failed for x={x}, n={n}");
+            }
+        }
+        for n in 0..=255u8 {
+            if let Some(x) = encode_single(n) {
+                assert_eq!(decode_single(x), Some(n), "roundtrip failed for n={n}, x={x}");
+            }
+        }
+        // Out-of-range.
+        assert_eq!(encode_single(0), None);
+        assert_eq!(encode_single(16), None);
+        assert_eq!(encode_single(236), None);
+        // Invalid raw bytes.
+        assert_eq!(decode_single(91), None);
+        assert_eq!(decode_single(127), None);
+    }
+
+    #[test]
+    fn encode_decode_pair_roundtrip() {
+        // encode → decode is always exact.
+        for n in 1..=30u8 {
+            for m in 1..=30u8 {
+                if let Some(x) = encode_pair(n, m) {
+                    assert_eq!(
+                        decode_pair(x),
+                        Some((n, m)),
+                        "roundtrip failed for (n,m)=({n},{m}), x={x}"
+                    );
+                }
+            }
+        }
+        // decode → encode: some pairs have multiple encodings, so the raw byte may differ,
+        // but decoding the result must produce the same pair.
+        for x in 0..=255u8 {
+            if let Some((n, m)) = decode_pair(x) {
+                let re = encode_pair(n, m).unwrap();
+                assert_eq!(
+                    decode_pair(re),
+                    Some((n, m)),
+                    "decode roundtrip failed for x={x}, re={re}, (n,m)=({n},{m})"
+                );
+            }
+        }
+        // Zero indices are invalid.
+        assert_eq!(encode_pair(0, 1), None);
+        assert_eq!(encode_pair(1, 0), None);
+        // Invalid raw bytes.
+        assert_eq!(decode_pair(80), None);
+        assert_eq!(decode_pair(127), None);
     }
 }

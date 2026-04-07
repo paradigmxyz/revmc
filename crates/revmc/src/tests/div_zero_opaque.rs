@@ -58,14 +58,14 @@ fn run_opaque_zero_div_test<B: Backend>(
     let code = bytecode_binop_opaque(opcode, a, U256::ZERO);
 
     unsafe { compiler.clear() }.unwrap();
-    compiler.inspect_stack_length(true);
+    compiler.inspect_stack(true);
     let f = unsafe { compiler.jit(name, &code, DEF_SPEC) }.unwrap();
 
     with_evm_context(&code, DEF_SPEC, |ecx, stack, stack_len| {
         let r = unsafe { f.call(Some(stack), Some(stack_len), ecx) };
         assert_eq!(r, InstructionResult::Stop, "{name}: unexpected return");
         assert_eq!(*stack_len, 1, "{name}: expected 1 stack element");
-        let actual = stack.as_slice()[0].to_u256();
+        let actual = unsafe { stack.as_slice(*stack_len)[0].to_u256() };
         assert_eq!(
             actual,
             U256::ZERO,

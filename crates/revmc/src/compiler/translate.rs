@@ -1,14 +1,17 @@
 //! EVM to IR translation.
 
 use super::default_attrs;
-use crate::{Backend, Builder, Bytecode, EvmContext, Inst, InstData, InstFlags, IntCC, Result};
+use crate::{
+    Backend, Builder, Bytecode, EvmContext, Inst, InstData, InstFlags, IntCC, Result, decode_pair,
+    decode_single,
+};
 use oxc_index::IndexVec;
 use revm_bytecode::opcode as op;
-use revm_interpreter::{InputsImpl, InstructionResult};
+use revm_interpreter::InstructionResult;
 use revm_primitives::U256;
 use revmc_backend::{Attribute, BackendTypes, FunctionAttributeLocation, Pointer, TypeMethods};
 use revmc_builtins::{Builtin, Builtins, CallKind, CreateKind};
-use std::{fmt::Write, mem, sync::atomic::AtomicPtr};
+use std::{fmt::Write, mem};
 
 const STACK_CAP: usize = 1024;
 // const WORD_SIZE: usize = 32;
@@ -20,7 +23,7 @@ pub(super) struct FcxConfig {
     pub(super) frame_pointers: bool,
 
     pub(super) debug: bool,
-    pub(super) inspect_stack_length: bool,
+    pub(super) inspect_stack: bool,
     pub(super) stack_bound_checks: bool,
     pub(super) gas_metering: bool,
 }
@@ -32,7 +35,7 @@ impl Default for FcxConfig {
             comments: false,
             frame_pointers: cfg!(debug_assertions) || cfg!(force_frame_pointers),
             debug: false,
-            inspect_stack_length: false,
+            inspect_stack: false,
             stack_bound_checks: true,
             gas_metering: true,
         }
@@ -46,25 +49,16 @@ type Incoming<B> = Vec<(<B as BackendTypes>::Value, <B as BackendTypes>::BasicBl
 #[allow(dead_code)]
 type SwitchTargets<B> = Vec<(u64, <B as BackendTypes>::BasicBlock)>;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ResumeKind {
-    /// Use `indirectbr`.
-    Blocks,
-    /// Use a switch over `0..N`.
-    Indexes,
-}
-
 pub(super) struct FunctionCx<'a, B: Backend> {
     // Configuration.
     config: FcxConfig,
 
     /// The backend's function builder.
-    bcx: B::Builder<'a>,
+    pub(super) bcx: B::Builder<'a>,
 
     // Common types.
-    ptr_type: B::Type,
     isize_type: B::Type,
-    word_type: B::Type,
+    pub(super) word_type: B::Type,
     address_type: B::Type,
     i8_type: B::Type,
 
@@ -79,8 +73,6 @@ pub(super) struct FunctionCx<'a, B: Backend> {
     sp_arg: Option<B::Value>,
     /// The amount of gas remaining. `i64`. See `Gas`.
     gas_remaining: Pointer<B::Builder<'a>>,
-    /// The input. Constant throughout the function.
-    input: B::Value,
     /// The EVM context. Opaque pointer, only passed to builtins.
     ecx: B::Value,
     /// Stack length before the current instruction.
@@ -88,14 +80,25 @@ pub(super) struct FunctionCx<'a, B: Backend> {
     /// Stack length offset for the current instruction, used for push/pop.
     len_offset: i8,
 
+    /// Stack length at the start of the current stack section, loaded once from the alloca.
+    /// All intra-section `len_before` values are derived from this + `section_len_offset`.
+    section_start_len: B::Value,
+    /// Stack pointer at the start of the current stack section (`&stack[section_start_len]`).
+    /// All intra-section stack pointer GEPs are derived from this base to preserve pointer
+    /// provenance, which lets LLVM prove aliasing and fold redundant operations.
+    section_start_sp: B::Value,
+    /// Cumulative stack diff from the section start to the current instruction (compile-time).
+    /// Updated after the opcode handler so that push/pop/sp helpers see the pre-diff value.
+    section_len_offset: i32,
+
     /// The bytecode being translated.
-    bytecode: &'a Bytecode<'a>,
+    pub(super) bytecode: &'a Bytecode<'a>,
     /// Instruction index to 1-based line number in bytecode.txt (for debug info).
     inst_lines: IndexVec<Inst, u32>,
     /// All entry blocks for each instruction.
     inst_entries: IndexVec<Inst, B::BasicBlock>,
     /// The current instruction being translated.
-    current_inst: Option<Inst>,
+    pub(super) current_inst: Option<Inst>,
 
     // Basic blocks are `None` when outside of a main function.
     /// `dynamic_jump_table` incoming values.
@@ -112,8 +115,6 @@ pub(super) struct FunctionCx<'a, B: Backend> {
     /// The return block that all return instructions branch to.
     return_block: Option<B::BasicBlock>,
 
-    /// The kind of resume mechanism to use.
-    resume_kind: ResumeKind,
     /// `resume_block` switch values.
     resume_blocks: Vec<B::BasicBlock>,
     /// `suspend_block` incoming values.
@@ -169,12 +170,12 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     ///     #[cfg(may_suspend)]
     ///     suspend(resume_at: u32): {
     ///         ecx.resume_at = resume_at;
-    ///         goto return(InstructionResult::Stop);  // Caller checks next_action
+    ///         goto return(Ok(())); // Caller checks next_action
     ///     };
     ///
     ///     // All paths lead to here.
     ///     return(ir: InstructionResult): {
-    ///         #[cfg(inspect_stack_length)]
+    ///         #[cfg(inspect_stack)]
     ///         *args.stack_len = stack_len;
     ///         return ir;
     ///     }
@@ -195,12 +196,11 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         }
 
         // Get common types.
-        let ptr_type = bcx.type_ptr();
         let isize_type = bcx.type_ptr_sized_int();
         let i8_type = bcx.type_int(8);
         let i64_type = bcx.type_int(64);
-        let address_type = bcx.type_int(160);
         let word_type = bcx.type_int(256);
+        let address_type = bcx.type_int(160);
 
         // Set up entry block.
         let gas_ptr = bcx.fn_param(0);
@@ -213,8 +213,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let sp_arg = bcx.fn_param(1);
         // Use a local alloca for the stack to allow the backend to eliminate dead stores to
         // stack slots above `stack_len` at function exit (e.g. `PUSH0 POP`).
-        // Disabled when `inspect_stack_length` is set because the caller observes every store.
-        let local_stack = !config.inspect_stack_length;
+        // Disabled when `inspect_stack` is set because the caller observes every store.
+        let local_stack = !config.inspect_stack;
         let stack = if local_stack {
             let stack_type = bcx.type_array(word_type, STACK_CAP as u32);
             bcx.new_stack_slot(stack_type, "stack.addr")
@@ -258,22 +258,25 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let failure_block = bcx.create_block("failure");
         let return_block = bcx.create_block("return");
 
+        let section_start_sp = stack.addr(&mut bcx);
+        let zero = bcx.iconst(isize_type, 0);
         let mut fx = FunctionCx {
             config,
 
-            ptr_type,
             isize_type,
-            address_type,
             word_type,
+            address_type,
             i8_type,
             stack_len,
             stack,
             sp_arg: local_stack.then_some(sp_arg),
             gas_remaining,
-            input,
             ecx,
-            len_before: bcx.iconst(isize_type, 0),
+            len_before: zero,
             len_offset: 0,
+            section_start_len: zero,
+            section_start_sp,
+            section_len_offset: 0,
             bcx,
 
             bytecode,
@@ -289,16 +292,12 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             incoming_returns: Vec::new(),
             return_block: Some(return_block),
 
-            resume_kind: ResumeKind::Indexes,
             resume_blocks: Vec::new(),
             suspend_blocks: Vec::new(),
             suspend_block,
 
             builtins,
         };
-
-        // We store the stack length if requested or necessary due to the bytecode.
-        let stack_length_observable = config.inspect_stack_length || bytecode.may_suspend();
 
         // Add debug assertions for the parameters.
         if config.debug_assertions {
@@ -309,17 +308,21 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 "gas metering is enabled",
             );
             fx.pointer_panic_with_bool(
-                !local_stack,
+                !local_stack || bytecode.may_suspend(),
                 sp_arg,
                 "stack pointer",
-                "local stack is disabled",
+                if !local_stack {
+                    "local stack is disabled"
+                } else {
+                    "bytecode suspends execution"
+                },
             );
             fx.pointer_panic_with_bool(
-                stack_length_observable,
+                config.inspect_stack || bytecode.may_suspend(),
                 stack_len_arg,
                 "stack length pointer",
-                if config.inspect_stack_length {
-                    "stack length inspection is enabled"
+                if config.inspect_stack {
+                    "stack inspection is enabled"
                 } else {
                     "bytecode suspends execution"
                 },
@@ -380,7 +383,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         // Also here is where the stack length is initialized.
         let load_len_at_start = |fx: &mut Self| {
             // Loaded from args only for the config.
-            if config.inspect_stack_length {
+            if config.inspect_stack {
                 let stack_len = fx.bcx.load(fx.isize_type, stack_len_arg, "stack_len");
                 fx.stack_len.store(&mut fx.bcx, stack_len);
                 fx.copy_stack_from_arg(stack_len);
@@ -398,11 +401,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 )
             };
 
-            let kind = fx.resume_kind;
-            let resume_ty = match kind {
-                ResumeKind::Blocks => fx.ptr_type,
-                ResumeKind::Indexes => fx.isize_type,
-            };
+            let resume_ty = fx.isize_type;
 
             // Resume block: load the `resume_at` value and switch to the corresponding block.
             // Invalid values are treated as unreachable.
@@ -413,10 +412,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 fx.bcx.switch_to_block(post_entry_block);
                 let resume_at = get_ecx_resume_at_ptr(&mut fx);
                 let resume_at = fx.bcx.load_aligned(resume_ty, resume_at, 1, "ecx.resume_at");
-                let no_resume = match kind {
-                    ResumeKind::Blocks => fx.bcx.is_null(resume_at),
-                    ResumeKind::Indexes => fx.bcx.icmp_imm(IntCC::Equal, resume_at, 0),
-                };
+                let no_resume = fx.bcx.icmp_imm(IntCC::Equal, resume_at, 0);
                 fx.bcx.brif(no_resume, no_resume_block, resume_block);
 
                 fx.bcx.switch_to_block(no_resume_block);
@@ -428,25 +424,18 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 let stack_len = fx.bcx.load(fx.isize_type, stack_len_arg, "stack_len");
                 fx.stack_len.store(&mut fx.bcx, stack_len);
                 fx.copy_stack_from_arg(stack_len);
-                match kind {
-                    ResumeKind::Blocks => {
-                        fx.bcx.br_indirect(resume_at, &fx.resume_blocks);
-                    }
-                    ResumeKind::Indexes => {
-                        let default = fx.bcx.create_block_after(resume_block, "resume_invalid");
-                        fx.bcx.switch_to_block(default);
-                        fx.call_panic("invalid `resume_at` value");
+                let default = fx.bcx.create_block_after(resume_block, "resume_invalid");
+                fx.bcx.switch_to_block(default);
+                fx.call_panic("invalid `resume_at` value");
 
-                        fx.bcx.switch_to_block(resume_block);
-                        let targets = fx
-                            .resume_blocks
-                            .iter()
-                            .enumerate()
-                            .map(|(i, b)| (i as u64 + 1, *b))
-                            .collect::<Vec<_>>();
-                        fx.bcx.switch(resume_at, default, &targets, true);
-                    }
-                }
+                fx.bcx.switch_to_block(resume_block);
+                let targets = fx
+                    .resume_blocks
+                    .iter()
+                    .enumerate()
+                    .map(|(i, b)| (i as u64 + 1, *b))
+                    .collect::<Vec<_>>();
+                fx.bcx.switch(resume_at, default, &targets, true);
             }
 
             // Suspend block: store the `resume_at` value and return `Stop`.
@@ -456,7 +445,13 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 let resume_at = get_ecx_resume_at_ptr(&mut fx);
                 fx.bcx.store_aligned(resume_value, resume_at, 1);
 
-                // Signal that execution suspended - caller checks next_action for Call/Create
+                // Save stack back to caller only when suspending, or always if inspecting.
+                // This matches the inverse of the condition in the return block.
+                if !config.inspect_stack {
+                    fx.copy_stack_to_arg();
+                    fx.save_stack_len();
+                }
+
                 fx.build_return_imm(InstructionResult::Stop);
             }
         } else {
@@ -487,7 +482,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         fx.bcx.switch_to_block(fx.return_block.unwrap());
         if !fx.incoming_returns.is_empty() {
             let return_value = fx.bcx.phi(fx.i8_type, &fx.incoming_returns);
-            if stack_length_observable {
+            if config.inspect_stack {
                 fx.copy_stack_to_arg();
                 fx.save_stack_len();
             }
@@ -576,13 +571,28 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         // Pay static gas for the current section.
         self.gas_cost_imm(data.gas_section.gas_cost as u64);
 
-        if data.flags.contains(InstFlags::SKIP_LOGIC) {
-            goto_return!("skipped");
+        // NOOPs that aren't section heads need no codegen beyond gas.
+        let (inp, out) = data.stack_io();
+        let diff = effective_stack_diff(inp, out, data);
+        if data.flags.contains(InstFlags::NOOP) && !data.is_stack_section_head() {
+            self.section_len_offset += diff;
+            goto_return!("noop");
         }
 
-        // Reset the stack length offset for this instruction.
+        // Compute len_before for this instruction.
+        // At section heads: load from the alloca once and reset the section offset.
+        // Within a section: derive from section_start_len + compile-time offset.
         self.len_offset = 0;
-        self.len_before = self.stack_len.load(&mut self.bcx, "stack_len");
+        if data.is_stack_section_head() {
+            self.section_start_len = self.stack_len.load(&mut self.bcx, "stack_len");
+            self.section_start_sp = self.sp_at(self.section_start_len);
+            self.section_len_offset = 0;
+        }
+        self.len_before = if self.section_len_offset == 0 {
+            self.section_start_len
+        } else {
+            self.bcx.iadd_imm(self.section_start_len, self.section_len_offset as i64)
+        };
 
         // Check stack length for the current section.
         if self.config.stack_bound_checks {
@@ -630,21 +640,40 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             }
         }
 
-        // Update the stack length for this instruction.
+        // NOOP section head: still needs bounds check above, but skip the rest.
+        if data.flags.contains(InstFlags::NOOP) {
+            self.section_len_offset += diff;
+            goto_return!("noop");
+        }
+        if diff != 0 || self.section_len_offset != 0 {
+            let len_changed = self.bcx.iadd_imm(self.len_before, diff as i64);
+            self.stack_len.store(&mut self.bcx, len_changed);
+        }
+
+        // If the output is a known constant and the opcode has no dynamic gas or side effects,
+        // skip the real logic and just write the result.
+        // The inputs are not loaded; we simply adjust the stack offset to consume them and
+        // push the folded constant. This turns e.g. `PUSH 3, PUSH 4, ADD` into a single
+        // store of `7`.
+        // Pure ops with a known-constant output: skip the opcode logic and just
+        // store the folded constant. Works for single-output arithmetic (ADD, MUL,
+        // ...) and DUP (which adds one new TOS without consuming its input).
+        if out >= 1
+            && let Some(const_out) = self.bytecode.const_output(inst)
         {
-            let (inp, out) = data.stack_io();
-            let diff = out as i64 - inp as i64;
-            if diff != 0 {
-                let mut diff = diff;
-                // HACK: For now all opcodes that suspend (minus the test one, which does not reach
-                // here) return exactly one value. This value is pushed onto the stack by the
-                // caller, so we don't account for it here.
-                if data.may_suspend() {
-                    diff -= 1;
-                }
-                let len_changed = self.bcx.iadd_imm(self.len_before, diff);
-                self.stack_len.store(&mut self.bcx, len_changed);
-            }
+            // We push exactly 1 value, so consume `inp + 1 - out` to match the
+            // real stack diff. For DUP (out = inp+1) this is 0; for ADD (out = 1)
+            // this equals inp.
+            self.len_offset -= (inp + 1 - out) as i8;
+            let value = self.bcx.iconst_256(const_out);
+            self.push(value);
+            self.section_len_offset += diff;
+            goto_return!("const output");
+        }
+
+        if self.try_peephole(data) {
+            self.section_len_offset += diff;
+            goto_return!("peephole");
         }
 
         // Macro utils.
@@ -672,41 +701,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             }};
         }
 
-        macro_rules! field {
-            // Gets the pointer to a field.
-            ($field:ident; @get $($paths:path),*; $($spec:tt).*) => {
-                self.get_field(self.$field, 0 $(+ mem::offset_of!($paths, $spec))*, stringify!($field.$($spec).*.addr))
-            };
-            // Gets and loads the pointer to a field.
-            // The value is loaded as a native-endian 256-bit integer.
-            // `@[endian]` is the endianness of the value. If native, omit it.
-            ($field:ident; @load $(@[endian = $endian:tt])? $ty:expr, $($paths:path),*; $($spec:tt).*) => {{
-                let ptr = field!($field; @get $($paths),*; $($spec).*);
-                // Use align=1 because the pointer comes from a byte-offset GEP and may not
-                // satisfy the type's natural alignment.
-                #[allow(unused_mut)]
-                let mut value = self.bcx.load_aligned($ty, ptr, 1, stringify!($field.$($spec).*));
-                $(
-                    if !cfg!(target_endian = $endian) {
-                        value = self.bcx.bswap(value);
-                    }
-                )?
-                value
-            }};
-            // Gets, loads, extends (if necessary), and pushes the value of a field to the stack.
-            // `@[endian]` is the endianness of the value. If native, omit it.
-            ($field:ident; @push $(@[endian = $endian:tt])? $ty:expr, $($rest:tt)*) => {{
-                let mut value = field!($field; @load $(@[endian = $endian])? $ty, $($rest)*);
-                if self.bcx.type_bit_width($ty) < 256 {
-                    value = self.bcx.zext(self.word_type, value);
-                }
-                self.push(value);
-            }};
-        }
-        macro_rules! input_field {
-            ($($tt:tt)*) => { field!(input; $($tt)*) };
-        }
-
         match data.opcode {
             op::STOP => goto_return!(build InstructionResult::Stop),
 
@@ -715,7 +709,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             op::SUB => binop!(isub),
             op::DIV => {
                 let sp = self.sp_after_inputs();
-                let _ = self.call_builtin(Builtin::UDiv, &[sp]);
+                let _ = self.call_builtin(Builtin::Div, &[sp]);
             }
             op::SDIV => {
                 let sp = self.sp_after_inputs();
@@ -723,11 +717,11 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             }
             op::MOD => {
                 let sp = self.sp_after_inputs();
-                let _ = self.call_builtin(Builtin::URem, &[sp]);
+                let _ = self.call_builtin(Builtin::Mod, &[sp]);
             }
             op::SMOD => {
                 let sp = self.sp_after_inputs();
-                let _ = self.call_builtin(Builtin::SRem, &[sp]);
+                let _ = self.call_builtin(Builtin::SMod, &[sp]);
             }
             op::ADDMOD => {
                 let sp = self.sp_after_inputs();
@@ -793,7 +787,9 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             }
 
             op::ADDRESS => {
-                input_field!(@push @[endian = "big"] self.address_type, InputsImpl; target_address)
+                let slot = self.sp_at_top();
+                let _ = self.call_builtin(Builtin::Address, &[self.ecx, slot]);
+                self.narrow_to_address(slot);
             }
             op::BALANCE => {
                 let sp = self.sp_after_inputs();
@@ -802,12 +798,16 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             op::ORIGIN => {
                 let slot = self.sp_at_top();
                 let _ = self.call_builtin(Builtin::Origin, &[self.ecx, slot]);
+                self.narrow_to_address(slot);
             }
             op::CALLER => {
-                input_field!(@push @[endian = "big"] self.address_type, InputsImpl; caller_address)
+                let slot = self.sp_at_top();
+                let _ = self.call_builtin(Builtin::Caller, &[self.ecx, slot]);
+                self.narrow_to_address(slot);
             }
             op::CALLVALUE => {
-                input_field!(@push @[endian = "little"] self.word_type, InputsImpl; call_value)
+                let slot = self.sp_at_top();
+                let _ = self.call_builtin(Builtin::CallValue, &[self.ecx, slot]);
             }
             op::CALLDATALOAD => {
                 let sp = self.sp_after_inputs();
@@ -844,7 +844,9 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 self.call_fallible_builtin(Builtin::ExtCodeCopy, &[self.ecx, sp]);
             }
             op::RETURNDATASIZE => {
-                field!(ecx; @push self.isize_type, EvmContext<'_>, pf::Slice; return_data.len);
+                let size = self.call_builtin(Builtin::ReturnDataSize, &[self.ecx]).unwrap();
+                let size = self.bcx.zext(self.word_type, size);
+                self.push(size);
             }
             op::RETURNDATACOPY => {
                 let sp = self.sp_after_inputs();
@@ -861,6 +863,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             op::COINBASE => {
                 let slot = self.sp_at_top();
                 let _ = self.call_builtin(Builtin::Coinbase, &[self.ecx, slot]);
+                self.narrow_to_address(slot);
             }
             op::TIMESTAMP => {
                 let slot = self.sp_at_top();
@@ -895,9 +898,12 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 let _ = self.call_builtin(Builtin::BlobHash, &[self.ecx, sp]);
             }
             op::BLOBBASEFEE => {
-                let len = self.len_before();
-                let slot = self.sp_at(len);
+                let slot = self.sp_at_top();
                 let _ = self.call_builtin(Builtin::BlobBaseFee, &[self.ecx, slot]);
+            }
+            op::SLOTNUM => {
+                let slot = self.sp_at_top();
+                let _ = self.call_builtin(Builtin::SlotNum, &[self.ecx, slot]);
             }
 
             op::POP => { /* Already handled in stack_io */ }
@@ -924,19 +930,14 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             op::JUMP | op::JUMPI => {
                 let is_invalid = data.flags.contains(InstFlags::INVALID_JUMP);
                 if is_invalid && opcode == op::JUMP {
-                    // NOTE: We can't early return for `JUMPI` since the jump target is evaluated
-                    // lazily.
+                    // Pop and discard the target; it's always on the stack.
+                    self.pop_ignore(1);
                     self.build_fail_imm(InstructionResult::InvalidJump);
                 } else {
                     let target = if is_invalid {
                         debug_assert_eq!(*data, op::JUMPI);
-                        // The jump target is invalid, but we still need to account for the stack.
-                        if data.flags.contains(InstFlags::BLOCK_RESOLVED_JUMP) {
-                            // Block-resolved: target is on the stack, pop and discard.
-                            let _ = self.pop();
-                        } else {
-                            self.len_offset -= 1;
-                        }
+                        // The jump target is invalid, but we still need to pop it.
+                        self.pop_ignore(1);
                         self.return_block.unwrap()
                     } else if data.flags.contains(InstFlags::MULTI_JUMP) {
                         let target_value = self.pop();
@@ -965,10 +966,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                         self.inst_entries[inst] = self.bcx.current_block().unwrap();
                         goto_return!(no_branch);
                     } else if data.flags.contains(InstFlags::STATIC_JUMP) {
-                        // Block-resolved jumps still have the target on the stack; pop and discard.
-                        if data.flags.contains(InstFlags::BLOCK_RESOLVED_JUMP) {
-                            let _ = self.pop();
-                        }
+                        // Pop and discard the target; it's always on the stack.
+                        self.pop_ignore(1);
                         let target_inst = Inst::from_usize(data.data as usize);
                         debug_assert_eq!(
                             *self.bytecode.inst(target_inst),
@@ -1036,16 +1035,27 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 self.push(value);
             }
             op::PUSH1..=op::PUSH32 => {
-                // NOTE: This can be None if the bytecode is invalid.
-                let imm = self.bytecode.get_imm(data);
-                let value = imm.map(U256::from_be_slice).unwrap_or_default();
+                let value = self.bytecode.get_push_value(data);
                 let value = self.bcx.iconst_256(value);
                 self.push(value);
             }
 
             op::DUP1..=op::DUP16 => self.dup((opcode - op::DUP1 + 1) as usize),
+            op::DUPN => match decode_single(self.bytecode.get_u8_imm(data)) {
+                Some(n) => self.dup(n as usize),
+                None => goto_return!(fail InstructionResult::InvalidImmediateEncoding),
+            },
 
             op::SWAP1..=op::SWAP16 => self.swap((opcode - op::SWAP1 + 1) as usize),
+            op::SWAPN => match decode_single(self.bytecode.get_u8_imm(data)) {
+                Some(n) => self.swap(n as usize),
+                None => goto_return!(fail InstructionResult::InvalidImmediateEncoding),
+            },
+
+            op::EXCHANGE => match decode_pair(self.bytecode.get_u8_imm(data)) {
+                Some((n, m)) => self.exchange(n as usize, (m - n) as usize),
+                None => goto_return!(fail InstructionResult::InvalidImmediateEncoding),
+            },
 
             op::LOG0..=op::LOG4 => {
                 let n = opcode - op::LOG0;
@@ -1098,27 +1108,35 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             _ => unreachable!("unimplemented instruction: {data:?}"),
         }
 
+        self.section_len_offset += diff;
         goto_return!("normal exit");
     }
 
     /// Pushes a 256-bit value onto the stack.
-    fn push(&mut self, value: B::Value) {
+    pub(super) fn push(&mut self, value: B::Value) {
         self.pushn(&[value]);
     }
 
     /// Pushes 256-bit values onto the stack.
     fn pushn(&mut self, values: &[B::Value]) {
-        let len_start = self.len_before();
         for &value in values {
-            let len = if self.len_offset != 0 {
-                self.bcx.iadd_imm(len_start, self.len_offset as i64)
-            } else {
-                len_start
-            };
+            let offset = self.section_len_offset as i64 + self.len_offset as i64;
             self.len_offset += 1;
-            let sp = self.sp_at(len);
+            let sp = self.sp_from_section(offset);
             self.bcx.store(value, sp);
         }
+    }
+
+    /// Returns the known constant values of the topmost `N` stack operands, in the same order
+    /// as [`popn`](Self::popn): index 0 is TOS, index 1 is second from top, etc.
+    pub(super) fn const_operands<const N: usize>(&self) -> [Option<U256>; N] {
+        let inst = self.current_inst.unwrap();
+        std::array::from_fn(|i| self.bytecode.const_operand(inst, i))
+    }
+
+    /// Consumes the topmost `n` elements from the stack without loading them.
+    pub(super) fn pop_ignore(&mut self, n: usize) {
+        self.len_offset -= n as i8;
     }
 
     /// Removes the topmost element from the stack and returns it.
@@ -1129,31 +1147,28 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     /// Removes the topmost `N` elements from the stack and returns them.
     ///
     /// If `load` is `false`, returns just the pointers.
-    fn popn<const N: usize>(&mut self) -> [B::Value; N] {
-        debug_assert_ne!(N, 0);
+    pub(super) fn popn<const N: usize>(&mut self) -> [B::Value; N] {
+        assert_ne!(N, 0);
 
-        let len_start = self.len_before();
         std::array::from_fn(|i| {
+            // Compute the operand depth: how many values have been popped so far
+            // from this instruction (including any prior `pop()` calls).
+            let depth = (-self.len_offset) as usize;
             self.len_offset -= 1;
-            let len = if self.len_offset != 0 {
-                self.bcx.iadd_imm(len_start, self.len_offset as i64)
-            } else {
-                len_start
-            };
-            let sp = self.sp_at(len);
             let name = b'a' + i as u8;
-            self.load_word(sp, std::str::from_utf8(&[name]).unwrap())
+            self.operand_value_or_load(depth, std::str::from_utf8(&[name]).unwrap(), |this| {
+                let offset = this.section_len_offset as i64 + this.len_offset as i64;
+                this.sp_from_section(offset)
+            })
         })
     }
 
     /// Duplicates the `n`th value from the top of the stack.
     /// `n` cannot be `0`.
     fn dup(&mut self, n: usize) {
-        debug_assert_ne!(n, 0);
-        let len = self.len_before();
-        let sp = self.sp_from_top(len, n);
+        assert_ne!(n, 0);
         let name = if self.config.debug { &format!("dup{n}") } else { "" };
-        let value = self.load_word(sp, name);
+        let value = self.operand_value_or_load(n - 1, name, |this| this.sp_from_top(n));
         self.push(value);
     }
 
@@ -1167,14 +1182,13 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     /// `n` is the first index, and the second index is calculated as `n + m`.
     /// `m` cannot be `0`.
     fn exchange(&mut self, n: usize, m: usize) {
-        debug_assert_ne!(m, 0);
-        let len = self.len_before();
+        assert_ne!(m, 0);
         // Load a.
-        let a_sp = self.sp_from_top(len, n + 1);
-        let a = self.load_word(a_sp, "swap.a");
+        let a_sp = self.sp_from_top(n + 1);
+        let a = self.operand_value_or_load(n, "swap.a", |_| a_sp);
         // Load b.
-        let b_sp = self.sp_from_top(len, n + m + 1);
-        let b = self.load_word(b_sp, "swap.b");
+        let b_sp = self.sp_from_top(n + m + 1);
+        let b = self.operand_value_or_load(n + m, "swap.b", |_| b_sp);
         // Store.
         self.bcx.store(a, b_sp);
         self.bcx.store(b, a_sp);
@@ -1208,28 +1222,19 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     fn suspend(&mut self) {
         // Register the next instruction as the resume block.
         let idx = self.resume_blocks.len();
-        let value = self.add_resume_at(self.inst_entries[self.current_inst.unwrap() + 1]);
+        self.add_resume_at(self.inst_entries[self.current_inst.unwrap() + 1]);
 
         // Register the current block as the suspend block.
-        let value = match value {
-            Some(value) => value,
-            None => self.bcx.iconst(self.isize_type, idx as i64 + 1),
-        };
+        let value = self.bcx.iconst(self.isize_type, idx as i64 + 1);
         self.suspend_blocks.push((value, self.bcx.current_block().unwrap()));
 
         // Branch to the suspend block.
         self.bcx.br(self.suspend_block);
     }
 
-    /// Adds a resume point and returns its index.
-    fn add_resume_at(&mut self, block: B::BasicBlock) -> Option<B::Value> {
-        let value = self.bcx.block_addr(block);
-        if self.resume_blocks.is_empty() {
-            self.resume_kind =
-                if value.is_some() { ResumeKind::Blocks } else { ResumeKind::Indexes };
-        }
+    /// Adds a resume point.
+    fn add_resume_at(&mut self, block: B::BasicBlock) {
         self.resume_blocks.push(block);
-        value
     }
 
     /// Loads the word at the given pointer.
@@ -1237,14 +1242,22 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         self.bcx.load(self.word_type, ptr, name)
     }
 
-    /// Gets the stack length before the current instruction.
-    fn len_before(&mut self) -> B::Value {
-        self.len_before
-    }
-
     /// Gets a field at the given offset.
     fn get_field(&mut self, ptr: B::Value, offset: usize, name: &str) -> B::Value {
         get_field(&mut self.bcx, ptr, offset, name)
+    }
+
+    /// Re-loads the address at `slot` as i160 and zero-extends to i256.
+    ///
+    /// On little-endian the low 160 bits sit at byte offset 0, so a direct
+    /// `load i160` + `zext i256` gives LLVM a typed narrow load — no AND needed
+    /// to prove the high 96 bits are zero.
+    #[allow(clippy::assertions_on_constants)]
+    fn narrow_to_address(&mut self, slot: B::Value) {
+        debug_assert!(cfg!(target_endian = "little"), "big-endian not yet supported");
+        let value = self.bcx.load(self.address_type, slot, "address");
+        let value = self.bcx.zext(self.word_type, value);
+        self.bcx.store(value, slot);
     }
 
     /// Loads the gas used.
@@ -1293,19 +1306,42 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
     /// Returns the stack pointer at the top (`&stack[stack.len]`).
     fn sp_at_top(&mut self) -> B::Value {
-        let len = self.len_before();
-        self.sp_at(len)
+        self.sp_from_section(self.section_len_offset as i64)
     }
 
     /// Returns the stack pointer after the input has been popped
     /// (`&stack[stack.len - op.input()]`).
+    ///
+    /// For any input whose value is a known constant, the constant is written into the
+    /// corresponding stack slot. This allows DSE to NOOP the producing PUSH even for
+    /// builtin-delegated opcodes that read operands directly from the stack pointer.
     fn sp_after_inputs(&mut self) -> B::Value {
-        let mut len = self.len_before();
+        let inst = self.current_inst.unwrap();
         let (inputs, _) = self.current_inst().stack_io();
-        if inputs > 0 {
-            len = self.bcx.isub_imm(len, inputs as i64);
+        let sp = self.sp_from_section(self.section_len_offset as i64 - inputs as i64);
+        for depth in 0..inputs as usize {
+            if let Some(c) = self.bytecode.const_operand(inst, depth) {
+                let value = self.bcx.iconst_256(c);
+                let slot_offset = (inputs as usize - 1 - depth) as i64;
+                let slot = if slot_offset == 0 {
+                    sp
+                } else {
+                    let offset = self.bcx.iconst(self.isize_type, slot_offset);
+                    self.bcx.gep(self.word_type, sp, &[offset], "sp.const")
+                };
+                self.bcx.store(value, slot);
+            }
         }
-        self.sp_at(len)
+        sp
+    }
+
+    /// Returns a stack pointer offset from `section_start_sp`.
+    fn sp_from_section(&mut self, offset: i64) -> B::Value {
+        if offset == 0 {
+            return self.section_start_sp;
+        }
+        let offset = self.bcx.iconst(self.isize_type, offset);
+        self.bcx.gep(self.word_type, self.section_start_sp, &[offset], "sp")
     }
 
     /// Returns the stack pointer at `len` (`&stack[len]`).
@@ -1314,11 +1350,26 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         self.bcx.gep(self.word_type, ptr, &[len], "sp")
     }
 
-    /// Returns the stack pointer at `len` from the top (`&stack[CAPACITY - len]`).
-    fn sp_from_top(&mut self, len: B::Value, n: usize) -> B::Value {
-        debug_assert_ne!(n, 0);
-        let len = self.bcx.isub_imm(len, n as i64);
-        self.sp_at(len)
+    /// Returns the stack pointer at `n` from the top (`&stack[len - n]`).
+    fn sp_from_top(&mut self, n: usize) -> B::Value {
+        assert_ne!(n, 0);
+        self.sp_from_section(self.section_len_offset as i64 - n as i64)
+    }
+
+    /// Returns the known constant value of a stack operand if available, otherwise loads from the
+    /// stack. `depth` 0 is TOS (first popped), 1 is second, etc.
+    fn operand_value_or_load(
+        &mut self,
+        depth: usize,
+        name: &str,
+        sp: impl FnOnce(&mut Self) -> B::Value,
+    ) -> B::Value {
+        let inst = self.current_inst.unwrap();
+        if let Some(c) = self.bytecode.const_operand(inst, depth) {
+            return self.bcx.iconst_256(c);
+        }
+        let sp = sp(self);
+        self.load_word(sp, name)
     }
 
     /// Builds a gas cost deduction for an immediate value.
@@ -1361,10 +1412,9 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     }
     */
 
-    /// Builds a check, failing if `ret` is not `InstructionResult::Continue`.
+    /// Builds a check, failing if the builtin returned a non-zero error.
     fn build_check_instruction_result(&mut self, ret: B::Value) {
-        // Continue was 0 in old revm, use Stop (1) as the "continue" marker
-        let failure = self.bcx.icmp_imm(IntCC::NotEqual, ret, InstructionResult::Stop as i64);
+        let failure = self.bcx.icmp_imm(IntCC::NotEqual, ret, 0);
         let target = self.build_check_inner(true, failure, ret);
         self.bcx.switch_to_block(target);
     }
@@ -1721,31 +1771,6 @@ impl<B: Backend> FunctionCx<'_, B> {
 mod pf {
     use super::*;
 
-    pub(super) struct Bytes {
-        pub(super) ptr: *const u8,
-        pub(super) len: usize,
-        data: AtomicPtr<()>,
-        vtable: &'static Vtable,
-    }
-    const _: [(); mem::size_of::<revm_primitives::Bytes>()] = [(); mem::size_of::<Bytes>()];
-    struct Vtable {
-        /// fn(data, ptr, len)
-        clone: unsafe fn(&AtomicPtr<()>, *const u8, usize) -> Bytes,
-        /// fn(data, ptr, len)
-        ///
-        /// takes `Bytes` to value
-        to_vec: unsafe fn(&AtomicPtr<()>, *const u8, usize) -> Vec<u8>,
-        /// fn(data, ptr, len)
-        drop: unsafe fn(&mut AtomicPtr<()>, *const u8, usize),
-    }
-
-    #[repr(C)] // See core::ptr::metadata::PtrComponents
-    pub(super) struct Slice {
-        pub(super) ptr: *const u8,
-        pub(super) len: usize,
-    }
-    const _: [(); mem::size_of::<&'static [u8]>()] = [(); mem::size_of::<Slice>()];
-
     pub(super) struct Gas {
         /// The initial gas limit. This is constant throughout execution.
         pub(super) limit: u64,
@@ -1763,6 +1788,16 @@ mod pf {
         expansion_cost: u64,
     }
     const _: [(); mem::size_of::<revm_interpreter::Gas>()] = [(); mem::size_of::<Gas>()];
+}
+
+/// Computes the effective stack diff for an instruction, matching the codegen semantics.
+fn effective_stack_diff(inp: u8, out: u8, data: &InstData) -> i32 {
+    let mut diff = out as i32 - inp as i32;
+    // Suspending ops return one value pushed by the caller after resume.
+    if data.may_suspend() {
+        diff -= 1;
+    }
+    diff
 }
 
 fn get_field<B: Builder>(bcx: &mut B, ptr: B::Value, offset: usize, name: &str) -> B::Value {

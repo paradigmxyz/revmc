@@ -55,7 +55,7 @@ paste = { workspace = true, optional = true }
 similar-asserts = { version = "1.5", optional = true }
 tracing-subscriber = { workspace = true, features = ["fmt"], optional = true }
 smallvec = "1.15.1"
-oxc_index = "4.1.0"
+oxc_index = { version = "4.1.0", features = ["nonmax"] }
 indexmap = "2.13.0"
 
 [build-dependencies]

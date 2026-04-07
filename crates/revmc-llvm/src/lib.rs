@@ -35,10 +35,10 @@ use revmc_backend::{
     TypeMethods, U256, eyre, format_bytes,
 };
 use std::{
-    borrow::Cow,
     cell::Cell,
     ffi::CString,
-    fmt, iter,
+    fmt::{self, Write},
+    iter,
     mem::ManuallyDrop,
     path::Path,
     sync::{
@@ -134,6 +134,8 @@ pub struct EvmLlvmBackend {
     _tscx: Option<orc::ThreadSafeContext>,
     /// Non-owning context handle for JIT mode. See [`create_orc_context`].
     _cx_handle: Option<Box<ManuallyDrop<Context>>>,
+    /// Owned context for AOT mode. `None` in JIT mode.
+    _aot_cx: Option<Box<Context>>,
 
     /// LLVM debug info builder and compile unit, created lazily when `debug_file` is set.
     di_state: Option<DiState>,
@@ -149,6 +151,7 @@ pub struct EvmLlvmBackend {
 
     aot: bool,
     backend_config: BackendConfig,
+    scratch: String,
     /// Separate from `function_names` to have always increasing IDs.
     function_counter: u32,
     /// Persistent mapping from function ID to symbol name.
@@ -408,10 +411,13 @@ impl OrcJitState {
     fn clear(&mut self) -> Result<()> {
         self.staged_functions.clear();
         self.pending_symbols.clear();
-        self.loaded_trackers.clear();
         self.committed_functions.clear();
         self.last_compiled_object = None;
+        // Clear the JITDylib before dropping resource trackers: `LLVMOrcJITDylibClear` calls
+        // remove on all trackers associated with the dylib and must run while the tracker
+        // handles are still live.
         self.jd().clear().map_err(error_msg)?;
+        self.loaded_trackers.clear();
         Ok(())
     }
 
@@ -475,23 +481,19 @@ impl fmt::Debug for DiState {
     }
 }
 
+// SAFETY: In JIT mode the LLVM context is owned by an ORC ThreadSafeContext.
+// In AOT mode the context is owned by `_aot_cx` (a Box<Context>).
+// Both travel with the backend, so no thread-local or shared state is referenced.
 unsafe impl Send for EvmLlvmBackend {}
 
 impl EvmLlvmBackend {
     /// Creates a new LLVM backend for the host machine.
-    ///
-    /// Use [`new_for_target`](Self::new_for_target) to create a backend for a specific target.
-    pub fn new(aot: bool) -> Result<Self> {
-        Self::new_for_target(aot, &revmc_backend::Target::Native)
-    }
-
-    /// Creates a new LLVM backend for the given target.
     #[instrument(name = "new_llvm_backend", level = "debug", skip_all)]
-    pub fn new_for_target(aot: bool, target: &revmc_backend::Target) -> Result<Self> {
+    pub fn new(aot: bool) -> Result<Self> {
         let config = BackendConfig::default();
         init()?;
 
-        let target_info = TargetInfo::new(target)?;
+        let target_info = TargetInfo::new();
         let target = &target_info.target;
         let machine = target
             .create_target_machine(
@@ -506,9 +508,13 @@ impl EvmLlvmBackend {
 
         // In JIT mode, ORC owns the context via a ThreadSafeContext so that modules can be
         // safely transferred to the JIT without double-ownership issues with the TLS context.
-        // In AOT mode, we use the thread-local context directly.
-        let (cx, tscx, cx_handle) = if aot {
-            (get_context(), None, None)
+        // In AOT mode, we use an owned Box<Context> so the backend is safely Send.
+        let (cx, tscx, cx_handle, aot_cx) = if aot {
+            let aot_cx = Box::new(Context::create());
+            // SAFETY: The Box provides a stable heap address. The context is valid as long as
+            // `_aot_cx` lives, and it is dropped after all LLVM objects due to field ordering.
+            let cx: &'static Context = unsafe { &*(&*aot_cx as *const Context) };
+            (cx, None, None, Some(aot_cx))
         } else {
             if !target.has_jit() {
                 return Err(eyre::eyre!("target {:?} does not support JIT", target.get_name()));
@@ -521,7 +527,7 @@ impl EvmLlvmBackend {
             }
 
             let (cx, tscx, cx_handle) = create_orc_context();
-            (cx, Some(tscx), Some(cx_handle))
+            (cx, Some(tscx), Some(cx_handle), None)
         };
 
         let module = create_module(cx, &machine, aot)?;
@@ -545,6 +551,7 @@ impl EvmLlvmBackend {
             orc: None,
             _tscx: tscx,
             _cx_handle: cx_handle,
+            _aot_cx: aot_cx,
             ty_void,
             ty_i1,
             ty_i8,
@@ -555,6 +562,7 @@ impl EvmLlvmBackend {
             ty_ptr,
             aot,
             backend_config: config,
+            scratch: String::new(),
             function_counter: 0,
             function_names: FxHashMap::default(),
             di_state: None,
@@ -1081,27 +1089,15 @@ impl Clone for TargetInfo {
 }
 
 impl TargetInfo {
-    fn new(target: &revmc_backend::Target) -> Result<Cow<'static, Self>> {
-        match target {
-            revmc_backend::Target::Native => {
-                static HOST_TARGET_INFO: OnceLock<TargetInfo> = OnceLock::new();
-                Ok(Cow::Borrowed(HOST_TARGET_INFO.get_or_init(|| {
-                    let triple = TargetMachine::get_default_triple();
-                    let target = Target::from_triple(&triple).unwrap();
-                    let cpu = TargetMachine::get_host_cpu_name().to_string_lossy().into_owned();
-                    let features =
-                        TargetMachine::get_host_cpu_features().to_string_lossy().into_owned();
-                    Self { target, triple, cpu, features }
-                })))
-            }
-            revmc_backend::Target::Triple { triple, cpu, features } => {
-                let triple = TargetTriple::create(triple);
-                let target = Target::from_triple(&triple).map_err(error_msg)?;
-                let cpu = cpu.as_ref().cloned().unwrap_or_default();
-                let features = features.as_ref().cloned().unwrap_or_default();
-                Ok(Cow::Owned(Self { target, triple, cpu, features }))
-            }
-        }
+    fn new() -> &'static Self {
+        static HOST_TARGET_INFO: OnceLock<TargetInfo> = OnceLock::new();
+        HOST_TARGET_INFO.get_or_init(|| {
+            let triple = TargetMachine::get_default_triple();
+            let target = Target::from_triple(&triple).unwrap();
+            let cpu = TargetMachine::get_host_cpu_name().to_string_lossy().into_owned();
+            let features = TargetMachine::get_host_cpu_features().to_string_lossy().into_owned();
+            Self { target, triple, cpu, features }
+        })
     }
 }
 
@@ -1355,11 +1351,13 @@ impl Builder for EvmLlvmBuilder<'_> {
     }
 
     fn iconst_256(&mut self, value: U256) -> Self::Value {
-        if value == U256::ZERO {
-            return self.ty_i256.const_zero().into();
+        if let Ok(low) = value.try_into() {
+            return self.ty_i256.const_int(low, false).into();
         }
 
-        self.ty_i256.const_int_from_string(&value.to_string(), StringRadix::Decimal).unwrap().into()
+        self.scratch.clear();
+        write!(self.scratch, "{value:x}").unwrap();
+        self.ty_i256.const_int_from_string(&self.scratch, StringRadix::Hexadecimal).unwrap().into()
     }
 
     fn str_const(&mut self, value: &str) -> Self::Value {
@@ -1942,14 +1940,6 @@ fn init_() -> Result<()> {
     Target::initialize_all(&config);
 
     Ok(())
-}
-
-fn get_context() -> &'static Context {
-    thread_local! {
-        static TLS_LLVM_CONTEXT: Context = Context::create();
-    }
-    // SAFETY: It can't be shared across threads anyway.
-    TLS_LLVM_CONTEXT.with(|cx| unsafe { core::mem::transmute(cx) })
 }
 
 fn create_module<'ctx>(

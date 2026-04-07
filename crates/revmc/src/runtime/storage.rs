@@ -3,7 +3,7 @@
 use crate::eyre;
 use alloy_primitives::B256;
 use revm_primitives::hardfork::SpecId;
-use revmc_backend::{OptimizationLevel, Target};
+use revmc_backend::OptimizationLevel;
 use std::path::PathBuf;
 
 /// Runtime cache key: the minimal identity for a compiled program at runtime.
@@ -24,8 +24,6 @@ pub struct ArtifactKey {
     pub runtime: RuntimeCacheKey,
     /// The compiler backend used.
     pub backend: BackendSelection,
-    /// The compilation target.
-    pub target: Target,
     /// The optimization level used.
     pub opt_level: OptimizationLevel,
 }

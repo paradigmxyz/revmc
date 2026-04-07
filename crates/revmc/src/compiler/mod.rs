@@ -1,6 +1,9 @@
 //! EVM bytecode compiler implementation.
 
-use crate::{Backend, Builder, Bytecode, EvmCompilerFn, EvmContext, EvmStack, FxHashMap, Result};
+use crate::{
+    Backend, Builder, Bytecode, EvmCompilerFn, EvmContext, EvmStack, FxHashMap, GasParams, Result,
+    bytecode::AnalysisConfig,
+};
 use revm_interpreter::{Gas, InputsImpl};
 use revm_primitives::{Bytes, hardfork::SpecId};
 use revmc_backend::{
@@ -18,10 +21,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-// TODO: Get rid of `cfg!(target_endian)` calls.
-
-// TODO: Test on big-endian hardware.
-// It probably doesn't work when loading Rust U256 into native endianness.
+mod peephole;
 
 mod translate;
 use translate::{FcxConfig, FunctionCx};
@@ -93,9 +93,12 @@ pub struct EvmCompiler<B: Backend> {
     out_dir: Option<PathBuf>,
     config: FcxConfig,
     builtins: Builtins<B>,
+    gas_params: Option<GasParams>,
 
     dump_assembly: bool,
     dump_unopt_assembly: bool,
+
+    compiler_gas_limit: u64,
 
     remarks: Remarks,
     finalized: bool,
@@ -110,8 +113,10 @@ impl<B: Backend> EvmCompiler<B> {
             out_dir: None,
             config: FcxConfig::default(),
             builtins: Builtins::new(),
+            gas_params: None,
             dump_assembly: true,
             dump_unopt_assembly: false,
+            compiler_gas_limit: crate::bytecode::DEFAULT_COMPILER_GAS_LIMIT,
             remarks: Remarks::default(),
             finalized: false,
         }
@@ -308,19 +313,16 @@ impl<B: Backend> EvmCompiler<B> {
         self.config.frame_pointers = yes;
     }
 
-    /// Sets whether to treat the stack length as observable outside the function.
-    ///
-    /// This also implies that the length is loaded in the beginning of the function, meaning
-    /// that a function can be executed with an initial stack.
+    /// Sets whether to treat the stack as observable outside the function.
     ///
     /// If this is set to `true`, the stack length must be passed in the arguments.
     ///
-    /// This is useful to inspect the stack length after the function has been executed, but it does
-    /// incur a performance penalty as the length will be stored at all return sites.
+    /// This is useful to inspect the stack after the function has been executed, but it does
+    /// incur a performance penalty as the stack will be stored at all return sites.
     ///
     /// Defaults to `false`.
-    pub fn inspect_stack_length(&mut self, yes: bool) {
-        self.config.inspect_stack_length = yes;
+    pub fn inspect_stack(&mut self, yes: bool) {
+        self.config.inspect_stack = yes;
     }
 
     /// Sets whether to enable stack bound checks.
@@ -339,6 +341,20 @@ impl<B: Backend> EvmCompiler<B> {
         self.config.stack_bound_checks = yes;
     }
 
+    /// Sets the gas budget for compile-time evaluation of user-supplied bytecode.
+    ///
+    /// The compiler evaluates EVM operations at compile time during analysis passes. Without a
+    /// budget, adversarial bytecode (e.g. many `EXP`) can make compilation
+    /// arbitrarily slow. This limit uses the EVM gas schedule to bound work.
+    ///
+    /// When the budget is exhausted, further evaluation is skipped and values remain dynamic.
+    ///
+    /// Defaults to 100k gas. Set to `0` to disable compile-time evaluation entirely, or
+    /// `u64::MAX` to disable the limit.
+    pub fn set_compiler_gas_limit(&mut self, limit: u64) {
+        self.compiler_gas_limit = limit;
+    }
+
     /// Sets whether to track gas costs.
     ///
     /// Disabling this will greatly improves compilation speed and performance, at the cost of not
@@ -354,6 +370,16 @@ impl<B: Backend> EvmCompiler<B> {
         self.config.gas_metering = yes;
     }
 
+    /// Sets custom gas parameters.
+    ///
+    /// Overrides the default gas schedule derived from the spec_id.
+    /// Useful for custom chains or hardforks with non-standard gas costs.
+    ///
+    /// Defaults to `GasParams::new_spec(spec_id)`.
+    pub fn set_gas_params(&mut self, gas_params: GasParams) {
+        self.gas_params = Some(gas_params);
+    }
+
     /// Translates the given EVM bytecode into an internal function.
     ///
     /// NOTE: `name` must be unique for each function, as it is used as the name of the final
@@ -364,7 +390,6 @@ impl<B: Backend> EvmCompiler<B> {
         input: impl Into<EvmCompilerInput<'a>>,
         spec_id: SpecId,
     ) -> Result<B::FuncId> {
-        ensure!(cfg!(target_endian = "little"), "only little-endian is supported");
         ensure!(!self.finalized, "cannot compile more functions after finalizing the module");
         let bytecode = self.parse(input.into(), spec_id)?;
         self.translate_inner(name, &bytecode)
@@ -476,7 +501,9 @@ impl<B: Backend> EvmCompiler<B> {
         let _t = self.remarks.time(|r| &r.parse);
         let EvmCompilerInput::Code(bytecode) = input;
 
-        let mut bytecode = Bytecode::new(bytecode, spec_id);
+        let mut bytecode = Bytecode::new(bytecode, spec_id, self.gas_params.clone());
+        bytecode.compiler_gas_limit = self.compiler_gas_limit;
+        bytecode.config.set(AnalysisConfig::INSPECT_STACK, self.config.inspect_stack);
         bytecode.analyze()?;
         if let Some(dump_dir) = &self.dump_dir() {
             Self::dump_bytecode(dump_dir, &bytecode)?;
@@ -487,6 +514,7 @@ impl<B: Backend> EvmCompiler<B> {
     #[instrument(name = "translate", level = "debug", skip_all)]
     #[doc(hidden)] // Not public API.
     pub fn translate_inner(&mut self, name: &str, bytecode: &Bytecode<'_>) -> Result<B::FuncId> {
+        ensure!(cfg!(target_endian = "little"), "only little-endian is supported");
         let _t = self.remarks.time(|r| &r.translate);
         ensure!(self.backend.function_name_is_unique(name), "function name `{name}` is not unique");
 
@@ -750,7 +778,7 @@ total:      {total:>11.3?}
             writer.flush()?;
         }
 
-        fs::write(dump_dir.join("bytecode.bin"), bytecode.code)?;
+        fs::write(dump_dir.join("bytecode.bin"), &*bytecode.code)?;
 
         {
             let file = fs::File::create(dump_dir.join("bytecode.dot"))?;

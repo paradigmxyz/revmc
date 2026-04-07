@@ -42,6 +42,8 @@ unsafe extern "C" {
         name: *const c_char,
     ) -> LLVMErrorRef;
 
+    pub(crate) fn revmc_llvm_lljit_enable_debug_support(jit: LLVMOrcLLJITRef) -> LLVMErrorRef;
+
     pub(crate) fn revmc_llvm_lljit_enable_perf_support(jit: LLVMOrcLLJITRef) -> LLVMErrorRef;
 
     pub(crate) fn revmc_llvm_lljit_enable_simple_perf(jit: LLVMOrcLLJITRef) -> LLVMErrorRef;

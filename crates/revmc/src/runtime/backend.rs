@@ -15,7 +15,6 @@ use alloy_primitives::{Bytes, keccak256, map::HashMap};
 use crossbeam_channel as chan;
 use dashmap::DashMap;
 use quanta::Instant;
-use revmc_backend::Target;
 use std::{
     sync::{Arc, atomic::Ordering},
     time::{SystemTime, UNIX_EPOCH},
@@ -328,7 +327,6 @@ impl BackendState {
         let artifact_key = ArtifactKey {
             runtime: key.clone(),
             backend: BackendSelection::Llvm,
-            target: Target::Native,
             opt_level: self.tuning.aot_opt_level,
         };
 
@@ -508,7 +506,6 @@ impl BackendState {
         let artifact_key = ArtifactKey {
             runtime: key.clone(),
             backend: BackendSelection::Llvm,
-            target: Target::Native,
             opt_level: self.tuning.aot_opt_level,
         };
 
