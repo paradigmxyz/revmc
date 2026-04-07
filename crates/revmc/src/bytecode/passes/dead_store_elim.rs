@@ -134,9 +134,7 @@ impl Bytecode<'_> {
                 // before any consumer.
                 if data.may_suspend() {
                     let h_after = heights[idx + 1] as usize;
-                    for pos in 0..h_after {
-                        live.set(pos, true);
-                    }
+                    live[..h_after].fill(true);
                 }
             }
         }
