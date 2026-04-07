@@ -12,6 +12,21 @@ pub struct OpcodesIterWithPc<'a> {
     pc: usize,
 }
 
+impl OpcodesIterWithPc<'_> {
+    /// Rewinds the iterator by `n` bytes so that the next call to [`Iterator::next`] re-yields
+    /// them as fresh opcodes.
+    ///
+    /// # Safety
+    ///
+    /// `n` must not exceed the number of bytes already consumed.
+    pub(crate) unsafe fn rewind(&mut self, n: usize) {
+        // SAFETY: the caller guarantees n ≤ bytes consumed, so `remaining` was originally
+        // part of a larger contiguous slice that started at least `n` bytes earlier.
+        unsafe { self.iter.rewind(n) };
+        self.pc -= n;
+    }
+}
+
 impl<'a> Iterator for OpcodesIterWithPc<'a> {
     type Item = (usize, Opcode<'a>);
 
@@ -88,6 +103,22 @@ impl<'a> OpcodesIter<'a> {
     #[inline]
     pub fn into_inner(self) -> slice::Iter<'a, u8> {
         self.iter
+    }
+
+    /// Rewinds the iterator by `n` bytes so that the next call to [`Iterator::next`] re-yields
+    /// them as fresh opcodes.
+    ///
+    /// # Safety
+    ///
+    /// `n` must not exceed the number of bytes already consumed.
+    pub(crate) unsafe fn rewind(&mut self, n: usize) {
+        let inner = self.inner_mut();
+        let remaining = inner.as_slice();
+        // SAFETY: the caller guarantees n ≤ bytes consumed, so `remaining` was originally
+        // part of a larger contiguous slice that started at least `n` bytes earlier.
+        let rewound =
+            unsafe { std::slice::from_raw_parts(remaining.as_ptr().sub(n), remaining.len() + n) };
+        *inner = rewound.iter();
     }
 }
 

@@ -448,6 +448,47 @@ tests! {
             expected_gas: GAS_WHAT_INTERPRETER_SAYS,
         }),
 
+        // JUMP into the 0x5b immediate byte of DUPN. Per EIP-8024, JUMPDEST analysis is
+        // unchanged by these opcodes, so 0x5b in the immediate position is a valid target.
+        jump_into_dupn_immediate(@raw {
+            bytecode: &[
+                op::PUSH1, 4, op::JUMP,
+                op::DUPN, op::JUMPDEST, // 0x5b immediate is a reachable JUMPDEST
+                op::PUSH1, 0x42, op::PUSH0, op::MSTORE,
+                op::PUSH1, 0x20, op::PUSH0, op::RETURN,
+            ],
+            spec_id: SpecId::AMSTERDAM,
+            expected_return: InstructionResult::Return,
+            expected_memory: MEMORY_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+        }),
+        // Same as above but with SWAPN.
+        jump_into_swapn_immediate(@raw {
+            bytecode: &[
+                op::PUSH1, 4, op::JUMP,
+                op::SWAPN, op::JUMPDEST,
+                op::PUSH1, 0x42, op::PUSH0, op::MSTORE,
+                op::PUSH1, 0x20, op::PUSH0, op::RETURN,
+            ],
+            spec_id: SpecId::AMSTERDAM,
+            expected_return: InstructionResult::Return,
+            expected_memory: MEMORY_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+        }),
+        // Same as above but with EXCHANGE.
+        jump_into_exchange_immediate(@raw {
+            bytecode: &[
+                op::PUSH1, 4, op::JUMP,
+                op::EXCHANGE, op::JUMPDEST,
+                op::PUSH1, 0x42, op::PUSH0, op::MSTORE,
+                op::PUSH1, 0x20, op::PUSH0, op::RETURN,
+            ],
+            spec_id: SpecId::AMSTERDAM,
+            expected_return: InstructionResult::Return,
+            expected_memory: MEMORY_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+        }),
+
         // Truncated PUSH2 at EOF: only 1 of 2 immediate bytes present.
         // EVM spec right-pads with zeros: PUSH2 0x42 → 0x4200.
         push2_truncated_eof(@raw {

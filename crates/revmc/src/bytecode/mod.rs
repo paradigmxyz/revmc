@@ -156,7 +156,8 @@ impl<'a> Bytecode<'a> {
         let mut jumpdests = BitVec::repeat(false, code.len());
         let mut pc_to_inst = FxHashMap::with_capacity_and_hasher(code.len(), Default::default());
         let op_infos = op_info_map(spec_id);
-        for (pc, Opcode { opcode, immediate }) in OpcodesIter::new(&code, spec_id).with_pc() {
+        let mut iter = OpcodesIter::new(&code, spec_id).with_pc();
+        while let Some((pc, Opcode { opcode, immediate })) = iter.next() {
             let inst: Inst = insts.next_idx();
             pc_to_inst.insert(pc as u32, inst);
 
@@ -191,6 +192,19 @@ impl<'a> Bytecode<'a> {
                 gas_section,
                 stack_section,
             });
+
+            // EIP-8024: JUMPDEST analysis is unchanged by DUPN/SWAPN/EXCHANGE. Their
+            // immediate byte is NOT masked, so 0x5b in that position is a valid jump
+            // target. When the immediate is 0x5b, rewind the iterator so it is re-yielded
+            // and processed as a normal JUMPDEST by the loop.
+            if matches!(opcode, op::DUPN | op::SWAPN | op::EXCHANGE)
+                && !info.is_unknown()
+                && !info.is_disabled()
+                && immediate == Some(&[op::JUMPDEST])
+            {
+                // SAFETY: we just consumed the 1-byte immediate.
+                unsafe { iter.rewind(1) };
+            }
         }
 
         // Pad code to ensure there is at least one diverging instruction.
