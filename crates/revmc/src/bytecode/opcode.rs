@@ -204,20 +204,12 @@ pub const fn stack_io(op: u8) -> (u8, u8) {
 pub(crate) fn compute_stack_io(op: u8, immediate: Option<&[u8]>) -> (u8, u8) {
     let imm_u8 = || immediate.map_or(0, |b| b[0]);
     match op {
-        op::DUPN => match decode_single(imm_u8()) {
-            Some(n) => (n, n + 1),
-            None => stack_io(op),
-        },
-        op::SWAPN => match decode_single(imm_u8()) {
-            Some(n) => (n + 1, n + 1),
-            None => stack_io(op),
-        },
-        op::EXCHANGE => match decode_pair(imm_u8()) {
-            Some((_n, m)) => (m + 1, m + 1),
-            None => stack_io(op),
-        },
-        _ => stack_io(op),
+        op::DUPN => decode_single(imm_u8()).map(|n| (n, n + 1)),
+        op::SWAPN => decode_single(imm_u8()).map(|n| (n + 1, n + 1)),
+        op::EXCHANGE => decode_pair(imm_u8()).map(|(_n, m)| (m + 1, m + 1)),
+        _ => None,
     }
+    .unwrap_or_else(|| stack_io(op))
 }
 
 /// Decodes a DUPN/SWAPN immediate byte into a stack index.
