@@ -150,9 +150,9 @@ dependencies = [
 
 [[package]]
 name = "alloy-evm"
-version = "0.29.2"
+version = "0.30.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3cb6ba2dafd6327f78f2b59ae539bd5c39c57a01dc76763e92942619d934a7bb"
+checksum = "e13146597a586a4166ac31b192883e08c044272d6b8c43de231ee1f43dd9a115"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
