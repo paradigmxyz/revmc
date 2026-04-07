@@ -124,9 +124,9 @@ matrix_tests!(
 // `JITDylib::clear` must run before dropping `ResourceTracker` handles.
 matrix_tests!(
     repeated_clear_recompile = |compiler| {
-        for i in 0..200u8 {
-            let code = push_stop(i);
-            jit_and_verify(compiler, "f", &code, U256::from(i));
+        for i in 0..1000u32 {
+            let code = push_stop((i & 0xFF) as u8);
+            jit_and_verify(compiler, "f", &code, U256::from(i & 0xFF));
             unsafe { compiler.clear() }.unwrap();
         }
     }
