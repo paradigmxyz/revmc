@@ -140,6 +140,14 @@ impl<'a> Bytecode<'a> {
             // Block-local constants (computed without incoming stack state) remain valid.
             self.snapshots.restore_from(self.cfg.blocks[canonical].insts(), local_snapshots);
 
+            // Clear NOOP flags on the canonical block. DSE ran before dedup and its
+            // liveness decisions depend on the predecessor-specific constant environment.
+            // After merging, the canonical block serves multiple predecessors, so the
+            // original NOOP decisions may be unsound.
+            for i in self.cfg.blocks[canonical].insts() {
+                self.insts[i].flags.remove(InstFlags::NOOP);
+            }
+
             for &dup in dups {
                 deduped += 1;
                 trace!("deduped: {from} -> {to}", from = dup, to = canonical);
@@ -215,7 +223,9 @@ fn block_bytes<'a>(
 
 #[cfg(test)]
 mod tests {
-    use crate::bytecode::{AnalysisConfig, passes::block_analysis::tests::analyze_asm_with};
+    use crate::bytecode::{
+        AnalysisConfig, InstFlags, passes::block_analysis::tests::analyze_asm_with,
+    };
 
     #[test]
     fn dedup_identical_revert_blocks() {
@@ -642,5 +652,16 @@ mod tests {
             bytecode.const_output(add_inst).is_none(),
             "canonical ADD should have no const_output after dedup (was stale)",
         );
+
+        // The canonical block's instructions must not carry stale NOOP flags from
+        // DSE that ran before dedup under a single-predecessor constant environment.
+        let canonical_block = bytecode.cfg.inst_to_block[canonical_start]
+            .expect("canonical inst should map to a block");
+        for i in bytecode.cfg.blocks[canonical_block].insts() {
+            assert!(
+                !bytecode.inst(i).flags.contains(InstFlags::NOOP),
+                "canonical inst {i:?} should not be NOOP after dedup",
+            );
+        }
     }
 }
