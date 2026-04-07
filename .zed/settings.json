@@ -10,6 +10,9 @@
           "features": ["llvm", "alloy-evm"],
           "sysroot": "discover",
         },
+        "diagnostics": {
+          "disabled": ["unsafe_op_in_unsafe_fn"],
+        },
       },
     },
   },

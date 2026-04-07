@@ -902,7 +902,7 @@ impl ExecutionSessionRef<'_> {
 
     /// Remove a JITDylib from the ExecutionSession, freeing all its resources once the last handle
     /// is dropped.
-    pub fn remove_jit_dylib(&self, jd: &JITDylibRef) -> Result<(), LLVMString> {
+    pub fn remove_jit_dylib(&self, jd: JITDylibRef) -> Result<(), LLVMString> {
         cvt(unsafe {
             crate::cpp::revmc_llvm_execution_session_remove_jit_dylib(
                 self.as_inner(),
@@ -954,26 +954,26 @@ impl JITDylibRef {
     }
 
     /// Unwraps the raw pointer.
-    pub fn as_inner(&self) -> LLVMOrcJITDylibRef {
+    pub fn as_inner(self) -> LLVMOrcJITDylibRef {
         self.dylib.as_ptr()
     }
 
     /// Return a reference to a newly created resource tracker associated with JD.
-    pub fn create_resource_tracker(&self) -> ResourceTracker {
+    pub fn create_resource_tracker(self) -> ResourceTracker {
         unsafe {
             ResourceTracker::from_inner(LLVMOrcJITDylibCreateResourceTracker(self.as_inner()))
         }
     }
 
     /// Return a reference to the default resource tracker for the given JITDylib.
-    pub fn get_default_resource_tracker(&self) -> ResourceTracker {
+    pub fn get_default_resource_tracker(self) -> ResourceTracker {
         unsafe {
             ResourceTracker::from_inner(LLVMOrcJITDylibGetDefaultResourceTracker(self.as_inner()))
         }
     }
 
     /// Add the given MaterializationUnit to the given JITDylib.
-    pub fn define(&self, mu: MaterializationUnit) -> Result<(), (LLVMString, MaterializationUnit)> {
+    pub fn define(self, mu: MaterializationUnit) -> Result<(), (LLVMString, MaterializationUnit)> {
         // If this operation succeeds then JITDylib JD will take ownership of MU.
         // If the operation fails then ownership remains with the caller who should call
         // LLVMOrcDisposeMaterializationUnit to destroy it.
@@ -985,19 +985,19 @@ impl JITDylibRef {
     /// Add another JITDylib to this JITDylib's link order.
     ///
     /// Symbols not found in this JITDylib will be searched for in `other`.
-    pub fn add_to_link_order(&self, other: &Self) {
+    pub fn add_to_link_order(self, other: Self) {
         unsafe {
             crate::cpp::revmc_llvm_jit_dylib_add_to_link_order(self.as_inner(), other.as_inner())
         };
     }
 
     /// Calls remove on all trackers associated with this JITDylib.
-    pub fn clear(&self) -> Result<(), LLVMString> {
+    pub fn clear(self) -> Result<(), LLVMString> {
         cvt(unsafe { LLVMOrcJITDylibClear(self.as_inner()) })
     }
 
     /// Add a DefinitionGenerator to the given JITDylib.
-    pub fn add_generator(&self, dg: DefinitionGenerator) {
+    pub fn add_generator(self, dg: DefinitionGenerator) {
         // The JITDylib will take ownership of the given generator:
         // the client is no longer responsible for managing its memory.
         let dg = mem::ManuallyDrop::new(dg);
@@ -1428,7 +1428,7 @@ impl LLJIT {
     /// Unlike [`lookup`](Self::lookup), which only searches the main JITDylib,
     /// this searches the given `jd`. The name is **unmangled** — the LLJIT
     /// applies the data layout prefix (e.g. `_` on macOS) internally.
-    pub fn lookup_in(&self, jd: &JITDylibRef, name: &CStr) -> Result<usize, LLVMString> {
+    pub fn lookup_in(&self, jd: JITDylibRef, name: &CStr) -> Result<usize, LLVMString> {
         let mut res = MaybeUninit::uninit();
         cvt(unsafe {
             crate::cpp::revmc_llvm_lljit_lookup_in(
@@ -1920,8 +1920,8 @@ mod tests {
         }
 
         // Lookup in each JD should return the correct function.
-        let addr_a = jit.lookup_in(&jd_a, c"test_fn").unwrap();
-        let addr_b = jit.lookup_in(&jd_b, c"test_fn").unwrap();
+        let addr_a = jit.lookup_in(jd_a, c"test_fn").unwrap();
+        let addr_b = jit.lookup_in(jd_b, c"test_fn").unwrap();
         assert_ne!(addr_a, addr_b);
 
         let f_a = unsafe { mem::transmute::<usize, extern "C" fn() -> u64>(addr_a) };
