@@ -42,7 +42,7 @@ use std::{
     mem::ManuallyDrop,
     path::Path,
     sync::{
-        Once, OnceLock,
+        Arc, Once, OnceLock,
         atomic::{AtomicU64, AtomicUsize, Ordering},
     },
 };
@@ -194,14 +194,12 @@ fn obj_capture_transform(obj: &[u8]) -> Result<Option<Vec<u8>>, String> {
 /// Process-global shared LLJIT instance.
 ///
 /// ORC/LLJIT is thread-safe and designed to be shared. Individual compilers get
-/// their own [`JITDylib`](orc::JITDylibRef) for symbol isolation, recycled via a pool.
+/// their own [`JITDylib`](orc::JITDylibRef) for symbol isolation.
 ///
 /// Builtin function pointers (absolute symbols) are defined once in a shared
 /// `builtins` JITDylib. Each per-compiler JITDylib links against the builtins
 /// JD so compiled code can resolve them without duplicating definitions.
 struct GlobalOrcJit {
-    jit: orc::LLJIT,
-
     /// Shared JITDylib containing absolute symbols for builtin functions.
     /// Added to each per-compiler JITDylib's link order.
     builtins_jd: orc::JITDylibRef,
@@ -210,11 +208,11 @@ struct GlobalOrcJit {
     builtins_defined: std::sync::Mutex<HashSet<CString>>,
 
     next_dylib_id: AtomicU64,
-    /// Pool of cleared JITDylibs ready for reuse.
-    pool: std::sync::Mutex<Vec<orc::JITDylibRef>>,
 
     /// Live JIT memory counters, updated by the C++ MemoryUsagePlugin.
     memory_counters: &'static JitMemoryCounters,
+
+    jit: orc::LLJIT,
 }
 
 impl GlobalOrcJit {
@@ -272,7 +270,6 @@ impl GlobalOrcJit {
                 builtins_jd,
                 builtins_defined: Default::default(),
                 next_dylib_id: Default::default(),
-                pool: Default::default(),
                 memory_counters,
             })
         });
@@ -282,14 +279,12 @@ impl GlobalOrcJit {
         }
     }
 
-    /// Acquires a JITDylib from the pool, or creates a new one.
-    fn acquire_jit_dylib(&self) -> orc::JITDylibRef {
-        if let Some(jd) = self.pool.lock().unwrap().pop() {
-            return jd;
-        }
+    /// Creates a fresh JITDylib for a compiler.
+    fn create_jit_dylib(&self) -> orc::JITDylibRef {
         let id = self.next_dylib_id.fetch_add(1, Ordering::Relaxed);
         let name = CString::new(format!("revmc.compiler.{id}")).unwrap();
-        let jd = self.jit.get_execution_session().create_bare_jit_dylib(&name);
+        let es = self.jit.get_execution_session();
+        let jd = es.create_bare_jit_dylib(&name);
         // Link against the builtins JD so compiled code can resolve builtin symbols.
         jd.add_to_link_order(&self.builtins_jd);
         // Attach a process symbol generator so the JITDylib can resolve libc and other
@@ -301,13 +296,14 @@ impl GlobalOrcJit {
         jd
     }
 
-    /// Returns a cleared JITDylib to the pool for reuse.
-    fn release_jit_dylib(&self, jd: orc::JITDylibRef) {
-        if let Err(e) = jd.clear() {
-            error!("failed to clear JITDylib for pool: {e}");
-            return;
+    /// Removes a JITDylib from the ExecutionSession, freeing all its resources.
+    fn remove_jit_dylib(&self, jd: orc::JITDylibRef) {
+        let es = self.jit.get_execution_session();
+        if let Err(e) = es.remove_jit_dylib(&jd) {
+            error!("failed to remove JITDylib: {e}");
         }
-        self.pool.lock().unwrap().push(jd);
+        // Reclaim unreferenced interned strings after removing symbols.
+        es.get_symbol_string_pool().clear_dead_entries();
     }
 
     /// Defines absolute symbols in the shared builtins JITDylib, skipping any
@@ -340,13 +336,27 @@ impl GlobalOrcJit {
     }
 }
 
+/// Shared guard that keeps a JITDylib alive.
+///
+/// The JITDylib will not be cleared or returned to the pool until the last
+/// `JitDylibGuard` is dropped. Runtime callers holding JIT function pointers
+/// must retain a clone of this guard to prevent the code from being freed.
+#[allow(missing_debug_implementations)]
+pub struct JitDylibGuard {
+    global: &'static GlobalOrcJit,
+    jd: orc::JITDylibRef,
+}
+
+impl Drop for JitDylibGuard {
+    fn drop(&mut self) {
+        self.global.remove_jit_dylib(self.jd);
+    }
+}
+
 /// ORC JIT state for the LLVM backend (JIT mode only).
 ///
 /// The LLVM context is owned separately (via `tscx`) and persists across JIT resets.
 /// Each compiler gets its own JITDylib in the global LLJIT for symbol isolation.
-///
-/// Drop order: `staged_functions` → `loaded_trackers` → `jd` (field declaration order).
-/// The context (`tscx`) outlives all of these since it lives on `EvmLlvmBackend`.
 struct OrcJitState {
     /// Reference to the global LLJIT instance.
     global: &'static GlobalOrcJit,
@@ -362,8 +372,11 @@ struct OrcJitState {
     /// Cached object buffer from the last `commit_staged_module`, captured via
     /// ObjectTransformLayer.
     last_compiled_object: Option<Vec<u8>>,
-    /// Per-compiler JITDylib in the global LLJIT. Provides symbol namespace isolation.
-    jd: Option<orc::JITDylibRef>,
+    /// Shared guard that owns the JITDylib. The JD is not recycled until all
+    /// `Arc<JitDylibGuard>` holders (including external callers) are dropped.
+    jd_guard: Arc<JitDylibGuard>,
+    /// Counter for throttling `SymbolStringPool::clearDeadEntries()` calls.
+    clear_pool_counter: u32,
 }
 
 impl fmt::Debug for OrcJitState {
@@ -380,6 +393,8 @@ impl fmt::Debug for OrcJitState {
 impl OrcJitState {
     fn new(debug_support: bool, profiling_support: bool, simple_perf: bool) -> Result<Self> {
         let global = GlobalOrcJit::get(debug_support, profiling_support, simple_perf)?;
+        let jd = global.create_jit_dylib();
+        let jd_guard = Arc::new(JitDylibGuard { global, jd });
         Ok(Self {
             global,
             staged_functions: FxHashMap::default(),
@@ -387,7 +402,8 @@ impl OrcJitState {
             loaded_trackers: Vec::new(),
             committed_functions: FxHashMap::default(),
             last_compiled_object: None,
-            jd: Some(global.acquire_jit_dylib()),
+            jd_guard,
+            clear_pool_counter: 0,
         })
     }
 
@@ -405,14 +421,19 @@ impl OrcJitState {
         Ok(())
     }
 
-    fn jd(&self) -> &orc::JITDylibRef {
-        self.jd.as_ref().unwrap()
+    /// Periodically clears dead entries from the global SymbolStringPool.
+    ///
+    /// `clearDeadEntries` is O(pool_size), so we throttle it to avoid
+    /// O(N²) total cost over many compilations.
+    fn maybe_clear_dead_pool_entries(&mut self) {
+        self.clear_pool_counter += 1;
+        if self.clear_pool_counter.is_multiple_of(256) {
+            self.global.jit.get_execution_session().get_symbol_string_pool().clear_dead_entries();
+        }
     }
-}
 
-impl Drop for OrcJitState {
-    fn drop(&mut self) {
-        self.global.release_jit_dylib(self.jd.take().unwrap());
+    fn jd(&self) -> orc::JITDylibRef {
+        self.jd_guard.jd
     }
 }
 
@@ -700,6 +721,34 @@ impl EvmLlvmBackend {
 
         Ok(())
     }
+
+    /// Pops and returns the [`ResourceTracker`](orc::ResourceTracker) for the last committed
+    /// JIT module.
+    ///
+    /// Each call to [`jit_function`](revmc_backend::Backend::jit_function) commits a module
+    /// with its own tracker. The caller takes ownership and is responsible for calling
+    /// `tracker.remove()` to free the machine code when it is no longer needed.
+    ///
+    /// The caller must also hold a [`JitDylibGuard`] to prevent the owning JITDylib from
+    /// being recycled before the tracker is removed.
+    ///
+    /// Returns `None` in AOT mode or if no modules have been committed.
+    pub fn take_last_resource_tracker(&mut self) -> Option<orc::ResourceTracker> {
+        let orc = self.orc.as_mut()?;
+        let tracker = orc.loaded_trackers.pop()?;
+        let tracker_idx = orc.loaded_trackers.len();
+        orc.committed_functions.retain(|_, idx| *idx != tracker_idx);
+        Some(tracker)
+    }
+
+    /// Returns a shared handle that keeps this backend's JITDylib alive.
+    ///
+    /// The JITDylib will not be cleared or recycled until all `JitDylibGuard` handles
+    /// (and the backend itself) are dropped. Callers holding JIT function pointers must
+    /// retain a guard to prevent the backing code from being freed.
+    pub fn jit_dylib_guard(&self) -> Arc<JitDylibGuard> {
+        Arc::clone(&self.orc.as_ref().expect("jit_dylib_guard called in AOT mode").jd_guard)
+    }
 }
 
 impl BackendTypes for EvmLlvmBackend {
@@ -939,7 +988,7 @@ impl Backend for EvmLlvmBackend {
         // in lookup_in when the symbol is first requested.
         let mut captured = None;
         let _guard = ScopedObjCapture::install(&mut captured);
-        let addr = orc.global.jit.lookup_in(orc.jd(), &name).map_err(error_msg)?;
+        let addr = orc.global.jit.lookup_in(&orc.jd(), &name).map_err(error_msg)?;
         drop(_guard);
         if captured.is_some() {
             orc.last_compiled_object = captured;
@@ -971,9 +1020,12 @@ impl Backend for EvmLlvmBackend {
 
     fn clear_ir(&mut self) -> Result<()> {
         self.di_state = None;
+        self.function_names.clear();
         self.module = create_module(self.cx, &self.machine, self.aot)?;
         if let Some(orc) = &mut self.orc {
             orc.staged_functions.clear();
+            orc.pending_symbols.clear();
+            orc.maybe_clear_dead_pool_entries();
         }
         Ok(())
     }
