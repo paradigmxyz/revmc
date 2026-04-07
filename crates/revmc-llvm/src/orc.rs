@@ -840,6 +840,15 @@ impl ExecutionSessionRef<'_> {
         self.es
     }
 
+    /// Returns the SymbolStringPool for this ExecutionSession.
+    pub fn get_symbol_string_pool(&self) -> SymbolStringPoolRef {
+        unsafe {
+            SymbolStringPoolRef::from_inner(LLVMOrcExecutionSessionGetSymbolStringPool(
+                self.as_inner(),
+            ))
+        }
+    }
+
     /// Intern a string in the ExecutionSession's SymbolStringPool and return a reference to it.
     pub fn intern(&self, name: &CStr) -> SymbolStringPoolEntry {
         unsafe {
@@ -928,6 +937,7 @@ impl ExecutionSessionRef<'_> {
 /// A JIT dynamic library reference.
 ///
 /// JITDylibs provide the symbol tables.
+#[derive(Clone, Copy)]
 pub struct JITDylibRef {
     dylib: NonNull<LLVMOrcOpaqueJITDylib>,
 }
