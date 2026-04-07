@@ -394,6 +394,10 @@ impl Bytecode<'_> {
     /// Also computes and stores per-instruction stack snapshots for constant propagation.
     /// Internally runs the private call/return detection pass and feeds the results
     /// as seed edges into the fixpoint.
+    ///
+    /// When the first round resolves jumps but dynamic jumps remain, rebuilds the CFG
+    /// and runs one additional PCR+fixpoint round. The rebuilt CFG incorporates newly
+    /// resolved edges, which can reduce opaque taint and enable further PCR resolution.
     #[instrument(name = "ba", level = "debug", skip_all)]
     pub(crate) fn block_analysis(&mut self, local_snapshots: &Snapshots) {
         self.init_snapshots();
@@ -407,6 +411,26 @@ impl Bytecode<'_> {
         }
 
         self.recompute_has_dynamic_jumps();
+
+        // Second round: if the first round resolved jumps but dynamic jumps remain,
+        // rebuild the CFG (incorporating new edges) and re-run PCR+fixpoint. The
+        // updated CFG may eliminate `has_unmodeled_jump`, reducing opaque taint and
+        // unlocking further resolutions.
+        if count > 0 && self.has_dynamic_jumps {
+            debug!("re-running with updated CFG");
+            self.rebuild_cfg();
+            self.init_snapshots();
+
+            let pcr_hints = self.compute_pcr_hints();
+            let (resolved, count) = self.run_abstract_interp(&pcr_hints, local_snapshots);
+
+            if count > 0 {
+                let newly_resolved = self.commit_resolved_jumps(&resolved);
+                debug!(newly_resolved, "resolved jumps (round 2)");
+            }
+
+            self.recompute_has_dynamic_jumps();
+        }
     }
 
     /// Recomputes the `has_dynamic_jumps` flag based on the current instruction set.
@@ -860,24 +884,26 @@ impl Bytecode<'_> {
         let mut worklist = Worklist::new(num_blocks);
         worklist.push(Block::from_usize(0));
 
-        // Discovered dynamic-jump target edges per block.
+        // PCR hint edges: used for state propagation but excluded from
+        // invalidation (the PCR pass has its own soundness guarantees).
+        let mut pcr_edges: IndexVec<Block, SmallVec<[Block; 4]>> =
+            IndexVec::from_vec(vec![SmallVec::new(); num_blocks]);
+        for hint in pcr_hints {
+            let Some(src_block) = self.cfg.inst_to_block[hint.jump_inst] else { continue };
+            for &target_inst in &hint.targets {
+                let Some(tgt_block) = self.cfg.inst_to_block[target_inst] else { continue };
+                if !pcr_edges[src_block].contains(&tgt_block) {
+                    pcr_edges[src_block].push(tgt_block);
+                }
+            }
+        }
+
+        // Discovered dynamic-jump target edges per block (fixpoint-discovered only).
         let mut discovered: IndexVec<Block, SmallVec<[Block; 4]>> =
             IndexVec::from_vec(vec![SmallVec::new(); num_blocks]);
         // Reverse map: discovered predecessors per block.
         let mut disc_preds: IndexVec<Block, SmallVec<[Block; 4]>> =
             IndexVec::from_vec(vec![SmallVec::new(); num_blocks]);
-
-        // Seed PCR hints as discovered edges.
-        for hint in pcr_hints {
-            let Some(src_block) = self.cfg.inst_to_block[hint.jump_inst] else { continue };
-            for &target_inst in &hint.targets {
-                let Some(tgt_block) = self.cfg.inst_to_block[target_inst] else { continue };
-                if !discovered[src_block].contains(&tgt_block) {
-                    discovered[src_block].push(tgt_block);
-                    disc_preds[tgt_block].push(src_block);
-                }
-            }
-        }
 
         let max_iterations = num_blocks * 64;
         let mut iterations = 0;
@@ -922,8 +948,8 @@ impl Bytecode<'_> {
                 );
             }
 
-            // Propagate to static CFG successors and discovered dynamic-jump targets.
-            for &succ in block.succs.iter().chain(&discovered[bid]) {
+            // Propagate to static CFG successors, PCR edges, and fixpoint-discovered edges.
+            for &succ in block.succs.iter().chain(&pcr_edges[bid]).chain(&discovered[bid]) {
                 if block_states[succ].join(&stack_buf, const_sets) {
                     worklist.push(succ);
                 }

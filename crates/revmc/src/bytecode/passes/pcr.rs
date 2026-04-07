@@ -18,7 +18,7 @@ use std::collections::VecDeque;
 use tracing::{debug, instrument, trace};
 
 /// Maximum call-string depth for context-sensitive traversal.
-const MAX_CONTEXT_DEPTH: usize = 8;
+const MAX_CONTEXT_DEPTH: usize = 16;
 
 /// Stack value provenance for return detection.
 ///
@@ -34,7 +34,7 @@ enum Provenance {
 }
 
 /// Call-string context: stack of caller block IDs, most recent last.
-type Context = SmallVec<[Block; 8]>;
+type Context = SmallVec<[Block; 16]>;
 
 /// Context-sensitive worklist for the PCR graph traversal.
 ///
@@ -290,79 +290,110 @@ impl Bytecode<'_> {
         let mut iterations = 0;
         let mut converged = true;
 
-        while let Some((bid, ctx)) = wl.pop() {
-            iterations += 1;
-            if iterations > max_iterations {
-                converged = false;
-                break;
-            }
+        // Run the main traversal from block 0, then seed unvisited callee blocks.
+        // This two-phase approach explores functions whose entry blocks are only
+        // reachable via already-resolved jumps (not through the block-0 path),
+        // without polluting nested-call contexts.
+        let mut phase = 0u8;
+        loop {
+            while let Some((bid, ctx)) = wl.pop() {
+                iterations += 1;
+                if iterations > max_iterations {
+                    converged = false;
+                    break;
+                }
 
-            let block = &self.cfg.blocks[bid];
-            let summary = &summaries[bid];
+                let block = &self.cfg.blocks[bid];
+                let summary = &summaries[bid];
 
-            match summary {
-                LocalBlockSummary::Call(call) => {
-                    // Private function call: push caller onto context, follow to callee.
-                    let mut new_ctx = ctx.clone();
-                    if new_ctx.len() >= MAX_CONTEXT_DEPTH {
-                        new_ctx.remove(0);
-                    }
-                    new_ctx.push(bid);
+                match summary {
+                    LocalBlockSummary::Call(call) => {
+                        // Private function call: push caller onto context, follow to callee.
+                        let mut new_ctx = ctx.clone();
+                        if new_ctx.len() >= MAX_CONTEXT_DEPTH {
+                            new_ctx.remove(0);
+                        }
+                        new_ctx.push(bid);
 
-                    let callee_block = self.cfg.inst_to_block[call.callee];
+                        let callee_block = self.cfg.inst_to_block[call.callee];
 
-                    if let Some(callee_block) = callee_block {
-                        wl.push(callee_block, new_ctx);
-                    }
+                        if let Some(callee_block) = callee_block {
+                            wl.push(callee_block, new_ctx);
+                        }
 
-                    // Also follow the continuation edge with the original context.
-                    // For JUMPI: the fallthrough is a CFG successor.
-                    // For JUMP: the continuation is not a CFG successor (it's only
-                    // reached when the callee returns), but we follow it optimistically
-                    // to ensure the traversal explores post-call blocks even when the
-                    // callee's return is not yet resolved (e.g., the callee always
-                    // reverts on some paths).
-                    let term = &self.insts[block.terminator()];
-                    if term.opcode == op::JUMPI {
-                        for &succ in &block.succs {
-                            if callee_block != Some(succ) {
-                                wl.push(succ, ctx.clone());
+                        // Also follow the continuation edge with the original context.
+                        // For JUMPI: the fallthrough is a CFG successor.
+                        // For JUMP: the continuation is not a CFG successor (it's only
+                        // reached when the callee returns), but we follow it optimistically
+                        // to ensure the traversal explores post-call blocks even when the
+                        // callee's return is not yet resolved (e.g., the callee always
+                        // reverts on some paths).
+                        let term = &self.insts[block.terminator()];
+                        if term.opcode == op::JUMPI {
+                            for &succ in &block.succs {
+                                if callee_block != Some(succ) {
+                                    wl.push(succ, ctx.clone());
+                                }
                             }
                         }
-                    }
-                    if let Some(cont_block) = self.cfg.inst_to_block[call.continuation] {
-                        wl.push(cont_block, ctx.clone());
-                    }
-                }
-                LocalBlockSummary::Return => {
-                    // Private function return: pop the caller from the context
-                    // to find the matching continuation address.
-                    if let Some(caller_bid) = ctx.last().copied()
-                        && let Some(LocalBlockSummary::Call(caller_call)) =
-                            summaries.get(caller_bid)
-                    {
-                        let continuation = caller_call.continuation;
-                        if !return_targets[bid].contains(&continuation) {
-                            return_targets[bid].push(continuation);
+                        if let Some(cont_block) = self.cfg.inst_to_block[call.continuation] {
+                            wl.push(cont_block, ctx.clone());
                         }
+                    }
+                    LocalBlockSummary::Return => {
+                        // Private function return: pop the caller from the context
+                        // to find the matching continuation address.
+                        if let Some(caller_bid) = ctx.last().copied()
+                            && let Some(LocalBlockSummary::Call(caller_call)) =
+                                summaries.get(caller_bid)
+                        {
+                            let continuation = caller_call.continuation;
+                            if !return_targets[bid].contains(&continuation) {
+                                return_targets[bid].push(continuation);
+                            }
 
-                        let new_ctx: Context = ctx[..ctx.len() - 1].into();
-                        if let Some(cont_block) = self.cfg.inst_to_block[continuation] {
-                            wl.push(cont_block, new_ctx);
+                            let new_ctx: Context = ctx[..ctx.len() - 1].into();
+                            if let Some(cont_block) = self.cfg.inst_to_block[continuation] {
+                                wl.push(cont_block, new_ctx);
+                            }
+                        } else {
+                            // Return reached with empty or invalid context — PCR may not
+                            // have discovered all callers (e.g. due to context truncation).
+                            context_tainted.set(bid.index(), true);
                         }
-                    } else {
-                        // Return reached with empty or invalid context — PCR may not
-                        // have discovered all callers (e.g. due to context truncation).
-                        context_tainted.set(bid.index(), true);
                     }
-                }
-                LocalBlockSummary::Normal => {
-                    // Normal block: propagate to all successors with same context.
-                    for &succ in &block.succs {
-                        wl.push(succ, ctx.clone());
+                    LocalBlockSummary::Normal => {
+                        // Normal block: propagate to all successors with same context.
+                        for &succ in &block.succs {
+                            wl.push(succ, ctx.clone());
+                        }
                     }
                 }
             }
+
+            if !converged || phase > 0 {
+                break;
+            }
+            phase = 1;
+
+            // Seed callee blocks that were not visited by the main traversal.
+            // Uses singleton caller contexts so returns can still match.
+            let mut n_seeded = 0usize;
+            for (caller_bid, summary) in summaries.iter_enumerated() {
+                if let LocalBlockSummary::Call(call) = summary
+                    && let Some(callee_block) = self.cfg.inst_to_block[call.callee]
+                    && wl.visited[callee_block].is_empty()
+                {
+                    let mut ctx = Context::new();
+                    ctx.push(caller_bid);
+                    wl.push(callee_block, ctx);
+                    n_seeded += 1;
+                }
+            }
+            if n_seeded == 0 {
+                break;
+            }
+            trace!(n_seeded, "seeded unvisited callees");
         }
 
         debug!(
