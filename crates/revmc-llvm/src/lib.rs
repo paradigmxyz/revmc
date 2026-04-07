@@ -286,7 +286,7 @@ impl GlobalOrcJit {
         let es = self.jit.get_execution_session();
         let jd = es.create_bare_jit_dylib(&name);
         // Link against the builtins JD so compiled code can resolve builtin symbols.
-        jd.add_to_link_order(&self.builtins_jd);
+        jd.add_to_link_order(self.builtins_jd);
         // Attach a process symbol generator so the JITDylib can resolve libc and other
         // process-level symbols (e.g. printf, memcpy) that JIT-compiled code may reference.
         let prefix = self.jit.get_global_prefix();
@@ -299,7 +299,7 @@ impl GlobalOrcJit {
     /// Removes a JITDylib from the ExecutionSession, freeing all its resources.
     fn remove_jit_dylib(&self, jd: orc::JITDylibRef) {
         let es = self.jit.get_execution_session();
-        if let Err(e) = es.remove_jit_dylib(&jd) {
+        if let Err(e) = es.remove_jit_dylib(jd) {
             error!("failed to remove JITDylib: {e}");
         }
         // Reclaim unreferenced interned strings after removing symbols.
@@ -988,7 +988,7 @@ impl Backend for EvmLlvmBackend {
         // in lookup_in when the symbol is first requested.
         let mut captured = None;
         let _guard = ScopedObjCapture::install(&mut captured);
-        let addr = orc.global.jit.lookup_in(&orc.jd(), &name).map_err(error_msg)?;
+        let addr = orc.global.jit.lookup_in(orc.jd(), &name).map_err(error_msg)?;
         drop(_guard);
         if captured.is_some() {
             orc.last_compiled_object = captured;
