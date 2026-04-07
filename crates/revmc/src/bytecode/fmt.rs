@@ -464,7 +464,7 @@ bb1:           ; stack_in=0 max_growth=2
   JUMPI bb1    ; ic= 8 pc=13
 
 bb2:           ; stack_in=0 max_growth=7
-  PUSH1 0x00   ; ic= 9 pc=14 gas=121 noop
+  PUSH1 0x00   ; ic= 9 pc=14 gas=121
   PUSH1 0x00   ; ic=10 pc=16 noop
   PUSH1 0x00   ; ic=11 pc=18 noop
   PUSH1 0x00   ; ic=12 pc=20 noop

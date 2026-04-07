@@ -126,6 +126,18 @@ impl Bytecode<'_> {
                     &self.snapshots.inputs[inst],
                     self.snapshots.outputs.get(inst).copied().flatten(),
                 );
+
+                // Suspending instructions (CALL/CREATE*) trigger `copy_stack_to_arg()`
+                // which copies the entire live stack prefix back to the interpreter.
+                // All positions in that prefix must be physically materialized — we
+                // cannot rely on later rematerialization since the suspend path runs
+                // before any consumer.
+                if data.may_suspend() {
+                    let h_after = heights[idx + 1] as usize;
+                    for pos in 0..h_after {
+                        live.set(pos, true);
+                    }
+                }
             }
         }
 
@@ -1030,6 +1042,43 @@ mod tests {
         assert!(
             bytecode.inst(Inst::from_usize(0)).flags.contains(InstFlags::NOOP),
             "PUSH 0 should be skipped (const input)"
+        );
+    }
+
+    #[test]
+    fn const_live_across_suspend_not_nooped() {
+        // PUSH1 0xaa is live across a CALL suspension: after the child returns,
+        // POP drops the success flag and MSTORE writes 0xaa. DSE must not NOOP
+        // the PUSH because copy_stack_to_arg copies the stack prefix at suspend
+        // time before any consumer rematerializes the constant.
+        //
+        // Bytecode: PUSH1 0xaa PUSH0×5 PUSH1 0x69 GAS CALL POP PUSH0 MSTORE PUSH1 32 PUSH0 RETURN
+        let bytecode = analyze_code_spec(
+            vec![
+                op::PUSH1,
+                0xaa,      // inst 0: live across CALL
+                op::PUSH0, // inst 1
+                op::PUSH0, // inst 2
+                op::PUSH0, // inst 3
+                op::PUSH0, // inst 4
+                op::PUSH0, // inst 5
+                op::PUSH1,
+                0x69,       // inst 6
+                op::GAS,    // inst 7
+                op::CALL,   // inst 8: suspends
+                op::POP,    // inst 9
+                op::PUSH0,  // inst 10
+                op::MSTORE, // inst 11
+                op::PUSH1,
+                32,         // inst 12
+                op::PUSH0,  // inst 13
+                op::RETURN, // inst 14
+            ],
+            SpecId::CANCUN,
+        );
+        assert!(
+            !bytecode.inst(Inst::from_usize(0)).flags.contains(InstFlags::NOOP),
+            "PUSH1 0xaa must NOT be nooped — it is live across the CALL suspension"
         );
     }
 }
