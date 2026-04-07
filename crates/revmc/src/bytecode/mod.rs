@@ -175,9 +175,11 @@ impl<'a> Bytecode<'a> {
             if info.is_disabled() {
                 flags |= InstFlags::DISABLED;
             }
-            let base_gas = info.base_gas();
-
-            let stack_io = compute_stack_io(opcode, immediate);
+            let (base_gas, stack_io) = if info.is_unknown() || info.is_disabled() {
+                (0, (0, 0))
+            } else {
+                (info.base_gas(), compute_stack_io(opcode, immediate))
+            };
 
             let gas_section = GasSection::default();
             let stack_section = StackSection::default();

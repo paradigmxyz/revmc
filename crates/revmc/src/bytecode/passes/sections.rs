@@ -218,13 +218,9 @@ impl SectionsAnalysis {
         }
 
         let data = bytecode.inst(inst);
-        // Disabled/unknown opcodes never execute, so they must not contribute stack I/O or gas
-        // to the current section. They still end both sections below via `is_diverging`.
-        if !data.flags.intersects(InstFlags::DISABLED | InstFlags::UNKNOWN) {
-            let (inp, out) = data.stack_io();
-            self.stack.process(inp, out);
-            self.gas.process(data.base_gas);
-        }
+        let (inp, out) = data.stack_io();
+        self.stack.process(inp, out);
+        self.gas.process(data.base_gas);
 
         // When EXP's builtin will be skipped — either because both operands are known
         // (const_output) or because the exponent is known and handled by a peephole (≤ 2) —
