@@ -49,6 +49,7 @@ mod macros;
 
 mod meta;
 
+mod disabled_section_poison;
 mod div_zero_opaque;
 mod fibonacci;
 mod resume;

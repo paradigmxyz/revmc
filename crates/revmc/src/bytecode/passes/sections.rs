@@ -218,9 +218,13 @@ impl SectionsAnalysis {
         }
 
         let data = bytecode.inst(inst);
-        let (inp, out) = data.stack_io();
-        self.stack.process(inp, out);
-        self.gas.process(data.base_gas);
+        // Disabled/unknown opcodes never execute, so they must not contribute stack I/O or gas
+        // to the current section. They still end both sections below via `is_diverging`.
+        if !data.flags.intersects(InstFlags::DISABLED | InstFlags::UNKNOWN) {
+            let (inp, out) = data.stack_io();
+            self.stack.process(inp, out);
+            self.gas.process(data.base_gas);
+        }
 
         // When EXP's builtin will be skipped — either because both operands are known
         // (const_output) or because the exponent is known and handled by a peephole (≤ 2) —
@@ -268,7 +272,10 @@ impl SectionsAnalysis {
 
 #[cfg(test)]
 mod tests {
-    use crate::bytecode::{Inst, passes::block_analysis::tests::analyze_asm};
+    use crate::bytecode::{
+        Inst,
+        passes::block_analysis::tests::{analyze_asm, analyze_asm_spec},
+    };
 
     /// Returns the gas section cost for the first non-dead instruction (the section head).
     fn section_gas(src: &str) -> u32 {
@@ -307,5 +314,22 @@ mod tests {
              PUSH 2 EXP PUSH0 MSTORE STOP",
         );
         assert_eq!(gas, 1621, "max exponent should cost 50*32=1600 dynamic gas");
+    }
+
+    /// Disabled opcodes must not contribute stack I/O or gas to the preceding section.
+    /// Otherwise the section-head underflow check fires before the disabled opcode's
+    /// `NotActivated` guard, producing a divergent `StackUnderflow`.
+    #[test]
+    fn disabled_opcode_does_not_poison_section() {
+        use crate::SpecId;
+
+        // CALLDATASIZE(0→1) ; TSTORE(2→0, disabled before Cancun)
+        let bytecode = analyze_asm_spec("CALLDATASIZE TSTORE", SpecId::SHANGHAI);
+        let head = bytecode.inst(Inst::from_usize(0));
+        assert_eq!(
+            head.stack_section.inputs, 0,
+            "CALLDATASIZE needs 0 inputs; disabled TSTORE must not inflate the section"
+        );
+        assert_eq!(head.gas_section.gas_cost, 2, "only CALLDATASIZE gas (2) should be charged");
     }
 }
