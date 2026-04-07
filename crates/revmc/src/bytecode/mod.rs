@@ -293,27 +293,26 @@ impl<'a> Bytecode<'a> {
     pub(crate) fn analyze(&mut self) -> Result<()> {
         self.recompute_has_dynamic_jumps();
         self.mark_dead_code();
-
         self.rebuild_cfg();
+
         self.block_analysis_local();
         self.mark_dead_code();
+        self.rebuild_cfg();
 
         let local_snapshots = self.snapshots.clone();
 
-        self.rebuild_cfg();
         self.block_analysis(&local_snapshots);
-        self.dead_store_elim();
         self.mark_dead_code();
+        self.rebuild_cfg();
 
         if self.config.contains(AnalysisConfig::DEDUP) {
-            self.rebuild_cfg();
             self.dedup_blocks(&local_snapshots);
             self.mark_dead_code();
+            self.rebuild_cfg();
         }
         drop(local_snapshots);
 
-        // Final rebuild so the CFG is consistent for sections analysis and DOT output.
-        self.rebuild_cfg();
+        self.dead_store_elim();
 
         self.calc_may_suspend();
 

@@ -215,7 +215,9 @@ fn block_bytes<'a>(
 
 #[cfg(test)]
 mod tests {
-    use crate::bytecode::{AnalysisConfig, passes::block_analysis::tests::analyze_asm_with};
+    use crate::bytecode::{
+        AnalysisConfig, InstFlags, passes::block_analysis::tests::analyze_asm_with,
+    };
 
     #[test]
     fn dedup_identical_revert_blocks() {
@@ -585,6 +587,72 @@ mod tests {
             targets.len(),
             4,
             "canonical dispatcher should have 4 multi-jump targets (merged), got {targets:?}",
+        );
+    }
+
+    #[test]
+    fn dedup_clears_stale_noop_flags() {
+        // Regression test for stale NOOP flags surviving dedup.
+        //
+        // Two byte-identical RETURN tails reached via different paths:
+        // - Path 0 pushes known constants (0x11, 0x22) → DSE can mark ADD as NOOP because the
+        //   output is a known constant (0x33).
+        // - Path 1 pushes CALLDATASIZE twice → ADD output is dynamic.
+        //
+        // After dedup merges the tails, the canonical block's snapshots are restored
+        // to local (which lack the incoming constants), but DSE re-runs and must NOT
+        // mark ADD as NOOP since its output is no longer a known constant.
+        let bytecode = analyze_asm_with(
+            "
+            CALLDATASIZE
+            PUSH %path1
+            JUMPI
+
+            ; Path 0: known constants.
+            PUSH1 0x11
+            PUSH1 0x22
+            PUSH %tail0
+            JUMP
+
+        path1:
+            JUMPDEST
+            ; Path 1: dynamic values.
+            CALLDATASIZE
+            CALLDATASIZE
+            PUSH %tail1
+            JUMP
+
+        tail0:
+            JUMPDEST
+            ADD
+            PUSH0
+            MSTORE
+            PUSH1 0x20
+            PUSH0
+            RETURN
+
+        tail1:
+            JUMPDEST
+            ADD
+            PUSH0
+            MSTORE
+            PUSH1 0x20
+            PUSH0
+            RETURN
+        ",
+            AnalysisConfig::DEDUP,
+        );
+
+        // Dedup should have merged the two tails.
+        assert_eq!(bytecode.redirects.len(), 1);
+
+        // The canonical block's ADD must NOT be marked NOOP — its output is dynamic
+        // under the merged (local) snapshots.
+        let canonical_start = *bytecode.redirects.values().next().unwrap();
+        let add_inst = canonical_start + 1; // JUMPDEST, ADD
+        assert!(
+            !bytecode.insts[add_inst].flags.contains(InstFlags::NOOP),
+            "canonical ADD must not be NOOP after dedup (stale flag from context-specific DSE)",
         );
     }
 
