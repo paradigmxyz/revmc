@@ -346,6 +346,8 @@ impl GlobalOrcJit {
 /// Each compiler gets its own JITDylib in the global LLJIT for symbol isolation.
 ///
 /// Drop order: `staged_functions` → `loaded_trackers` → `jd` (field declaration order).
+/// In `clear()`, `jd().clear()` runs before dropping `loaded_trackers` so that
+/// `LLVMOrcJITDylibClear` sees live tracker handles.
 /// The context (`tscx`) outlives all of these since it lives on `EvmLlvmBackend`.
 struct OrcJitState {
     /// Reference to the global LLJIT instance.
@@ -395,10 +397,13 @@ impl OrcJitState {
     fn clear(&mut self) -> Result<()> {
         self.staged_functions.clear();
         self.pending_symbols.clear();
-        self.loaded_trackers.clear();
         self.committed_functions.clear();
         self.last_compiled_object = None;
+        // Clear the JITDylib before dropping resource trackers: `LLVMOrcJITDylibClear` calls
+        // remove on all trackers associated with the dylib and must run while the tracker
+        // handles are still live.
         self.jd().clear().map_err(error_msg)?;
+        self.loaded_trackers.clear();
         Ok(())
     }
 
