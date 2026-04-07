@@ -174,8 +174,7 @@ impl<'a> Bytecode<'a> {
             if info.is_disabled() {
                 flags |= InstFlags::DISABLED;
             }
-            let (base_gas, stack_io) = if flags.intersects(InstFlags::DISABLED | InstFlags::UNKNOWN)
-            {
+            let (base_gas, stack_io) = if info.is_unknown() || info.is_disabled() {
                 (0, (0, 0))
             } else {
                 (info.base_gas(), compute_stack_io(opcode, immediate))
