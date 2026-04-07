@@ -395,10 +395,13 @@ impl OrcJitState {
     fn clear(&mut self) -> Result<()> {
         self.staged_functions.clear();
         self.pending_symbols.clear();
-        self.loaded_trackers.clear();
         self.committed_functions.clear();
         self.last_compiled_object = None;
+        // Clear the JITDylib before dropping resource trackers: `LLVMOrcJITDylibClear` calls
+        // remove on all trackers associated with the dylib and must run while the tracker
+        // handles are still live.
         self.jd().clear().map_err(error_msg)?;
+        self.loaded_trackers.clear();
         Ok(())
     }
 

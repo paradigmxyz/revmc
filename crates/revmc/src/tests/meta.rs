@@ -120,6 +120,18 @@ matrix_tests!(
     }
 );
 
+// Repeated clear/recompile cycles. Regression test for resource tracker UAF:
+// `JITDylib::clear` must run before dropping `ResourceTracker` handles.
+matrix_tests!(
+    repeated_clear_recompile = |compiler| {
+        for i in 0..1000u32 {
+            let code = push_stop((i & 0xFF) as u8);
+            jit_and_verify(compiler, "f", &code, U256::from(i & 0xFF));
+            unsafe { compiler.clear() }.unwrap();
+        }
+    }
+);
+
 // Free one function, then free all remaining via `clear`.
 matrix_tests!(
     free_single_then_clear = |compiler| {
