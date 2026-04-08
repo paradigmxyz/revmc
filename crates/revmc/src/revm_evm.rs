@@ -6,6 +6,7 @@
 
 use crate::runtime::{JitBackend, LookupDecision, LookupRequest};
 use alloy_primitives::{Address, Bytes};
+use revm_context::{Host, JournalEntry};
 use revm_context_interface::{
     Cfg, ContextSetters, ContextTr, Database,
     journaled_state::JournalTr,
@@ -18,10 +19,10 @@ use revm_handler::{
     SystemCallTx, evm::ContextDbError,
 };
 use revm_inspector::{
-    InspectCommitEvm, InspectEvm, InspectSystemCallEvm, InspectorEvmTr, InspectorHandler,
-    JournalExt,
+    InspectCommitEvm, InspectEvm, InspectSystemCallEvm, Inspector, InspectorEvmTr, InspectorFrame,
+    InspectorHandler, JournalExt,
 };
-use revm_interpreter::InterpreterResult;
+use revm_interpreter::{InstructionResult, InterpreterAction, InterpreterResult, InterpreterTypes};
 use revm_primitives::{B256Map, hardfork::SpecId};
 use revm_state::EvmState;
 
@@ -344,6 +345,59 @@ where
     ) {
         self.inner.all_mut_inspector()
     }
+
+    #[inline]
+    fn inspect_frame_run(
+        &mut self,
+    ) -> Result<FrameInitOrResult<Self::Frame>, ContextDbError<Self::Context>> {
+        let spec_id: SpecId = self.inner.ctx_ref().cfg().spec().into();
+        let frame = self.inner.frame_stack().get();
+        let code_hash = frame.interpreter.bytecode.get_or_calculate_hash();
+
+        let decision = self.lookup_cache.entry(code_hash).or_insert_with(|| {
+            let code = frame.interpreter.bytecode.original_bytes();
+            self.backend.lookup(LookupRequest { code_hash, code, spec_id })
+        });
+
+        let LookupDecision::Compiled(program) = decision else {
+            return self.inner.inspect_frame_run();
+        };
+
+        // Record log count before JIT execution so we can replay new logs.
+        let logs_before = self.inner.ctx_ref().journal().logs().len();
+
+        let (ctx, _, _, frame_stack) = self.inner.all_mut();
+        let frame = frame_stack.get();
+        let action = unsafe { program.func.call_with_interpreter(&mut frame.interpreter, ctx) };
+
+        // Replay logs emitted by the JIT-compiled code to the inspector.
+        // Collected into a vec to avoid borrowing ctx immutably while passing it to log().
+        let (ctx, inspector) = self.ctx_inspector();
+        let new_logs = ctx.journal().logs()[logs_before..].to_vec();
+        for log in new_logs {
+            inspector.log(ctx, log);
+        }
+
+        // Handle selfdestruct.
+        if let InterpreterAction::Return(result) = &action {
+            if result.result == InstructionResult::SelfDestruct {
+                inspect_selfdestruct(ctx, inspector);
+            }
+        }
+
+        let (ctx, _, _, frame_stack) = self.inner.all_mut();
+        let frame = frame_stack.get();
+        let mut result = frame.process_next_action::<_, ContextDbError<Self::Context>>(ctx, action);
+
+        if let Ok(ItemOrResult::Result(frame_result)) = &mut result {
+            let (ctx, inspector, frame) = self.ctx_inspector_frame();
+            if let Some(frame) = frame.eth_frame() {
+                revm_inspector::handler::frame_end(ctx, inspector, &frame.input, frame_result);
+                frame.set_finished(true);
+            }
+        }
+        result
+    }
 }
 
 impl<EVM> InspectEvm for JitEvm<EVM>
@@ -397,6 +451,24 @@ where
             ),
         );
         MainnetHandler::default().inspect_run_system_call(self)
+    }
+}
+
+#[inline(never)]
+#[cold]
+fn inspect_selfdestruct<CTX, IT>(context: &mut CTX, inspector: &mut impl Inspector<CTX, IT>)
+where
+    CTX: ContextTr<Journal: JournalExt> + Host,
+    IT: InterpreterTypes,
+{
+    if let Some(
+        JournalEntry::AccountDestroyed {
+            address: contract, target: to, had_balance: balance, ..
+        }
+        | JournalEntry::BalanceTransfer { from: contract, to, balance, .. },
+    ) = context.journal_mut().journal().last()
+    {
+        inspector.selfdestruct(*contract, *to, *balance);
     }
 }
 

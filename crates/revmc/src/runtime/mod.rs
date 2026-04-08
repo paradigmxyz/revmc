@@ -111,6 +111,7 @@ impl JitBackend {
     /// first [`set_enabled(true)`](Self::set_enabled) call.
     pub fn new(mut config: RuntimeConfig) -> eyre::Result<Self> {
         if config.blocking {
+            config.enabled = true;
             config.tuning.jit_hot_threshold = 0;
         }
 
