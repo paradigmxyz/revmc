@@ -360,6 +360,13 @@ impl Drop for JitDylibGuard {
 struct OrcJitState {
     /// Reference to the global LLJIT instance.
     global: &'static GlobalOrcJit,
+    /// Shared guard that owns the JITDylib. The JD is not recycled until all
+    /// `Arc<JitDylibGuard>` holders (including external callers) are dropped.
+    ///
+    /// Declared before `loaded_trackers` so it drops first: `removeJITDylib`
+    /// (called in `JitDylibGuard::drop`) clears the JITDylib internally and
+    /// must run while the tracker handles are still live.
+    jd_guard: Arc<JitDylibGuard>,
     /// Functions in the current staging module (not yet committed to JIT).
     staged_functions: FxHashMap<u32, FunctionValue<'static>>,
     /// Absolute symbols collected during translation, flushed to the global
@@ -372,9 +379,6 @@ struct OrcJitState {
     /// Cached object buffer from the last `commit_staged_module`, captured via
     /// ObjectTransformLayer.
     last_compiled_object: Option<Vec<u8>>,
-    /// Shared guard that owns the JITDylib. The JD is not recycled until all
-    /// `Arc<JitDylibGuard>` holders (including external callers) are dropped.
-    jd_guard: Arc<JitDylibGuard>,
     /// Counter for throttling `SymbolStringPool::clearDeadEntries()` calls.
     clear_pool_counter: u32,
 }
