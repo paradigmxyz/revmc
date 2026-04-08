@@ -599,7 +599,9 @@ impl<B: Backend> EvmCompiler<B> {
                 let attrs = default_attrs::for_sized_ptr((size, align))
                     // `Gas` and `InputsImpl` are reachable through `EvmContext` and can alias
                     // parameters 0 and 3. Keep `noalias` only for stack and stack_len.
-                    .chain(matches!(i, 1 | 2).then_some(Attribute::NoAlias));
+                    .chain(matches!(i, 1 | 2).then_some(Attribute::NoAlias))
+                    // All parameters are `&mut`.
+                    .chain(std::iter::once(Attribute::Writable));
                 for attr in attrs {
                     let loc = FunctionAttributeLocation::Param(i as _);
                     bcx.add_function_attribute(None, attr, loc);
