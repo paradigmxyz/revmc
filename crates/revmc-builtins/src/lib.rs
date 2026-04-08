@@ -599,10 +599,14 @@ pub unsafe extern "C" fn __revmc_builtin_log(
         topics.push(sp.sub(i as usize).read().to_be_bytes());
     }
 
-    ecx.host.log(Log {
+    let log = Log {
         address: ecx.input.target_address,
         data: LogData::new(topics, data).expect("too many topics"),
-    });
+    };
+    if let Some(on_log) = &mut ecx.on_log {
+        on_log(&log);
+    }
+    ecx.host.log(log);
     Ok(())
 }
 

@@ -334,10 +334,10 @@ fn set_enabled_toggle() {
 
     assert!(matches!(tb.lookup(req.clone()), LookupDecision::Interpret(InterpretReason::Disabled)));
 
-    tb.set_enabled(true);
+    tb.set_enabled(true).unwrap();
     assert!(matches!(tb.lookup(req.clone()), LookupDecision::Interpret(InterpretReason::NotReady)));
 
-    tb.set_enabled(false);
+    tb.set_enabled(false).unwrap();
     assert!(matches!(tb.lookup(req), LookupDecision::Interpret(InterpretReason::Disabled)));
 }
 
@@ -853,14 +853,14 @@ fn set_enabled_during_compilation() {
     }
 
     // Disable while compilation may be in progress.
-    tb.set_enabled(false);
+    tb.set_enabled(false).unwrap();
     assert!(matches!(
         tb.lookup(TestBackend::req_cancun(BYTECODE_RET42)),
         LookupDecision::Interpret(InterpretReason::Disabled)
     ));
 
     // Re-enable and check compilation eventually completes.
-    tb.set_enabled(true);
+    tb.set_enabled(true).unwrap();
     tb.wait_compiled(BYTECODE_RET42, SpecId::CANCUN);
 }
 

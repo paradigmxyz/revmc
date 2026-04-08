@@ -25,6 +25,7 @@ use revm_inspector::{
 use revm_interpreter::{InstructionResult, InterpreterAction, InterpreterResult, InterpreterTypes};
 use revm_primitives::{B256Map, hardfork::SpecId};
 use revm_state::EvmState;
+use std::sync::Arc;
 
 /// Mainnet EVM with JIT-compiled function dispatch.
 ///
@@ -359,30 +360,44 @@ where
             self.backend.lookup(LookupRequest { code_hash, code, spec_id })
         });
 
-        let LookupDecision::Compiled(program) = decision else {
-            return self.inner.inspect_frame_run();
+        let program = match decision {
+            LookupDecision::Compiled(program) => Arc::clone(program),
+            LookupDecision::Interpret(_) => return self.inner.inspect_frame_run(),
         };
 
-        // Record log count before JIT execution so we can replay new logs.
-        let logs_before = self.inner.ctx_ref().journal().logs().len();
+        // Set up the on_log callback to forward logs to the inspector during JIT execution.
+        //
+        // SAFETY: We dereference raw pointers to the inspector and context inside the closure.
+        // This creates aliasing &mut references with `ecx.host` (which borrows the context),
+        // but the inspector's `log()` implementation only accesses the inspector itself,
+        // not the journaled state already borrowed by the host.
+        let (ctx, inspector) = self.ctx_inspector();
+        let ctx_ptr: *mut EVM::Context = ctx;
+        let inspector_ptr: *mut <EVM as InspectorEvmTr>::Inspector = inspector;
+        let mut on_log = move |log: &revm_primitives::Log| unsafe {
+            (*inspector_ptr).log(&mut *ctx_ptr, log.clone());
+        };
 
         let (ctx, _, _, frame_stack) = self.inner.all_mut();
         let frame = frame_stack.get();
-        let action = unsafe { program.func.call_with_interpreter(&mut frame.interpreter, ctx) };
-
-        // Replay logs emitted by the JIT-compiled code to the inspector.
-        // Collected into a vec to avoid borrowing ctx immutably while passing it to log().
-        let (ctx, inspector) = self.ctx_inspector();
-        let new_logs = ctx.journal().logs()[logs_before..].to_vec();
-        for log in new_logs {
-            inspector.log(ctx, log);
-        }
+        let action = unsafe {
+            program.func.call_with_interpreter_with(&mut frame.interpreter, ctx, |ecx| {
+                // SAFETY: `on_log` lives on the stack and outlives the JIT call.
+                // The closure captures raw pointers whose types may not be
+                // `'static`, so we erase the lifetime via pointer cast.
+                ecx.on_log = Some(core::mem::transmute::<
+                    &mut dyn FnMut(&revm_primitives::Log),
+                    &mut (dyn FnMut(&revm_primitives::Log) + '_),
+                >(&mut on_log));
+            })
+        };
 
         // Handle selfdestruct.
-        if let InterpreterAction::Return(result) = &action {
-            if result.result == InstructionResult::SelfDestruct {
-                inspect_selfdestruct(ctx, inspector);
-            }
+        let (ctx, inspector) = self.ctx_inspector();
+        if let InterpreterAction::Return(result) = &action
+            && result.result == InstructionResult::SelfDestruct
+        {
+            inspect_selfdestruct(ctx, inspector);
         }
 
         let (ctx, _, _, frame_stack) = self.inner.all_mut();
