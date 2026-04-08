@@ -67,6 +67,15 @@ struct BackendInner {
     thread: std::sync::Mutex<Option<BackendThread>>,
     /// Shutdown timeout.
     shutdown_timeout: Duration,
+    /// State for lazily spawning the backend thread on first [`JitBackend::enable`].
+    #[debug(skip)]
+    lazy_spawn: std::sync::Mutex<Option<LazySpawnState>>,
+}
+
+/// State kept around for lazily spawning the backend thread.
+struct LazySpawnState {
+    rx: chan::Receiver<Command>,
+    config: RuntimeConfig,
 }
 
 /// Backend thread handle and its completion signal.
@@ -77,7 +86,8 @@ struct BackendThread {
 
 /// JIT compilation backend with O(1) compiled-function lookup.
 ///
-/// Created via [`JitBackend::start`]. This type is cheaply clonable (backed by `Arc`).
+/// Created via [`JitBackend::new`] or [`JitBackend::disabled`].
+/// This type is cheaply clonable (backed by `Arc`).
 /// All clones share the same backend thread, resident map, and statistics.
 #[derive(Clone, Debug)]
 pub struct JitBackend {
@@ -85,66 +95,41 @@ pub struct JitBackend {
 }
 
 impl JitBackend {
-    /// Starts the backend: loads AOT artifacts, builds the resident map, and spawns the
-    /// backend thread.
-    pub fn start(mut config: RuntimeConfig) -> eyre::Result<Self> {
-        // Blocking mode forces enabled and zero threshold.
+    /// Creates a disabled backend that performs no compilation and spawns no threads.
+    ///
+    /// All [`lookup`](Self::lookup) calls return [`LookupDecision::Interpret(Disabled)`].
+    /// Call [`set_enabled`](Self::set_enabled) to lazily spawn the backend thread with
+    /// a default [`RuntimeConfig`].
+    pub fn disabled() -> Self {
+        Self::new(RuntimeConfig::default()).expect("default config cannot fail")
+    }
+
+    /// Creates a backend from the given config.
+    ///
+    /// If [`enabled`](RuntimeConfig::enabled) is `true`, the backend thread is spawned
+    /// immediately and AOT artifacts are preloaded. Otherwise, both are deferred until the
+    /// first [`set_enabled(true)`](Self::set_enabled) call.
+    pub fn new(mut config: RuntimeConfig) -> eyre::Result<Self> {
         if config.blocking {
-            config.enabled = true;
             config.tuning.jit_hot_threshold = 0;
         }
 
-        debug!(
-            enabled = config.enabled,
-            blocking = config.blocking,
-            workers = config.tuning.jit_worker_count,
-            hot_threshold = config.tuning.jit_hot_threshold,
-            channel_capacity = config.tuning.lookup_event_channel_capacity,
-            "starting JIT backend",
-        );
-        let resident = Self::preload_aot(config.store.as_deref())?;
-        let resident = Arc::new(resident);
-
+        let enabled = config.enabled;
         let (tx, rx) = chan::bounded::<Command>(config.tuning.lookup_event_channel_capacity);
-        let (done_tx, done_rx) = chan::bounded::<()>(1);
-
-        let tuning = config.tuning;
-        let store = config.store.clone();
-        let dump_dir = config.dump_dir;
-        let debug_assertions = config.debug_assertions;
-        let on_compilation = config.on_compilation;
-        let resident_for_thread = Arc::clone(&resident);
-        let stats = Arc::new(RuntimeStats::default());
-        let stats_for_thread = Arc::clone(&stats);
-
-        let thread = std::thread::Builder::new()
-            .name(config.thread_name)
-            .spawn(move || {
-                backend::run(
-                    rx,
-                    resident_for_thread,
-                    store,
-                    tuning,
-                    dump_dir,
-                    debug_assertions,
-                    stats_for_thread,
-                    on_compilation,
-                );
-                let _ = done_tx.send(());
-            })
-            .wrap_err("failed to spawn backend thread")?;
-
-        let inner = BackendInner {
-            resident,
-            enabled: AtomicBool::new(config.enabled),
-            blocking: config.blocking,
-            tx,
-            stats,
-            thread: std::sync::Mutex::new(Some(BackendThread { handle: thread, done_rx })),
-            shutdown_timeout: config.tuning.shutdown_timeout,
+        let this = Self {
+            inner: Arc::new(BackendInner {
+                resident: Arc::new(ResidentMap::default()),
+                enabled: AtomicBool::new(false),
+                blocking: config.blocking,
+                tx,
+                stats: Arc::new(RuntimeStats::default()),
+                thread: std::sync::Mutex::new(None),
+                shutdown_timeout: config.tuning.shutdown_timeout,
+                lazy_spawn: std::sync::Mutex::new(Some(LazySpawnState { rx, config })),
+            }),
         };
-
-        Ok(Self { inner: Arc::new(inner) })
+        this.set_enabled(enabled)?;
+        Ok(this)
     }
 
     /// Looks up a compiled function for the given request.
@@ -288,15 +273,75 @@ impl JitBackend {
         let _ = self.inner.tx.try_send(Command::ClearAll);
     }
 
-    /// Sets whether the runtime is enabled.
-    pub fn set_enabled(&self, enabled: bool) {
+    /// Returns whether the runtime is enabled.
+    pub fn enabled(&self) -> bool {
+        self.inner.enabled.load(Ordering::Relaxed)
+    }
+
+    /// Sets whether the runtime is enabled, spawning the backend thread on first enable.
+    ///
+    /// When `enabled` is `true` and the backend thread has not been spawned yet, this
+    /// lazily starts it using the config provided at construction time.
+    pub fn set_enabled(&self, enabled: bool) -> eyre::Result<()> {
         debug!(enabled, "set_enabled");
         self.inner.enabled.store(enabled, Ordering::Relaxed);
+        if enabled {
+            self.ensure_started()?;
+        }
+        Ok(())
     }
 
     /// Returns a point-in-time snapshot of runtime statistics.
     pub fn stats(&self) -> RuntimeStatsSnapshot {
         self.inner.stats.snapshot(self.inner.resident.len() as u64, self.inner.tx.len() as u64)
+    }
+
+    /// Spawns the backend thread if it hasn't been started yet.
+    fn ensure_started(&self) -> eyre::Result<()> {
+        let Some(lazy) = self.inner.lazy_spawn.lock().unwrap().take() else {
+            return Ok(());
+        };
+
+        let LazySpawnState { rx, config } = lazy;
+
+        debug!(
+            blocking = self.inner.blocking,
+            workers = config.tuning.jit_worker_count,
+            hot_threshold = config.tuning.jit_hot_threshold,
+            channel_capacity = config.tuning.lookup_event_channel_capacity,
+            "spawning backend thread",
+        );
+
+        // Preload AOT artifacts into the already-allocated resident map.
+        if let Ok(preloaded) = Self::preload_aot(config.store.as_deref()) {
+            for entry in preloaded.into_iter() {
+                self.inner.resident.insert(entry.0, entry.1);
+            }
+        }
+
+        let (done_tx, done_rx) = chan::bounded::<()>(1);
+        let resident = Arc::clone(&self.inner.resident);
+        let stats = Arc::clone(&self.inner.stats);
+
+        let thread = std::thread::Builder::new()
+            .name(config.thread_name)
+            .spawn(move || {
+                backend::run(
+                    rx,
+                    resident,
+                    config.store,
+                    config.tuning,
+                    config.dump_dir,
+                    config.debug_assertions,
+                    stats,
+                    config.on_compilation,
+                );
+                let _ = done_tx.send(());
+            })
+            .wrap_err("failed to spawn backend thread")?;
+
+        *self.inner.thread.lock().unwrap() = Some(BackendThread { handle: thread, done_rx });
+        Ok(())
     }
 
     /// Preloads AOT artifacts from the store into the resident map.

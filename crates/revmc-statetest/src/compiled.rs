@@ -759,7 +759,7 @@ pub fn run(
             tuning: RuntimeTuning { jit_worker_count: cpus, ..Default::default() },
             ..Default::default()
         };
-        Some(JitBackend::start(config).map_err(|e| TestError {
+        Some(JitBackend::new(config).map_err(|e| TestError {
             name: "backend".to_string(),
             path: String::new(),
             kind: TestErrorKind::CompilationError(format!("backend start: {e}")),

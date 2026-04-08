@@ -183,7 +183,7 @@ mod tests {
     use revm_database_interface::DatabaseCommit;
 
     fn blocking_backend() -> JitBackend {
-        JitBackend::start(RuntimeConfig { blocking: true, ..Default::default() }).unwrap()
+        JitBackend::new(RuntimeConfig { blocking: true, ..Default::default() }).unwrap()
     }
 
     fn deploy_contract<

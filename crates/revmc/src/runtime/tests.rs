@@ -46,7 +46,7 @@ struct TestBackend {
 impl TestBackend {
     /// Creates a backend with the given config.
     fn new(config: RuntimeConfig) -> Self {
-        Self { backend: JitBackend::start(config).unwrap() }
+        Self { backend: JitBackend::new(config).unwrap() }
     }
 
     /// Creates a backend with `enabled: true` and the given tuning overrides.
@@ -295,7 +295,7 @@ fn start_empty_store() {
 fn startup_store_failure() {
     let config =
         RuntimeConfig { enabled: true, store: Some(Arc::new(FailingStore)), ..Default::default() };
-    let result = JitBackend::start(config);
+    let result = JitBackend::new(config);
     assert!(result.is_err());
 }
 
@@ -355,7 +355,7 @@ fn events_sent_on_lookup() {
 
 #[test]
 fn drop_shuts_down_backend() {
-    let backend = JitBackend::start(RuntimeConfig::default()).unwrap();
+    let backend = JitBackend::new(RuntimeConfig::default()).unwrap();
     let backend2 = backend.clone();
     drop(backend);
 

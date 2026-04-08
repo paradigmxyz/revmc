@@ -34,7 +34,6 @@ use revm_state::EvmState;
 /// the standard mainnet EVM.
 #[derive(derive_more::Debug)]
 pub struct JitEvm<EVM> {
-    #[debug(skip)]
     inner: EVM,
     backend: JitBackend,
     /// Cached lookup decisions keyed by `code_hash` alone.
@@ -65,12 +64,30 @@ impl<EVM> JitEvm<EVM> {
     pub const fn backend(&self) -> &JitBackend {
         &self.backend
     }
+
+    /// Returns a mutable reference to the JIT backend.
+    pub fn backend_mut(&mut self) -> &mut JitBackend {
+        &mut self.backend
+    }
+
+    /// Replaces the JIT backend and clears the lookup cache.
+    pub fn set_backend(&mut self, backend: JitBackend) {
+        self.backend = backend;
+        self.lookup_cache.clear();
+    }
 }
 
 impl<EVM: EvmTr> JitEvm<EVM>
 where
     EVM::Context: ContextTr,
 {
+    /// Creates a new JIT EVM with a disabled backend.
+    ///
+    /// Equivalent to `JitEvm::new(inner, JitBackend::disabled())`.
+    pub fn disabled(inner: EVM) -> Self {
+        Self::new(inner, JitBackend::disabled())
+    }
+
     /// Creates a new JIT EVM from an inner EVM and backend.
     pub fn new(inner: EVM, backend: JitBackend) -> Self {
         let spec_id: SpecId = inner.ctx_ref().cfg().spec().into();
@@ -396,7 +413,7 @@ mod tests {
     use revm_handler::MainBuilder;
 
     fn blocking_backend() -> JitBackend {
-        JitBackend::start(RuntimeConfig { blocking: true, ..Default::default() }).unwrap()
+        JitBackend::new(RuntimeConfig { blocking: true, ..Default::default() }).unwrap()
     }
 
     type TestInnerEvm = revm_handler::MainnetEvm<
@@ -559,7 +576,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let backend = JitBackend::start(config).unwrap();
+        let backend = JitBackend::new(config).unwrap();
 
         let runtime_code: &[u8] = &[0x60, 0x42, 0x5f, 0x52, 0x60, 0x20, 0x5f, 0xf3];
 
