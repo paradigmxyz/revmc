@@ -206,13 +206,11 @@ builtins! {
         let mut ecx_ro = ecx_base;
         ecx_ro.push(Attribute::ReadOnly);
 
-        let sp_dyn = {
-            let mut v = size_and_align_with(None, core::mem::align_of::<revmc_context::EvmWord>());
-            v.push(Attribute::Writable);
-            v
-        };
+        let sp_base = size_and_align_with(None, core::mem::align_of::<revmc_context::EvmWord>());
+        let mut sp_dyn = sp_base.clone();
+        sp_dyn.push(Attribute::Writable);
 
-        let mut sp = size_and_align_with(None, core::mem::align_of::<revmc_context::EvmWord>());
+        let mut sp = sp_base;
         // `sp` is at `top - inputs`, we have access to `max(inputs, outputs)` words.
         let n_stack_words = inputs.max(outputs);
         let size_of_word = core::mem::size_of::<revmc_context::EvmWord>();
