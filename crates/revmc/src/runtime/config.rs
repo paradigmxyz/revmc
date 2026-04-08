@@ -6,7 +6,7 @@ use revm_primitives::hardfork::SpecId;
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
 /// Runtime configuration.
-#[allow(missing_debug_implementations)]
+#[derive(derive_more::Debug)]
 pub struct RuntimeConfig {
     /// Whether compiled-code lookup is enabled.
     ///
@@ -21,6 +21,7 @@ pub struct RuntimeConfig {
     /// Artifact store for loading precompiled AOT artifacts.
     ///
     /// `None` means no AOT preload—only JIT will populate the map (in later phases).
+    #[debug(skip)]
     pub store: Option<Arc<dyn ArtifactStore>>,
 
     /// Tuning knobs.
@@ -59,6 +60,7 @@ pub struct RuntimeConfig {
     /// Callback invoked after each compilation completes (success or failure).
     ///
     /// Defaults to `None`.
+    #[debug(skip)]
     pub on_compilation: Option<Arc<dyn Fn(CompilationEvent) + Send + Sync>>,
 }
 

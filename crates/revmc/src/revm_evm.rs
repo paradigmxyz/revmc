@@ -32,12 +32,14 @@ use revm_state::EvmState;
 ///
 /// Implements [`ExecuteEvm`] so it can be used as a drop-in replacement for
 /// the standard mainnet EVM.
-#[expect(missing_debug_implementations)]
+#[derive(derive_more::Debug)]
 pub struct JitEvm<EVM> {
+    #[debug(skip)]
     inner: EVM,
     backend: JitBackend,
     /// Cached lookup decisions keyed by `code_hash` alone.
     /// Invalidated when the `spec_id` changes.
+    #[debug(skip)]
     lookup_cache: B256Map<LookupDecision>,
     /// The `spec_id` the cache was built for; cleared on mismatch.
     lookup_cache_spec_id: SpecId,

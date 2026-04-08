@@ -86,13 +86,16 @@ impl Drop for TimingGuard<'_> {
 /// [`write_object`]: EvmCompiler::write_object
 /// [`jit_function`]: EvmCompiler::jit_function
 /// [`clear`]: EvmCompiler::clear
-#[allow(missing_debug_implementations)]
+#[derive(derive_more::Debug)]
 pub struct EvmCompiler<B: Backend> {
     name: Option<String>,
+    #[debug(skip)]
     backend: B,
     out_dir: Option<PathBuf>,
     config: FcxConfig,
+    #[debug(skip)]
     builtins: Builtins<B>,
+    #[debug(skip)]
     gas_params: Option<GasParams>,
 
     dump_assembly: bool,
@@ -100,6 +103,7 @@ pub struct EvmCompiler<B: Backend> {
 
     compiler_gas_limit: u64,
 
+    #[debug(skip)]
     remarks: Remarks,
     finalized: bool,
 }

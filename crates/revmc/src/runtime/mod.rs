@@ -47,18 +47,23 @@ mod worker;
 mod tests;
 
 /// Shared inner state for [`JitBackend`].
+#[derive(derive_more::Debug)]
 struct BackendInner {
     /// Shared resident compiled map.
+    #[debug(skip)]
     resident: Arc<ResidentMap>,
     /// Global enable flag.
     enabled: AtomicBool,
     /// Blocking mode: every lookup synchronously compiles and never falls back.
     blocking: bool,
     /// Channel for sending commands to the backend thread.
+    #[debug(skip)]
     tx: chan::Sender<Command>,
     /// Shared stats counters.
+    #[debug(skip)]
     stats: Arc<RuntimeStats>,
     /// Backend thread + done signal. `None` after shutdown.
+    #[debug(skip)]
     thread: std::sync::Mutex<Option<BackendThread>>,
     /// Shutdown timeout.
     shutdown_timeout: Duration,
@@ -74,8 +79,7 @@ struct BackendThread {
 ///
 /// Created via [`JitBackend::start`]. This type is cheaply clonable (backed by `Arc`).
 /// All clones share the same backend thread, resident map, and statistics.
-#[derive(Clone)]
-#[allow(missing_debug_implementations)]
+#[derive(Clone, Debug)]
 pub struct JitBackend {
     inner: Arc<BackendInner>,
 }

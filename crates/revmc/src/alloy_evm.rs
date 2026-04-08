@@ -28,8 +28,9 @@ type InnerEvm<DB, I, P> =
 ///
 /// Wraps the standard revm EVM inside a [`revm_evm::JitEvm`] which overrides `frame_run`
 /// to look up compiled functions via [`JitBackend`] before falling back to the interpreter.
-#[expect(missing_debug_implementations)]
+#[derive(derive_more::Debug)]
 pub struct JitEvm<DB: Database, I, PRECOMPILE = PrecompilesMap> {
+    #[debug(skip)]
     inner: revm_evm::JitEvm<InnerEvm<DB, I, PRECOMPILE>>,
     inspect: bool,
 }
@@ -129,8 +130,7 @@ where
 }
 
 /// Factory producing [`JitEvm`] instances.
-#[derive(Clone)]
-#[expect(missing_debug_implementations)]
+#[derive(Clone, Debug)]
 pub struct JitEvmFactory {
     backend: JitBackend,
 }
