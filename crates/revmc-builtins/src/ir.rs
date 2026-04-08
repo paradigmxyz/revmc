@@ -200,13 +200,19 @@ builtins! {
             (0, 0)
         };
 
-        let ecx = size_and_align::<revmc_context::EvmContext<'static>>();
-        let mut ecx_ro = ecx.clone();
+        let ecx_base = size_and_align::<revmc_context::EvmContext<'static>>();
+        let mut ecx = ecx_base.clone();
+        ecx.push(Attribute::Writable);
+        let mut ecx_ro = ecx_base;
         ecx_ro.push(Attribute::ReadOnly);
 
-        let sp_dyn = size_and_align_with(None, core::mem::align_of::<revmc_context::EvmWord>());
+        let sp_dyn = {
+            let mut v = size_and_align_with(None, core::mem::align_of::<revmc_context::EvmWord>());
+            v.push(Attribute::Writable);
+            v
+        };
 
-        let mut sp = sp_dyn.clone();
+        let mut sp = size_and_align_with(None, core::mem::align_of::<revmc_context::EvmWord>());
         // `sp` is at `top - inputs`, we have access to `max(inputs, outputs)` words.
         let n_stack_words = inputs.max(outputs);
         let size_of_word = core::mem::size_of::<revmc_context::EvmWord>();
@@ -214,11 +220,12 @@ builtins! {
         match (inputs, outputs) {
             (0, 0) => sp.push(Attribute::ReadNone),
             (0, 1..) => {
+                sp.push(Attribute::Writable);
                 sp.push(Attribute::WriteOnly);
                 sp.push(Attribute::Initializes(size_of_word as u64 * outputs as u64));
             }
             (1.., 0) => sp.push(Attribute::ReadOnly),
-            (1.., 1..) => {}
+            (1.., 1..) => sp.push(Attribute::Writable),
         }
     }
 
