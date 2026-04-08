@@ -6,22 +6,22 @@ use revm_primitives::hardfork::SpecId;
 
 /// Opcode information.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct OpcodeInfo(u16);
+pub struct OpcodeInfo(u32);
 
 impl OpcodeInfo {
     /// The unknown flag.
-    pub const UNKNOWN: u16 = 0b1000_0000_0000_0000;
+    pub const UNKNOWN: u32 = 1 << 31;
     /// The dynamic flag.
-    pub const DYNAMIC: u16 = 0b0100_0000_0000_0000;
+    pub const DYNAMIC: u32 = 1 << 30;
     /// The disabled flag.
-    pub const DISABLED: u16 = 0b0010_0000_0000_0000;
-    /// The mask for the gas cost.
-    pub const MASK: u16 = 0b0000_1111_1111_1111;
+    pub const DISABLED: u32 = 1 << 29;
+    /// The mask for the gas cost (16 bits, max 65535).
+    pub const MASK: u32 = 0xFFFF;
 
     /// Creates a new gas info with the given gas cost.
     #[inline]
     pub const fn new(gas: u16) -> Self {
-        Self(gas)
+        Self(gas as u32)
     }
 
     /// Returns `true` if the opcode is unknown.
@@ -48,7 +48,7 @@ impl OpcodeInfo {
     /// This may not be the final/full gas cost of the opcode as it may also have a dynamic cost.
     #[inline]
     pub const fn base_gas(self) -> u16 {
-        self.0 & Self::MASK
+        (self.0 & Self::MASK) as u16
     }
 
     /// Sets the unknown flag.
@@ -70,15 +70,9 @@ impl OpcodeInfo {
     }
 
     /// Sets the gas cost.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the gas cost is greater than [`Self::MASK`].
     #[inline]
-    #[track_caller]
     pub fn set_gas(&mut self, gas: u16) {
-        assert!(gas <= Self::MASK);
-        self.0 = (self.0 & !Self::MASK) | (gas & Self::MASK);
+        self.0 = (self.0 & !Self::MASK) | (gas as u32);
     }
 }
 
@@ -124,13 +118,11 @@ const DYNAMIC_WITH_BASE_GAS: &[u8] = &[
     op::CALLCODE,
     op::DELEGATECALL,
     op::STATICCALL,
+    op::SELFDESTRUCT,
 ];
 
 /// Opcodes whose gas cost is entirely dynamic — computed fully in builtins at runtime.
-/// The upstream instruction table may assign a non-zero static gas to some of these (e.g.
-/// SELFDESTRUCT=5000 post-Tangerine), but revmc handles their full gas in builtins,
-/// so their base gas is always 0.
-const FULLY_DYNAMIC: &[u8] = &[op::SSTORE, op::CREATE, op::CREATE2, op::SELFDESTRUCT];
+const FULLY_DYNAMIC: &[u8] = &[op::SSTORE, op::CREATE, op::CREATE2];
 
 /// Opcodes that are gated behind a specific `SpecId`, paired with the spec they were introduced in.
 const SPEC_GATED_OPCODES: &[(u8, SpecId)] = &[
@@ -320,13 +312,15 @@ mod tests {
         // Dynamic-with-base-gas opcodes: base gas varies by spec.
         let frontier = op_info_map(SpecId::FRONTIER);
         assert_eq!(frontier[op::SLOAD as usize].base_gas(), 50);
-        assert_eq!(frontier[op::SELFDESTRUCT as usize].base_gas(), 0); // FULLY_DYNAMIC (5000 > MASK)
+        assert_eq!(frontier[op::SELFDESTRUCT as usize].base_gas(), 0);
+        assert!(frontier[op::SELFDESTRUCT as usize].is_dynamic());
         assert_eq!(frontier[op::CALL as usize].base_gas(), 40);
         assert_eq!(frontier[op::BALANCE as usize].base_gas(), 20);
         assert_eq!(frontier[op::EXTCODESIZE as usize].base_gas(), 20);
         let tangerine = op_info_map(SpecId::TANGERINE);
         assert_eq!(tangerine[op::SLOAD as usize].base_gas(), 200);
-        assert_eq!(tangerine[op::SELFDESTRUCT as usize].base_gas(), 0);
+        assert_eq!(tangerine[op::SELFDESTRUCT as usize].base_gas(), 5000);
+        assert!(tangerine[op::SELFDESTRUCT as usize].is_dynamic());
         assert_eq!(tangerine[op::CALL as usize].base_gas(), 700);
         assert_eq!(tangerine[op::BALANCE as usize].base_gas(), 400);
         assert_eq!(tangerine[op::EXTCODESIZE as usize].base_gas(), 700);
