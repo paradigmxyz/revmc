@@ -314,10 +314,8 @@ impl JitBackend {
         );
 
         // Preload AOT artifacts into the already-allocated resident map.
-        if let Ok(preloaded) = Self::preload_aot(config.store.as_deref()) {
-            for entry in preloaded.into_iter() {
-                self.inner.resident.insert(entry.0, entry.1);
-            }
+        for entry in Self::preload_aot(config.store.as_deref())? {
+            self.inner.resident.insert(entry.0, entry.1);
         }
 
         let (done_tx, done_rx) = chan::bounded::<()>(1);
