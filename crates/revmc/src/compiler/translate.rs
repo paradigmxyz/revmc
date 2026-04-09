@@ -577,6 +577,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         self.gas_cost_imm(data.gas_section.gas_cost as u64);
 
         // NOOPs that aren't section heads need no codegen beyond gas.
+        // We only update `section_len_offset` (no store to `len.addr`); the next real
+        // instruction will reconcile `stored_len_offset` in a single store.
         let (inp, out) = data.stack_io();
         let diff = effective_stack_diff(inp, out, data);
         if data.flags.contains(InstFlags::NOOP) && !data.is_stack_section_head() {
