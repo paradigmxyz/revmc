@@ -185,6 +185,21 @@ impl JitBackend {
         self.inner.resident.get(&key).map(|entry| Arc::clone(&entry))
     }
 
+    /// Like [`get_compiled`](Self::get_compiled), but also records hit/miss stats.
+    pub fn get_compiled_tracked(
+        &self,
+        code_hash: B256,
+        spec_id: SpecId,
+    ) -> Option<Arc<CompiledProgram>> {
+        let result = self.get_compiled(code_hash, spec_id);
+        if result.is_some() {
+            self.inner.stats.lookup_hits.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.inner.stats.lookup_misses.fetch_add(1, Ordering::Relaxed);
+        }
+        result
+    }
+
     /// Looks up a compiled function, blocking until compilation completes if not yet ready.
     ///
     /// If the function is already compiled, returns it immediately. Otherwise, enqueues
@@ -196,11 +211,11 @@ impl JitBackend {
         }
         let code_hash = req.code_hash;
         let spec_id = req.spec_id;
-        if let Some(program) = self.get_compiled(code_hash, spec_id) {
+        if let Some(program) = self.get_compiled_tracked(code_hash, spec_id) {
             return Some(program);
         }
         let _ = self.compile_jit_sync(req);
-        self.get_compiled(code_hash, spec_id)
+        self.get_compiled_tracked(code_hash, spec_id)
     }
 
     /// Enqueues an explicit JIT compilation request for the given bytecode.
