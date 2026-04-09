@@ -90,6 +90,10 @@ pub(super) struct FunctionCx<'a, B: Backend> {
     /// Cumulative stack diff from the section start to the current instruction (compile-time).
     /// Updated after the opcode handler so that push/pop/sp helpers see the pre-diff value.
     section_len_offset: i32,
+    /// The cumulative offset that `len.addr` currently holds relative to `section_start_len`.
+    /// At section start this is 0 (len.addr == section_start_len). After each store it becomes
+    /// `section_len_offset + diff`. Stores are skipped when the new offset matches this value.
+    stored_len_offset: i32,
 
     /// The bytecode being translated.
     pub(super) bytecode: &'a Bytecode<'a>,
@@ -277,6 +281,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             section_start_len: zero,
             section_start_sp,
             section_len_offset: 0,
+            stored_len_offset: 0,
             bcx,
 
             bytecode,
@@ -572,6 +577,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         self.gas_cost_imm(data.gas_section.gas_cost as u64);
 
         // NOOPs that aren't section heads need no codegen beyond gas.
+        // We only update `section_len_offset` (no store to `len.addr`); the next real
+        // instruction will reconcile `stored_len_offset` in a single store.
         let (inp, out) = data.stack_io();
         let diff = effective_stack_diff(inp, out, data);
         if data.flags.contains(InstFlags::NOOP) && !data.is_stack_section_head() {
@@ -587,6 +594,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             self.section_start_len = self.stack_len.load(&mut self.bcx, "stack_len");
             self.section_start_sp = self.sp_at(self.section_start_len);
             self.section_len_offset = 0;
+            self.stored_len_offset = 0;
         }
         self.len_before = if self.section_len_offset == 0 {
             self.section_start_len
@@ -645,9 +653,14 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             self.section_len_offset += diff;
             goto_return!("noop");
         }
-        if diff != 0 || self.section_len_offset != 0 {
+
+        // Store the updated stack length. Skip when `len.addr` already holds the
+        // correct value, i.e. the offset we'd write matches what's already stored.
+        let new_len_offset = self.section_len_offset + diff;
+        if new_len_offset != self.stored_len_offset {
             let len_changed = self.bcx.iadd_imm(self.len_before, diff as i64);
             self.stack_len.store(&mut self.bcx, len_changed);
+            self.stored_len_offset = new_len_offset;
         }
 
         // If the output is a known constant and the opcode has no dynamic gas or side effects,
