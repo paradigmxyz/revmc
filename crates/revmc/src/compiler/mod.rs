@@ -99,6 +99,7 @@ pub struct EvmCompiler<B: Backend> {
     gas_params: Option<GasParams>,
 
     no_dedup: bool,
+
     no_dse: bool,
 
     dump_assembly: bool,
@@ -245,8 +246,8 @@ impl<B: Backend> EvmCompiler<B> {
 
     /// Disables the block deduplication pass.
     ///
-    /// When `true`, the dedup pass that merges identical basic blocks is skipped.
-    /// Useful for debugging JIT correctness issues related to dedup.
+    /// When `true`, deduplication is skipped. Useful for debugging JIT correctness issues
+    /// where deduplication incorrectly merges blocks.
     ///
     /// Defaults to `false`.
     pub fn set_no_dedup(&mut self, yes: bool) {
