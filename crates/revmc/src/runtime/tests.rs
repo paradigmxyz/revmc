@@ -1114,3 +1114,28 @@ fn prepare_aot_skips_jit_resident() {
     let p = tb.get_compiled(code_hash, SpecId::CANCUN).unwrap();
     assert_eq!(p.kind, ProgramKind::Jit);
 }
+
+// ===========================================================================
+// Tests: compiler recycling.
+// ===========================================================================
+
+/// Compile several distinct contracts with `compiler_recycle_threshold: 1` so
+/// the worker recreates its LLVM context after every single compilation.
+/// All contracts must still compile successfully.
+#[test]
+#[cfg(feature = "llvm")]
+fn compiler_recycle_every_compilation() {
+    let n = 5u8;
+    let tb = TestBackend::with_tuning_1w(RuntimeTuning {
+        jit_hot_threshold: 1,
+        compiler_recycle_threshold: 1,
+        ..Default::default()
+    });
+
+    for i in 0..n {
+        let bc = indexed_bytecode(i);
+        tb.trigger_jit_cancun(&bc);
+    }
+
+    assert_eq!(tb.stats().resident_entries, n as u64);
+}

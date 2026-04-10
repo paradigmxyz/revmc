@@ -710,14 +710,7 @@ pub(crate) fn run(
 
     let (result_tx, result_rx) = chan::unbounded::<WorkerResult>();
 
-    let workers = WorkerPool::new(
-        tuning.jit_worker_count,
-        tuning.jit_worker_queue_capacity,
-        result_tx,
-        tuning.jit_opt_level,
-        dump_dir,
-        debug_assertions,
-    );
+    let workers = WorkerPool::new(&tuning, result_tx, dump_dir, debug_assertions);
 
     let sweep_interval = tuning.eviction_sweep_interval;
 

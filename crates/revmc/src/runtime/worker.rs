@@ -182,18 +182,18 @@ pub(crate) struct WorkerPool {
 impl WorkerPool {
     /// Creates and starts the worker pool.
     pub(crate) fn new(
-        worker_count: usize,
-        job_queue_capacity: usize,
+        tuning: &super::config::RuntimeTuning,
         result_tx: chan::Sender<WorkerResult>,
-        opt_level: crate::OptimizationLevel,
         dump_dir: Option<PathBuf>,
         debug_assertions: bool,
     ) -> Self {
+        let worker_count = tuning.jit_worker_count;
         let mut job_txs = Vec::with_capacity(worker_count);
         let mut threads = Vec::with_capacity(worker_count);
 
+        let tuning = *tuning;
         for worker_id in 0..worker_count {
-            let (job_tx, job_rx) = chan::bounded::<WorkerJob>(job_queue_capacity);
+            let (job_tx, job_rx) = chan::bounded::<WorkerJob>(tuning.jit_worker_queue_capacity);
             let result_tx = result_tx.clone();
             let dump_dir = dump_dir.clone();
 
@@ -204,9 +204,10 @@ impl WorkerPool {
                         worker_id,
                         job_rx,
                         result_tx,
-                        opt_level,
+                        tuning.jit_opt_level,
                         dump_dir.as_deref(),
                         debug_assertions,
+                        tuning.compiler_recycle_threshold,
                     );
                 })
                 .expect("failed to spawn compile worker");
@@ -265,27 +266,33 @@ fn worker_loop(
     opt_level: crate::OptimizationLevel,
     dump_dir: Option<&Path>,
     debug_assertions: bool,
+    compiler_recycle_threshold: usize,
 ) {
-    use crate::{EvmCompiler, EvmLlvmBackend};
+    use crate::{EvmCompiler, EvmLlvmBackend, runtime::config::CompilationKind};
 
     let _span = debug_span!("revmc_worker", id).entered();
     debug!("compile worker started");
 
-    let backend = match EvmLlvmBackend::new(false) {
-        Ok(b) => b,
+    let create_compiler = || -> Result<EvmCompiler<EvmLlvmBackend>, String> {
+        let backend = EvmLlvmBackend::new(false).map_err(|e| e.to_string())?;
+        let mut compiler = EvmCompiler::new(backend);
+        compiler.set_opt_level(opt_level);
+        compiler.debug_assertions(debug_assertions);
+        Ok(compiler)
+    };
+
+    let mut jit_compiler = match create_compiler() {
+        Ok(c) => c,
         Err(e) => {
             error!(error = %e, "failed to create LLVM backend, worker exiting");
             return;
         }
     };
-    let mut jit_compiler = EvmCompiler::new(backend);
-    jit_compiler.set_opt_level(opt_level);
-    jit_compiler.debug_assertions(debug_assertions);
 
-    use crate::runtime::config::CompilationKind;
+    let mut compilations_since_recycle: usize = 0;
 
     while let Ok(job) = job_rx.recv() {
-        debug!(?job, "received job");
+        trace!(?job, "received job");
         let t0 = std::time::Instant::now();
         let (key, outcome, kind, sync_notifier, generation, timings) = match job {
             WorkerJob::Jit(job) => {
@@ -363,6 +370,23 @@ fn worker_loop(
             compile_duration,
             timings,
         });
+
+        // Recycle the compiler to reclaim LLVM context memory.
+        compilations_since_recycle += 1;
+        if compiler_recycle_threshold > 0
+            && compilations_since_recycle >= compiler_recycle_threshold
+        {
+            debug!(compilations_since_recycle, "recycling compiler");
+            drop(jit_compiler);
+            jit_compiler = match create_compiler() {
+                Ok(c) => c,
+                Err(e) => {
+                    error!(error = %e, "failed to recreate compiler, worker exiting");
+                    return;
+                }
+            };
+            compilations_since_recycle = 0;
+        }
     }
 
     debug!("compile worker shutting down");
@@ -423,6 +447,7 @@ fn worker_loop(
     _opt_level: crate::OptimizationLevel,
     _dump_dir: Option<&Path>,
     _debug_assertions: bool,
+    _compiler_recycle_threshold: usize,
 ) {
     use crate::runtime::config::CompilationKind;
 

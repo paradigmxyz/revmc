@@ -185,6 +185,18 @@ pub struct RuntimeTuning {
     ///
     /// Defaults to `60s`.
     pub eviction_sweep_interval: Duration,
+
+    /// Number of compilations before recycling the compiler (destroying and
+    /// recreating the LLVM context) to reclaim accumulated allocator memory.
+    ///
+    /// LLVM's internal bump-pointer allocators never shrink, so after many
+    /// compilations the RSS grows without bound. Recycling the compiler
+    /// periodically bounds this growth.
+    ///
+    /// `0` means never recycle.
+    ///
+    /// Defaults to `1000`.
+    pub compiler_recycle_threshold: usize,
 }
 
 impl Default for RuntimeTuning {
@@ -205,6 +217,7 @@ impl Default for RuntimeTuning {
             resident_code_cache_bytes: 1024 * 1024 * 1024,
             idle_evict_duration: Some(Duration::from_secs(600)),
             eviction_sweep_interval: Duration::from_secs(60),
+            compiler_recycle_threshold: 1000,
         }
     }
 }
