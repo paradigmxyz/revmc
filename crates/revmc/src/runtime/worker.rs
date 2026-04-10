@@ -186,6 +186,7 @@ impl WorkerPool {
         result_tx: chan::Sender<WorkerResult>,
         dump_dir: Option<PathBuf>,
         debug_assertions: bool,
+        no_dedup: bool,
     ) -> Self {
         let worker_count = tuning.jit_worker_count;
         let mut job_txs = Vec::with_capacity(worker_count);
@@ -207,6 +208,7 @@ impl WorkerPool {
                         tuning.jit_opt_level,
                         dump_dir.as_deref(),
                         debug_assertions,
+                        no_dedup,
                         tuning.compiler_recycle_threshold,
                     );
                 })
@@ -266,6 +268,7 @@ fn worker_loop(
     opt_level: crate::OptimizationLevel,
     dump_dir: Option<&Path>,
     debug_assertions: bool,
+    no_dedup: bool,
     compiler_recycle_threshold: usize,
 ) {
     use crate::{EvmCompiler, EvmLlvmBackend, runtime::config::CompilationKind};
@@ -278,6 +281,7 @@ fn worker_loop(
         let mut compiler = EvmCompiler::new(backend);
         compiler.set_opt_level(opt_level);
         compiler.debug_assertions(debug_assertions);
+        compiler.set_no_dedup(no_dedup);
         Ok(compiler)
     };
 
@@ -447,6 +451,7 @@ fn worker_loop(
     _opt_level: crate::OptimizationLevel,
     _dump_dir: Option<&Path>,
     _debug_assertions: bool,
+    _no_dedup: bool,
     _compiler_recycle_threshold: usize,
 ) {
     use crate::runtime::config::CompilationKind;

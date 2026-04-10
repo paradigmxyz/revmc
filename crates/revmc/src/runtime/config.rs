@@ -43,6 +43,14 @@ pub struct RuntimeConfig {
     /// Defaults to `false`.
     pub debug_assertions: bool,
 
+    /// Disable the block deduplication pass.
+    ///
+    /// When `true`, the dedup pass that merges identical basic blocks is skipped.
+    /// Useful for isolating dedup-related JIT correctness bugs.
+    ///
+    /// Defaults to `false`.
+    pub no_dedup: bool,
+
     /// Blocking mode: every lookup synchronously JIT-compiles on miss and never
     /// falls back to the interpreter.
     ///
@@ -99,6 +107,7 @@ impl Default for RuntimeConfig {
             tuning: RuntimeTuning::default(),
             dump_dir: None,
             debug_assertions: false,
+            no_dedup: false,
             blocking: false,
             on_compilation: None,
         }

@@ -101,6 +101,7 @@ pub struct EvmCompiler<B: Backend> {
     dump_assembly: bool,
     dump_unopt_assembly: bool,
 
+    no_dedup: bool,
     compiler_gas_limit: u64,
 
     #[debug(skip)]
@@ -120,6 +121,7 @@ impl<B: Backend> EvmCompiler<B> {
             gas_params: None,
             dump_assembly: true,
             dump_unopt_assembly: false,
+            no_dedup: false,
             compiler_gas_limit: crate::bytecode::DEFAULT_COMPILER_GAS_LIMIT,
             remarks: Remarks::default(),
             finalized: false,
@@ -329,6 +331,16 @@ impl<B: Backend> EvmCompiler<B> {
         self.config.inspect_stack = yes;
     }
 
+    /// Disables the block deduplication pass.
+    ///
+    /// When `true`, the dedup pass that merges identical basic blocks is skipped.
+    /// Useful for debugging JIT correctness issues related to dedup.
+    ///
+    /// Defaults to `false`.
+    pub fn set_no_dedup(&mut self, yes: bool) {
+        self.no_dedup = yes;
+    }
+
     /// Sets whether to enable stack bound checks.
     ///
     /// Defaults to `true`.
@@ -508,6 +520,7 @@ impl<B: Backend> EvmCompiler<B> {
         let mut bytecode = Bytecode::new(bytecode, spec_id, self.gas_params.clone());
         bytecode.compiler_gas_limit = self.compiler_gas_limit;
         bytecode.config.set(AnalysisConfig::INSPECT_STACK, self.config.inspect_stack);
+        bytecode.config.set(AnalysisConfig::DEDUP, !self.no_dedup);
         bytecode.analyze()?;
         if let Some(dump_dir) = &self.dump_dir() {
             Self::dump_bytecode(dump_dir, &bytecode)?;
