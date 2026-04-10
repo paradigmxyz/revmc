@@ -6,7 +6,7 @@
 
 use crate::runtime::{
     api::{CompiledProgram, LoadedLibrary},
-    config::{CompilationEvent, RuntimeTuning},
+    config::{CompilationEvent, RuntimeConfig, RuntimeTuning},
     stats::RuntimeStats,
     storage::{ArtifactKey, ArtifactManifest, ArtifactStore, BackendSelection, RuntimeCacheKey},
     worker::{AotJob, JitJob, SyncNotifier, WorkerJob, WorkerPool, WorkerResult, WorkerSuccess},
@@ -695,26 +695,19 @@ impl BackendState {
 }
 
 /// Runs the backend event loop. Called on the backend thread.
-#[expect(clippy::too_many_arguments)]
 pub(crate) fn run(
     cmd_rx: chan::Receiver<Command>,
     resident: Arc<ResidentMap>,
-    store: Option<Arc<dyn ArtifactStore>>,
-    tuning: RuntimeTuning,
-    dump_dir: Option<std::path::PathBuf>,
-    debug_assertions: bool,
-    no_dedup: bool,
-    no_dse: bool,
+    config: RuntimeConfig,
     stats: Arc<RuntimeStats>,
-    on_compilation: Option<Arc<dyn Fn(CompilationEvent) + Send + Sync>>,
 ) {
     debug!("backend thread started");
 
     let (result_tx, result_rx) = chan::unbounded::<WorkerResult>();
 
-    let workers = WorkerPool::new(&tuning, result_tx, dump_dir, debug_assertions, no_dedup, no_dse);
+    let workers = WorkerPool::new(result_tx, config.clone());
 
-    let sweep_interval = tuning.eviction_sweep_interval;
+    let sweep_interval = config.tuning.eviction_sweep_interval;
 
     // Seed resident metadata from startup-preloaded AOT entries.
     let now = Instant::now();
@@ -729,13 +722,13 @@ pub(crate) fn run(
         entries: HashMap::default(),
         workers,
         result_rx,
-        store,
-        tuning,
+        store: config.store,
+        tuning: config.tuning,
         pending_jobs: 0,
         generation: 0,
         last_sweep: now,
         stats,
-        on_compilation,
+        on_compilation: config.on_compilation,
     };
 
     loop {

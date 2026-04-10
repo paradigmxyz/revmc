@@ -338,20 +338,9 @@ impl JitBackend {
         let stats = Arc::clone(&self.inner.stats);
 
         let thread = std::thread::Builder::new()
-            .name(config.thread_name)
+            .name(config.thread_name.clone())
             .spawn(move || {
-                backend::run(
-                    rx,
-                    resident,
-                    config.store,
-                    config.tuning,
-                    config.dump_dir,
-                    config.debug_assertions,
-                    config.no_dedup,
-                    config.no_dse,
-                    stats,
-                    config.on_compilation,
-                );
+                backend::run(rx, resident, config, stats);
                 let _ = done_tx.send(());
             })
             .wrap_err("failed to spawn backend thread")?;

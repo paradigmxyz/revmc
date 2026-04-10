@@ -6,7 +6,7 @@ use revm_primitives::hardfork::SpecId;
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
 /// Runtime configuration.
-#[derive(derive_more::Debug)]
+#[derive(Clone, derive_more::Debug)]
 pub struct RuntimeConfig {
     /// Whether compiled-code lookup is enabled.
     ///

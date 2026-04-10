@@ -9,14 +9,13 @@
 //! Workers no longer need to stay alive for code lifetime — they exit as soon
 //! as the job channel closes.
 
-use crate::{CompileTimings, EvmCompilerFn, runtime::storage::RuntimeCacheKey};
+use crate::{
+    CompileTimings, EvmCompilerFn,
+    runtime::{config::RuntimeConfig, storage::RuntimeCacheKey},
+};
 use alloy_primitives::Bytes;
 use crossbeam_channel as chan;
-use std::{
-    path::{Path, PathBuf},
-    sync::Arc,
-    time::Duration,
-};
+use std::{sync::Arc, time::Duration};
 
 /// Notifier for synchronous compilation requests.
 ///
@@ -181,38 +180,21 @@ pub(crate) struct WorkerPool {
 
 impl WorkerPool {
     /// Creates and starts the worker pool.
-    pub(crate) fn new(
-        tuning: &super::config::RuntimeTuning,
-        result_tx: chan::Sender<WorkerResult>,
-        dump_dir: Option<PathBuf>,
-        debug_assertions: bool,
-        no_dedup: bool,
-        no_dse: bool,
-    ) -> Self {
-        let worker_count = tuning.jit_worker_count;
+    pub(crate) fn new(result_tx: chan::Sender<WorkerResult>, config: RuntimeConfig) -> Self {
+        let worker_count = config.tuning.jit_worker_count;
         let mut job_txs = Vec::with_capacity(worker_count);
         let mut threads = Vec::with_capacity(worker_count);
 
-        let tuning = *tuning;
         for worker_id in 0..worker_count {
-            let (job_tx, job_rx) = chan::bounded::<WorkerJob>(tuning.jit_worker_queue_capacity);
+            let (job_tx, job_rx) =
+                chan::bounded::<WorkerJob>(config.tuning.jit_worker_queue_capacity);
             let result_tx = result_tx.clone();
-            let dump_dir = dump_dir.clone();
+            let config = config.clone();
 
             let thread = std::thread::Builder::new()
                 .name(format!("revmc-{worker_id:02}"))
                 .spawn(move || {
-                    worker_loop(
-                        worker_id,
-                        job_rx,
-                        result_tx,
-                        tuning.jit_opt_level,
-                        dump_dir.as_deref(),
-                        debug_assertions,
-                        no_dedup,
-                        no_dse,
-                        tuning.compiler_recycle_threshold,
-                    );
+                    worker_loop(worker_id, job_rx, result_tx, &config);
                 })
                 .expect("failed to spawn compile worker");
 
@@ -267,12 +249,7 @@ fn worker_loop(
     id: usize,
     job_rx: chan::Receiver<WorkerJob>,
     result_tx: chan::Sender<WorkerResult>,
-    opt_level: crate::OptimizationLevel,
-    dump_dir: Option<&Path>,
-    debug_assertions: bool,
-    no_dedup: bool,
-    no_dse: bool,
-    compiler_recycle_threshold: usize,
+    config: &RuntimeConfig,
 ) {
     use crate::{EvmCompiler, EvmLlvmBackend, runtime::config::CompilationKind};
 
@@ -282,10 +259,10 @@ fn worker_loop(
     let create_compiler = || -> Result<EvmCompiler<EvmLlvmBackend>, String> {
         let backend = EvmLlvmBackend::new(false).map_err(|e| e.to_string())?;
         let mut compiler = EvmCompiler::new(backend);
-        compiler.set_opt_level(opt_level);
-        compiler.debug_assertions(debug_assertions);
-        compiler.set_no_dedup(no_dedup);
-        compiler.set_no_dse(no_dse);
+        compiler.set_opt_level(config.tuning.jit_opt_level);
+        compiler.debug_assertions(config.debug_assertions);
+        compiler.set_no_dedup(config.no_dedup);
+        compiler.set_no_dse(config.no_dse);
         Ok(compiler)
     };
 
@@ -308,7 +285,7 @@ fn worker_loop(
                     debug_span!("jit_compile", hash=%job.key.code_hash, spec_id=?job.key.spec_id)
                         .entered();
 
-                if let Some(base) = dump_dir {
+                if let Some(base) = &config.dump_dir {
                     let dir = base
                         .join(format!("{:?}", job.key.spec_id))
                         .join(format!("{}", job.key.code_hash));
@@ -381,8 +358,8 @@ fn worker_loop(
 
         // Recycle the compiler to reclaim LLVM context memory.
         compilations_since_recycle += 1;
-        if compiler_recycle_threshold > 0
-            && compilations_since_recycle >= compiler_recycle_threshold
+        if config.tuning.compiler_recycle_threshold > 0
+            && compilations_since_recycle >= config.tuning.compiler_recycle_threshold
         {
             debug!(compilations_since_recycle, "recycling compiler");
             drop(jit_compiler);
@@ -452,12 +429,7 @@ fn worker_loop(
     worker_id: usize,
     job_rx: chan::Receiver<WorkerJob>,
     result_tx: chan::Sender<WorkerResult>,
-    _opt_level: crate::OptimizationLevel,
-    _dump_dir: Option<&Path>,
-    _debug_assertions: bool,
-    _no_dedup: bool,
-    _no_dse: bool,
-    _compiler_recycle_threshold: usize,
+    _config: &RuntimeConfig,
 ) {
     use crate::runtime::config::CompilationKind;
 
