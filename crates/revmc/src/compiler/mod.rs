@@ -81,6 +81,9 @@ pub struct EvmCompiler<B: Backend> {
     builtins: Builtins<B>,
     gas_params: Option<GasParams>,
 
+    no_dedup: bool,
+    no_dse: bool,
+
     dump_assembly: bool,
     dump_unopt_assembly: bool,
 
@@ -100,6 +103,8 @@ impl<B: Backend> EvmCompiler<B> {
             config: FcxConfig::default(),
             builtins: Builtins::new(),
             gas_params: None,
+            no_dedup: false,
+            no_dse: false,
             dump_assembly: true,
             dump_unopt_assembly: false,
             compiler_gas_limit: crate::bytecode::DEFAULT_COMPILER_GAS_LIMIT,
@@ -189,6 +194,26 @@ impl<B: Backend> EvmCompiler<B> {
     pub fn debug_assertions(&mut self, yes: bool) {
         self.update_backend_config(|c| c.debug_assertions = yes);
         self.config.debug_assertions = yes;
+    }
+
+    /// Disables the block deduplication pass.
+    ///
+    /// When `true`, deduplication is skipped. Useful for debugging JIT correctness issues
+    /// where deduplication incorrectly merges blocks.
+    ///
+    /// Defaults to `false`.
+    pub fn set_no_dedup(&mut self, yes: bool) {
+        self.no_dedup = yes;
+    }
+
+    /// Disables the dead store elimination pass.
+    ///
+    /// When `true`, DSE is skipped. Useful for debugging JIT correctness issues
+    /// where DSE incorrectly eliminates live stack operations.
+    ///
+    /// Defaults to `false`.
+    pub fn set_no_dse(&mut self, yes: bool) {
+        self.no_dse = yes;
     }
 
     /// Returns whether JIT debug support is enabled.
@@ -457,6 +482,8 @@ impl<B: Backend> EvmCompiler<B> {
         let mut bytecode = Bytecode::new(bytecode, spec_id, self.gas_params.clone());
         bytecode.compiler_gas_limit = self.compiler_gas_limit;
         bytecode.config.set(AnalysisConfig::INSPECT_STACK, self.config.inspect_stack);
+        bytecode.config.set(AnalysisConfig::DEDUP, !self.no_dedup);
+        bytecode.config.set(AnalysisConfig::DSE, !self.no_dse);
         bytecode.analyze()?;
         if let Some(dump_dir) = &self.dump_dir() {
             Self::dump_bytecode(dump_dir, &bytecode)?;
