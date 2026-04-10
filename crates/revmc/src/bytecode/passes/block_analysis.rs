@@ -519,18 +519,26 @@ impl Bytecode<'_> {
         cfg.inst_to_block.resize(n, None);
         let mut current_start = None;
         let mut current_end = 0;
+        let mut pending_leader = false;
 
         for i in 0..n {
             if self.insts.raw[i].is_dead_code() {
+                // Propagate leader marks past dead code so that the next alive
+                // instruction starts a new block. Without this, a block ending
+                // in JUMPI whose fall-through was deduped (dead) would merge
+                // with the next alive instruction, potentially changing the
+                // block's terminator and poisoning DSE liveness.
+                pending_leader |= is_leader[i];
                 continue;
             }
 
-            if is_leader[i] || current_start.is_none() {
+            if is_leader[i] || pending_leader || current_start.is_none() {
                 if let Some(start) = current_start {
                     finish_block(cfg, start, current_end);
                 }
                 current_start = Some(i);
             }
+            pending_leader = false;
             current_end = i + 1;
         }
 
