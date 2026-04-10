@@ -67,9 +67,11 @@ bitflags::bitflags! {
         /// The stack is observable outside the function (`inspect_stack` mode).
         /// When set, DSE must not assume diverging terminators kill the stack.
         const INSPECT_STACK = 1 << 1;
+        /// Run dead store elimination.
+        const DSE = 1 << 2;
 
         /// All passes enabled.
-        const ALL = Self::DEDUP.bits();
+        const ALL = Self::DEDUP.bits() | Self::DSE.bits();
     }
 }
 
@@ -328,7 +330,9 @@ impl<'a> Bytecode<'a> {
         }
         drop(local_snapshots);
 
-        self.dead_store_elim();
+        if self.config.contains(AnalysisConfig::DSE) {
+            self.dead_store_elim();
+        }
 
         self.calc_may_suspend();
 
