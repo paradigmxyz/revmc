@@ -51,6 +51,14 @@ pub struct RuntimeConfig {
     /// Defaults to `false`.
     pub no_dedup: bool,
 
+    /// Disable the dead store elimination pass.
+    ///
+    /// When `true`, DSE is skipped. Useful for debugging JIT correctness issues
+    /// where DSE incorrectly eliminates live stack operations.
+    ///
+    /// Defaults to `false`.
+    pub no_dse: bool,
+
     /// Blocking mode: every lookup synchronously JIT-compiles on miss and never
     /// falls back to the interpreter.
     ///
@@ -108,6 +116,7 @@ impl Default for RuntimeConfig {
             dump_dir: None,
             debug_assertions: false,
             no_dedup: false,
+            no_dse: false,
             blocking: false,
             on_compilation: None,
         }

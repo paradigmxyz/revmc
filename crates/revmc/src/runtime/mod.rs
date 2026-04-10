@@ -348,6 +348,7 @@ impl JitBackend {
                     config.dump_dir,
                     config.debug_assertions,
                     config.no_dedup,
+                    config.no_dse,
                     stats,
                     config.on_compilation,
                 );

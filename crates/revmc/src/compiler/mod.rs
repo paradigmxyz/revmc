@@ -98,10 +98,11 @@ pub struct EvmCompiler<B: Backend> {
     #[debug(skip)]
     gas_params: Option<GasParams>,
 
+    no_dedup: bool,
+    no_dse: bool,
+
     dump_assembly: bool,
     dump_unopt_assembly: bool,
-
-    no_dedup: bool,
     compiler_gas_limit: u64,
 
     #[debug(skip)]
@@ -122,6 +123,7 @@ impl<B: Backend> EvmCompiler<B> {
             dump_assembly: true,
             dump_unopt_assembly: false,
             no_dedup: false,
+            no_dse: false,
             compiler_gas_limit: crate::bytecode::DEFAULT_COMPILER_GAS_LIMIT,
             remarks: Remarks::default(),
             finalized: false,
@@ -241,6 +243,26 @@ impl<B: Backend> EvmCompiler<B> {
         self.config.debug_assertions = yes;
     }
 
+    /// Disables the block deduplication pass.
+    ///
+    /// When `true`, the dedup pass that merges identical basic blocks is skipped.
+    /// Useful for debugging JIT correctness issues related to dedup.
+    ///
+    /// Defaults to `false`.
+    pub fn set_no_dedup(&mut self, yes: bool) {
+        self.no_dedup = yes;
+    }
+
+    /// Disables the dead store elimination pass.
+    ///
+    /// When `true`, DSE is skipped. Useful for debugging JIT correctness issues
+    /// where DSE incorrectly eliminates live stack operations.
+    ///
+    /// Defaults to `false`.
+    pub fn set_no_dse(&mut self, yes: bool) {
+        self.no_dse = yes;
+    }
+
     /// Returns whether JIT debug support is enabled.
     ///
     /// Registers JIT objects with debuggers via `__jit_debug_register_code`,
@@ -329,16 +351,6 @@ impl<B: Backend> EvmCompiler<B> {
     /// Defaults to `false`.
     pub fn inspect_stack(&mut self, yes: bool) {
         self.config.inspect_stack = yes;
-    }
-
-    /// Disables the block deduplication pass.
-    ///
-    /// When `true`, the dedup pass that merges identical basic blocks is skipped.
-    /// Useful for debugging JIT correctness issues related to dedup.
-    ///
-    /// Defaults to `false`.
-    pub fn set_no_dedup(&mut self, yes: bool) {
-        self.no_dedup = yes;
     }
 
     /// Sets whether to enable stack bound checks.
@@ -521,6 +533,7 @@ impl<B: Backend> EvmCompiler<B> {
         bytecode.compiler_gas_limit = self.compiler_gas_limit;
         bytecode.config.set(AnalysisConfig::INSPECT_STACK, self.config.inspect_stack);
         bytecode.config.set(AnalysisConfig::DEDUP, !self.no_dedup);
+        bytecode.config.set(AnalysisConfig::DSE, !self.no_dse);
         bytecode.analyze()?;
         if let Some(dump_dir) = &self.dump_dir() {
             Self::dump_bytecode(dump_dir, &bytecode)?;

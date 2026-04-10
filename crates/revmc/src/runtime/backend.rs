@@ -704,6 +704,7 @@ pub(crate) fn run(
     dump_dir: Option<std::path::PathBuf>,
     debug_assertions: bool,
     no_dedup: bool,
+    no_dse: bool,
     stats: Arc<RuntimeStats>,
     on_compilation: Option<Arc<dyn Fn(CompilationEvent) + Send + Sync>>,
 ) {
@@ -711,7 +712,7 @@ pub(crate) fn run(
 
     let (result_tx, result_rx) = chan::unbounded::<WorkerResult>();
 
-    let workers = WorkerPool::new(&tuning, result_tx, dump_dir, debug_assertions, no_dedup);
+    let workers = WorkerPool::new(&tuning, result_tx, dump_dir, debug_assertions, no_dedup, no_dse);
 
     let sweep_interval = tuning.eviction_sweep_interval;
 
