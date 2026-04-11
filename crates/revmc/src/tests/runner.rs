@@ -93,6 +93,8 @@ pub struct TestCase<'a> {
     pub is_static: bool,
     pub gas_limit: u64,
 
+    /// Override `inspect_stack` on the compiler. `None` uses the default (`true`).
+    pub inspect_stack: Option<bool>,
     pub modify_ecx: Option<fn(&mut EvmContext<'_>)>,
 
     pub expected_return: InstructionResult,
@@ -123,6 +125,7 @@ impl Default for TestCase<'_> {
             spec_id: DEF_SPEC,
             is_static: false,
             gas_limit: DEF_GAS_LIMIT,
+            inspect_stack: None,
             modify_ecx: None,
             expected_return: InstructionResult::Stop,
             expected_stack: &[],
@@ -140,6 +143,7 @@ impl fmt::Debug for TestCase<'_> {
         f.debug_struct("TestCase")
             .field("bytecode", &format_bytecode(self.bytecode, self.spec_id))
             .field("spec_id", &self.spec_id)
+            .field("inspect_stack", &self.inspect_stack)
             .field("modify_ecx", &self.modify_ecx.is_some())
             .field("expected_return", &self.expected_return)
             .field("expected_stack", &self.expected_stack)
@@ -159,6 +163,7 @@ impl<'a> TestCase<'a> {
             spec_id,
             is_static: false,
             gas_limit: DEF_GAS_LIMIT,
+            inspect_stack: None,
             modify_ecx: None,
             expected_return: RETURN_WHAT_INTERPRETER_SAYS,
             expected_stack: STACK_WHAT_INTERPRETER_SAYS,
@@ -461,7 +466,7 @@ pub fn set_test_dump<B: Backend>(compiler: &mut EvmCompiler<B>, module_path: &st
 
 pub fn run_test_case<B: Backend>(test_case: &TestCase<'_>, compiler: &mut EvmCompiler<B>) {
     let TestCase { bytecode, spec_id, .. } = *test_case;
-    compiler.inspect_stack(true);
+    compiler.inspect_stack(test_case.inspect_stack.unwrap_or(true));
     // compiler.debug_assertions(false);
     let f = unsafe { compiler.jit("test", bytecode, spec_id) }.unwrap();
     run_compiled_test_case(test_case, f);
@@ -473,6 +478,7 @@ fn run_compiled_test_case(test_case: &TestCase<'_>, f: EvmCompilerFn) {
         spec_id,
         is_static,
         gas_limit,
+        inspect_stack: _,
         modify_ecx,
         expected_return,
         expected_stack,
