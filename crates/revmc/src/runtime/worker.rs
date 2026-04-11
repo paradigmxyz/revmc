@@ -261,8 +261,8 @@ fn worker_loop(
         let mut compiler = EvmCompiler::new(backend);
         compiler.set_opt_level(config.tuning.jit_opt_level);
         compiler.debug_assertions(config.debug_assertions);
-        compiler.set_no_dedup(config.no_dedup);
-        compiler.set_no_dse(config.no_dse);
+        compiler.set_dedup(!config.no_dedup);
+        compiler.set_dse(!config.no_dse);
         Ok(compiler)
     };
 
