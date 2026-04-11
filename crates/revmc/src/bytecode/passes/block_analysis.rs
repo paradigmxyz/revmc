@@ -503,11 +503,16 @@ impl Bytecode<'_> {
         is_leader.set(0, true);
 
         for (i, inst) in self.insts.raw.iter().enumerate() {
-            if inst.is_dead_code() {
-                continue;
-            }
+            // Reachable JUMPDESTs must be leaders even when dead (e.g. deduped).
+            // Without this, `pending_leader` in the block-building loop below never
+            // fires for a dead JUMPDEST, and the preceding live block absorbs the
+            // next alive instruction — potentially a diverging terminator that
+            // poisons DSE.
             if inst.is_reachable_jumpdest(self.has_dynamic_jumps) {
                 is_leader.set(i, true);
+            }
+            if inst.is_dead_code() {
+                continue;
             }
             if (inst.is_branching() || inst.is_diverging()) && i + 1 < n {
                 is_leader.set(i + 1, true);

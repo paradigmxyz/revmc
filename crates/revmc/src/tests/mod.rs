@@ -49,6 +49,7 @@ mod macros;
 
 mod meta;
 
+mod dedup_jumpdest_leader;
 mod dedup_leader_propagation;
 mod disabled_section_poison;
 mod div_zero_opaque;
