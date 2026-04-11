@@ -67,7 +67,7 @@ struct BackendInner {
     thread: std::sync::Mutex<Option<BackendThread>>,
     /// Shutdown timeout.
     shutdown_timeout: Duration,
-    /// State for lazily spawning the backend thread on first [`JitBackend::enable`].
+    /// State for lazily spawning the backend thread.
     #[debug(skip)]
     lazy_spawn: std::sync::Mutex<Option<LazySpawnState>>,
 }
@@ -97,7 +97,7 @@ pub struct JitBackend {
 impl JitBackend {
     /// Creates a disabled backend that performs no compilation and spawns no threads.
     ///
-    /// All [`lookup`](Self::lookup) calls return [`LookupDecision::Interpret(Disabled)`].
+    /// All [`lookup`](Self::lookup) calls return `LookupDecision::Interpret(Disabled)`.
     /// Call [`set_enabled`](Self::set_enabled) to lazily spawn the backend thread with
     /// a default [`RuntimeConfig`].
     pub fn disabled() -> Self {
