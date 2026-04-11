@@ -67,7 +67,7 @@ struct BackendInner {
     thread: std::sync::Mutex<Option<BackendThread>>,
     /// Shutdown timeout.
     shutdown_timeout: Duration,
-    /// State for lazily spawning the backend thread on first [`JitBackend::enable`].
+    /// State for lazily spawning the backend thread.
     #[debug(skip)]
     lazy_spawn: std::sync::Mutex<Option<LazySpawnState>>,
 }
@@ -97,7 +97,7 @@ pub struct JitBackend {
 impl JitBackend {
     /// Creates a disabled backend that performs no compilation and spawns no threads.
     ///
-    /// All [`lookup`](Self::lookup) calls return [`LookupDecision::Interpret(Disabled)`].
+    /// All [`lookup`](Self::lookup) calls return `LookupDecision::Interpret(Disabled)`.
     /// Call [`set_enabled`](Self::set_enabled) to lazily spawn the backend thread with
     /// a default [`RuntimeConfig`].
     pub fn disabled() -> Self {
@@ -223,6 +223,7 @@ impl JitBackend {
     /// This is fire-and-forget: returns immediately and silently drops the request
     /// if the backend channel is full.
     pub fn compile_jit(&self, req: LookupRequest) {
+        let _ = self.ensure_started();
         let cmd = Command::CompileJit(CompileJitRequest {
             key: RuntimeCacheKey { code_hash: req.code_hash, spec_id: req.spec_id },
             bytecode: req.code,
@@ -237,6 +238,7 @@ impl JitBackend {
     /// or when the compilation fails. Use [`get_compiled`](Self::get_compiled) to
     /// retrieve the result after this returns.
     pub fn compile_jit_sync(&self, req: LookupRequest) -> eyre::Result<()> {
+        self.ensure_started()?;
         let (tx, rx) = chan::bounded(1);
         let cmd = Command::CompileJit(CompileJitRequest {
             key: RuntimeCacheKey { code_hash: req.code_hash, spec_id: req.spec_id },
@@ -260,6 +262,7 @@ impl JitBackend {
     ///
     /// This is enqueue-only and returns immediately.
     pub fn prepare_aot_batch(&self, reqs: Vec<AotRequest>) {
+        let _ = self.ensure_started();
         let owned: Vec<PrepareAotRequest> = reqs
             .into_iter()
             .map(|r| PrepareAotRequest {
@@ -314,7 +317,8 @@ impl JitBackend {
 
     /// Spawns the backend thread if it hasn't been started yet.
     fn ensure_started(&self) -> eyre::Result<()> {
-        let Some(lazy) = self.inner.lazy_spawn.lock().unwrap().take() else {
+        let mut guard = self.inner.lazy_spawn.lock().unwrap();
+        let Some(lazy) = guard.take() else {
             return Ok(());
         };
 
@@ -329,9 +333,20 @@ impl JitBackend {
         );
 
         // Preload AOT artifacts into the already-allocated resident map.
-        for entry in Self::preload_aot(config.store.as_deref())? {
-            self.inner.resident.insert(entry.0, entry.1);
+        match Self::preload_aot(config.store.as_deref()) {
+            Ok(entries) => {
+                for entry in entries {
+                    self.inner.resident.insert(entry.0, entry.1);
+                }
+            }
+            Err(e) => {
+                // Restore lazy_spawn so a subsequent attempt can retry.
+                *guard = Some(LazySpawnState { rx, config });
+                return Err(e);
+            }
         }
+
+        drop(guard);
 
         let (done_tx, done_rx) = chan::bounded::<()>(1);
         let resident = Arc::clone(&self.inner.resident);

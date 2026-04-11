@@ -5,7 +5,7 @@
 //! the shared resident `DashMap`.
 
 use crate::runtime::{
-    api::{CompiledProgram, LoadedLibrary},
+    api::{CompiledProgram, LoadedLibrary, ProgramKind},
     config::{CompilationEvent, RuntimeConfig, RuntimeTuning},
     stats::RuntimeStats,
     storage::{ArtifactKey, ArtifactManifest, ArtifactStore, BackendSelection, RuntimeCacheKey},
@@ -169,6 +169,12 @@ impl BackendState {
             return;
         }
 
+        // Cap cold entry count to prevent unbounded memory growth from miss tracking.
+        let max_entries = self.tuning.max_pending_jit_jobs * 10;
+        if !self.entries.contains_key(&event.key) && self.entries.len() >= max_entries {
+            return;
+        }
+
         let entry = self.entries.entry(event.key.clone()).or_insert_with(|| EntryState {
             hotness: 0,
             phase: EntryPhase::Cold,
@@ -219,6 +225,14 @@ impl BackendState {
 
         // Skip empty bytecodes.
         if req.bytecode.is_empty() {
+            req.sync_notifier.notify();
+            return;
+        }
+
+        // Skip bytecodes that exceed the maximum length.
+        if self.tuning.jit_max_bytecode_len > 0
+            && req.bytecode.len() > self.tuning.jit_max_bytecode_len
+        {
             req.sync_notifier.notify();
             return;
         }
@@ -531,9 +545,7 @@ impl BackendState {
                     error = %e,
                     "failed to persist AOT artifact",
                 );
-                if let Some(entry) = self.entries.get_mut(&key) {
-                    entry.phase = EntryPhase::Failed;
-                }
+                self.entries.remove(&key);
                 self.stats.compilations_failed.fetch_add(1, Ordering::Relaxed);
                 return;
             }
@@ -580,10 +592,8 @@ impl BackendState {
                                 error = %e,
                                 "failed to load persisted AOT artifact",
                             );
-                            // Persisted successfully but couldn't load — mark as failed.
-                            if let Some(entry) = self.entries.get_mut(&key) {
-                                entry.phase = EntryPhase::Failed;
-                            }
+                            // Persisted successfully but couldn't load — remove so JIT can retry.
+                            self.entries.remove(&key);
                             self.stats.compilations_failed.fetch_add(1, Ordering::Relaxed);
                         }
                     }
@@ -593,9 +603,7 @@ impl BackendState {
                         code_hash = %key.code_hash,
                         "stored AOT artifact not found on reload",
                     );
-                    if let Some(entry) = self.entries.get_mut(&key) {
-                        entry.phase = EntryPhase::Failed;
-                    }
+                    self.entries.remove(&key);
                     self.stats.compilations_failed.fetch_add(1, Ordering::Relaxed);
                 }
                 Err(e) => {
@@ -604,21 +612,17 @@ impl BackendState {
                         error = %e,
                         "failed to reload persisted AOT artifact",
                     );
-                    if let Some(entry) = self.entries.get_mut(&key) {
-                        entry.phase = EntryPhase::Failed;
-                    }
+                    self.entries.remove(&key);
                     self.stats.compilations_failed.fetch_add(1, Ordering::Relaxed);
                 }
             }
         } else {
-            // No store configured — can't persist, mark as failed.
+            // No store configured — can't persist, remove so JIT can retry.
             warn!(
                 code_hash = %key.code_hash,
                 "AOT compilation completed but no artifact store configured",
             );
-            if let Some(entry) = self.entries.get_mut(&key) {
-                entry.phase = EntryPhase::Failed;
-            }
+            self.entries.remove(&key);
             self.stats.compilations_failed.fetch_add(1, Ordering::Relaxed);
         }
     }
@@ -656,12 +660,16 @@ impl BackendState {
             }
         }
 
-        // Phase 2: enforce memory budget by evicting LRU entries.
+        // Phase 2: enforce memory budget by evicting LRU JIT entries.
         if budget > 0 && jit_total_bytes() > budget {
-            // Collect entries sorted by last_hit_at ascending (oldest first).
+            // Collect JIT entries sorted by last_hit_at ascending (oldest first).
+            // AOT entries are excluded because they don't contribute to `jit_total_bytes()`.
             let mut entries: Vec<(RuntimeCacheKey, Instant)> = self
                 .resident_meta
                 .iter()
+                .filter(|(key, _)| {
+                    self.resident.get(key).is_some_and(|p| matches!(p.kind, ProgramKind::Jit))
+                })
                 .map(|(key, meta)| (key.clone(), meta.last_hit_at))
                 .collect();
             entries.sort_by_key(|(_, t)| *t);

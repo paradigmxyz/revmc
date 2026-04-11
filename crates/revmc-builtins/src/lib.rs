@@ -403,7 +403,7 @@ pub unsafe extern "C" fn __revmc_builtin_number(ecx: &EvmContext<'_>, slot: &mut
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __revmc_builtin_difficulty(ecx: &EvmContext<'_>, slot: &mut EvmWord) {
     *slot = if ecx.spec_id.is_enabled_in(SpecId::MERGE) {
-        ecx.host.prevrandao().unwrap_or_default().into()
+        ecx.host.prevrandao().unwrap().into()
     } else {
         ecx.host.difficulty().into()
     };
