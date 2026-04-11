@@ -98,9 +98,9 @@ pub struct EvmCompiler<B: Backend> {
     #[debug(skip)]
     gas_params: Option<GasParams>,
 
-    no_dedup: bool,
+    dedup: bool,
 
-    no_dse: bool,
+    dse: bool,
 
     dump_assembly: bool,
     dump_unopt_assembly: bool,
@@ -123,8 +123,8 @@ impl<B: Backend> EvmCompiler<B> {
             gas_params: None,
             dump_assembly: true,
             dump_unopt_assembly: false,
-            no_dedup: false,
-            no_dse: false,
+            dedup: true,
+            dse: true,
             compiler_gas_limit: crate::bytecode::DEFAULT_COMPILER_GAS_LIMIT,
             remarks: Remarks::default(),
             finalized: false,
@@ -244,24 +244,18 @@ impl<B: Backend> EvmCompiler<B> {
         self.config.debug_assertions = yes;
     }
 
-    /// Disables the block deduplication pass.
+    /// Enables the block deduplication pass.
     ///
-    /// When `true`, deduplication is skipped. Useful for debugging JIT correctness issues
-    /// where deduplication incorrectly merges blocks.
-    ///
-    /// Defaults to `false`.
-    pub fn set_no_dedup(&mut self, yes: bool) {
-        self.no_dedup = yes;
+    /// Defaults to `true`.
+    pub fn set_dedup(&mut self, yes: bool) {
+        self.dedup = yes;
     }
 
-    /// Disables the dead store elimination pass.
+    /// Enables the dead store elimination pass.
     ///
-    /// When `true`, DSE is skipped. Useful for debugging JIT correctness issues
-    /// where DSE incorrectly eliminates live stack operations.
-    ///
-    /// Defaults to `false`.
-    pub fn set_no_dse(&mut self, yes: bool) {
-        self.no_dse = yes;
+    /// Defaults to `true`.
+    pub fn set_dse(&mut self, yes: bool) {
+        self.dse = yes;
     }
 
     /// Returns whether JIT debug support is enabled.
@@ -533,8 +527,8 @@ impl<B: Backend> EvmCompiler<B> {
         let mut bytecode = Bytecode::new(bytecode, spec_id, self.gas_params.clone());
         bytecode.compiler_gas_limit = self.compiler_gas_limit;
         bytecode.config.set(AnalysisConfig::INSPECT_STACK, self.config.inspect_stack);
-        bytecode.config.set(AnalysisConfig::DEDUP, !self.no_dedup);
-        bytecode.config.set(AnalysisConfig::DSE, !self.no_dse);
+        bytecode.config.set(AnalysisConfig::DEDUP, self.dedup);
+        bytecode.config.set(AnalysisConfig::DSE, self.dse);
         bytecode.analyze()?;
         if let Some(dump_dir) = &self.dump_dir() {
             Self::dump_bytecode(dump_dir, &bytecode)?;
