@@ -49,10 +49,6 @@ mod macros;
 
 mod meta;
 
-mod dedup_jumpdest_leader;
-mod dedup_leader_propagation;
-mod disabled_section_poison;
-mod div_zero_opaque;
 mod fibonacci;
 mod resume;
 mod resume_at_call;
@@ -1611,6 +1607,138 @@ tests! {
     }
 
     regressions {
+        // Dedup must not poison DSE via lost leader marks.
+        //
+        // When a JUMPI's fall-through block gets deduped (marked DEAD_CODE), the leader mark
+        // on the first dead instruction must propagate to the next alive instruction so that
+        // `rebuild_cfg` starts a new block there. Without this, the JUMPI block absorbs the
+        // next alive instruction (e.g. INVALID) as its terminator, which—if diverging—causes
+        // DSE to treat all exit stack positions as dead, incorrectly NOOP-ing live PUSHes.
+        //
+        // `inspect_stack` must be off so DSE's diverging-terminator optimisation is active.
+        dedup_leader_propagation(@raw {
+            bytecode: &[
+                // Block 0: JUMPDEST, setup JUMPI#1 (cond=0, not taken)
+                op::JUMPDEST,
+                op::PUSH1, 0x00,
+                op::PUSH1, 0x09,
+                op::JUMPI,
+                // Canonical fall-through: PUSH1 0x09; JUMP
+                op::PUSH1, 0x09,
+                op::JUMP,
+                // Block 2: JUMPDEST, JUMPI#2 (taken when CALLDATASIZE != 0)
+                op::JUMPDEST,
+                op::PUSH1, 0x2a,      // live-out value
+                op::CALLDATASIZE,     // condition
+                op::PUSH1, 0x14,      // dest2
+                op::JUMPI,
+                // Duplicate fall-through: PUSH1 0x09; JUMP (same bytes as canonical)
+                op::PUSH1, 0x09,
+                op::JUMP,
+                // INVALID — alive instruction after dead deduped block
+                op::INVALID,
+                // dest2: consume the 0x2a value
+                op::JUMPDEST,
+                op::PUSH1, 0x00,
+                op::MSTORE,
+                op::PUSH1, 0x20,
+                op::PUSH1, 0x00,
+                op::RETURN,
+            ],
+            inspect_stack: Some(false),
+            expected_return: InstructionResult::Return,
+            expected_memory: &0x2a_U256.to_be_bytes::<32>(),
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+            expected_next_action: InterpreterAction::Return(
+                InterpreterResult {
+                    result: InstructionResult::Return,
+                    output: Bytes::copy_from_slice(&0x2a_U256.to_be_bytes::<32>()),
+                    gas: Gas::new(GAS_WHAT_INTERPRETER_SAYS),
+                }
+            ),
+        }),
+
+        // Same class of bug as dedup_leader_propagation, but triggered by a deduped
+        // reachable JUMPDEST block rather than a JUMPI fall-through.
+        //
+        // When `rebuild_cfg` skips dead instructions before checking `is_reachable_jumpdest`,
+        // a deduped JUMPDEST block never gets its leader mark set. `pending_leader` never
+        // fires and the preceding live block absorbs the next alive instruction past the dead
+        // region. If that instruction is a diverging terminator (INVALID), DSE treats all
+        // exit stack positions as dead and incorrectly NOOPs live PUSHes.
+        //
+        // Real-world trigger: tx 0x3a0ab5...31856 (block 5330710).
+        dedup_jumpdest_leader(@raw {
+            bytecode: &[
+                // 0x00: entry
+                op::JUMPDEST,
+                op::PUSH1, 0x00,
+                op::CALLDATASIZE,
+                op::PUSH1, 0x0e,      // -> alt_entry
+                op::JUMPI,
+                // 0x07: not-taken -> dup_ret (makes it reachable for analysis)
+                op::PUSH1, 0x14,      // -> dup_ret
+                op::JUMP,
+                // 0x0a: canonical_ret
+                op::JUMPDEST,
+                op::PUSH1, 0x19,      // -> dest
+                op::JUMP,
+                // 0x0e: alt_entry
+                op::JUMPDEST,
+                op::DUP1,
+                op::POP,
+                op::POP,
+                op::PUSH1, 0x2a,      // <- DSE must NOT kill
+                // 0x14: dup_ret (byte-identical to canonical_ret -> deduped)
+                op::JUMPDEST,
+                op::PUSH1, 0x19,      // -> dest
+                op::JUMP,
+                // 0x18: alive after dead dup_ret
+                op::INVALID,
+                // 0x19: dest
+                op::JUMPDEST,
+                op::PUSH1, 0x00,
+                op::MSTORE,
+                op::PUSH1, 0x20,
+                op::PUSH1, 0x00,
+                op::RETURN,
+            ],
+            inspect_stack: Some(false),
+            expected_return: InstructionResult::Return,
+            expected_memory: &0x2a_U256.to_be_bytes::<32>(),
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+            expected_next_action: InterpreterAction::Return(
+                InterpreterResult {
+                    result: InstructionResult::Return,
+                    output: Bytes::copy_from_slice(&0x2a_U256.to_be_bytes::<32>()),
+                    gas: Gas::new(GAS_WHAT_INTERPRETER_SAYS),
+                }
+            ),
+        }),
+
+        // Disabled opcodes must not poison stack sections.
+        //
+        // When a disabled opcode (e.g. TSTORE before Cancun) follows executable instructions
+        // in the same section, its stack I/O requirements must not be folded into the
+        // section-head underflow check.
+        //
+        // CALLDATASIZE(0->1) ; TSTORE(2->0, disabled before Cancun).
+        // The interpreter executes CALLDATASIZE then halts at TSTORE with NotActivated.
+        calldatasize_tstore_shanghai(@raw {
+            bytecode: &[op::CALLDATASIZE, op::TSTORE],
+            spec_id: SpecId::SHANGHAI,
+            expected_return: InstructionResult::NotActivated,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+        }),
+
+        // PUSH0(0->1) ; TLOAD(1->1, disabled before Cancun).
+        push0_tload_shanghai(@raw {
+            bytecode: &[op::PUSH0, op::TLOAD],
+            spec_id: SpecId::SHANGHAI,
+            expected_return: InstructionResult::NotActivated,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+        }),
+
         // Mismatched costs in < BERLIN.
         // GeneralStateTests/stSolidityTest/TestKeywords.json
         st_solidity_keywords(@raw {
@@ -1639,6 +1767,62 @@ tests! {
             }),
         }),
     }
+}
+
+// DIV/MOD/SMOD/SDIV with zero divisor loaded from memory (opaque to LLVM).
+//
+// When the divisor is opaque (e.g. loaded via MLOAD), `udiv/urem/srem i256` with
+// divisor==0 is UB in LLVM IR. The fix uses `lazy_select` (conditional branch) so
+// the division is never executed when b==0.
+//
+// EVM spec: x DIV 0 = 0, x MOD 0 = 0, x SMOD 0 = 0, x SDIV 0 = 0.
+mod div_zero_opaque {
+    use super::*;
+
+    /// Build bytecode: MSTORE(a, 0), MSTORE(b, 32), MLOAD(32), MLOAD(0), `<op>`
+    ///
+    /// The operands pass through MLOAD (an opaque builtin), preventing LLVM from
+    /// constant-folding or exploiting division-by-zero UB at compile time.
+    fn bytecode_binop_opaque(opcode: u8, a: U256, b: U256) -> Vec<u8> {
+        let mut code = Vec::with_capacity(128);
+        code.push(op::PUSH32);
+        code.extend_from_slice(&a.to_be_bytes::<32>());
+        code.push(op::PUSH1);
+        code.push(0x00);
+        code.push(op::MSTORE);
+        code.push(op::PUSH32);
+        code.extend_from_slice(&b.to_be_bytes::<32>());
+        code.push(op::PUSH1);
+        code.push(0x20);
+        code.push(op::MSTORE);
+        code.push(op::PUSH1);
+        code.push(0x20);
+        code.push(op::MLOAD);
+        code.push(op::PUSH1);
+        code.push(0x00);
+        code.push(op::MLOAD);
+        code.push(opcode);
+        code
+    }
+
+    fn run<B: Backend>(compiler: &mut EvmCompiler<B>, name: &str, opcode: u8, a: U256) {
+        let code = bytecode_binop_opaque(opcode, a, U256::ZERO);
+        unsafe { compiler.clear() }.unwrap();
+        compiler.inspect_stack(true);
+        let f = unsafe { compiler.jit(name, &code, DEF_SPEC) }.unwrap();
+        with_evm_context(&code, DEF_SPEC, |ecx, stack, stack_len| {
+            let r = unsafe { f.call(Some(stack), Some(stack_len), ecx) };
+            assert_eq!(r, InstructionResult::Stop, "{name}: unexpected return");
+            assert_eq!(*stack_len, 1, "{name}: expected 1 stack element");
+            let actual = unsafe { stack.as_slice(*stack_len)[0].to_u256() };
+            assert_eq!(actual, U256::ZERO, "{name}: EVM spec mandates 0 for division by zero");
+        });
+    }
+
+    matrix_tests!(div = |jit| run(jit, "div_zero", op::DIV, U256::from(32)));
+    matrix_tests!(r#mod = |jit| run(jit, "mod_zero", op::MOD, U256::from(32)));
+    matrix_tests!(smod = |jit| run(jit, "smod_zero", op::SMOD, U256::from(5)));
+    matrix_tests!(sdiv = |jit| run(jit, "sdiv_zero", op::SDIV, U256::from(5)));
 }
 
 fn bytecode_unop(op: u8, a: U256) -> [u8; 34] {
