@@ -101,12 +101,19 @@ where
         }
     }
 
-    /// Clears the lookup cache if the spec has changed since the last call.
+    /// Clears stale lookup-cache entries.
+    ///
+    /// On a spec change the entire cache is dropped. Otherwise only
+    /// [`Interpret`](LookupDecision::Interpret) entries are evicted so that
+    /// hotness events keep flowing to the backend, while already-compiled
+    /// entries stay cached to avoid redundant lookups.
     fn invalidate_cache(&mut self) {
         let spec_id: SpecId = self.inner.ctx_ref().cfg().spec().into();
         if spec_id != self.lookup_cache_spec_id {
             self.lookup_cache.clear();
             self.lookup_cache_spec_id = spec_id;
+        } else {
+            self.lookup_cache.retain(|_, v| matches!(v, LookupDecision::Compiled(_)));
         }
     }
 }
@@ -289,6 +296,7 @@ where
                 data,
             ),
         );
+        self.invalidate_cache();
         MainnetHandler::default().run_system_call(self)
     }
 }
@@ -465,6 +473,7 @@ where
                 data,
             ),
         );
+        self.invalidate_cache();
         MainnetHandler::default().inspect_run_system_call(self)
     }
 }
