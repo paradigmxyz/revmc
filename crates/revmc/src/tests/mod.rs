@@ -1582,12 +1582,56 @@ tests! {
     dedup {
         // Transitive redirect chains in dedup caused MULTI_JUMP case PCs to resolve to
         // stale dead entry blocks, producing InvalidJump on valid bytecode.
-        // Dedup creates t2->t1, t1->t0, u1->u0. The live `fn` block has a MULTI_JUMP
-        // dispatching to t0/t1/t2. Without transitive compression, t2's inst_entry
-        // pointed at the dead t1 block instead of canonical t0.
-        // Path: entry -> path1 -> path2 -> fn -> t2 -> u1 -> STOP
+        //
+        // t0/t1/t2 are byte-identical trampolines (JUMPDEST JUMP) that get deduped into
+        // a chain t2->t1->t0. `fn` dispatches to t0/t1/t2 via multi-jump. Without
+        // transitive compression, t2's inst_entry points at the dead t1 block.
+        //
+        // Path taken at runtime: entry -> path1 -> path2 -> fn -> t2 -> u1 -> STOP
         transitive_redirect_multi_jump(@raw {
-            bytecode: &hex!("3660095760266020565b3460155760286022602a565b60286024602a56fefefe5b565b565b565b005b005b56"),
+            bytecode: &asm("
+                ; entry: dispatch on CALLDATASIZE (nonzero -> path1)
+                CALLDATASIZE
+                PUSH %path1
+                JUMPI
+                ; not taken: u0 via t0
+                PUSH %u0
+                PUSH %t0
+                JUMP
+
+            path1:
+                JUMPDEST
+                CALLVALUE
+                PUSH %path2
+                JUMPI
+                ; not taken: u1 via t1 via fn
+                PUSH %u1
+                PUSH %t1
+                PUSH %fn
+                JUMP
+
+            path2:
+                JUMPDEST
+                ; u1 via t2 via fn
+                PUSH %u1
+                PUSH %t2
+                PUSH %fn
+                JUMP
+
+            dead0: INVALID
+            dead1: INVALID
+            dead2: INVALID
+
+            ; three byte-identical trampolines that get deduped (t2->t1->t0)
+            t0: JUMPDEST  JUMP
+            t1: JUMPDEST  JUMP
+            t2: JUMPDEST  JUMP
+
+            u0: JUMPDEST  STOP
+            u1: JUMPDEST  STOP
+
+            fn: JUMPDEST  JUMP
+            "),
             spec_id: SpecId::CANCUN,
             expected_return: RETURN_WHAT_INTERPRETER_SAYS,
             expected_stack: STACK_WHAT_INTERPRETER_SAYS,
@@ -1596,11 +1640,62 @@ tests! {
 
         // Dedup merges two byte-identical MULTI_JUMP dispatcher blocks after their
         // target blocks are deduped, but only the canonical dispatcher's case PCs
-        // were emitted in the switch. Valid PCs unique to the eliminated dispatcher
-        // fell into InvalidJump. DEF_CD has nonzero words, so the bytecode takes the
+        // were emitted in the switch. DEF_CD has nonzero words, so the bytecode takes the
         // path through the second dispatcher (the one that gets deduped away).
+        //
+        // Each path pushes (stop_pc, dispatcher_pc) then JUMPs to the dispatcher.
+        // fn1 and fn2 are byte-identical dispatchers (JUMPDEST JUMP) that get deduped.
         dedup_multi_jump_dispatcher(@raw {
-            bytecode: &hex!("5f3560165760203560105760286030565b602a6030565b602035602257602c6032565b602e6032565b005b005b005b005b565b56"),
+            bytecode: &asm("
+                ; dispatch on first calldata word
+                PUSH0
+                CALLDATALOAD
+                PUSH %d1
+                JUMPI
+
+                ; dispatch on second calldata word
+                PUSH 0x20
+                CALLDATALOAD
+                PUSH %d0
+                JUMPI
+
+                ; neither taken: stop0 via fn1
+                PUSH %stop0
+                PUSH %fn1
+                JUMP
+
+            d0:
+                JUMPDEST
+                PUSH %stop1
+                PUSH %fn1
+                JUMP
+
+            d1:
+                JUMPDEST
+                PUSH 0x20
+                CALLDATALOAD
+                PUSH %d1_taken
+                JUMPI
+                ; not taken: stop2 via fn2
+                PUSH %stop2
+                PUSH %fn2
+                JUMP
+
+            d1_taken:
+                JUMPDEST
+                PUSH %stop3
+                PUSH %fn2
+                JUMP
+
+            stop0: JUMPDEST  STOP
+            stop1: JUMPDEST  STOP
+            stop2: JUMPDEST  STOP
+            stop3: JUMPDEST  STOP
+
+            ; two byte-identical dispatchers that get deduped
+            fn1: JUMPDEST  JUMP
+            fn2: JUMPDEST  JUMP
+            "),
             expected_return: InstructionResult::Stop,
             expected_gas: GAS_WHAT_INTERPRETER_SAYS,
         }),
@@ -1609,108 +1704,108 @@ tests! {
     regressions {
         // Dedup must not poison DSE via lost leader marks.
         //
-        // When a JUMPI's fall-through block gets deduped (marked DEAD_CODE), the leader mark
-        // on the first dead instruction must propagate to the next alive instruction so that
-        // `rebuild_cfg` starts a new block there. Without this, the JUMPI block absorbs the
-        // next alive instruction (e.g. INVALID) as its terminator, which—if diverging—causes
-        // DSE to treat all exit stack positions as dead, incorrectly NOOP-ing live PUSHes.
+        // When a JUMPI's fall-through block gets deduped, the leader mark on the first dead
+        // instruction must propagate to the next alive instruction. Without this, the JUMPI
+        // block absorbs the next alive instruction (e.g. INVALID) as its terminator, which
+        // causes DSE to treat all exit stack positions as dead, incorrectly NOOP-ing live PUSHes.
         //
-        // `inspect_stack` must be off so DSE's diverging-terminator optimisation is active.
+        // inspect_stack must be off so DSE's diverging-terminator optimisation is active.
         dedup_leader_propagation(@raw {
-            bytecode: &[
-                // Block 0: JUMPDEST, setup JUMPI#1 (cond=0, not taken)
-                op::JUMPDEST,
-                op::PUSH1, 0x00,
-                op::PUSH1, 0x09,
-                op::JUMPI,
-                // Canonical fall-through: PUSH1 0x09; JUMP
-                op::PUSH1, 0x09,
-                op::JUMP,
-                // Block 2: JUMPDEST, JUMPI#2 (taken when CALLDATASIZE != 0)
-                op::JUMPDEST,
-                op::PUSH1, 0x2a,      // live-out value
-                op::CALLDATASIZE,     // condition
-                op::PUSH1, 0x14,      // dest2
-                op::JUMPI,
-                // Duplicate fall-through: PUSH1 0x09; JUMP (same bytes as canonical)
-                op::PUSH1, 0x09,
-                op::JUMP,
-                // INVALID — alive instruction after dead deduped block
-                op::INVALID,
-                // dest2: consume the 0x2a value
-                op::JUMPDEST,
-                op::PUSH1, 0x00,
-                op::MSTORE,
-                op::PUSH1, 0x20,
-                op::PUSH1, 0x00,
-                op::RETURN,
-            ],
+            bytecode: &asm("
+            entry:
+                JUMPDEST
+                PUSH 0x00       ; cond = 0
+                PUSH %jumpi2
+                JUMPI           ; not taken
+                ; canonical fall-through
+                PUSH %jumpi2
+                JUMP
+
+            jumpi2:
+                JUMPDEST
+                PUSH 0x2a       ; live-out value DSE must preserve
+                CALLDATASIZE    ; condition (nonzero)
+                PUSH %dest
+                JUMPI           ; taken
+                ; duplicate fall-through (same bytes as canonical -> deduped)
+                PUSH %jumpi2
+                JUMP
+
+                INVALID         ; alive after dead deduped block
+
+            dest:
+                JUMPDEST
+                PUSH 0x00
+                MSTORE          ; mem[0] = 0x2a
+                PUSH 0x20
+                PUSH 0x00
+                RETURN
+            "),
             inspect_stack: Some(false),
             expected_return: InstructionResult::Return,
-            expected_memory: &0x2a_U256.to_be_bytes::<32>(),
+            expected_memory: &U256::from(0x2a).to_be_bytes::<32>(),
             expected_gas: GAS_WHAT_INTERPRETER_SAYS,
             expected_next_action: InterpreterAction::Return(
                 InterpreterResult {
                     result: InstructionResult::Return,
-                    output: Bytes::copy_from_slice(&0x2a_U256.to_be_bytes::<32>()),
+                    output: Bytes::copy_from_slice(&U256::from(0x2a).to_be_bytes::<32>()),
                     gas: Gas::new(GAS_WHAT_INTERPRETER_SAYS),
                 }
             ),
         }),
 
-        // Same class of bug as dedup_leader_propagation, but triggered by a deduped
-        // reachable JUMPDEST block rather than a JUMPI fall-through.
-        //
-        // When `rebuild_cfg` skips dead instructions before checking `is_reachable_jumpdest`,
-        // a deduped JUMPDEST block never gets its leader mark set. `pending_leader` never
-        // fires and the preceding live block absorbs the next alive instruction past the dead
-        // region. If that instruction is a diverging terminator (INVALID), DSE treats all
-        // exit stack positions as dead and incorrectly NOOPs live PUSHes.
+        // Same class of bug but triggered by a deduped reachable JUMPDEST block rather than
+        // a JUMPI fall-through.
         //
         // Real-world trigger: tx 0x3a0ab5...31856 (block 5330710).
         dedup_jumpdest_leader(@raw {
-            bytecode: &[
-                // 0x00: entry
-                op::JUMPDEST,
-                op::PUSH1, 0x00,
-                op::CALLDATASIZE,
-                op::PUSH1, 0x0e,      // -> alt_entry
-                op::JUMPI,
-                // 0x07: not-taken -> dup_ret (makes it reachable for analysis)
-                op::PUSH1, 0x14,      // -> dup_ret
-                op::JUMP,
-                // 0x0a: canonical_ret
-                op::JUMPDEST,
-                op::PUSH1, 0x19,      // -> dest
-                op::JUMP,
-                // 0x0e: alt_entry
-                op::JUMPDEST,
-                op::DUP1,
-                op::POP,
-                op::POP,
-                op::PUSH1, 0x2a,      // <- DSE must NOT kill
-                // 0x14: dup_ret (byte-identical to canonical_ret -> deduped)
-                op::JUMPDEST,
-                op::PUSH1, 0x19,      // -> dest
-                op::JUMP,
-                // 0x18: alive after dead dup_ret
-                op::INVALID,
-                // 0x19: dest
-                op::JUMPDEST,
-                op::PUSH1, 0x00,
-                op::MSTORE,
-                op::PUSH1, 0x20,
-                op::PUSH1, 0x00,
-                op::RETURN,
-            ],
+            bytecode: &asm("
+            entry:
+                JUMPDEST
+                PUSH 0x00
+                CALLDATASIZE
+                PUSH %alt_entry
+                JUMPI
+                ; not-taken -> dup_ret (makes it reachable for analysis)
+                PUSH %dup_ret
+                JUMP
+
+            canonical_ret:
+                JUMPDEST
+                PUSH %dest
+                JUMP
+
+            alt_entry:
+                JUMPDEST
+                DUP1
+                POP
+                POP
+                PUSH 0x2a       ; <- DSE must NOT kill
+
+            dup_ret:
+                ; byte-identical to canonical_ret -> deduped
+                JUMPDEST
+                PUSH %dest
+                JUMP
+
+                INVALID         ; alive after dead dup_ret
+
+            dest:
+                JUMPDEST
+                PUSH 0x00
+                MSTORE
+                PUSH 0x20
+                PUSH 0x00
+                RETURN
+            "),
             inspect_stack: Some(false),
             expected_return: InstructionResult::Return,
-            expected_memory: &0x2a_U256.to_be_bytes::<32>(),
+            expected_memory: &U256::from(0x2a).to_be_bytes::<32>(),
             expected_gas: GAS_WHAT_INTERPRETER_SAYS,
             expected_next_action: InterpreterAction::Return(
                 InterpreterResult {
                     result: InstructionResult::Return,
-                    output: Bytes::copy_from_slice(&0x2a_U256.to_be_bytes::<32>()),
+                    output: Bytes::copy_from_slice(&U256::from(0x2a).to_be_bytes::<32>()),
                     gas: Gas::new(GAS_WHAT_INTERPRETER_SAYS),
                 }
             ),
@@ -1850,4 +1945,8 @@ fn bytecode_ternop(op: u8, a: U256, b: U256, c: U256) -> [u8; 100] {
     build_push32!(code[i], a);
     code[i] = op;
     code
+}
+
+fn asm(s: &str) -> Vec<u8> {
+    crate::bytecode::parse_asm(s).unwrap()
 }
