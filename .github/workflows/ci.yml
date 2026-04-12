@@ -8,7 +8,6 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUSTC_WRAPPER: sccache
-  LLVM_VERSION: "22" # Must be just the major version
   ALL_BACKENDS: "llvm"
 
 concurrency:
@@ -37,11 +36,11 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install LLVM (apt)
         if: ${{ matrix.os == 'ubuntu' }}
-        run: sudo .github/scripts/install_llvm_ubuntu.sh ${{ env.LLVM_VERSION }}
+        run: sudo .github/scripts/install_llvm_ubuntu.sh
       - name: Install LLVM (brew)
         if: ${{ matrix.os == 'macos' }}
         run: |
-          v=${{ env.LLVM_VERSION }}
+          v=22
           HOMEBREW_NO_AUTO_UPDATE=1 brew install "llvm@${v}"
           prefix="$(brew --prefix llvm@${v})"
           echo "LLVM_SYS_${v}1_PREFIX=${prefix}" >> $GITHUB_ENV
@@ -82,11 +81,11 @@ jobs:
         run: git submodule update --init --checkout --depth 1 tests/ethereum-tests
       - name: Install LLVM (apt)
         if: ${{ matrix.os == 'ubuntu' }}
-        run: sudo .github/scripts/install_llvm_ubuntu.sh ${{ env.LLVM_VERSION }}
+        run: sudo .github/scripts/install_llvm_ubuntu.sh
       - name: Install LLVM (brew)
         if: ${{ matrix.os == 'macos' }}
         run: |
-          v=${{ env.LLVM_VERSION }}
+          v=22
           HOMEBREW_NO_AUTO_UPDATE=1 brew install "llvm@${v}"
           prefix="$(brew --prefix llvm@${v})"
           echo "LLVM_SYS_${v}1_PREFIX=${prefix}" >> $GITHUB_ENV
@@ -109,7 +108,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install LLVM
-        run: sudo .github/scripts/install_llvm_ubuntu.sh ${{ env.LLVM_VERSION }}
+        run: sudo .github/scripts/install_llvm_ubuntu.sh
       - uses: dtolnay/rust-toolchain@stable
       - uses: mozilla-actions/sccache-action@v0.0.9
       - uses: taiki-e/install-action@cargo-hack
@@ -127,7 +126,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install LLVM
-        run: sudo .github/scripts/install_llvm_ubuntu.sh ${{ env.LLVM_VERSION }}
+        run: sudo .github/scripts/install_llvm_ubuntu.sh
       - uses: dtolnay/rust-toolchain@clippy
       - uses: mozilla-actions/sccache-action@v0.0.9
       - uses: Swatinem/rust-cache@v2
@@ -143,7 +142,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install LLVM
-        run: sudo .github/scripts/install_llvm_ubuntu.sh ${{ env.LLVM_VERSION }}
+        run: sudo .github/scripts/install_llvm_ubuntu.sh
       - uses: dtolnay/rust-toolchain@nightly
       - uses: mozilla-actions/sccache-action@v0.0.9
       - uses: Swatinem/rust-cache@v2

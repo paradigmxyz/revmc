@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -eo pipefail
 
-v=${1:-$LLVM_VERSION}
+v=${1:-22}
 bins=(clang llvm-config lld ld.lld FileCheck)
 llvm_sh=$(mktemp)
 
