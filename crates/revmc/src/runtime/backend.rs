@@ -189,7 +189,7 @@ impl BackendState {
 
         entry.hotness = entry.hotness.saturating_add(1);
 
-        if entry.hotness >= self.tuning.jit_hot_threshold
+        if (entry.hotness as usize) >= self.tuning.jit_hot_threshold
             && self.pending_jobs < self.tuning.max_pending_jit_jobs
         {
             debug!(

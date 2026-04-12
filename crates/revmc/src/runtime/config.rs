@@ -141,7 +141,7 @@ pub struct RuntimeTuning {
     /// Number of observed misses before a key is promoted to JIT compilation.
     ///
     /// Defaults to `8`.
-    pub jit_hot_threshold: u32,
+    pub jit_hot_threshold: usize,
 
     /// Maximum bytecode length eligible for JIT compilation.
     ///
