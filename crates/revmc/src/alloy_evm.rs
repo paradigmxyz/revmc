@@ -140,6 +140,11 @@ impl JitEvmFactory {
     pub const fn new(backend: JitBackend) -> Self {
         Self { backend }
     }
+
+    /// Returns a reference to the JIT backend.
+    pub const fn backend(&self) -> &JitBackend {
+        &self.backend
+    }
 }
 
 impl EvmFactory for JitEvmFactory {
