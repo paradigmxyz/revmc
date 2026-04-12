@@ -3,10 +3,6 @@
 fn main() {
     println!("cargo:rerun-if-changed=cpp/lib.cpp");
 
-    for (k, v) in std::env::vars() {
-        eprintln!("{k}={v}");
-    }
-
     let cxxflags = ["llvm-config", "llvm-config-22"]
         .into_iter()
         .find_map(|llvm_config| {
