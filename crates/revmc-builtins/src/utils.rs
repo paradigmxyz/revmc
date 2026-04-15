@@ -1,5 +1,7 @@
 use core::num::NonZero;
+use revm_context_interface::journaled_state::AccountInfoLoad;
 use revm_interpreter::{InstructionResult, as_usize_saturated, host::LoadError};
+use revm_primitives::Address;
 use revmc_context::{EvmContext, EvmWord};
 
 pub type BuiltinResult = Result<(), BuiltinError>;
@@ -35,6 +37,23 @@ impl<T> OkOrFatal<T> for Option<T> {
     fn ok_or_fatal(self) -> Result<T, BuiltinError> {
         self.ok_or(InstructionResult::FatalExternalError.into())
     }
+}
+
+/// Loads an account, handling cold load gas accounting.
+///
+/// Pre-Berlin, `cold_account_additional_cost` is 0, so the cold load logic is a no-op.
+pub(crate) fn load_account<'a>(
+    ecx: &'a mut EvmContext<'_>,
+    address: Address,
+    load_code: bool,
+) -> Result<AccountInfoLoad<'a>, BuiltinError> {
+    let cold_load_gas = ecx.host.gas_params().cold_account_additional_cost();
+    let skip_cold_load = ecx.gas.remaining() < cold_load_gas;
+    let account = ecx.host.load_account_info_skip_cold_load(address, load_code, skip_cold_load)?;
+    if account.is_cold {
+        gas!(ecx, cold_load_gas);
+    }
+    Ok(account)
 }
 
 /// Splits the stack pointer into `N` elements by casting it to an array.

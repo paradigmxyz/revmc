@@ -164,13 +164,8 @@ pub unsafe extern "C" fn __revmc_builtin_balance(
     address: &mut EvmWord,
 ) -> BuiltinResult {
     let addr = address.to_address();
-    if ecx.spec_id.is_enabled_in(SpecId::BERLIN) {
-        let account = berlin_load_account!(ecx, addr, false);
-        *address = account.balance.into();
-    } else {
-        let account = ecx.host.load_account_info_skip_cold_load(addr, false, false)?;
-        *address = account.balance.into();
-    }
+    let account = load_account(ecx, addr, false)?;
+    *address = account.balance.into();
     Ok(())
 }
 
@@ -272,13 +267,8 @@ pub unsafe extern "C" fn __revmc_builtin_extcodesize(
     address: &mut EvmWord,
 ) -> BuiltinResult {
     let addr = address.to_address();
-    if ecx.spec_id.is_enabled_in(SpecId::BERLIN) {
-        let account = berlin_load_account!(ecx, addr, true);
-        *address = U256::from(account.code.as_ref().unwrap().len()).into();
-    } else {
-        let account = ecx.host.load_account_info_skip_cold_load(addr, true, false)?;
-        *address = U256::from(account.code.as_ref().unwrap().len()).into();
-    }
+    let account = load_account(ecx, addr, true)?;
+    *address = U256::from(account.code.as_ref().unwrap().len()).into();
     Ok(())
 }
 
@@ -297,13 +287,8 @@ pub unsafe extern "C" fn __revmc_builtin_extcodecopy(
         ensure_memory(ecx, memory_offset_usize, len)?;
     }
 
-    let code = if ecx.spec_id.is_enabled_in(SpecId::BERLIN) {
-        let account = berlin_load_account!(ecx, addr, true);
-        account.code.as_ref().unwrap().original_bytes()
-    } else {
-        let code = ecx.host.load_account_code(addr).ok_or_fatal()?;
-        code.data
-    };
+    let account = load_account(ecx, addr, true)?;
+    let code = account.code.as_ref().unwrap().original_bytes();
 
     let code_offset_usize = core::cmp::min(as_usize_saturated!(code_offset.to_u256()), code.len());
     ecx.memory.set_data(memory_offset_usize, code_offset_usize, len, &code);
@@ -339,11 +324,7 @@ pub unsafe extern "C" fn __revmc_builtin_extcodehash(
     address: &mut EvmWord,
 ) -> BuiltinResult {
     let addr = address.to_address();
-    let account = if ecx.spec_id.is_enabled_in(SpecId::BERLIN) {
-        berlin_load_account!(ecx, addr, false)
-    } else {
-        ecx.host.load_account_info_skip_cold_load(addr, false, false)?
-    };
+    let account = load_account(ecx, addr, false)?;
     let code_hash = if account.is_empty { revm_primitives::B256::ZERO } else { account.code_hash };
     *address = EvmWord::from_be_bytes(code_hash);
     Ok(())
