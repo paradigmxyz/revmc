@@ -18,25 +18,6 @@ macro_rules! gas {
     };
 }
 
-/// Mirrors revm's `berlin_load_account!` macro.
-/// Loads account info with the cold-load-skip optimization: if remaining gas
-/// is less than the cold cost, skip the DB load and return OOG immediately.
-/// Charges `cold_account_additional_cost` if cold. The base `warm_storage_read_cost`
-/// is deducted upfront by the JIT as static gas.
-#[collapse_debuginfo(yes)]
-macro_rules! berlin_load_account {
-    ($ecx:expr, $address:expr, $load_code:expr) => {{
-        let cold_load_gas = $ecx.host.gas_params().cold_account_additional_cost();
-        let skip_cold_load = $ecx.gas.remaining() < cold_load_gas;
-        let account =
-            $ecx.host.load_account_info_skip_cold_load($address, $load_code, skip_cold_load)?;
-        if account.is_cold {
-            gas!($ecx, cold_load_gas);
-        }
-        account
-    }};
-}
-
 #[collapse_debuginfo(yes)]
 macro_rules! ensure_non_staticcall {
     ($ecx:expr) => {

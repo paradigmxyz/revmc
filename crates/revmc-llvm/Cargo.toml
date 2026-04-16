@@ -19,9 +19,9 @@ workspace = true
 [dependencies]
 revmc-backend.workspace = true
 
-inkwell = { git = "https://github.com/TheDan64/inkwell", rev = "d20c58f320d1eee62911ce1a274ed32a6aa99861", features = ["llvm22-1"] }
+inkwell = { git = "https://github.com/TheDan64/inkwell", rev = "4f4d09a57b26e581a532aec9457b332bfe6469dc", features = ["llvm22-1"] }
 alloy-primitives = { workspace = true, features = ["std", "map-fxhash"] }
-object = { version = "0.37", default-features = false, features = ["read_core", "elf"] }
+object = { version = "0.39", default-features = false, features = ["read_core", "elf"] }
 tracing.workspace = true
 
 [build-dependencies]
