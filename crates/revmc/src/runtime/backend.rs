@@ -106,8 +106,6 @@ enum EntryPhase {
     Cold,
     /// JIT compilation in progress on a worker.
     Working,
-    /// JIT compilation failed.
-    Failed,
 }
 
 /// All backend-thread-owned mutable state.
@@ -237,37 +235,26 @@ impl BackendState {
             return;
         }
 
+        let entry = self.entries.entry(req.key.clone()).or_insert_with(|| EntryState {
+            hotness: 0,
+            phase: EntryPhase::Cold,
+            bytecode: req.bytecode.clone(),
+            pending_notifiers: Vec::new(),
+        });
         // If already working, queue the notifier to fire when the result arrives.
-        // If failed, notify immediately (compilation won't be retried).
-        if let Some(entry) = self.entries.get_mut(&req.key) {
-            match entry.phase {
-                EntryPhase::Working => {
-                    entry.pending_notifiers.push(req.sync_notifier);
-                    return;
-                }
-                EntryPhase::Failed => {
-                    req.sync_notifier.notify();
-                    return;
-                }
-                EntryPhase::Cold => {}
-            }
+        if entry.phase == EntryPhase::Working {
+            entry.pending_notifiers.push(req.sync_notifier);
+            return;
         }
 
         let code_hash = req.key.code_hash;
         let symbol = format!("jit_{:x}_{:?}", req.key.code_hash, req.key.spec_id);
         let job = WorkerJob::Jit(JitJob {
-            key: req.key.clone(),
-            bytecode: req.bytecode.clone(),
+            key: req.key,
+            bytecode: req.bytecode,
             symbol_name: symbol,
             sync_notifier: req.sync_notifier,
             generation: self.generation,
-        });
-
-        let entry = self.entries.entry(req.key).or_insert_with(|| EntryState {
-            hotness: 0,
-            phase: EntryPhase::Cold,
-            bytecode: req.bytecode,
-            pending_notifiers: Vec::new(),
         });
 
         if self.workers.try_send(job) {
@@ -294,9 +281,9 @@ impl BackendState {
                 continue;
             }
 
-            // Check if already working or failed.
+            // Check if already working.
             if let Some(entry) = self.entries.get(&req.key)
-                && entry.phase != EntryPhase::Cold
+                && entry.phase == EntryPhase::Working
             {
                 continue;
             }
@@ -454,6 +441,7 @@ impl BackendState {
                 current_gen = self.generation,
                 "discarding stale worker result",
             );
+            self.entries.remove(&result.key);
             notify();
             return;
         }
@@ -495,9 +483,7 @@ impl BackendState {
                 self.handle_aot_success(result.key.clone(), success);
             }
             Err(err) => {
-                if let Some(entry) = self.entries.get_mut(&result.key) {
-                    entry.phase = EntryPhase::Failed;
-                }
+                self.entries.remove(&result.key);
                 self.stats.compilations_failed.fetch_add(1, Ordering::Relaxed);
 
                 warn!(
