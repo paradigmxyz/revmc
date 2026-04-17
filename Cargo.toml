@@ -45,7 +45,7 @@ revmc-llvm = { version = "0.1.0", path = "crates/revmc-llvm", default-features =
 
 alloy-primitives = { version = "1.5", default-features = false }
 ruint = { version = "1.17", default-features = false }
-alloy-evm = { version = "0.30", default-features = false }
+alloy-evm = { version = "0.33", default-features = false }
 
 revm-bytecode = { version = "10.0", default-features = false, features = ["parse"] }
 revm-context = { version = "16.0", default-features = false }

@@ -88,6 +88,10 @@ where
         &self.inner.ctx.block
     }
 
+    fn cfg_env(&self) -> &revm_context::CfgEnv<Self::Spec> {
+        &self.inner.cfg
+    }
+
     fn chain_id(&self) -> u64 {
         self.inner.ctx.cfg.chain_id
     }
