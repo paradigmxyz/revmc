@@ -619,10 +619,6 @@ fn execute_blockchain_test(
 
     // Process each block in the test
     for (block_idx, block) in test_case.blocks.iter().enumerate() {
-        if !json_output {
-            println!("Run block {block_idx}/{}", test_case.blocks.len());
-        }
-
         // Check if this block should fail
         let should_fail = block.expect_exception.is_some();
 
