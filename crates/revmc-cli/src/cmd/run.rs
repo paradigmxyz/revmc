@@ -184,7 +184,7 @@ impl RunArgs {
 
         let bytecode = compiler.parse(bytecode_slice.into(), spec_id)?;
         if self.display || self.parse_only {
-            println!("{name}()\n{bytecode}");
+            println!("{name}()\n{bytecode:#}");
         }
         if let Some(fmt) = self.dot {
             let dump_dir = compiler.dump_dir().expect("dump_dir should be set when --dot is used");
