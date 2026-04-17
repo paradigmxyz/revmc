@@ -89,6 +89,9 @@ impl Host for BenchHost {
     fn gas_params(&self) -> &GasParams {
         &self.gas_params
     }
+    fn is_amsterdam_eip8037_enabled(&self) -> bool {
+        false
+    }
     fn block_hash(&mut self, _number: u64) -> Option<B256> {
         Some(B256::ZERO)
     }

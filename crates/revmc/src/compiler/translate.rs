@@ -209,7 +209,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         // Set up entry block.
         let gas_ptr = bcx.fn_param(0);
         let gas_remaining = {
-            let offset = bcx.iconst(i64_type, mem::offset_of!(pf::Gas, remaining) as i64);
+            let offset = bcx.iconst(i64_type, mem::offset_of!(pf::Gas, tracker.remaining) as i64);
             let name = "gas.remaining.addr";
             Pointer::new_address(i64_type, bcx.gep(i8_type, gas_ptr, &[offset], name))
         };
@@ -1785,14 +1785,23 @@ mod pf {
     use super::*;
 
     pub(super) struct Gas {
-        /// The initial gas limit. This is constant throughout execution.
-        pub(super) limit: u64,
+        /// GasTracker fields (EIP-8037 reservoir model).
+        pub(super) tracker: GasTracker,
+        /// Memory gas tracking (words_num: usize, expansion_cost: u64).
+        memory: MemoryGas,
+    }
+
+    pub(super) struct GasTracker {
+        /// The initial gas limit.
+        limit: u64,
         /// The remaining gas.
         pub(super) remaining: u64,
-        /// Refunded gas. This is used only at the end of execution.
+        /// State gas reservoir (EIP-8037).
+        reservoir: u64,
+        /// Total state gas spent.
+        state_gas_spent: u64,
+        /// Refunded gas.
         refunded: i64,
-        /// Memory gas tracking (words_num: usize, expansion_cost: u64)
-        memory: MemoryGas,
     }
 
     #[repr(C)]

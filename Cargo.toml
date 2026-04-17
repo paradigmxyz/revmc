@@ -44,17 +44,17 @@ revmc-context = { version = "0.1.0", path = "crates/revmc-context", default-feat
 revmc-llvm = { version = "0.1.0", path = "crates/revmc-llvm", default-features = false }
 
 alloy-primitives = { version = "1.5", default-features = false }
-revm-bytecode = { version = "9.0", default-features = false, features = ["parse"] }
-revm-context = { version = "15.0", default-features = false }
-revm-context-interface = { version = "16.0", default-features = false }
-revm-database = { version = "12.0", default-features = false }
-revm-database-interface = { version = "10.0", default-features = false }
-revm-handler = { version = "17.0", default-features = false }
-revm-inspector = { version = "17.0", default-features = false }
-revm-interpreter = { version = "34.0", default-features = false }
-revm-primitives = { version = "22.1", default-features = false }
-revm-state = { version = "10.0", default-features = false }
-revm-statetest-types = { version = "16.0", default-features = false }
+revm-bytecode = { version = "10.0", default-features = false, features = ["parse"] }
+revm-context = { version = "16.0", default-features = false }
+revm-context-interface = { version = "17.0", default-features = false }
+revm-database = { version = "13.0", default-features = false }
+revm-database-interface = { version = "11.0", default-features = false }
+revm-handler = { version = "18.0", default-features = false }
+revm-inspector = { version = "19.0", default-features = false }
+revm-interpreter = { version = "35.0", default-features = false }
+revm-primitives = { version = "23.0", default-features = false }
+revm-state = { version = "11.0", default-features = false }
+revm-statetest-types = { version = "17.0", default-features = false }
 ruint = { version = "1.17", default-features = false }
 
 color-eyre = "0.6"
