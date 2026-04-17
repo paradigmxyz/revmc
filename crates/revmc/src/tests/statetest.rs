@@ -19,8 +19,7 @@ fn run_state_tests(mode: CompileMode) {
     // Legacy submodule (ethereum/tests tarball).
     if let Some(mut path) = revmc_statetest::get_general_state_tests_path() {
         let mut subdir = std::env::var("SUBDIR").ok();
-        if subdir.is_none() && std::env::var_os("CI").is_none() && matches!(mode, CompileMode::Aot)
-        {
+        if matches!(mode, CompileMode::Aot) && subdir.is_none() && !is_ci() {
             subdir = Some("stRevertTest".into());
         }
         if let Some(subdir) = subdir {
@@ -34,8 +33,8 @@ fn run_state_tests(mode: CompileMode) {
         );
     }
 
-    // Additional test suites from ./scripts/setup-test-fixtures.sh (CI only).
-    if is_ci() {
+    // Additional test suites from ./scripts/setup-test-fixtures.sh (CI only, interpreter/JIT).
+    if is_ci() && !matches!(mode, CompileMode::Aot) {
         test_files.extend(collect_tests(
             revmc_statetest::get_exec_spec_stable_state_tests_path,
             "exec-spec-tests stable",
