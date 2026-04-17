@@ -13,8 +13,10 @@ revm-database = { workspace = true, features = ["std"] }
 revm-database-interface = { workspace = true, features = ["std"] }
 revm-handler = { workspace = true, features = ["std"] }
 revm-inspector = { workspace = true, features = ["std", "tracer"] }
+revm-bytecode = { workspace = true, features = ["std"] }
 revm-interpreter.workspace = true
 revm-primitives = { workspace = true, features = ["std"] }
+revm-state = { workspace = true, features = ["std"] }
 revm-statetest-types.workspace = true
 
 alloy-rlp = { version = "0.3", features = ["arrayvec", "derive"] }

@@ -5,3 +5,4 @@ clif
 /tmp
 /tests/GeneralStateTests
 /tests/BlockchainTests
+/test-fixtures
