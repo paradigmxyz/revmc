@@ -288,7 +288,7 @@ tests! {
             expected_gas: 3 + 3 + 3 + 3 + 3,
         }),
 
-        // DUPN 0x00: decode_single(0) = 17, duplicates 17th stack item.
+        // DUPN 0x80: decode_single(0x80) = 17, duplicates 17th stack item.
         dupn(@raw {
             bytecode: &{
                 let mut code = [0u8; 21];
@@ -300,7 +300,7 @@ tests! {
                     i += 1;
                 }
                 code[18] = op::DUPN;
-                code[19] = 0x00; // n=17
+                code[19] = 0x80; // n=17
                 code
             },
             spec_id: SpecId::AMSTERDAM,
@@ -314,7 +314,7 @@ tests! {
             expected_gas: GAS_WHAT_INTERPRETER_SAYS,
         }),
 
-        // SWAPN 0x00: decode_single(0) = 17, swaps top with 17th item.
+        // SWAPN 0x80: decode_single(0x80) = 17, swaps top with 17th item.
         swapn(@raw {
             bytecode: &{
                 let mut code = [0u8; 23];
@@ -327,7 +327,7 @@ tests! {
                 }
                 code[18] = op::PUSH1; code[19] = 2; // top = 2
                 code[20] = op::SWAPN;
-                code[21] = 0x00; // n=17
+                code[21] = 0x80; // n=17
                 code
             },
             spec_id: SpecId::AMSTERDAM,
@@ -341,9 +341,9 @@ tests! {
             expected_gas: GAS_WHAT_INTERPRETER_SAYS,
         }),
 
-        // EXCHANGE 0x01: decode_pair(1) = (1, 2), swaps 2nd and 3rd from top.
+        // EXCHANGE 0x8E: decode_pair(0x8E) = (1, 2), swaps 2nd and 3rd from top.
         exchange_basic(@raw {
-            bytecode: &[op::PUSH1, 1, op::PUSH1, 2, op::PUSH1, 3, op::EXCHANGE, 0x01],
+            bytecode: &[op::PUSH1, 1, op::PUSH1, 2, op::PUSH1, 3, op::EXCHANGE, 0x8E],
             spec_id: SpecId::AMSTERDAM,
             // stack before: [1, 2, 3] (3 on top)
             // exchange(1, 2): swaps items at depth 1 and 2 (0-indexed from top)
@@ -360,27 +360,27 @@ tests! {
             expected_gas: GAS_WHAT_INTERPRETER_SAYS,
         }),
 
-        // Insufficient stack depth: DUPN 0x00 decodes to depth 17, but only 1 item on stack.
+        // Insufficient stack depth: DUPN 0x80 decodes to depth 17, but only 1 item on stack.
         dupn_underflow(@raw {
-            bytecode: &[op::PUSH0, op::DUPN, 0x00],
+            bytecode: &[op::PUSH0, op::DUPN, 0x80],
             spec_id: SpecId::AMSTERDAM,
             expected_return: InstructionResult::StackOverflow,
             expected_stack: STACK_WHAT_INTERPRETER_SAYS,
             expected_gas: GAS_WHAT_INTERPRETER_SAYS,
         }),
-        // Insufficient stack depth: SWAPN 0x00 decodes to depth 17, but only 1 item on stack.
+        // Insufficient stack depth: SWAPN 0x80 decodes to depth 17, but only 1 item on stack.
         swapn_underflow(@raw {
-            bytecode: &[op::PUSH0, op::SWAPN, 0x00],
+            bytecode: &[op::PUSH0, op::SWAPN, 0x80],
             spec_id: SpecId::AMSTERDAM,
-            expected_return: InstructionResult::StackOverflow,
+            expected_return: InstructionResult::StackUnderflow,
             expected_stack: STACK_WHAT_INTERPRETER_SAYS,
             expected_gas: GAS_WHAT_INTERPRETER_SAYS,
         }),
-        // Insufficient stack depth: EXCHANGE 0x01 decodes to (1,2), but only 2 items on stack.
+        // Insufficient stack depth: EXCHANGE 0x8E decodes to (1,2), but only 2 items on stack.
         exchange_underflow(@raw {
-            bytecode: &[op::PUSH0, op::PUSH0, op::EXCHANGE, 0x01],
+            bytecode: &[op::PUSH0, op::PUSH0, op::EXCHANGE, 0x8E],
             spec_id: SpecId::AMSTERDAM,
-            expected_return: InstructionResult::StackOverflow,
+            expected_return: InstructionResult::StackUnderflow,
             expected_stack: STACK_WHAT_INTERPRETER_SAYS,
             expected_gas: GAS_WHAT_INTERPRETER_SAYS,
         }),
@@ -400,9 +400,9 @@ tests! {
             expected_stack: STACK_WHAT_INTERPRETER_SAYS,
             expected_gas: GAS_WHAT_INTERPRETER_SAYS,
         }),
-        // Invalid immediate: 80 is in the invalid range [80, 127] for decode_pair.
+        // Invalid immediate: 82 is in the invalid range [82, 127] for decode_pair.
         exchange_invalid_imm(@raw {
-            bytecode: &[op::PUSH0, op::PUSH0, op::PUSH0, op::EXCHANGE, 80],
+            bytecode: &[op::PUSH0, op::PUSH0, op::PUSH0, op::EXCHANGE, 82],
             spec_id: SpecId::AMSTERDAM,
             expected_return: InstructionResult::InvalidImmediateEncoding,
             expected_stack: STACK_WHAT_INTERPRETER_SAYS,
@@ -410,7 +410,7 @@ tests! {
         }),
 
         // Truncated trailing DUPN at EOF: immediate byte missing, zero-padded to 0x00.
-        // decode_single(0) = 17, so this is DUPN(17) with 17 items on stack → succeeds.
+        // decode_single(0) = 145, so this is DUPN(145) with only 17 items on stack → overflow.
         dupn_truncated_eof(@raw {
             bytecode: &{
                 let mut code = [0u8; 18];
@@ -428,7 +428,7 @@ tests! {
             expected_gas: GAS_WHAT_INTERPRETER_SAYS,
         }),
         // Truncated trailing SWAPN at EOF: immediate byte missing, zero-padded to 0x00.
-        // decode_single(0) = 17, so this is SWAPN(17) with 18 items on stack → succeeds.
+        // decode_single(0) = 145, so this is SWAPN(145) with only 18 items on stack → overflow.
         swapn_truncated_eof(@raw {
             bytecode: &{
                 let mut code = [0u8; 19];
@@ -1233,6 +1233,7 @@ tests! {
                 0x42_U256,
                 Bytes::copy_from_slice(&0x69_U256.to_be_bytes::<32>()),
                 66917,
+                0,
             )))),
         }),
         create2(@raw {
@@ -1248,6 +1249,7 @@ tests! {
                 0x42_U256,
                 Bytes::copy_from_slice(&0x69_U256.to_be_bytes::<32>()),
                 66908,
+                0,
             )))),
         }),
         call(@raw {
@@ -1324,7 +1326,7 @@ tests! {
                     output: Bytes::copy_from_slice(&0x69_U256.to_be_bytes::<32>()),
                     gas: {
                         let mut gas = Gas::new(DEF_GAS_LIMIT);
-                        assert!(gas.record_cost(3 + 2 + (3 + memory_gas_cost(1)) + 3 + 2));
+                        assert!(gas.record_regular_cost(3 + 2 + (3 + memory_gas_cost(1)) + 3 + 2));
                         gas
                     },
                 }
@@ -1341,7 +1343,7 @@ tests! {
                     output: Bytes::copy_from_slice(&0x69_U256.to_be_bytes::<32>()),
                     gas: {
                         let mut gas = Gas::new(DEF_GAS_LIMIT);
-                        assert!(gas.record_cost(3 + 2 + (3 + memory_gas_cost(1)) + 3 + 2));
+                        assert!(gas.record_regular_cost(3 + 2 + (3 + memory_gas_cost(1)) + 3 + 2));
                         gas
                     },
                 }
@@ -1632,10 +1634,11 @@ tests! {
                 if let Some(InterpreterAction::NewFrame(FrameInput::Call(call_inputs))) =
                     ecx.next_action.as_ref()
                 {
+                    let (code_hash, _) = &call_inputs.known_bytecode;
                     assert!(
-                        call_inputs.known_bytecode.is_some(),
+                        !code_hash.is_zero(),
                         "CALL must populate known_bytecode via load_account_delegated; \
-                         got None (old code path that skips delegation resolution)"
+                         got zero code hash (old code path that skips delegation resolution)"
                     );
                 }
             }),

@@ -81,10 +81,9 @@ pub fn def_env() -> DefEnv {
     }
 }
 
-/// Memory gas calculation with proper parameters.
-/// This is a helper that wraps the new 3-argument memory_gas function.
+/// Memory gas calculation: `num_words * 3 + num_words**2 / 512`.
 pub fn memory_gas_cost(num_words: usize) -> u64 {
-    gas::memory_gas(num_words, 3, 512)
+    (num_words as u64) * 3 + (num_words as u64) * (num_words as u64) / 512
 }
 
 pub struct TestCase<'a> {
@@ -284,6 +283,10 @@ impl Host for TestHost {
 
     fn gas_params(&self) -> &GasParams {
         &self.gas_params
+    }
+
+    fn is_amsterdam_eip8037_enabled(&self) -> bool {
+        false
     }
 
     fn difficulty(&self) -> U256 {
@@ -577,10 +580,10 @@ fn run_compiled_test_case(test_case: &TestCase<'_>, f: EvmCompilerFn) {
             if skip_interpreter_checks {
                 expected_gas = 0; // Will skip comparison below
             } else {
-                expected_gas = interpreter.gas.spent();
+                expected_gas = interpreter.gas.total_gas_spent();
             }
         } else if !skip_interpreter_checks {
-            assert_eq!(interpreter.gas.spent(), expected_gas, "interpreter gas mismatch");
+            assert_eq!(interpreter.gas.total_gas_spent(), expected_gas, "interpreter gas mismatch");
         }
 
         // Track whether we should skip JIT stack/gas/memory comparisons
@@ -648,7 +651,7 @@ fn run_compiled_test_case(test_case: &TestCase<'_>, f: EvmCompilerFn) {
             }
 
             if !skip_jit_gas {
-                assert_eq!(ecx.gas.spent(), expected_gas, "gas mismatch");
+                assert_eq!(ecx.gas.total_gas_spent(), expected_gas, "gas mismatch");
             }
         }
 
@@ -685,7 +688,11 @@ fn assert_actions(actual: &InterpreterAction, expected: &InterpreterAction) {
             assert_eq!(result.result, expected_result.result, "result mismatch");
             assert_eq!(result.output, expected_result.output, "result output mismatch");
             if expected_result.gas.limit() != GAS_WHAT_INTERPRETER_SAYS {
-                assert_eq!(result.gas.spent(), expected_result.gas.spent(), "result gas mismatch");
+                assert_eq!(
+                    result.gas.total_gas_spent(),
+                    expected_result.gas.total_gas_spent(),
+                    "result gas mismatch"
+                );
             }
         }
         (

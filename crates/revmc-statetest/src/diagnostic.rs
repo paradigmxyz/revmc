@@ -62,7 +62,7 @@ fn snapshot_from_result(
                 ExecutionResult::Revert { .. } => ExecStatus::Revert,
                 ExecutionResult::Halt { reason, .. } => ExecStatus::Halt(format!("{reason:?}")),
             };
-            (status, result.output().cloned(), result.gas_used())
+            (status, result.output().cloned(), result.tx_gas_used())
         }
         Err(e) => (ExecStatus::Error(e.to_string()), None, 0),
     };

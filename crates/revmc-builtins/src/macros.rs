@@ -12,7 +12,16 @@ macro_rules! tri {
 #[collapse_debuginfo(yes)]
 macro_rules! gas {
     ($ecx:expr, $gas:expr) => {
-        if !$ecx.gas.record_cost($gas) {
+        if !$ecx.gas.record_regular_cost($gas) {
+            return Err(InstructionResult::OutOfGas.into());
+        }
+    };
+}
+
+#[collapse_debuginfo(yes)]
+macro_rules! state_gas {
+    ($ecx:expr, $gas:expr) => {
+        if !$ecx.gas.record_state_cost($gas) {
             return Err(InstructionResult::OutOfGas.into());
         }
     };

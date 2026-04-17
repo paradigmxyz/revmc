@@ -12,8 +12,8 @@ extern crate tracing;
 
 use alloc::{boxed::Box, vec::Vec};
 use revm_interpreter::{
-    CallInput, CallInputs, CallScheme, CallValue, CreateInputs, CreateScheme, InstructionResult,
-    InterpreterAction, InterpreterResult, as_u64_saturated, as_usize_saturated,
+    CallInput, CallInputs, CallScheme, CallValue, CreateInputs, CreateScheme, FrameInput,
+    InstructionResult, InterpreterAction, InterpreterResult, as_u64_saturated, as_usize_saturated,
     interpreter_types::{InputsTr, MemoryTr},
 };
 use revm_primitives::{B256, Bytes, KECCAK_EMPTY, Log, LogData, U256, hardfork::SpecId};
@@ -635,6 +635,11 @@ pub unsafe extern "C" fn __revmc_builtin_create(
         CreateScheme::Create
     };
 
+    // State gas for account creation + contract metadata (EIP-8037).
+    if ecx.host.is_amsterdam_eip8037_enabled() {
+        state_gas!(ecx, ecx.host.gas_params().create_state_gas());
+    }
+
     let mut gas_limit = ecx.gas.remaining();
     if ecx.spec_id.is_enabled_in(SpecId::TANGERINE) {
         gas_limit = ecx.host.gas_params().call_stipend_reduction(gas_limit);
@@ -642,9 +647,14 @@ pub unsafe extern "C" fn __revmc_builtin_create(
     gas!(ecx, gas_limit);
 
     *ecx.next_action =
-        Some(InterpreterAction::NewFrame(revm_interpreter::FrameInput::Create(Box::new(
-            CreateInputs::new(ecx.input.target_address, scheme, value.to_u256(), code, gas_limit),
-        ))));
+        Some(InterpreterAction::NewFrame(FrameInput::Create(Box::new(CreateInputs::new(
+            ecx.input.target_address,
+            scheme,
+            value.to_u256(),
+            code,
+            gas_limit,
+            ecx.gas.reservoir(),
+        )))));
 
     Ok(())
 }
@@ -709,7 +719,7 @@ pub unsafe extern "C" fn __revmc_builtin_call(
 
     // Match interpreter call path: load delegated account and pass resolved bytecode/hash
     // through CallInputs::known_bytecode (covers EIP-7702 delegation and EOF execution).
-    let (dynamic_gas, bytecode, code_hash) =
+    let (dynamic_gas, state_gas_cost, bytecode, code_hash) =
         revm_interpreter::instructions::contract::load_account_delegated(
             ecx.host,
             ecx.spec_id,
@@ -720,6 +730,9 @@ pub unsafe extern "C" fn __revmc_builtin_call(
         )?;
 
     gas!(ecx, dynamic_gas);
+
+    // Deduct state gas (EIP-8037) if any.
+    state_gas!(ecx, state_gas_cost);
 
     // EIP-150: Gas cost changes for IO-heavy operations
     let mut gas_limit = if ecx.spec_id.is_enabled_in(SpecId::TANGERINE) {
@@ -742,7 +755,7 @@ pub unsafe extern "C" fn __revmc_builtin_call(
             return_memory_offset: out_offset..out_offset + out_len,
             gas_limit,
             bytecode_address: to,
-            known_bytecode: Some((code_hash, bytecode)),
+            known_bytecode: (code_hash, bytecode),
             target_address: if matches!(call_kind, CallKind::DelegateCall | CallKind::CallCode) {
                 ecx.input.target_address
             } else {
@@ -760,6 +773,7 @@ pub unsafe extern "C" fn __revmc_builtin_call(
             },
             scheme: call_kind.into(),
             is_static: ecx.is_static || call_kind == CallKind::StaticCall,
+            reservoir: ecx.gas.reservoir(),
         }),
     )));
 

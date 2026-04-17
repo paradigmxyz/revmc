@@ -43,13 +43,22 @@ pub fn parse_asm(s: &str) -> Result<Vec<u8>> {
 
 /// A token produced by the tokenizer.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Token<'a> {
+pub(super) struct Token<'a> {
+    /// The source text slice this token was produced from.
+    pub src: &'a str,
+    /// The kind of token.
+    pub kind: TokenKind,
+}
+
+/// The kind of a [`Token`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum TokenKind {
     /// An identifier (opcode name, macro name, etc.).
-    Ident(&'a str),
+    Ident,
     /// A label definition (`name:`).
-    Label(&'a str),
+    Label,
     /// A label reference (`%name`).
-    LabelRef(&'a str),
+    LabelRef,
     /// A numeric literal.
     Number(U256),
     /// A comma.
@@ -59,19 +68,25 @@ enum Token<'a> {
     /// Closing parenthesis.
     RParen,
     /// A macro parameter reference (`$name`).
-    ParamRef(&'a str),
+    ParamRef,
+    /// Whitespace.
+    Whitespace,
+    /// Comment text including the leading `;`.
+    Comment,
     /// Unrecognized input.
-    Unknown(&'a str),
+    Unknown,
 }
 
 /// Character-by-character tokenizer over source text.
-struct Tokenizer<'a> {
+///
+/// Always emits all tokens including whitespace and comments.
+pub(super) struct Tokenizer<'a> {
     src: &'a str,
     pos: usize,
 }
 
 impl<'a> Tokenizer<'a> {
-    fn new(src: &'a str) -> Self {
+    pub(super) fn new(src: &'a str) -> Self {
         Self { src, pos: 0 }
     }
 
@@ -85,20 +100,6 @@ impl<'a> Tokenizer<'a> {
 
     fn advance(&mut self, n: usize) {
         self.pos += n;
-    }
-
-    fn skip_whitespace(&mut self) {
-        let rest = self.remaining();
-        let trimmed = rest.trim_start_matches(|c: char| c.is_ascii_whitespace());
-        self.advance(rest.len() - trimmed.len());
-    }
-
-    fn skip_line(&mut self) {
-        if let Some(nl) = self.remaining().find('\n') {
-            self.advance(nl + 1);
-        } else {
-            self.pos = self.src.len();
-        }
     }
 
     /// Read a contiguous word of alphanumeric/underscore characters.
@@ -118,11 +119,11 @@ impl<'a> Tokenizer<'a> {
         } else {
             rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len())
         };
-        let s = &rest[..end];
+        let src = &rest[..end];
         self.advance(end);
-        match s.parse::<U256>() {
-            Ok(n) => Token::Number(n),
-            Err(_) => Token::Unknown(s),
+        match src.parse::<U256>() {
+            Ok(n) => Token { src, kind: TokenKind::Number(n) },
+            Err(_) => Token { src, kind: TokenKind::Unknown },
         }
     }
 }
@@ -131,78 +132,97 @@ impl<'a> Iterator for Tokenizer<'a> {
     type Item = Token<'a>;
 
     fn next(&mut self) -> Option<Token<'a>> {
-        loop {
-            self.skip_whitespace();
-            let c = self.peek_char()?;
+        // Emit whitespace as a token.
+        let rest = self.remaining();
+        let trimmed = rest.trim_start_matches(|c: char| c.is_ascii_whitespace());
+        let ws_len = rest.len() - trimmed.len();
+        if ws_len > 0 {
+            let src = &self.src[self.pos..self.pos + ws_len];
+            self.advance(ws_len);
+            return Some(Token { src, kind: TokenKind::Whitespace });
+        }
 
-            match c {
-                ';' => self.skip_line(),
+        let c = self.peek_char()?;
 
-                '%' => {
-                    let start = self.pos;
-                    self.advance(1);
-                    let name = self.read_word();
-                    return Some(if name.is_empty() {
-                        Token::Unknown(&self.src[start..self.pos])
-                    } else {
-                        Token::LabelRef(name)
-                    });
+        match c {
+            ';' => {
+                let start = self.pos;
+                if let Some(nl) = self.remaining().find('\n') {
+                    self.advance(nl);
+                } else {
+                    self.pos = self.src.len();
                 }
+                Some(Token { src: &self.src[start..self.pos], kind: TokenKind::Comment })
+            }
 
-                '$' => {
-                    let start = self.pos;
-                    self.advance(1);
-                    let name = self.read_word();
-                    return Some(if name.is_empty() {
-                        Token::Unknown(&self.src[start..self.pos])
-                    } else {
-                        Token::ParamRef(name)
-                    });
-                }
+            '%' => {
+                let start = self.pos;
+                self.advance(1);
+                let name = self.read_word();
+                Some(if name.is_empty() {
+                    Token { src: &self.src[start..self.pos], kind: TokenKind::Unknown }
+                } else {
+                    Token { src: name, kind: TokenKind::LabelRef }
+                })
+            }
 
-                ',' => {
-                    self.advance(1);
-                    return Some(Token::Comma);
-                }
-                '(' => {
-                    self.advance(1);
-                    return Some(Token::LParen);
-                }
-                ')' => {
-                    self.advance(1);
-                    return Some(Token::RParen);
-                }
+            '$' => {
+                let start = self.pos;
+                self.advance(1);
+                let name = self.read_word();
+                Some(if name.is_empty() {
+                    Token { src: &self.src[start..self.pos], kind: TokenKind::Unknown }
+                } else {
+                    Token { src: name, kind: TokenKind::ParamRef }
+                })
+            }
 
-                '0'..='9' => return Some(self.read_number()),
+            ',' => {
+                let src = &self.src[self.pos..self.pos + 1];
+                self.advance(1);
+                Some(Token { src, kind: TokenKind::Comma })
+            }
+            '(' => {
+                let src = &self.src[self.pos..self.pos + 1];
+                self.advance(1);
+                Some(Token { src, kind: TokenKind::LParen })
+            }
+            ')' => {
+                let src = &self.src[self.pos..self.pos + 1];
+                self.advance(1);
+                Some(Token { src, kind: TokenKind::RParen })
+            }
 
-                _ if c.is_ascii_alphabetic() || c == '_' => {
-                    let word = self.read_word();
-                    if self.peek_char() == Some(':') {
-                        self.advance(1);
-                        return Some(Token::Label(word));
+            '0'..='9' => Some(self.read_number()),
+
+            _ if c.is_ascii_alphabetic() || c == '_' => {
+                let word = self.read_word();
+                if self.peek_char() == Some(':') {
+                    self.advance(1);
+                    Some(Token { src: word, kind: TokenKind::Label })
+                } else {
+                    Some(Token { src: word, kind: TokenKind::Ident })
+                }
+            }
+
+            ':' => {
+                self.advance(1);
+                Some(Token { src: "", kind: TokenKind::Label })
+            }
+
+            _ => {
+                let start = self.pos;
+                // Consume consecutive unrecognized characters.
+                while let Some(c) = self.peek_char() {
+                    if c.is_ascii_whitespace()
+                        || c.is_ascii_alphanumeric()
+                        || matches!(c, '_' | ';' | '%' | '$' | ',' | '(' | ')' | ':')
+                    {
+                        break;
                     }
-                    return Some(Token::Ident(word));
+                    self.advance(c.len_utf8());
                 }
-
-                ':' => {
-                    self.advance(1);
-                    return Some(Token::Label(""));
-                }
-
-                _ => {
-                    let start = self.pos;
-                    // Consume consecutive unrecognized characters.
-                    while let Some(c) = self.peek_char() {
-                        if c.is_ascii_whitespace()
-                            || c.is_ascii_alphanumeric()
-                            || matches!(c, '_' | ';' | '%' | '$' | ',' | '(' | ')' | ':')
-                        {
-                            break;
-                        }
-                        self.advance(c.len_utf8());
-                    }
-                    return Some(Token::Unknown(&self.src[start..self.pos]));
-                }
+                Some(Token { src: &self.src[start..self.pos], kind: TokenKind::Unknown })
             }
         }
     }
@@ -229,12 +249,12 @@ fn builtin_macros() -> HashMap<&'static str, MacroDef<'static>> {
             is_fn: false,
             params: vec![],
             body: vec![
-                Token::Ident("PUSH0"),
-                Token::Ident("MSTORE"),
-                Token::Ident("PUSH1"),
-                Token::Number(U256::from(0x20)),
-                Token::Ident("PUSH0"),
-                Token::Ident("RETURN"),
+                Token { src: "PUSH0", kind: TokenKind::Ident },
+                Token { src: "MSTORE", kind: TokenKind::Ident },
+                Token { src: "PUSH1", kind: TokenKind::Ident },
+                Token { src: "0x20", kind: TokenKind::Number(U256::from(0x20)) },
+                Token { src: "PUSH0", kind: TokenKind::Ident },
+                Token { src: "RETURN", kind: TokenKind::Ident },
             ],
         },
     );
@@ -262,11 +282,14 @@ fn preprocess(s: &str) -> Result<Vec<Token<'_>>> {
         }
     }
 
-    // Tokenize non-directive lines (borrowing from `s`).
+    // Tokenize non-directive lines (borrowing from `s`), skipping whitespace and comments.
     let mut raw = Vec::new();
     for &(start, end) in &rest_start {
         let line = &s[start..end];
-        raw.extend(Tokenizer::new(line));
+        raw.extend(
+            Tokenizer::new(line)
+                .filter(|t| !matches!(t.kind, TokenKind::Whitespace | TokenKind::Comment)),
+        );
     }
 
     if macros.is_empty() {
@@ -278,28 +301,31 @@ fn preprocess(s: &str) -> Result<Vec<Token<'_>>> {
 
 /// Parse a `#define` directive body (everything after `#define`) into the macro table.
 fn parse_define<'a>(after: &'a str, macros: &mut HashMap<&'a str, MacroDef<'a>>) -> Result<()> {
-    let mut tok = Tokenizer::new(after);
+    let mut tok = Tokenizer::new(after)
+        .filter(|t| !matches!(t.kind, TokenKind::Whitespace | TokenKind::Comment))
+        .peekable();
 
     let name = match tok.next() {
-        Some(Token::Ident(name)) => name,
+        Some(Token { src, kind: TokenKind::Ident }) => src,
         Some(other) => eyre::bail!("expected macro name after #define, got {other:?}"),
         None => eyre::bail!("expected macro name after #define"),
     };
 
     // Function-like macro: NAME(a, b).
     // Only if '(' immediately follows the name (no whitespace), matching C preprocessor semantics.
-    let is_fn = tok.peek_char() == Some('(');
+    let is_fn = after.as_bytes().get(name.as_ptr() as usize - after.as_ptr() as usize + name.len())
+        == Some(&b'(');
 
     let all_tokens: Vec<Token<'a>> = tok.collect();
     let mut i = 0;
 
     let mut params = Vec::new();
-    if is_fn && matches!(all_tokens.get(i), Some(Token::LParen)) {
+    if is_fn && matches!(all_tokens.get(i), Some(Token { kind: TokenKind::LParen, .. })) {
         i += 1; // consume '('
-        if !matches!(all_tokens.get(i), Some(Token::RParen)) {
+        if !matches!(all_tokens.get(i), Some(Token { kind: TokenKind::RParen, .. })) {
             loop {
                 match all_tokens.get(i) {
-                    Some(Token::Ident(p)) => {
+                    Some(Token { src: p, kind: TokenKind::Ident }) => {
                         params.push(*p);
                         i += 1;
                     }
@@ -308,11 +334,11 @@ fn parse_define<'a>(after: &'a str, macros: &mut HashMap<&'a str, MacroDef<'a>>)
                     }
                 }
                 match all_tokens.get(i) {
-                    Some(Token::RParen) => {
+                    Some(Token { kind: TokenKind::RParen, .. }) => {
                         i += 1;
                         break;
                     }
-                    Some(Token::Comma) => i += 1,
+                    Some(Token { kind: TokenKind::Comma, .. }) => i += 1,
                     other => eyre::bail!(
                         "expected ',' or ')' in #define {name} parameter list, got {other:?}"
                     ),
@@ -337,21 +363,25 @@ fn expand_macros<'a>(
     let mut iter = tokens.into_iter().peekable();
 
     while let Some(tok) = iter.next() {
-        let Token::Ident(name) = &tok else {
+        let TokenKind::Ident = &tok.kind else {
             out.push(tok);
             continue;
         };
-        let Some(mac) = macros.get(name) else {
+        let Some(mac) = macros.get(tok.src) else {
             out.push(tok);
             continue;
         };
+        let name = tok.src;
 
         if !mac.is_fn {
             // Object-like macro: simple body substitution.
             out.extend(mac.body.iter().cloned());
         } else {
             // Function-like macro: consume `(arg1, arg2, ...)`.
-            eyre::ensure!(iter.next() == Some(Token::LParen), "macro {name:?} expects arguments");
+            eyre::ensure!(
+                matches!(iter.next(), Some(Token { kind: TokenKind::LParen, .. })),
+                "macro {name:?} expects arguments",
+            );
 
             // Parse arguments, handling nested parens.
             let mut args: Vec<Vec<Token<'a>>> = vec![vec![]];
@@ -360,19 +390,19 @@ fn expand_macros<'a>(
                 let t = iter
                     .next()
                     .ok_or_else(|| eyre::eyre!("unclosed '(' in macro invocation {name:?}"))?;
-                match &t {
-                    Token::LParen => {
+                match &t.kind {
+                    TokenKind::LParen => {
                         depth += 1;
                         args.last_mut().unwrap().push(t);
                     }
-                    Token::RParen => {
+                    TokenKind::RParen => {
                         depth -= 1;
                         if depth == 0 {
                             break;
                         }
                         args.last_mut().unwrap().push(t);
                     }
-                    Token::Comma if depth == 1 => args.push(vec![]),
+                    TokenKind::Comma if depth == 1 => args.push(vec![]),
                     _ => args.last_mut().unwrap().push(t),
                 }
             }
@@ -394,8 +424,8 @@ fn expand_macros<'a>(
 
             // Substitute $param refs in the body.
             for body_tok in &mac.body {
-                if let Token::ParamRef(pname) = body_tok
-                    && let Some(idx) = mac.params.iter().position(|p| p == pname)
+                if let TokenKind::ParamRef = body_tok.kind
+                    && let Some(idx) = mac.params.iter().position(|p| *p == body_tok.src)
                 {
                     out.extend(args[idx].iter().cloned());
                 } else {
@@ -449,14 +479,16 @@ fn parse_items<'a>(tokens: &[Token<'a>]) -> Result<Vec<Item<'a>>> {
     let mut items = Vec::new();
     let mut i = 0;
     while i < tokens.len() {
-        match &tokens[i] {
-            Token::Label(name) => {
+        match &tokens[i].kind {
+            TokenKind::Label => {
+                let name = tokens[i].src;
                 eyre::ensure!(!name.is_empty(), "empty label name");
                 items.push(Item::Label(name));
                 i += 1;
             }
-            Token::Ident(word) => {
-                if *word == "PUSH" {
+            TokenKind::Ident => {
+                let word = tokens[i].src;
+                if word == "PUSH" {
                     i += 1;
                     let imm = expect_imm(tokens, &mut i, "PUSH")?;
                     items.push(Item::Inst(Inst {
@@ -464,8 +496,8 @@ fn parse_items<'a>(tokens: &[Token<'a>]) -> Result<Vec<Item<'a>>> {
                         imm: Some(imm),
                         push_kind: PushKind::Auto,
                     }));
-                } else if *word == "DUP" || *word == "SWAP" {
-                    let is_swap = *word == "SWAP";
+                } else if word == "DUP" || word == "SWAP" {
+                    let is_swap = word == "SWAP";
                     i += 1;
                     let n = expect_number_u8(tokens, &mut i, word)?;
                     eyre::ensure!(n >= 1, "{word} index must be >= 1, got {n}");
@@ -524,7 +556,10 @@ fn parse_items<'a>(tokens: &[Token<'a>]) -> Result<Vec<Item<'a>>> {
                                 push_kind: PushKind::Fixed(imm_len),
                             }));
                         } else {
-                            if matches!(tokens.get(i), Some(Token::Number(_))) {
+                            if matches!(
+                                tokens.get(i),
+                                Some(Token { kind: TokenKind::Number(_), .. })
+                            ) {
                                 eyre::bail!("unexpected immediate for opcode {opc}");
                             }
                             items.push(Item::Inst(Inst {
@@ -536,8 +571,8 @@ fn parse_items<'a>(tokens: &[Token<'a>]) -> Result<Vec<Item<'a>>> {
                     }
                 }
             }
-            Token::Unknown(s) => eyre::bail!("unexpected token: {s:?}"),
-            other => eyre::bail!("unexpected token: {other:?}"),
+            TokenKind::Unknown => eyre::bail!("unexpected token: {:?}", tokens[i].src),
+            _ => eyre::bail!("unexpected token: {:?}", tokens[i]),
         }
     }
     Ok(items)
@@ -551,8 +586,8 @@ fn expect_number_u8(
 ) -> Result<u8> {
     let tok = tokens.get(*i).ok_or_else(|| eyre::eyre!("missing immediate for opcode {ctx}"))?;
     *i += 1;
-    match tok {
-        Token::Number(n) => {
+    match &tok.kind {
+        TokenKind::Number(n) => {
             let v: u64 =
                 n.try_into().map_err(|_| eyre::eyre!("invalid {ctx} immediate: too large"))?;
             u8::try_from(v).map_err(|_| eyre::eyre!("invalid {ctx} immediate: too large"))
@@ -569,10 +604,10 @@ fn expect_imm<'a>(
 ) -> Result<Imm<'a>> {
     let tok = tokens.get(*i).ok_or_else(|| eyre::eyre!("missing immediate for opcode {ctx}"))?;
     *i += 1;
-    match tok {
-        Token::Number(n) => Ok(Imm::Number(*n)),
-        Token::LabelRef(name) => Ok(Imm::Label(name)),
-        other => eyre::bail!("expected immediate for {ctx}, got {other:?}"),
+    match &tok.kind {
+        TokenKind::Number(n) => Ok(Imm::Number(*n)),
+        TokenKind::LabelRef => Ok(Imm::Label(tok.src)),
+        _ => eyre::bail!("expected immediate for {ctx}, got {tok:?}"),
     }
 }
 
@@ -861,8 +896,8 @@ mod tests {
         assert_eq!(parse_asm("DUP 1").unwrap(), vec![op::DUP1]);
         assert_eq!(parse_asm("DUP 16").unwrap(), vec![op::DUP16]);
         // DUP 17+ → DUPN with encoded immediate.
-        assert_eq!(parse_asm("DUP 17").unwrap(), vec![op::DUPN, 0x00]);
-        assert_eq!(parse_asm("DUP 108").unwrap(), vec![op::DUPN, 128]);
+        assert_eq!(parse_asm("DUP 17").unwrap(), vec![op::DUPN, 0x80]);
+        assert_eq!(parse_asm("DUP 108").unwrap(), vec![op::DUPN, 0xDB]);
         // DUP 0 is invalid.
         assert!(parse_asm("DUP 0").is_err());
         // DUP 236 is out of range.
@@ -875,8 +910,8 @@ mod tests {
         assert_eq!(parse_asm("SWAP 1").unwrap(), vec![op::SWAP1]);
         assert_eq!(parse_asm("SWAP 16").unwrap(), vec![op::SWAP16]);
         // SWAP 17+ → SWAPN with encoded immediate.
-        assert_eq!(parse_asm("SWAP 17").unwrap(), vec![op::SWAPN, 0x00]);
-        assert_eq!(parse_asm("SWAP 108").unwrap(), vec![op::SWAPN, 128]);
+        assert_eq!(parse_asm("SWAP 17").unwrap(), vec![op::SWAPN, 0x80]);
+        assert_eq!(parse_asm("SWAP 108").unwrap(), vec![op::SWAPN, 0xDB]);
         // SWAP 0 is invalid.
         assert!(parse_asm("SWAP 0").is_err());
     }
@@ -884,8 +919,8 @@ mod tests {
     #[test]
     fn dupn() {
         // Explicit DUPN only accepts 17+.
-        assert_eq!(parse_asm("DUPN 17").unwrap(), vec![op::DUPN, 0x00]);
-        assert_eq!(parse_asm("DUPN 108").unwrap(), vec![op::DUPN, 128]);
+        assert_eq!(parse_asm("DUPN 17").unwrap(), vec![op::DUPN, 0x80]);
+        assert_eq!(parse_asm("DUPN 108").unwrap(), vec![op::DUPN, 0xDB]);
         assert!(parse_asm("DUPN 16").is_err());
         assert!(parse_asm("DUPN 0").is_err());
         assert!(parse_asm("DUPN 236").is_err());
@@ -894,8 +929,8 @@ mod tests {
 
     #[test]
     fn swapn() {
-        assert_eq!(parse_asm("SWAPN 17").unwrap(), vec![op::SWAPN, 0x00]);
-        assert_eq!(parse_asm("SWAPN 108").unwrap(), vec![op::SWAPN, 128]);
+        assert_eq!(parse_asm("SWAPN 17").unwrap(), vec![op::SWAPN, 0x80]);
+        assert_eq!(parse_asm("SWAPN 108").unwrap(), vec![op::SWAPN, 0xDB]);
         assert!(parse_asm("SWAPN 16").is_err());
         assert!(parse_asm("SWAPN 0").is_err());
     }
@@ -903,7 +938,7 @@ mod tests {
     #[test]
     fn exchange() {
         // Two separate number tokens.
-        assert_eq!(parse_asm("EXCHANGE 1 2").unwrap(), vec![op::EXCHANGE, 0x01]);
+        assert_eq!(parse_asm("EXCHANGE 1 2").unwrap(), vec![op::EXCHANGE, 0x8E]);
         assert!(parse_asm("EXCHANGE 1 14").is_ok());
         // (2, 1) cannot be encoded.
         assert!(parse_asm("EXCHANGE 2 1").is_err());

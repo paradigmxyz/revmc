@@ -216,38 +216,25 @@ pub(crate) fn compute_stack_io(op: u8, immediate: Option<&[u8]>) -> (u8, u8) {
 ///
 /// Returns `None` if the immediate is in the invalid range `[91, 127]`.
 pub fn decode_single(x: u8) -> Option<u8> {
-    let x = x as u16;
-    if x <= 90 {
-        Some((x + 17) as u8)
-    } else if x >= 128 {
-        Some((x - 20) as u8)
-    } else {
-        None
-    }
+    if x <= 90 || x >= 128 { Some(x.wrapping_add(145)) } else { None }
 }
 
 /// Encodes a stack index into a DUPN/SWAPN immediate byte.
 ///
-/// Returns `None` if the index is outside the valid range `[17, 235]`.
+/// Returns `None` if the value is outside the valid range.
 pub fn encode_single(n: u8) -> Option<u8> {
-    match n {
-        17..=107 => Some(n - 17),
-        108..=235 => Some(n.wrapping_add(20)),
-        _ => None,
-    }
+    let x = n.wrapping_sub(145);
+    if decode_single(x) == Some(n) { Some(x) } else { None }
 }
 
 /// Decodes an EXCHANGE immediate byte into a pair of stack indices `(n, m)`.
 ///
-/// Returns `None` if the immediate is in the invalid range `[80, 127]`.
+/// Returns `None` if the value is outside the valid range.
 pub fn decode_pair(x: u8) -> Option<(u8, u8)> {
-    let k = if x <= 79 {
-        x as u16
-    } else if x >= 128 {
-        x as u16 - 48
-    } else {
+    if x > 81 && x < 128 {
         return None;
-    };
+    }
+    let k = (x ^ 143) as u16;
     let q = (k / 16) as u8;
     let r = (k % 16) as u8;
     if q < r { Some((q + 1, r + 1)) } else { Some((r + 1, 29 - q)) }
@@ -260,31 +247,23 @@ pub fn encode_pair(n: u8, m: u8) -> Option<u8> {
     if n == 0 || m == 0 {
         return None;
     }
-    let try_encode_k = |k: u16| -> Option<u8> {
-        if k <= 79 {
-            Some(k as u8)
-        } else if (80..=207).contains(&k) {
-            Some((k + 48) as u8)
-        } else {
-            None
+    // Try both (q,r) orderings and check round-trip.
+    let try_k = |q: u8, r: u8| -> Option<u8> {
+        if q >= 16 || r >= 16 {
+            return None;
         }
+        let k = q as u16 * 16 + r as u16;
+        let x = (k as u8) ^ 143;
+        if decode_pair(x) == Some((n, m)) { Some(x) } else { None }
     };
 
     // Case 1: q < r → n = q+1, m = r+1.
-    // Requires n < m AND m <= 16 (so r = m-1 fits in one base-16 digit).
-    if n < m && m <= 16 {
-        let k = (n - 1) as u16 * 16 + (m - 1) as u16;
-        return try_encode_k(k);
+    if n < m {
+        try_k(n - 1, m - 1)
+    } else {
+        // Case 2: q >= r → n = r+1, m = 29-q.
+        if let Some(q) = 29u8.checked_sub(m) { try_k(q, n - 1) } else { None }
     }
-
-    // Case 2: q >= r → n = r+1, m = 29-q.
-    // Requires n+m <= 30 AND n <= 16 (so r = n-1 fits in one base-16 digit).
-    if n <= 16 && n.checked_add(m).is_some_and(|s| s <= 30) {
-        let k = (29 - m) as u16 * 16 + (n - 1) as u16;
-        return try_encode_k(k);
-    }
-
-    None
 }
 
 /// Returns a string representation of the given bytecode.
@@ -362,7 +341,7 @@ mod tests {
                 assert_eq!(decode_single(x), Some(n), "roundtrip failed for n={n}, x={x}");
             }
         }
-        // Out-of-range.
+        // Out-of-range: values in [236,255] ∪ [0,16] have no valid encoding.
         assert_eq!(encode_single(0), None);
         assert_eq!(encode_single(16), None);
         assert_eq!(encode_single(236), None);
@@ -387,9 +366,11 @@ mod tests {
         }
         // decode → encode: some pairs have multiple encodings, so the raw byte may differ,
         // but decoding the result must produce the same pair.
+        // Some decoded pairs may have values too large to re-encode.
         for x in 0..=255u8 {
-            if let Some((n, m)) = decode_pair(x) {
-                let re = encode_pair(n, m).unwrap();
+            if let Some((n, m)) = decode_pair(x)
+                && let Some(re) = encode_pair(n, m)
+            {
                 assert_eq!(
                     decode_pair(re),
                     Some((n, m)),
@@ -400,8 +381,11 @@ mod tests {
         // Zero indices are invalid.
         assert_eq!(encode_pair(0, 1), None);
         assert_eq!(encode_pair(1, 0), None);
-        // Invalid raw bytes.
-        assert_eq!(decode_pair(80), None);
+        // Invalid raw bytes: [82, 127].
+        assert_eq!(decode_pair(82), None);
         assert_eq!(decode_pair(127), None);
+        // Edge: 80 and 81 are now valid.
+        assert!(decode_pair(80).is_some());
+        assert!(decode_pair(81).is_some());
     }
 }

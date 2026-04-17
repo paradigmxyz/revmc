@@ -1,8 +1,13 @@
-use super::{Bytecode, Inst, InstData, InstFlags, bitvec_as_bytes, passes::block_analysis::Block};
+use super::{
+    Bytecode, Inst, InstData, InstFlags,
+    asm::{TokenKind, Tokenizer},
+    bitvec_as_bytes,
+    passes::block_analysis::Block,
+};
 use oxc_index::{IndexVec, index_vec};
 use revm_bytecode::opcode as op;
 use revm_primitives::hex;
-use std::{borrow::Cow, fmt, fmt::Write};
+use std::{borrow::Cow, fmt, fmt::Write, io::IsTerminal};
 
 impl Bytecode<'_> {
     /// Resolves a jump target instruction to its CFG block index.
@@ -77,26 +82,27 @@ impl Bytecode<'_> {
                 let opcode = data.to_op_in(self);
                 write!(text, "{opcode}").unwrap();
                 if data.flags.contains(InstFlags::INVALID_JUMP) {
-                    text.push_str(" INVALID");
+                    text.push_str(" %invalid");
                 } else if data.flags.contains(InstFlags::MULTI_JUMP) {
                     if let Some(targets) = self.multi_jump_targets(inst) {
-                        text.push(' ');
                         for (i, &t) in targets.iter().enumerate() {
                             if i > 0 {
-                                text.push_str(", ");
+                                text.push(',');
                             }
                             match self.target_block(t) {
-                                Some(b) => write!(text, " {b}").unwrap(),
-                                None => write!(text, " inst {t}").unwrap(),
+                                Some(b) => write!(text, " %{b}").unwrap(),
+                                None => write!(text, " %inst{t}").unwrap(),
                             }
                         }
                     }
                 } else if data.is_static_jump() {
                     let target = Inst::from_usize(data.data as usize);
                     match self.target_block(target) {
-                        Some(b) => write!(text, " {b}").unwrap(),
-                        None => write!(text, " inst {target}").unwrap(),
+                        Some(b) => write!(text, " %{b}").unwrap(),
+                        None => write!(text, " %inst{target}").unwrap(),
                     }
+                } else if data.is_jump() {
+                    text.push_str(" %dynamic");
                 }
 
                 // Comment with ic, pc, and flags/behavior.
@@ -147,13 +153,10 @@ impl Bytecode<'_> {
         *self.inst_lines.borrow_mut() = inst_lines;
         lines
     }
-}
 
-impl fmt::Display for Bytecode<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    /// Formats the bytecode IR as plain text.
+    fn display_plain(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let lines = self.collect_lines();
-
-        // Find max text width and write with aligned comments.
         let max_text_width = lines.iter().map(|(t, _)| t.len()).max().unwrap_or(0);
         let comment_col = max_text_width.clamp(4, 20);
         for (text, comment) in &lines {
@@ -165,8 +168,101 @@ impl fmt::Display for Bytecode<'_> {
                 writeln!(f, "{text:<comment_col$} ; {comment}")?;
             }
         }
-
         Ok(())
+    }
+
+    /// Formats the bytecode IR with ANSI syntax highlighting.
+    ///
+    /// Builds the plain-text output first, then runs it through the asm
+    /// tokenizer and emits colored spans.
+    fn display_colored(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let plain = format!("{}", std::fmt::from_fn(|f| self.display_plain(f)));
+        colorize(f, &plain)
+    }
+}
+
+impl fmt::Display for Bytecode<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if f.alternate() && std::io::stdout().is_terminal() {
+            self.display_colored(f)
+        } else {
+            self.display_plain(f)
+        }
+    }
+}
+
+// ———————————————————————————————————————————————————————————————————————
+// Colorizer (uses asm::Tokenizer)
+// ———————————————————————————————————————————————————————————————————————
+
+const RESET: &str = "\x1b[0m";
+const BOLD: &str = "\x1b[1m";
+const DIM: &str = "\x1b[2m";
+const CYAN: &str = "\x1b[36m";
+const GREEN: &str = "\x1b[32m";
+const YELLOW: &str = "\x1b[33m";
+const RED: &str = "\x1b[31m";
+const BLUE: &str = "\x1b[34m";
+const WHITE: &str = "\x1b[37m";
+
+/// Writes ANSI-colored output by tokenizing `plain` with the asm tokenizer.
+fn colorize(f: &mut fmt::Formatter<'_>, plain: &str) -> fmt::Result {
+    for token in Tokenizer::new(plain) {
+        let s = token.src;
+        match token.kind {
+            TokenKind::Whitespace => write!(f, "{s}")?,
+            TokenKind::Label => write!(f, "{BOLD}{CYAN}{s}:{RESET}")?,
+            TokenKind::Comment => write!(f, "{DIM}{s}{RESET}")?,
+            TokenKind::Number(_) => write!(f, "{YELLOW}{s}{RESET}")?,
+            TokenKind::LabelRef if s == "dynamic" => write!(f, "{RED}%{s}{RESET}")?,
+            TokenKind::LabelRef => write!(f, "{CYAN}%{s}{RESET}")?,
+            TokenKind::Ident => {
+                let color = opcode_color(s);
+                write!(f, "{BOLD}{color}{s}{RESET}")?;
+            }
+            TokenKind::Comma => write!(f, ",")?,
+            TokenKind::Unknown => write!(f, "{s}")?,
+            TokenKind::LParen | TokenKind::RParen | TokenKind::ParamRef => {}
+        }
+    }
+    Ok(())
+}
+
+/// Returns the ANSI color for an opcode name based on its byte-value category.
+fn opcode_color(name: &str) -> &'static str {
+    use revm_bytecode::opcode::OpCode;
+    let byte = match OpCode::parse(name) {
+        Some(op) => op.get(),
+        // Bare "PUSH" without a number suffix.
+        None if name == "PUSH" => op::PUSH32,
+        None => return WHITE,
+    };
+    opcode_color_by_byte(byte)
+}
+
+fn opcode_color_by_byte(byte: u8) -> &'static str {
+    use op::*;
+    match byte {
+        // Terminating.
+        STOP | RETURN | REVERT | INVALID | SELFDESTRUCT => RED,
+        // Side effects: jumps, calls, creates, log.
+        JUMP
+        | JUMPI
+        | JUMPDEST
+        | CREATE
+        | CALL
+        | CALLCODE
+        | DELEGATECALL
+        | CREATE2
+        | STATICCALL
+        | LOG0..=LOG4 => GREEN,
+        // Arithmetic, comparison, bitwise, keccak.
+        ADD..=SIGNEXTEND | LT..=CLZ | KECCAK256 => WHITE,
+        // I/O: environment, memory, storage.
+        ADDRESS..=SLOTNUM | MLOAD..=MCOPY => BLUE,
+        // Stack: POP, PUSH, DUP, SWAP, EOF stack ops.
+        POP | PUSH0..=SWAP16 | DUPN | SWAPN | EXCHANGE => YELLOW,
+        _ => WHITE,
     }
 }
 
@@ -452,7 +548,7 @@ mod tests {
 
 bb0:           ; stack_in=0 max_growth=1
   PUSH1 0x03   ; ic= 0 pc= 0 gas=11 noop
-  JUMP bb1     ; ic= 1 pc= 2
+  JUMP %bb1    ; ic= 1 pc= 2
 
 bb1:           ; stack_in=0 max_growth=2
   JUMPDEST     ; ic= 2 pc= 3 gas=7 reachable
@@ -461,7 +557,7 @@ bb1:           ; stack_in=0 max_growth=2
   SSTORE       ; ic= 5 pc= 8
   PUSH1 0x01   ; ic= 6 pc= 9 gas=16 noop
   PUSH1 0x03   ; ic= 7 pc=11 noop
-  JUMPI bb1    ; ic= 8 pc=13
+  JUMPI %bb1   ; ic= 8 pc=13
 
 bb2:           ; stack_in=0 max_growth=7
   PUSH1 0x00   ; ic= 9 pc=14 gas=121
@@ -477,6 +573,34 @@ bb2:           ; stack_in=0 max_growth=7
 
 "#]]
         );
+    }
+
+    #[test]
+    fn display_roundtrip() {
+        let bytecode = test_bytecode();
+        let displayed = format!("{bytecode}");
+
+        // Strip the resolved jump-target refs (e.g. ` %bb1`) from JUMP/JUMPI
+        // lines — these are display metadata, not asm operands.
+        let stripped: String = displayed
+            .lines()
+            .map(|line| {
+                let (before_comment, comment) = line.split_once(';').unwrap_or((line, ""));
+                let cleaned = before_comment
+                    .replace(" %bb", " ; %bb")
+                    .replace(" %dynamic", " ; %dynamic")
+                    .replace(" %invalid", " ; %invalid");
+                if comment.is_empty() {
+                    format!("{cleaned}\n")
+                } else {
+                    format!("{cleaned};{comment}\n")
+                }
+            })
+            .collect();
+
+        println!("{stripped}");
+        let reparsed = crate::parse_asm(&stripped).unwrap();
+        assert_eq!(reparsed, bytecode.code.as_ref(), "display output did not roundtrip");
     }
 
     #[test]
