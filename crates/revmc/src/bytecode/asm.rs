@@ -896,8 +896,8 @@ mod tests {
         assert_eq!(parse_asm("DUP 1").unwrap(), vec![op::DUP1]);
         assert_eq!(parse_asm("DUP 16").unwrap(), vec![op::DUP16]);
         // DUP 17+ → DUPN with encoded immediate.
-        assert_eq!(parse_asm("DUP 17").unwrap(), vec![op::DUPN, 0x00]);
-        assert_eq!(parse_asm("DUP 108").unwrap(), vec![op::DUPN, 128]);
+        assert_eq!(parse_asm("DUP 17").unwrap(), vec![op::DUPN, 0x80]);
+        assert_eq!(parse_asm("DUP 108").unwrap(), vec![op::DUPN, 0xDB]);
         // DUP 0 is invalid.
         assert!(parse_asm("DUP 0").is_err());
         // DUP 236 is out of range.
@@ -910,8 +910,8 @@ mod tests {
         assert_eq!(parse_asm("SWAP 1").unwrap(), vec![op::SWAP1]);
         assert_eq!(parse_asm("SWAP 16").unwrap(), vec![op::SWAP16]);
         // SWAP 17+ → SWAPN with encoded immediate.
-        assert_eq!(parse_asm("SWAP 17").unwrap(), vec![op::SWAPN, 0x00]);
-        assert_eq!(parse_asm("SWAP 108").unwrap(), vec![op::SWAPN, 128]);
+        assert_eq!(parse_asm("SWAP 17").unwrap(), vec![op::SWAPN, 0x80]);
+        assert_eq!(parse_asm("SWAP 108").unwrap(), vec![op::SWAPN, 0xDB]);
         // SWAP 0 is invalid.
         assert!(parse_asm("SWAP 0").is_err());
     }
@@ -919,8 +919,8 @@ mod tests {
     #[test]
     fn dupn() {
         // Explicit DUPN only accepts 17+.
-        assert_eq!(parse_asm("DUPN 17").unwrap(), vec![op::DUPN, 0x00]);
-        assert_eq!(parse_asm("DUPN 108").unwrap(), vec![op::DUPN, 128]);
+        assert_eq!(parse_asm("DUPN 17").unwrap(), vec![op::DUPN, 0x80]);
+        assert_eq!(parse_asm("DUPN 108").unwrap(), vec![op::DUPN, 0xDB]);
         assert!(parse_asm("DUPN 16").is_err());
         assert!(parse_asm("DUPN 0").is_err());
         assert!(parse_asm("DUPN 236").is_err());
@@ -929,8 +929,8 @@ mod tests {
 
     #[test]
     fn swapn() {
-        assert_eq!(parse_asm("SWAPN 17").unwrap(), vec![op::SWAPN, 0x00]);
-        assert_eq!(parse_asm("SWAPN 108").unwrap(), vec![op::SWAPN, 128]);
+        assert_eq!(parse_asm("SWAPN 17").unwrap(), vec![op::SWAPN, 0x80]);
+        assert_eq!(parse_asm("SWAPN 108").unwrap(), vec![op::SWAPN, 0xDB]);
         assert!(parse_asm("SWAPN 16").is_err());
         assert!(parse_asm("SWAPN 0").is_err());
     }
@@ -938,7 +938,7 @@ mod tests {
     #[test]
     fn exchange() {
         // Two separate number tokens.
-        assert_eq!(parse_asm("EXCHANGE 1 2").unwrap(), vec![op::EXCHANGE, 0x01]);
+        assert_eq!(parse_asm("EXCHANGE 1 2").unwrap(), vec![op::EXCHANGE, 0x8E]);
         assert!(parse_asm("EXCHANGE 1 14").is_ok());
         // (2, 1) cannot be encoded.
         assert!(parse_asm("EXCHANGE 2 1").is_err());

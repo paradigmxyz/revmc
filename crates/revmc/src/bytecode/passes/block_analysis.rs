@@ -1230,10 +1230,10 @@ pub(crate) mod tests {
     #[test]
     fn const_snapshot_eof_stack_ops() {
         // DUPN/SWAPN min index is 17, so we need 17 values on the stack.
-        // 16 × PUSH0, PUSH1 0xAA, DUPN 17 (raw=0x00), STOP.
+        // 16 × PUSH0, PUSH1 0xAA, DUPN 17 (raw=0x80), STOP.
         let mut code: Vec<u8> = vec![op::PUSH0; 16];
         code.extend([op::PUSH1, 0xAA]); // inst 16: TOS = 0xAA
-        code.extend([op::DUPN, 0x00]); // inst 17: DUPN 17 (dup bottom = 0x00)
+        code.extend([op::DUPN, 0x80]); // inst 17: DUPN 17 (dup bottom = 0x00)
         code.push(op::STOP); // inst 18
         let bytecode = analyze_code_spec(code, SpecId::AMSTERDAM);
         // DUPN duplicates the 17th item (bottom PUSH0 = 0x00).
