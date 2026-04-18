@@ -1114,8 +1114,9 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             op::INVALID => goto_return!(fail InstructionResult::InvalidFEOpcode),
             op::SELFDESTRUCT => {
                 let sp = self.sp_after_inputs();
-                self.call_fallible_builtin(Builtin::SelfDestruct, &[self.ecx, sp]);
-                goto_return!(build InstructionResult::SelfDestruct);
+                let r = self.call_builtin(Builtin::SelfDestruct, &[self.ecx, sp]).unwrap();
+                self.build_return(r);
+                goto_return!(no_branch);
             }
 
             _ => unreachable!("unimplemented instruction: {data:?}"),
@@ -1211,8 +1212,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     fn return_common(&mut self, ir: InstructionResult) {
         let sp = self.sp_after_inputs();
         let ir_const = self.bcx.iconst(self.i8_type, ir as i64);
-        self.call_fallible_builtin(Builtin::DoReturn, &[self.ecx, sp, ir_const]);
-        self.build_return_imm(ir);
+        let r = self.call_builtin(Builtin::DoReturn, &[self.ecx, sp, ir_const]).unwrap();
+        self.build_return(r);
     }
 
     /// Builds a `CREATE` or `CREATE2` instruction.
