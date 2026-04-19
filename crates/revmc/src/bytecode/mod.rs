@@ -50,7 +50,7 @@ oxc_index::define_nonmax_u32_index_type! {
     /// Also known as `ic`, or instruction counter; not to be confused with SSA `inst`s.
     pub(crate) struct Inst;
 }
-impl_index_display!(Inst, "{}");
+impl_index_display!(Inst, "ic{}");
 
 oxc_index::define_nonmax_u32_index_type! {
     /// Index into the deduplicated U256 constant pool.
@@ -363,7 +363,7 @@ impl<'a> Bytecode<'a> {
     fn mark_dead_code(&mut self) {
         let mut iter = self.insts.iter_mut_enumerated();
         while let Some((i, data)) = iter.next() {
-            if data.is_diverging() {
+            if !data.can_fall_through() {
                 let mut end = i;
                 let mut any_new = false;
                 for (j, data) in &mut iter {
@@ -617,8 +617,11 @@ impl<'a> Bytecode<'a> {
         };
         let data = self.inst(inst);
 
-        let mut s = String::new();
-        let _ = write!(s, "OP{inst}.{}", data.to_op());
+        let mut s = String::with_capacity(64);
+        if let Some(block) = self.cfg.inst_to_block[inst] {
+            let _ = write!(s, "{block}.");
+        }
+        let _ = write!(s, "{inst}.{}", data.to_op());
         if !name.is_empty() {
             let _ = write!(s, ".{name}");
         }

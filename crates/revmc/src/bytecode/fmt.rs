@@ -61,6 +61,16 @@ impl Bytecode<'_> {
                 )
                 .unwrap();
             }
+            if !comment.is_empty() {
+                comment.push(' ');
+            }
+            write!(comment, "predecessors=").unwrap();
+            for (i, pred) in block.preds.iter().enumerate() {
+                if i > 0 {
+                    comment.push(',');
+                }
+                write!(comment, "{pred}").unwrap();
+            }
             // Pad header to align with indented instructions.
             while header.len() < 2 {
                 header.push(' ');
@@ -546,11 +556,11 @@ mod tests {
             snapbox::str![[r#"
                ; spec_id=Osaka has_dynamic_jumps=false may_suspend=true
 
-bb0:           ; stack_in=0 max_growth=1
+bb0:           ; stack_in=0 max_growth=1 predecessors=
   PUSH1 0x03   ; ic= 0 pc= 0 gas=11 noop
   JUMP %bb1    ; ic= 1 pc= 2
 
-bb1:           ; stack_in=0 max_growth=2
+bb1:           ; stack_in=0 max_growth=2 predecessors=bb0,bb1
   JUMPDEST     ; ic= 2 pc= 3 gas=7 reachable
   PUSH1 0x01   ; ic= 3 pc= 4 noop
   PUSH1 0x00   ; ic= 4 pc= 6 noop
@@ -559,7 +569,7 @@ bb1:           ; stack_in=0 max_growth=2
   PUSH1 0x03   ; ic= 7 pc=11 noop
   JUMPI %bb1   ; ic= 8 pc=13
 
-bb2:           ; stack_in=0 max_growth=7
+bb2:           ; stack_in=0 max_growth=7 predecessors=bb1
   PUSH1 0x00   ; ic= 9 pc=14 gas=121
   PUSH1 0x00   ; ic=10 pc=16 noop
   PUSH1 0x00   ; ic=11 pc=18 noop
