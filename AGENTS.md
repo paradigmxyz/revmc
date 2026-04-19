@@ -62,8 +62,8 @@ RUST_LOG=debug cargo r -- run usdc_proxy --display |& rg 'jump|JUMP'
 To get a summary across all benchmarks:
 
 ```bash
-./scripts/jump-resolution.sh                  # all benchmarks
-./scripts/jump-resolution.sh usdc_proxy weth  # specific benchmarks
+./scripts/jump-resolution.py                  # all benchmarks
+./scripts/jump-resolution.py usdc_proxy weth  # specific benchmarks
 ```
 
 Use `cargo r -- run --list` to see available benchmark names.
@@ -73,9 +73,9 @@ Use `cargo r -- run --list` to see available benchmark names.
 To compare LLVM IR and assembly line counts against another revision:
 
 ```bash
-./scripts/codegen-lines.sh /tmp/dump --diff main                # all benchmarks vs main
-./scripts/codegen-lines.sh /tmp/dump --diff main usdc_proxy     # specific benchmarks
-./scripts/codegen-lines.sh /tmp/dump                            # line counts only (no diff)
+./scripts/codegen-lines.py /tmp/dump --diff main                # all benchmarks vs main
+./scripts/codegen-lines.py /tmp/dump --diff main usdc_proxy     # specific benchmarks
+./scripts/codegen-lines.py /tmp/dump                            # line counts only (no diff)
 ```
 
 ## Important
