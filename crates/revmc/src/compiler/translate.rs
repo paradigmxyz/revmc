@@ -207,12 +207,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let address_type = bcx.type_int(160);
 
         // Set up entry block.
-        let gas_ptr = bcx.fn_param(0);
-        let gas_remaining = {
-            let offset = bcx.iconst(i64_type, mem::offset_of!(pf::Gas, tracker.remaining) as i64);
-            let name = "gas.remaining.addr";
-            Pointer::new_address(i64_type, bcx.gep(i8_type, gas_ptr, &[offset], name))
-        };
+        let ecx = bcx.fn_param(0);
 
         let sp_arg = bcx.fn_param(1);
         // Use a local alloca for the stack to allow the backend to eliminate dead stores to
@@ -230,8 +225,18 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         // This is initialized later in `post_entry_block`.
         let stack_len = bcx.new_stack_slot(isize_type, "len.addr");
 
-        let input = bcx.fn_param(3);
-        let ecx = bcx.fn_param(4);
+        // Load gas pointer from ecx.
+        let ptr_type = bcx.type_ptr();
+        let gas_ptr = {
+            let gas_field =
+                get_field(&mut bcx, ecx, mem::offset_of!(EvmContext<'_>, gas), "ecx.gas.addr");
+            bcx.load(ptr_type, gas_field, "ecx.gas")
+        };
+        let gas_remaining = {
+            let offset = bcx.iconst(i64_type, mem::offset_of!(pf::Gas, tracker.remaining) as i64);
+            let name = "gas.remaining.addr";
+            Pointer::new_address(i64_type, bcx.gep(i8_type, gas_ptr, &[offset], name))
+        };
 
         // Create all instruction entry blocks.
         // Dead-code instructions map to `unreachable_block`, except when block deduplication
@@ -306,12 +311,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
         // Add debug assertions for the parameters.
         if config.debug_assertions {
-            fx.pointer_panic_with_bool(
-                config.gas_metering,
-                gas_ptr,
-                "gas pointer",
-                "gas metering is enabled",
-            );
+            fx.pointer_panic_with_bool(true, ecx, "EVM context pointer", "");
             fx.pointer_panic_with_bool(
                 !local_stack || bytecode.may_suspend(),
                 sp_arg,
@@ -332,8 +332,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                     "bytecode suspends execution"
                 },
             );
-            fx.pointer_panic_with_bool(true, input, "input pointer", "");
-            fx.pointer_panic_with_bool(true, ecx, "EVM context pointer", "");
 
             // Assert that the runtime spec_id matches the compilation spec_id.
             let compiled_spec = fx.bcx.iconst(fx.i8_type, bytecode.spec_id as i64);
