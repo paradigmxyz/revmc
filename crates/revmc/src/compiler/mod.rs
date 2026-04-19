@@ -275,6 +275,18 @@ impl<B: Backend> EvmCompiler<B> {
         self.update_backend_config(|c| c.simple_perf = yes);
     }
 
+    /// Sets whether to enable debug info emission.
+    ///
+    /// Debug info embeds DWARF metadata and annotates IR/assembly dumps with source locations
+    /// from the parsed bytecode.
+    ///
+    /// Automatically enabled by [`set_dump_to`](Self::set_dump_to).
+    ///
+    /// Defaults to `false`.
+    pub fn set_debug_info(&mut self, yes: bool) {
+        self.config.debug = yes;
+    }
+
     /// Sets whether to enable frame pointers.
     ///
     /// This is useful for profiling and debugging, but it incurs a very slight performance penalty.
