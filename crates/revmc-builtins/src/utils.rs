@@ -1,4 +1,4 @@
-use core::num::NonZero;
+use core::{hint::cold_path, num::NonZero};
 use revm_context_interface::journaled_state::AccountInfoLoad;
 use revm_interpreter::{InstructionResult, as_usize_saturated, host::LoadError};
 use revm_primitives::Address;
@@ -13,6 +13,7 @@ pub struct BuiltinError(NonZero<u8>);
 impl From<InstructionResult> for BuiltinError {
     #[inline]
     fn from(value: InstructionResult) -> Self {
+        cold_path();
         Self(unsafe { NonZero::new(value as u8).unwrap_unchecked() })
     }
 }
@@ -20,6 +21,7 @@ impl From<InstructionResult> for BuiltinError {
 impl From<LoadError> for BuiltinError {
     #[inline]
     fn from(value: LoadError) -> Self {
+        cold_path();
         match value {
             LoadError::ColdLoadSkipped => InstructionResult::OutOfGas.into(),
             LoadError::DBError => InstructionResult::FatalExternalError.into(),
@@ -35,7 +37,7 @@ pub(crate) trait OkOrFatal<T> {
 impl<T> OkOrFatal<T> for Option<T> {
     #[inline]
     fn ok_or_fatal(self) -> Result<T, BuiltinError> {
-        self.ok_or(InstructionResult::FatalExternalError.into())
+        self.ok_or_else(|| InstructionResult::FatalExternalError.into())
     }
 }
 
