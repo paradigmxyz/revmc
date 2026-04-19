@@ -100,6 +100,7 @@ const _: () = {
     assert!(core::mem::size_of::<EvmContext<'_>>() == 96);
     // Key fields accessed by JIT code
     assert!(offset_of!(EvmContext<'_>, memory) == 0);
+    assert!(offset_of!(EvmContext<'_>, gas) == 16);
     assert!(offset_of!(EvmContext<'_>, spec_id) == 65);
     assert!(offset_of!(EvmContext<'_>, resume_at) == 72);
 };
@@ -164,11 +165,9 @@ macro_rules! extern_revmc {
             $(
                 $(#[$attr])*
                 $vis fn $name(
-                    gas: *mut $crate::private::revm_interpreter::Gas,
+                    ecx: *mut $crate::EvmContext<'_>,
                     stack: *mut $crate::EvmStack,
                     stack_len: *mut usize,
-                    input: *const $crate::private::revm_interpreter::InputsImpl,
-                    ecx: *mut $crate::EvmContext<'_>,
                 ) -> $crate::private::revm_interpreter::InstructionResult;
             )+
         }
@@ -181,11 +180,9 @@ macro_rules! extern_revmc {
 /// information.
 // When changing the signature, also update the corresponding declarations in `fn translate`.
 pub type RawEvmCompilerFn = unsafe extern "C" fn(
-    gas: *mut Gas,
+    ecx: *mut EvmContext<'_>,
     stack: *mut EvmStack,
     stack_len: *mut usize,
-    input: *const InputsImpl,
-    ecx: *mut EvmContext<'_>,
 ) -> InstructionResult;
 
 /// An EVM bytecode function.
@@ -288,7 +285,7 @@ impl EvmCompilerFn {
         stack_len: Option<&mut usize>,
         ecx: &mut EvmContext<'_>,
     ) -> InstructionResult {
-        (self.0)(ecx.gas, option_as_mut_ptr(stack), option_as_mut_ptr(stack_len), ecx.input, ecx)
+        (self.0)(ecx, option_as_mut_ptr(stack), option_as_mut_ptr(stack_len))
     }
 
     /// Same as [`call`](Self::call) but with `#[inline(never)]`.
@@ -777,11 +774,9 @@ mod tests {
 
     #[unsafe(no_mangle)]
     extern "C" fn __test_fn(
-        _gas: *mut Gas,
+        _ecx: *mut EvmContext<'_>,
         _stack: *mut EvmStack,
         _stack_len: *mut usize,
-        _input: *const InputsImpl,
-        _ecx: *mut EvmContext<'_>,
     ) -> InstructionResult {
         InstructionResult::Stop
     }
