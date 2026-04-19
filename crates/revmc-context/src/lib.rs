@@ -91,18 +91,21 @@ pub struct EvmContext<'a> {
     pub resume_at: ResumeAt,
     /// The contract bytecode, for CODECOPY at runtime.
     pub bytecode: *const [u8],
+    /// The size of the call input data, cached for CALLDATASIZE.
+    pub calldatasize: usize,
 }
 
 // Static assertions to ensure the struct layout matches expectations.
 // These offsets are used by the JIT compiler to access fields.
 const _: () = {
     use core::mem::offset_of;
-    assert!(core::mem::size_of::<EvmContext<'_>>() == 96);
+    assert!(core::mem::size_of::<EvmContext<'_>>() == 104);
     // Key fields accessed by JIT code
     assert!(offset_of!(EvmContext<'_>, memory) == 0);
     assert!(offset_of!(EvmContext<'_>, gas) == 16);
     assert!(offset_of!(EvmContext<'_>, spec_id) == 65);
     assert!(offset_of!(EvmContext<'_>, resume_at) == 72);
+    assert!(offset_of!(EvmContext<'_>, calldatasize) == 96);
 };
 
 impl fmt::Debug for EvmContext<'_> {
@@ -127,6 +130,7 @@ impl<'a> EvmContext<'a> {
         let resume_at = ResumeAt::load(interpreter);
         let (stack, stack_len) = EvmStack::from_interpreter_stack(&mut interpreter.stack);
         let bytecode = interpreter.bytecode.bytecode_slice() as *const [u8];
+        let calldatasize = interpreter.input.input.len();
         let this = Self {
             memory: &mut interpreter.memory,
             input: &mut interpreter.input,
@@ -138,6 +142,7 @@ impl<'a> EvmContext<'a> {
             spec_id: interpreter.runtime_flag.spec_id(),
             resume_at,
             bytecode,
+            calldatasize,
         };
         (this, stack, stack_len)
     }

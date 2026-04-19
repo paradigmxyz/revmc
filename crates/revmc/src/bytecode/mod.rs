@@ -3,7 +3,7 @@
 use crate::FxHashMap;
 use bitvec::vec::BitVec;
 use oxc_index::IndexVec;
-use revm_bytecode::{opcode as op, opcode::OpCode};
+use revm_bytecode::opcode as op;
 use revm_primitives::{U256, hardfork::SpecId};
 use revmc_backend::Result;
 use smallvec::SmallVec;
@@ -524,6 +524,7 @@ impl<'a> Bytecode<'a> {
     /// Logs per-opcode constant-input statistics at trace level.
     #[inline(never)]
     fn log_const_input_stats(&self) {
+        use op::*;
         use std::fmt::Write;
 
         // per_input[depth] = [total, const_count, fits_usize_count].
@@ -538,8 +539,7 @@ impl<'a> Bytecode<'a> {
         let mut stats = [const { None }; 256];
         for (inst, data) in self.iter_insts() {
             let (inputs, outputs) = data.stack_io();
-            if inputs == 0
-                || matches!(data.opcode, op::DUP1..=op::DUP16 | op::SWAP1..=op::SWAP16 | op::DUPN | op::SWAPN)
+            if matches!(data.opcode, PUSH0..=PUSH32 | DUP1..=DUP16 | SWAP1..=SWAP16 | DUPN | SWAPN)
             {
                 continue;
             }

@@ -242,14 +242,6 @@ pub unsafe extern "C" fn __revmc_builtin_calldataload_c(
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn __revmc_builtin_calldatasize(ecx: &EvmContext<'_>) -> usize {
-    match ecx.input.input() {
-        CallInput::Bytes(bytes) => bytes.len(),
-        CallInput::SharedBuffer(range) => range.len(),
-    }
-}
-
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn __revmc_builtin_calldatacopy(
     ecx: &mut EvmContext<'_>,
     rev![memory_offset, data_offset, len]: &mut [EvmWord; 3],

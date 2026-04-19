@@ -262,7 +262,6 @@ builtins! {
     CallValue      = __revmc_builtin_call_value(@[ecx_ro] ptr, @[sp] ptr) None,
     CallDataLoad   = __revmc_builtin_calldataload(@[ecx_ro] ptr, @[sp] ptr) None,
     CallDataLoadC  = __revmc_builtin_calldataload_c(@[ecx_ro] ptr, @[sp] ptr, usize) None,
-    CallDataSize   = __revmc_builtin_calldatasize(@[ecx_ro] ptr) Some(usize),
     CallDataCopy   = __revmc_builtin_calldatacopy(@[ecx] ptr, @[sp] ptr) Some(u8),
     CodeCopy       = __revmc_builtin_codecopy(@[ecx] ptr, @[sp] ptr) Some(u8),
     GasPrice       = __revmc_builtin_gas_price(@[ecx_ro] ptr, @[sp] ptr) None,
