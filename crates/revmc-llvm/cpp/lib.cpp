@@ -13,6 +13,7 @@
 #include <llvm/ExecutionEngine/Orc/TargetProcess/JITLoaderGDB.h>
 #include <llvm/ExecutionEngine/Orc/TargetProcess/JITLoaderPerf.h>
 #include <llvm/IR/Attributes.h>
+#include <llvm/IR/GlobalValue.h>
 #include <llvm/Target/TargetMachine.h>
 
 #include <atomic>
@@ -356,4 +357,8 @@ revmc_llvm_target_machine_set_opt_level(LLVMTargetMachineRef TM,
     break;
   }
   Machine->setOptLevel(L);
+}
+
+extern "C" void revmc_llvm_set_dso_local(LLVMValueRef Val, bool Local) {
+  unwrap<GlobalValue>(Val)->setDSOLocal(Local);
 }
