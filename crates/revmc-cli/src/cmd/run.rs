@@ -162,9 +162,7 @@ impl RunArgs {
         compiler.gas_metering(!self.no_gas);
         unsafe { compiler.stack_bound_checks(!self.no_len_checks) };
         compiler.debug_assertions(self.debug_assertions);
-        if self.no_debug_info {
-            compiler.set_debug_info(false);
-        }
+        compiler.set_debug_info(!self.no_debug_info);
 
         compiler.set_module_name(name);
         if let Some(dump_dir) = compiler.dump_dir() {
