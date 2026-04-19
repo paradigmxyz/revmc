@@ -21,8 +21,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-mod peephole;
-
 mod translate;
 use translate::{FcxConfig, FunctionCx};
 

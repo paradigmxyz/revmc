@@ -155,11 +155,27 @@ macro_rules! builtins {
             fn op(self) -> u8 {
                 use revm_bytecode::opcode::*;
 
-                const PANIC: u8 = 0;
-                const ASSERTSPECID: u8 = 0;
+                // _in_out
+                const _0_0: u8 = STOP;
+                const _0_1: u8 = PUSH0;
+                const _1_0: u8 = POP;
 
-                const LOG: u8 = LOG0;
+                const PANIC: u8 = _0_0;
+                const ASSERTSPECID: u8 = _0_0;
+
+                const KECCAK256CC: u8 = _0_1;
+
+                const CALLDATALOADC: u8 = _0_1;
+                const MLOADC: u8 = _0_1;
+                const SLOADC: u8 = _0_1;
+
+                const MSTORECD: u8 = _1_0;
+                const MSTOREDC: u8 = _1_0;
+                const MSTORECC: u8 = _0_0;
+
+                const LOG: u8 = _0_0;
                 const DORETURN: u8 = RETURN;
+                const DORETURNCC: u8 = _0_0;
 
                 match self {
                     $(Self::$ident => [<$ident:upper>]),*
@@ -238,12 +254,14 @@ builtins! {
     MulMod         = __revmc_builtin_mulmod(@[sp] ptr) None,
     Exp            = __revmc_builtin_exp(@[ecx] ptr, @[sp] ptr) Some(u8),
     Keccak256      = __revmc_builtin_keccak256(@[ecx] ptr, @[sp] ptr) Some(u8),
+    Keccak256CC    = __revmc_builtin_keccak256_cc(@[ecx] ptr, @[sp] ptr, usize, usize) Some(u8),
     Address        = __revmc_builtin_address(@[ecx_ro] ptr, @[sp] ptr) None,
     Balance        = __revmc_builtin_balance(@[ecx] ptr, @[sp] ptr) Some(u8),
     Origin         = __revmc_builtin_origin(@[ecx_ro] ptr, @[sp] ptr) None,
     Caller         = __revmc_builtin_caller(@[ecx_ro] ptr, @[sp] ptr) None,
     CallValue      = __revmc_builtin_call_value(@[ecx_ro] ptr, @[sp] ptr) None,
     CallDataLoad   = __revmc_builtin_calldataload(@[ecx_ro] ptr, @[sp] ptr) None,
+    CallDataLoadC  = __revmc_builtin_calldataload_c(@[ecx_ro] ptr, @[sp] ptr, usize) None,
     CallDataSize   = __revmc_builtin_calldatasize(@[ecx_ro] ptr) Some(usize),
     CallDataCopy   = __revmc_builtin_calldatacopy(@[ecx] ptr, @[sp] ptr) Some(u8),
     CodeCopy       = __revmc_builtin_codecopy(@[ecx] ptr, @[sp] ptr) Some(u8),
@@ -266,9 +284,14 @@ builtins! {
     BlobBaseFee    = __revmc_builtin_blob_base_fee(@[ecx_ro] ptr, @[sp] ptr) None,
     SlotNum        = __revmc_builtin_slot_num(@[ecx_ro] ptr, @[sp] ptr) None,
     Mload          = __revmc_builtin_mload(@[ecx] ptr, @[sp] ptr) Some(u8),
+    MloadC         = __revmc_builtin_mload_c(@[ecx] ptr, @[sp] ptr, usize) Some(u8),
     Mstore         = __revmc_builtin_mstore(@[ecx] ptr, @[sp] ptr) Some(u8),
+    MstoreCD       = __revmc_builtin_mstore_cd(@[ecx] ptr, usize, @[sp] ptr) Some(u8),
+    MstoreDC       = __revmc_builtin_mstore_dc(@[ecx] ptr, @[sp] ptr, usize) Some(u8),
+    MstoreCC       = __revmc_builtin_mstore_cc(@[ecx] ptr, usize, usize) Some(u8),
     Mstore8        = __revmc_builtin_mstore8(@[ecx] ptr, @[sp] ptr) Some(u8),
     Sload          = __revmc_builtin_sload(@[ecx] ptr, @[sp] ptr) Some(u8),
+    SloadC         = __revmc_builtin_sload_c(@[ecx] ptr, @[sp] ptr, usize) Some(u8),
     Sstore         = __revmc_builtin_sstore(@[ecx] ptr, @[sp] ptr) Some(u8),
     Msize          = __revmc_builtin_msize(@[ecx_ro] ptr) Some(usize),
     Tload          = __revmc_builtin_tload(@[ecx] ptr, @[sp] ptr) None,
@@ -279,5 +302,6 @@ builtins! {
     Create         = __revmc_builtin_create(@[ecx] ptr, @[sp_dyn] ptr, u8) Some(u8),
     Call           = __revmc_builtin_call(@[ecx] ptr, @[sp_dyn] ptr, u8) Some(u8),
     DoReturn       = __revmc_builtin_do_return(@[ecx] ptr, @[sp] ptr, u8) Some(u8),
+    DoReturnCC     = __revmc_builtin_do_return_cc(@[ecx] ptr, usize, usize, u8) Some(u8),
     SelfDestruct   = __revmc_builtin_selfdestruct(@[ecx] ptr, @[sp] ptr) Some(u8),
 }

@@ -5,6 +5,7 @@ use crate::{
     Backend, Builder, Bytecode, EvmContext, Inst, InstData, InstFlags, IntCC, Result, decode_pair,
     decode_single,
 };
+use either::Either;
 use oxc_index::IndexVec;
 use revm_bytecode::opcode as op;
 use revm_interpreter::InstructionResult;
@@ -12,6 +13,8 @@ use revm_primitives::U256;
 use revmc_backend::{Attribute, BackendTypes, FunctionAttributeLocation, Pointer, TypeMethods};
 use revmc_builtins::{Builtin, Builtins, CallKind, CreateKind};
 use std::{fmt::Write, mem};
+
+mod peephole;
 
 const STACK_CAP: usize = 1024;
 // const WORD_SIZE: usize = 32;
@@ -54,11 +57,11 @@ pub(super) struct FunctionCx<'a, B: Backend> {
     config: FcxConfig,
 
     /// The backend's function builder.
-    pub(super) bcx: B::Builder<'a>,
+    bcx: B::Builder<'a>,
 
     // Common types.
     isize_type: B::Type,
-    pub(super) word_type: B::Type,
+    word_type: B::Type,
     address_type: B::Type,
     i8_type: B::Type,
 
@@ -96,13 +99,13 @@ pub(super) struct FunctionCx<'a, B: Backend> {
     stored_len_offset: i32,
 
     /// The bytecode being translated.
-    pub(super) bytecode: &'a Bytecode<'a>,
+    bytecode: &'a Bytecode<'a>,
     /// Instruction index to 1-based line number in bytecode.txt (for debug info).
     inst_lines: IndexVec<Inst, u32>,
     /// All entry blocks for each instruction.
     inst_entries: IndexVec<Inst, B::BasicBlock>,
     /// The current instruction being translated.
-    pub(super) current_inst: Option<Inst>,
+    current_inst: Option<Inst>,
 
     // Basic blocks are `None` when outside of a main function.
     /// `dynamic_jump_table` incoming values.
@@ -686,7 +689,11 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
         if self.try_peephole(data) {
             self.section_len_offset += diff;
-            goto_return!("peephole");
+            if self.current_inst().is_diverging() {
+                goto_return!(no_branch);
+            } else {
+                goto_return!("peephole");
+            }
         }
 
         // Macro utils.
@@ -1127,7 +1134,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     }
 
     /// Pushes a 256-bit value onto the stack.
-    pub(super) fn push(&mut self, value: B::Value) {
+    fn push(&mut self, value: B::Value) {
         self.pushn(&[value]);
     }
 
@@ -1143,13 +1150,13 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
     /// Returns the known constant values of the topmost `N` stack operands, in the same order
     /// as [`popn`](Self::popn): index 0 is TOS, index 1 is second from top, etc.
-    pub(super) fn const_operands<const N: usize>(&self) -> [Option<U256>; N] {
+    fn const_operands<const N: usize>(&self) -> [Option<U256>; N] {
         let inst = self.current_inst.unwrap();
         std::array::from_fn(|i| self.bytecode.const_operand(inst, i))
     }
 
     /// Consumes the topmost `n` elements from the stack without loading them.
-    pub(super) fn pop_ignore(&mut self, n: usize) {
+    fn pop_ignore(&mut self, n: usize) {
         self.len_offset -= n as i8;
     }
 
@@ -1161,7 +1168,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     /// Removes the topmost `N` elements from the stack and returns them.
     ///
     /// If `load` is `false`, returns just the pointers.
-    pub(super) fn popn<const N: usize>(&mut self) -> [B::Value; N] {
+    fn popn<const N: usize>(&mut self) -> [B::Value; N] {
         assert_ne!(N, 0);
 
         std::array::from_fn(|i| {
@@ -1319,6 +1326,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     }
 
     /// Returns the stack pointer at the top (`&stack[stack.len]`).
+    #[must_use]
     fn sp_at_top(&mut self) -> B::Value {
         self.sp_from_section(self.section_len_offset as i64)
     }
@@ -1329,14 +1337,30 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     /// For any input whose value is a known constant, the constant is written into the
     /// corresponding stack slot. This allows DSE to NOOP the producing PUSH even for
     /// builtin-delegated opcodes that read operands directly from the stack pointer.
+    #[must_use]
     fn sp_after_inputs(&mut self) -> B::Value {
+        self.sp_after_inputs_inner(None)
+    }
+
+    #[must_use]
+    fn sp_after_inputs_with(&mut self, materialize: &[usize]) -> B::Value {
+        self.sp_after_inputs_inner(Some(materialize))
+    }
+
+    #[doc(hidden)]
+    fn sp_after_inputs_inner(&mut self, materialize: Option<&[usize]>) -> B::Value {
         let inst = self.current_inst.unwrap();
         let (inputs, _) = self.current_inst().stack_io();
-        let sp = self.sp_from_section(self.section_len_offset as i64 - inputs as i64);
-        for depth in 0..inputs as usize {
+        let inputs = inputs as usize;
+        let sp = self.sp_from_top(inputs);
+        let materialize = match materialize {
+            Some(x) => Either::Left(x.iter().copied()),
+            None => Either::Right(0..inputs),
+        };
+        for depth in materialize {
             if let Some(c) = self.bytecode.const_operand(inst, depth) {
                 let value = self.bcx.iconst_256(c);
-                let slot_offset = (inputs as usize - 1 - depth) as i64;
+                let slot_offset = (inputs - 1 - depth) as i64;
                 let slot = if slot_offset == 0 {
                     sp
                 } else {
@@ -1366,7 +1390,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
     /// Returns the stack pointer at `n` from the top (`&stack[len - n]`).
     fn sp_from_top(&mut self, n: usize) -> B::Value {
-        assert_ne!(n, 0);
         self.sp_from_section(self.section_len_offset as i64 - n as i64)
     }
 
@@ -1405,6 +1428,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         // This can overflow the gas counters, which has to be adjusted for after the call.
         let gas_remaining = self.load_gas_remaining();
         let (res, overflow) = self.bcx.usub_overflow(gas_remaining, cost);
+        // TODO: revisit this
         if self.bytecode.is_small() {
             // Storing the result before the check significantly increases time spent in
             // `llvm::MemoryDependenceResults::getNonLocalPointerDependency`, but it might produce
@@ -1572,7 +1596,9 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
     /// Build a call to a builtin that returns an [`InstructionResult`].
     fn call_fallible_builtin(&mut self, builtin: Builtin, args: &[B::Value]) {
-        let ret = self.call_builtin(builtin, args).expect("builtin does not return a value");
+        let ret = self
+            .call_builtin(builtin, args)
+            .unwrap_or_else(|| panic!("builtin {builtin:?} does not return a value"));
         self.build_check_instruction_result(ret);
     }
 
@@ -1787,26 +1813,26 @@ mod pf {
         /// GasTracker fields (EIP-8037 reservoir model).
         pub(super) tracker: GasTracker,
         /// Memory gas tracking (words_num: usize, expansion_cost: u64).
-        memory: MemoryGas,
+        pub(super) memory: MemoryGas,
     }
 
     pub(super) struct GasTracker {
         /// The initial gas limit.
-        limit: u64,
+        pub(super) limit: u64,
         /// The remaining gas.
         pub(super) remaining: u64,
         /// State gas reservoir (EIP-8037).
-        reservoir: u64,
+        pub(super) reservoir: u64,
         /// Total state gas spent.
-        state_gas_spent: u64,
+        pub(super) state_gas_spent: u64,
         /// Refunded gas.
-        refunded: i64,
+        pub(super) refunded: i64,
     }
 
     #[repr(C)]
-    struct MemoryGas {
-        words_num: usize,
-        expansion_cost: u64,
+    pub(super) struct MemoryGas {
+        pub(super) words_num: usize,
+        pub(super) expansion_cost: u64,
     }
     const _: [(); mem::size_of::<revm_interpreter::Gas>()] = [(); mem::size_of::<Gas>()];
 }
