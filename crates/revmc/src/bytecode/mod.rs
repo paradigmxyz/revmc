@@ -344,7 +344,7 @@ impl<'a> Bytecode<'a> {
             "constant folding gas budget",
         );
 
-        if !tracing::enabled!(tracing::Level::TRACE) {
+        if tracing::enabled!(tracing::Level::TRACE) {
             self.log_const_input_stats();
         }
 
