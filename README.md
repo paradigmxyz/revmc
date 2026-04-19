@@ -77,7 +77,9 @@ SUBDIR=stSelfBalance cargo nextest run -p revmc -E 'test(statetest::jit)'
 
 ## Credits
 
-The initial compiler implementation was inspired by [`paradigmxyz/jitevm`](https://github.com/paradigmxyz/jitevm).
+- [`paradigmxyz/jitevm`](https://github.com/paradigmxyz/jitevm) for inspiring the initial compiler implementation.
+- [gigahorse-toolchain](https://github.com/nevillegrech/gigahorse-toolchain) for static analysis ideas.
+- [Solidity](https://github.com/ethereum/solidity) and [Vyper](https://github.com/vyperlang/vyper) compilers for opcode semantics and optimization references.
 
 #### License
 
