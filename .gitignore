@@ -6,3 +6,4 @@ clif
 /tests/GeneralStateTests
 /tests/BlockchainTests
 /test-fixtures
+/scripts/__pycache__
