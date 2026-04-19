@@ -792,7 +792,7 @@ pub unsafe extern "C" fn __revmc_builtin_do_return(
     };
     *ecx.next_action =
         Some(InterpreterAction::Return(InterpreterResult { output, gas: *ecx.gas, result }));
-    Ok(())
+    Err(result.into())
 }
 
 #[unsafe(no_mangle)]
@@ -820,5 +820,5 @@ pub unsafe extern "C" fn __revmc_builtin_selfdestruct(
         ecx.gas.record_refund(ecx.host.gas_params().selfdestruct_refund());
     }
 
-    Ok(())
+    Err(InstructionResult::SelfDestruct.into())
 }
