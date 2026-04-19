@@ -1546,8 +1546,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let target = self.create_block_after(failure, "contd");
         self.bcx.brif(cond, failure, target);
 
-        // `panic` is already marked as a cold function call.
-        // self.bcx.set_cold_block(failure);
         self.bcx.switch_to_block(failure);
         self.call_panic(msg);
 
