@@ -344,6 +344,8 @@ impl<'a> Bytecode<'a> {
             "constant folding gas budget",
         );
 
+        self.log_const_input_stats();
+
         Ok(())
     }
 
@@ -515,6 +517,97 @@ impl<'a> Bytecode<'a> {
     pub(crate) fn const_output(&self, inst: Inst) -> Option<U256> {
         let idx = self.snapshots.outputs[inst]?.as_const()?;
         Some(*self.u256_interner.borrow().get(idx))
+    }
+
+    /// Logs per-opcode constant-input statistics at trace level.
+    fn log_const_input_stats(&self) {
+        use revm_bytecode::opcode::OpCode;
+        use std::fmt::Write;
+
+        if !tracing::enabled!(tracing::Level::TRACE) {
+            return;
+        }
+
+        // per_input[depth] = [total, const_count, fits_usize_count].
+        struct Entry {
+            inputs: usize,
+            outputs: usize,
+            total: u32,
+            all_const: u32,
+            const_output: u32,
+            per_input: Vec<[u32; 3]>,
+        }
+        let mut stats: Vec<Option<Entry>> = (0..256).map(|_| None).collect();
+        for (inst, data) in self.iter_insts() {
+            let (inputs, outputs) = data.stack_io();
+            if inputs == 0
+                || matches!(data.opcode, op::DUP1..=op::DUP16 | op::SWAP1..=op::SWAP16 | op::DUPN | op::SWAPN)
+            {
+                continue;
+            }
+            let entry = stats[data.opcode as usize].get_or_insert_with(|| Entry {
+                inputs: inputs as usize,
+                outputs: outputs as usize,
+                total: 0,
+                all_const: 0,
+                const_output: 0,
+                per_input: vec![[0u32; 3]; inputs as usize],
+            });
+            entry.total += 1;
+            let mut all = true;
+            for depth in 0..inputs as usize {
+                entry.per_input[depth][0] += 1;
+                if let Some(val) = self.const_operand(inst, depth) {
+                    entry.per_input[depth][1] += 1;
+                    if val <= U256::from(usize::MAX) {
+                        entry.per_input[depth][2] += 1;
+                    }
+                } else {
+                    all = false;
+                }
+            }
+            if all {
+                entry.all_const += 1;
+            }
+            if self.const_output(inst).is_some() {
+                entry.const_output += 1;
+            }
+        }
+
+        let mut buf = String::from("const input stats:");
+        for (opcode, entry) in stats.iter().enumerate() {
+            let Some(entry) = entry else { continue };
+            if entry.total == 0 {
+                continue;
+            }
+            let name = OpCode::new(opcode as u8)
+                .map_or_else(|| format!("0x{opcode:02x}"), |o| o.as_str().to_string());
+            let all_pct = entry.all_const as f64 / entry.total as f64 * 100.0;
+            let _ = write!(
+                buf,
+                "\n  {name:<16} 0x{opcode:02x}, {total} occ, {inputs} inputs, all_const={ac}/{total} ({all_pct:.0}%)",
+                opcode = opcode,
+                total = entry.total,
+                inputs = entry.inputs,
+                ac = entry.all_const,
+            );
+            if entry.outputs > 0 {
+                let co = entry.const_output;
+                let co_pct = co as f64 / entry.total as f64 * 100.0;
+                let _ = write!(buf, ", const_output={co}/{t} ({co_pct:.0}%)", t = entry.total);
+            }
+            for (i, [t, c, usize_c]) in entry.per_input.iter().enumerate() {
+                if *t > 0 {
+                    let pct = *c as f64 / *t as f64 * 100.0;
+                    let usize_pct = *usize_c as f64 / *t as f64 * 100.0;
+                    let _ = write!(
+                        buf,
+                        "\n    [{i}]: const={c}/{t} ({pct:.0}%), fits_usize={usize_c}/{t} ({usize_pct:.0}%)",
+                    );
+                }
+            }
+        }
+        trace!("{buf}");
     }
 
     /// Returns the name for a basic block.
