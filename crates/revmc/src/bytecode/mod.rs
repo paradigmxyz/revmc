@@ -3,7 +3,7 @@
 use crate::FxHashMap;
 use bitvec::vec::BitVec;
 use oxc_index::IndexVec;
-use revm_bytecode::opcode as op;
+use revm_bytecode::{opcode as op, opcode::OpCode};
 use revm_primitives::{U256, hardfork::SpecId};
 use revmc_backend::Result;
 use smallvec::SmallVec;
@@ -344,7 +344,9 @@ impl<'a> Bytecode<'a> {
             "constant folding gas budget",
         );
 
-        self.log_const_input_stats();
+        if !tracing::enabled!(tracing::Level::TRACE) {
+            self.log_const_input_stats();
+        }
 
         Ok(())
     }
@@ -520,13 +522,9 @@ impl<'a> Bytecode<'a> {
     }
 
     /// Logs per-opcode constant-input statistics at trace level.
+    #[inline(never)]
     fn log_const_input_stats(&self) {
-        use revm_bytecode::opcode::OpCode;
         use std::fmt::Write;
-
-        if !tracing::enabled!(tracing::Level::TRACE) {
-            return;
-        }
 
         // per_input[depth] = [total, const_count, fits_usize_count].
         struct Entry {
@@ -537,7 +535,7 @@ impl<'a> Bytecode<'a> {
             const_output: u32,
             per_input: Vec<[u32; 3]>,
         }
-        let mut stats: Vec<Option<Entry>> = (0..256).map(|_| None).collect();
+        let mut stats = [const { None }; 256];
         for (inst, data) in self.iter_insts() {
             let (inputs, outputs) = data.stack_io();
             if inputs == 0
