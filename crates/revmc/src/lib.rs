@@ -33,6 +33,9 @@ pub use llvm::EvmLlvmBackend;
 #[doc(inline)]
 pub use revmc_llvm as llvm;
 
+#[doc(hidden)]
+pub use revmc_builtins as builtins;
+
 #[doc(no_inline)]
 pub use revm_bytecode;
 #[doc(no_inline)]
