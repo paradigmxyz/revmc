@@ -506,7 +506,7 @@ impl EvmLlvmBackend {
                 &target_info.features,
                 convert_opt_level(config.opt_level),
                 if aot { RelocMode::PIC } else { RelocMode::Static },
-                if aot { CodeModel::Default } else { CodeModel::JITDefault },
+                CodeModel::Default,
             )
             .ok_or_else(|| eyre::eyre!("failed to create target machine"))?;
 
@@ -882,6 +882,7 @@ impl Backend for EvmLlvmBackend {
             let fn_type = self.fn_type(ret, params);
             let function =
                 self.module().add_function(name, fn_type, Some(convert_linkage(linkage)));
+            cpp::set_dso_local(function);
             if self.backend_config.is_dumping {
                 for (i, &name) in param_names.iter().enumerate() {
                     function.get_nth_param(i as u32).expect(name).set_name(self.name(name));
@@ -1806,6 +1807,7 @@ impl Builder for EvmLlvmBuilder<'_> {
 
         let func_ty = self.fn_type(ret, params);
         let function = self.module().add_function(name, func_ty, Some(convert_linkage(linkage)));
+        cpp::set_dso_local(function);
         let prev_function = std::mem::replace(&mut self.function, function);
 
         let entry = self.cx.append_basic_block(function, self.name("entry"));
@@ -1831,7 +1833,10 @@ impl Builder for EvmLlvmBuilder<'_> {
         }
 
         let ty = self.cx.void_type().fn_type(&[self.ty_ptr.into()], true);
-        self.module().add_function(name, ty, Some(inkwell::module::Linkage::External))
+        let function =
+            self.module().add_function(name, ty, Some(inkwell::module::Linkage::External));
+        cpp::set_dso_local(function);
+        function
     }
 
     fn add_function(
@@ -1844,6 +1849,7 @@ impl Builder for EvmLlvmBuilder<'_> {
     ) -> Self::Function {
         let func_ty = self.fn_type(ret, params);
         let function = self.module().add_function(name, func_ty, Some(convert_linkage(linkage)));
+        cpp::set_dso_local(function);
         if let Some(address) = address
             && let Some(orc) = &mut self.orc
         {
