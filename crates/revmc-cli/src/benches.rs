@@ -21,7 +21,7 @@ pub struct Bench {
     pub calldata: Vec<u8>,
     pub stack_input: Vec<U256>,
     pub native: Option<fn()>,
-    /// Pre-seeded storage entries `(key, value)` inserted at `Address::ZERO`.
+    /// Pre-seeded storage entries `(key, value)` inserted at `BENCH_CONTRACT`.
     pub storage: Vec<(U256, U256)>,
     /// Override for `Host::block_number()`.
     pub block_number: Option<U256>,
@@ -100,11 +100,11 @@ pub fn get_benches() -> Vec<Bench> {
                 "00000000000000000000000000000000000000000000000000000000000003e8"
             )
             .to_vec(),
-            // balanceOf[address(0)] = 1_000_000 (caller is address(0))
-            // slot = keccak256(abi.encode(address(0), uint256(3)))
+            // balanceOf[BENCH_CALLER] = 1_000_000
+            // slot = keccak256(abi.encode(0x1111..1111, uint256(3)))
             storage: vec![(
                 U256::from_str_radix(
-                    "3617319a054d772f909f7c479a2cebe5066e836a939412e32403c99029b92eff",
+                    "fc40ea33816453f766ebc0872d4b5152b468882abe7b6b35528069db4d6e41c4",
                     16,
                 )
                 .unwrap(),

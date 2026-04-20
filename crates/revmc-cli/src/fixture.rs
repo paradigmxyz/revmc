@@ -166,10 +166,10 @@ pub struct PreparedBench {
 }
 
 /// Caller address used for synthetic bytecode benchmarks.
-///
-/// `Address::ZERO` to match the old `BenchHost::caller()` behaviour — existing
-/// benchmarks (e.g. `weth`) pre-seed storage slots keyed by this address.
-const BENCH_CALLER: Address = Address::ZERO;
+const BENCH_CALLER: Address = Address::new([
+    0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
+    0x11, 0x11, 0x11, 0x11,
+]);
 
 /// Contract address used for synthetic bytecode benchmarks.
 const BENCH_CONTRACT: Address = Address::new([
