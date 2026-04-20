@@ -232,6 +232,13 @@ pub fn get_benches() -> Vec<Bench> {
             fixture_json: Some(include_str!("../../../data/curve-stableswap-2pool.json")),
             ..Default::default()
         },
+        // https://github.com/karalabe/burntpix-benchmark
+        Bench {
+            name: "burntpix",
+            spec_id: Some(revmc::primitives::hardfork::SpecId::CANCUN),
+            fixture_json: Some(include_str!("../../../data/burntpix.json")),
+            ..Default::default()
+        },
     ]
 }
 

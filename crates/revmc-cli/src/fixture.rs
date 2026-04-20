@@ -10,7 +10,9 @@ use revm_handler::{
 };
 use revm_primitives::{Address, B256, Bytes, StorageKeyMap, StorageValue, TxKind, U256};
 use revm_state::AccountInfo;
-use revmc::{EvmCompiler, EvmCompilerFn, EvmLlvmBackend, RawEvmCompilerFn};
+use revmc::{
+    EvmCompiler, EvmCompilerFn, EvmLlvmBackend, RawEvmCompilerFn, primitives::hardfork::SpecId,
+};
 use serde::Deserialize;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -146,21 +148,153 @@ struct ParsedAccount {
     storage: StorageKeyMap<StorageValue>,
 }
 
-/// A prepared transaction-fixture benchmark, ready to run.
+/// A prepared benchmark, ready to run via interpreter or JIT.
+///
+/// Handles both fixture-based (multi-contract transaction) and simple bytecode
+/// benchmarks — the latter are converted to a single-contract fixture
+/// internally so the execution path is the same.
 #[allow(missing_debug_implementations)]
-pub struct PreparedFixtureBench {
+pub struct PreparedBench {
+    name: &'static str,
+    runnable: bool,
     accounts: Vec<ParsedAccount>,
     block: BlockEnv,
     cfg: CfgEnv,
     tx: TxEnv,
     functions: HashMap<B256, RawEvmCompilerFn>,
-    // Prevent drop of compiler while JIT functions are alive.
     _compiler: Box<EvmCompiler<EvmLlvmBackend>>,
 }
 
-impl PreparedFixtureBench {
-    /// Load and JIT-compile a fixture benchmark.
-    pub fn load(bench: &Bench) -> Self {
+/// Caller address used for synthetic bytecode benchmarks.
+///
+/// `Address::ZERO` to match the old `BenchHost::caller()` behaviour — existing
+/// benchmarks (e.g. `weth`) pre-seed storage slots keyed by this address.
+const BENCH_CALLER: Address = Address::ZERO;
+
+/// Contract address used for synthetic bytecode benchmarks.
+const BENCH_CONTRACT: Address = Address::new([
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xcc, 0xcc, 0xcc, 0xcc,
+]);
+
+impl PreparedBench {
+    /// Load and JIT-compile a benchmark.
+    pub fn load(bench: &Bench, default_spec_id: SpecId) -> Self {
+        let (accounts, block, cfg, tx) = if bench.is_fixture() {
+            Self::parse_fixture(bench)
+        } else {
+            Self::from_bytecode(bench, default_spec_id)
+        };
+
+        // JIT compile all contract bytecodes.
+        let spec_id = cfg.spec;
+        let mut compiler = Box::new(EvmCompiler::new_llvm(false).expect("LLVM backend"));
+        let mut seen = HashSet::new();
+        let mut pending = Vec::new();
+        for acct in &accounts {
+            if acct.bytecode.is_empty() || !seen.insert(acct.code_hash) {
+                continue;
+            }
+            let name = format!("contract_{}", revmc::primitives::hex::encode(acct.code_hash));
+            let func_id = compiler
+                .translate(&name, acct.bytecode.original_byte_slice(), spec_id)
+                .expect("translation failed");
+            pending.push((acct.code_hash, func_id));
+        }
+        let mut functions = HashMap::new();
+        for (hash, func_id) in pending {
+            let fn_ptr = unsafe { compiler.jit_function(func_id).expect("JIT failed") };
+            functions.insert(hash, fn_ptr.into_inner());
+        }
+
+        let runnable = bench.stack_input.is_empty();
+        Self {
+            name: bench.name,
+            runnable,
+            accounts,
+            block,
+            cfg,
+            tx,
+            functions,
+            _compiler: compiler,
+        }
+    }
+
+    /// Whether this benchmark can be run as a transaction.
+    ///
+    /// Benchmarks with `stack_input` push values onto the stack before execution,
+    /// which is not possible via `transact()`. They can still be compiled and
+    /// benchmarked at the bytecode level.
+    pub fn is_runnable(&self) -> bool {
+        self.runnable
+    }
+
+    /// Convert a bytecode [`Bench`] into fixture state.
+    fn from_bytecode(
+        bench: &Bench,
+        spec_id: SpecId,
+    ) -> (Vec<ParsedAccount>, BlockEnv, CfgEnv, TxEnv) {
+        let bytecode = Bytecode::new_raw(Bytes::copy_from_slice(&bench.bytecode));
+        let code_hash = bytecode.hash_slow();
+
+        let storage: StorageKeyMap<StorageValue> =
+            bench.storage.iter().map(|&(k, v)| (k, v)).collect();
+
+        let contract = ParsedAccount {
+            address: BENCH_CONTRACT,
+            balance: U256::ZERO,
+            nonce: 1,
+            bytecode,
+            code_hash,
+            storage,
+        };
+        let caller = ParsedAccount {
+            address: BENCH_CALLER,
+            balance: U256::MAX / U256::from(2),
+            nonce: 0,
+            bytecode: Bytecode::default(),
+            code_hash: B256::ZERO,
+            storage: Default::default(),
+        };
+
+        let gas_limit = u64::MAX / 2;
+        let mut block = BlockEnv {
+            number: bench.block_number.unwrap_or(U256::from(1)),
+            timestamp: bench.timestamp.unwrap_or(U256::from(1)),
+            gas_limit,
+            basefee: 0,
+            ..Default::default()
+        };
+        block.set_blob_excess_gas_and_price(
+            0,
+            revm_primitives::eip4844::BLOB_BASE_FEE_UPDATE_FRACTION_CANCUN,
+        );
+
+        let mut cfg = CfgEnv::new_with_spec(spec_id);
+        cfg.tx_gas_limit_cap = Some(gas_limit);
+        cfg.disable_nonce_check = true;
+        let tx = TxEnv {
+            tx_type: 0,
+            caller: BENCH_CALLER,
+            gas_limit,
+            gas_price: 0,
+            kind: TxKind::Call(BENCH_CONTRACT),
+            value: U256::ZERO,
+            data: Bytes::from(bench.calldata.clone()),
+            nonce: 0,
+            chain_id: Some(cfg.chain_id),
+            access_list: Default::default(),
+            gas_priority_fee: None,
+            blob_hashes: Vec::new(),
+            max_fee_per_blob_gas: 0,
+            authorization_list: Vec::new(),
+        };
+
+        (vec![caller, contract], block, cfg, tx)
+    }
+
+    /// Parse a fixture JSON into accounts, block, cfg, tx.
+    fn parse_fixture(bench: &Bench) -> (Vec<ParsedAccount>, BlockEnv, CfgEnv, TxEnv) {
         let fixture_json = bench.fixture_json.expect("fixture_json required for fixture bench");
         let spec_id = bench.spec_id.expect("spec_id required for fixture bench");
         let file: FixtureFile =
@@ -204,12 +338,8 @@ impl PreparedFixtureBench {
             revm_primitives::eip4844::BLOB_BASE_FEE_UPDATE_FRACTION_CANCUN,
         );
 
-        // Build tx (use sender from fixture, or derive from secret key).
-        let caller = first_tx
-            .sender
-            .as_deref()
-            .map(parse_address)
-            .unwrap_or_else(|| parse_address("0x89d5e72a8a4a0330a65bbcef3032be2f728264a8"));
+        // Build tx.
+        let caller = first_tx.sender.as_deref().map(parse_address).unwrap_or(BENCH_CALLER);
         let cfg = CfgEnv::new_with_spec(spec_id);
         let tx = TxEnv {
             tx_type: 0,
@@ -233,27 +363,12 @@ impl PreparedFixtureBench {
             authorization_list: Vec::new(),
         };
 
-        // JIT compile all contract bytecodes.
-        let mut compiler = Box::new(EvmCompiler::new_llvm(false).expect("LLVM backend"));
-        let mut seen = HashSet::new();
-        let mut pending = Vec::new();
-        for acct in &accounts {
-            if acct.bytecode.is_empty() || !seen.insert(acct.code_hash) {
-                continue;
-            }
-            let name = format!("contract_{}", revmc::primitives::hex::encode(acct.code_hash));
-            let func_id = compiler
-                .translate(&name, acct.bytecode.original_byte_slice(), spec_id)
-                .expect("translation failed");
-            pending.push((acct.code_hash, func_id));
-        }
-        let mut functions = HashMap::new();
-        for (hash, func_id) in pending {
-            let fn_ptr = unsafe { compiler.jit_function(func_id).expect("JIT failed") };
-            functions.insert(hash, fn_ptr.into_inner());
-        }
+        (accounts, block, cfg, tx)
+    }
 
-        Self { accounts, block, cfg, tx, functions, _compiler: compiler }
+    /// Benchmark name.
+    pub fn name(&self) -> &str {
+        self.name
     }
 
     /// Build a fresh `CacheDB` from the parsed prestate.
@@ -304,6 +419,17 @@ impl PreparedFixtureBench {
         let result = handler.run(&mut evm).expect("JIT execution failed");
         let state = evm.ctx.journaled_state.finalize();
         ResultAndState::new(result, state)
+    }
+
+    /// Sanity-check that both interpreter and JIT produce a successful result.
+    ///
+    /// Panics if `!self.is_runnable()`.
+    pub fn sanity_check(&self) {
+        assert!(self.runnable, "cannot sanity-check a non-runnable benchmark");
+        let r = self.run_interpreter();
+        assert!(r.result.is_success(), "interpreter sanity check failed: {:?}", r.result);
+        let r = self.run_jit();
+        assert!(r.result.is_success(), "JIT sanity check failed: {:?}", r.result);
     }
 }
 
