@@ -59,9 +59,18 @@ impl<B: Backend> Builtins<B> {
             ]
         } else if builtin == Builtin::AssertSpecId {
             &[Attribute::NoFree, Attribute::NoRecurse, Attribute::NoSync, Attribute::ArgMemOnly]
-        } else {
-            // Fallible builtins may longjmp on error, so we cannot mark them WillReturn.
+        } else if builtin.is_fallible() {
+            // Fallible builtins may exit via revmc_exit on error, so we cannot mark WillReturn.
             &[
+                Attribute::NoFree,
+                Attribute::NoRecurse,
+                Attribute::NoSync,
+                Attribute::NoUnwind,
+                Attribute::ArgMemOnly,
+            ]
+        } else {
+            &[
+                Attribute::WillReturn,
                 Attribute::NoFree,
                 Attribute::NoRecurse,
                 Attribute::NoSync,
@@ -151,6 +160,47 @@ macro_rules! builtins {
                 match self {
                     $(Self::$ident => vec![$(builtins!(@param_attr default $($param_attr)?)),*]),*
                 }
+            }
+
+            /// Whether this builtin may exit via `revmc_exit` on error.
+            ///
+            /// These are the builtins whose Rust implementation returns `BuiltinResult`
+            /// and thus may call `fail()` → `revmc_exit()`. They must NOT be marked
+            /// `WillReturn` in LLVM IR.
+            ///
+            /// Note: `NoReturn` builtins (DoReturn, DoReturnCC, SelfDestruct) *always*
+            /// exit and are handled separately.
+            pub const fn is_fallible(self) -> bool {
+                matches!(
+                    self,
+                    Self::Exp
+                        | Self::Keccak256
+                        | Self::Keccak256CC
+                        | Self::Balance
+                        | Self::CallDataCopy
+                        | Self::CodeCopy
+                        | Self::ExtCodeSize
+                        | Self::ExtCodeCopy
+                        | Self::ReturnDataCopy
+                        | Self::ExtCodeHash
+                        | Self::BlockHash
+                        | Self::SelfBalance
+                        | Self::Mload
+                        | Self::MloadC
+                        | Self::Mstore
+                        | Self::MstoreCD
+                        | Self::MstoreDC
+                        | Self::MstoreCC
+                        | Self::Mstore8
+                        | Self::Sload
+                        | Self::SloadC
+                        | Self::Sstore
+                        | Self::Tstore
+                        | Self::Mcopy
+                        | Self::Log
+                        | Self::Create
+                        | Self::Call
+                )
             }
 
             fn op(self) -> u8 {
@@ -301,7 +351,7 @@ builtins! {
 
     Create         = __revmc_builtin_create(@[ecx] ptr, @[sp_dyn] ptr, u8) None,
     Call           = __revmc_builtin_call(@[ecx] ptr, @[sp_dyn] ptr, u8) None,
-    DoReturn       = __revmc_builtin_do_return(@[ecx] ptr, @[sp] ptr, u8) None,
-    DoReturnCC     = __revmc_builtin_do_return_cc(@[ecx] ptr, usize, usize, u8) None,
-    SelfDestruct   = __revmc_builtin_selfdestruct(@[ecx] ptr, @[sp] ptr) None,
+    DoReturn       = #[NoReturn] __revmc_builtin_do_return(@[ecx] ptr, @[sp] ptr, u8) None,
+    DoReturnCC     = #[NoReturn] __revmc_builtin_do_return_cc(@[ecx] ptr, usize, usize, u8) None,
+    SelfDestruct   = #[NoReturn] __revmc_builtin_selfdestruct(@[ecx] ptr, @[sp] ptr) None,
 }
