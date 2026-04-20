@@ -7,7 +7,7 @@ use revmc::{
     EvmCompiler, EvmContext, EvmLlvmBackend, EvmStack, OptimizationLevel,
     primitives::hardfork::SpecId,
 };
-use revmc_cli::{BenchHost, PreparedBench};
+use revmc_cli::{BenchHost, JitHandler, PreparedBench};
 use std::time::Duration;
 
 const SPEC_ID: SpecId = SpecId::OSAKA;
@@ -160,12 +160,23 @@ fn run_bench(c: &mut Criterion, def: &revmc_cli::Bench) {
     // ── Unified runtime benchmarks ──────────────────────────────────────
 
     if prepared.is_runnable() {
+        let tx = prepared.tx().clone();
         g.bench_function(format!("{name}/rt/interpreter"), |b| {
-            b.iter(|| prepared.run_interpreter());
+            b.iter_batched(
+                || prepared.new_interpreter_evm(),
+                |mut evm| PreparedBench::run_interpreter_with(evm.evm(), tx.clone()),
+                BatchSize::SmallInput,
+            );
         });
 
         g.bench_function(format!("{name}/rt/jit"), |b| {
-            b.iter(|| prepared.run_jit());
+            b.iter_batched(
+                || prepared.new_jit_evm(),
+                |(mut evm, mut handler): (_, JitHandler)| {
+                    PreparedBench::run_jit_with(evm.evm(), &mut handler)
+                },
+                BatchSize::SmallInput,
+            );
         });
     }
 
