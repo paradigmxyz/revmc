@@ -234,8 +234,7 @@ impl PreparedFixtureBench {
         };
 
         // JIT compile all contract bytecodes.
-        let backend = EvmLlvmBackend::new(false).expect("LLVM backend");
-        let mut compiler = Box::new(EvmCompiler::new(backend));
+        let mut compiler = Box::new(EvmCompiler::new_llvm(false).expect("LLVM backend"));
         let mut seen = HashSet::new();
         let mut pending = Vec::new();
         for acct in &accounts {
