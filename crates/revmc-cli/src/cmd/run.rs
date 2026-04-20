@@ -178,7 +178,11 @@ impl RunArgs {
             }
 
             let f_id = compiler.translate_inner(name, &parsed)?;
-            let _ = f_id;
+
+            // Finalize the module (verify + optimize + dump IR/asm).
+            if !self.aot {
+                let _ = unsafe { compiler.jit_function(f_id)? };
+            }
 
             if self.aot {
                 let out_dir = if let Some(out_dir) = compiler.out_dir() {

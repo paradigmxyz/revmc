@@ -421,15 +421,20 @@ impl PreparedBench {
         ResultAndState::new(result, state)
     }
 
-    /// Sanity-check that both interpreter and JIT produce a successful result.
+    /// Sanity-check that interpreter and JIT produce matching results.
     ///
     /// Panics if `!self.is_runnable()`.
     pub fn sanity_check(&self) {
         assert!(self.runnable, "cannot sanity-check a non-runnable benchmark");
-        let r = self.run_interpreter();
-        assert!(r.result.is_success(), "interpreter sanity check failed: {:?}", r.result);
-        let r = self.run_jit();
-        assert!(r.result.is_success(), "JIT sanity check failed: {:?}", r.result);
+        let interp = self.run_interpreter();
+        let jit = self.run_jit();
+        assert_eq!(
+            interp.result.is_success(),
+            jit.result.is_success(),
+            "interpreter and JIT results differ:\n  interpreter: {:?}\n  JIT: {:?}",
+            interp.result,
+            jit.result,
+        );
     }
 }
 
