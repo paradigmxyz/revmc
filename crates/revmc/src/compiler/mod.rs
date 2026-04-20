@@ -11,6 +11,7 @@ use revmc_backend::{
 };
 use revmc_builtins::Builtins;
 use revmc_context::RawEvmCompilerFn;
+use revmc_llvm::EvmLlvmBackend;
 use std::{
     cell::Cell,
     fs,
@@ -88,6 +89,13 @@ pub struct EvmCompiler<B: Backend> {
 
     remarks: Remarks,
     finalized: bool,
+}
+
+impl EvmCompiler<EvmLlvmBackend> {
+    /// Creates a new instance of the compiler with the LLVM backend.
+    pub fn new_llvm(aot: bool) -> Result<Self> {
+        EvmLlvmBackend::new(aot).map(Self::new)
+    }
 }
 
 impl<B: Backend> EvmCompiler<B> {

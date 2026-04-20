@@ -116,8 +116,7 @@ mod tests {
         let shared_lib = shared_library_path(tmp.path(), "out");
 
         // Compile and build object file.
-        let backend = crate::EvmLlvmBackend::new(true).unwrap();
-        let mut compiler = crate::EvmCompiler::new(backend);
+        let mut compiler = crate::EvmCompiler::new_llvm(true).unwrap();
         if let Err(e) = compiler.translate("link_test_basic", &[][..], SpecId::CANCUN) {
             panic!("failed to compile: {e}");
         }
