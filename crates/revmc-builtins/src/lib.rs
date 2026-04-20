@@ -83,13 +83,14 @@ fn fail(ecx: &mut EvmContext<'_>, e: BuiltinError) -> ! {
 
 macro_rules! builtins {
     () => {};
-    ($(#[$attr:meta])* pub unsafe extern "C" fn $name:ident($ecx:ident : &mut EvmContext<'_> $(, $($rest_args:tt)*)?) -> BuiltinResult $block:block $($more:tt)*) => {
+    ($(#[$attr:meta])* pub unsafe extern "C" fn $name:ident($ecx:ident : &mut EvmContext<'_> $(, $rest_i:ident : $rest_t:ty)* $(,)?) -> BuiltinResult $block:block $($more:tt)*) => {
         $(#[$attr])*
-        pub unsafe extern "C" fn $name($ecx: &mut EvmContext<'_> $(, $($rest_args)*)?) {
-            let __ecx_ptr: *mut EvmContext<'_> = $ecx;
-            match ({#[inline(always)] move || -> BuiltinResult { $block }})() {
+        pub unsafe extern "C" fn $name($ecx: &mut EvmContext<'_> $(, $rest_i: $rest_t)*) {
+            #[inline(always)]
+            unsafe fn imp($ecx: &mut EvmContext<'_> $(, $rest_i: $rest_t)*) -> BuiltinResult $block
+            match unsafe { imp($ecx $(, $rest_i)*) } {
                 Ok(()) => {}
-                Err(e) => fail(unsafe { &mut *__ecx_ptr }, e),
+                Err(e) => fail($ecx, e),
             }
         }
 

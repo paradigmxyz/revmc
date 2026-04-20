@@ -55,10 +55,10 @@ pub(crate) unsafe extern "C" fn revmc_entry(
 #[unsafe(naked)]
 pub unsafe extern "C" fn revmc_exit(ecx: *const EvmContext<'_>) -> ! {
     core::arch::naked_asm!(
+        // Restore the saved SP (must read before clobbering x0).
+        "ldr x9, [x0, {exit_sp}]",
         // Load exit_result into the return register.
         "ldrb w0, [x0, {exit_result}]",
-        // Restore the saved SP.
-        "ldr x9, [x0, {exit_sp}]",
         "mov sp, x9",
         // Restore callee-saved registers and return.
         "ldp x25, x26, [sp, #64]",
