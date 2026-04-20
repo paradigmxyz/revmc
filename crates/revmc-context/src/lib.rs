@@ -299,7 +299,7 @@ impl EvmCompilerFn {
         stack_len: Option<&mut usize>,
         ecx: &mut EvmContext<'_>,
     ) -> InstructionResult {
-        revmc_entry(self.0, ecx, option_as_mut_ptr(stack), option_as_mut_ptr(stack_len))
+        revmc_entry(ecx, option_as_mut_ptr(stack), option_as_mut_ptr(stack_len), self.0)
     }
 
     /// Same as [`call`](Self::call) but with `#[inline(never)]`.

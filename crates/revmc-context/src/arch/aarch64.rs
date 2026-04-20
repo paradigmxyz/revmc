@@ -3,22 +3,20 @@ use crate::{EvmContext, EvmStack, RawEvmCompilerFn};
 use revm_interpreter::InstructionResult;
 
 /// Entry trampoline: saves callee-saved registers, stores SP into
-/// `ecx.exit_sp`, shuffles args, and calls the JIT function.
+/// `ecx.exit_sp`, and calls the JIT function.
 ///
 /// On normal return the JIT function's `InstructionResult` is forwarded.
 /// On abnormal exit (builtin error), [`revmc_exit`] restores SP and
 /// returns the `exit_result` stored in `EvmContext`.
 #[unsafe(naked)]
 pub(crate) unsafe extern "C" fn revmc_entry(
-    f: RawEvmCompilerFn,
     ecx: *mut EvmContext<'_>,
     stack: *mut EvmStack,
     stack_len: *mut usize,
+    f: RawEvmCompilerFn,
 ) -> InstructionResult {
-    // AArch64 AAPCS64 calling convention:
-    //   x0 = f, x1 = ecx, x2 = stack, x3 = stack_len
-    //   Callee-saved: x19-x28, x29 (FP), x30 (LR)
-    //   SP must be 16-byte aligned at all times.
+    // AAPCS64: x0=ecx, x1=stack, x2=stack_len, x3=f
+    // The JIT function takes (ecx, stack, stack_len) — already in x0, x1, x2.
     core::arch::naked_asm!(
         // Save FP/LR and callee-saved registers (5 pairs = 80 bytes).
         "stp x29, x30, [sp, #-80]!",
@@ -28,13 +26,8 @@ pub(crate) unsafe extern "C" fn revmc_entry(
         "stp x25, x26, [sp, #64]",
         // Save SP into ecx->exit_sp.
         "mov x9, sp",
-        "str x9, [x1, {exit_sp}]",
-        // Shuffle args: f(ecx, stack, stack_len).
-        "mov x9, x0",  // save function pointer
-        "mov x0, x1",  // arg0 = ecx
-        "mov x1, x2",  // arg1 = stack
-        "mov x2, x3",  // arg2 = stack_len
-        "blr x9",
+        "str x9, [x0, {exit_sp}]",
+        "blr x3",
         // Normal return — w0 = InstructionResult.
         "ldp x25, x26, [sp, #64]",
         "ldp x23, x24, [sp, #48]",

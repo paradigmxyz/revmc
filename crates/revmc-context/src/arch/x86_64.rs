@@ -3,18 +3,20 @@ use crate::{EvmContext, EvmStack, RawEvmCompilerFn};
 use revm_interpreter::InstructionResult;
 
 /// Entry trampoline: saves callee-saved registers, stores RSP into
-/// `ecx.exit_sp`, shuffles args, and calls the JIT function.
+/// `ecx.exit_sp`, and calls the JIT function.
 ///
 /// On normal return the JIT function's `InstructionResult` is forwarded.
 /// On abnormal exit (builtin error), [`revmc_exit`] restores RSP and
 /// returns the `exit_result` stored in `EvmContext`.
 #[unsafe(naked)]
 pub(crate) unsafe extern "C" fn revmc_entry(
-    f: RawEvmCompilerFn,
     ecx: *mut EvmContext<'_>,
     stack: *mut EvmStack,
     stack_len: *mut usize,
+    f: RawEvmCompilerFn,
 ) -> InstructionResult {
+    // System V AMD64: rdi=ecx, rsi=stack, rdx=stack_len, rcx=f
+    // The JIT function takes (ecx, stack, stack_len) — already in rdi, rsi, rdx.
     core::arch::naked_asm!(
         // Save callee-saved registers.
         "push rbp",
@@ -24,15 +26,10 @@ pub(crate) unsafe extern "C" fn revmc_entry(
         "push r14",
         "push r15",
         // Save RSP into ecx->exit_sp (after pushes, before alignment).
-        "mov [rsi + {exit_sp}], rsp",
+        "mov [rdi + {exit_sp}], rsp",
         // Align stack to 16 bytes for the call.
         "sub rsp, 8",
-        // Shuffle args: f(ecx, stack, stack_len).
-        "mov rax, rdi", // save function pointer
-        "mov rdi, rsi", // arg0 = ecx
-        "mov rsi, rdx", // arg1 = stack
-        "mov rdx, rcx", // arg2 = stack_len
-        "call rax",
+        "call rcx",
         // Normal return — eax = InstructionResult.
         "add rsp, 8",
         "pop r15",
