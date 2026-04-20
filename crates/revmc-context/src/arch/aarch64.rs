@@ -47,11 +47,11 @@ pub(crate) unsafe extern "C" fn revmc_entry(
 }
 
 /// Exit trampoline: loads `ecx.exit_result`, restores the saved SP,
-/// pops callee-saved registers and returns to the caller of [`revmc_entry`].
+/// pops callee-saved registers and returns to the caller of `revmc_entry`.
 ///
 /// # Safety
 ///
-/// Must only be called from a builtin that was invoked through [`revmc_entry`].
+/// Must only be called from a builtin that was invoked through `revmc_entry`.
 #[unsafe(naked)]
 pub unsafe extern "C" fn revmc_exit(ecx: *const EvmContext<'_>) -> ! {
     core::arch::naked_asm!(
