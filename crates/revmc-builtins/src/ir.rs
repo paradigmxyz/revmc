@@ -48,44 +48,16 @@ impl<B: Backend> Builtins<B> {
         let address = builtin.addr();
         let linkage = revmc_backend::Linkage::Import;
         let f = bcx.add_function(name, &params, ret, Some(address), linkage);
-        let noreturn = builtin.attrs().contains(&Attribute::NoReturn);
-        let default_attrs: &[Attribute] = if builtin == Builtin::Panic {
-            &[
-                Attribute::Cold,
-                Attribute::NoReturn,
-                Attribute::NoFree,
-                Attribute::NoRecurse,
-                Attribute::NoSync,
-            ]
-        } else if noreturn {
-            &[
-                Attribute::NoReturn,
-                Attribute::NoFree,
-                Attribute::NoRecurse,
-                Attribute::NoSync,
-            ]
-        } else if builtin == Builtin::AssertSpecId {
-            &[Attribute::NoFree, Attribute::NoRecurse, Attribute::NoSync, Attribute::ArgMemOnly]
-        } else if builtin.is_fallible() {
-            // Fallible builtins may exit via revmc_exit on error, so we cannot mark WillReturn.
-            &[
-                Attribute::NoFree,
-                Attribute::NoRecurse,
-                Attribute::NoSync,
-                Attribute::NoUnwind,
-                Attribute::ArgMemOnly,
-            ]
-        } else {
-            &[
-                Attribute::WillReturn,
-                Attribute::NoFree,
-                Attribute::NoRecurse,
-                Attribute::NoSync,
-                Attribute::NoUnwind,
-                Attribute::ArgMemOnly,
-            ]
-        };
-        for attr in default_attrs.iter().chain(builtin.attrs()).copied() {
+        let mut attrs = Vec::with_capacity(16);
+        attrs.extend(builtin.attrs());
+        attrs.extend([
+            Attribute::NoFree,
+            Attribute::NoRecurse,
+            Attribute::NoSync,
+            Attribute::NoUnwind,
+            Attribute::ArgMemOnly,
+        ]);
+        for attr in attrs {
             bcx.add_function_attribute(Some(f), attr, FunctionAttributeLocation::Function);
         }
         let param_attrs = builtin.param_attrs();
@@ -153,7 +125,7 @@ macro_rules! builtins {
                 #[allow(unused_imports)]
                 use Attribute::*;
                 match self {
-                    $(Self::$ident => &[$($attr)*]),*
+                    $(Self::$ident => &[$($attr),*]),*
                 }
             }
 
@@ -167,47 +139,6 @@ macro_rules! builtins {
                 match self {
                     $(Self::$ident => vec![$(builtins!(@param_attr default $($param_attr)?)),*]),*
                 }
-            }
-
-            /// Whether this builtin may exit via `revmc_exit` on error.
-            ///
-            /// These are the builtins whose Rust implementation returns `BuiltinResult`
-            /// and thus may call `fail()` → `revmc_exit()`. They must NOT be marked
-            /// `WillReturn` in LLVM IR.
-            ///
-            /// Note: `NoReturn` builtins (DoReturn, DoReturnCC, SelfDestruct) *always*
-            /// exit and are handled separately.
-            pub const fn is_fallible(self) -> bool {
-                matches!(
-                    self,
-                    Self::Exp
-                        | Self::Keccak256
-                        | Self::Keccak256CC
-                        | Self::Balance
-                        | Self::CallDataCopy
-                        | Self::CodeCopy
-                        | Self::ExtCodeSize
-                        | Self::ExtCodeCopy
-                        | Self::ReturnDataCopy
-                        | Self::ExtCodeHash
-                        | Self::BlockHash
-                        | Self::SelfBalance
-                        | Self::Mload
-                        | Self::MloadC
-                        | Self::Mstore
-                        | Self::MstoreCD
-                        | Self::MstoreDC
-                        | Self::MstoreCC
-                        | Self::Mstore8
-                        | Self::Sload
-                        | Self::SloadC
-                        | Self::Sstore
-                        | Self::Tstore
-                        | Self::Mcopy
-                        | Self::Log
-                        | Self::Create
-                        | Self::Call
-                )
             }
 
             fn op(self) -> u8 {
@@ -301,7 +232,7 @@ builtins! {
         }
     }
 
-    Panic          = __revmc_builtin_panic(ptr, usize) None,
+    Panic          = #[Cold] #[NoReturn] __revmc_builtin_panic(ptr, usize) None,
     AssertSpecId   = __revmc_builtin_assert_spec_id(@[ecx] ptr, u8) None,
 
     Div            = __revmc_builtin_div(@[sp] ptr) None,
