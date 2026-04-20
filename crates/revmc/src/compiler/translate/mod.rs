@@ -492,7 +492,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 fx.copy_stack_to_arg();
                 fx.save_stack_len();
             }
-            fx.build_exit(return_value);
+            fx.bcx.ret(&[return_value]);
         } else {
             fx.bcx.unreachable();
         }
@@ -1531,34 +1531,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             self.incoming_returns.push((ret, self.bcx.current_block().unwrap()));
             self.bcx.br(block);
         } else {
-            self.build_exit(ret);
+            self.bcx.ret(&[ret]);
         }
-    }
-
-    /// Stores `ret` into `ecx.exit_result` and tail-calls `revmc_exit`.
-    fn build_exit(&mut self, ret: B::Value) {
-        let exit_result_ptr = self.get_field(
-            self.ecx,
-            mem::offset_of!(EvmContext<'_>, exit_result),
-            "ecx.exit_result",
-        );
-        self.bcx.store(ret, exit_result_ptr);
-
-        let ptr_type = self.bcx.type_ptr();
-        let exit_fn = self.bcx.get_function("__revmc_exit").unwrap_or_else(|| {
-            let address = revmc_context::revmc_exit as *const () as usize;
-            let linkage = revmc_backend::Linkage::Import;
-            let f =
-                self.bcx.add_function("__revmc_exit", &[ptr_type], None, Some(address), linkage);
-            self.bcx.add_function_attribute(
-                Some(f),
-                Attribute::NoReturn,
-                FunctionAttributeLocation::Function,
-            );
-            f
-        });
-        let _ = self.bcx.tail_call(exit_fn, &[self.ecx], revmc_backend::TailCallKind::Tail);
-        self.bcx.unreachable();
     }
 
     fn add_invalid_jump(&mut self) {
