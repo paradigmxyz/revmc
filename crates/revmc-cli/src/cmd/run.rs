@@ -6,8 +6,8 @@ use revm_interpreter::{
     interpreter::{EthInterpreter, ExtBytecode},
 };
 use revmc::{
-    EvmCompiler, EvmContext, EvmLlvmBackend, OptimizationLevel, eyre::ensure,
-    primitives::hardfork::SpecId, shared_library_path,
+    EvmCompiler, EvmContext, OptimizationLevel, eyre::ensure, primitives::hardfork::SpecId,
+    shared_library_path,
 };
 use revmc_cli::{Bench, BenchHost, PreparedFixtureBench, get_benches, read_code};
 use std::{
@@ -148,8 +148,7 @@ impl RunArgs {
         let Bench { bytecode, calldata, stack_input, .. } = bench_entry.clone();
 
         // Build the compiler.
-        let backend = EvmLlvmBackend::new(self.aot)?;
-        let mut compiler = EvmCompiler::new(backend);
+        let mut compiler = EvmCompiler::new_llvm(self.aot)?;
         compiler.set_opt_level(self.opt_level);
         let out_dir = if self.out_dir.is_some() {
             self.out_dir

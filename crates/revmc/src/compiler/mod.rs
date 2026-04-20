@@ -90,6 +90,14 @@ pub struct EvmCompiler<B: Backend> {
     finalized: bool,
 }
 
+#[cfg(feature = "llvm")]
+impl EvmCompiler<revmc_llvm::EvmLlvmBackend> {
+    /// Creates a new instance of the compiler with the LLVM backend.
+    pub fn new_llvm(aot: bool) -> Result<Self> {
+        revmc_llvm::EvmLlvmBackend::new(aot).map(Self::new)
+    }
+}
+
 impl<B: Backend> EvmCompiler<B> {
     /// Creates a new instance of the compiler with the given backend.
     pub fn new(backend: B) -> Self {
