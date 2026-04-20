@@ -74,13 +74,41 @@ pub enum CreateKind {
 // If results are expected to be pushed back onto the stack, they must be written to the read
 // pointers in **reverse order**, meaning the last pointer is the first return value.
 
+#[inline(always)]
+#[cold]
+fn fail(ecx: &mut EvmContext<'_>, e: BuiltinError) -> ! {
+    ecx.exit_result = e.into();
+    unsafe { revmc_context::revmc_exit(ecx) }
+}
+
+macro_rules! builtins {
+    () => {};
+    ($(#[$attr:meta])* pub unsafe extern "C" fn $name:ident($ecx:ident : &mut EvmContext<'_> $(, $($rest_args:tt)*)?) -> BuiltinResult $block:block $($more:tt)*) => {
+        $(#[$attr])*
+        pub unsafe extern "C" fn $name($ecx: &mut EvmContext<'_> $(, $($rest_args)*)?) {
+            let __ecx_ptr: *mut EvmContext<'_> = $ecx;
+            match ({#[inline(always)] move || -> BuiltinResult { $block }})() {
+                Ok(()) => {}
+                Err(e) => fail(unsafe { &mut *__ecx_ptr }, e),
+            }
+        }
+
+        builtins! { $($more)* }
+    };
+    ($item:item $($rest:tt)*) => {
+        $item
+        builtins! { $($rest)* }
+    };
+}
+
+builtins! {
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __revmc_builtin_panic(data: *const u8, len: usize) -> ! {
     let msg = unsafe { core::str::from_utf8_unchecked(core::slice::from_raw_parts(data, len)) };
     panic!("{msg}");
 }
 
-/// Debug assertion: panics if `ecx.spec_id != expected`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __revmc_builtin_assert_spec_id(ecx: &EvmContext<'_>, expected: SpecId) {
     assert_eq!(
@@ -463,7 +491,8 @@ pub unsafe extern "C" fn __revmc_builtin_mload_c(
     offset: u64,
 ) -> BuiltinResult {
     *offset_ptr = U256::from(offset).into();
-    __revmc_builtin_mload(ecx, offset_ptr)
+    __revmc_builtin_mload(ecx, offset_ptr);
+    Ok(())
 }
 
 #[unsafe(no_mangle)]
@@ -553,7 +582,8 @@ pub unsafe extern "C" fn __revmc_builtin_sload_c(
     key: u64,
 ) -> BuiltinResult {
     *index = U256::from(key).into();
-    __revmc_builtin_sload(ecx, index)
+    __revmc_builtin_sload(ecx, index);
+    Ok(())
 }
 
 #[unsafe(no_mangle)]
@@ -909,4 +939,6 @@ pub unsafe extern "C" fn __revmc_builtin_selfdestruct(
     }
 
     Err(InstructionResult::SelfDestruct.into())
+}
+
 }
