@@ -281,7 +281,7 @@ impl RunArgs {
 
         // Unified runtime path for both bytecode and fixture benchmarks.
         let spec_id: SpecId = self.spec_id.into();
-        let prepared = PreparedBench::load(&bench_entry, spec_id);
+        let (prepared, _compiler) = PreparedBench::load(&bench_entry, spec_id);
 
         if !prepared.is_runnable() {
             return Err(eyre!(

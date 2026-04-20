@@ -1,4 +1,4 @@
-#![allow(missing_docs)]
+#![allow(missing_docs, unexpected_cfgs)]
 
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use revm_bytecode::Bytecode;
@@ -27,20 +27,28 @@ const SKIP_JIT: &[&str] = &[
 const SKIP_ALL: &[&str] = &["seaport", "snailtracer"];
 
 fn bench(c: &mut Criterion) {
+    // Single compiler shared across all benchmarks. JIT'd code lives in its
+    // memory, so it must outlive every `PreparedBench`. `clear_ir()` is called
+    // between benchmarks to free IR while keeping machine code alive.
+    let mut compiler = EvmCompiler::new_llvm(false).unwrap();
     for bench in &revmc_cli::get_benches() {
         if SKIP_ALL.contains(&bench.name) {
             continue;
         }
-        run_bench(c, bench);
+        run_bench(c, bench, &mut compiler);
     }
 }
 
-fn run_bench(c: &mut Criterion, def: &revmc_cli::Bench) {
+fn run_bench(
+    c: &mut Criterion,
+    def: &revmc_cli::Bench,
+    compiler: &mut EvmCompiler<EvmLlvmBackend>,
+) {
     let name = def.name;
     let is_fixture = def.is_fixture();
 
-    let prepared = PreparedBench::load(def, SPEC_ID);
-    if prepared.is_runnable() {
+    let prepared = PreparedBench::load_with(def, SPEC_ID, compiler);
+    if cfg!(any(debug_assertions, codspeed)) && prepared.is_runnable() {
         prepared.sanity_check();
     }
 

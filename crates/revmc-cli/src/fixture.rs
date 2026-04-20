@@ -183,7 +183,6 @@ pub struct PreparedBench {
     cfg: CfgEnv,
     tx: TxEnv,
     functions: HashMap<B256, RawEvmCompilerFn>,
-    _compiler: Box<EvmCompiler<EvmLlvmBackend>>,
 }
 
 /// Caller address used for synthetic bytecode benchmarks.
@@ -199,8 +198,23 @@ const BENCH_CONTRACT: Address = Address::new([
 ]);
 
 impl PreparedBench {
-    /// Load and JIT-compile a benchmark.
-    pub fn load(bench: &Bench, default_spec_id: SpecId) -> Self {
+    /// Load and JIT-compile a benchmark using a fresh compiler.
+    pub fn load(bench: &Bench, default_spec_id: SpecId) -> (Self, EvmCompiler<EvmLlvmBackend>) {
+        let mut compiler = EvmCompiler::new_llvm(false).expect("LLVM backend");
+        let prepared = Self::load_with(bench, default_spec_id, &mut compiler);
+        (prepared, compiler)
+    }
+
+    /// Load and JIT-compile a benchmark, reusing an existing compiler.
+    ///
+    /// The caller must keep `compiler` alive as long as the returned `PreparedBench` is used,
+    /// since the JIT'd function pointers live in the compiler's code memory.
+    /// Call [`EvmCompiler::clear_ir`] between invocations to free IR while retaining code.
+    pub fn load_with(
+        bench: &Bench,
+        default_spec_id: SpecId,
+        compiler: &mut EvmCompiler<EvmLlvmBackend>,
+    ) -> Self {
         let (accounts, block, cfg, tx) = if bench.is_fixture() {
             Self::parse_fixture(bench)
         } else {
@@ -209,7 +223,6 @@ impl PreparedBench {
 
         // JIT compile all contract bytecodes.
         let spec_id = cfg.spec;
-        let mut compiler = Box::new(EvmCompiler::new_llvm(false).expect("LLVM backend"));
         let mut seen = HashSet::new();
         let mut pending = Vec::new();
         for acct in &accounts {
@@ -227,18 +240,10 @@ impl PreparedBench {
             let fn_ptr = unsafe { compiler.jit_function(func_id).expect("JIT failed") };
             functions.insert(hash, fn_ptr.into_inner());
         }
+        compiler.clear_ir().expect("clear_ir failed");
 
         let runnable = bench.stack_input.is_empty();
-        Self {
-            name: bench.name,
-            runnable,
-            accounts,
-            block,
-            cfg,
-            tx,
-            functions,
-            _compiler: compiler,
-        }
+        Self { name: bench.name, runnable, accounts, block, cfg, tx, functions }
     }
 
     /// Whether this benchmark can be run as a transaction.
