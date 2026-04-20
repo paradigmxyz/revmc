@@ -49,9 +49,16 @@ impl<B: Backend> Builtins<B> {
         let linkage = revmc_backend::Linkage::Import;
         let f = bcx.add_function(name, &params, ret, Some(address), linkage);
         let noreturn = builtin.attrs().contains(&Attribute::NoReturn);
-        let default_attrs: &[Attribute] = if builtin == Builtin::Panic || noreturn {
+        let default_attrs: &[Attribute] = if builtin == Builtin::Panic {
             &[
                 Attribute::Cold,
+                Attribute::NoReturn,
+                Attribute::NoFree,
+                Attribute::NoRecurse,
+                Attribute::NoSync,
+            ]
+        } else if noreturn {
+            &[
                 Attribute::NoReturn,
                 Attribute::NoFree,
                 Attribute::NoRecurse,
