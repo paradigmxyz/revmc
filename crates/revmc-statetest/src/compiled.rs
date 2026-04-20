@@ -406,7 +406,7 @@ impl CompileCache {
 }
 
 fn make_compiler(aot: bool) -> RefCell<EvmCompiler<EvmLlvmBackend>> {
-    RefCell::new(EvmCompiler::new(EvmLlvmBackend::new(aot).unwrap()))
+    RefCell::new(EvmCompiler::new_llvm(aot).unwrap())
 }
 
 // ── Compiled test execution ─────────────────────────────────────────────────
