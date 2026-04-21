@@ -12,8 +12,9 @@ use std::collections::{BTreeMap, HashSet};
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
-/// EVM type used for benchmarks. Owns its DB so no self-referential gymnastics needed.
-pub type BenchEvm = JitEvm<MainnetEvm<revm_handler::MainnetContext<CacheDB<EmptyDB>>>>;
+/// Simple owned-DB JIT EVM. Wraps a `MainnetEvm` with an owned `CacheDB` so
+/// there are no lifetime issues. Suitable for benchmarks and simple runners.
+pub type SimpleJitEvm = JitEvm<MainnetEvm<revm_handler::MainnetContext<CacheDB<EmptyDB>>>>;
 
 // ── Fixture Serde ────────────────────────────────────────────────────────────
 
@@ -341,7 +342,7 @@ impl PreparedBench {
     }
 
     /// Build a fresh EVM with the given JIT functions.
-    fn new_evm(&self, functions: B256Map<RawEvmCompilerFn>) -> BenchEvm {
+    fn new_evm(&self, functions: B256Map<RawEvmCompilerFn>) -> SimpleJitEvm {
         let ctx = Context::<BlockEnv, TxEnv, CfgEnv, _, Journal<_>, ()>::new(
             self.fresh_db(),
             self.cfg.spec,
@@ -353,7 +354,7 @@ impl PreparedBench {
     }
 
     /// Build a fresh interpreter EVM (no JIT functions).
-    pub fn new_interpreter_evm(&self) -> BenchEvm {
+    pub fn new_interpreter_evm(&self) -> SimpleJitEvm {
         self.new_evm(B256Map::default())
     }
 
@@ -364,7 +365,7 @@ impl PreparedBench {
     }
 
     /// Build a fresh JIT EVM with compiled functions.
-    pub fn new_jit_evm(&self) -> BenchEvm {
+    pub fn new_jit_evm(&self) -> SimpleJitEvm {
         self.new_evm(self.functions.clone())
     }
 
