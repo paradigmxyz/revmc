@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, HashSet};
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
-type BenchEvm<'a> = MainnetEvm<revm_handler::MainnetContext<&'a mut CacheDB<EmptyDB>>>;
+type BenchEvm<'a> = JitEvm<MainnetEvm<revm_handler::MainnetContext<&'a mut CacheDB<EmptyDB>>>>;
 
 /// Boxed EVM with its backing DB. The EVM holds a reference into the DB, so
 /// both must live together in a pinned allocation.
@@ -25,7 +25,7 @@ pub struct EvmWithDb {
 impl EvmWithDb {
     /// Access the EVM.
     pub fn evm(&mut self) -> &mut BenchEvm<'static> {
-        // SAFETY: Always initialised immediately after `Box::new` in `new_interpreter_evm`.
+        // SAFETY: Always initialised immediately after `Box::new` in `new_evm`.
         unsafe { self.evm.assume_init_mut() }
     }
 }
@@ -341,11 +341,6 @@ impl PreparedBench {
         &self.tx
     }
 
-    /// JIT-compiled functions keyed by code hash.
-    pub fn functions(&self) -> &B256Map<RawEvmCompilerFn> {
-        &self.functions
-    }
-
     /// Build a fresh `CacheDB` from the parsed prestate.
     fn fresh_db(&self) -> CacheDB<EmptyDB> {
         let mut db = CacheDB::new(EmptyDB::new());
@@ -367,8 +362,8 @@ impl PreparedBench {
         db
     }
 
-    /// Build a fresh interpreter EVM. Returned boxed to keep the DB stable.
-    pub fn new_interpreter_evm(&self) -> Box<EvmWithDb> {
+    /// Build a fresh EVM with the given JIT functions. Returned boxed to keep the DB stable.
+    fn new_evm(&self, functions: B256Map<RawEvmCompilerFn>) -> Box<EvmWithDb> {
         let mut boxed =
             Box::new(EvmWithDb { db: self.fresh_db(), evm: std::mem::MaybeUninit::uninit() });
         let db_ptr: *mut CacheDB<EmptyDB> = &mut boxed.db;
@@ -377,11 +372,16 @@ impl PreparedBench {
         // parameter requires it, but the actual borrow is bounded by the Box.
         let db_ref: &'static mut CacheDB<EmptyDB> = unsafe { &mut *db_ptr };
         let ctx = Context::<BlockEnv, TxEnv, CfgEnv, _, Journal<_>, ()>::new(db_ref, self.cfg.spec);
-        let mut evm = ctx.build_mainnet();
-        evm.ctx.block = self.block.clone();
-        evm.ctx.cfg = self.cfg.clone();
-        boxed.evm.write(evm);
+        let mut inner = ctx.build_mainnet();
+        inner.ctx.block = self.block.clone();
+        inner.ctx.cfg = self.cfg.clone();
+        boxed.evm.write(JitEvm::new(inner, functions));
         boxed
+    }
+
+    /// Build a fresh interpreter EVM (no JIT functions).
+    pub fn new_interpreter_evm(&self) -> Box<EvmWithDb> {
+        self.new_evm(B256Map::default())
     }
 
     /// Run the interpreter on a pre-built EVM.
@@ -395,30 +395,20 @@ impl PreparedBench {
         Self::run_interpreter_with(evm.evm(), self.tx.clone())
     }
 
-    /// Build a fresh JIT EVM.
+    /// Build a fresh JIT EVM with compiled functions.
     pub fn new_jit_evm(&self) -> Box<EvmWithDb> {
-        self.new_interpreter_evm()
+        self.new_evm(self.functions.clone())
     }
 
     /// Run JIT on a pre-built EVM.
-    pub fn run_jit_with(
-        evm: &mut BenchEvm<'static>,
-        functions: &B256Map<RawEvmCompilerFn>,
-        tx: TxEnv,
-    ) -> ResultAndState {
-        // SAFETY: We take the EVM by pointer to wrap it in JitEvm without moving
-        // it out of the EvmWithDb. The pointer is valid for the duration of this call.
-        let inner = unsafe { core::ptr::read(evm) };
-        let mut jit = JitEvm::new(inner, functions.clone());
-        let result = jit.transact(tx).expect("JIT execution failed");
-        unsafe { core::ptr::write(evm, jit.into_inner()) };
-        result
+    pub fn run_jit_with(evm: &mut BenchEvm<'static>, tx: TxEnv) -> ResultAndState {
+        evm.transact(tx).expect("JIT execution failed")
     }
 
     /// Run via the JIT-compiled handler.
     pub fn run_jit(&self) -> ResultAndState {
         let mut evm = self.new_jit_evm();
-        Self::run_jit_with(evm.evm(), &self.functions, self.tx.clone())
+        Self::run_jit_with(evm.evm(), self.tx.clone())
     }
 
     /// Sanity-check that interpreter and JIT produce matching results.
