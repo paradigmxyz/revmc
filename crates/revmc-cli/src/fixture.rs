@@ -12,30 +12,8 @@ use std::collections::{BTreeMap, HashSet};
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
-type BenchEvm<'a> = JitEvm<MainnetEvm<revm_handler::MainnetContext<&'a mut CacheDB<EmptyDB>>>>;
-
-/// Boxed EVM with its backing DB. The EVM holds a reference into the DB, so
-/// both must live together in a pinned allocation.
-#[allow(missing_debug_implementations)]
-pub struct EvmWithDb {
-    db: CacheDB<EmptyDB>,
-    evm: std::mem::MaybeUninit<BenchEvm<'static>>,
-}
-
-impl EvmWithDb {
-    /// Access the EVM.
-    pub fn evm(&mut self) -> &mut BenchEvm<'static> {
-        // SAFETY: Always initialised immediately after `Box::new` in `new_evm`.
-        unsafe { self.evm.assume_init_mut() }
-    }
-}
-
-impl Drop for EvmWithDb {
-    fn drop(&mut self) {
-        // SAFETY: Drop the EVM before the DB it borrows.
-        unsafe { self.evm.assume_init_drop() };
-    }
-}
+/// EVM type used for benchmarks. Owns its DB so no self-referential gymnastics needed.
+pub type BenchEvm = JitEvm<MainnetEvm<revm_handler::MainnetContext<CacheDB<EmptyDB>>>>;
 
 // ── Fixture Serde ────────────────────────────────────────────────────────────
 
@@ -362,53 +340,38 @@ impl PreparedBench {
         db
     }
 
-    /// Build a fresh EVM with the given JIT functions. Returned boxed to keep the DB stable.
-    fn new_evm(&self, functions: B256Map<RawEvmCompilerFn>) -> Box<EvmWithDb> {
-        let mut boxed =
-            Box::new(EvmWithDb { db: self.fresh_db(), evm: std::mem::MaybeUninit::uninit() });
-        let db_ptr: *mut CacheDB<EmptyDB> = &mut boxed.db;
-        // SAFETY: The DB lives in the same Box as the EVM, so the reference is valid for the
-        // lifetime of the Box. We erase the lifetime to `'static` because the `BenchEvm` type
-        // parameter requires it, but the actual borrow is bounded by the Box.
-        let db_ref: &'static mut CacheDB<EmptyDB> = unsafe { &mut *db_ptr };
-        let ctx = Context::<BlockEnv, TxEnv, CfgEnv, _, Journal<_>, ()>::new(db_ref, self.cfg.spec);
+    /// Build a fresh EVM with the given JIT functions.
+    fn new_evm(&self, functions: B256Map<RawEvmCompilerFn>) -> BenchEvm {
+        let ctx = Context::<BlockEnv, TxEnv, CfgEnv, _, Journal<_>, ()>::new(
+            self.fresh_db(),
+            self.cfg.spec,
+        );
         let mut inner = ctx.build_mainnet();
         inner.ctx.block = self.block.clone();
         inner.ctx.cfg = self.cfg.clone();
-        boxed.evm.write(JitEvm::new(inner, functions));
-        boxed
+        JitEvm::new(inner, functions)
     }
 
     /// Build a fresh interpreter EVM (no JIT functions).
-    pub fn new_interpreter_evm(&self) -> Box<EvmWithDb> {
+    pub fn new_interpreter_evm(&self) -> BenchEvm {
         self.new_evm(B256Map::default())
-    }
-
-    /// Run the interpreter on a pre-built EVM.
-    pub fn run_interpreter_with(evm: &mut BenchEvm<'static>, tx: TxEnv) -> ResultAndState {
-        evm.transact(tx).expect("interpreter execution failed")
     }
 
     /// Run via the plain interpreter.
     pub fn run_interpreter(&self) -> ResultAndState {
         let mut evm = self.new_interpreter_evm();
-        Self::run_interpreter_with(evm.evm(), self.tx.clone())
+        evm.transact(self.tx.clone()).expect("interpreter execution failed")
     }
 
     /// Build a fresh JIT EVM with compiled functions.
-    pub fn new_jit_evm(&self) -> Box<EvmWithDb> {
+    pub fn new_jit_evm(&self) -> BenchEvm {
         self.new_evm(self.functions.clone())
-    }
-
-    /// Run JIT on a pre-built EVM.
-    pub fn run_jit_with(evm: &mut BenchEvm<'static>, tx: TxEnv) -> ResultAndState {
-        evm.transact(tx).expect("JIT execution failed")
     }
 
     /// Run via the JIT-compiled handler.
     pub fn run_jit(&self) -> ResultAndState {
         let mut evm = self.new_jit_evm();
-        Self::run_jit_with(evm.evm(), self.tx.clone())
+        evm.transact(self.tx.clone()).expect("JIT execution failed")
     }
 
     /// Sanity-check that interpreter and JIT produce matching results.

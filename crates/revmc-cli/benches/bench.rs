@@ -2,6 +2,7 @@
 
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use revm_bytecode::Bytecode;
+use revm_handler::ExecuteEvm;
 use revm_interpreter::{InputsImpl, SharedMemory, interpreter::ExtBytecode};
 use revmc::{
     EvmCompiler, EvmContext, EvmLlvmBackend, EvmStack, OptimizationLevel,
@@ -169,18 +170,21 @@ fn run_bench(
 
     if prepared.is_runnable() {
         let tx = prepared.tx().clone();
+
+        let mut interp_evm = prepared.new_interpreter_evm();
         g.bench_function(format!("{name}/rt/interpreter"), |b| {
-            b.iter_batched_ref(
-                || prepared.new_interpreter_evm(),
-                |evm| PreparedBench::run_interpreter_with(evm.evm(), tx.clone()),
+            b.iter_batched(
+                || tx.clone(),
+                |tx| interp_evm.transact_one(tx).unwrap(),
                 BatchSize::SmallInput,
             );
         });
 
+        let mut jit_evm = prepared.new_jit_evm();
         g.bench_function(format!("{name}/rt/jit"), |b| {
-            b.iter_batched_ref(
-                || prepared.new_jit_evm(),
-                |evm| PreparedBench::run_jit_with(evm.evm(), tx.clone()),
+            b.iter_batched(
+                || tx.clone(),
+                |tx| jit_evm.transact_one(tx).unwrap(),
                 BatchSize::SmallInput,
             );
         });
