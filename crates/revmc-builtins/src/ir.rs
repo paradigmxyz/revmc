@@ -3,9 +3,24 @@ use revmc_backend::{Attribute, Backend, Builder, FunctionAttributeLocation, Type
 // Must be kept in sync with `remvc-build`.
 const MANGLE_PREFIX: &str = "__revmc_builtin_";
 
+/// Builtin function information.
+#[derive(Debug)]
+pub struct BuiltinInfo<B: Backend> {
+    pub func: B::Function,
+}
+
+impl<B: Backend> Clone for BuiltinInfo<B> {
+    #[inline]
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<B: Backend> Copy for BuiltinInfo<B> {}
+
 /// Builtin cache.
 #[derive(Debug)]
-pub struct Builtins<B: Backend>([Option<B::Function>; Builtin::COUNT]);
+pub struct Builtins<B: Backend>([Option<BuiltinInfo<B>>; Builtin::COUNT]);
 
 unsafe impl<B: Backend> Send for Builtins<B> {}
 
@@ -27,51 +42,36 @@ impl<B: Backend> Builtins<B> {
     }
 
     /// Get the function for the given builtin.
-    pub fn get(&mut self, builtin: Builtin, bcx: &mut B::Builder<'_>) -> B::Function {
+    pub fn get(&mut self, builtin: Builtin, bcx: &mut B::Builder<'_>) -> BuiltinInfo<B> {
         *self.0[builtin as usize].get_or_insert_with(|| Self::init(builtin, bcx))
     }
 
     #[cold]
-    fn init(builtin: Builtin, bcx: &mut B::Builder<'_>) -> B::Function {
+    fn init(builtin: Builtin, bcx: &mut B::Builder<'_>) -> BuiltinInfo<B> {
         let name = builtin.name();
         debug_assert!(name.starts_with(MANGLE_PREFIX), "{name:?}");
-        bcx.get_function(name).inspect(|r| trace!(name, ?r, "pre-existing")).unwrap_or_else(|| {
-            let r = Self::build(name, builtin, bcx);
-            trace!(name, ?r, "built");
-            r
-        })
+        let func = bcx.get_function(name).unwrap_or_else(|| Self::build(name, builtin, bcx));
+        BuiltinInfo { func }
     }
 
     fn build(name: &str, builtin: Builtin, bcx: &mut B::Builder<'_>) -> B::Function {
         let ret = builtin.ret(bcx);
         let params = builtin.params(bcx);
+        let param_attrs = builtin.param_attrs();
         let address = builtin.addr();
         let linkage = revmc_backend::Linkage::Import;
         let f = bcx.add_function(name, &params, ret, Some(address), linkage);
-        let default_attrs: &[Attribute] = if builtin == Builtin::Panic {
-            &[
-                Attribute::Cold,
-                Attribute::NoReturn,
-                Attribute::NoFree,
-                Attribute::NoRecurse,
-                Attribute::NoSync,
-            ]
-        } else if builtin == Builtin::AssertSpecId {
-            &[Attribute::NoFree, Attribute::NoRecurse, Attribute::NoSync, Attribute::ArgMemOnly]
-        } else {
-            &[
-                Attribute::WillReturn,
-                Attribute::NoFree,
-                Attribute::NoRecurse,
-                Attribute::NoSync,
-                Attribute::NoUnwind,
-                Attribute::ArgMemOnly,
-            ]
-        };
-        for attr in default_attrs.iter().chain(builtin.attrs()).copied() {
+        let mut attrs = Vec::with_capacity(16);
+        attrs.extend(builtin.attrs());
+        attrs.extend([
+            Attribute::NoFree,
+            Attribute::NoRecurse,
+            Attribute::NoSync,
+            Attribute::NoUnwind,
+        ]);
+        for attr in attrs {
             bcx.add_function_attribute(Some(f), attr, FunctionAttributeLocation::Function);
         }
-        let param_attrs = builtin.param_attrs();
         for (i, param_attrs) in param_attrs.iter().enumerate() {
             for attr in param_attrs {
                 bcx.add_function_attribute(
@@ -303,4 +303,20 @@ builtins! {
     DoReturn       = __revmc_builtin_do_return(@[ecx] ptr, @[sp] ptr, u8) Some(u8),
     DoReturnCC     = __revmc_builtin_do_return_cc(@[ecx] ptr, usize, usize, u8) Some(u8),
     SelfDestruct   = __revmc_builtin_selfdestruct(@[ecx] ptr, @[sp] ptr) Some(u8),
+}
+
+impl Builtin {
+    /// Returns `true` if this builtin takes an `ecx` parameter.
+    pub fn uses_ecx(self) -> bool {
+        !matches!(
+            self,
+            Self::Panic
+                | Self::Div
+                | Self::SDiv
+                | Self::Mod
+                | Self::SMod
+                | Self::AddMod
+                | Self::MulMod
+        )
+    }
 }

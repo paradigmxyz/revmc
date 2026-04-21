@@ -177,6 +177,9 @@ impl<'a> Bytecode<'a> {
             if info.is_disabled() {
                 flags |= InstFlags::DISABLED;
             }
+            if info.is_dynamic_gas() {
+                flags |= InstFlags::DYNAMIC;
+            }
             let (base_gas, stack_io) = if info.is_unknown() || info.is_disabled() {
                 (0, (0, 0))
             } else {
@@ -744,6 +747,12 @@ impl InstData {
             || (self.opcode == op::SSTORE && spec_id.is_enabled_in(SpecId::ISTANBUL))
     }
 
+    /// Returns `true` if this instruction has dynamic gas.
+    #[allow(dead_code)]
+    pub(crate) fn has_dynamic_gas(&self) -> bool {
+        self.flags.contains(InstFlags::DYNAMIC)
+    }
+
     /// Returns `true` if execution can fall through to the next sequential instruction.
     #[inline]
     pub(crate) fn can_fall_through(&self) -> bool {
@@ -791,29 +800,31 @@ impl InstData {
 bitflags::bitflags! {
     /// [`InstrData`] flags.
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-    pub(crate) struct InstFlags: u8 {
+    pub(crate) struct InstFlags: u16 {
         /// The `JUMP`/`JUMPI` target is known at compile time.
-        const STATIC_JUMP = 1 << 0;
+        const STATIC_JUMP        = 1 << 0;
         /// The jump target is known to be invalid.
         /// Always returns [`InstructionResult::InvalidJump`] at runtime.
-        const INVALID_JUMP = 1 << 1;
+        const INVALID_JUMP       = 1 << 1;
         /// The jump has multiple known targets (see `Bytecode::multi_jump_targets`).
         /// The target value is still on the stack and must be popped and switched on at runtime.
-        const MULTI_JUMP = 1 << 2;
+        const MULTI_JUMP         = 1 << 2;
 
         /// The instruction is disabled in this EVM version.
         /// Always returns [`InstructionResult::NotActivated`] at runtime.
-        const DISABLED = 1 << 3;
+        const DISABLED           = 1 << 3;
         /// The instruction is unknown.
         /// Always returns [`InstructionResult::NotFound`] at runtime.
-        const UNKNOWN = 1 << 4;
+        const UNKNOWN            = 1 << 4;
+        /// The instruction uses dynamic gas.
+        const DYNAMIC            = 1 << 5;
 
         /// Instruction is a no-op: skip generating logic, but keep the gas calculation.
-        const NOOP = 1 << 5;
+        const NOOP               = 1 << 6;
         /// This instruction starts a new stack section.
-        const STACK_SECTION_HEAD = 1 << 6;
+        const STACK_SECTION_HEAD = 1 << 7;
         /// Don't generate any code.
-        const DEAD_CODE = 1 << 7;
+        const DEAD_CODE          = 1 << 8;
     }
 }
 

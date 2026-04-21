@@ -2894,7 +2894,6 @@ dependencies = [
  "revm-primitives",
  "revmc-backend",
  "revmc-context",
- "tracing",
 ]
 
 [[package]]

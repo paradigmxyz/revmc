@@ -32,7 +32,7 @@ impl OpcodeInfo {
 
     /// Returns `true` if the gas cost is dynamic.
     #[inline]
-    pub const fn is_dynamic(self) -> bool {
+    pub const fn is_dynamic_gas(self) -> bool {
         self.0 & Self::DYNAMIC != 0
     }
 
@@ -261,7 +261,7 @@ mod tests {
 
         // EXP: base 10, dynamic.
         assert_eq!(cancun[op::EXP as usize].base_gas(), 10);
-        assert!(cancun[op::EXP as usize].is_dynamic());
+        assert!(cancun[op::EXP as usize].is_dynamic_gas());
 
         // PUSH/DUP/SWAP gas.
         assert_eq!(cancun[op::PUSH1 as usize].base_gas(), 3);
@@ -275,13 +275,13 @@ mod tests {
         assert_eq!(cancun[op::LOG2 as usize].base_gas(), 375);
         assert_eq!(cancun[op::LOG3 as usize].base_gas(), 375);
         assert_eq!(cancun[op::LOG4 as usize].base_gas(), 375);
-        assert!(cancun[op::LOG0 as usize].is_dynamic());
+        assert!(cancun[op::LOG0 as usize].is_dynamic_gas());
 
         // Memory ops: dynamic with base cost 3.
         assert_eq!(cancun[op::MLOAD as usize].base_gas(), 3);
-        assert!(cancun[op::MLOAD as usize].is_dynamic());
+        assert!(cancun[op::MLOAD as usize].is_dynamic_gas());
         assert_eq!(cancun[op::KECCAK256 as usize].base_gas(), 30);
-        assert!(cancun[op::KECCAK256 as usize].is_dynamic());
+        assert!(cancun[op::KECCAK256 as usize].is_dynamic_gas());
 
         // Transient storage (Cancun).
         assert_eq!(cancun[op::TLOAD as usize].base_gas(), 100);
@@ -313,14 +313,14 @@ mod tests {
         let frontier = op_info_map(SpecId::FRONTIER);
         assert_eq!(frontier[op::SLOAD as usize].base_gas(), 50);
         assert_eq!(frontier[op::SELFDESTRUCT as usize].base_gas(), 0);
-        assert!(frontier[op::SELFDESTRUCT as usize].is_dynamic());
+        assert!(frontier[op::SELFDESTRUCT as usize].is_dynamic_gas());
         assert_eq!(frontier[op::CALL as usize].base_gas(), 40);
         assert_eq!(frontier[op::BALANCE as usize].base_gas(), 20);
         assert_eq!(frontier[op::EXTCODESIZE as usize].base_gas(), 20);
         let tangerine = op_info_map(SpecId::TANGERINE);
         assert_eq!(tangerine[op::SLOAD as usize].base_gas(), 200);
         assert_eq!(tangerine[op::SELFDESTRUCT as usize].base_gas(), 5000);
-        assert!(tangerine[op::SELFDESTRUCT as usize].is_dynamic());
+        assert!(tangerine[op::SELFDESTRUCT as usize].is_dynamic_gas());
         assert_eq!(tangerine[op::CALL as usize].base_gas(), 700);
         assert_eq!(tangerine[op::BALANCE as usize].base_gas(), 400);
         assert_eq!(tangerine[op::EXTCODESIZE as usize].base_gas(), 700);

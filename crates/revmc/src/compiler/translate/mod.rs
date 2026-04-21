@@ -11,7 +11,7 @@ use revm_bytecode::opcode as op;
 use revm_interpreter::InstructionResult;
 use revm_primitives::U256;
 use revmc_backend::{Attribute, BackendTypes, FunctionAttributeLocation, Pointer, TypeMethods};
-use revmc_builtins::{Builtin, Builtins, CallKind, CreateKind};
+use revmc_builtins::{Builtin, BuiltinInfo, Builtins, CallKind, CreateKind};
 use std::{fmt::Write, mem};
 
 mod peephole;
@@ -74,8 +74,16 @@ pub(super) struct FunctionCx<'a, B: Backend> {
     /// The stack argument pointer. Only used when `local_stack` is enabled and the stack needs
     /// to be copied in/out at entry/exit boundaries.
     sp_arg: Option<B::Value>,
-    /// The amount of gas remaining. `i64`. See `Gas`.
+    /// The amount of gas remaining. `i64`. Points into the local Gas alloca at the
+    /// `tracker.remaining` offset. The StackSlot lets SROA promote gas tracking to SSA,
+    /// eliminating the CGP MemDep pathology with external pointer stores.
     gas_remaining: Pointer<B::Builder<'a>>,
+    /// Base address of the local `Gas` alloca.
+    local_gas: B::Value,
+    /// The original (external) gas pointer loaded from `ecx.gas` at entry.
+    gas_ext: B::Value,
+    /// Pointer to the `ecx.gas` field — used to swap between local and external gas.
+    ecx_gas_field: B::Value,
     /// The EVM context. Opaque pointer, only passed to builtins.
     ecx: B::Value,
     /// Stack length before the current instruction.
@@ -228,17 +236,25 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         // This is initialized later in `post_entry_block`.
         let stack_len = bcx.new_stack_slot(isize_type, "len.addr");
 
-        // Load gas pointer from ecx.
+        // Copy the entire Gas struct to a local alloca and redirect ecx.gas to it.
+        // This lets SROA promote gas_remaining to SSA while builtins naturally read/write
+        // the local copy through ecx.gas — no per-builtin flush/reload needed.
         let ptr_type = bcx.type_ptr();
-        let gas_ptr = {
-            let gas_field =
-                get_field(&mut bcx, ecx, mem::offset_of!(EvmContext<'_>, gas), "ecx.gas.addr");
-            bcx.load(ptr_type, gas_field, "ecx.gas")
+        let gas_size = mem::size_of::<revm_interpreter::Gas>() as i64;
+        let ecx_gas_field =
+            get_field(&mut bcx, ecx, mem::offset_of!(EvmContext<'_>, gas), "ecx.gas.addr");
+        let gas_ext = bcx.load(ptr_type, ecx_gas_field, "ecx.gas");
+        let local_gas = {
+            let gas_type = bcx.type_array(i8_type, gas_size as _);
+            let slot = bcx.new_stack_slot(gas_type, "gas.local");
+            slot.addr(&mut bcx)
         };
+        bcx.memcpy_inline(local_gas, gas_ext, gas_size);
+        bcx.store(local_gas, ecx_gas_field);
         let gas_remaining = {
             let offset = bcx.iconst(i64_type, mem::offset_of!(pf::Gas, tracker.remaining) as i64);
-            let name = "gas.remaining.addr";
-            Pointer::new_address(i64_type, bcx.gep(i8_type, gas_ptr, &[offset], name))
+            let addr = bcx.gep(i8_type, local_gas, &[offset], "gas.remaining.addr");
+            Pointer::new_address(i64_type, addr)
         };
 
         // Create all instruction entry blocks.
@@ -283,6 +299,9 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             stack,
             sp_arg: local_stack.then_some(sp_arg),
             gas_remaining,
+            local_gas,
+            gas_ext,
+            ecx_gas_field,
             ecx,
             len_before: zero,
             len_offset: 0,
@@ -422,6 +441,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 let stack_len = fx.bcx.load(fx.isize_type, stack_len_arg, "stack_len");
                 fx.stack_len.store(&mut fx.bcx, stack_len);
                 fx.copy_stack_from_arg(stack_len);
+                fx.reload_gas();
                 let default = fx.bcx.create_block_after(resume_block, "resume_invalid");
                 fx.bcx.switch_to_block(default);
                 fx.call_panic("invalid `resume_at` value");
@@ -450,6 +470,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                     fx.save_stack_len();
                 }
 
+                fx.save_gas();
                 fx.build_return_imm(InstructionResult::Stop);
             }
         } else {
@@ -471,6 +492,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         if !fx.incoming_failures.is_empty() {
             let failure_value = fx.bcx.phi(fx.i8_type, &fx.incoming_failures);
             fx.bcx.set_current_block_cold();
+            fx.save_gas();
             fx.build_return(failure_value);
         } else {
             fx.bcx.unreachable();
@@ -484,6 +506,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 fx.copy_stack_to_arg();
                 fx.save_stack_len();
             }
+            fx.save_gas();
             fx.bcx.ret(&[return_value]);
         } else {
             fx.bcx.unreachable();
@@ -1294,6 +1317,20 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         self.gas_remaining.store(&mut self.bcx, value);
     }
 
+    /// Copies the local Gas alloca back to the external Gas struct and restores `ecx.gas`.
+    fn save_gas(&mut self) {
+        let gas_size = mem::size_of::<revm_interpreter::Gas>() as i64;
+        self.bcx.memcpy_inline(self.gas_ext, self.local_gas, gas_size);
+        self.bcx.store(self.gas_ext, self.ecx_gas_field);
+    }
+
+    /// Copies the external Gas struct into the local alloca and redirects `ecx.gas`.
+    fn reload_gas(&mut self) {
+        let gas_size = mem::size_of::<revm_interpreter::Gas>() as i64;
+        self.bcx.memcpy_inline(self.local_gas, self.gas_ext, gas_size);
+        self.bcx.store(self.local_gas, self.ecx_gas_field);
+    }
+
     /// Saves the local `stack_len` to `stack_len_arg`.
     fn save_stack_len(&mut self) {
         let len = self.stack_len.load(&mut self.bcx, "stack_len");
@@ -1572,10 +1609,10 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
     /// Build a call to the panic builtin.
     fn call_panic(&mut self, msg: &str) {
-        let function = self.builtin_function(Builtin::Panic);
+        let panik = self.builtin_function(Builtin::Panic);
         let ptr = self.bcx.str_const(msg);
         let len = self.bcx.iconst(self.isize_type, msg.len() as i64);
-        let _ = self.bcx.call(function, &[ptr, len]);
+        let _ = self.bcx.call(panik.func, &[ptr, len]);
         self.bcx.unreachable();
     }
 
@@ -1599,16 +1636,16 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     /// Build a call to a builtin.
     #[must_use]
     fn call_builtin(&mut self, builtin: Builtin, args: &[B::Value]) -> Option<B::Value> {
-        let function = self.builtin_function(builtin);
+        let billtin = self.builtin_function(builtin);
         // self.call_printf(
         //     format_printf!("{} - calling {}\n", self.op_block_name(""), builtin.name()),
         //     &[],
         // );
-        self.bcx.call(function, args)
+        self.bcx.call(billtin.func, args)
     }
 
     /// Gets the function for the given builtin.
-    fn builtin_function(&mut self, builtin: Builtin) -> B::Function {
+    fn builtin_function(&mut self, builtin: Builtin) -> BuiltinInfo<B> {
         self.builtins.get(builtin, &mut self.bcx)
     }
 

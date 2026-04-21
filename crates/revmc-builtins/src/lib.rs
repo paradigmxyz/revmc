@@ -6,10 +6,6 @@
 
 extern crate alloc;
 
-#[macro_use]
-#[cfg(feature = "ir")]
-extern crate tracing;
-
 use alloc::{boxed::Box, vec::Vec};
 use revm_interpreter::{
     CallInput, CallInputs, CallScheme, CallValue, CreateInputs, CreateScheme, FrameInput,
