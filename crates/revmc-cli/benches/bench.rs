@@ -48,7 +48,7 @@ fn run_bench(
     let is_fixture = def.is_fixture();
 
     let prepared = PreparedBench::load_with(def, SPEC_ID, compiler);
-    if cfg!(any(debug_assertions, codspeed)) && prepared.is_runnable() {
+    if cfg!(any(debug_assertions, not(codspeed))) && prepared.is_runnable() {
         prepared.sanity_check();
     }
 
