@@ -304,19 +304,3 @@ builtins! {
     DoReturnCC     = __revmc_builtin_do_return_cc(@[ecx] ptr, usize, usize, u8) Some(u8),
     SelfDestruct   = __revmc_builtin_selfdestruct(@[ecx] ptr, @[sp] ptr) Some(u8),
 }
-
-impl Builtin {
-    /// Returns `true` if this builtin takes an `ecx` parameter.
-    pub fn uses_ecx(self) -> bool {
-        !matches!(
-            self,
-            Self::Panic
-                | Self::Div
-                | Self::SDiv
-                | Self::Mod
-                | Self::SMod
-                | Self::AddMod
-                | Self::MulMod
-        )
-    }
-}
