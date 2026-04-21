@@ -1,27 +1,28 @@
+use crate::Bench;
 use revm_bytecode::Bytecode;
 use revm_context::{BlockEnv, CfgEnv, Context, Journal, TxEnv};
 use revm_context_interface::{
-    ContextSetters,
+    ContextSetters, ContextTr,
+    journaled_state::JournalTr,
     result::{EVMError, HaltReason, InvalidTransaction, ResultAndState},
 };
 use revm_database::{CacheDB, EmptyDB};
 use revm_handler::{
-    EvmTr, ExecuteEvm, FrameResult, Handler, ItemOrResult, MainBuilder, MainnetEvm,
+    EthFrame, EvmTr, ExecuteEvm, FrameInitOrResult, FrameTr, Handler, ItemOrResult, MainBuilder,
+    MainnetEvm, MainnetHandler, PrecompileProvider, evm::ContextDbError,
 };
-use revm_primitives::{Address, B256, Bytes, StorageKeyMap, StorageValue, TxKind, U256};
-use revm_state::AccountInfo;
+use revm_interpreter::InterpreterResult;
+use revm_primitives::{Address, B256, B256Map, Bytes, StorageKeyMap, StorageValue, TxKind, U256};
+use revm_state::{AccountInfo, EvmState};
 use revmc::{
     EvmCompiler, EvmCompilerFn, EvmLlvmBackend, RawEvmCompilerFn, primitives::hardfork::SpecId,
 };
 use serde::Deserialize;
-use std::collections::{BTreeMap, HashMap, HashSet};
-
-use crate::Bench;
+use std::collections::{BTreeMap, HashSet};
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
 type BenchEvm<'a> = MainnetEvm<revm_handler::MainnetContext<&'a mut CacheDB<EmptyDB>>>;
-type BenchError = EVMError<core::convert::Infallible, InvalidTransaction>;
 
 /// Boxed EVM with its backing DB. The EVM holds a reference into the DB, so
 /// both must live together in a pinned allocation.
@@ -46,55 +47,175 @@ impl Drop for EvmWithDb {
     }
 }
 
-// ── JIT Handler ──────────────────────────────────────────────────────────────
+// ── JitEvm ──────────────────────────────────────────────────────────────────
 
+/// Wrapper around any [`EvmTr`] that overrides [`EvmTr::frame_run`] to dispatch
+/// to JIT-compiled functions by code hash, falling back to the interpreter.
+///
+/// The `F` parameter is a lookup function `(B256, &[u8]) -> Option<EvmCompilerFn>` called
+/// when a code hash is not found in the precompiled map. Return `None` to fall
+/// back to the interpreter; return `Some(f)` to execute `f` (e.g. compile on the fly).
 #[allow(missing_debug_implementations)]
-pub struct JitHandler {
-    functions: HashMap<B256, RawEvmCompilerFn>,
+pub struct JitEvm<EVM, F = fn(B256, &[u8]) -> Option<EvmCompilerFn>> {
+    inner: EVM,
+    functions: B256Map<RawEvmCompilerFn>,
+    on_miss: F,
 }
 
-impl Handler for JitHandler {
-    type Evm = BenchEvm<'static>;
-    type Error = BenchError;
-    type HaltReason = HaltReason;
+fn no_miss(_: B256, _: &[u8]) -> Option<EvmCompilerFn> {
+    None
+}
 
-    fn run_exec_loop(
+impl<EVM> JitEvm<EVM> {
+    /// Create a new JIT EVM wrapper that falls back to the interpreter on miss.
+    pub fn new(inner: EVM, functions: B256Map<RawEvmCompilerFn>) -> Self {
+        Self { inner, functions, on_miss: no_miss }
+    }
+}
+
+impl<EVM, F> JitEvm<EVM, F> {
+    /// Create a new JIT EVM wrapper with a custom miss handler.
+    pub fn with_on_miss(inner: EVM, functions: B256Map<RawEvmCompilerFn>, on_miss: F) -> Self {
+        Self { inner, functions, on_miss }
+    }
+
+    /// Consumes the wrapper and returns the inner EVM.
+    pub fn into_inner(self) -> EVM {
+        self.inner
+    }
+}
+
+impl<EVM, F> core::ops::Deref for JitEvm<EVM, F> {
+    type Target = EVM;
+    fn deref(&self) -> &EVM {
+        &self.inner
+    }
+}
+
+impl<EVM, F> core::ops::DerefMut for JitEvm<EVM, F> {
+    fn deref_mut(&mut self) -> &mut EVM {
+        &mut self.inner
+    }
+}
+
+impl<EVM, F> EvmTr for JitEvm<EVM, F>
+where
+    EVM: EvmTr<
+            Frame = EthFrame,
+            Precompiles: PrecompileProvider<EVM::Context, Output = InterpreterResult>,
+        >,
+    F: FnMut(B256, &[u8]) -> Option<EvmCompilerFn>,
+{
+    type Context = EVM::Context;
+    type Instructions = EVM::Instructions;
+    type Precompiles = EVM::Precompiles;
+    type Frame = EVM::Frame;
+
+    fn all(
+        &self,
+    ) -> (
+        &Self::Context,
+        &Self::Instructions,
+        &Self::Precompiles,
+        &revm_context_interface::FrameStack<Self::Frame>,
+    ) {
+        self.inner.all()
+    }
+
+    fn all_mut(
         &mut self,
-        evm: &mut Self::Evm,
-        first_frame_input: revm_interpreter::interpreter_action::FrameInit,
-    ) -> Result<FrameResult, Self::Error> {
-        let res = evm.frame_init(first_frame_input)?;
-        if let ItemOrResult::Result(frame_result) = res {
-            return Ok(frame_result);
-        }
-        loop {
-            let call_or_result = {
-                let frame = evm.frame_stack.get();
-                let bytecode_hash = frame.interpreter.bytecode.get_or_calculate_hash();
-                if let Some(&raw_fn) = self.functions.get(&bytecode_hash) {
-                    let ctx = &mut evm.ctx;
-                    let f = EvmCompilerFn::new(raw_fn);
-                    let action = unsafe { f.call_with_interpreter(&mut frame.interpreter, ctx) };
-                    frame.process_next_action::<_, BenchError>(ctx, action).inspect(|i| {
-                        if i.is_result() {
-                            frame.set_finished(true);
-                        }
-                    })?
-                } else {
-                    evm.frame_run()?
-                }
-            };
-            let result = match call_or_result {
-                ItemOrResult::Item(init) => match evm.frame_init(init)? {
-                    ItemOrResult::Item(_) => continue,
-                    ItemOrResult::Result(result) => result,
+    ) -> (
+        &mut Self::Context,
+        &mut Self::Instructions,
+        &mut Self::Precompiles,
+        &mut revm_context_interface::FrameStack<Self::Frame>,
+    ) {
+        self.inner.all_mut()
+    }
+
+    fn frame_init(
+        &mut self,
+        frame_input: <Self::Frame as FrameTr>::FrameInit,
+    ) -> Result<
+        ItemOrResult<&mut Self::Frame, <Self::Frame as FrameTr>::FrameResult>,
+        ContextDbError<Self::Context>,
+    > {
+        self.inner.frame_init(frame_input)
+    }
+
+    fn frame_run(
+        &mut self,
+    ) -> Result<FrameInitOrResult<Self::Frame>, ContextDbError<Self::Context>> {
+        let frame = self.inner.frame_stack().get();
+        let code_hash = frame.interpreter.bytecode.get_or_calculate_hash();
+
+        let f = if let Some(&raw_fn) = self.functions.get(&code_hash) {
+            Some(EvmCompilerFn::new(raw_fn))
+        } else {
+            let code = frame.interpreter.bytecode.original_bytes();
+            (self.on_miss)(code_hash, &code)
+        };
+
+        if let Some(f) = f {
+            let (ctx, _, _, frame_stack) = self.inner.all_mut();
+            let frame = frame_stack.get();
+            let action = unsafe { f.call_with_interpreter(&mut frame.interpreter, ctx) };
+            Ok(frame.process_next_action::<_, ContextDbError<Self::Context>>(ctx, action).inspect(
+                |i| {
+                    if i.is_result() {
+                        frame.set_finished(true);
+                    }
                 },
-                ItemOrResult::Result(result) => result,
-            };
-            if let Some(result) = evm.frame_return_result(result)? {
-                return Ok(result);
-            }
+            )?)
+        } else {
+            self.inner.frame_run()
         }
+    }
+
+    fn frame_return_result(
+        &mut self,
+        result: <Self::Frame as FrameTr>::FrameResult,
+    ) -> Result<Option<<Self::Frame as FrameTr>::FrameResult>, ContextDbError<Self::Context>> {
+        self.inner.frame_return_result(result)
+    }
+}
+
+impl<EVM, F> ExecuteEvm for JitEvm<EVM, F>
+where
+    EVM: EvmTr<
+            Frame = EthFrame,
+            Context: ContextTr<Journal: JournalTr<State = EvmState>> + ContextSetters,
+            Precompiles: PrecompileProvider<EVM::Context, Output = InterpreterResult>,
+        >,
+    F: FnMut(B256, &[u8]) -> Option<EvmCompilerFn>,
+{
+    type ExecutionResult = revm_context_interface::result::ExecutionResult<HaltReason>;
+    type State = EvmState;
+    type Error = EVMError<
+        <<EVM::Context as ContextTr>::Db as revm_context_interface::Database>::Error,
+        InvalidTransaction,
+    >;
+    type Tx = <EVM::Context as ContextTr>::Tx;
+    type Block = <EVM::Context as ContextTr>::Block;
+
+    fn transact_one(&mut self, tx: Self::Tx) -> Result<Self::ExecutionResult, Self::Error> {
+        self.ctx_mut().set_tx(tx);
+        MainnetHandler::default().run(self)
+    }
+
+    fn finalize(&mut self) -> Self::State {
+        self.ctx_mut().journal_mut().finalize()
+    }
+
+    fn set_block(&mut self, block: Self::Block) {
+        self.ctx_mut().set_block(block);
+    }
+
+    fn replay(&mut self) -> Result<ResultAndState<HaltReason>, Self::Error> {
+        MainnetHandler::default().run(self).map(|result| {
+            let state = self.ctx_mut().journal_mut().finalize();
+            ResultAndState::new(result, state)
+        })
     }
 }
 
@@ -182,7 +303,7 @@ pub struct PreparedBench {
     block: BlockEnv,
     cfg: CfgEnv,
     tx: TxEnv,
-    functions: HashMap<B256, RawEvmCompilerFn>,
+    functions: B256Map<RawEvmCompilerFn>,
 }
 
 /// Caller address used for synthetic bytecode benchmarks.
@@ -235,7 +356,7 @@ impl PreparedBench {
                 .expect("translation failed");
             pending.push((acct.code_hash, func_id));
         }
-        let mut functions = HashMap::new();
+        let mut functions = B256Map::default();
         for (hash, func_id) in pending {
             let fn_ptr = unsafe { compiler.jit_function(func_id).expect("JIT failed") };
             functions.insert(hash, fn_ptr.into_inner());
@@ -402,6 +523,11 @@ impl PreparedBench {
         &self.tx
     }
 
+    /// JIT-compiled functions keyed by code hash.
+    pub fn functions(&self) -> &B256Map<RawEvmCompilerFn> {
+        &self.functions
+    }
+
     /// Build a fresh `CacheDB` from the parsed prestate.
     fn fresh_db(&self) -> CacheDB<EmptyDB> {
         let mut db = CacheDB::new(EmptyDB::new());
@@ -451,25 +577,30 @@ impl PreparedBench {
         Self::run_interpreter_with(evm.evm(), self.tx.clone())
     }
 
-    /// Build a fresh JIT EVM and handler.
-    pub fn new_jit_evm(&self) -> (Box<EvmWithDb>, JitHandler) {
-        let mut boxed = self.new_interpreter_evm();
-        boxed.evm().ctx.set_tx(self.tx.clone());
-        let handler = JitHandler { functions: self.functions.clone() };
-        (boxed, handler)
+    /// Build a fresh JIT EVM.
+    pub fn new_jit_evm(&self) -> Box<EvmWithDb> {
+        self.new_interpreter_evm()
     }
 
-    /// Run JIT on a pre-built EVM and handler.
-    pub fn run_jit_with(evm: &mut BenchEvm<'static>, handler: &mut JitHandler) -> ResultAndState {
-        let result = handler.run(evm).expect("JIT execution failed");
-        let state = evm.ctx.journaled_state.finalize();
-        ResultAndState::new(result, state)
+    /// Run JIT on a pre-built EVM.
+    pub fn run_jit_with(
+        evm: &mut BenchEvm<'static>,
+        functions: &B256Map<RawEvmCompilerFn>,
+        tx: TxEnv,
+    ) -> ResultAndState {
+        // SAFETY: We take the EVM by pointer to wrap it in JitEvm without moving
+        // it out of the EvmWithDb. The pointer is valid for the duration of this call.
+        let inner = unsafe { core::ptr::read(evm) };
+        let mut jit = JitEvm::new(inner, functions.clone());
+        let result = jit.transact(tx).expect("JIT execution failed");
+        unsafe { core::ptr::write(evm, jit.into_inner()) };
+        result
     }
 
     /// Run via the JIT-compiled handler.
     pub fn run_jit(&self) -> ResultAndState {
-        let (mut evm, mut handler) = self.new_jit_evm();
-        Self::run_jit_with(evm.evm(), &mut handler)
+        let mut evm = self.new_jit_evm();
+        Self::run_jit_with(evm.evm(), &self.functions, self.tx.clone())
     }
 
     /// Sanity-check that interpreter and JIT produce matching results.

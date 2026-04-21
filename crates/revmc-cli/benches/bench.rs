@@ -169,6 +169,7 @@ fn run_bench(
 
     if prepared.is_runnable() {
         let tx = prepared.tx().clone();
+        let functions = prepared.functions();
         g.bench_function(format!("{name}/rt/interpreter"), |b| {
             b.iter_batched_ref(
                 || prepared.new_interpreter_evm(),
@@ -180,7 +181,7 @@ fn run_bench(
         g.bench_function(format!("{name}/rt/jit"), |b| {
             b.iter_batched_ref(
                 || prepared.new_jit_evm(),
-                |(evm, handler)| PreparedBench::run_jit_with(evm.evm(), handler),
+                |evm| PreparedBench::run_jit_with(evm.evm(), functions, tx.clone()),
                 BatchSize::SmallInput,
             );
         });
