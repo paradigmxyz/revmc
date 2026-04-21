@@ -366,16 +366,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             let targets = jumpdests
                 .map(|(inst, data)| (data.pc as u64, fx.inst_entries[inst]))
                 .collect::<Vec<_>>();
-            let index = fx.bcx.phi(fx.word_type, &fx.incoming_dynamic_jumps);
-
-            // Saturating convert i256 to i64: if the value doesn't fit, select u64::MAX
-            // which won't match any valid jump target.
             let i64_type = fx.bcx.type_int(64);
-            let reduced = fx.bcx.ireduce(i64_type, index);
-            let extended = fx.bcx.zext(fx.word_type, reduced);
-            let fits = fx.bcx.icmp(IntCC::Equal, index, extended);
-            let sentinel = fx.bcx.iconst(i64_type, u64::MAX as i64);
-            let index = fx.bcx.select(fits, reduced, sentinel);
+            let index = fx.bcx.phi(i64_type, &fx.incoming_dynamic_jumps);
             fx.add_invalid_jump();
             fx.bcx.switch(index, return_block, &targets, true);
         } else {
@@ -1002,6 +994,14 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                         // Dynamic jump.
                         debug_assert!(self.bytecode.has_dynamic_jumps());
                         let target = self.pop();
+                        // Saturating convert i256 to i64: if the value doesn't fit,
+                        // select u64::MAX which won't match any valid jump target.
+                        let i64_type = self.bcx.type_int(64);
+                        let reduced = self.bcx.ireduce(i64_type, target);
+                        let extended = self.bcx.zext(self.word_type, reduced);
+                        let fits = self.bcx.icmp(IntCC::Equal, target, extended);
+                        let sentinel = self.bcx.iconst(i64_type, u64::MAX as i64);
+                        let target = self.bcx.select(fits, reduced, sentinel);
                         self.incoming_dynamic_jumps
                             .push((target, self.bcx.current_block().unwrap()));
                         self.dynamic_jump_table

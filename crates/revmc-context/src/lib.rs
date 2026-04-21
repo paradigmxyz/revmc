@@ -10,6 +10,7 @@ use core::{fmt, mem::MaybeUninit, ptr};
 use revm_interpreter::{
     Gas, Host, InputsImpl, InstructionResult, Interpreter, InterpreterAction, InterpreterResult,
     SharedMemory,
+    context_interface::cfg::GasParams,
     interpreter_types::{Jumps, LegacyBytecode, ReturnData, RuntimeFlag},
 };
 use revm_primitives::{Address, B256, Bytes, U256, hardfork::SpecId, ruint};
@@ -101,12 +102,15 @@ pub struct EvmContext<'a> {
     pub exit_result: InstructionResult,
     /// Saved RSP from the entry trampoline, used by [`revmc_exit`] to unwind.
     pub exit_sp: *mut u8,
+    /// Cached gas parameters from the host.
+    pub gas_params: GasParams,
 }
 
 // Static assertions to ensure the struct layout matches expectations.
 // These offsets are used by the JIT compiler to access fields.
 const _: () = {
     use core::mem::offset_of;
+
     // Key fields accessed by JIT code
     assert!(offset_of!(EvmContext<'_>, memory) == 0);
     assert!(offset_of!(EvmContext<'_>, gas) == 16);
@@ -138,6 +142,7 @@ impl<'a> EvmContext<'a> {
         let (stack, stack_len) = EvmStack::from_interpreter_stack(&mut interpreter.stack);
         let bytecode = interpreter.bytecode.bytecode_slice() as *const [u8];
         let calldatasize = interpreter.input.input.len();
+        let gas_params = host.gas_params().clone();
         let this = Self {
             memory: &mut interpreter.memory,
             input: &mut interpreter.input,
@@ -152,6 +157,7 @@ impl<'a> EvmContext<'a> {
             calldatasize,
             exit_result: InstructionResult::Stop,
             exit_sp: ptr::null_mut(),
+            gas_params,
         };
         (this, stack, stack_len)
     }
