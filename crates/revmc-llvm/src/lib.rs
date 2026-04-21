@@ -1930,7 +1930,17 @@ fn init_() -> Result<()> {
     }
 
     // The first arg is only used in `-help` output AFAICT.
-    let args = [c"revmc-llvm".as_ptr(), c"-x86-asm-syntax=intel".as_ptr()];
+    let args = [
+        c"revmc-llvm".as_ptr(),
+        c"-x86-asm-syntax=intel".as_ptr(),
+        // CodeGenPrepare's memory optimization has a pathological interaction with our IR shape:
+        // repeated stores to the same `gas_remaining` pointer in a huge function cause
+        // MemoryDependenceResults::getNonLocalPointerDependency to do superlinear work.
+        // Mark functions with ≥1000 BBs as "huge" to skip the expensive CGP memory opts,
+        // which produce identical codegen at that scale. Small functions still benefit from
+        // CGP's address sinking and branch optimizations.
+        c"--cgpp-huge-func=1000".as_ptr(),
+    ];
     unsafe {
         inkwell::llvm_sys::support::LLVMParseCommandLineOptions(
             args.len() as i32,
