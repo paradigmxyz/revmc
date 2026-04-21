@@ -1,16 +1,14 @@
-#![allow(missing_docs)]
+#![allow(missing_docs, unexpected_cfgs)]
 
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use revm_bytecode::Bytecode;
-use revm_interpreter::{
-    InputsImpl, SharedMemory, instruction_table,
-    interpreter::{EthInterpreter, ExtBytecode},
-};
+use revm_handler::ExecuteEvm;
+use revm_interpreter::{InputsImpl, SharedMemory, interpreter::ExtBytecode};
 use revmc::{
     EvmCompiler, EvmContext, EvmLlvmBackend, EvmStack, OptimizationLevel,
     primitives::hardfork::SpecId,
 };
-use revmc_cli::{BenchHost, PreparedFixtureBench};
+use revmc_cli::{BenchHost, PreparedBench};
 use std::time::Duration;
 
 const SPEC_ID: SpecId = SpecId::OSAKA;
@@ -30,164 +28,167 @@ const SKIP_JIT: &[&str] = &[
 const SKIP_ALL: &[&str] = &["seaport", "snailtracer"];
 
 fn bench(c: &mut Criterion) {
+    // Single compiler shared across all benchmarks. JIT'd code lives in its
+    // memory, so it must outlive every `PreparedBench`. `clear_ir()` is called
+    // between benchmarks to free IR while keeping machine code alive.
+    let mut compiler = EvmCompiler::new_llvm(false).unwrap();
     for bench in &revmc_cli::get_benches() {
         if SKIP_ALL.contains(&bench.name) {
             continue;
         }
-        if bench.is_fixture() {
-            run_fixture_bench(c, bench);
-        } else {
-            run_bytecode_bench(c, bench);
-        }
+        run_bench(c, bench, &mut compiler);
     }
 }
 
-fn run_fixture_bench(c: &mut Criterion, bench: &revmc_cli::Bench) {
-    let name = bench.name;
-    let prepared = PreparedFixtureBench::load(bench);
+fn run_bench(
+    c: &mut Criterion,
+    def: &revmc_cli::Bench,
+    compiler: &mut EvmCompiler<EvmLlvmBackend>,
+) {
+    let name = def.name;
+    let is_fixture = def.is_fixture();
 
-    // Sanity check.
-    assert!(prepared.run_interpreter().result.is_success(), "interpreter execution reverted");
-    assert!(prepared.run_jit().result.is_success(), "JIT execution reverted");
-
-    let mut g = c.benchmark_group(name);
-    g.sample_size(10);
-    g.warm_up_time(Duration::from_secs(1));
-    g.measurement_time(Duration::from_secs(5));
-
-    g.bench_function(format!("{name}/rt/interpreter"), |b| {
-        b.iter(|| prepared.run_interpreter());
-    });
-
-    g.bench_function(format!("{name}/rt/jit"), |b| {
-        b.iter(|| prepared.run_jit());
-    });
-
-    g.finish();
-}
-
-fn run_bytecode_bench(c: &mut Criterion, bench: &revmc_cli::Bench) {
-    let def = bench;
-    let name = bench.name;
+    let prepared = PreparedBench::load_with(def, SPEC_ID, compiler);
+    if cfg!(any(debug_assertions, not(codspeed))) && prepared.is_runnable() {
+        prepared.sanity_check();
+    }
 
     let mut g = c.benchmark_group(name);
     g.sample_size(10);
     g.warm_up_time(Duration::from_secs(1));
     g.measurement_time(Duration::from_secs(5));
 
-    let gas_limit = u64::MAX / 2;
-    let calldata: revmc::primitives::Bytes = def.calldata.clone().into();
-    let bytecode_raw = Bytecode::new_raw(revmc::primitives::Bytes::copy_from_slice(&def.bytecode));
+    // ── Bytecode-only benchmarks ────────────────────────────────────────
 
-    // ── Compile-time ────────────────────────────────────────────────────
+    if !is_fixture {
+        let gas_limit = u64::MAX / 2;
+        let calldata: revmc::primitives::Bytes = def.calldata.clone().into();
+        let bytecode_raw =
+            Bytecode::new_raw(revmc::primitives::Bytes::copy_from_slice(&def.bytecode));
 
-    g.bench_function(format!("{name}/compile/translate"), |b| {
-        b.iter_batched_ref(
-            || new_compiler(OptimizationLevel::Default),
-            |compiler| {
-                compiler.translate(name, &def.bytecode, SPEC_ID).unwrap();
-            },
-            BatchSize::PerIteration,
-        )
-    });
-
-    if !SKIP_JIT.contains(&name) {
-        g.bench_function(format!("{name}/compile/jit"), |b| {
+        // Compile-time.
+        g.bench_function(format!("{name}/compile/translate"), |b| {
             b.iter_batched_ref(
-                || {
-                    let mut compiler = new_compiler(OptimizationLevel::default());
-                    let id = compiler.translate(name, &def.bytecode, SPEC_ID).expect("translate");
-                    (compiler, id)
-                },
-                |(compiler, id)| unsafe {
-                    compiler.jit_function(*id).unwrap();
+                || new_compiler(OptimizationLevel::Default),
+                |compiler| {
+                    compiler.translate(name, &def.bytecode, SPEC_ID).unwrap();
                 },
                 BatchSize::PerIteration,
             )
         });
-    }
 
-    // ── Runtime ─────────────────────────────────────────────────────────
+        if !SKIP_JIT.contains(&name) {
+            g.bench_function(format!("{name}/compile/jit"), |b| {
+                b.iter_batched_ref(
+                    || {
+                        let mut compiler = new_compiler(OptimizationLevel::default());
+                        let id =
+                            compiler.translate(name, &def.bytecode, SPEC_ID).expect("translate");
+                        (compiler, id)
+                    },
+                    |(compiler, id)| unsafe {
+                        compiler.jit_function(*id).unwrap();
+                    },
+                    BatchSize::PerIteration,
+                )
+            });
+        }
 
-    let mut host = BenchHost::new(SPEC_ID);
-    host.apply_bench(def);
-    let table = instruction_table::<EthInterpreter, BenchHost>();
+        // Native baseline.
+        if let Some(native) = def.native {
+            g.bench_function(format!("{name}/rt/native"), |b| {
+                b.iter_batched(|| (), |()| native(), BatchSize::SmallInput)
+            });
+        }
 
-    let mut compiler = EvmCompiler::new_llvm(false).unwrap();
-    compiler.inspect_stack(!def.stack_input.is_empty());
-    compiler.gas_metering(true);
+        // JIT variants (no_gas etc.).
+        let mut host = BenchHost::new(SPEC_ID);
+        host.apply_bench(def);
 
-    if let Some(native) = def.native {
-        g.bench_function(format!("{name}/rt/native"), |b| {
-            b.iter_batched(|| (), |()| native(), BatchSize::SmallInput)
-        });
-    }
+        let mut compiler = EvmCompiler::new_llvm(false).unwrap();
+        compiler.inspect_stack(!def.stack_input.is_empty());
+        compiler.gas_metering(true);
 
-    let new_interpreter = || {
-        let ext_bytecode = ExtBytecode::new(bytecode_raw.clone());
-        let input = InputsImpl {
-            input: revm_interpreter::CallInput::Bytes(calldata.clone()),
-            ..Default::default()
+        let new_interpreter = || {
+            let ext_bytecode = ExtBytecode::new(bytecode_raw.clone());
+            let input = InputsImpl {
+                input: revm_interpreter::CallInput::Bytes(calldata.clone()),
+                ..Default::default()
+            };
+            revm_interpreter::Interpreter::new(
+                SharedMemory::new(),
+                ext_bytecode,
+                input,
+                false,
+                SPEC_ID,
+                gas_limit,
+            )
         };
-        revm_interpreter::Interpreter::new(
-            SharedMemory::new(),
-            ext_bytecode,
-            input,
-            false,
-            SPEC_ID,
-            gas_limit,
-        )
-    };
 
-    const NO_GAS_BENCHES: &[&str] = &["fibonacci", "fibonacci-calldata", "factorial"];
-    let mut jit_variants: Vec<(&str, (bool, bool))> = vec![("default", (true, true))];
-    if NO_GAS_BENCHES.contains(&name) {
-        jit_variants.push(("no_gas", (false, true)));
+        const NO_GAS_BENCHES: &[&str] = &["fibonacci", "fibonacci-calldata", "factorial"];
+        let mut jit_variants: Vec<(&str, (bool, bool))> = vec![("default", (true, true))];
+        if NO_GAS_BENCHES.contains(&name) {
+            jit_variants.push(("no_gas", (false, true)));
+        }
+        let jit_ids: Vec<_> = jit_variants
+            .iter()
+            .map(|&(kind, (gas, stack))| {
+                compiler.gas_metering(gas);
+                unsafe { compiler.stack_bound_checks(stack) };
+                let sym = format!("{name}/{kind}");
+                (
+                    kind,
+                    compiler
+                        .translate(&sym, bytecode_raw.original_byte_slice(), SPEC_ID)
+                        .expect(kind),
+                )
+            })
+            .collect();
+        for &(kind, fn_id) in &jit_ids {
+            let jit = unsafe { compiler.jit_function(fn_id) }.expect(kind);
+            g.bench_function(format!("{name}/rt/jit/{kind}"), |b| {
+                b.iter_batched_ref(
+                    || {
+                        let mut stack = EvmStack::new();
+                        for (i, input) in def.stack_input.iter().enumerate() {
+                            stack.set(i, (*input).into());
+                        }
+                        (new_interpreter(), stack)
+                    },
+                    |(interpreter, stack)| {
+                        let mut stack_len = def.stack_input.len();
+                        let mut ecx = EvmContext::from_interpreter(interpreter, &mut host);
+                        unsafe { jit.call(Some(stack), Some(&mut stack_len), &mut ecx) }
+                    },
+                    BatchSize::SmallInput,
+                )
+            });
+        }
     }
-    let jit_ids: Vec<_> = jit_variants
-        .iter()
-        .map(|&(kind, (gas, stack))| {
-            compiler.gas_metering(gas);
-            unsafe { compiler.stack_bound_checks(stack) };
-            let sym = format!("{name}/{kind}");
-            (
-                kind,
-                compiler.translate(&sym, bytecode_raw.original_byte_slice(), SPEC_ID).expect(kind),
-            )
-        })
-        .collect();
-    for &(kind, fn_id) in &jit_ids {
-        let jit = unsafe { compiler.jit_function(fn_id) }.expect(kind);
-        g.bench_function(format!("{name}/rt/jit/{kind}"), |b| {
-            b.iter_batched_ref(
-                || {
-                    let mut stack = EvmStack::new();
-                    for (i, input) in def.stack_input.iter().enumerate() {
-                        stack.set(i, (*input).into());
-                    }
-                    (new_interpreter(), stack)
-                },
-                |(interpreter, stack)| {
-                    let mut stack_len = def.stack_input.len();
-                    let mut ecx = EvmContext::from_interpreter(interpreter, &mut host);
-                    unsafe { jit.call(Some(stack), Some(&mut stack_len), &mut ecx) }
-                },
+
+    // ── Unified runtime benchmarks ──────────────────────────────────────
+
+    if prepared.is_runnable() {
+        let tx = prepared.tx().clone();
+
+        let mut interp_evm = prepared.new_interpreter_evm();
+        g.bench_function(format!("{name}/rt/interpreter"), |b| {
+            b.iter_batched(
+                || tx.clone(),
+                |tx| interp_evm.transact_one(tx).unwrap(),
                 BatchSize::SmallInput,
-            )
+            );
+        });
+
+        let mut jit_evm = prepared.new_jit_evm();
+        g.bench_function(format!("{name}/rt/jit"), |b| {
+            b.iter_batched(
+                || tx.clone(),
+                |tx| jit_evm.transact_one(tx).unwrap(),
+                BatchSize::SmallInput,
+            );
         });
     }
-
-    g.bench_function(format!("{name}/rt/interpreter"), |b| {
-        b.iter_batched_ref(
-            || {
-                let mut interpreter = new_interpreter();
-                interpreter.stack.data_mut().extend_from_slice(&def.stack_input);
-                interpreter
-            },
-            |interpreter| interpreter.run_plain(&table, &mut host),
-            BatchSize::SmallInput,
-        )
-    });
 
     g.finish();
 }
