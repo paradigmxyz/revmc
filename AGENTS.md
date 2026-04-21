@@ -46,6 +46,19 @@ RUST_LOG=revmc=debug cargo r -- ...        # only revmc crate logs
 RUST_LOG=revmc::bytecode=trace cargo r --  # trace a specific module
 ```
 
+## Injecting LLVM args
+
+Extra LLVM command-line arguments can be passed via the `REVMC_LLVM_ARGS`
+environment variable (space-separated):
+
+```bash
+REVMC_LLVM_ARGS="-debug-only=isel" cargo r -- run usdc_proxy
+REVMC_LLVM_ARGS="-print-after-all" cargo r -- run usdc_proxy
+```
+
+LLVM args are a one-shot global (`LLVMParseCommandLineOptions`); only the first
+call takes effect.
+
 ## Checking dynamic jump resolution
 
 To see how many jumps are resolved vs unresolved on a real contract:
