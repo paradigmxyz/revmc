@@ -87,12 +87,6 @@ pub(crate) struct RunArgs {
     inspect_stack: bool,
     #[arg(long, default_value = "1000000000")]
     gas_limit: u64,
-
-    /// Extra LLVM command-line arguments (space-separated).
-    ///
-    /// Falls back to `REVMC_LLVM_ARGS` env var if not set.
-    #[arg(long, value_delimiter = ' ', num_args = 1..)]
-    llvm_args: Vec<String>,
 }
 
 impl RunArgs {
@@ -140,10 +134,6 @@ impl RunArgs {
 
         let name = bench_entry.name;
         let is_fixture = bench_entry.is_fixture();
-
-        if !self.llvm_args.is_empty() {
-            revmc::llvm::set_llvm_args(&self.llvm_args);
-        }
 
         // Bytecode-only features: parse, display, dot, aot.
         if !is_fixture {

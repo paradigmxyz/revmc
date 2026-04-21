@@ -1907,25 +1907,6 @@ fn build_pass_pipeline(with_licm: bool) -> String {
     passes
 }
 
-/// Extra LLVM command-line arguments set via [`set_llvm_args`].
-static LLVM_ARGS: OnceLock<Vec<String>> = OnceLock::new();
-
-/// Sets extra LLVM command-line arguments that will be forwarded to
-/// `LLVMParseCommandLineOptions` during backend initialization.
-///
-/// Must be called **before** the first [`EvmLlvmBackend`] is created;
-/// later calls are silently ignored (LLVM args are a one-shot global).
-///
-/// If this is never called, the `REVMC_LLVM_ARGS` environment variable
-/// is consulted instead (space-separated).
-///
-/// ```no_run
-/// revmc_llvm::set_llvm_args(["-x86-asm-syntax=att", "-debug-only=isel"]);
-/// ```
-pub fn set_llvm_args(args: impl IntoIterator<Item = impl Into<String>>) {
-    let _ = LLVM_ARGS.set(args.into_iter().map(Into::into).collect());
-}
-
 fn init() -> Result<()> {
     let mut init_result = Ok(());
     static INIT: Once = Once::new();
@@ -1948,15 +1929,12 @@ fn init_() -> Result<()> {
         install_fatal_error_handler(report_fatal_error);
     }
 
-    // Collect extra LLVM args: prefer `set_llvm_args`, fall back to `REVMC_LLVM_ARGS` env var.
-    let extra: Vec<CString>;
-    if let Some(api_args) = LLVM_ARGS.get() {
-        extra = api_args.iter().filter_map(|s| CString::new(s.as_str()).ok()).collect();
-    } else if let Ok(env) = std::env::var("REVMC_LLVM_ARGS") {
-        extra = env.split_whitespace().filter_map(|s| CString::new(s).ok()).collect();
-    } else {
-        extra = Vec::new();
-    }
+    // Collect extra LLVM args from `REVMC_LLVM_ARGS` env var (space-separated).
+    let extra: Vec<CString> = std::env::var("REVMC_LLVM_ARGS")
+        .ok()
+        .iter()
+        .flat_map(|s| s.split_whitespace().filter_map(|s| CString::new(s).ok()).collect::<Vec<_>>())
+        .collect();
 
     // The first arg is only used in `-help` output AFAICT.
     let mut args = vec![c"revmc-llvm".as_ptr(), c"-x86-asm-syntax=intel".as_ptr()];
