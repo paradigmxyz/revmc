@@ -49,7 +49,7 @@ pub(crate) fn load_account<'a>(
     address: Address,
     load_code: bool,
 ) -> Result<AccountInfoLoad<'a>, BuiltinError> {
-    let cold_load_gas = ecx.host.gas_params().cold_account_additional_cost();
+    let cold_load_gas = ecx.gas_params.cold_account_additional_cost();
     let skip_cold_load = ecx.gas.remaining() < cold_load_gas;
     let account = ecx.host.load_account_info_skip_cold_load(address, load_code, skip_cold_load)?;
     if account.is_cold {
@@ -74,14 +74,8 @@ pub(crate) unsafe fn read_words_rev<'a, const N: usize>(sp: *mut EvmWord) -> &'a
 
 #[inline]
 pub(crate) fn ensure_memory(ecx: &mut EvmContext<'_>, offset: usize, len: usize) -> BuiltinResult {
-    revm_interpreter::interpreter::resize_memory(
-        ecx.gas,
-        ecx.memory,
-        ecx.host.gas_params(),
-        offset,
-        len,
-    )
-    .map_err(Into::into)
+    revm_interpreter::interpreter::resize_memory(ecx.gas, ecx.memory, &ecx.gas_params, offset, len)
+        .map_err(Into::into)
 }
 
 pub(crate) unsafe fn copy_operation(
@@ -91,7 +85,7 @@ pub(crate) unsafe fn copy_operation(
 ) -> BuiltinResult {
     let len = try_into_usize!(len);
     if len != 0 {
-        gas!(ecx, ecx.host.gas_params().copy_cost(len));
+        gas!(ecx, ecx.gas_params.copy_cost(len));
         let memory_offset = try_into_usize!(memory_offset);
         ensure_memory(ecx, memory_offset, len)?;
         let data_offset = data_offset.to_u256();
