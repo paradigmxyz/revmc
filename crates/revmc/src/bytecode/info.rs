@@ -1,6 +1,8 @@
 use revm_bytecode::opcode as op;
 use revm_interpreter::{
-    host::DummyHost, instructions::instruction_table_gas_changes_spec, interpreter::EthInterpreter,
+    host::DummyHost,
+    instructions::{self, Instruction, gas},
+    interpreter::EthInterpreter,
 };
 use revm_primitives::hardfork::SpecId;
 
@@ -53,43 +55,42 @@ impl OpcodeInfo {
 
     /// Sets the unknown flag.
     #[inline]
-    pub fn set_unknown(&mut self) {
+    pub const fn set_unknown(&mut self) {
         self.0 = Self::UNKNOWN;
     }
 
     /// Sets the dynamic flag.
     #[inline]
-    pub fn set_dynamic(&mut self) {
+    pub const fn set_dynamic(&mut self) {
         self.0 |= Self::DYNAMIC;
     }
 
     /// Sets the disabled flag.
     #[inline]
-    pub fn set_disabled(&mut self) {
+    pub const fn set_disabled(&mut self) {
         self.0 |= Self::DISABLED;
     }
 
     /// Sets the gas cost.
     #[inline]
-    pub fn set_gas(&mut self, gas: u16) {
+    pub const fn set_gas(&mut self, gas: u16) {
         self.0 = (self.0 & !Self::MASK) | (gas as u32);
     }
 }
 
 /// Returns the static info map for the given `SpecId`.
-pub fn op_info_map(spec_id: SpecId) -> &'static [OpcodeInfo; 256] {
-    use std::sync::OnceLock;
-    static MAPS: OnceLock<[[OpcodeInfo; 256]; 32]> = OnceLock::new();
-    let maps = MAPS.get_or_init(|| {
-        let mut maps = [[OpcodeInfo(OpcodeInfo::UNKNOWN); 256]; 32];
-        for (i, map) in maps.iter_mut().enumerate() {
-            if let Ok(spec) = SpecId::try_from(i as u8) {
-                *map = make_map(spec);
-            }
+pub const fn op_info_map(spec_id: SpecId) -> &'static [OpcodeInfo; 256] {
+    const SPEC_COUNT: usize = SpecId::AMSTERDAM as usize + 1;
+    static MAPS: [[OpcodeInfo; 256]; SPEC_COUNT] = {
+        let mut maps = [[OpcodeInfo(OpcodeInfo::UNKNOWN); 256]; SPEC_COUNT];
+        let mut i = 0;
+        while i < SPEC_COUNT {
+            maps[i] = make_map(unsafe { core::mem::transmute::<u8, SpecId>(i as u8) });
+            i += 1;
         }
         maps
-    });
-    &maps[spec_id as usize]
+    };
+    &MAPS[spec_id as usize]
 }
 
 /// Opcodes with a dynamic gas component that also have a base (static) cost deducted upfront.
@@ -155,39 +156,85 @@ const SPEC_GATED_OPCODES: &[(u8, SpecId)] = &[
 /// Opcodes present in the upstream instruction table but not supported by revmc (e.g. EOF-only).
 const UNSUPPORTED_OPCODES: &[u8] = &[];
 
-fn make_map(spec_id: SpecId) -> [OpcodeInfo; 256] {
-    let table = instruction_table_gas_changes_spec::<EthInterpreter, DummyHost>(spec_id);
+const fn contains(haystack: &[u8], needle: u8) -> bool {
+    let mut i = 0;
+    while i < haystack.len() {
+        if haystack[i] == needle {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
 
+/// Applies spec-specific gas changes on top of the base instruction table.
+///
+/// Replicates `instruction_table_gas_changes_spec` in const context.
+const fn spec_static_gas(
+    table: &[Instruction<EthInterpreter, DummyHost>; 256],
+    op: u8,
+    spec_id: SpecId,
+) -> u64 {
+    let base = table[op as usize].static_gas();
+
+    match op {
+        op::SLOAD if spec_id.is_enabled_in(SpecId::BERLIN) => gas::WARM_STORAGE_READ_COST,
+        op::SLOAD if spec_id.is_enabled_in(SpecId::ISTANBUL) => gas::ISTANBUL_SLOAD_GAS,
+        op::SLOAD if spec_id.is_enabled_in(SpecId::TANGERINE) => 200,
+        op::BALANCE if spec_id.is_enabled_in(SpecId::BERLIN) => gas::WARM_STORAGE_READ_COST,
+        op::BALANCE if spec_id.is_enabled_in(SpecId::ISTANBUL) => 700,
+        op::BALANCE if spec_id.is_enabled_in(SpecId::TANGERINE) => 400,
+        op::EXTCODESIZE if spec_id.is_enabled_in(SpecId::BERLIN) => gas::WARM_STORAGE_READ_COST,
+        op::EXTCODESIZE if spec_id.is_enabled_in(SpecId::TANGERINE) => 700,
+        op::EXTCODECOPY if spec_id.is_enabled_in(SpecId::BERLIN) => gas::WARM_STORAGE_READ_COST,
+        op::EXTCODECOPY if spec_id.is_enabled_in(SpecId::TANGERINE) => 700,
+        op::EXTCODEHASH if spec_id.is_enabled_in(SpecId::BERLIN) => gas::WARM_STORAGE_READ_COST,
+        op::EXTCODEHASH if spec_id.is_enabled_in(SpecId::ISTANBUL) => 700,
+        op::CALL | op::CALLCODE if spec_id.is_enabled_in(SpecId::BERLIN) => {
+            gas::WARM_STORAGE_READ_COST
+        }
+        op::CALL | op::CALLCODE if spec_id.is_enabled_in(SpecId::TANGERINE) => 700,
+        op::DELEGATECALL | op::STATICCALL if spec_id.is_enabled_in(SpecId::BERLIN) => {
+            gas::WARM_STORAGE_READ_COST
+        }
+        op::DELEGATECALL | op::STATICCALL if spec_id.is_enabled_in(SpecId::TANGERINE) => 700,
+        op::SELFDESTRUCT if spec_id.is_enabled_in(SpecId::TANGERINE) => 5000,
+        _ => base,
+    }
+}
+
+const fn make_map(spec_id: SpecId) -> [OpcodeInfo; 256] {
+    let table = instructions::instruction_table::<EthInterpreter, DummyHost>();
     let mut map = [OpcodeInfo(OpcodeInfo::UNKNOWN); 256];
 
-    for i in 0..256u16 {
+    let mut i = 0u16;
+    while i < 256 {
         let op = i as u8;
 
         // Skip opcodes not defined in revm's opcode table.
         if revm_bytecode::opcode::OpCode::new(op).is_none() {
+            i += 1;
             continue;
         }
 
         // Mark opcodes not supported by revmc (e.g. EOF-only) as disabled rather than
         // unknown, so they return `NotActivated` instead of `OpcodeNotFound` at runtime.
-        if UNSUPPORTED_OPCODES.contains(&op) {
+        if contains(UNSUPPORTED_OPCODES, op) {
             map[op as usize].set_disabled();
+            i += 1;
             continue;
         }
 
-        let is_fully_dynamic = FULLY_DYNAMIC.contains(&op);
-        let is_dynamic_with_base = DYNAMIC_WITH_BASE_GAS.contains(&op);
+        let is_fully_dynamic = contains(FULLY_DYNAMIC, op);
+        let is_dynamic_with_base = contains(DYNAMIC_WITH_BASE_GAS, op);
 
         // Fully dynamic opcodes have their entire gas cost handled in builtins.
         let gas = if is_fully_dynamic {
             0u16
         } else {
-            let static_gas = table[op as usize].static_gas();
-            assert!(
-                static_gas <= OpcodeInfo::MASK as u64,
-                "static gas for opcode 0x{op:02X} exceeds OpcodeInfo capacity: {static_gas}"
-            );
-            static_gas as u16
+            let sg = spec_static_gas(&table, op, spec_id);
+            assert!(sg <= OpcodeInfo::MASK as u64, "static gas exceeds OpcodeInfo capacity");
+            sg as u16
         };
 
         let mut info = OpcodeInfo::new(gas);
@@ -197,13 +244,17 @@ fn make_map(spec_id: SpecId) -> [OpcodeInfo; 256] {
         }
 
         map[op as usize] = info;
+        i += 1;
     }
 
     // Apply spec-gating: mark opcodes as disabled if the current spec is before their introduction.
-    for &(op, required_spec) in SPEC_GATED_OPCODES {
+    let mut j = 0;
+    while j < SPEC_GATED_OPCODES.len() {
+        let (op, required_spec) = SPEC_GATED_OPCODES[j];
         if (spec_id as u8) < (required_spec as u8) {
             map[op as usize].set_disabled();
         }
+        j += 1;
     }
 
     map
