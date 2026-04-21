@@ -1937,9 +1937,19 @@ fn init_() -> Result<()> {
         .collect();
 
     // The first arg is only used in `-help` output AFAICT.
-    let mut args = vec![c"revmc-llvm".as_ptr(), c"-x86-asm-syntax=intel".as_ptr()];
+    let mut args = vec![
+        c"revmc-llvm".as_ptr(),
+        c"-x86-asm-syntax=intel".as_ptr(),
+        // CodeGenPrepare's memory optimization has a pathological interaction with our IR shape:
+        // repeated stores to the same `gas_remaining` pointer in a huge function cause
+        // MemoryDependenceResults::getNonLocalPointerDependency to do superlinear work.
+        // Mark functions with ≥1000 BBs as "huge" to skip the expensive CGP memory opts,
+        // which produce identical codegen at that scale. Small functions still benefit from
+        // CGP's address sinking and branch optimizations.
+        c"--cgpp-huge-func=1000".as_ptr(),
+    ];
     args.extend(extra.iter().map(|s| s.as_ptr()));
-    if args.len() > 2 {
+    if args.len() > 3 {
         debug!(extra = ?&extra, "passing extra LLVM args");
     }
     unsafe {
