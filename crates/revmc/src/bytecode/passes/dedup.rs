@@ -58,11 +58,10 @@ impl<'a> Bytecode<'a> {
             if deduped == 0 {
                 break;
             }
-            // Compress redirect chains so that earlier redirects (e.g. t2 -> t1) are
-            // updated when their target gets deduped in a later round (t1 -> t0).
+            // Compress redirect chains so that earlier redirects (e.g. A→B) are
+            // updated when their target gets deduped in a later round (B→C).
             // Without this, rebuild_cfg resolves edges only one hop, leaving stale
-            // intermediate targets in DedupKey.succs (preventing valid merges) and
-            // in translate.rs inst_entries (causing InvalidJump on valid bytecode).
+            // intermediate targets.
             for inst in self.redirects.keys().copied().collect::<Vec<_>>() {
                 let mut target = self.redirects[&inst];
                 let original = target;
@@ -448,7 +447,8 @@ mod tests {
         bytecode.config = AnalysisConfig::DEDUP;
         bytecode.analyze().unwrap();
 
-        assert_eq!(bytecode.redirects.len(), 13);
+        assert!(!bytecode.has_dynamic_jumps());
+        assert_eq!(bytecode.redirects.len(), 20);
     }
 
     #[test]

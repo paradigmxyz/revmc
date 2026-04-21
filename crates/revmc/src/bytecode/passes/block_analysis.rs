@@ -28,13 +28,18 @@
 //! a transitive predecessor analysis invalidates suspect resolutions that may be based on
 //! incomplete information, ensuring that only sound jump targets are reported as resolved.
 
-use super::StackSection;
-use crate::bytecode::{Bytecode, Inst, InstFlags, Interner, U256Idx};
+use super::{StackSection, pcr::PcrHint};
+use crate::{
+    FxHashMap,
+    bytecode::{
+        Bytecode, Inst, InstFlags, Interner, U256Idx,
+        passes::const_fold::{const_fold_gas, try_const_fold},
+    },
+};
 use bitvec::vec::BitVec;
 use either::Either;
 use oxc_index::{IndexVec, index_vec};
 use revm_bytecode::opcode as op;
-use revm_primitives::U256;
 use smallvec::SmallVec;
 use std::{cmp::Ordering, collections::VecDeque, ops::Range};
 
@@ -91,12 +96,12 @@ impl AbsValue {
 }
 
 /// Constant-set interner used by the abstract interpreter.
-struct ConstSetInterner {
+pub(super) struct ConstSetInterner {
     interner: Interner<ConstSetIdx, Box<[U256Idx]>>,
 }
 
 impl ConstSetInterner {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self { interner: Interner::new() }
     }
 
@@ -290,7 +295,7 @@ impl BlockData {
 
 /// Resolved jump target after fixpoint.
 #[derive(Clone, Debug)]
-enum JumpTarget {
+pub(super) enum JumpTarget {
     /// Not yet observed.
     Bottom,
     /// Known constant target instruction index.
@@ -357,8 +362,10 @@ impl Bytecode<'_> {
 
             let Some(&operand) = self.snapshots.inputs[term_inst].last() else { continue };
             debug_assert!(!matches!(operand, AbsValue::ConstSet(_)));
+            if operand == AbsValue::Top {
+                continue;
+            }
             let target = self.resolve_jump_operand(operand, &empty_sets);
-            let JumpTarget::Const(target_inst) = target else { continue };
 
             // Log non-adjacent resolutions (not simple PUSH+JUMP).
             if trace_logs
@@ -371,7 +378,7 @@ impl Bytecode<'_> {
                 })
                 && !is_adjacent
             {
-                trace!(%term_inst, %target_inst, pc = self.insts[term_inst].pc, "resolved non-adjacent jump");
+                trace!(%term_inst, ?target, pc = self.insts[term_inst].pc, "resolved non-adjacent jump");
             }
 
             resolved.push((term_inst, target));
@@ -385,10 +392,18 @@ impl Bytecode<'_> {
     /// Runs abstract stack interpretation to resolve additional jump targets.
     ///
     /// Also computes and stores per-instruction stack snapshots for constant propagation.
+    /// Internally runs the private call/return detection pass and feeds the results
+    /// as seed edges into the fixpoint.
+    ///
+    /// When the first round resolves jumps but dynamic jumps remain, rebuilds the CFG
+    /// and runs one additional PCR+fixpoint round. The rebuilt CFG incorporates newly
+    /// resolved edges, which can reduce opaque taint and enable further PCR resolution.
     #[instrument(name = "ba", level = "debug", skip_all)]
     pub(crate) fn block_analysis(&mut self, local_snapshots: &Snapshots) {
         self.init_snapshots();
-        let (resolved, count) = self.run_abstract_interp(local_snapshots);
+
+        let pcr_hints = self.compute_pcr_hints();
+        let (resolved, count) = self.run_abstract_interp(&pcr_hints, local_snapshots);
 
         if count > 0 {
             let newly_resolved = self.commit_resolved_jumps(&resolved);
@@ -396,6 +411,26 @@ impl Bytecode<'_> {
         }
 
         self.recompute_has_dynamic_jumps();
+
+        // Second round: if the first round resolved jumps but dynamic jumps remain,
+        // rebuild the CFG (incorporating new edges) and re-run PCR+fixpoint. The
+        // updated CFG may eliminate `has_unmodeled_jump`, reducing opaque taint and
+        // unlocking further resolutions.
+        if count > 0 && self.has_dynamic_jumps {
+            debug!("re-running with updated CFG");
+            self.rebuild_cfg();
+            self.init_snapshots();
+
+            let pcr_hints = self.compute_pcr_hints();
+            let (resolved, count) = self.run_abstract_interp(&pcr_hints, local_snapshots);
+
+            if count > 0 {
+                let newly_resolved = self.commit_resolved_jumps(&resolved);
+                debug!(newly_resolved, "resolved jumps (round 2)");
+            }
+
+            self.recompute_has_dynamic_jumps();
+        }
     }
 
     /// Recomputes the `has_dynamic_jumps` flag based on the current instruction set.
@@ -412,10 +447,10 @@ impl Bytecode<'_> {
     /// Commits resolved jump targets by setting flags and data on the corresponding instructions.
     ///
     /// Returns the number of newly resolved jumps.
-    fn commit_resolved_jumps(&mut self, resolved: &[(Inst, JumpTarget)]) -> u32 {
+    fn commit_resolved_jumps(&mut self, resolved: &[(Inst, JumpTarget)]) -> usize {
         let has_top_jump = resolved.iter().any(|(_, t)| matches!(t, JumpTarget::Top));
 
-        let mut newly_resolved = 0u32;
+        let mut newly_resolved = 0usize;
         for &(jump_inst, ref target) in resolved {
             // Skip if already resolved by block_analysis_local.
             if self.insts[jump_inst].flags.contains(InstFlags::STATIC_JUMP) {
@@ -595,12 +630,17 @@ impl Bytecode<'_> {
         assert_ne!(cfg.blocks.len(), 0, "should always build at least one block");
     }
 
-    /// Run worklist-based abstract interpretation over the CFG.
+    /// Runs worklist-based abstract interpretation over the CFG.
     ///
     /// Returns a list of (jump_inst, resolved_target) pairs and the count of resolvable jumps.
     /// Stack snapshots are recorded into `self.snapshots` during the fixpoint.
+    ///
+    /// `pcr_hints` are private-call/return edges discovered by the PCR pass. They are seeded
+    /// into the fixpoint as discovered edges so the abstract interpreter can propagate states
+    /// along them without requiring them to be pre-committed.
     fn run_abstract_interp(
         &mut self,
+        pcr_hints: &[PcrHint],
         local_snapshots: &Snapshots,
     ) -> (Vec<(Inst, JumpTarget)>, usize) {
         let num_blocks = self.cfg.blocks.len();
@@ -619,7 +659,8 @@ impl Bytecode<'_> {
         }
 
         let mut const_sets = ConstSetInterner::new();
-        let (discovered_edges, converged) = self.run_fixpoint(&mut block_states, &mut const_sets);
+        let (discovered_edges, converged) =
+            self.run_fixpoint(&mut block_states, &mut const_sets, pcr_hints);
 
         // On non-convergence, all fixpoint-derived snapshots are potentially stale.
         // Restore the safe block-local snapshots computed by `block_analysis_local`.
@@ -627,11 +668,16 @@ impl Bytecode<'_> {
             self.snapshots.restore_from(self.insts.indices(), local_snapshots);
         }
 
+        // Build a lookup from PCR hints for quick access.
+        let pcr_map: FxHashMap<Inst, &PcrHint> =
+            pcr_hints.iter().map(|h| (h.jump_inst, h)).collect();
+
         // After convergence, resolve each dynamic jump from its snapshot operand.
+        // If the fixpoint couldn't resolve a jump but PCR has a hint, use the hint.
         let mut jump_targets: Vec<(Inst, JumpTarget)> = Vec::new();
         let mut has_top_jump = false;
         for &jump_inst in &jump_insts {
-            let target = match self.snapshots.inputs[jump_inst].last() {
+            let mut target = match self.snapshots.inputs[jump_inst].last() {
                 Some(&operand) => self.resolve_jump_operand(operand, &const_sets),
                 None => {
                     // No snapshot means the block was never interpreted (unreachable).
@@ -639,6 +685,20 @@ impl Bytecode<'_> {
                     JumpTarget::Bottom
                 }
             };
+
+            // If the fixpoint left this jump unresolved, try the PCR hint.
+            // Only for Top (reachable but unknown); Bottom means unreachable.
+            if matches!(target, JumpTarget::Top)
+                && let Some(&hint) = pcr_map.get(&jump_inst)
+            {
+                target = if hint.targets.len() == 1 {
+                    JumpTarget::Const(hint.targets[0])
+                } else {
+                    JumpTarget::Multi(hint.targets.clone())
+                };
+                trace!(%jump_inst, ?hint.targets, "resolved via PCR hint");
+            }
+
             if matches!(target, JumpTarget::Top) {
                 has_top_jump = true;
             }
@@ -648,6 +708,14 @@ impl Bytecode<'_> {
         // Invalidate resolutions that may be unsound due to incomplete analysis.
         // When the fixpoint didn't converge, partially-discovered ConstSets may be
         // incomplete, so we must conservatively invalidate them too.
+        //
+        // NOTE: even when all remaining Top jumps are private returns, global
+        // invalidation is still required because opaque-tainted returns can land on
+        // any JUMPDEST with an unknown stack state. Skipping invalidation for
+        // private-return-only Top jumps is empirically unsound (curve_stableswap).
+        // A narrower strategy would require every remaining Top jump to have a
+        // proven complete target superset, which needs more precise PCR taint
+        // analysis.
         if has_top_jump || !converged {
             self.invalidate_suspect_jumps(
                 &mut jump_targets,
@@ -668,7 +736,11 @@ impl Bytecode<'_> {
     }
 
     /// Resolves a jump target from the snapshot operand recorded during the fixpoint.
-    fn resolve_jump_operand(&self, operand: AbsValue, const_sets: &ConstSetInterner) -> JumpTarget {
+    pub(super) fn resolve_jump_operand(
+        &self,
+        operand: AbsValue,
+        const_sets: &ConstSetInterner,
+    ) -> JumpTarget {
         match operand {
             AbsValue::Const(idx) => {
                 let val = *self.u256_interner.borrow().get(idx);
@@ -779,6 +851,7 @@ impl Bytecode<'_> {
             }
         }
 
+        let mut n_invalidated = 0usize;
         for (inst, target) in jump_targets.iter_mut() {
             if !matches!(target, JumpTarget::Const(_) | JumpTarget::Multi(_) | JumpTarget::Invalid)
             {
@@ -787,8 +860,13 @@ impl Bytecode<'_> {
             if let Some(bid) = self.cfg.inst_to_block[*inst]
                 && suspect[bid.index()]
             {
+                trace!(%bid, jump_inst = %*inst, "invalidated suspect jump");
                 *target = JumpTarget::Top;
+                n_invalidated += 1;
             }
+        }
+        if n_invalidated > 0 {
+            debug!(n_invalidated, "invalidated suspect jumps");
         }
 
         // Restore block-local snapshots in suspect blocks: the fixpoint may have recorded
@@ -806,23 +884,41 @@ impl Bytecode<'_> {
     /// Run a worklist-based fixpoint to compute abstract block states.
     ///
     /// Returns `(discovered_edges, converged)`.
+    ///
+    /// `pcr_hints` provides pre-computed private-call/return edges that are seeded into the
+    /// discovered-edge maps before the fixpoint begins.
     fn run_fixpoint(
         &mut self,
         block_states: &mut IndexVec<Block, BlockState>,
         const_sets: &mut ConstSetInterner,
+        pcr_hints: &[PcrHint],
     ) -> (IndexVec<Block, SmallVec<[Block; 4]>>, bool) {
         let num_blocks = self.cfg.blocks.len();
         let mut worklist = Worklist::new(num_blocks);
         worklist.push(Block::from_usize(0));
 
-        // Discovered dynamic-jump target edges per block.
+        // PCR hint edges: used for state propagation but excluded from
+        // invalidation (the PCR pass has its own soundness guarantees).
+        let mut pcr_edges: IndexVec<Block, SmallVec<[Block; 4]>> =
+            IndexVec::from_vec(vec![SmallVec::new(); num_blocks]);
+        for hint in pcr_hints {
+            let Some(src_block) = self.cfg.inst_to_block[hint.jump_inst] else { continue };
+            for &target_inst in &hint.targets {
+                let Some(tgt_block) = self.cfg.inst_to_block[target_inst] else { continue };
+                if !pcr_edges[src_block].contains(&tgt_block) {
+                    pcr_edges[src_block].push(tgt_block);
+                }
+            }
+        }
+
+        // Discovered dynamic-jump target edges per block (fixpoint-discovered only).
         let mut discovered: IndexVec<Block, SmallVec<[Block; 4]>> =
             IndexVec::from_vec(vec![SmallVec::new(); num_blocks]);
         // Reverse map: discovered predecessors per block.
         let mut disc_preds: IndexVec<Block, SmallVec<[Block; 4]>> =
             IndexVec::from_vec(vec![SmallVec::new(); num_blocks]);
 
-        let max_iterations = num_blocks * 8;
+        let max_iterations = num_blocks * 64;
         let mut iterations = 0;
         let mut converged = true;
 
@@ -865,8 +961,8 @@ impl Bytecode<'_> {
                 );
             }
 
-            // Propagate to static CFG successors and discovered dynamic-jump targets.
-            for &succ in block.succs.iter().chain(&discovered[bid]) {
+            // Propagate to static CFG successors, PCR edges, and fixpoint-discovered edges.
+            for &succ in block.succs.iter().chain(&pcr_edges[bid]).chain(&discovered[bid]) {
                 if block_states[succ].join(&stack_buf, const_sets) {
                     worklist.push(succ);
                 }
@@ -886,7 +982,7 @@ impl Bytecode<'_> {
     ///
     /// The caller must pre-fill `stack` with the input state; on return it contains the output.
     /// Records per-instruction operand snapshots into `self.snapshots`.
-    fn interpret_block(
+    pub(super) fn interpret_block(
         &mut self,
         insts: impl IntoIterator<Item = Inst>,
         stack: &mut Vec<AbsValue>,
@@ -909,133 +1005,40 @@ impl Bytecode<'_> {
                 snap.extend_from_slice(&stack[start..]);
             }
 
-            match inst.opcode {
-                op::PUSH0 => {
-                    stack.push(AbsValue::Const(self.intern_u256(U256::ZERO)));
+            if let Some(ok) = self.apply_stack_shuffle(inst, stack, AbsValue::Top) {
+                if !ok {
+                    return false;
                 }
-                op::PUSH1..=op::PUSH32 => {
-                    let value = self.get_push_value(inst);
-                    stack.push(AbsValue::Const(self.intern_u256(value)));
+            } else if matches!(inst.opcode, op::PUSH0..=op::PUSH32) {
+                let value = self.get_push_value(inst);
+                stack.push(AbsValue::Const(self.intern_u256(value)));
+            } else {
+                if stack.len() < inp {
+                    return false;
                 }
-                op::POP => {
-                    if stack.pop().is_none() {
-                        return false;
-                    }
-                }
-                op::DUP1..=op::DUP16 => {
-                    let depth = (inst.opcode - op::DUP1 + 1) as usize;
-                    if stack.len() < depth {
-                        return false;
-                    }
-                    stack.push(stack[stack.len() - depth]);
-                }
-                op::SWAP1..=op::SWAP16 => {
-                    let depth = (inst.opcode - op::SWAP1 + 1) as usize;
-                    let len = stack.len();
-                    if len < depth + 1 {
-                        return false;
-                    }
-                    stack.swap(len - 1, len - 1 - depth);
-                }
-                op::DUPN => {
-                    let depth = crate::decode_single(self.get_u8_imm(inst));
-                    match depth {
-                        Some(n) => {
-                            let n = n as usize;
-                            if stack.len() < n {
-                                // Depth exceeds the tracked abstract stack (truncated by
-                                // MAX_ABS_STACK_DEPTH). The slot is reachable at runtime
-                                // but unknown abstractly.
-                                stack.push(AbsValue::Top);
-                            } else {
-                                stack.push(stack[stack.len() - n]);
-                            }
-                        }
-                        None => return false,
-                    }
-                }
-                op::SWAPN => {
-                    let depth = crate::decode_single(self.get_u8_imm(inst));
-                    match depth {
-                        Some(n) => {
-                            let n = n as usize;
-                            let len = stack.len();
-                            if len < n + 1 {
-                                // Deep slot beyond tracked abstract stack; TOS becomes Top
-                                // and the deep slot (not tracked) is unchanged.
-                                if let Some(tos) = stack.last_mut() {
-                                    *tos = AbsValue::Top;
-                                }
-                            } else {
-                                stack.swap(len - 1, len - 1 - n);
-                            }
-                        }
-                        None => return false,
-                    }
-                }
-                op::EXCHANGE => {
-                    let pair = crate::decode_pair(self.get_u8_imm(inst));
-                    match pair {
-                        Some((n, m)) => {
-                            let (n, m) = (n as usize, m as usize);
-                            let len = stack.len();
-                            if len < m + 1 {
-                                // Deep slot beyond tracked abstract stack; the shallower
-                                // slot (if tracked) becomes Top.
-                                if len > n {
-                                    stack[len - 1 - n] = AbsValue::Top;
-                                }
-                            } else {
-                                stack.swap(len - 1 - n, len - 1 - m);
-                            }
-                        }
-                        None => return false,
-                    }
-                }
-                _ => {
-                    if stack.len() < inp {
-                        return false;
-                    }
 
-                    // Try constant folding for common arithmetic, respecting the gas budget.
-                    let result = if out > 0 && self.compiler_gas_used < self.compiler_gas_limit {
-                        let inputs_slice = &stack[stack.len() - inp..];
-                        let mut interner = self.u256_interner.borrow_mut();
+                // Try constant folding for common arithmetic, respecting the gas budget.
+                let result = if out > 0
+                    && !self.out_of_compiler_gas()
+                    && let inputs_slice = &stack[stack.len() - inp..]
+                    && let mut interner = self.u256_interner.borrow_mut()
+                    && let Some(cost) = const_fold_gas(inst.opcode, inputs_slice, &interner)
+                    && pay_compiler_gas(&mut self.compiler_gas_used, self.compiler_gas_limit, cost)
+                {
+                    try_const_fold(inst, inputs_slice, &mut interner, self.code.len())
+                } else {
+                    None
+                };
 
-                        // Check gas cost before doing the actual fold.
-                        let gas =
-                            super::const_fold::const_fold_gas(inst.opcode, inputs_slice, &interner);
-                        if let Some(cost) = gas
-                            && self.compiler_gas_used.saturating_add(cost)
-                                <= self.compiler_gas_limit
-                        {
-                            let folded = super::const_fold::try_const_fold(
-                                inst,
-                                inputs_slice,
-                                &mut interner,
-                                self.code.len(),
-                            );
-                            if folded.is_some() {
-                                self.compiler_gas_used += cost;
-                            }
-                            folded
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    };
+                // Pop inputs.
+                stack.truncate(stack.len() - inp);
 
-                    // Pop inputs.
-                    stack.truncate(stack.len() - inp);
-
-                    // Push outputs.
-                    if let Some(folded) = result {
-                        debug_assert_eq!(out, 1);
-                        stack.push(folded);
-                    } else {
-                        stack.resize(stack.len() + out, AbsValue::Top);
-                    }
+                // Push outputs.
+                if let Some(folded) = result {
+                    debug_assert_eq!(out, 1);
+                    stack.push(folded);
+                } else {
+                    stack.resize(stack.len() + out, AbsValue::Top);
                 }
             }
 
@@ -1054,13 +1057,22 @@ impl Bytecode<'_> {
 
         true
     }
+
+    fn out_of_compiler_gas(&self) -> bool {
+        self.compiler_gas_used > self.compiler_gas_limit
+    }
+}
+
+fn pay_compiler_gas(gas: &mut u64, limit: u64, cost: u64) -> bool {
+    *gas = gas.saturating_add(cost);
+    *gas <= limit
 }
 
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
     pub(crate) use crate::bytecode::Inst;
-    use revm_primitives::{hardfork::SpecId, hex};
+    pub(crate) use revm_primitives::{U256, hardfork::SpecId, hex};
 
     pub(crate) fn analyze_hex(hex: &str) -> Bytecode<'static> {
         let code = hex::decode(hex.trim()).unwrap();
@@ -1112,10 +1124,11 @@ pub(crate) mod tests {
 
     #[test]
     fn revert_sub_call_storage_oog() {
+        // PCR resolves all dynamic jumps in this contract (private call/return pattern).
         let bytecode = analyze_hex(
             "60606040526000357c0100000000000000000000000000000000000000000000000000000000900463ffffffff168063b28175c4146046578063c0406226146052575b6000565b3460005760506076565b005b34600057605c6081565b604051808215151515815260200191505060405180910390f35b600c6000819055505b565b600060896076565b600d600181905550600e600281905550600190505b905600a165627a7a723058202a8a75d7d795b5bcb9042fb18b283daa90b999a11ddec892f5487322",
         );
-        assert!(bytecode.has_dynamic_jumps());
+        assert!(!bytecode.has_dynamic_jumps());
     }
 
     #[test]
@@ -1464,12 +1477,17 @@ pub(crate) mod tests {
         ",
         );
 
-        // The wrapper return JUMP (pc=30) remains dynamic because the outer
-        // return address is lost to Top during the top-aligned join.
-        // Because an unresolved Top jump exists, the conservative invalidation
-        // also invalidates the inner return JUMP — any reachable JUMPDEST
-        // (including inner's entry) is suspect.
-        assert!(bytecode.has_dynamic_jumps, "expected dynamic jumps to remain");
+        // The inner return JUMP should resolve to Multi([ret1, ret_w]).
+        let inner_return = bytecode
+            .iter_insts()
+            .find(|(_, d)| d.is_jump() && d.flags.contains(InstFlags::MULTI_JUMP));
+        assert!(inner_return.is_some(), "expected inner return to be multi-target");
+
+        // The wrapper return JUMP (pc=30) was previously unresolvable because
+        // the outer return address was buried below the inner function's frame
+        // and lost during top-aligned joins. The context-sensitive call/return
+        // resolution pass now resolves it via call-string tracking.
+        assert!(!bytecode.has_dynamic_jumps, "expected all jumps to be resolved");
     }
 
     /// Regression test: deep DUPN on Amsterdam must not cause the abstract interpreter to
@@ -2330,8 +2348,8 @@ mod tests_edge_cases {
         // chain into the shared function, which does PUSH1 0x42; SWAP1; JUMP.
         // With enough callers and relays, the fixpoint cap is exceeded before all
         // return addresses are discovered.
-        let k = 15;
-        let b = 31;
+        let k = 200;
+        let b = 200;
         let mut lines = Vec::new();
         lines.push("PUSH %call0".to_string());
         lines.push("JUMP".to_string());
@@ -2362,9 +2380,16 @@ mod tests_edge_cases {
             }
             lines.push("JUMP".to_string());
         }
+        // The shared function uses MLOAD (a non-stack-only op) before the return
+        // jump so the PCR pass does NOT classify it as a private return block.
+        // This ensures the fixpoint must discover the return edges on its own,
+        // and with enough relay blocks it fails to converge.
         lines.push("fn_entry:".to_string());
         lines.push("JUMPDEST".to_string());
         lines.push("PUSH1 0x42".to_string());
+        lines.push("PUSH0".to_string());
+        lines.push("MLOAD".to_string());
+        lines.push("POP".to_string());
         lines.push("SWAP1".to_string());
         lines.push("JUMP".to_string());
 
@@ -2381,6 +2406,140 @@ mod tests_edge_cases {
         assert!(
             bytecode.has_dynamic_jumps,
             "return jump should remain dynamic when fixpoint doesn't converge"
+        );
+    }
+
+    /// Context truncation at MAX_CONTEXT_DEPTH must taint the return block.
+    ///
+    /// Builds a call chain deeper than MAX_CONTEXT_DEPTH where the innermost
+    /// function is shared with a direct caller on a separate path. When the
+    /// context is truncated, the shared function's return block is reached with
+    /// empty context (the oldest caller was evicted), so PCR must suppress the
+    /// hint to avoid emitting an incomplete target set.
+    #[test]
+    #[allow(clippy::vec_init_then_push)]
+    fn pcr_context_truncation_taints_return() {
+        // entry ─JUMPI─> extra_caller ─> shared_fn ─return─> ret_extra
+        //   └─fallthrough─> f0 -> f1 -> ... -> f(depth-1) -> shared_fn ─return─> ...
+        //
+        // The chain path has depth > MAX_CONTEXT_DEPTH, so the context is
+        // truncated before reaching shared_fn. shared_fn's return is then
+        // reached with empty context from that path.
+        let depth = 12; // > MAX_CONTEXT_DEPTH (8)
+        let mut lines = Vec::new();
+
+        // Entry: branch to extra_caller or fallthrough to chain.
+        lines.push("PUSH0".to_string());
+        lines.push("CALLDATALOAD".to_string());
+        lines.push("PUSH %extra_caller".to_string());
+        lines.push("JUMPI".to_string());
+
+        // Fallthrough: call f0.
+        lines.push("PUSH %ret_entry".to_string());
+        lines.push("PUSH %f0".to_string());
+        lines.push("JUMP".to_string());
+        lines.push("ret_entry:".to_string());
+        lines.push("JUMPDEST".to_string());
+        lines.push("POP".to_string());
+        lines.push("STOP".to_string());
+
+        // Chain: f0 calls f1, ..., f(depth-1) calls shared_fn.
+        for i in 0..depth {
+            lines.push(format!("f{i}:"));
+            lines.push("JUMPDEST".to_string());
+            let callee =
+                if i + 1 < depth { format!("f{}", i + 1) } else { "shared_fn".to_string() };
+            lines.push(format!("PUSH %ret_f{i}"));
+            lines.push(format!("PUSH %{callee}"));
+            lines.push("JUMP".to_string());
+            lines.push(format!("ret_f{i}:"));
+            lines.push("JUMPDEST".to_string());
+            lines.push("SWAP1".to_string());
+            lines.push("JUMP".to_string());
+        }
+
+        // Extra direct caller of shared_fn (reachable from entry via JUMPI).
+        lines.push("extra_caller:".to_string());
+        lines.push("JUMPDEST".to_string());
+        lines.push("PUSH %ret_extra".to_string());
+        lines.push("PUSH %shared_fn".to_string());
+        lines.push("JUMP".to_string());
+        lines.push("ret_extra:".to_string());
+        lines.push("JUMPDEST".to_string());
+        lines.push("POP".to_string());
+        lines.push("STOP".to_string());
+
+        // Shared function: push result and return via entry-stack address.
+        lines.push("shared_fn:".to_string());
+        lines.push("JUMPDEST".to_string());
+        lines.push("PUSH1 0x42".to_string());
+        lines.push("SWAP1".to_string());
+        lines.push("JUMP".to_string());
+
+        let asm = lines.join("\n");
+        let bytecode = analyze_asm(&asm);
+
+        // shared_fn's return JUMP must NOT be resolved as a single STATIC_JUMP
+        // because context truncation may have hidden valid callers.
+        let shared_fn_return = bytecode
+            .iter_insts()
+            .rev()
+            .find(|(_, d)| d.is_jump() && !d.flags.contains(InstFlags::DEAD_CODE));
+        let (_, rj) = shared_fn_return.unwrap();
+        assert!(
+            !rj.flags.contains(InstFlags::STATIC_JUMP) || rj.flags.contains(InstFlags::MULTI_JUMP),
+            "context truncation: shared return should not be resolved to a single target"
+        );
+    }
+
+    /// JUMPI where only the condition (not the destination) has Input provenance
+    /// must NOT be classified as a private return.
+    #[test]
+    fn jumpi_condition_input_not_return() {
+        let bytecode = analyze_asm(
+            "
+            ; Call site 1.
+            PUSH %ret1
+            PUSH %fn_entry
+            JUMP
+        ret1:
+            JUMPDEST
+            POP
+            ; Call site 2.
+            PUSH %ret2
+            PUSH %fn_entry
+            JUMP
+        ret2:
+            JUMPDEST
+            POP
+            STOP
+
+            ; Function that uses JUMPI where the CONDITION comes from the entry
+            ; stack (Input provenance) but the DESTINATION is a local constant.
+            ; This must NOT be classified as a private return.
+        fn_entry:
+            JUMPDEST            ; stack: [ret_addr]
+            PUSH %local_target  ; stack: [ret_addr, local_target]
+            SWAP1               ; stack: [local_target, ret_addr]
+            JUMPI               ; pops (dest=local_target, cond=ret_addr)
+            STOP                ; fallthrough
+        local_target:
+            JUMPDEST
+            STOP
+        ",
+        );
+
+        // The JUMPI should be resolved as a static jump to local_target
+        // (not classified as a return). If PCR wrongly checks the condition's
+        // provenance instead of the destination's, it would see Input and
+        // classify this as a return.
+        let fn_jumpi = bytecode
+            .iter_insts()
+            .find(|(_, d)| d.opcode == op::JUMPI && !d.flags.contains(InstFlags::DEAD_CODE));
+        let (_, ji) = fn_jumpi.unwrap();
+        assert!(
+            ji.flags.contains(InstFlags::STATIC_JUMP),
+            "JUMPI with local destination should be resolved as static, not classified as return"
         );
     }
 }
