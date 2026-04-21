@@ -7,7 +7,7 @@ use revmc::{
     EvmCompiler, EvmContext, EvmLlvmBackend, EvmStack, OptimizationLevel,
     primitives::hardfork::SpecId,
 };
-use revmc_cli::{BenchHost, JitHandler, PreparedBench};
+use revmc_cli::{BenchHost, PreparedBench};
 use std::time::Duration;
 
 const SPEC_ID: SpecId = SpecId::OSAKA;
@@ -170,19 +170,17 @@ fn run_bench(
     if prepared.is_runnable() {
         let tx = prepared.tx().clone();
         g.bench_function(format!("{name}/rt/interpreter"), |b| {
-            b.iter_batched(
+            b.iter_batched_ref(
                 || prepared.new_interpreter_evm(),
-                |mut evm| PreparedBench::run_interpreter_with(evm.evm(), tx.clone()),
+                |evm| PreparedBench::run_interpreter_with(evm.evm(), tx.clone()),
                 BatchSize::SmallInput,
             );
         });
 
         g.bench_function(format!("{name}/rt/jit"), |b| {
-            b.iter_batched(
+            b.iter_batched_ref(
                 || prepared.new_jit_evm(),
-                |(mut evm, mut handler): (_, JitHandler)| {
-                    PreparedBench::run_jit_with(evm.evm(), &mut handler)
-                },
+                |(evm, handler)| PreparedBench::run_jit_with(evm.evm(), handler),
                 BatchSize::SmallInput,
             );
         });
