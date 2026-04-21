@@ -2854,6 +2854,7 @@ dependencies = [
  "paste",
  "revm-bytecode",
  "revm-context-interface",
+ "revm-handler",
  "revm-interpreter",
  "revm-primitives",
  "revm-state",

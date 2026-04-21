@@ -1,15 +1,12 @@
 use clap::{Parser, ValueEnum};
 use color_eyre::{Result, eyre::eyre};
 use revm_bytecode::Bytecode;
-use revm_interpreter::{
-    InputsImpl, SharedMemory, instruction_table,
-    interpreter::{EthInterpreter, ExtBytecode},
-};
+use revm_interpreter::{InputsImpl, SharedMemory, interpreter::ExtBytecode};
 use revmc::{
     EvmCompiler, EvmContext, OptimizationLevel, eyre::ensure, primitives::hardfork::SpecId,
     shared_library_path,
 };
-use revmc_cli::{Bench, BenchHost, PreparedFixtureBench, get_benches, read_code};
+use revmc_cli::{Bench, BenchHost, PreparedBench, get_benches, read_code};
 use std::{
     hint::black_box,
     path::{Path, PathBuf},
@@ -81,9 +78,6 @@ pub(crate) struct RunArgs {
     spec_id: SpecIdValueEnum,
     #[arg(long)]
     debug_assertions: bool,
-    /// Disable DWARF debug info emission.
-    #[arg(long)]
-    no_debug_info: bool,
     #[arg(long)]
     no_gas: bool,
     #[arg(long)]
@@ -139,236 +133,181 @@ impl RunArgs {
         };
 
         let name = bench_entry.name;
+        let is_fixture = bench_entry.is_fixture();
 
-        // Handle TxFixture benchmarks separately.
-        if bench_entry.is_fixture() {
-            return self.run_fixture(name, &bench_entry);
-        }
+        // Bytecode-only features: parse, display, dot, aot.
+        if !is_fixture {
+            let Bench { ref bytecode, ref calldata, ref stack_input, .. } = bench_entry;
 
-        let Bench { bytecode, calldata, stack_input, .. } = bench_entry.clone();
-
-        // Build the compiler.
-        let mut compiler = EvmCompiler::new_llvm(self.aot)?;
-        compiler.set_opt_level(self.opt_level);
-        let out_dir = if self.out_dir.is_some() {
-            self.out_dir
-        } else if self.dot.is_some() || self.display || self.parse_only {
-            Some(std::env::temp_dir().join("revmc-cli"))
-        } else {
-            None
-        };
-        compiler.set_dump_to(out_dir);
-        compiler.gas_metering(!self.no_gas);
-        unsafe { compiler.stack_bound_checks(!self.no_len_checks) };
-        compiler.debug_assertions(self.debug_assertions);
-        compiler.set_debug_info(!self.no_debug_info);
-
-        compiler.set_module_name(name);
-        if let Some(dump_dir) = compiler.dump_dir() {
-            eprintln!("Dump directory: {}", dump_dir.display());
-        }
-
-        let calldata: revmc::primitives::Bytes = if let Some(calldata) = self.calldata {
-            revmc::primitives::hex::decode(calldata)?.into()
-        } else {
-            calldata.into()
-        };
-        let gas_limit = self.gas_limit;
-
-        let spec_id = self.spec_id.into();
-
-        let bytecode_raw = Bytecode::new_raw(revmc::primitives::Bytes::copy_from_slice(&bytecode));
-        let bytecode_slice = bytecode_raw.original_byte_slice();
-
-        let mut host = BenchHost::new(spec_id);
-        host.apply_bench(&bench_entry);
-
-        compiler.inspect_stack(self.inspect_stack || !stack_input.is_empty());
-
-        let bytecode = compiler.parse(bytecode_slice.into(), spec_id)?;
-        if self.display || self.parse_only {
-            println!("{name}()\n{bytecode:#}");
-        }
-        if let Some(fmt) = self.dot {
-            let dump_dir = compiler.dump_dir().expect("dump_dir should be set when --dot is used");
-            open_dot(&dump_dir.join("bytecode.dot"), fmt, !self.no_open)?;
-        }
-        if self.parse_only {
-            return Ok(());
-        }
-
-        let f_id = compiler.translate_inner(name, &bytecode)?;
-
-        let mut load = self.load;
-        if self.aot {
-            let out_dir = if let Some(out_dir) = compiler.out_dir() {
-                out_dir.join(&bench_name)
+            let mut compiler = EvmCompiler::new_llvm(self.aot)?;
+            compiler.set_opt_level(self.opt_level);
+            let out_dir = if self.out_dir.is_some() {
+                self.out_dir.clone()
+            } else if self.dot.is_some() || self.display || self.parse_only {
+                Some(std::env::temp_dir().join("revmc-cli"))
             } else {
-                let dir = std::env::temp_dir().join("revmc-cli").join(&bench_name);
-                std::fs::create_dir_all(&dir)?;
-                dir
+                None
             };
+            compiler.set_dump_to(out_dir);
+            compiler.gas_metering(!self.no_gas);
+            unsafe { compiler.stack_bound_checks(!self.no_len_checks) };
+            compiler.debug_assertions(self.debug_assertions);
 
-            // Compile.
-            let obj = out_dir.join("a.o");
-            compiler.write_object_to_file(&obj)?;
-            ensure!(obj.exists(), "Failed to write object file");
-            eprintln!("Compiled object file to {}", obj.display());
-
-            // Link.
-            if !self.no_link {
-                let shared_lib = shared_library_path(&out_dir, "a");
-                let linker = revmc::Linker::new();
-                linker.link(&shared_lib, [obj.to_str().unwrap()])?;
-                ensure!(shared_lib.exists(), "Failed to link object file");
-                eprintln!("Linked shared object file to {}", shared_lib.display());
+            compiler.set_module_name(name);
+            if let Some(dump_dir) = compiler.dump_dir() {
+                eprintln!("Dump directory: {}", dump_dir.display());
             }
 
-            // Fall through to loading the library below if requested.
-            if let Some(load @ None) = &mut load {
-                *load = Some(shared_library_path(&out_dir, "a"));
-            } else {
+            let spec_id: SpecId = self.spec_id.into();
+            let bytecode_raw =
+                Bytecode::new_raw(revmc::primitives::Bytes::copy_from_slice(bytecode));
+
+            compiler.inspect_stack(self.inspect_stack || !stack_input.is_empty());
+
+            let parsed = compiler.parse(bytecode_raw.original_byte_slice().into(), spec_id)?;
+            if self.display || self.parse_only {
+                println!("{name}()\n{parsed:#}");
+            }
+            if let Some(fmt) = self.dot {
+                let dump_dir =
+                    compiler.dump_dir().expect("dump_dir should be set when --dot is used");
+                open_dot(&dump_dir.join("bytecode.dot"), fmt, !self.no_open)?;
+            }
+            if self.parse_only {
+                return Ok(());
+            }
+
+            let f_id = compiler.translate_inner(name, &parsed)?;
+
+            // Finalize the module (verify + optimize + dump IR/asm).
+            if !self.aot {
+                let _ = unsafe { compiler.jit_function(f_id)? };
+            }
+
+            if self.aot {
+                let out_dir = if let Some(out_dir) = compiler.out_dir() {
+                    out_dir.join(&bench_name)
+                } else {
+                    let dir = std::env::temp_dir().join("revmc-cli").join(&bench_name);
+                    std::fs::create_dir_all(&dir)?;
+                    dir
+                };
+
+                let obj = out_dir.join("a.o");
+                compiler.write_object_to_file(&obj)?;
+                ensure!(obj.exists(), "Failed to write object file");
+                eprintln!("Compiled object file to {}", obj.display());
+
+                if !self.no_link {
+                    let shared_lib = shared_library_path(&out_dir, "a");
+                    let linker = revmc::Linker::new();
+                    linker.link(&shared_lib, [obj.to_str().unwrap()])?;
+                    ensure!(shared_lib.exists(), "Failed to link object file");
+                    eprintln!("Linked shared object file to {}", shared_lib.display());
+                }
+
+                if self.load.is_none() {
+                    return Ok(());
+                }
+            }
+
+            // --load: run from a shared library instead of JIT.
+            if let Some(ref load) = self.load {
+                let calldata: revmc::primitives::Bytes = if let Some(ref cd) = self.calldata {
+                    revmc::primitives::hex::decode(cd)?.into()
+                } else {
+                    calldata.clone().into()
+                };
+                let gas_limit = self.gas_limit;
+
+                let load_path = match load {
+                    Some(p) => p.clone(),
+                    None => {
+                        let out_dir =
+                            compiler.out_dir().map(|d| d.join(&bench_name)).unwrap_or_else(|| {
+                                std::env::temp_dir().join("revmc-cli").join(&bench_name)
+                            });
+                        shared_library_path(&out_dir, "a")
+                    }
+                };
+                let lib = unsafe { libloading::Library::new(load_path) }?;
+                let f: libloading::Symbol<'_, revmc::EvmCompilerFn> =
+                    unsafe { lib.get(name.as_bytes())? };
+                let f = *f;
+
+                let mut host = BenchHost::new(spec_id);
+                host.apply_bench(&bench_entry);
+                let mk_interpreter = || {
+                    let ext_bytecode = ExtBytecode::new(bytecode_raw.clone());
+                    let input = InputsImpl {
+                        input: revm_interpreter::CallInput::Bytes(calldata.clone()),
+                        ..Default::default()
+                    };
+                    revm_interpreter::Interpreter::new(
+                        SharedMemory::new(),
+                        ext_bytecode,
+                        input,
+                        false,
+                        spec_id,
+                        gas_limit,
+                    )
+                };
+
+                let mut interpreter = mk_interpreter();
+                let (mut ecx, stack, stack_len) =
+                    EvmContext::from_interpreter_with_stack(&mut interpreter, &mut host);
+                for (i, input) in stack_input.iter().enumerate() {
+                    stack.set(i, (*input).into());
+                }
+                *stack_len = stack_input.len();
+                let ret = unsafe { f.call_noinline(Some(stack), Some(stack_len), &mut ecx) };
+                println!("InstructionResult::{ret:?}");
+
+                if self.n_iters > 1 {
+                    bench(self.n_iters, &format!("{name}/loaded"), || {
+                        let mut interpreter = mk_interpreter();
+                        let (mut ecx, stack, stack_len) =
+                            EvmContext::from_interpreter_with_stack(&mut interpreter, &mut host);
+                        for (i, input) in stack_input.iter().enumerate() {
+                            stack.set(i, (*input).into());
+                        }
+                        *stack_len = stack_input.len();
+                        unsafe { f.call_noinline(Some(stack), Some(stack_len), &mut ecx) }
+                    });
+                }
                 return Ok(());
             }
         }
 
-        let lib;
-        let f = if let Some(load) = load {
-            if let Some(load) = load {
-                lib = unsafe { libloading::Library::new(load) }?;
-                let f: libloading::Symbol<'_, revmc::EvmCompilerFn> =
-                    unsafe { lib.get(name.as_bytes())? };
-                *f
-            } else {
-                return Err(eyre!("--load with no argument requires --aot"));
-            }
-        } else {
-            unsafe { compiler.jit_function(f_id)? }
-        };
+        // Unified runtime path for both bytecode and fixture benchmarks.
+        let spec_id: SpecId = self.spec_id.into();
+        let (prepared, _compiler) = PreparedBench::load(&bench_entry, spec_id);
 
-        let table = instruction_table::<EthInterpreter, BenchHost>();
+        if !prepared.is_runnable() {
+            return Err(eyre!(
+                "benchmark '{name}' uses stack_input and cannot be run as a transaction"
+            ));
+        }
 
-        let mk_interpreter = || {
-            let ext_bytecode = ExtBytecode::new(bytecode_raw.clone());
-            let input = InputsImpl {
-                input: revm_interpreter::CallInput::Bytes(calldata.clone()),
-                ..Default::default()
-            };
-            revm_interpreter::Interpreter::new(
-                SharedMemory::new(),
-                ext_bytecode,
-                input,
-                false,
-                spec_id,
-                gas_limit,
-            )
-        };
+        prepared.sanity_check();
 
         if self.n_iters == 0 {
             return Ok(());
         }
 
-        // Single run: print results.
         if self.interpret {
-            let mut interpreter = mk_interpreter();
-            for input in &stack_input {
-                interpreter.stack.data_mut().push(*input);
-            }
-            let action = interpreter.run_plain(&table, &mut host);
-            let ret =
-                action.instruction_result().unwrap_or(revm_interpreter::InstructionResult::Stop);
-            println!("InstructionResult::{ret:?}");
-            println!("InterpreterAction::{action:#?}");
+            prepared.run_interpreter();
         } else {
-            let mut interpreter = mk_interpreter();
-            let (mut ecx, stack, stack_len) =
-                EvmContext::from_interpreter_with_stack(&mut interpreter, &mut host);
-            for (i, input) in stack_input.iter().enumerate() {
-                stack.set(i, (*input).into());
-            }
-            *stack_len = stack_input.len();
-            let ret = unsafe { f.call_noinline(Some(stack), Some(stack_len), &mut ecx) };
-            let action = ecx.next_action.take().unwrap_or_else(|| {
-                revm_interpreter::InterpreterAction::Return(revm_interpreter::InterpreterResult {
-                    result: ret,
-                    output: revm_primitives::Bytes::new(),
-                    gas: *ecx.gas,
-                })
-            });
-            println!("InstructionResult::{ret:?}");
-            println!("InterpreterAction::{action:#?}");
+            prepared.run_jit();
         }
 
         if self.n_iters > 1 {
-            // Benchmark interpreter.
             if self.interpret || !self.jit_only {
-                bench(self.n_iters, &format!("{name}/interpreter"), || {
-                    let mut interpreter = mk_interpreter();
-                    for input in &stack_input {
-                        interpreter.stack.data_mut().push(*input);
-                    }
-                    let action = interpreter.run_plain(&table, &mut host);
-                    let ret = action
-                        .instruction_result()
-                        .unwrap_or(revm_interpreter::InstructionResult::Stop);
-                    (ret, action)
-                });
+                bench(self.n_iters, &format!("{name}/interpreter"), || prepared.run_interpreter());
             }
-            // Benchmark JIT.
             if !self.interpret {
-                bench(self.n_iters, &format!("{name}/jit"), || {
-                    let mut interpreter = mk_interpreter();
-                    let (mut ecx, stack, stack_len) =
-                        EvmContext::from_interpreter_with_stack(&mut interpreter, &mut host);
-                    for (i, input) in stack_input.iter().enumerate() {
-                        stack.set(i, (*input).into());
-                    }
-                    *stack_len = stack_input.len();
-                    let r = unsafe { f.call_noinline(Some(stack), Some(stack_len), &mut ecx) };
-                    let action = ecx.next_action.take().unwrap_or_else(|| {
-                        revm_interpreter::InterpreterAction::Return(
-                            revm_interpreter::InterpreterResult {
-                                result: r,
-                                output: revm_primitives::Bytes::new(),
-                                gas: *ecx.gas,
-                            },
-                        )
-                    });
-                    (r, action)
-                });
+                bench(self.n_iters, &format!("{name}/jit"), || prepared.run_jit());
             }
-        }
-
-        Ok(())
-    }
-
-    fn run_fixture(&self, name: &str, bench_entry: &Bench) -> Result<()> {
-        let prepared = PreparedFixtureBench::load(bench_entry);
-
-        // Sanity check.
-        let result = prepared.run_interpreter();
-        assert!(result.result.is_success(), "fixture interpreter execution reverted");
-        let result = prepared.run_jit();
-        assert!(result.result.is_success(), "fixture JIT execution reverted");
-
-        if self.n_iters <= 1 {
-            if self.interpret {
-                let result = prepared.run_interpreter();
-                println!("Interpreter result: {:?}", result.result);
-            } else {
-                let result = prepared.run_jit();
-                println!("JIT result: {:?}", result.result);
-            }
-            return Ok(());
-        }
-
-        if self.interpret || !self.jit_only {
-            bench(self.n_iters, &format!("{name}/interpreter"), || {
-                black_box(prepared.run_interpreter())
-            });
-        }
-        if !self.interpret {
-            bench(self.n_iters, &format!("{name}/jit"), || black_box(prepared.run_jit()));
         }
 
         Ok(())
