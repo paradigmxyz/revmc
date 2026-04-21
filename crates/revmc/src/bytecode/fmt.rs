@@ -16,7 +16,7 @@ impl Bytecode<'_> {
     }
 
     /// Collects formatted lines and builds the inst-to-line map stored in `self.inst_lines`.
-    fn collect_lines(&self) -> Vec<(String, String)> {
+    pub(super) fn collect_lines(&self) -> Vec<(String, String)> {
         let mut lines: Vec<(String, String)> = Vec::new();
         let mut inst_lines: IndexVec<Inst, u32> = index_vec![0u32; self.insts.len()];
 

@@ -240,8 +240,11 @@ impl<'a> Bytecode<'a> {
 
     /// Takes the instruction-to-line map built during formatting.
     ///
-    /// Returns an empty `Vec` if the bytecode has not been formatted yet.
+    /// If the bytecode has not been formatted yet, formats it first to build the map.
     pub(crate) fn take_inst_lines(&self) -> IndexVec<Inst, u32> {
+        if self.inst_lines.borrow().is_empty() {
+            self.collect_lines();
+        }
         self.inst_lines.take()
     }
 
