@@ -61,7 +61,14 @@ call takes effect.
 
 ## Checking dynamic jump resolution
 
-To see how many jumps are resolved vs unresolved on a real contract:
+To get jump resolution stats across benchmarks:
+
+```bash
+./scripts/bench.py /tmp/bench --jump-resolution                    # all benchmarks
+./scripts/bench.py /tmp/bench --jump-resolution usdc_proxy weth    # specific benchmarks
+```
+
+To inspect a single contract in detail:
 
 ```bash
 RUST_LOG=debug cargo r -- run usdc_proxy --display |& rg 'jump|JUMP'
@@ -72,26 +79,23 @@ RUST_LOG=debug cargo r -- run usdc_proxy --display |& rg 'jump|JUMP'
 - `JUMP bb<N>` / `JUMP bb<N>, bb<M>` — resolved (single/multi-target).
 - `JUMP               ; pc=<N>` (no `bb` target) — unresolved dynamic jump.
 
-To get a summary across all benchmarks:
-
-```bash
-./scripts/jump-resolution.py                  # all benchmarks
-./scripts/jump-resolution.py usdc_proxy weth  # specific benchmarks
-```
-
 Use `cargo r -- run --list` to see available benchmark names.
 
 ## Benchmarking against another revision
 
-To compare codegen line counts and compile times against another revision:
+`./scripts/bench.py` is the unified benchmarking tool. It collects codegen line
+counts, compile times, jump resolution stats, and constant-input statistics.
 
 ```bash
-./scripts/bench-diff.py /tmp/bench main                          # all benchmarks vs main
-./scripts/bench-diff.py /tmp/bench main usdc_proxy seaport       # specific benchmarks
-./scripts/bench-diff.py /tmp/bench main --extra-dir tmp/mainnet  # include mainnet .bin files
-./scripts/bench-diff.py /tmp/bench                               # current branch only (no diff)
-./scripts/bench-diff.py /tmp/bench main --no-codegen             # compile times only
-./scripts/bench-diff.py /tmp/bench main --no-compile-time        # codegen lines only
+./scripts/bench.py /tmp/bench --diff main                          # codegen + compile time vs main
+./scripts/bench.py /tmp/bench --diff main usdc_proxy seaport       # specific benchmarks
+./scripts/bench.py /tmp/bench --diff main --extra-dir tmp/mainnet  # include mainnet .bin files
+./scripts/bench.py /tmp/bench                                      # current branch only (no diff)
+./scripts/bench.py /tmp/bench --diff main --no-codegen-lines       # compile times only
+./scripts/bench.py /tmp/bench --diff main --no-compile-time        # codegen lines only
+./scripts/bench.py /tmp/bench --jump-resolution                    # jump resolution stats
+./scripts/bench.py /tmp/bench --input-stats                        # constant-input stats
+./scripts/bench.py /tmp/bench --codegen --jump-resolution          # combine multiple analyses
 ```
 
 ## Important
