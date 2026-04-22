@@ -137,7 +137,7 @@ impl RunArgs {
 
         // Bytecode-only features: parse, display, dot, aot.
         if !is_fixture {
-            let Bench { ref bytecode, ref calldata, ref stack_input, .. } = bench_entry;
+            let Bench { ref bytecode, ref calldata, .. } = bench_entry;
 
             let mut compiler = EvmCompiler::new_llvm(self.aot)?;
             compiler.set_opt_level(self.opt_level);
@@ -162,7 +162,7 @@ impl RunArgs {
             let bytecode_raw =
                 Bytecode::new_raw(revmc::primitives::Bytes::copy_from_slice(bytecode));
 
-            compiler.inspect_stack(self.inspect_stack || !stack_input.is_empty());
+            compiler.inspect_stack(self.inspect_stack);
 
             let parsed = compiler.parse(bytecode_raw.original_byte_slice().into(), spec_id)?;
             if self.display || self.parse_only {
@@ -256,10 +256,6 @@ impl RunArgs {
                 let mut interpreter = mk_interpreter();
                 let (mut ecx, stack, stack_len) =
                     EvmContext::from_interpreter_with_stack(&mut interpreter, &mut host);
-                for (i, input) in stack_input.iter().enumerate() {
-                    stack.set(i, (*input).into());
-                }
-                *stack_len = stack_input.len();
                 let ret = unsafe { f.call_noinline(Some(stack), Some(stack_len), &mut ecx) };
                 println!("InstructionResult::{ret:?}");
 
@@ -268,10 +264,6 @@ impl RunArgs {
                         let mut interpreter = mk_interpreter();
                         let (mut ecx, stack, stack_len) =
                             EvmContext::from_interpreter_with_stack(&mut interpreter, &mut host);
-                        for (i, input) in stack_input.iter().enumerate() {
-                            stack.set(i, (*input).into());
-                        }
-                        *stack_len = stack_input.len();
                         unsafe { f.call_noinline(Some(stack), Some(stack_len), &mut ecx) }
                     });
                 }
@@ -282,12 +274,6 @@ impl RunArgs {
         // Unified runtime path for both bytecode and fixture benchmarks.
         let spec_id: SpecId = self.spec_id.into();
         let (prepared, _compiler) = PreparedBench::load(&bench_entry, spec_id);
-
-        if !prepared.is_runnable() {
-            return Err(eyre!(
-                "benchmark '{name}' uses stack_input and cannot be run as a transaction"
-            ));
-        }
 
         prepared.sanity_check();
 
