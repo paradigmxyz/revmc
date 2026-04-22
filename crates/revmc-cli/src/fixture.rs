@@ -284,7 +284,8 @@ impl PreparedBench {
 
         // Build tx.
         let caller = first_tx.sender.as_deref().map(parse_address).unwrap_or(BENCH_CALLER);
-        let cfg = CfgEnv::new_with_spec(spec_id);
+        let mut cfg = CfgEnv::new_with_spec(spec_id);
+        cfg.disable_nonce_check = true;
         let tx = TxEnv {
             tx_type: 0,
             caller,

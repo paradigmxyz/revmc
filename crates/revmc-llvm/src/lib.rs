@@ -1929,8 +1929,15 @@ fn init_() -> Result<()> {
         install_fatal_error_handler(report_fatal_error);
     }
 
+    // Collect extra LLVM args from `REVMC_LLVM_ARGS` env var (space-separated).
+    let extra: Vec<CString> = std::env::var("REVMC_LLVM_ARGS")
+        .ok()
+        .iter()
+        .flat_map(|s| s.split_whitespace().filter_map(|s| CString::new(s).ok()).collect::<Vec<_>>())
+        .collect();
+
     // The first arg is only used in `-help` output AFAICT.
-    let args = [
+    let mut args = vec![
         c"revmc-llvm".as_ptr(),
         c"-x86-asm-syntax=intel".as_ptr(),
         // CodeGenPrepare's memory optimization has a pathological interaction with our IR shape:
@@ -1941,6 +1948,10 @@ fn init_() -> Result<()> {
         // CGP's address sinking and branch optimizations.
         c"--cgpp-huge-func=1000".as_ptr(),
     ];
+    args.extend(extra.iter().map(|s| s.as_ptr()));
+    if args.len() > 2 {
+        debug!(extra = ?&extra, "passing extra LLVM args");
+    }
     unsafe {
         inkwell::llvm_sys::support::LLVMParseCommandLineOptions(
             args.len() as i32,
