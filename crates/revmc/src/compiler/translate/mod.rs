@@ -8,7 +8,7 @@ use crate::{
 use either::Either;
 use oxc_index::IndexVec;
 use revm_bytecode::opcode as op;
-use revm_interpreter::InstructionResult;
+use revm_interpreter::{InputsImpl, InstructionResult};
 use revm_primitives::U256;
 use revmc_backend::{Attribute, BackendTypes, FunctionAttributeLocation, Pointer, TypeMethods};
 use revmc_builtins::{Builtin, Builtins, CallKind, CreateKind};
@@ -711,6 +711,40 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             }};
         }
 
+        /// Gets the pointer to a field via chained `offset_of!`.
+        macro_rules! field {
+            // Gets the pointer to a field.
+            (@get $base:expr, $($paths:path),*; $($spec:tt).*) => {
+                self.get_field($base, 0 $(+ mem::offset_of!($paths, $spec))*, stringify!($($spec).*.addr))
+            };
+            // Loads a big-endian field and byte-swaps it.
+            (@load @[bswap] $ty:expr, $base:expr, $($rest:tt)*) => {{
+                let value = field!(@load $ty, $base, $($rest)*);
+                self.bcx.bswap(value)
+            }};
+            // Loads a native-endian field.
+            (@load $ty:expr, $base:expr, $($rest:tt)*) => {{
+                let ptr = field!(@get $base, $($rest)*);
+                self.bcx.load_aligned($ty, ptr, 1, stringify!($($rest)*))
+            }};
+            // Loads a big-endian field, byte-swaps, extends, and pushes.
+            (@push @[bswap] $ty:expr, $base:expr, $($rest:tt)*) => {{
+                let mut value = field!(@load @[bswap] $ty, $base, $($rest)*);
+                if self.bcx.type_bit_width($ty) < 256 {
+                    value = self.bcx.zext(self.word_type, value);
+                }
+                self.push(value);
+            }};
+            // Loads a native-endian field, extends, and pushes.
+            (@push $ty:expr, $base:expr, $($rest:tt)*) => {{
+                let mut value = field!(@load $ty, $base, $($rest)*);
+                if self.bcx.type_bit_width($ty) < 256 {
+                    value = self.bcx.zext(self.word_type, value);
+                }
+                self.push(value);
+            }};
+        }
+
         match data.opcode {
             op::STOP => goto_return!(build InstructionResult::Stop),
 
@@ -797,9 +831,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             }
 
             op::ADDRESS => {
-                let slot = self.sp_at_top();
-                let _ = self.call_builtin(Builtin::Address, &[self.ecx, slot]);
-                self.narrow_to_address(slot);
+                let input = self.load_input_ptr();
+                field!(@push @[bswap] self.address_type, input, InputsImpl; target_address);
             }
             op::BALANCE => {
                 let sp = self.sp_after_inputs();
@@ -811,17 +844,23 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 self.narrow_to_address(slot);
             }
             op::CALLER => {
-                let slot = self.sp_at_top();
-                let _ = self.call_builtin(Builtin::Caller, &[self.ecx, slot]);
-                self.narrow_to_address(slot);
+                let input = self.load_input_ptr();
+                field!(@push @[bswap] self.address_type, input, InputsImpl; caller_address);
             }
             op::CALLVALUE => {
-                let slot = self.sp_at_top();
-                let _ = self.call_builtin(Builtin::CallValue, &[self.ecx, slot]);
+                let input = self.load_input_ptr();
+                field!(@push self.word_type, input, InputsImpl; call_value);
             }
             op::CALLDATALOAD => {
                 let sp = self.sp_after_inputs();
-                let _ = self.call_builtin(Builtin::CallDataLoad, &[self.ecx, sp]);
+                // Saturating convert i256 offset to isize.
+                let offset_word = self.load_word(sp, "calldataload.offset");
+                let offset = self.bcx.ireduce(self.isize_type, offset_word);
+                let extended = self.bcx.zext(self.word_type, offset);
+                let fits = self.bcx.icmp(IntCC::Equal, offset_word, extended);
+                let sentinel = self.bcx.iconst(self.isize_type, isize::MAX as i64);
+                let offset = self.bcx.select(fits, offset, sentinel);
+                self.emit_calldataload_inline(offset, sp);
             }
             op::CALLDATASIZE => {
                 let calldatasize_ptr = self.get_field(
@@ -859,9 +898,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 self.call_fallible_builtin(Builtin::ExtCodeCopy, &[self.ecx, sp]);
             }
             op::RETURNDATASIZE => {
-                let size = self.call_builtin(Builtin::ReturnDataSize, &[self.ecx]).unwrap();
-                let size = self.bcx.zext(self.word_type, size);
-                self.push(size);
+                field!(@push self.isize_type, self.ecx, EvmContext<'_>, pf::Slice; return_data.len);
             }
             op::RETURNDATACOPY => {
                 let sp = self.sp_after_inputs();
@@ -1282,6 +1319,56 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let value = self.bcx.load(self.address_type, slot, "address");
         let value = self.bcx.zext(self.word_type, value);
         self.bcx.store(value, slot);
+    }
+
+    /// Loads the `ecx.input` pointer (`&mut InputsImpl`).
+    fn load_input_ptr(&mut self) -> B::Value {
+        let ptr_type = self.bcx.type_ptr();
+        let input_ptr_ptr =
+            self.get_field(self.ecx, mem::offset_of!(EvmContext<'_>, input), "ecx.input.addr");
+        self.bcx.load(ptr_type, input_ptr_ptr, "ecx.input")
+    }
+
+    /// Emits inline CALLDATALOAD: zero slot, memcpy from `ecx.calldata + offset`, bswap.
+    fn emit_calldataload_inline(&mut self, offset: B::Value, slot: B::Value) {
+        let isize_type = self.isize_type;
+        let ptr_type = self.bcx.type_ptr();
+
+        let calldata_addr = self.get_field(
+            self.ecx,
+            mem::offset_of!(EvmContext<'_>, calldata),
+            "ecx.calldata.addr",
+        );
+        let calldata_ptr = self.bcx.load(ptr_type, calldata_addr, "ecx.calldata");
+        let calldatasize_addr = self.get_field(
+            self.ecx,
+            mem::offset_of!(EvmContext<'_>, calldatasize),
+            "ecx.calldatasize.addr",
+        );
+        let calldatasize = self.bcx.load(isize_type, calldatasize_addr, "ecx.calldatasize");
+
+        // Zero the output, then copy min(32, calldatasize - offset) bytes if in bounds.
+        let zero = self.bcx.iconst_256(U256::ZERO);
+        self.bcx.store(zero, slot);
+
+        let in_bounds = self.bcx.icmp(IntCC::UnsignedLessThan, offset, calldatasize);
+        let current = self.current_block();
+        let copy_block = self.create_block_after(current, "calldataload.copy");
+        let done_block = self.create_block_after(copy_block, "calldataload.done");
+        self.bcx.brif(in_bounds, copy_block, done_block);
+
+        self.bcx.switch_to_block(copy_block);
+        let remaining = self.bcx.isub(calldatasize, offset);
+        let thirty_two = self.bcx.iconst(isize_type, 32);
+        let count = self.bcx.umin(remaining, thirty_two);
+        let src = self.bcx.gep(self.i8_type, calldata_ptr, &[offset], "calldata.src");
+        self.bcx.memcpy(slot, src, count);
+        self.bcx.br(done_block);
+
+        self.bcx.switch_to_block(done_block);
+        let word = self.bcx.load(self.word_type, slot, "calldataload.raw");
+        let swapped = self.bcx.bswap(word);
+        self.bcx.store(swapped, slot);
     }
 
     /// Loads the gas used.
@@ -1803,6 +1890,13 @@ impl<B: Backend> FunctionCx<'_, B> {
 #[allow(dead_code)]
 mod pf {
     use super::*;
+
+    #[repr(C)] // See core::ptr::metadata::PtrComponents
+    pub(super) struct Slice {
+        pub(super) ptr: *const u8,
+        pub(super) len: usize,
+    }
+    const _: [(); mem::size_of::<&'static [u8]>()] = [(); mem::size_of::<Slice>()];
 
     pub(super) struct Gas {
         /// GasTracker fields (EIP-8037 reservoir model).

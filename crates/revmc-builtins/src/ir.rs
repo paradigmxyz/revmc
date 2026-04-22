@@ -154,7 +154,6 @@ macro_rules! builtins {
 
                 const KECCAK256CC: u8 = _0_1;
 
-                const CALLDATALOADC: u8 = _0_1;
                 const MLOADC: u8 = _0_1;
                 const SLOADC: u8 = _0_1;
 
@@ -244,19 +243,13 @@ builtins! {
     Exp            = __revmc_builtin_exp(@[ecx] ptr, @[sp] ptr) None,
     Keccak256      = __revmc_builtin_keccak256(@[ecx] ptr, @[sp] ptr) None,
     Keccak256CC    = __revmc_builtin_keccak256_cc(@[ecx] ptr, @[sp] ptr, usize, usize) None,
-    Address        = __revmc_builtin_address(@[ecx_ro] ptr, @[sp] ptr) None,
     Balance        = __revmc_builtin_balance(@[ecx] ptr, @[sp] ptr) None,
     Origin         = __revmc_builtin_origin(@[ecx_ro] ptr, @[sp] ptr) None,
-    Caller         = __revmc_builtin_caller(@[ecx_ro] ptr, @[sp] ptr) None,
-    CallValue      = __revmc_builtin_call_value(@[ecx_ro] ptr, @[sp] ptr) None,
-    CallDataLoad   = __revmc_builtin_calldataload(@[ecx_ro] ptr, @[sp] ptr) None,
-    CallDataLoadC  = __revmc_builtin_calldataload_c(@[ecx_ro] ptr, @[sp] ptr, usize) None,
     CallDataCopy   = __revmc_builtin_calldatacopy(@[ecx] ptr, @[sp] ptr) None,
     CodeCopy       = __revmc_builtin_codecopy(@[ecx] ptr, @[sp] ptr) None,
     GasPrice       = __revmc_builtin_gas_price(@[ecx_ro] ptr, @[sp] ptr) None,
     ExtCodeSize    = __revmc_builtin_extcodesize(@[ecx] ptr, @[sp] ptr) None,
     ExtCodeCopy    = __revmc_builtin_extcodecopy(@[ecx] ptr, @[sp] ptr) None,
-    ReturnDataSize = __revmc_builtin_returndatasize(@[ecx_ro] ptr) Some(usize),
     ReturnDataCopy = __revmc_builtin_returndatacopy(@[ecx] ptr, @[sp] ptr) None,
     ExtCodeHash    = __revmc_builtin_extcodehash(@[ecx] ptr, @[sp] ptr) None,
     BlockHash      = __revmc_builtin_blockhash(@[ecx] ptr, @[sp] ptr) None,
