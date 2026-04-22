@@ -293,14 +293,27 @@ impl BlockData {
 enum JumpTarget {
     /// Not yet observed.
     Bottom,
-    /// Known constant target instruction index.
-    Const(Inst),
-    /// Multiple known constant target instruction indices.
-    Multi(SmallVec<[Inst; 4]>),
+    /// One or more known constant target instruction indices.
+    Resolved(SmallVec<[Inst; 4]>),
     /// Known constant but invalid target.
     Invalid,
     /// Unknown target.
     Top,
+}
+
+impl JumpTarget {
+    /// Creates a resolved target with a single constant.
+    fn single(inst: Inst) -> Self {
+        Self::Resolved(SmallVec::from_elem(inst, 1))
+    }
+
+    /// Returns the single resolved target, if exactly one.
+    fn as_single(&self) -> Option<Inst> {
+        match self {
+            Self::Resolved(targets) if targets.len() == 1 => Some(targets[0]),
+            _ => None,
+        }
+    }
 }
 
 /// CFG for abstract interpretation.
@@ -358,7 +371,7 @@ impl Bytecode<'_> {
             let Some(&operand) = self.snapshots.inputs[term_inst].last() else { continue };
             debug_assert!(!matches!(operand, AbsValue::ConstSet(_)));
             let target = self.resolve_jump_operand(operand, &empty_sets);
-            let JumpTarget::Const(target_inst) = target else { continue };
+            let Some(target_inst) = target.as_single() else { continue };
 
             // Log non-adjacent resolutions (not simple PUSH+JUMP).
             if trace_logs
@@ -423,32 +436,26 @@ impl Bytecode<'_> {
             }
 
             match *target {
-                JumpTarget::Const(target_inst) => {
-                    debug_assert_eq!(
-                        self.insts[target_inst].opcode,
-                        op::JUMPDEST,
-                        "block_analysis resolved to non-JUMPDEST"
-                    );
-                    self.insts[jump_inst].flags |= InstFlags::STATIC_JUMP;
-                    self.insts[jump_inst].data = target_inst.index() as u32;
-                    // Mark JUMPDEST as reachable.
-                    self.insts[target_inst].data = 1;
-                    newly_resolved += 1;
-                    trace!(%jump_inst, %target_inst, "resolved jump");
-                }
-                JumpTarget::Multi(ref targets) => {
+                JumpTarget::Resolved(ref targets) => {
                     for &target_inst in targets {
                         debug_assert_eq!(
                             self.insts[target_inst].opcode,
                             op::JUMPDEST,
-                            "block_analysis multi-resolved to non-JUMPDEST"
+                            "block_analysis resolved to non-JUMPDEST"
                         );
                         self.insts[target_inst].data = 1;
                     }
-                    self.insts[jump_inst].flags |= InstFlags::STATIC_JUMP | InstFlags::MULTI_JUMP;
-                    self.multi_jump_targets.insert(jump_inst, targets.clone());
+                    if targets.len() == 1 {
+                        self.insts[jump_inst].flags |= InstFlags::STATIC_JUMP;
+                        self.insts[jump_inst].data = targets[0].index() as u32;
+                        trace!(%jump_inst, target_inst = %targets[0], "resolved jump");
+                    } else {
+                        self.insts[jump_inst].flags |=
+                            InstFlags::STATIC_JUMP | InstFlags::MULTI_JUMP;
+                        self.multi_jump_targets.insert(jump_inst, targets.clone());
+                        trace!(%jump_inst, n_targets = targets.len(), "resolved multi-target jump");
+                    }
                     newly_resolved += 1;
-                    trace!(%jump_inst, n_targets = targets.len(), "resolved multi-target jump");
                 }
                 JumpTarget::Invalid => {
                     self.insts[jump_inst].flags |= InstFlags::STATIC_JUMP | InstFlags::INVALID_JUMP;
@@ -659,9 +666,7 @@ impl Bytecode<'_> {
 
         let count = jump_targets
             .iter()
-            .filter(|(_, t)| {
-                matches!(t, JumpTarget::Const(_) | JumpTarget::Multi(_) | JumpTarget::Invalid)
-            })
+            .filter(|(_, t)| matches!(t, JumpTarget::Resolved(_) | JumpTarget::Invalid))
             .count();
 
         (jump_targets, count)
@@ -674,7 +679,7 @@ impl Bytecode<'_> {
                 let val = *self.u256_interner.borrow().get(idx);
                 match usize::try_from(val) {
                     Ok(target_pc) if self.is_valid_jump(target_pc) => {
-                        JumpTarget::Const(self.pc_to_inst(target_pc))
+                        JumpTarget::single(self.pc_to_inst(target_pc))
                     }
                     _ => JumpTarget::Invalid,
                 }
@@ -696,7 +701,11 @@ impl Bytecode<'_> {
                         }
                     }
                 }
-                if !targets.is_empty() { JumpTarget::Multi(targets) } else { JumpTarget::Invalid }
+                if !targets.is_empty() {
+                    JumpTarget::Resolved(targets)
+                } else {
+                    JumpTarget::Invalid
+                }
             }
             AbsValue::Top => JumpTarget::Top,
         }
@@ -780,8 +789,7 @@ impl Bytecode<'_> {
         }
 
         for (inst, target) in jump_targets.iter_mut() {
-            if !matches!(target, JumpTarget::Const(_) | JumpTarget::Multi(_) | JumpTarget::Invalid)
-            {
+            if !matches!(target, JumpTarget::Resolved(_) | JumpTarget::Invalid) {
                 continue;
             }
             if let Some(bid) = self.cfg.inst_to_block[*inst]
