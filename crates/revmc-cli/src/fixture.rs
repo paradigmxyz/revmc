@@ -8,7 +8,10 @@ use revm_primitives::{Address, B256, B256Map, Bytes, StorageKeyMap, StorageValue
 use revm_state::AccountInfo;
 use revmc::{EvmCompiler, EvmLlvmBackend, JitEvm, RawEvmCompilerFn, primitives::hardfork::SpecId};
 use serde::Deserialize;
-use std::collections::{BTreeMap, HashSet};
+use std::{
+    collections::{BTreeMap, HashSet},
+    path::Path,
+};
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -95,7 +98,6 @@ struct ParsedAccount {
 #[allow(missing_debug_implementations)]
 pub struct PreparedBench {
     name: &'static str,
-    runnable: bool,
     accounts: Vec<ParsedAccount>,
     block: BlockEnv,
     cfg: CfgEnv,
@@ -160,17 +162,38 @@ impl PreparedBench {
         }
         compiler.clear_ir().expect("clear_ir failed");
 
-        let runnable = bench.stack_input.is_empty();
-        Self { name: bench.name, runnable, accounts, block, cfg, tx, functions }
+        Self { name: bench.name, accounts, block, cfg, tx, functions }
     }
 
-    /// Whether this benchmark can be run as a transaction.
+    /// Load a benchmark from a pre-compiled shared library instead of JIT-compiling.
     ///
-    /// Benchmarks with `stack_input` push values onto the stack before execution,
-    /// which is not possible via `transact()`. They can still be compiled and
-    /// benchmarked at the bytecode level.
-    pub fn is_runnable(&self) -> bool {
-        self.runnable
+    /// The `symbol_name` is looked up in the library for each non-empty contract bytecode.
+    /// The caller must keep `_lib` alive as long as the returned `PreparedBench` is used.
+    pub fn load_from_library(
+        bench: &Bench,
+        default_spec_id: SpecId,
+        lib_path: &Path,
+        symbol_name: &str,
+    ) -> (Self, libloading::Library) {
+        let (accounts, block, cfg, tx) = if bench.is_fixture() {
+            Self::parse_fixture(bench)
+        } else {
+            Self::from_bytecode(bench, default_spec_id)
+        };
+
+        let lib = unsafe { libloading::Library::new(lib_path) }.expect("failed to load library");
+        let mut functions = B256Map::default();
+        let mut seen = HashSet::new();
+        for acct in &accounts {
+            if acct.bytecode.is_empty() || !seen.insert(acct.code_hash) {
+                continue;
+            }
+            let f: libloading::Symbol<'_, revmc::EvmCompilerFn> =
+                unsafe { lib.get(symbol_name.as_bytes()) }.expect("symbol not found in library");
+            functions.insert(acct.code_hash, (*f).into_inner());
+        }
+
+        (Self { name: bench.name, accounts, block, cfg, tx, functions }, lib)
     }
 
     /// Convert a bytecode [`Bench`] into fixture state.
@@ -377,10 +400,7 @@ impl PreparedBench {
     }
 
     /// Sanity-check that interpreter and JIT produce matching results.
-    ///
-    /// Panics if `!self.is_runnable()`.
     pub fn sanity_check(&self) {
-        assert!(self.runnable, "cannot sanity-check a non-runnable benchmark");
         let interp = self.run_interpreter();
         let jit = self.run_jit();
         assert_eq!(

@@ -1514,17 +1514,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         // This can overflow the gas counters, which has to be adjusted for after the call.
         let gas_remaining = self.load_gas_remaining();
         let (res, overflow) = self.bcx.usub_overflow(gas_remaining, cost);
-        // TODO: revisit this
-        if self.bytecode.is_small() {
-            // Storing the result before the check significantly increases time spent in
-            // `llvm::MemoryDependenceResults::getNonLocalPointerDependency`, but it might produce
-            // slightly better code.
-            self.store_gas_remaining(res);
-            self.build_check(overflow, InstructionResult::OutOfGas);
-        } else {
-            self.build_check(overflow, InstructionResult::OutOfGas);
-            self.store_gas_remaining(res);
-        }
+        self.store_gas_remaining(res);
+        self.build_check(overflow, InstructionResult::OutOfGas);
     }
 
     /*
