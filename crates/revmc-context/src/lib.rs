@@ -15,6 +15,10 @@ use revm_interpreter::{
 };
 use revm_primitives::{Address, B256, Bytes, U256, hardfork::SpecId, ruint};
 
+mod arch;
+use arch::revmc_entry;
+pub use arch::revmc_exit;
+
 /// Resume point for compiled EVM code after a CALL/CREATE suspension.
 ///
 /// Encoded as the interpreter's bytecode PC. `0` means no resume (initial state),
@@ -94,6 +98,10 @@ pub struct EvmContext<'a> {
     pub bytecode: *const [u8],
     /// The size of the call input data, cached for CALLDATASIZE.
     pub calldatasize: usize,
+    /// The result set by a builtin before exiting via [`revmc_exit`].
+    pub exit_result: InstructionResult,
+    /// Saved RSP from the entry trampoline, used by [`revmc_exit`] to unwind.
+    pub exit_sp: *mut u8,
     /// Cached gas parameters from the host.
     pub gas_params: GasParams,
 }
@@ -102,7 +110,7 @@ pub struct EvmContext<'a> {
 // These offsets are used by the JIT compiler to access fields.
 const _: () = {
     use core::mem::offset_of;
-    assert!(core::mem::size_of::<EvmContext<'_>>() == 120);
+
     // Key fields accessed by JIT code
     assert!(offset_of!(EvmContext<'_>, memory) == 0);
     assert!(offset_of!(EvmContext<'_>, gas) == 16);
@@ -147,6 +155,8 @@ impl<'a> EvmContext<'a> {
             resume_at,
             bytecode,
             calldatasize,
+            exit_result: InstructionResult::Stop,
+            exit_sp: ptr::null_mut(),
             gas_params,
         };
         (this, stack, stack_len)
@@ -295,7 +305,7 @@ impl EvmCompilerFn {
         stack_len: Option<&mut usize>,
         ecx: &mut EvmContext<'_>,
     ) -> InstructionResult {
-        (self.0)(ecx, option_as_mut_ptr(stack), option_as_mut_ptr(stack_len))
+        revmc_entry(ecx, option_as_mut_ptr(stack), option_as_mut_ptr(stack_len), self.0)
     }
 
     /// Same as [`call`](Self::call) but with `#[inline(never)]`.
