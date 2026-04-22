@@ -1935,6 +1935,9 @@ fn init_() -> Result<()> {
         .iter()
         .flat_map(|s| s.split_whitespace().filter_map(|s| CString::new(s).ok()).collect::<Vec<_>>())
         .collect();
+    if !extra.is_empty() {
+        debug!(extra = ?&extra, "passing extra LLVM args");
+    }
 
     // The first arg is only used in `-help` output AFAICT.
     let mut args = vec![
@@ -1949,9 +1952,6 @@ fn init_() -> Result<()> {
         c"--cgpp-huge-func=1000".as_ptr(),
     ];
     args.extend(extra.iter().map(|s| s.as_ptr()));
-    if args.len() > 3 {
-        debug!(extra = ?&extra, "passing extra LLVM args");
-    }
     unsafe {
         inkwell::llvm_sys::support::LLVMParseCommandLineOptions(
             args.len() as i32,
