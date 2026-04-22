@@ -49,7 +49,7 @@ fn run_bench(
     let is_fixture = def.is_fixture();
 
     let prepared = PreparedBench::load_with(def, SPEC_ID, compiler);
-    if cfg!(any(debug_assertions, not(codspeed))) && prepared.is_runnable() {
+    if cfg!(any(debug_assertions, not(codspeed))) {
         prepared.sanity_check();
     }
 
@@ -94,19 +94,11 @@ fn run_bench(
             });
         }
 
-        // Native baseline.
-        if let Some(native) = def.native {
-            g.bench_function(format!("{name}/rt/native"), |b| {
-                b.iter_batched(|| (), |()| native(), BatchSize::SmallInput)
-            });
-        }
-
         // JIT variants (no_gas etc.).
         let mut host = BenchHost::new(SPEC_ID);
         host.apply_bench(def);
 
         let mut compiler = EvmCompiler::new_llvm(false).unwrap();
-        compiler.inspect_stack(!def.stack_input.is_empty());
         compiler.gas_metering(true);
 
         let new_interpreter = || {
@@ -125,7 +117,7 @@ fn run_bench(
             )
         };
 
-        const NO_GAS_BENCHES: &[&str] = &["fibonacci", "fibonacci-calldata", "factorial"];
+        const NO_GAS_BENCHES: &[&str] = &["fibonacci-calldata", "factorial"];
         let mut jit_variants: Vec<(&str, (bool, bool))> = vec![("default", (true, true))];
         if NO_GAS_BENCHES.contains(&name) {
             jit_variants.push(("no_gas", (false, true)));
@@ -148,15 +140,9 @@ fn run_bench(
             let jit = unsafe { compiler.jit_function(fn_id) }.expect(kind);
             g.bench_function(format!("{name}/rt/jit/{kind}"), |b| {
                 b.iter_batched_ref(
-                    || {
-                        let mut stack = EvmStack::new();
-                        for (i, input) in def.stack_input.iter().enumerate() {
-                            stack.set(i, (*input).into());
-                        }
-                        (new_interpreter(), stack)
-                    },
+                    || (new_interpreter(), EvmStack::new()),
                     |(interpreter, stack)| {
-                        let mut stack_len = def.stack_input.len();
+                        let mut stack_len = 0;
                         let mut ecx = EvmContext::from_interpreter(interpreter, &mut host);
                         unsafe { jit.call(Some(stack), Some(&mut stack_len), &mut ecx) }
                     },
@@ -168,27 +154,25 @@ fn run_bench(
 
     // ── Unified runtime benchmarks ──────────────────────────────────────
 
-    if prepared.is_runnable() {
-        let tx = prepared.tx().clone();
+    let tx = prepared.tx().clone();
 
-        let mut interp_evm = prepared.new_interpreter_evm();
-        g.bench_function(format!("{name}/rt/interpreter"), |b| {
-            b.iter_batched(
-                || tx.clone(),
-                |tx| interp_evm.transact_one(tx).unwrap(),
-                BatchSize::SmallInput,
-            );
-        });
+    let mut interp_evm = prepared.new_interpreter_evm();
+    g.bench_function(format!("{name}/rt/interpreter"), |b| {
+        b.iter_batched(
+            || tx.clone(),
+            |tx| interp_evm.transact_one(tx).unwrap(),
+            BatchSize::SmallInput,
+        );
+    });
 
-        let mut jit_evm = prepared.new_jit_evm();
-        g.bench_function(format!("{name}/rt/jit"), |b| {
-            b.iter_batched(
-                || tx.clone(),
-                |tx| jit_evm.transact_one(tx).unwrap(),
-                BatchSize::SmallInput,
-            );
-        });
-    }
+    let mut jit_evm = prepared.new_jit_evm();
+    g.bench_function(format!("{name}/rt/jit"), |b| {
+        b.iter_batched(
+            || tx.clone(),
+            |tx| jit_evm.transact_one(tx).unwrap(),
+            BatchSize::SmallInput,
+        );
+    });
 
     g.finish();
 }

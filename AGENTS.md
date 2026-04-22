@@ -91,11 +91,11 @@ counts, compile times, jump resolution stats, and constant-input statistics.
 ./scripts/bench.py /tmp/bench --diff main usdc_proxy seaport       # specific benchmarks
 ./scripts/bench.py /tmp/bench --diff main --extra-dir tmp/mainnet  # include mainnet .bin files
 ./scripts/bench.py /tmp/bench                                      # current branch only (no diff)
-./scripts/bench.py /tmp/bench --diff main --no-codegen-lines       # compile times only
-./scripts/bench.py /tmp/bench --diff main --no-compile-time        # codegen lines only
+./scripts/bench.py /tmp/bench --diff main --compile-times          # compile times only
+./scripts/bench.py /tmp/bench --diff main --codegen-lines          # codegen lines only
 ./scripts/bench.py /tmp/bench --jump-resolution                    # jump resolution stats
 ./scripts/bench.py /tmp/bench --input-stats                        # constant-input stats
-./scripts/bench.py /tmp/bench --codegen --jump-resolution          # combine multiple analyses
+./scripts/bench.py /tmp/bench --codegen-lines --jump-resolution    # combine multiple analyses
 ```
 
 ## Important
