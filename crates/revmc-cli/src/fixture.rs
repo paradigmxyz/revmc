@@ -98,7 +98,6 @@ struct ParsedAccount {
 #[allow(missing_debug_implementations)]
 pub struct PreparedBench {
     name: &'static str,
-    runnable: bool,
     accounts: Vec<ParsedAccount>,
     block: BlockEnv,
     cfg: CfgEnv,
@@ -163,8 +162,7 @@ impl PreparedBench {
         }
         compiler.clear_ir().expect("clear_ir failed");
 
-        let runnable = bench.stack_input.is_empty();
-        Self { name: bench.name, runnable, accounts, block, cfg, tx, functions }
+        Self { name: bench.name, accounts, block, cfg, tx, functions }
     }
 
     /// Load a benchmark from a pre-compiled shared library instead of JIT-compiling.
@@ -195,17 +193,7 @@ impl PreparedBench {
             functions.insert(acct.code_hash, (*f).into_inner());
         }
 
-        let runnable = bench.stack_input.is_empty();
-        (Self { name: bench.name, runnable, accounts, block, cfg, tx, functions }, lib)
-    }
-
-    /// Whether this benchmark can be run as a transaction.
-    ///
-    /// Benchmarks with `stack_input` push values onto the stack before execution,
-    /// which is not possible via `transact()`. They can still be compiled and
-    /// benchmarked at the bytecode level.
-    pub fn is_runnable(&self) -> bool {
-        self.runnable
+        (Self { name: bench.name, accounts, block, cfg, tx, functions }, lib)
     }
 
     /// Convert a bytecode [`Bench`] into fixture state.
@@ -412,10 +400,7 @@ impl PreparedBench {
     }
 
     /// Sanity-check that interpreter and JIT produce matching results.
-    ///
-    /// Panics if `!self.is_runnable()`.
     pub fn sanity_check(&self) {
-        assert!(self.runnable, "cannot sanity-check a non-runnable benchmark");
         let interp = self.run_interpreter();
         let jit = self.run_jit();
         assert_eq!(

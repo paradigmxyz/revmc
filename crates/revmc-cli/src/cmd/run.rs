@@ -130,7 +130,7 @@ impl RunArgs {
 
         // Bytecode-only features: parse, display, dot, aot.
         if !is_fixture {
-            let Bench { ref bytecode, ref stack_input, .. } = bench_entry;
+            let Bench { ref bytecode, .. } = bench_entry;
 
             let mut compiler = EvmCompiler::new_llvm(self.aot)?;
             compiler.set_opt_level(self.opt_level);
@@ -153,7 +153,7 @@ impl RunArgs {
 
             let spec_id: SpecId = self.spec_id.into();
 
-            compiler.inspect_stack(self.inspect_stack || !stack_input.is_empty());
+            compiler.inspect_stack(self.inspect_stack);
 
             let parsed = compiler.parse(bytecode.as_slice().into(), spec_id)?;
             if self.display || self.parse_only {
@@ -226,12 +226,6 @@ impl RunArgs {
             _compiler = Some(compiler);
             _lib = None;
         };
-
-        if !prepared.is_runnable() {
-            return Err(eyre!(
-                "benchmark '{name}' uses stack_input and cannot be run as a transaction"
-            ));
-        }
 
         prepared.sanity_check();
 
