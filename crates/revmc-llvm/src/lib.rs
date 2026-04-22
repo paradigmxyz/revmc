@@ -1915,8 +1915,8 @@ fn init() -> Result<()> {
 }
 
 fn init_() -> Result<()> {
-    // TODO: This also reports "PLEASE submit a bug report to..." when the segfault is
-    // outside of LLVM.
+    // This also reports "PLEASE submit a bug report to..." when the segfault is
+    // outside of LLVM, so keep it disabled.
     // enable_llvm_pretty_stack_trace();
 
     extern "C" fn report_fatal_error(msg: *const std::ffi::c_char) {
@@ -1925,9 +1925,7 @@ fn init_() -> Result<()> {
         error!(target: "llvm", "LLVM fatal error: {msg}");
     }
 
-    unsafe {
-        install_fatal_error_handler(report_fatal_error);
-    }
+    unsafe { install_fatal_error_handler(report_fatal_error) };
 
     // Collect extra LLVM args from `REVMC_LLVM_ARGS` env var (space-separated).
     let extra: Vec<CString> = std::env::var("REVMC_LLVM_ARGS")

@@ -490,8 +490,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         // Finalize the failure block.
         fx.bcx.switch_to_block(fx.failure_block.unwrap());
         if !fx.incoming_failures.is_empty() {
-            let failure_value = fx.bcx.phi(fx.i8_type, &fx.incoming_failures);
             fx.bcx.set_current_block_cold();
+            let failure_value = fx.bcx.phi(fx.i8_type, &fx.incoming_failures);
             fx.save_gas();
             fx.build_return(failure_value);
         } else {
