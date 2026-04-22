@@ -1843,7 +1843,10 @@ tests! {
             spec_id: SpecId::ISTANBUL,
             modify_ecx: Some(|ecx| {
                 ecx.input.call_value = 1_U256;
-                ecx.input.input = interpreter::CallInput::Bytes(Bytes::from(&hex!("c0406226")));
+                let input = Bytes::from(&hex!("c0406226"));
+                ecx.calldata = input.as_ptr();
+                ecx.calldatasize = input.len();
+                ecx.input.input = interpreter::CallInput::Bytes(input);
             }),
             // Note: Cannot use RETURN_WHAT_INTERPRETER_SAYS here because modify_ecx
             // only modifies the JIT context, not the interpreter's input. The interpreter

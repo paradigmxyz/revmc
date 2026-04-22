@@ -31,7 +31,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             op::SIGNEXTEND => self.peephole_signextend(),
             op::BYTE => self.peephole_byte(),
 
-            op::CALLDATALOAD | op::MLOAD | op::SLOAD => self.peephole_load(data.opcode),
+            op::MLOAD | op::SLOAD => self.peephole_load(data.opcode),
             op::MSTORE => self.peephole_mstore(),
 
             op::KECCAK256 => self.peephole_keccak256(),

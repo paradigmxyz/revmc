@@ -849,18 +849,81 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             }
             op::CALLDATALOAD => {
                 let sp = self.sp_after_inputs();
-                let _ = self.call_builtin(Builtin::CallDataLoad, &[self.ecx, sp]);
-            }
-            op::CALLDATASIZE => {
-                let calldatasize_ptr = self.get_field(
+                let ptr_type = self.bcx.type_ptr();
+
+                // Saturating convert i256 offset to isize.
+                let offset_word = self.load_word(sp, "calldataload.offset");
+                let offset = self.bcx.ireduce(self.isize_type, offset_word);
+                let extended = self.bcx.zext(self.word_type, offset);
+                let fits = self.bcx.icmp(IntCC::Equal, offset_word, extended);
+                let sentinel = self.bcx.iconst(self.isize_type, isize::MAX as i64);
+                let offset = self.bcx.select(fits, offset, sentinel);
+
+                let calldata_addr = self.get_field(
+                    self.ecx,
+                    mem::offset_of!(EvmContext<'_>, calldata),
+                    "ecx.calldata.addr",
+                );
+                let calldata_ptr = self.bcx.load(ptr_type, calldata_addr, "ecx.calldata");
+                let calldatasize_addr = self.get_field(
                     self.ecx,
                     mem::offset_of!(EvmContext<'_>, calldatasize),
                     "ecx.calldatasize.addr",
                 );
-                let size = self.bcx.load(self.isize_type, calldatasize_ptr, "ecx.calldatasize");
-                let size = self.bcx.zext(self.word_type, size);
-                self.push(size);
+                let calldatasize =
+                    self.bcx.load(self.isize_type, calldatasize_addr, "ecx.calldatasize");
+
+                let remaining = self.bcx.isub(calldatasize, offset);
+                let src = self.bcx.gep(self.i8_type, calldata_ptr, &[offset], "calldata.src");
+
+                // Fast path: 32+ bytes available → direct unaligned load + bswap.
+                let thirty_two = self.bcx.iconst(self.isize_type, 32);
+                let full_avail =
+                    self.bcx.icmp(IntCC::SignedGreaterThanOrEqual, remaining, thirty_two);
+                let current = self.current_block();
+                let full_block = self.create_block_after(current, "calldataload.full");
+                let check_partial =
+                    self.create_block_after(full_block, "calldataload.check_partial");
+                let partial_block =
+                    self.create_block_after(check_partial, "calldataload.partial");
+                let done_block = self.create_block_after(partial_block, "calldataload.done");
+                self.bcx.brif(full_avail, full_block, check_partial);
+
+                // Full read: load 32 bytes directly, bswap, store.
+                self.bcx.switch_to_block(full_block);
+                let word =
+                    self.bcx.load_aligned(self.word_type, src, 1, "calldataload.full");
+                let swapped = self.bcx.bswap(word);
+                self.bcx.store(swapped, sp);
+                self.bcx.br(done_block);
+
+                // Check if any bytes are available at all.
+                self.bcx.switch_to_block(check_partial);
+                let zero = self.bcx.iconst_256(U256::ZERO);
+                self.bcx.store(zero, sp);
+                let in_bounds = self.bcx.icmp(IntCC::UnsignedLessThan, offset, calldatasize);
+                self.bcx.brif(in_bounds, partial_block, done_block);
+
+                // Partial read: memcpy remaining bytes into zeroed slot, then bswap.
+                self.bcx.switch_to_block(partial_block);
+                self.bcx.memcpy(sp, src, remaining);
+                let word = self.bcx.load(self.word_type, sp, "calldataload.partial");
+                let swapped = self.bcx.bswap(word);
+                self.bcx.store(swapped, sp);
+                self.bcx.br(done_block);
+
+                self.bcx.switch_to_block(done_block);
             }
+            op::CALLDATASIZE => {
+            let calldatasize_ptr = self.get_field(
+                self.ecx,
+                mem::offset_of!(EvmContext<'_>, calldatasize),
+                "ecx.calldatasize.addr",
+            );
+            let size = self.bcx.load(self.isize_type, calldatasize_ptr, "ecx.calldatasize");
+            let size = self.bcx.zext(self.word_type, size);
+            self.push(size);
+        }
             op::CALLDATACOPY => {
                 let sp = self.sp_after_inputs();
                 self.call_fallible_builtin(Builtin::CallDataCopy, &[self.ecx, sp]);
