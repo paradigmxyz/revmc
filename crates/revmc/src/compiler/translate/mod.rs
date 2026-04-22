@@ -717,27 +717,23 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             (@get $base:expr, $($paths:path),*; $($spec:tt).*) => {
                 self.get_field($base, 0 $(+ mem::offset_of!($paths, $spec))*, stringify!($($spec).*.addr))
             };
-            // Loads a big-endian field and byte-swaps it.
-            (@load @[bswap] $ty:expr, $base:expr, $($rest:tt)*) => {{
-                let value = field!(@load $ty, $base, $($rest)*);
-                self.bcx.bswap(value)
+            // Loads a field.
+            // `@[endian]` is the endianness of the stored value. If native, omit it.
+            (@load $(@[endian = $endian:tt])? $ty:expr, $base:expr, $($paths:path),*; $($spec:tt).*) => {{
+                let ptr = field!(@get $base, $($paths),*; $($spec).*);
+                #[allow(unused_mut)]
+                let mut value = self.bcx.load_aligned($ty, ptr, 1, stringify!($($spec).*));
+                $(
+                    if !cfg!(target_endian = $endian) {
+                        value = self.bcx.bswap(value);
+                    }
+                )?
+                value
             }};
-            // Loads a native-endian field.
-            (@load $ty:expr, $base:expr, $($rest:tt)*) => {{
-                let ptr = field!(@get $base, $($rest)*);
-                self.bcx.load_aligned($ty, ptr, 1, stringify!($($rest)*))
-            }};
-            // Loads a big-endian field, byte-swaps, extends, and pushes.
-            (@push @[bswap] $ty:expr, $base:expr, $($rest:tt)*) => {{
-                let mut value = field!(@load @[bswap] $ty, $base, $($rest)*);
-                if self.bcx.type_bit_width($ty) < 256 {
-                    value = self.bcx.zext(self.word_type, value);
-                }
-                self.push(value);
-            }};
-            // Loads a native-endian field, extends, and pushes.
-            (@push $ty:expr, $base:expr, $($rest:tt)*) => {{
-                let mut value = field!(@load $ty, $base, $($rest)*);
+            // Loads, extends (if necessary), and pushes a field.
+            // `@[endian]` is the endianness of the stored value. If native, omit it.
+            (@push $(@[endian = $endian:tt])? $ty:expr, $base:expr, $($rest:tt)*) => {{
+                let mut value = field!(@load $(@[endian = $endian])? $ty, $base, $($rest)*);
                 if self.bcx.type_bit_width($ty) < 256 {
                     value = self.bcx.zext(self.word_type, value);
                 }
@@ -832,7 +828,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
             op::ADDRESS => {
                 let input = self.load_input_ptr();
-                field!(@push @[bswap] self.address_type, input, InputsImpl; target_address);
+                field!(@push @[endian = "big"] self.address_type, input, InputsImpl; target_address);
             }
             op::BALANCE => {
                 let sp = self.sp_after_inputs();
@@ -845,7 +841,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             }
             op::CALLER => {
                 let input = self.load_input_ptr();
-                field!(@push @[bswap] self.address_type, input, InputsImpl; caller_address);
+                field!(@push @[endian = "big"] self.address_type, input, InputsImpl; caller_address);
             }
             op::CALLVALUE => {
                 let input = self.load_input_ptr();
@@ -863,14 +859,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 self.emit_calldataload_inline(offset, sp);
             }
             op::CALLDATASIZE => {
-                let calldatasize_ptr = self.get_field(
-                    self.ecx,
-                    mem::offset_of!(EvmContext<'_>, calldatasize),
-                    "ecx.calldatasize.addr",
-                );
-                let size = self.bcx.load(self.isize_type, calldatasize_ptr, "ecx.calldatasize");
-                let size = self.bcx.zext(self.word_type, size);
-                self.push(size);
+                field!(@push self.isize_type, self.ecx, EvmContext<'_>; calldatasize);
             }
             op::CALLDATACOPY => {
                 let sp = self.sp_after_inputs();
