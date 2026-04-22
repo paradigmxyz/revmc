@@ -123,6 +123,8 @@ def fmt_pct(base: float | int, current: float | int) -> str:
     if base == 0:
         return "-"
     pct = (current - base) / base * 100
+    if round(pct, 1) == 0:
+        return "="
     return f"{pct:+.1f}%{_indicator(pct)}"
 
 
@@ -136,6 +138,16 @@ def fmt_dur(s: float) -> str:
     if s < 1.0:
         return f"{s * 1e3:.1f}ms"
     return f"{s:.3f}s"
+
+
+def fmt_size(b: int) -> str:
+    if b == 0:
+        return "-"
+    if b < 1024:
+        return f"{b} B"
+    if b < 1024 * 1024:
+        return f"{b / 1024:.1f} KiB"
+    return f"{b / 1024 / 1024:.1f} MiB"
 
 
 def line_count(path: str) -> int:
@@ -189,6 +201,28 @@ def parse_remarks(dump_dir: str, bench: str) -> dict[str, float]:
     return result
 
 
+JIT_SIZE_RE = re.compile(r"\((\d+) B\)")
+
+
+def parse_jit_size(dump_dir: str, bench: str) -> int:
+    """Parse JIT code size in bytes from remarks.txt."""
+    path = os.path.join(dump_dir, dump_subdir(bench), "remarks.txt")
+    in_section = False
+    try:
+        with open(path) as f:
+            for line in f:
+                if line.startswith("JIT code sizes"):
+                    in_section = True
+                    continue
+                if in_section:
+                    m = JIT_SIZE_RE.search(line)
+                    if m:
+                        return int(m.group(1))
+    except FileNotFoundError:
+        pass
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # Analysis classes
 # ---------------------------------------------------------------------------
@@ -233,50 +267,60 @@ class CodegenLines(Analysis):
         return None
 
     def _collect(self, benches, dump_dir):
-        """Collect line counts per file type, returns (rows, totals)."""
+        """Collect line counts per file type + JIT size, returns (rows, totals).
+
+        Each row is (name, [line_counts...], jit_size).
+        """
         FILES = ["unopt.ll", "opt.ll", "opt.s"]
         rows = []
         totals = [0] * len(FILES)
+        total_size = 0
         for bench in benches:
             sub = dump_subdir(bench)
             counts = [line_count(os.path.join(dump_dir, sub, f)) for f in FILES]
             if all(c == 0 for c in counts):
                 continue
-            rows.append((bench_name(bench), counts))
+            jit_size = parse_jit_size(dump_dir, bench)
+            rows.append((bench_name(bench), counts, jit_size))
             for i, c in enumerate(counts):
                 totals[i] += c
-        return rows, totals
+            total_size += jit_size
+        return rows, totals, total_size
 
     def report(self, benches, dump_dir, outputs):
-        rows, totals = self._collect(benches, dump_dir)
+        rows, totals, total_size = self._collect(benches, dump_dir)
         print("### Assembly line counts\n")
-        table = [[name, *counts] for name, counts in rows]
-        table.append(["**TOTAL**", *[f"**{t}**" for t in totals]])
-        print_table(["benchmark", "unopt.ll", "opt.ll", "opt.s"], table)
+        table = [[name, *counts, fmt_size(jit_size)] for name, counts, jit_size in rows]
+        table.append(
+            ["**TOTAL**", *[f"**{t}**" for t in totals], f"**{fmt_size(total_size)}**"]
+        )
+        print_table(["benchmark", "unopt.ll", "opt.ll", "opt.s", "jit size"], table)
 
     def report_diff(
         self, benches, dump_dir, outputs, base_dump, base_outputs, base_label
     ):
-        cur_rows, cur_totals = self._collect(benches, dump_dir)
-        base_rows, base_totals = self._collect(benches, base_dump)
-        base_map = dict(base_rows)
-
-        def diff_cell(b, c):
-            return f"{fmt_diff(b, c)} ({fmt_pct(b, c)})"
+        cur_rows, cur_totals, cur_total_size = self._collect(benches, dump_dir)
+        base_rows, base_totals, base_total_size = self._collect(benches, base_dump)
+        base_map = {name: (counts, jit_size) for name, counts, jit_size in base_rows}
 
         # Summary table.
         print("### Assembly line counts\n")
-        headers = ["benchmark", "unopt.ll", "opt.ll", "opt.s"]
+        headers = ["benchmark", "unopt.ll", "opt.ll", "opt.s", "jit size"]
         table = []
-        for name, counts in cur_rows:
-            base_counts = base_map.get(name, [0] * 3)
+        for name, counts, jit_size in cur_rows:
+            base_counts, base_jit = base_map.get(name, ([0] * 3, 0))
             table.append(
-                [name, *[diff_cell(b, c) for b, c in zip(base_counts, counts)]]
+                [
+                    name,
+                    *[fmt_pct(b, c) for b, c in zip(base_counts, counts)],
+                    fmt_pct(base_jit, jit_size),
+                ]
             )
         table.append(
             [
                 "**TOTAL**",
-                *[f"**{diff_cell(b, c)}**" for b, c in zip(base_totals, cur_totals)],
+                *[f"**{fmt_pct(b, c)}**" for b, c in zip(base_totals, cur_totals)],
+                f"**{fmt_pct(base_total_size, cur_total_size)}**",
             ]
         )
         print_table(headers, table)
@@ -286,16 +330,22 @@ class CodegenLines(Analysis):
         detail_headers = ["benchmark"]
         for f in ["unopt.ll", "opt.ll", "opt.s"]:
             detail_headers += [f"{f} ({base_label})", "diff"]
+        detail_headers += [f"jit size ({base_label})", "diff"]
         detail_table = []
-        for name, counts in cur_rows:
-            base_counts = base_map.get(name, [0] * 3)
+        for name, counts, jit_size in cur_rows:
+            base_counts, base_jit = base_map.get(name, ([0] * 3, 0))
             row = [name]
             for b, c in zip(base_counts, counts):
-                row += [b, diff_cell(b, c)]
+                row += [b, fmt_pct(b, c)]
+            row += [fmt_size(base_jit), fmt_pct(base_jit, jit_size)]
             detail_table.append(row)
         total_row = ["**TOTAL**"]
         for b, c in zip(base_totals, cur_totals):
-            total_row += [f"**{b}**", f"**{diff_cell(b, c)}**"]
+            total_row += [f"**{b}**", f"**{fmt_pct(b, c)}**"]
+        total_row += [
+            f"**{fmt_size(base_total_size)}**",
+            f"**{fmt_pct(base_total_size, cur_total_size)}**",
+        ]
         detail_table.append(total_row)
         print_table(detail_headers, detail_table)
         print("</details>\n")
