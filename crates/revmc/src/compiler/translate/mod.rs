@@ -852,14 +852,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 let _ = self.call_builtin(Builtin::CallDataLoad, &[self.ecx, sp]);
             }
             op::CALLDATASIZE => {
-                let calldatasize_ptr = self.get_field(
-                    self.ecx,
-                    mem::offset_of!(EvmContext<'_>, calldatasize),
-                    "ecx.calldatasize.addr",
-                );
-                let size = self.bcx.load(self.isize_type, calldatasize_ptr, "ecx.calldatasize");
-                let size = self.bcx.zext(self.word_type, size);
-                self.push(size);
+                field!(@push self.isize_type, self.ecx, EvmContext<'_>; calldatasize);
             }
             op::CALLDATACOPY => {
                 let sp = self.sp_after_inputs();
