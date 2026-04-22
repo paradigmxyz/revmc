@@ -8,7 +8,10 @@ use revm_primitives::{Address, B256, B256Map, Bytes, StorageKeyMap, StorageValue
 use revm_state::AccountInfo;
 use revmc::{EvmCompiler, EvmLlvmBackend, JitEvm, RawEvmCompilerFn, primitives::hardfork::SpecId};
 use serde::Deserialize;
-use std::collections::{BTreeMap, HashSet};
+use std::{
+    collections::{BTreeMap, HashSet},
+    path::Path,
+};
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -162,6 +165,38 @@ impl PreparedBench {
 
         let runnable = bench.stack_input.is_empty();
         Self { name: bench.name, runnable, accounts, block, cfg, tx, functions }
+    }
+
+    /// Load a benchmark from a pre-compiled shared library instead of JIT-compiling.
+    ///
+    /// The `symbol_name` is looked up in the library for each non-empty contract bytecode.
+    /// The caller must keep `_lib` alive as long as the returned `PreparedBench` is used.
+    pub fn load_from_library(
+        bench: &Bench,
+        default_spec_id: SpecId,
+        lib_path: &Path,
+        symbol_name: &str,
+    ) -> (Self, libloading::Library) {
+        let (accounts, block, cfg, tx) = if bench.is_fixture() {
+            Self::parse_fixture(bench)
+        } else {
+            Self::from_bytecode(bench, default_spec_id)
+        };
+
+        let lib = unsafe { libloading::Library::new(lib_path) }.expect("failed to load library");
+        let mut functions = B256Map::default();
+        let mut seen = HashSet::new();
+        for acct in &accounts {
+            if acct.bytecode.is_empty() || !seen.insert(acct.code_hash) {
+                continue;
+            }
+            let f: libloading::Symbol<'_, revmc::EvmCompilerFn> =
+                unsafe { lib.get(symbol_name.as_bytes()) }.expect("symbol not found in library");
+            functions.insert(acct.code_hash, (*f).into_inner());
+        }
+
+        let runnable = bench.stack_input.is_empty();
+        (Self { name: bench.name, runnable, accounts, block, cfg, tx, functions }, lib)
     }
 
     /// Whether this benchmark can be run as a transaction.

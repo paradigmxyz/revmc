@@ -1,12 +1,9 @@
 use clap::{Parser, ValueEnum};
 use color_eyre::{Result, eyre::eyre};
-use revm_bytecode::Bytecode;
-use revm_interpreter::{InputsImpl, SharedMemory, interpreter::ExtBytecode};
 use revmc::{
-    EvmCompiler, EvmContext, OptimizationLevel, eyre::ensure, primitives::hardfork::SpecId,
-    shared_library_path,
+    EvmCompiler, OptimizationLevel, eyre::ensure, primitives::hardfork::SpecId, shared_library_path,
 };
-use revmc_cli::{Bench, BenchHost, PreparedBench, get_benches, read_code};
+use revmc_cli::{Bench, PreparedBench, get_benches, read_code};
 use std::{
     hint::black_box,
     path::{Path, PathBuf},
@@ -122,22 +119,18 @@ impl RunArgs {
         } else {
             match get_benches().into_iter().find(|b| b.name == bench_name) {
                 Some(b) => b,
-                None => {
-                    if self.load.is_some() {
-                        Bench { name: bench_name.clone().leak(), ..Default::default() }
-                    } else {
-                        return Err(eyre!("unknown benchmark: {bench_name}"));
-                    }
-                }
+                None => return Err(eyre!("unknown benchmark: {bench_name}")),
             }
         };
 
         let name = bench_entry.name;
         let is_fixture = bench_entry.is_fixture();
+        let default_aot_dir = || std::env::temp_dir().join("revmc-cli").join(&bench_name);
+        let mut aot_dir = None;
 
         // Bytecode-only features: parse, display, dot, aot.
         if !is_fixture {
-            let Bench { ref bytecode, ref calldata, ref stack_input, .. } = bench_entry;
+            let Bench { ref bytecode, ref stack_input, .. } = bench_entry;
 
             let mut compiler = EvmCompiler::new_llvm(self.aot)?;
             compiler.set_opt_level(self.opt_level);
@@ -159,12 +152,10 @@ impl RunArgs {
             }
 
             let spec_id: SpecId = self.spec_id.into();
-            let bytecode_raw =
-                Bytecode::new_raw(revmc::primitives::Bytes::copy_from_slice(bytecode));
 
             compiler.inspect_stack(self.inspect_stack || !stack_input.is_empty());
 
-            let parsed = compiler.parse(bytecode_raw.original_byte_slice().into(), spec_id)?;
+            let parsed = compiler.parse(bytecode.as_slice().into(), spec_id)?;
             if self.display || self.parse_only {
                 println!("{name}()\n{parsed:#}");
             }
@@ -188,7 +179,7 @@ impl RunArgs {
                 let out_dir = if let Some(out_dir) = compiler.out_dir() {
                     out_dir.join(&bench_name)
                 } else {
-                    let dir = std::env::temp_dir().join("revmc-cli").join(&bench_name);
+                    let dir = default_aot_dir();
                     std::fs::create_dir_all(&dir)?;
                     dir
                 };
@@ -206,82 +197,35 @@ impl RunArgs {
                     eprintln!("Linked shared object file to {}", shared_lib.display());
                 }
 
+                aot_dir = Some(out_dir);
                 if self.load.is_none() {
                     return Ok(());
                 }
             }
-
-            // --load: run from a shared library instead of JIT.
-            if let Some(ref load) = self.load {
-                let calldata: revmc::primitives::Bytes = if let Some(ref cd) = self.calldata {
-                    revmc::primitives::hex::decode(cd)?.into()
-                } else {
-                    calldata.clone().into()
-                };
-                let gas_limit = self.gas_limit;
-
-                let load_path = match load {
-                    Some(p) => p.clone(),
-                    None => {
-                        let out_dir =
-                            compiler.out_dir().map(|d| d.join(&bench_name)).unwrap_or_else(|| {
-                                std::env::temp_dir().join("revmc-cli").join(&bench_name)
-                            });
-                        shared_library_path(&out_dir, "a")
-                    }
-                };
-                let lib = unsafe { libloading::Library::new(load_path) }?;
-                let f: libloading::Symbol<'_, revmc::EvmCompilerFn> =
-                    unsafe { lib.get(name.as_bytes())? };
-                let f = *f;
-
-                let mut host = BenchHost::new(spec_id);
-                host.apply_bench(&bench_entry);
-                let mk_interpreter = || {
-                    let ext_bytecode = ExtBytecode::new(bytecode_raw.clone());
-                    let input = InputsImpl {
-                        input: revm_interpreter::CallInput::Bytes(calldata.clone()),
-                        ..Default::default()
-                    };
-                    revm_interpreter::Interpreter::new(
-                        SharedMemory::new(),
-                        ext_bytecode,
-                        input,
-                        false,
-                        spec_id,
-                        gas_limit,
-                    )
-                };
-
-                let mut interpreter = mk_interpreter();
-                let (mut ecx, stack, stack_len) =
-                    EvmContext::from_interpreter_with_stack(&mut interpreter, &mut host);
-                for (i, input) in stack_input.iter().enumerate() {
-                    stack.set(i, (*input).into());
-                }
-                *stack_len = stack_input.len();
-                let ret = unsafe { f.call_noinline(Some(stack), Some(stack_len), &mut ecx) };
-                println!("InstructionResult::{ret:?}");
-
-                if self.n_iters > 1 {
-                    bench(self.n_iters, &format!("{name}/loaded"), || {
-                        let mut interpreter = mk_interpreter();
-                        let (mut ecx, stack, stack_len) =
-                            EvmContext::from_interpreter_with_stack(&mut interpreter, &mut host);
-                        for (i, input) in stack_input.iter().enumerate() {
-                            stack.set(i, (*input).into());
-                        }
-                        *stack_len = stack_input.len();
-                        unsafe { f.call_noinline(Some(stack), Some(stack_len), &mut ecx) }
-                    });
-                }
-                return Ok(());
-            }
         }
 
-        // Unified runtime path for both bytecode and fixture benchmarks.
+        // Unified runtime path for both bytecode, fixture, and loaded benchmarks.
         let spec_id: SpecId = self.spec_id.into();
-        let (prepared, _compiler) = PreparedBench::load(&bench_entry, spec_id);
+        let load_path = self.load.as_ref().map(|load| match load {
+            Some(p) => p.clone(),
+            None => {
+                let out_dir = aot_dir.unwrap_or_else(&default_aot_dir);
+                shared_library_path(&out_dir, "a")
+            }
+        });
+        let (prepared, _compiler, _lib);
+        if let Some(ref load_path) = load_path {
+            let lib;
+            (prepared, lib) =
+                PreparedBench::load_from_library(&bench_entry, spec_id, load_path, name);
+            _compiler = None;
+            _lib = Some(lib);
+        } else {
+            let compiler;
+            (prepared, compiler) = PreparedBench::load(&bench_entry, spec_id);
+            _compiler = Some(compiler);
+            _lib = None;
+        };
 
         if !prepared.is_runnable() {
             return Err(eyre!(
