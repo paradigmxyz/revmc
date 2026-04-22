@@ -8,8 +8,8 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::{fmt, mem::MaybeUninit, ptr};
 use revm_interpreter::{
-    CallInput, Gas, Host, InputsImpl, InstructionResult, Interpreter, InterpreterAction,
-    InterpreterResult, SharedMemory,
+    Gas, Host, InputsImpl, InstructionResult, Interpreter, InterpreterAction, InterpreterResult,
+    SharedMemory,
     context_interface::cfg::GasParams,
     interpreter_types::{Jumps, LegacyBytecode, ReturnData, RuntimeFlag},
 };
@@ -94,12 +94,8 @@ pub struct EvmContext<'a> {
     /// Index that tracks where execution should resume after a CALL/CREATE suspension.
     #[doc(hidden)] // Not public API.
     pub resume_at: ResumeAt,
-
     /// The contract bytecode, for CODECOPY at runtime.
     pub bytecode: *const [u8],
-
-    /// Pointer to the call input data, cached for inline CALLDATALOAD.
-    pub calldata: *const u8,
     /// The size of the call input data, cached for CALLDATASIZE.
     pub calldatasize: usize,
     /// The result set by a builtin before exiting via [`revmc_exit`].
@@ -115,15 +111,12 @@ pub struct EvmContext<'a> {
 const _: () = {
     use core::mem::offset_of;
 
-    assert!(core::mem::size_of::<EvmContext<'_>>() == 144);
-
     // Key fields accessed by JIT code
     assert!(offset_of!(EvmContext<'_>, memory) == 0);
     assert!(offset_of!(EvmContext<'_>, gas) == 16);
     assert!(offset_of!(EvmContext<'_>, spec_id) == 65);
     assert!(offset_of!(EvmContext<'_>, resume_at) == 72);
-    assert!(offset_of!(EvmContext<'_>, calldata) == 96);
-    assert!(offset_of!(EvmContext<'_>, calldatasize) == 104);
+    assert!(offset_of!(EvmContext<'_>, calldatasize) == 96);
 };
 
 impl fmt::Debug for EvmContext<'_> {
@@ -149,16 +142,6 @@ impl<'a> EvmContext<'a> {
         let (stack, stack_len) = EvmStack::from_interpreter_stack(&mut interpreter.stack);
         let bytecode = interpreter.bytecode.bytecode_slice() as *const [u8];
         let calldatasize = interpreter.input.input.len();
-        let calldata = match &interpreter.input.input {
-            CallInput::Bytes(bytes) => bytes.as_ptr(),
-            CallInput::SharedBuffer(_range) => {
-                unimplemented!("CallInput::SharedBuffer is not supported")
-                // let buf = interpreter.memory.global_slice_range(range.clone());
-                // let ptr = buf.as_ptr();
-                // drop(buf);
-                // ptr
-            }
-        };
         let gas_params = host.gas_params().clone();
         let this = Self {
             memory: &mut interpreter.memory,
@@ -171,7 +154,6 @@ impl<'a> EvmContext<'a> {
             spec_id: interpreter.runtime_flag.spec_id(),
             resume_at,
             bytecode,
-            calldata,
             calldatasize,
             exit_result: InstructionResult::Stop,
             exit_sp: ptr::null_mut(),

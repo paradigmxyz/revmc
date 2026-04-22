@@ -849,14 +849,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             }
             op::CALLDATALOAD => {
                 let sp = self.sp_after_inputs();
-                // Saturating convert i256 offset to isize.
-                let offset_word = self.load_word(sp, "calldataload.offset");
-                let offset = self.bcx.ireduce(self.isize_type, offset_word);
-                let extended = self.bcx.zext(self.word_type, offset);
-                let fits = self.bcx.icmp(IntCC::Equal, offset_word, extended);
-                let sentinel = self.bcx.iconst(self.isize_type, isize::MAX as i64);
-                let offset = self.bcx.select(fits, offset, sentinel);
-                self.emit_calldataload_inline(offset, sp);
+                let _ = self.call_builtin(Builtin::CallDataLoad, &[self.ecx, sp]);
             }
             op::CALLDATASIZE => {
                 let calldatasize_ptr = self.get_field(
@@ -1323,48 +1316,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let input_ptr_ptr =
             self.get_field(self.ecx, mem::offset_of!(EvmContext<'_>, input), "ecx.input.addr");
         self.bcx.load(ptr_type, input_ptr_ptr, "ecx.input")
-    }
-
-    /// Emits inline CALLDATALOAD: zero slot, memcpy from `ecx.calldata + offset`, bswap.
-    fn emit_calldataload_inline(&mut self, offset: B::Value, slot: B::Value) {
-        let isize_type = self.isize_type;
-        let ptr_type = self.bcx.type_ptr();
-
-        let calldata_addr = self.get_field(
-            self.ecx,
-            mem::offset_of!(EvmContext<'_>, calldata),
-            "ecx.calldata.addr",
-        );
-        let calldata_ptr = self.bcx.load(ptr_type, calldata_addr, "ecx.calldata");
-        let calldatasize_addr = self.get_field(
-            self.ecx,
-            mem::offset_of!(EvmContext<'_>, calldatasize),
-            "ecx.calldatasize.addr",
-        );
-        let calldatasize = self.bcx.load(isize_type, calldatasize_addr, "ecx.calldatasize");
-
-        // Zero the output, then copy min(32, calldatasize - offset) bytes if in bounds.
-        let zero = self.bcx.iconst_256(U256::ZERO);
-        self.bcx.store(zero, slot);
-
-        let in_bounds = self.bcx.icmp(IntCC::UnsignedLessThan, offset, calldatasize);
-        let current = self.current_block();
-        let copy_block = self.create_block_after(current, "calldataload.copy");
-        let done_block = self.create_block_after(copy_block, "calldataload.done");
-        self.bcx.brif(in_bounds, copy_block, done_block);
-
-        self.bcx.switch_to_block(copy_block);
-        let remaining = self.bcx.isub(calldatasize, offset);
-        let thirty_two = self.bcx.iconst(isize_type, 32);
-        let count = self.bcx.umin(remaining, thirty_two);
-        let src = self.bcx.gep(self.i8_type, calldata_ptr, &[offset], "calldata.src");
-        self.bcx.memcpy(slot, src, count);
-        self.bcx.br(done_block);
-
-        self.bcx.switch_to_block(done_block);
-        let word = self.bcx.load(self.word_type, slot, "calldataload.raw");
-        let swapped = self.bcx.bswap(word);
-        self.bcx.store(swapped, slot);
     }
 
     /// Loads the gas used.

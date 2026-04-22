@@ -282,21 +282,20 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         if let [Some(offset)] = self.const_operands()
             && let Ok(offset) = u64::try_from(offset)
         {
-            if op == op::CALLDATALOAD {
-                let sp = self.sp_from_top(1);
-                let offset = self.bcx.iconst(self.isize_type, offset as i64);
-                self.emit_calldataload_inline(offset, sp);
-                return true;
-            }
             let builtin = match op {
                 op::MLOAD => Builtin::MloadC,
                 op::SLOAD => Builtin::SloadC,
+                op::CALLDATALOAD => Builtin::CallDataLoadC,
                 _ => unreachable!(),
             };
             let sp = self.sp_from_top(1);
             let offset = self.bcx.iconst(self.isize_type, offset as i64);
             let args = &[self.ecx, sp, offset];
-            self.call_fallible_builtin(builtin, args);
+            if op == op::CALLDATALOAD {
+                let _ = self.call_builtin(builtin, args);
+            } else {
+                self.call_fallible_builtin(builtin, args);
+            }
             true
         } else {
             false
