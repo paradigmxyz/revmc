@@ -81,14 +81,17 @@ To get a summary across all benchmarks:
 
 Use `cargo r -- run --list` to see available benchmark names.
 
-## Comparing codegen output
+## Benchmarking against another revision
 
-To compare LLVM IR and assembly line counts against another revision:
+To compare codegen line counts and compile times against another revision:
 
 ```bash
-./scripts/codegen-lines.py /tmp/dump --diff main                # all benchmarks vs main
-./scripts/codegen-lines.py /tmp/dump --diff main usdc_proxy     # specific benchmarks
-./scripts/codegen-lines.py /tmp/dump                            # line counts only (no diff)
+./scripts/bench-diff.py /tmp/bench main                          # all benchmarks vs main
+./scripts/bench-diff.py /tmp/bench main usdc_proxy seaport       # specific benchmarks
+./scripts/bench-diff.py /tmp/bench main --extra-dir tmp/mainnet  # include mainnet .bin files
+./scripts/bench-diff.py /tmp/bench                               # current branch only (no diff)
+./scripts/bench-diff.py /tmp/bench main --no-codegen             # compile times only
+./scripts/bench-diff.py /tmp/bench main --no-compile-time        # codegen lines only
 ```
 
 ## Important
