@@ -75,13 +75,46 @@ pub enum CreateKind {
 // If results are expected to be pushed back onto the stack, they must be written to the read
 // pointers in **reverse order**, meaning the last pointer is the first return value.
 
+#[inline(always)]
+#[cold]
+fn fail(ecx: &mut EvmContext<'_>, e: BuiltinError) -> ! {
+    ecx.exit_result = e.into();
+    unsafe { revmc_context::revmc_exit(ecx) }
+}
+
+macro_rules! builtins {
+    () => {};
+
+    // Fallible builtins: `-> BuiltinResult` is stripped and errors route through `fail()`.
+    ($(#[$attr:meta])* pub unsafe extern "C" fn $name:ident($ecx:ident : &mut EvmContext<'_> $(, $rest_i:ident : $rest_t:ty)* $(,)?) -> BuiltinResult $block:block $($more:tt)*) => {
+        $(#[$attr])*
+        pub unsafe extern "C" fn $name($ecx: &mut EvmContext<'_> $(, $rest_i : $rest_t)*) {
+            #[inline(always)]
+            unsafe fn imp($ecx: &mut EvmContext<'_> $(, $rest_i : $rest_t)*) -> BuiltinResult $block
+            match unsafe { imp($ecx $(, $rest_i)*) } {
+                Ok(()) => {}
+                Err(e) => fail($ecx, e),
+            }
+        }
+
+        builtins! { $($more)* }
+    };
+
+    // Infallible items pass through unchanged.
+    ($item:item $($rest:tt)*) => {
+        $item
+        builtins! { $($rest)* }
+    };
+}
+
+builtins! {
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __revmc_builtin_panic(data: *const u8, len: usize) -> ! {
     let msg = unsafe { core::str::from_utf8_unchecked(core::slice::from_raw_parts(data, len)) };
     panic!("{msg}");
 }
 
-/// Debug assertion: panics if `ecx.spec_id != expected`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __revmc_builtin_assert_spec_id(ecx: &EvmContext<'_>, expected: SpecId) {
     assert_eq!(
@@ -125,8 +158,9 @@ pub unsafe extern "C" fn __revmc_builtin_mulmod(rev![a, b, c]: &mut [EvmWord; 3]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __revmc_builtin_exp(
     ecx: &mut EvmContext<'_>,
-    rev![base, exponent_ptr]: &mut [EvmWord; 2],
+    sp: &mut [EvmWord; 2],
 ) -> BuiltinResult {
+    let rev![base, exponent_ptr] = sp;
     let exponent = exponent_ptr.to_u256();
     gas!(ecx, ecx.gas_params.exp_cost(exponent));
     *exponent_ptr = base.to_u256().pow(exponent).into();
@@ -136,8 +170,9 @@ pub unsafe extern "C" fn __revmc_builtin_exp(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __revmc_builtin_keccak256(
     ecx: &mut EvmContext<'_>,
-    rev![offset, len_ptr]: &mut [EvmWord; 2],
+    sp: &mut [EvmWord; 2],
 ) -> BuiltinResult {
+    let rev![offset, len_ptr] = sp;
     let len = try_into_usize!(len_ptr);
     do_keccak256(ecx, len_ptr, *offset, len)
 }
@@ -244,8 +279,9 @@ fn do_calldataload(ecx: &EvmContext<'_>, out: &mut EvmWord, offset: usize) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __revmc_builtin_calldatacopy(
     ecx: &mut EvmContext<'_>,
-    rev![memory_offset, data_offset, len]: &mut [EvmWord; 3],
+    sp: &mut [EvmWord; 3],
 ) -> BuiltinResult {
+    let rev![memory_offset, data_offset, len] = sp;
     let len = try_into_usize!(len);
     if len != 0 {
         gas!(ecx, ecx.gas_params.copy_cost(len));
@@ -293,8 +329,9 @@ pub unsafe extern "C" fn __revmc_builtin_extcodesize(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __revmc_builtin_extcodecopy(
     ecx: &mut EvmContext<'_>,
-    rev![address, memory_offset, code_offset, len]: &mut [EvmWord; 4],
+    sp: &mut [EvmWord; 4],
 ) -> BuiltinResult {
+    let rev![address, memory_offset, code_offset, len] = sp;
     let addr = address.to_address();
     let len = try_into_usize!(len);
     gas!(ecx, ecx.gas_params.extcodecopy(len));
@@ -316,8 +353,9 @@ pub unsafe extern "C" fn __revmc_builtin_extcodecopy(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __revmc_builtin_returndatacopy(
     ecx: &mut EvmContext<'_>,
-    rev![memory_offset, offset, len]: &mut [EvmWord; 3],
+    sp: &mut [EvmWord; 3],
 ) -> BuiltinResult {
+    let rev![memory_offset, offset, len] = sp;
     let len = try_into_usize!(len);
     let data_offset = as_usize_saturated!(offset.to_u256());
 
@@ -471,8 +509,9 @@ fn do_mload(ecx: &mut EvmContext<'_>, out: &mut EvmWord, offset: usize) -> Built
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __revmc_builtin_mstore(
     ecx: &mut EvmContext<'_>,
-    rev![offset, value]: &mut [EvmWord; 2],
+    sp: &mut [EvmWord; 2],
 ) -> BuiltinResult {
+    let rev![offset, value] = sp;
     do_mstore(ecx, try_into_usize!(offset), Either::Left(value))
 }
 
@@ -520,8 +559,9 @@ fn do_mstore(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __revmc_builtin_mstore8(
     ecx: &mut EvmContext<'_>,
-    rev![offset, value]: &mut [EvmWord; 2],
+    sp: &mut [EvmWord; 2],
 ) -> BuiltinResult {
+    let rev![offset, value] = sp;
     let offset = try_into_usize!(offset);
     ensure_memory(ecx, offset, 1)?;
     ecx.memory.set(offset, &[value.to_u256().byte(0)]);
@@ -563,14 +603,16 @@ pub unsafe extern "C" fn __revmc_builtin_sload_c(
     key: u64,
 ) -> BuiltinResult {
     *index = U256::from(key).into();
-    __revmc_builtin_sload(ecx, index)
+    __revmc_builtin_sload(ecx, index);
+    Ok(())
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __revmc_builtin_sstore(
     ecx: &mut EvmContext<'_>,
-    rev![index, value]: &mut [EvmWord; 2],
+    sp: &mut [EvmWord; 2],
 ) -> BuiltinResult {
+    let rev![index, value] = sp;
     ensure_non_staticcall!(ecx);
 
     let target = ecx.input.target_address;
@@ -610,8 +652,9 @@ pub unsafe extern "C" fn __revmc_builtin_tload(ecx: &mut EvmContext<'_>, key: &m
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __revmc_builtin_tstore(
     ecx: &mut EvmContext<'_>,
-    rev![key, value]: &mut [EvmWord; 2],
+    sp: &mut [EvmWord; 2],
 ) -> BuiltinResult {
+    let rev![key, value] = sp;
     ensure_non_staticcall!(ecx);
     ecx.host.tstore(ecx.input.target_address, key.to_u256(), value.to_u256());
     Ok(())
@@ -620,8 +663,9 @@ pub unsafe extern "C" fn __revmc_builtin_tstore(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __revmc_builtin_mcopy(
     ecx: &mut EvmContext<'_>,
-    rev![dst, src, len]: &mut [EvmWord; 3],
+    sp: &mut [EvmWord; 3],
 ) -> BuiltinResult {
+    let rev![dst, src, len] = sp;
     let len = try_into_usize!(len);
     gas!(ecx, ecx.gas_params.mcopy_cost(len));
     if len != 0 {
@@ -857,9 +901,10 @@ pub unsafe extern "C" fn __revmc_builtin_call(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __revmc_builtin_do_return(
     ecx: &mut EvmContext<'_>,
-    rev![offset, len]: &mut [EvmWord; 2],
+    sp: &mut [EvmWord; 2],
     result: InstructionResult,
 ) -> BuiltinResult {
+    let rev![offset, len] = sp;
     let len = try_into_usize!(len);
     let output = if len != 0 {
         let offset = try_into_usize!(offset);
@@ -919,4 +964,6 @@ pub unsafe extern "C" fn __revmc_builtin_selfdestruct(
     }
 
     Err(InstructionResult::SelfDestruct.into())
+}
+
 }

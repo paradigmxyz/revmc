@@ -1124,8 +1124,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             op::INVALID => goto_return!(fail InstructionResult::InvalidFEOpcode),
             op::SELFDESTRUCT => {
                 let sp = self.sp_after_inputs();
-                let r = self.call_builtin(Builtin::SelfDestruct, &[self.ecx, sp]).unwrap();
-                self.build_return(r);
+                let _ = self.call_builtin(Builtin::SelfDestruct, &[self.ecx, sp]);
+                self.bcx.unreachable();
                 goto_return!(no_branch);
             }
 
@@ -1222,8 +1222,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     fn return_common(&mut self, ir: InstructionResult) {
         let sp = self.sp_after_inputs();
         let ir_const = self.bcx.iconst(self.i8_type, ir as i64);
-        let r = self.call_builtin(Builtin::DoReturn, &[self.ecx, sp, ir_const]).unwrap();
-        self.build_return(r);
+        let _ = self.call_builtin(Builtin::DoReturn, &[self.ecx, sp, ir_const]);
+        self.bcx.unreachable();
     }
 
     /// Builds a `CREATE` or `CREATE2` instruction.
@@ -1453,13 +1453,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     }
     */
 
-    /// Builds a check, failing if the builtin returned a non-zero error.
-    fn build_check_instruction_result(&mut self, ret: B::Value) {
-        let failure = self.bcx.icmp_imm(IntCC::NotEqual, ret, 0);
-        let target = self.build_check_inner(true, failure, ret);
-        self.bcx.switch_to_block(target);
-    }
-
     /// Builds a check, failing if the condition is true.
     ///
     /// `if failure_cond { return ret } else { ... }`
@@ -1597,12 +1590,11 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let _ = self.bcx.call(printf, &args);
     }
 
-    /// Build a call to a builtin that returns an [`InstructionResult`].
+    /// Build a call to a fallible builtin.
+    ///
+    /// The builtin longjmps on error, so no return value check is needed.
     fn call_fallible_builtin(&mut self, builtin: Builtin, args: &[B::Value]) {
-        let ret = self
-            .call_builtin(builtin, args)
-            .unwrap_or_else(|| panic!("builtin {builtin:?} does not return a value"));
-        self.build_check_instruction_result(ret);
+        let _ = self.call_builtin(builtin, args);
     }
 
     /// Build a call to a builtin.
