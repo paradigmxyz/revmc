@@ -128,9 +128,18 @@ impl RunArgs {
         let default_aot_dir = || std::env::temp_dir().join("revmc-cli").join(&bench_name);
         let mut aot_dir = None;
 
-        // Bytecode-only features: parse, display, dot, aot.
-        if !is_fixture {
-            let Bench { ref bytecode, .. } = bench_entry;
+        // Compile the entry-point contract: parse, display, dot, dump, aot.
+        // For fixture benchmarks, extract the tx-target bytecode.
+        {
+            let bytecode;
+            let compile_spec_id: SpecId;
+            if is_fixture {
+                bytecode = fixture_entry_bytecode(bench_entry.fixture_json.unwrap());
+                compile_spec_id = bench_entry.spec_id.unwrap();
+            } else {
+                bytecode = bench_entry.bytecode.clone();
+                compile_spec_id = self.spec_id.into();
+            };
 
             let mut compiler = EvmCompiler::new_llvm(self.aot)?;
             compiler.set_opt_level(self.opt_level);
@@ -151,11 +160,9 @@ impl RunArgs {
                 eprintln!("Dump directory: {}", dump_dir.display());
             }
 
-            let spec_id: SpecId = self.spec_id.into();
-
             compiler.inspect_stack(self.inspect_stack);
 
-            let parsed = compiler.parse(bytecode.as_slice().into(), spec_id)?;
+            let parsed = compiler.parse(bytecode.as_slice().into(), compile_spec_id)?;
             if self.display || self.parse_only {
                 println!("{name}()\n{parsed:#}");
             }
@@ -250,6 +257,16 @@ impl RunArgs {
 
         Ok(())
     }
+}
+
+/// Extract the entry-point contract's bytecode from a fixture JSON.
+fn fixture_entry_bytecode(json: &str) -> Vec<u8> {
+    let v: serde_json::Value = serde_json::from_str(json).expect("invalid fixture JSON");
+    let case = v.as_object().unwrap().values().next().unwrap();
+    let to = case["transaction"][0]["to"].as_str().expect("fixture missing transaction.to");
+    let code = case["pre"][to]["code"].as_str().expect("fixture missing entry-point code");
+    let hex = code.strip_prefix("0x").unwrap_or(code);
+    revmc::primitives::hex::decode(hex).expect("invalid hex in fixture code")
 }
 
 fn open_dot(dot_path: &Path, fmt: DotFormat, open: bool) -> Result<()> {
