@@ -786,8 +786,21 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 self.call_fallible_builtin(Builtin::Exp, &[self.ecx, sp]);
             }
             op::SIGNEXTEND => {
+                // let shift = 248 - 8 * ext;
+                // ext < 31
+                //   ? (x << shift) >>s shift
+                //   : x
                 let [ext, x] = self.popn();
-                let r = self.call_signextend(ext, x);
+
+                let might_do_something = self.bcx.icmp_imm(IntCC::UnsignedLessThan, ext, 31);
+
+                let shift = self.bcx.imul_imm(ext, 8);
+                let c248 = self.bcx.iconst_256(U256::from(248));
+                let shift = self.bcx.isub(c248, shift);
+                let shifted = self.bcx.ishl(x, shift);
+                let sext = self.bcx.sshr(shifted, shift);
+
+                let r = self.bcx.select(might_do_something, sext, x);
                 self.push(r);
             }
 
@@ -1695,9 +1708,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
 /// IR builtins.
 impl<B: Backend> FunctionCx<'_, B> {
-    fn call_signextend(&mut self, ext: B::Value, x: B::Value) -> B::Value {
-        self.call_ir_binop_builtin("signextend", ext, x, Self::build_signextend)
-    }
 
     /// Builds: `fn signextend(ext: u256, x: u256) -> u256`
     fn build_signextend(&mut self) {
