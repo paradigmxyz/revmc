@@ -76,16 +76,42 @@ macro_rules! tests {
         )*
     };
 
-    // Generate an `_opaque` companion test for binop cases (2 args).
+    // Generate an `_opaque` companion test for each arity.
     // Uses MSTORE+MLOAD to make operands invisible to the compiler.
     (@maybe_opaque $name:ident(@raw { $($fields:tt)* })) => {};
-    (@maybe_opaque $name:ident($op:expr, $a:expr => $($ret:tt)*)) => {};
-    (@maybe_opaque $name:ident($op:expr, $a:expr, $b:expr, $c:expr => $($ret:tt)*)) => {};
-    (@maybe_opaque $name:ident($op:expr, $a:expr, $b:expr => $($ret:expr),* $(; $($_rest:tt)*)?)) => {
+    (@maybe_opaque $name:ident($op:expr, $a:expr => $($ret:expr),* $(; $($_r1:tt)*)?)) => {
+        paste::paste! {
+            matrix_tests!([<$name _opaque>] = |jit| run_test_case(
+                &TestCase {
+                    bytecode: &bytecode_unop_opaque($op, $a),
+                    expected_stack: &[$($ret),*],
+                    expected_memory: MEMORY_WHAT_INTERPRETER_SAYS,
+                    expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+                    ..Default::default()
+                },
+                jit,
+            ));
+        }
+    };
+    (@maybe_opaque $name:ident($op:expr, $a:expr, $b:expr => $($ret:expr),* $(; $($_r2:tt)*)?)) => {
         paste::paste! {
             matrix_tests!([<$name _opaque>] = |jit| run_test_case(
                 &TestCase {
                     bytecode: &bytecode_binop_opaque($op, $a, $b),
+                    expected_stack: &[$($ret),*],
+                    expected_memory: MEMORY_WHAT_INTERPRETER_SAYS,
+                    expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+                    ..Default::default()
+                },
+                jit,
+            ));
+        }
+    };
+    (@maybe_opaque $name:ident($op:expr, $a:expr, $b:expr, $c:expr => $($ret:expr),* $(; $($_r3:tt)*)?)) => {
+        paste::paste! {
+            matrix_tests!([<$name _opaque>] = |jit| run_test_case(
+                &TestCase {
+                    bytecode: &bytecode_ternop_opaque($op, $a, $b, $c),
                     expected_stack: &[$($ret),*],
                     expected_memory: MEMORY_WHAT_INTERPRETER_SAYS,
                     expected_gas: GAS_WHAT_INTERPRETER_SAYS,
