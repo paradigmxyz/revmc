@@ -219,6 +219,13 @@ pub fn get_benches() -> Vec<Bench> {
             fixture_json: Some(include_str!("../../../data/curve-stableswap-2pool.json")),
             ..Default::default()
         },
+        // https://etherscan.io/address/0x5F8E7D750E75b44747C058A204D8DEa0D18fA5d3
+        Bench {
+            name: "onchain_lm_v2",
+            spec_id: Some(revmc::primitives::hardfork::SpecId::CANCUN),
+            fixture_json: Some(include_str!("../../../data/onchain-lm-v2.json")),
+            ..Default::default()
+        },
         // https://github.com/karalabe/burntpix-benchmark
         Bench {
             name: "burntpix",
