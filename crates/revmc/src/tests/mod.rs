@@ -1866,21 +1866,6 @@ tests! {
     }
 }
 
-/// Build opaque unop bytecode: MSTORE(a, 0), MLOAD(0), `<op>`.
-fn bytecode_unop_opaque(opcode: u8, a: U256) -> Vec<u8> {
-    let mut code = Vec::with_capacity(64);
-    code.push(op::PUSH32);
-    code.extend_from_slice(&a.to_be_bytes::<32>());
-    code.push(op::PUSH1);
-    code.push(0x00);
-    code.push(op::MSTORE);
-    code.push(op::PUSH1);
-    code.push(0x00);
-    code.push(op::MLOAD);
-    code.push(opcode);
-    code
-}
-
 fn bytecode_unop(op: u8, a: U256) -> [u8; 34] {
     let mut code = [0; 34];
     let mut i = 0;
@@ -1895,6 +1880,31 @@ fn bytecode_binop(op: u8, a: U256, b: U256) -> [u8; 67] {
     build_push32!(code[i], b);
     build_push32!(code[i], a);
     code[i] = op;
+    code
+}
+
+fn bytecode_ternop(op: u8, a: U256, b: U256, c: U256) -> [u8; 100] {
+    let mut code = [0; 100];
+    let mut i = 0;
+    build_push32!(code[i], c);
+    build_push32!(code[i], b);
+    build_push32!(code[i], a);
+    code[i] = op;
+    code
+}
+
+/// Build opaque unop bytecode: MSTORE(a, 0), MLOAD(0), `<op>`.
+fn bytecode_unop_opaque(opcode: u8, a: U256) -> Vec<u8> {
+    let mut code = Vec::with_capacity(64);
+    code.push(op::PUSH32);
+    code.extend_from_slice(&a.to_be_bytes::<32>());
+    code.push(op::PUSH1);
+    code.push(0x00);
+    code.push(op::MSTORE);
+    code.push(op::PUSH1);
+    code.push(0x00);
+    code.push(op::MLOAD);
+    code.push(opcode);
     code
 }
 
@@ -1941,16 +1951,6 @@ fn bytecode_ternop_opaque(opcode: u8, a: U256, b: U256, c: U256) -> Vec<u8> {
         code.push(op::MLOAD);
     }
     code.push(opcode);
-    code
-}
-
-fn bytecode_ternop(op: u8, a: U256, b: U256, c: U256) -> [u8; 100] {
-    let mut code = [0; 100];
-    let mut i = 0;
-    build_push32!(code[i], c);
-    build_push32!(code[i], b);
-    build_push32!(code[i], a);
-    code[i] = op;
     code
 }
 
