@@ -1708,68 +1708,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
 /// IR builtins.
 impl<B: Backend> FunctionCx<'_, B> {
-
-    /// Builds: `fn signextend(ext: u256, x: u256) -> u256`
-    fn build_signextend(&mut self) {
-        // From the yellow paper:
-        /*
-        let [ext, x] = stack.pop();
-        let t = 256 - 8 * (ext + 1);
-        let mut result = x;
-        result[..t] = [x[t]; t]; // Index by bits.
-        */
-
-        let ext = self.bcx.fn_param(0);
-        let x = self.bcx.fn_param(1);
-
-        // For 31 we also don't need to do anything.
-        let might_do_something = self.bcx.icmp_imm(IntCC::UnsignedLessThan, ext, 31);
-        let r = self.bcx.lazy_select(
-            might_do_something,
-            self.bcx.type_int(256),
-            |bcx| {
-                // Adapted from revm: https://github.com/bluealloy/revm/blob/fda371f73aba2c30a83c639608be78145fd1123b/crates/interpreter/src/instructions/arithmetic.rs#L89
-                // let bit_index = 8 * ext + 7;
-                // let bit = (x >> bit_index) & 1 != 0;
-                // let mask = (1 << bit_index) - 1;
-                // let r = if bit { x | !mask } else { *x & mask };
-
-                // let bit_index = 8 * ext + 7;
-                let bit_index = bcx.imul_imm(ext, 8);
-                let bit_index = bcx.iadd_imm(bit_index, 7);
-
-                // let bit = (x >> bit_index) & 1 != 0;
-                let one = bcx.iconst_256(U256::from(1));
-                let bit = bcx.ushr(x, bit_index);
-                let bit = bcx.bitand(bit, one);
-                let bit = bcx.icmp_imm(IntCC::NotEqual, bit, 0);
-
-                // let mask = (1 << bit_index) - 1;
-                let mask = bcx.ishl(one, bit_index);
-                let mask = bcx.isub_imm(mask, 1);
-
-                // let r = if bit { x | !mask } else { *x & mask };
-                let not_mask = bcx.bitnot(mask);
-                let sext = bcx.bitor(x, not_mask);
-                let zext = bcx.bitand(x, mask);
-                bcx.select(bit, sext, zext)
-            },
-            |_bcx| x,
-        );
-        self.bcx.ret(&[r]);
-    }
-
-    fn call_ir_binop_builtin(
-        &mut self,
-        name: &str,
-        x1: B::Value,
-        x2: B::Value,
-        build: fn(&mut Self),
-    ) -> B::Value {
-        let word = self.word_type;
-        self.call_ir_builtin(name, &[x1, x2], &[word, word], Some(word), build).unwrap()
-    }
-
+    #[allow(dead_code)]
     #[must_use]
     fn call_ir_builtin(
         &mut self,
