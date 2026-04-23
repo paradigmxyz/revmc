@@ -8,7 +8,7 @@ use crate::{
 use either::Either;
 use oxc_index::IndexVec;
 use revm_bytecode::opcode as op;
-use revm_interpreter::InstructionResult;
+use revm_interpreter::{InputsImpl, InstructionResult};
 use revm_primitives::U256;
 use revmc_backend::{Attribute, BackendTypes, FunctionAttributeLocation, Pointer, TypeMethods};
 use revmc_builtins::{Builtin, Builtins, CallKind, CreateKind};
@@ -78,6 +78,8 @@ pub(super) struct FunctionCx<'a, B: Backend> {
     gas_remaining: Pointer<B::Builder<'a>>,
     /// The EVM context. Opaque pointer, only passed to builtins.
     ecx: B::Value,
+    /// The `ecx.input` pointer (`&InputsImpl`). Loaded once at entry.
+    input: B::Value,
     /// Stack length before the current instruction.
     len_before: B::Value,
     /// Stack length offset for the current instruction, used for push/pop.
@@ -241,6 +243,13 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             Pointer::new_address(i64_type, bcx.gep(i8_type, gas_ptr, &[offset], name))
         };
 
+        // Load input pointer from ecx.
+        let input = {
+            let input_field =
+                get_field(&mut bcx, ecx, mem::offset_of!(EvmContext<'_>, input), "ecx.input.addr");
+            bcx.load(ptr_type, input_field, "ecx.input")
+        };
+
         // Create all instruction entry blocks.
         // Dead-code instructions map to `unreachable_block`, except when block deduplication
         // has a redirect — those are resolved in a second pass once all blocks exist.
@@ -284,6 +293,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             sp_arg: local_stack.then_some(sp_arg),
             gas_remaining,
             ecx,
+            input,
             len_before: zero,
             len_offset: 0,
             section_start_len: zero,
@@ -711,6 +721,36 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             }};
         }
 
+        /// Gets the pointer to a field via chained `offset_of!`.
+        macro_rules! field {
+            // Gets the pointer to a field.
+            (@get $base:expr, $($paths:path),*; $($spec:tt).*) => {
+                self.get_field($base, 0 $(+ mem::offset_of!($paths, $spec))*, stringify!($($spec).*.addr))
+            };
+            // Loads a field.
+            // `@[endian]` is the endianness of the stored value. If native, omit it.
+            (@load $(@[endian = $endian:tt])? $ty:expr, $base:expr, $($paths:path),*; $($spec:tt).*) => {{
+                let ptr = field!(@get $base, $($paths),*; $($spec).*);
+                #[allow(unused_mut)]
+                let mut value = self.bcx.load_aligned($ty, ptr, 1, stringify!($($spec).*));
+                $(
+                    if !cfg!(target_endian = $endian) {
+                        value = self.bcx.bswap(value);
+                    }
+                )?
+                value
+            }};
+            // Loads, extends (if necessary), and pushes a field.
+            // `@[endian]` is the endianness of the stored value. If native, omit it.
+            (@push $(@[endian = $endian:tt])? $ty:expr, $base:expr, $($rest:tt)*) => {{
+                let mut value = field!(@load $(@[endian = $endian])? $ty, $base, $($rest)*);
+                if self.bcx.type_bit_width($ty) < 256 {
+                    value = self.bcx.zext(self.word_type, value);
+                }
+                self.push(value);
+            }};
+        }
+
         match data.opcode {
             op::STOP => goto_return!(build InstructionResult::Stop),
 
@@ -797,9 +837,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             }
 
             op::ADDRESS => {
-                let slot = self.sp_at_top();
-                let _ = self.call_builtin(Builtin::Address, &[self.ecx, slot]);
-                self.narrow_to_address(slot);
+                field!(@push @[endian = "big"] self.address_type, self.input, InputsImpl; target_address);
             }
             op::BALANCE => {
                 let sp = self.sp_after_inputs();
@@ -811,27 +849,17 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 self.narrow_to_address(slot);
             }
             op::CALLER => {
-                let slot = self.sp_at_top();
-                let _ = self.call_builtin(Builtin::Caller, &[self.ecx, slot]);
-                self.narrow_to_address(slot);
+                field!(@push @[endian = "big"] self.address_type, self.input, InputsImpl; caller_address);
             }
             op::CALLVALUE => {
-                let slot = self.sp_at_top();
-                let _ = self.call_builtin(Builtin::CallValue, &[self.ecx, slot]);
+                field!(@push self.word_type, self.input, InputsImpl; call_value);
             }
             op::CALLDATALOAD => {
                 let sp = self.sp_after_inputs();
                 let _ = self.call_builtin(Builtin::CallDataLoad, &[self.ecx, sp]);
             }
             op::CALLDATASIZE => {
-                let calldatasize_ptr = self.get_field(
-                    self.ecx,
-                    mem::offset_of!(EvmContext<'_>, calldatasize),
-                    "ecx.calldatasize.addr",
-                );
-                let size = self.bcx.load(self.isize_type, calldatasize_ptr, "ecx.calldatasize");
-                let size = self.bcx.zext(self.word_type, size);
-                self.push(size);
+                field!(@push self.isize_type, self.ecx, EvmContext<'_>; calldatasize);
             }
             op::CALLDATACOPY => {
                 let sp = self.sp_after_inputs();
@@ -859,9 +887,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 self.call_fallible_builtin(Builtin::ExtCodeCopy, &[self.ecx, sp]);
             }
             op::RETURNDATASIZE => {
-                let size = self.call_builtin(Builtin::ReturnDataSize, &[self.ecx]).unwrap();
-                let size = self.bcx.zext(self.word_type, size);
-                self.push(size);
+                field!(@push self.isize_type, self.ecx, EvmContext<'_>, pf::Slice; return_data.len);
             }
             op::RETURNDATACOPY => {
                 let sp = self.sp_after_inputs();
@@ -1794,6 +1820,13 @@ impl<B: Backend> FunctionCx<'_, B> {
 #[allow(dead_code)]
 mod pf {
     use super::*;
+
+    #[repr(C)] // See core::ptr::metadata::PtrComponents
+    pub(super) struct Slice {
+        pub(super) ptr: *const u8,
+        pub(super) len: usize,
+    }
+    const _: [(); mem::size_of::<&'static [u8]>()] = [(); mem::size_of::<Slice>()];
 
     pub(super) struct Gas {
         /// GasTracker fields (EIP-8037 reservoir model).
