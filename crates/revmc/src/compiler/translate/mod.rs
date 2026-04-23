@@ -786,8 +786,17 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 self.call_fallible_builtin(Builtin::Exp, &[self.ecx, sp]);
             }
             op::SIGNEXTEND => {
+                // Sign-extend x from (ext+1) bytes using arithmetic shift:
+                //   shift = 248 - 8 * ext
+                //   result = (x << shift) >>s shift
                 let [ext, x] = self.popn();
-                let r = self.call_signextend(ext, x);
+                let might_do_something = self.bcx.icmp_imm(IntCC::UnsignedLessThan, ext, 31);
+                let shift = self.bcx.imul_imm(ext, 8);
+                let c248 = self.bcx.iconst_256(U256::from(248));
+                let shift = self.bcx.isub(c248, shift);
+                let shifted = self.bcx.ishl(x, shift);
+                let sext = self.bcx.sshr(shifted, shift);
+                let r = self.bcx.select(might_do_something, sext, x);
                 self.push(r);
             }
 
@@ -1702,41 +1711,6 @@ impl<B: Backend> FunctionCx<'_, B> {
         let zero = self.bcx.iconst_256(U256::ZERO);
         let r = self.bcx.select(cond, byte, zero);
 
-        self.bcx.ret(&[r]);
-    }
-
-    fn call_signextend(&mut self, ext: B::Value, x: B::Value) -> B::Value {
-        self.call_ir_binop_builtin("signextend", ext, x, Self::build_signextend)
-    }
-
-    /// Builds: `fn signextend(ext: u256, x: u256) -> u256`
-    fn build_signextend(&mut self) {
-        // Sign-extend x from (ext+1) bytes using arithmetic shift:
-        //   shift = 256 - 8 * (ext + 1) = 248 - 8 * ext
-        //   result = (x << shift) >>s shift
-        // The left shift moves the sign bit to bit 255, then the arithmetic
-        // right shift propagates it back down.
-
-        let ext = self.bcx.fn_param(0);
-        let x = self.bcx.fn_param(1);
-
-        // For ext >= 31 the value already fills 32 bytes; nothing to do.
-        let might_do_something = self.bcx.icmp_imm(IntCC::UnsignedLessThan, ext, 31);
-        let r = self.bcx.lazy_select(
-            might_do_something,
-            self.bcx.type_int(256),
-            |bcx| {
-                // shift = 248 - 8 * ext
-                let shift = bcx.imul_imm(ext, 8);
-                let c248 = bcx.iconst_256(U256::from(248));
-                let shift = bcx.isub(c248, shift);
-
-                // (x << shift) >>s shift
-                let shifted = bcx.ishl(x, shift);
-                bcx.sshr(shifted, shift)
-            },
-            |_bcx| x,
-        );
         self.bcx.ret(&[r]);
     }
 
