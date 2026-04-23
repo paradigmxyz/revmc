@@ -250,7 +250,13 @@ impl SectionsAnalysis {
         // Branching and suspending instructions end both sections.
         let next = inst + 1;
         if data.may_suspend() || data.is_branching() {
-            self.stack.mark_end(bytecode, next);
+            // Skip marking section end on back-edges: poisoning scratch slots on a loop
+            // back-edge prevents LICM from promoting those slots to SSA registers.
+            let is_back_edge = data.is_static_jump()
+                && Inst::from_usize(data.data as usize) <= self.stack.start_inst;
+            if !is_back_edge {
+                self.stack.mark_end(bytecode, next);
+            }
             self.stack.save_to_reset(bytecode, next);
             self.gas.save_to_reset(bytecode, next);
         } else if data.requires_gasleft(bytecode.spec_id) {
