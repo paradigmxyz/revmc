@@ -1922,6 +1922,65 @@ mod div_zero_opaque {
     matrix_tests!(sdiv = |jit| run(jit, "sdiv_zero", op::SDIV, U256::from(5)));
 }
 
+/// Tests SIGNEXTEND with operands that are opaque to the compiler (loaded via
+/// MLOAD), exercising the dynamic-shift codepath instead of constant folding.
+mod signextend_opaque {
+    use super::*;
+
+    fn bytecode_binop_opaque(opcode: u8, a: U256, b: U256) -> Vec<u8> {
+        let mut code = Vec::with_capacity(128);
+        code.push(op::PUSH32);
+        code.extend_from_slice(&a.to_be_bytes::<32>());
+        code.push(op::PUSH1);
+        code.push(0x00);
+        code.push(op::MSTORE);
+        code.push(op::PUSH32);
+        code.extend_from_slice(&b.to_be_bytes::<32>());
+        code.push(op::PUSH1);
+        code.push(0x20);
+        code.push(op::MSTORE);
+        code.push(op::PUSH1);
+        code.push(0x20);
+        code.push(op::MLOAD);
+        code.push(op::PUSH1);
+        code.push(0x00);
+        code.push(op::MLOAD);
+        code.push(opcode);
+        code
+    }
+
+    fn run<B: Backend>(
+        compiler: &mut EvmCompiler<B>,
+        name: &str,
+        ext: U256,
+        x: U256,
+        expected: U256,
+    ) {
+        let code = bytecode_binop_opaque(op::SIGNEXTEND, ext, x);
+        unsafe { compiler.clear() }.unwrap();
+        compiler.inspect_stack(true);
+        let f = unsafe { compiler.jit(name, &code, DEF_SPEC) }.unwrap();
+        with_evm_context(&code, DEF_SPEC, |ecx, stack, stack_len| {
+            let r = unsafe { f.call(Some(stack), Some(stack_len), ecx) };
+            assert_eq!(r, InstructionResult::Stop, "{name}: unexpected return");
+            assert_eq!(*stack_len, 1, "{name}: expected 1 stack element");
+            let actual = unsafe { stack.as_slice(*stack_len)[0].to_u256() };
+            assert_eq!(actual, expected, "{name}");
+        });
+    }
+
+    uint! {
+        matrix_tests!(sext_byte0_pos = |jit| run(jit, "sext_byte0_pos", 0_U256, 0x7f_U256, 0x7f_U256));
+        matrix_tests!(sext_byte0_neg = |jit| run(jit, "sext_byte0_neg", 0_U256, 0x80_U256, -0x80_U256));
+        matrix_tests!(sext_byte0_ff = |jit| run(jit, "sext_byte0_ff", 0_U256, 0xff_U256, U256::MAX));
+        matrix_tests!(sext_byte1_pos = |jit| run(jit, "sext_byte1_pos", 1_U256, 0x7fff_U256, 0x7fff_U256));
+        matrix_tests!(sext_byte1_neg = |jit| run(jit, "sext_byte1_neg", 1_U256, 0x8000_U256, -0x8000_U256));
+        matrix_tests!(sext_byte16 = |jit| run(jit, "sext_byte16", 16_U256, 0x80_U256.wrapping_shl(128), -0x80_U256.wrapping_shl(128)));
+        matrix_tests!(sext_noop_31 = |jit| run(jit, "sext_noop_31", 31_U256, 0x42_U256, 0x42_U256));
+        matrix_tests!(sext_noop_max = |jit| run(jit, "sext_noop_max", U256::MAX, 0x42_U256, 0x42_U256));
+    }
+}
+
 fn bytecode_unop(op: u8, a: U256) -> [u8; 34] {
     let mut code = [0; 34];
     let mut i = 0;
