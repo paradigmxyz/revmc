@@ -99,6 +99,9 @@ pub(super) struct FunctionCx<'a, B: Backend> {
     /// At section start this is 0 (len.addr == section_start_len). After each store it becomes
     /// `section_len_offset + diff`. Stores are skipped when the new offset matches this value.
     stored_len_offset: i32,
+    /// Maximum stack growth in the current section (from `StackSection::max_growth`).
+    /// Used to determine scratch slots to poison at section exits.
+    section_max_growth: i32,
 
     /// The bytecode being translated.
     bytecode: &'a Bytecode<'a>,
@@ -300,6 +303,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             section_start_sp,
             section_len_offset: 0,
             stored_len_offset: 0,
+            section_max_growth: 0,
             bcx,
 
             bytecode,
@@ -537,6 +541,9 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         /// Use `build` to build the return instruction and skip the branch.
         macro_rules! goto_return {
             (no_branch $($comment:expr)?) => {
+                if data.is_stack_section_end() {
+                    self.poison_section_scratch(self.section_len_offset);
+                }
                 $(
                     if self.config.comments {
                         self.add_comment($comment);
@@ -598,6 +605,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             self.section_start_sp = self.sp_at(self.section_start_len);
             self.section_len_offset = 0;
             self.stored_len_offset = 0;
+            self.section_max_growth = data.stack_section.max_growth as i32;
         }
         self.len_before = if self.section_len_offset == 0 {
             self.section_start_len
@@ -1033,6 +1041,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                         self.bcx.switch(target_value, return_block, &switch_targets, true);
 
                         self.inst_entries[inst] = self.bcx.current_block().unwrap();
+                        self.section_len_offset += diff;
                         goto_return!(no_branch);
                     } else if data.flags.contains(InstFlags::STATIC_JUMP) {
                         // Pop and discard the target; it's always on the stack.
@@ -1075,6 +1084,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                     self.inst_entries[inst] = self.bcx.current_block().unwrap();
                 }
 
+                self.section_len_offset += diff;
                 goto_return!(no_branch);
             }
             op::PC => {
@@ -1363,6 +1373,27 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             let word_size = 32i64;
             let byte_len = self.bcx.imul_imm(len, word_size);
             self.bcx.memcpy(dst, src, byte_len);
+        }
+    }
+
+    /// Stores poison to scratch stack slots (between exit height and max growth) in the
+    /// current section. `exit_offset` is the stack height relative to section start after
+    /// the current instruction.
+    ///
+    /// If the current block already has a terminator, inserts the stores before it.
+    fn poison_section_scratch(&mut self, exit_offset: i32) {
+        let start = exit_offset.max(0);
+        if start >= self.section_max_growth {
+            return;
+        }
+        let has_term = self.bcx.position_before_terminator();
+        let poison = self.bcx.poison(self.word_type);
+        for offset in start..self.section_max_growth {
+            let sp = self.sp_from_section(offset as i64);
+            self.bcx.store(poison, sp);
+        }
+        if has_term {
+            self.bcx.position_at_end();
         }
     }
 

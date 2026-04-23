@@ -281,6 +281,13 @@ pub trait Builder: BackendTypes + TypeMethods {
     fn seal_all_blocks(&mut self);
     fn set_current_block_cold(&mut self);
     fn current_block(&mut self) -> Option<Self::BasicBlock>;
+
+    /// Positions the builder before the current block's terminator, returning `true`.
+    /// Returns `false` (and does nothing) if the block has no terminator.
+    fn position_before_terminator(&mut self) -> bool;
+
+    /// Positions the builder at the end of the current block (after the terminator).
+    fn position_at_end(&mut self);
     fn block_addr(&mut self, block: Self::BasicBlock) -> Option<Self::Value>;
 
     fn add_comment_to_current_inst(&mut self, comment: &str);
@@ -295,6 +302,8 @@ pub trait Builder: BackendTypes + TypeMethods {
     fn num_fn_params(&self) -> usize;
 
     fn bool_const(&mut self, value: bool) -> Self::Value;
+    /// Returns a poison value of the given type.
+    fn poison(&mut self, ty: Self::Type) -> Self::Value;
     /// Sign-extends negative values to `ty`.
     fn iconst(&mut self, ty: Self::Type, value: i64) -> Self::Value;
     fn uconst(&mut self, ty: Self::Type, value: u64) -> Self::Value;

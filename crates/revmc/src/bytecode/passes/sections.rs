@@ -187,6 +187,19 @@ impl StackSectionAnalysis {
         }
     }
 
+    /// Marks the last non-dead instruction before `next_section_inst` as the section end.
+    fn mark_end(&self, bytecode: &mut Bytecode<'_>, next_section_inst: Inst) {
+        if self.start_inst >= bytecode.insts.len_idx() || self.max_growth <= 0 {
+            return;
+        }
+        let end = next_section_inst.min(bytecode.insts.len_idx());
+        if let Some(inst) =
+            bytecode.insts[self.start_inst..end].iter_mut().rev().find(|inst| !inst.is_dead_code())
+        {
+            inst.flags |= InstFlags::STACK_SECTION_END;
+        }
+    }
+
     /// Resets the analysis for a new section.
     pub(crate) fn reset(&mut self, inst: Inst) {
         *self = Self { start_inst: inst, ..Default::default() };
@@ -213,6 +226,7 @@ impl SectionsAnalysis {
     pub(crate) fn process(&mut self, bytecode: &mut Bytecode<'_>, inst: Inst) {
         // JUMPDEST starts both gas and stack sections.
         if bytecode.inst(inst).is_reachable_jumpdest(bytecode.has_dynamic_jumps()) {
+            self.stack.mark_end(bytecode, inst);
             self.stack.save_to_reset(bytecode, inst);
             self.gas.save_to_reset(bytecode, inst);
         }
@@ -236,6 +250,7 @@ impl SectionsAnalysis {
         // Branching and suspending instructions end both sections.
         let next = inst + 1;
         if data.may_suspend() || data.is_branching() {
+            self.stack.mark_end(bytecode, next);
             self.stack.save_to_reset(bytecode, next);
             self.gas.save_to_reset(bytecode, next);
         } else if data.requires_gasleft(bytecode.spec_id) {
@@ -247,6 +262,7 @@ impl SectionsAnalysis {
     pub(crate) fn finish(self, bytecode: &mut Bytecode<'_>) {
         let last = bytecode.insts.len_idx() - 1;
         self.gas.save_to(bytecode, last);
+        self.stack.mark_end(bytecode, last);
         self.stack.save_to(bytecode, last);
         if enabled!(tracing::Level::DEBUG) {
             let mut max_len = 0usize;

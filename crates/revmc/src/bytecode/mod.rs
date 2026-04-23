@@ -630,14 +630,14 @@ impl<'a> Bytecode<'a> {
 pub(crate) struct InstData {
     /// The opcode byte.
     pub(crate) opcode: u8,
+    /// Stack inputs and outputs, decoded from the immediate for `DUPN`/`SWAPN`/`EXCHANGE`.
+    stack_io: (u8, u8),
     /// Flags.
     pub(crate) flags: InstFlags,
     /// The base gas cost of the opcode.
     ///
     /// This may not be the final/full gas cost of the opcode as it may also have a dynamic cost.
     base_gas: u16,
-    /// Stack inputs and outputs, decoded from the immediate for `DUPN`/`SWAPN`/`EXCHANGE`.
-    stack_io: (u8, u8),
     /// Instruction-specific data:
     /// - if the instruction has immediate data, this is a packed offset+length into the bytecode;
     /// - `JUMP{,I} && STATIC_JUMP in kind`: the jump target, `Instr`;
@@ -730,6 +730,12 @@ impl InstData {
         self.flags.contains(InstFlags::STACK_SECTION_HEAD)
     }
 
+    /// Returns `true` if this instruction is the last in its stack section.
+    #[inline]
+    pub(crate) fn is_stack_section_end(&self) -> bool {
+        self.flags.contains(InstFlags::STACK_SECTION_END)
+    }
+
     /// Returns `true` if this instruction is dead code.
     pub(crate) fn is_dead_code(&self) -> bool {
         self.flags.contains(InstFlags::DEAD_CODE)
@@ -791,29 +797,32 @@ impl InstData {
 bitflags::bitflags! {
     /// [`InstrData`] flags.
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-    pub(crate) struct InstFlags: u8 {
+    pub(crate) struct InstFlags: u16 {
         /// The `JUMP`/`JUMPI` target is known at compile time.
-        const STATIC_JUMP = 1 << 0;
+        const STATIC_JUMP        = 1 << 0;
         /// The jump target is known to be invalid.
         /// Always returns [`InstructionResult::InvalidJump`] at runtime.
-        const INVALID_JUMP = 1 << 1;
+        const INVALID_JUMP       = 1 << 1;
         /// The jump has multiple known targets (see `Bytecode::multi_jump_targets`).
         /// The target value is still on the stack and must be popped and switched on at runtime.
-        const MULTI_JUMP = 1 << 2;
+        const MULTI_JUMP         = 1 << 2;
 
         /// The instruction is disabled in this EVM version.
         /// Always returns [`InstructionResult::NotActivated`] at runtime.
-        const DISABLED = 1 << 3;
+        const DISABLED           = 1 << 3;
         /// The instruction is unknown.
         /// Always returns [`InstructionResult::NotFound`] at runtime.
-        const UNKNOWN = 1 << 4;
+        const UNKNOWN            = 1 << 4;
 
-        /// Instruction is a no-op: skip generating logic, but keep the gas calculation.
-        const NOOP = 1 << 5;
-        /// This instruction starts a new stack section.
-        const STACK_SECTION_HEAD = 1 << 6;
         /// Don't generate any code.
-        const DEAD_CODE = 1 << 7;
+        const DEAD_CODE          = 1 << 5;
+        /// Instruction is a no-op: skip generating logic, but keep the gas calculation.
+        const NOOP               = 1 << 6;
+
+        /// This instruction starts a new stack section.
+        const STACK_SECTION_HEAD = 1 << 7;
+        /// This instruction is the last in its stack section.
+        const STACK_SECTION_END  = 1 << 8;
     }
 }
 

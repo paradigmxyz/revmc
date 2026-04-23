@@ -1304,6 +1304,21 @@ impl Builder for EvmLlvmBuilder<'_> {
         self.bcx.get_insert_block()
     }
 
+    fn position_before_terminator(&mut self) -> bool {
+        let block = self.bcx.get_insert_block().unwrap();
+        if let Some(term) = block.get_terminator() {
+            self.bcx.position_before(&term);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn position_at_end(&mut self) {
+        let block = self.bcx.get_insert_block().unwrap();
+        self.bcx.position_at_end(block);
+    }
+
     fn block_addr(&mut self, block: Self::BasicBlock) -> Option<Self::Value> {
         unsafe { block.get_address().map(Into::into) }
     }
@@ -1345,6 +1360,10 @@ impl Builder for EvmLlvmBuilder<'_> {
 
     fn bool_const(&mut self, value: bool) -> Self::Value {
         self.ty_i1.const_int(value as u64, false).into()
+    }
+
+    fn poison(&mut self, ty: Self::Type) -> Self::Value {
+        ty.into_int_type().get_poison().into()
     }
 
     fn iconst(&mut self, ty: Self::Type, value: i64) -> Self::Value {
