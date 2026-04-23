@@ -891,15 +891,13 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 let full_block = self.create_block_after(current, "calldataload.full");
                 let check_partial =
                     self.create_block_after(full_block, "calldataload.check_partial");
-                let partial_block =
-                    self.create_block_after(check_partial, "calldataload.partial");
+                let partial_block = self.create_block_after(check_partial, "calldataload.partial");
                 let done_block = self.create_block_after(partial_block, "calldataload.done");
                 self.bcx.brif(full_avail, full_block, check_partial);
 
                 // Full read: load 32 bytes directly, bswap, store.
                 self.bcx.switch_to_block(full_block);
-                let word =
-                    self.bcx.load_aligned(self.word_type, src, 1, "calldataload.full");
+                let word = self.bcx.load_aligned(self.word_type, src, 1, "calldataload.full");
                 let swapped = self.bcx.bswap(word);
                 self.bcx.store(swapped, sp);
                 self.bcx.br(done_block);
