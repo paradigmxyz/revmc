@@ -784,6 +784,22 @@ def main():
         outputs = collect(benches, binary, dump_dir, rust_log)
 
         if args.base_rev:
+            # Detect self-diff: abort if base_rev resolves to the same commit as HEAD.
+            head_sha = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                capture_output=True, text=True, check=True, cwd=root,
+            ).stdout.strip()
+            base_sha = subprocess.run(
+                ["git", "rev-parse", args.base_rev],
+                capture_output=True, text=True, check=True, cwd=root,
+            ).stdout.strip()
+            if head_sha == base_sha:
+                eprint(
+                    f"error: --diff {args.base_rev!r} resolves to HEAD ({head_sha[:12]}); "
+                    f"diffing a branch against itself is pointless"
+                )
+                raise SystemExit(1)
+
             base_dump = args.dump_dir + ".base"
             base_worktree = tempfile.mkdtemp()
             try:
