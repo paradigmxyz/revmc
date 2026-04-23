@@ -108,6 +108,9 @@ pub struct EvmContext<'a> {
     pub exit_sp: *mut u8,
     /// Cached gas parameters from the host.
     pub gas_params: GasParams,
+    /// Owned copy of calldata when the input is a `SharedBuffer`.
+    /// Kept alive so that `calldata` pointer remains valid.
+    _calldata_owned: Box<[u8]>,
 }
 
 // Static assertions to ensure the struct layout matches expectations.
@@ -115,7 +118,7 @@ pub struct EvmContext<'a> {
 const _: () = {
     use core::mem::offset_of;
 
-    assert!(core::mem::size_of::<EvmContext<'_>>() == 144);
+    assert!(core::mem::size_of::<EvmContext<'_>>() == 160);
 
     // Key fields accessed by JIT code
     assert!(offset_of!(EvmContext<'_>, memory) == 0);
@@ -149,14 +152,13 @@ impl<'a> EvmContext<'a> {
         let (stack, stack_len) = EvmStack::from_interpreter_stack(&mut interpreter.stack);
         let bytecode = interpreter.bytecode.bytecode_slice() as *const [u8];
         let calldatasize = interpreter.input.input.len();
+        let mut calldata_owned = Box::<[u8]>::default();
         let calldata = match &interpreter.input.input {
             CallInput::Bytes(bytes) => bytes.as_ptr(),
-            CallInput::SharedBuffer(_range) => {
-                unimplemented!("CallInput::SharedBuffer is not supported")
-                // let buf = interpreter.memory.global_slice_range(range.clone());
-                // let ptr = buf.as_ptr();
-                // drop(buf);
-                // ptr
+            CallInput::SharedBuffer(range) => {
+                let buf = interpreter.memory.global_slice_range(range.clone());
+                calldata_owned = buf.as_ref().into();
+                calldata_owned.as_ptr()
             }
         };
         let gas_params = host.gas_params().clone();
@@ -176,6 +178,7 @@ impl<'a> EvmContext<'a> {
             exit_result: InstructionResult::Stop,
             exit_sp: ptr::null_mut(),
             gas_params,
+            _calldata_owned: calldata_owned,
         };
         (this, stack, stack_len)
     }
