@@ -35,7 +35,8 @@ cargo r -- run usdc_proxy --parse-only     # parse and analyze only (no codegen)
 cargo r -- run usdc_proxy --display        # print parsed bytecode IR
 cargo r -- run usdc_proxy --dot            # render CFG as DOT/SVG
 cargo r -- run usdc_proxy --aot            # compile to shared library
-cargo r -- run custom --code 6001600201    # run custom bytecode
+cargo r -- run custom --code 6001600201    # run custom bytecode (hex)
+cargo r -- run custom --code 'PUSH1 1 PUSH1 2 ADD' # run custom bytecode (asm string)
 ```
 
 Use `RUST_LOG` to control log output:
