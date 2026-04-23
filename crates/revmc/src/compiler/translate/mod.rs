@@ -886,49 +886,49 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 let current = self.current_block();
                 let full_block = self.create_block_after(current, "calldataload.full");
                 let slow_block = self.create_block_after(full_block, "calldataload.slow");
-                let partial_block = self.create_block_after(slow_block, "calldataload.partial");
-                let done_block = self.create_block_after(partial_block, "calldataload.done");
+                let done_block = self.create_block_after(slow_block, "calldataload.done");
 
-                // Saturating convert i256 offset to isize.
+                // Truncate i256 offset to isize.
                 let offset_word = self.load_word(sp, "calldataload.offset");
                 let offset = self.bcx.ireduce(self.isize_type, offset_word);
+
+                // Check that the truncated offset fits (no high bits lost) AND
+                // offset < calldatasize (in bounds). Both must hold for a valid load.
                 let extended = self.bcx.zext(self.word_type, offset);
                 let fits = self.bcx.icmp(IntCC::Equal, offset_word, extended);
-                let sentinel = self.bcx.iconst(self.isize_type, usize::MAX as i64);
-                let offset = self.bcx.select(fits, offset, sentinel);
+                let in_bounds = self.bcx.icmp(IntCC::UnsignedLessThan, offset, self.calldatasize);
+                let valid = self.bcx.bitand(fits, in_bounds);
 
                 let remaining = self.bcx.isub(self.calldatasize, offset);
                 let src = self.bcx.gep(self.i8_type, self.calldata_ptr, &[offset], "calldata.src");
 
-                // Fast path: 32+ bytes available → direct unaligned load + bswap.
+                // Fast path: offset is valid and 32+ bytes available.
                 let thirty_two = self.bcx.iconst(self.isize_type, 32);
                 let full_avail =
                     self.bcx.icmp(IntCC::UnsignedGreaterThanOrEqual, remaining, thirty_two);
-                self.bcx.brif(full_avail, full_block, slow_block);
+                let fast = self.bcx.bitand(valid, full_avail);
+                self.bcx.brif(fast, full_block, slow_block);
 
-                // Full read: load 32 bytes directly, bswap, store.
+                // Full read: load 32 bytes directly, bswap.
                 self.bcx.switch_to_block(full_block);
-                let word = self.bcx.load_aligned(self.word_type, src, 1, "calldataload.full");
-                let swapped = self.bcx.bswap(word);
-                self.bcx.store(swapped, sp);
+                let full_word = self.bcx.load_aligned(self.word_type, src, 1, "calldataload.full");
+                let fast_result = self.bcx.bswap(full_word);
                 self.bcx.br(done_block);
 
-                // Slow path: zero the slot, memcpy remaining bytes if in-bounds,
-                // then bswap.
+                // Slow path: cold IR builtin (src, remaining) -> i256.
+                // When !valid (OOB), remaining is garbage but the builtin checks
+                // remaining > 0, so we clamp it to 0 for the OOB case.
                 self.bcx.switch_to_block(slow_block);
-                let zero = self.bcx.iconst_256(U256::ZERO);
-                self.bcx.store(zero, sp);
-                let in_bounds = self.bcx.icmp(IntCC::UnsignedLessThan, offset, self.calldatasize);
-                self.bcx.brif(in_bounds, partial_block, done_block);
-
-                self.bcx.switch_to_block(partial_block);
-                self.bcx.memcpy(sp, src, remaining);
-                let word = self.bcx.load(self.word_type, sp, "calldataload.partial");
-                let swapped = self.bcx.bswap(word);
-                self.bcx.store(swapped, sp);
+                let zero_isize = self.bcx.iconst(self.isize_type, 0);
+                let safe_remaining = self.bcx.select(valid, remaining, zero_isize);
+                let slow_result = self.call_calldataload_slow(src, safe_remaining);
                 self.bcx.br(done_block);
 
                 self.bcx.switch_to_block(done_block);
+                let result = self
+                    .bcx
+                    .phi(self.word_type, &[(fast_result, full_block), (slow_result, slow_block)]);
+                self.bcx.store(result, sp);
             }
             op::CALLDATASIZE => {
                 let size = self.bcx.zext(self.word_type, self.calldatasize);
@@ -1830,6 +1830,59 @@ impl<B: Backend> FunctionCx<'_, B> {
             |_bcx| x,
         );
         self.bcx.ret(&[r]);
+    }
+
+    /// Calls the cold calldataload slow path: `fn(src: *const u8, remaining: isize) -> i256`.
+    ///
+    /// If `remaining > 0`, copies `remaining` bytes from `src` into a zero-initialized word,
+    /// bswaps, and returns. Otherwise returns zero.
+    fn call_calldataload_slow(&mut self, src: B::Value, remaining: B::Value) -> B::Value {
+        let ptr_type = self.bcx.type_ptr();
+        let isize_type = self.isize_type;
+        let word_type = self.word_type;
+        self.call_ir_builtin(
+            "calldataload_slow",
+            &[src, remaining],
+            &[ptr_type, isize_type],
+            Some(word_type),
+            |this| {
+                this.bcx.add_function_attribute(
+                    None,
+                    Attribute::Cold,
+                    FunctionAttributeLocation::Function,
+                );
+
+                let src = this.bcx.fn_param(0);
+                let remaining = this.bcx.fn_param(1);
+
+                // Alloca in entry block, before any branches.
+                let word_type = this.bcx.type_int(256);
+                let slot = this.bcx.new_stack_slot_raw(word_type, "tmp");
+                let slot_ptr = this.bcx.stack_addr(word_type, slot);
+                let zero = this.bcx.iconst_256(U256::ZERO);
+                this.bcx.store(zero, slot_ptr);
+
+                let entry_block = this.bcx.current_block().unwrap();
+                let has_data = this.bcx.icmp_imm(IntCC::SignedGreaterThan, remaining, 0);
+                let partial_block = this.bcx.create_block("partial");
+                let done_block = this.bcx.create_block("done");
+
+                this.bcx.brif(has_data, partial_block, done_block);
+
+                // Partial: memcpy remaining bytes, bswap.
+                this.bcx.switch_to_block(partial_block);
+                this.bcx.memcpy(slot_ptr, src, remaining);
+                let word = this.bcx.load(word_type, slot_ptr, "partial");
+                let swapped = this.bcx.bswap(word);
+                this.bcx.br(done_block);
+
+                // Done: phi(zero, swapped).
+                this.bcx.switch_to_block(done_block);
+                let r = this.bcx.phi(word_type, &[(zero, entry_block), (swapped, partial_block)]);
+                this.bcx.ret(&[r]);
+            },
+        )
+        .unwrap()
     }
 
     fn call_ir_binop_builtin(
