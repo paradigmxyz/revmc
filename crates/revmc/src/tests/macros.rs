@@ -7,7 +7,9 @@ macro_rules! matrix_tests {
             use similar_asserts::assert_eq;
 
             fn run_llvm(compiler: &mut EvmCompiler<crate::llvm::EvmLlvmBackend>) {
-                crate::tests::set_test_dump(compiler, module_path!());
+                if std::env::var_os("REVMC_TEST_DUMP").is_some() {
+                    crate::tests::set_test_dump(compiler, module_path!());
+                }
                 $run(compiler);
             }
 
