@@ -1866,121 +1866,6 @@ tests! {
     }
 }
 
-// DIV/MOD/SMOD/SDIV with zero divisor loaded from memory (opaque to LLVM).
-//
-// When the divisor is opaque (e.g. loaded via MLOAD), `udiv/urem/srem i256` with
-// divisor==0 is UB in LLVM IR. The fix uses `lazy_select` (conditional branch) so
-// the division is never executed when b==0.
-//
-// EVM spec: x DIV 0 = 0, x MOD 0 = 0, x SMOD 0 = 0, x SDIV 0 = 0.
-mod div_zero_opaque {
-    use super::*;
-
-    /// Build bytecode: MSTORE(a, 0), MSTORE(b, 32), MLOAD(32), MLOAD(0), `<op>`
-    ///
-    /// The operands pass through MLOAD (an opaque builtin), preventing LLVM from
-    /// constant-folding or exploiting division-by-zero UB at compile time.
-    fn bytecode_binop_opaque(opcode: u8, a: U256, b: U256) -> Vec<u8> {
-        let mut code = Vec::with_capacity(128);
-        code.push(op::PUSH32);
-        code.extend_from_slice(&a.to_be_bytes::<32>());
-        code.push(op::PUSH1);
-        code.push(0x00);
-        code.push(op::MSTORE);
-        code.push(op::PUSH32);
-        code.extend_from_slice(&b.to_be_bytes::<32>());
-        code.push(op::PUSH1);
-        code.push(0x20);
-        code.push(op::MSTORE);
-        code.push(op::PUSH1);
-        code.push(0x20);
-        code.push(op::MLOAD);
-        code.push(op::PUSH1);
-        code.push(0x00);
-        code.push(op::MLOAD);
-        code.push(opcode);
-        code
-    }
-
-    fn run<B: Backend>(compiler: &mut EvmCompiler<B>, name: &str, opcode: u8, a: U256) {
-        let code = bytecode_binop_opaque(opcode, a, U256::ZERO);
-        unsafe { compiler.clear() }.unwrap();
-        compiler.inspect_stack(true);
-        let f = unsafe { compiler.jit(name, &code, DEF_SPEC) }.unwrap();
-        with_evm_context(&code, DEF_SPEC, |ecx, stack, stack_len| {
-            let r = unsafe { f.call(Some(stack), Some(stack_len), ecx) };
-            assert_eq!(r, InstructionResult::Stop, "{name}: unexpected return");
-            assert_eq!(*stack_len, 1, "{name}: expected 1 stack element");
-            let actual = unsafe { stack.as_slice(*stack_len)[0].to_u256() };
-            assert_eq!(actual, U256::ZERO, "{name}: EVM spec mandates 0 for division by zero");
-        });
-    }
-
-    matrix_tests!(div = |jit| run(jit, "div_zero", op::DIV, U256::from(32)));
-    matrix_tests!(r#mod = |jit| run(jit, "mod_zero", op::MOD, U256::from(32)));
-    matrix_tests!(smod = |jit| run(jit, "smod_zero", op::SMOD, U256::from(5)));
-    matrix_tests!(sdiv = |jit| run(jit, "sdiv_zero", op::SDIV, U256::from(5)));
-}
-
-/// Tests SIGNEXTEND with operands that are opaque to the compiler (loaded via
-/// MLOAD), exercising the dynamic-shift codepath instead of constant folding.
-mod signextend_opaque {
-    use super::*;
-
-    fn bytecode_binop_opaque(opcode: u8, a: U256, b: U256) -> Vec<u8> {
-        let mut code = Vec::with_capacity(128);
-        code.push(op::PUSH32);
-        code.extend_from_slice(&a.to_be_bytes::<32>());
-        code.push(op::PUSH1);
-        code.push(0x00);
-        code.push(op::MSTORE);
-        code.push(op::PUSH32);
-        code.extend_from_slice(&b.to_be_bytes::<32>());
-        code.push(op::PUSH1);
-        code.push(0x20);
-        code.push(op::MSTORE);
-        code.push(op::PUSH1);
-        code.push(0x20);
-        code.push(op::MLOAD);
-        code.push(op::PUSH1);
-        code.push(0x00);
-        code.push(op::MLOAD);
-        code.push(opcode);
-        code
-    }
-
-    fn run<B: Backend>(
-        compiler: &mut EvmCompiler<B>,
-        name: &str,
-        ext: U256,
-        x: U256,
-        expected: U256,
-    ) {
-        let code = bytecode_binop_opaque(op::SIGNEXTEND, ext, x);
-        unsafe { compiler.clear() }.unwrap();
-        compiler.inspect_stack(true);
-        let f = unsafe { compiler.jit(name, &code, DEF_SPEC) }.unwrap();
-        with_evm_context(&code, DEF_SPEC, |ecx, stack, stack_len| {
-            let r = unsafe { f.call(Some(stack), Some(stack_len), ecx) };
-            assert_eq!(r, InstructionResult::Stop, "{name}: unexpected return");
-            assert_eq!(*stack_len, 1, "{name}: expected 1 stack element");
-            let actual = unsafe { stack.as_slice(*stack_len)[0].to_u256() };
-            assert_eq!(actual, expected, "{name}");
-        });
-    }
-
-    uint! {
-        matrix_tests!(sext_byte0_pos = |jit| run(jit, "sext_byte0_pos", 0_U256, 0x7f_U256, 0x7f_U256));
-        matrix_tests!(sext_byte0_neg = |jit| run(jit, "sext_byte0_neg", 0_U256, 0x80_U256, -0x80_U256));
-        matrix_tests!(sext_byte0_ff = |jit| run(jit, "sext_byte0_ff", 0_U256, 0xff_U256, U256::MAX));
-        matrix_tests!(sext_byte1_pos = |jit| run(jit, "sext_byte1_pos", 1_U256, 0x7fff_U256, 0x7fff_U256));
-        matrix_tests!(sext_byte1_neg = |jit| run(jit, "sext_byte1_neg", 1_U256, 0x8000_U256, -0x8000_U256));
-        matrix_tests!(sext_byte16 = |jit| run(jit, "sext_byte16", 16_U256, 0x80_U256.wrapping_shl(128), -0x80_U256.wrapping_shl(128)));
-        matrix_tests!(sext_noop_31 = |jit| run(jit, "sext_noop_31", 31_U256, 0x42_U256, 0x42_U256));
-        matrix_tests!(sext_noop_max = |jit| run(jit, "sext_noop_max", U256::MAX, 0x42_U256, 0x42_U256));
-    }
-}
-
 fn bytecode_unop(op: u8, a: U256) -> [u8; 34] {
     let mut code = [0; 34];
     let mut i = 0;
@@ -1995,6 +1880,32 @@ fn bytecode_binop(op: u8, a: U256, b: U256) -> [u8; 67] {
     build_push32!(code[i], b);
     build_push32!(code[i], a);
     code[i] = op;
+    code
+}
+
+/// Build bytecode: MSTORE(a, 0), MSTORE(b, 32), MLOAD(32), MLOAD(0), `<op>`
+///
+/// The operands pass through MLOAD (an opaque builtin), preventing the compiler
+/// from constant-folding or exploiting UB at compile time.
+fn bytecode_binop_opaque(opcode: u8, a: U256, b: U256) -> Vec<u8> {
+    let mut code = Vec::with_capacity(128);
+    code.push(op::PUSH32);
+    code.extend_from_slice(&a.to_be_bytes::<32>());
+    code.push(op::PUSH1);
+    code.push(0x00);
+    code.push(op::MSTORE);
+    code.push(op::PUSH32);
+    code.extend_from_slice(&b.to_be_bytes::<32>());
+    code.push(op::PUSH1);
+    code.push(0x20);
+    code.push(op::MSTORE);
+    code.push(op::PUSH1);
+    code.push(0x20);
+    code.push(op::MLOAD);
+    code.push(op::PUSH1);
+    code.push(0x00);
+    code.push(op::MLOAD);
+    code.push(opcode);
     code
 }
 

@@ -72,7 +72,28 @@ macro_rules! tests {
     (@cases $( $name:ident($($t:tt)*) ),* $(,)?) => {
         $(
             matrix_tests!($name = |jit| run_test_case(tests!(@case $($t)*), jit));
+            tests!(@maybe_opaque $name($($t)*));
         )*
+    };
+
+    // Generate an `_opaque` companion test for binop cases (2 args).
+    // Uses MSTORE+MLOAD to make operands invisible to the compiler.
+    (@maybe_opaque $name:ident(@raw { $($fields:tt)* })) => {};
+    (@maybe_opaque $name:ident($op:expr, $a:expr => $($ret:tt)*)) => {};
+    (@maybe_opaque $name:ident($op:expr, $a:expr, $b:expr, $c:expr => $($ret:tt)*)) => {};
+    (@maybe_opaque $name:ident($op:expr, $a:expr, $b:expr => $($ret:expr),* $(; $($_rest:tt)*)?)) => {
+        paste::paste! {
+            matrix_tests!([<$name _opaque>] = |jit| run_test_case(
+                &TestCase {
+                    bytecode: &bytecode_binop_opaque($op, $a, $b),
+                    expected_stack: &[$($ret),*],
+                    expected_memory: MEMORY_WHAT_INTERPRETER_SAYS,
+                    expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+                    ..Default::default()
+                },
+                jit,
+            ));
+        }
     };
 
     (@case @raw { $($fields:tt)* }) => { &TestCase { $($fields)* ..Default::default() } };
