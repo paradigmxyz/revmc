@@ -80,6 +80,10 @@ pub(super) struct FunctionCx<'a, B: Backend> {
     ecx: B::Value,
     /// The `ecx.input` pointer (`&InputsImpl`). Loaded once at entry.
     input: B::Value,
+    /// The calldata pointer. Loaded once at entry.
+    calldata_ptr: B::Value,
+    /// The calldata size. Loaded once at entry.
+    calldatasize: B::Value,
     /// Stack length before the current instruction.
     len_before: B::Value,
     /// Stack length offset for the current instruction, used for push/pop.
@@ -250,6 +254,26 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             bcx.load(ptr_type, input_field, "ecx.input")
         };
 
+        // Load calldata pointer and size from ecx (constant for the call frame).
+        let calldata_ptr = {
+            let field = get_field(
+                &mut bcx,
+                ecx,
+                mem::offset_of!(EvmContext<'_>, calldata),
+                "ecx.calldata.addr",
+            );
+            bcx.load(ptr_type, field, "ecx.calldata")
+        };
+        let calldatasize = {
+            let field = get_field(
+                &mut bcx,
+                ecx,
+                mem::offset_of!(EvmContext<'_>, calldatasize),
+                "ecx.calldatasize.addr",
+            );
+            bcx.load(isize_type, field, "ecx.calldatasize")
+        };
+
         // Create all instruction entry blocks.
         // Dead-code instructions map to `unreachable_block`, except when block deduplication
         // has a redirect — those are resolved in a second pass once all blocks exist.
@@ -294,6 +318,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             gas_remaining,
             ecx,
             input,
+            calldata_ptr,
+            calldatasize,
             len_before: zero,
             len_offset: 0,
             section_start_len: zero,
@@ -856,44 +882,29 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             }
             op::CALLDATALOAD => {
                 let sp = self.sp_after_inputs();
-                let ptr_type = self.bcx.type_ptr();
+
+                let current = self.current_block();
+                let full_block = self.create_block_after(current, "calldataload.full");
+                let slow_block = self.create_block_after(full_block, "calldataload.slow");
+                let partial_block = self.create_block_after(slow_block, "calldataload.partial");
+                let done_block = self.create_block_after(partial_block, "calldataload.done");
 
                 // Saturating convert i256 offset to isize.
                 let offset_word = self.load_word(sp, "calldataload.offset");
                 let offset = self.bcx.ireduce(self.isize_type, offset_word);
                 let extended = self.bcx.zext(self.word_type, offset);
                 let fits = self.bcx.icmp(IntCC::Equal, offset_word, extended);
-                let sentinel = self.bcx.iconst(self.isize_type, isize::MAX as i64);
+                let sentinel = self.bcx.iconst(self.isize_type, usize::MAX as i64);
                 let offset = self.bcx.select(fits, offset, sentinel);
 
-                let calldata_addr = self.get_field(
-                    self.ecx,
-                    mem::offset_of!(EvmContext<'_>, calldata),
-                    "ecx.calldata.addr",
-                );
-                let calldata_ptr = self.bcx.load(ptr_type, calldata_addr, "ecx.calldata");
-                let calldatasize_addr = self.get_field(
-                    self.ecx,
-                    mem::offset_of!(EvmContext<'_>, calldatasize),
-                    "ecx.calldatasize.addr",
-                );
-                let calldatasize =
-                    self.bcx.load(self.isize_type, calldatasize_addr, "ecx.calldatasize");
-
-                let remaining = self.bcx.isub(calldatasize, offset);
-                let src = self.bcx.gep(self.i8_type, calldata_ptr, &[offset], "calldata.src");
+                let remaining = self.bcx.isub(self.calldatasize, offset);
+                let src = self.bcx.gep(self.i8_type, self.calldata_ptr, &[offset], "calldata.src");
 
                 // Fast path: 32+ bytes available → direct unaligned load + bswap.
                 let thirty_two = self.bcx.iconst(self.isize_type, 32);
                 let full_avail =
-                    self.bcx.icmp(IntCC::SignedGreaterThanOrEqual, remaining, thirty_two);
-                let current = self.current_block();
-                let full_block = self.create_block_after(current, "calldataload.full");
-                let check_partial =
-                    self.create_block_after(full_block, "calldataload.check_partial");
-                let partial_block = self.create_block_after(check_partial, "calldataload.partial");
-                let done_block = self.create_block_after(partial_block, "calldataload.done");
-                self.bcx.brif(full_avail, full_block, check_partial);
+                    self.bcx.icmp(IntCC::UnsignedGreaterThanOrEqual, remaining, thirty_two);
+                self.bcx.brif(full_avail, full_block, slow_block);
 
                 // Full read: load 32 bytes directly, bswap, store.
                 self.bcx.switch_to_block(full_block);
@@ -902,14 +913,14 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 self.bcx.store(swapped, sp);
                 self.bcx.br(done_block);
 
-                // Check if any bytes are available at all.
-                self.bcx.switch_to_block(check_partial);
+                // Slow path: zero the slot, memcpy remaining bytes if in-bounds,
+                // then bswap.
+                self.bcx.switch_to_block(slow_block);
                 let zero = self.bcx.iconst_256(U256::ZERO);
                 self.bcx.store(zero, sp);
-                let in_bounds = self.bcx.icmp(IntCC::UnsignedLessThan, offset, calldatasize);
+                let in_bounds = self.bcx.icmp(IntCC::UnsignedLessThan, offset, self.calldatasize);
                 self.bcx.brif(in_bounds, partial_block, done_block);
 
-                // Partial read: memcpy remaining bytes into zeroed slot, then bswap.
                 self.bcx.switch_to_block(partial_block);
                 self.bcx.memcpy(sp, src, remaining);
                 let word = self.bcx.load(self.word_type, sp, "calldataload.partial");
@@ -920,7 +931,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 self.bcx.switch_to_block(done_block);
             }
             op::CALLDATASIZE => {
-                field!(@push self.isize_type, self.ecx, EvmContext<'_>; calldatasize);
+                let size = self.bcx.zext(self.word_type, self.calldatasize);
+                self.push(size);
             }
             op::CALLDATACOPY => {
                 let sp = self.sp_after_inputs();

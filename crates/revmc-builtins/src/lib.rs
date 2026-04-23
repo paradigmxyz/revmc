@@ -17,7 +17,7 @@ use revm_interpreter::{
     InstructionResult, InterpreterAction, InterpreterResult, as_u64_saturated, as_usize_saturated,
     interpreter_types::{InputsTr, MemoryTr},
 };
-use revm_primitives::{B256, Bytes, KECCAK_EMPTY, Log, LogData, U256, hardfork::SpecId};
+use revm_primitives::{Bytes, KECCAK_EMPTY, Log, LogData, U256, hardfork::SpecId};
 use revmc_context::{EvmContext, EvmWord};
 
 pub mod gas;
@@ -219,41 +219,6 @@ pub unsafe extern "C" fn __revmc_builtin_balance(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __revmc_builtin_origin(ecx: &EvmContext<'_>, slot: &mut EvmWord) {
     *slot = EvmWord::from_be_bytes(ecx.host.caller().into_word());
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn __revmc_builtin_calldataload(
-    ecx: &EvmContext<'_>,
-    offset_ptr: &mut EvmWord,
-) {
-    do_calldataload(ecx, offset_ptr, as_usize_saturated!(offset_ptr.to_u256()));
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn __revmc_builtin_calldataload_c(
-    ecx: &EvmContext<'_>,
-    offset_ptr: &mut EvmWord,
-    offset: u64,
-) {
-    do_calldataload(ecx, offset_ptr, offset as usize);
-}
-
-fn do_calldataload(ecx: &EvmContext<'_>, out: &mut EvmWord, offset: usize) {
-    let mut word = B256::ZERO;
-    let input = ecx.input.input();
-    let input_len = input.len();
-    if offset < input_len {
-        let count = 32.min(input_len - offset);
-        let input = ecx.input.input().as_bytes_memory(ecx.memory);
-        // SAFETY: `count` is bounded by the calldata length.
-        // This is `word[..count].copy_from_slice(input[offset..offset + count])`, written using
-        // raw pointers as apparently the compiler cannot optimize the slice version, and using
-        // `get_unchecked` twice is uglier.
-        unsafe {
-            core::ptr::copy_nonoverlapping(input.as_ptr().add(offset), word.as_mut_ptr(), count)
-        };
-    }
-    *out = EvmWord::from_be_bytes(word);
 }
 
 #[unsafe(no_mangle)]

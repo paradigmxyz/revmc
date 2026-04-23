@@ -285,17 +285,11 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             let builtin = match op {
                 op::MLOAD => Builtin::MloadC,
                 op::SLOAD => Builtin::SloadC,
-                op::CALLDATALOAD => Builtin::CallDataLoadC,
                 _ => unreachable!(),
             };
             let sp = self.sp_from_top(1);
             let offset = self.bcx.iconst(self.isize_type, offset as i64);
-            let args = &[self.ecx, sp, offset];
-            if op == op::CALLDATALOAD {
-                let _ = self.call_builtin(builtin, args);
-            } else {
-                self.call_fallible_builtin(builtin, args);
-            }
+            self.call_fallible_builtin(builtin, &[self.ecx, sp, offset]);
             true
         } else {
             false
