@@ -786,16 +786,20 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 self.call_fallible_builtin(Builtin::Exp, &[self.ecx, sp]);
             }
             op::SIGNEXTEND => {
-                // Sign-extend x from (ext+1) bytes using arithmetic shift:
-                //   shift = 248 - 8 * ext
-                //   result = (x << shift) >>s shift
+                // let shift = 248 - 8 * ext;
+                // ext < 31
+                //   ? (x << shift) >>s shift
+                //   : x
                 let [ext, x] = self.popn();
+
                 let might_do_something = self.bcx.icmp_imm(IntCC::UnsignedLessThan, ext, 31);
+
                 let shift = self.bcx.imul_imm(ext, 8);
                 let c248 = self.bcx.iconst_256(U256::from(248));
                 let shift = self.bcx.isub(c248, shift);
                 let shifted = self.bcx.ishl(x, shift);
                 let sext = self.bcx.sshr(shifted, shift);
+
                 let r = self.bcx.select(might_do_something, sext, x);
                 self.push(r);
             }
