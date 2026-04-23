@@ -817,8 +817,17 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             op::XOR => binop!(bitxor),
             op::NOT => unop!(bitnot),
             op::BYTE => {
+                // byte(index, value) = (value >> (31 - index) * 8) & 0xFF, or 0 if index >= 32.
                 let [index, value] = self.popn();
-                let r = self.call_byte(index, value);
+                let in_range = self.bcx.icmp_imm(IntCC::UnsignedLessThan, index, 32);
+                let thirty_one = self.bcx.iconst_256(U256::from(31));
+                let shift = self.bcx.isub(thirty_one, index);
+                let shift = self.bcx.imul_imm(shift, 8);
+                let shifted = self.bcx.ushr(value, shift);
+                let mask = self.bcx.iconst_256(U256::from(0xFF));
+                let byte = self.bcx.bitand(shifted, mask);
+                let zero = self.bcx.iconst_256(U256::ZERO);
+                let r = self.bcx.select(in_range, byte, zero);
                 self.push(r);
             }
             op::SHL => binop!(@shift ishl, |value, shift| self.bcx.iconst_256(U256::ZERO)),
@@ -1680,31 +1689,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
 /// IR builtins.
 impl<B: Backend> FunctionCx<'_, B> {
-    fn call_byte(&mut self, index: B::Value, value: B::Value) -> B::Value {
-        self.call_ir_binop_builtin("byte", index, value, Self::build_byte)
-    }
-
-    /// Builds: `fn byte(index: u256, value: u256) -> u256`
-    fn build_byte(&mut self) {
-        let index = self.bcx.fn_param(0);
-        let value = self.bcx.fn_param(1);
-
-        let cond = self.bcx.icmp_imm(IntCC::UnsignedLessThan, index, 32);
-        let byte = {
-            // (value >> (31 - index) * 8) & 0xFF
-            let thirty_one = self.bcx.iconst_256(U256::from(31));
-            let shift = self.bcx.isub(thirty_one, index);
-            let shift = self.bcx.imul_imm(shift, 8);
-            let shifted = self.bcx.ushr(value, shift);
-            let mask = self.bcx.iconst_256(U256::from(0xFF));
-            self.bcx.bitand(shifted, mask)
-        };
-        let zero = self.bcx.iconst_256(U256::ZERO);
-        let r = self.bcx.select(cond, byte, zero);
-
-        self.bcx.ret(&[r]);
-    }
-
     fn call_signextend(&mut self, ext: B::Value, x: B::Value) -> B::Value {
         self.call_ir_binop_builtin("signextend", ext, x, Self::build_signextend)
     }
