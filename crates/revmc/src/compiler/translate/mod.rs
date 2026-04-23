@@ -786,8 +786,21 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 self.call_fallible_builtin(Builtin::Exp, &[self.ecx, sp]);
             }
             op::SIGNEXTEND => {
+                // let shift = 248 - 8 * ext;
+                // ext < 31
+                //   ? (x << shift) >>s shift
+                //   : x
                 let [ext, x] = self.popn();
-                let r = self.call_signextend(ext, x);
+
+                let might_do_something = self.bcx.icmp_imm(IntCC::UnsignedLessThan, ext, 31);
+
+                let shift = self.bcx.imul_imm(ext, 8);
+                let c248 = self.bcx.iconst_256(U256::from(248));
+                let shift = self.bcx.isub(c248, shift);
+                let shifted = self.bcx.ishl(x, shift);
+                let sext = self.bcx.sshr(shifted, shift);
+
+                let r = self.bcx.select(might_do_something, sext, x);
                 self.push(r);
             }
 
@@ -1702,60 +1715,6 @@ impl<B: Backend> FunctionCx<'_, B> {
         let zero = self.bcx.iconst_256(U256::ZERO);
         let r = self.bcx.select(cond, byte, zero);
 
-        self.bcx.ret(&[r]);
-    }
-
-    fn call_signextend(&mut self, ext: B::Value, x: B::Value) -> B::Value {
-        self.call_ir_binop_builtin("signextend", ext, x, Self::build_signextend)
-    }
-
-    /// Builds: `fn signextend(ext: u256, x: u256) -> u256`
-    fn build_signextend(&mut self) {
-        // From the yellow paper:
-        /*
-        let [ext, x] = stack.pop();
-        let t = 256 - 8 * (ext + 1);
-        let mut result = x;
-        result[..t] = [x[t]; t]; // Index by bits.
-        */
-
-        let ext = self.bcx.fn_param(0);
-        let x = self.bcx.fn_param(1);
-
-        // For 31 we also don't need to do anything.
-        let might_do_something = self.bcx.icmp_imm(IntCC::UnsignedLessThan, ext, 31);
-        let r = self.bcx.lazy_select(
-            might_do_something,
-            self.bcx.type_int(256),
-            |bcx| {
-                // Adapted from revm: https://github.com/bluealloy/revm/blob/fda371f73aba2c30a83c639608be78145fd1123b/crates/interpreter/src/instructions/arithmetic.rs#L89
-                // let bit_index = 8 * ext + 7;
-                // let bit = (x >> bit_index) & 1 != 0;
-                // let mask = (1 << bit_index) - 1;
-                // let r = if bit { x | !mask } else { *x & mask };
-
-                // let bit_index = 8 * ext + 7;
-                let bit_index = bcx.imul_imm(ext, 8);
-                let bit_index = bcx.iadd_imm(bit_index, 7);
-
-                // let bit = (x >> bit_index) & 1 != 0;
-                let one = bcx.iconst_256(U256::from(1));
-                let bit = bcx.ushr(x, bit_index);
-                let bit = bcx.bitand(bit, one);
-                let bit = bcx.icmp_imm(IntCC::NotEqual, bit, 0);
-
-                // let mask = (1 << bit_index) - 1;
-                let mask = bcx.ishl(one, bit_index);
-                let mask = bcx.isub_imm(mask, 1);
-
-                // let r = if bit { x | !mask } else { *x & mask };
-                let not_mask = bcx.bitnot(mask);
-                let sext = bcx.bitor(x, not_mask);
-                let zext = bcx.bitand(x, mask);
-                bcx.select(bit, sext, zext)
-            },
-            |_bcx| x,
-        );
         self.bcx.ret(&[r]);
     }
 
