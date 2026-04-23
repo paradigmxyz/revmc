@@ -830,20 +830,15 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             op::XOR => binop!(bitxor),
             op::NOT => unop!(bitnot),
             op::BYTE => {
-                // index < 32
-                //   ? (value >> (31 - index) * 8) & 0xFF
-                //   : 0
+                // byte(index, value) = (value >> (248 - index * 8)) & 0xFF, or 0 if index >= 32.
                 let [index, value] = self.popn();
-
                 let in_range = self.bcx.icmp_imm(IntCC::UnsignedLessThan, index, 32);
-
-                let thirty_one = self.bcx.iconst_256(U256::from(31));
-                let shift = self.bcx.isub(thirty_one, index);
-                let shift = self.bcx.imul_imm(shift, 8);
+                let shift = self.bcx.imul_imm(index, 8);
+                let c248 = self.bcx.iconst_256(U256::from(248));
+                let shift = self.bcx.isub(c248, shift);
                 let shifted = self.bcx.ushr(value, shift);
                 let mask = self.bcx.iconst_256(U256::from(0xFF));
                 let byte = self.bcx.bitand(shifted, mask);
-
                 let zero = self.bcx.iconst_256(U256::ZERO);
 
                 let r = self.bcx.select(in_range, byte, zero);
