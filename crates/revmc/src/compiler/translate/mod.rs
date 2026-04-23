@@ -883,11 +883,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             op::CALLDATALOAD => {
                 let sp = self.sp_after_inputs();
 
-                let current = self.current_block();
-                let full_block = self.create_block_after(current, "calldataload.full");
-                let slow_block = self.create_block_after(full_block, "calldataload.slow");
-                let done_block = self.create_block_after(slow_block, "calldataload.done");
-
                 // Truncate i256 offset to isize.
                 let offset_word = self.load_word(sp, "calldataload.offset");
                 let offset = self.bcx.ireduce(self.isize_type, offset_word);
@@ -907,27 +902,18 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 let full_avail =
                     self.bcx.icmp(IntCC::UnsignedGreaterThanOrEqual, remaining, thirty_two);
                 let fast = self.bcx.bitand(valid, full_avail);
-                self.bcx.brif(fast, full_block, slow_block);
 
-                // Full read: load 32 bytes directly, bswap.
-                self.bcx.switch_to_block(full_block);
-                let full_word = self.bcx.load_aligned(self.word_type, src, 1, "calldataload.full");
-                let fast_result = self.bcx.bswap(full_word);
-                self.bcx.br(done_block);
-
-                // Slow path: cold IR builtin (src, remaining) -> i256.
-                // When !valid (OOB), remaining is garbage but the builtin checks
-                // remaining > 0, so we clamp it to 0 for the OOB case.
-                self.bcx.switch_to_block(slow_block);
-                let zero_isize = self.bcx.iconst(self.isize_type, 0);
-                let safe_remaining = self.bcx.select(valid, remaining, zero_isize);
-                let slow_result = self.call_calldataload_slow(src, safe_remaining);
-                self.bcx.br(done_block);
-
-                self.bcx.switch_to_block(done_block);
-                let result = self
-                    .bcx
-                    .phi(self.word_type, &[(fast_result, full_block), (slow_result, slow_block)]);
+                let result = self.lazy_select(
+                    fast,
+                    self.word_type,
+                    |this| this.bcx.load_aligned(this.word_type, src, 1, "calldataload.full"),
+                    |this| {
+                        let zero_isize = this.bcx.iconst(this.isize_type, 0);
+                        let safe_remaining = this.bcx.select(valid, remaining, zero_isize);
+                        this.call_calldataload_slow(src, safe_remaining)
+                    },
+                );
+                let result = self.bcx.bswap(result);
                 self.bcx.store(result, sp);
             }
             op::CALLDATASIZE => {
@@ -1845,44 +1831,33 @@ impl<B: Backend> FunctionCx<'_, B> {
             &[src, remaining],
             &[ptr_type, isize_type],
             Some(word_type),
-            |this| {
-                this.bcx.add_function_attribute(
-                    None,
-                    Attribute::Cold,
-                    FunctionAttributeLocation::Function,
-                );
-
-                let src = this.bcx.fn_param(0);
-                let remaining = this.bcx.fn_param(1);
-
-                // Alloca in entry block, before any branches.
-                let word_type = this.bcx.type_int(256);
-                let slot = this.bcx.new_stack_slot_raw(word_type, "tmp");
-                let slot_ptr = this.bcx.stack_addr(word_type, slot);
-                let zero = this.bcx.iconst_256(U256::ZERO);
-                this.bcx.store(zero, slot_ptr);
-
-                let entry_block = this.bcx.current_block().unwrap();
-                let has_data = this.bcx.icmp_imm(IntCC::SignedGreaterThan, remaining, 0);
-                let partial_block = this.bcx.create_block("partial");
-                let done_block = this.bcx.create_block("done");
-
-                this.bcx.brif(has_data, partial_block, done_block);
-
-                // Partial: memcpy remaining bytes, bswap.
-                this.bcx.switch_to_block(partial_block);
-                this.bcx.memcpy(slot_ptr, src, remaining);
-                let word = this.bcx.load(word_type, slot_ptr, "partial");
-                let swapped = this.bcx.bswap(word);
-                this.bcx.br(done_block);
-
-                // Done: phi(zero, swapped).
-                this.bcx.switch_to_block(done_block);
-                let r = this.bcx.phi(word_type, &[(zero, entry_block), (swapped, partial_block)]);
-                this.bcx.ret(&[r]);
-            },
+            Self::build_calldataload_slow,
         )
         .unwrap()
+    }
+
+    fn build_calldataload_slow(&mut self) {
+        self.bcx.add_function_attribute(None, Attribute::Cold, FunctionAttributeLocation::Function);
+
+        let src = self.bcx.fn_param(0);
+        let remaining = self.bcx.fn_param(1);
+
+        let zero = self.bcx.iconst_256(U256::ZERO);
+
+        let has_data = self.bcx.icmp_imm(IntCC::SignedGreaterThan, remaining, 0);
+        let r = self.lazy_select(
+            has_data,
+            self.word_type,
+            |this| {
+                let slot = this.bcx.new_stack_slot_raw(this.word_type, "tmp");
+                let slot_ptr = this.bcx.stack_addr(this.word_type, slot);
+                this.bcx.store(zero, slot_ptr);
+                this.bcx.memcpy(slot_ptr, src, remaining);
+                this.bcx.load(this.word_type, slot_ptr, "partial")
+            },
+            |_bcx| zero,
+        );
+        self.bcx.ret(&[r]);
     }
 
     fn call_ir_binop_builtin(
@@ -1938,6 +1913,22 @@ impl<B: Backend> FunctionCx<'_, B> {
             this.return_block = prev_return_block;
         });
         self.bcx.call(f, args)
+    }
+
+    fn lazy_select(
+        &mut self,
+        cond: B::Value,
+        ty: B::Type,
+        then_value: impl FnOnce(&mut Self) -> B::Value,
+        else_value: impl FnOnce(&mut Self) -> B::Value,
+    ) -> B::Value {
+        // SAFETY: two aliases of `self` for the two `FnOnce` closures. Only one
+        // closure executes at a time (they are behind a branch), and each closure's
+        // `_bcx` (`&mut self.bcx`) is not used — the closure goes through `this`
+        // instead, which aliases the same `Self`.
+        let this1 = unsafe { &mut *(self as *mut Self) };
+        let this2 = unsafe { &mut *(self as *mut Self) };
+        self.bcx.lazy_select(cond, ty, |_bcx| then_value(this1), |_bcx| else_value(this2))
     }
 }
 
