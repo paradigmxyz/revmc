@@ -969,44 +969,30 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             op::TIMESTAMP => {
                 let slot = self.sp_at_top();
                 let _ = self.call_builtin(Builtin::Timestamp, &[self.ecx, slot]);
-                let value = self.load_word(slot, "timestamp");
-                self.deferred_virtual = Some((self.section_len_offset, value));
             }
             op::NUMBER => {
                 let slot = self.sp_at_top();
                 let _ = self.call_builtin(Builtin::Number, &[self.ecx, slot]);
-                let value = self.load_word(slot, "number");
-                self.deferred_virtual = Some((self.section_len_offset, value));
             }
             op::DIFFICULTY => {
                 let slot = self.sp_at_top();
                 let _ = self.call_builtin(Builtin::Difficulty, &[self.ecx, slot]);
-                let value = self.load_word(slot, "difficulty");
-                self.deferred_virtual = Some((self.section_len_offset, value));
             }
             op::GASLIMIT => {
                 let slot = self.sp_at_top();
                 let _ = self.call_builtin(Builtin::GasLimit, &[self.ecx, slot]);
-                let value = self.load_word(slot, "gaslimit");
-                self.deferred_virtual = Some((self.section_len_offset, value));
             }
             op::CHAINID => {
                 let slot = self.sp_at_top();
                 let _ = self.call_builtin(Builtin::ChainId, &[self.ecx, slot]);
-                let value = self.load_word(slot, "chainid");
-                self.deferred_virtual = Some((self.section_len_offset, value));
             }
             op::SELFBALANCE => {
                 let slot = self.sp_at_top();
                 self.call_fallible_builtin(Builtin::SelfBalance, &[self.ecx, slot]);
-                let value = self.load_word(slot, "selfbalance");
-                self.deferred_virtual = Some((self.section_len_offset, value));
             }
             op::BASEFEE => {
                 let slot = self.sp_at_top();
                 let _ = self.call_builtin(Builtin::Basefee, &[self.ecx, slot]);
-                let value = self.load_word(slot, "basefee");
-                self.deferred_virtual = Some((self.section_len_offset, value));
             }
             op::BLOBHASH => {
                 let sp = self.sp_after_inputs();
@@ -1015,14 +1001,10 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             op::BLOBBASEFEE => {
                 let slot = self.sp_at_top();
                 let _ = self.call_builtin(Builtin::BlobBaseFee, &[self.ecx, slot]);
-                let value = self.load_word(slot, "blobbasefee");
-                self.deferred_virtual = Some((self.section_len_offset, value));
             }
             op::SLOTNUM => {
                 let slot = self.sp_at_top();
                 let _ = self.call_builtin(Builtin::SlotNum, &[self.ecx, slot]);
-                let value = self.load_word(slot, "slotnum");
-                self.deferred_virtual = Some((self.section_len_offset, value));
             }
 
             op::POP => {
@@ -1451,7 +1433,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         get_field(&mut self.bcx, ptr, offset, name)
     }
 
-    /// Loads the address at `slot` as i160, zero-extends to i256, and returns the value.
+    /// Re-loads the address at `slot` as i160, zero-extends to i256, stores it back,
+    /// and returns the zext'd value.
     ///
     /// On little-endian the low 160 bits sit at byte offset 0, so a direct
     /// `load i160` + `zext i256` gives LLVM a typed narrow load — no AND needed
@@ -1460,7 +1443,9 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     fn narrow_to_address(&mut self, slot: B::Value) -> B::Value {
         debug_assert!(cfg!(target_endian = "little"), "big-endian not yet supported");
         let value = self.bcx.load(self.address_type, slot, "address");
-        self.bcx.zext(self.word_type, value)
+        let value = self.bcx.zext(self.word_type, value);
+        self.bcx.store(value, slot);
+        value
     }
 
     /// Loads the gas used.
