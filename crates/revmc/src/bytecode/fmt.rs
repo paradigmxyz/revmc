@@ -183,6 +183,8 @@ impl Bytecode<'_> {
                 writeln!(f)?;
             } else if comment.is_empty() {
                 writeln!(f, "{text}")?;
+            } else if text.is_empty() {
+                writeln!(f, "; {comment}")?;
             } else {
                 writeln!(f, "{text:<comment_col$} ; {comment}")?;
             }
