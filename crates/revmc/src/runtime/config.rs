@@ -2,6 +2,7 @@
 
 use crate::{CompileTimings, runtime::storage::ArtifactStore};
 use alloy_primitives::B256;
+use revm_context_interface::cfg::GasParams;
 use revm_primitives::hardfork::SpecId;
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
@@ -58,6 +59,17 @@ pub struct RuntimeConfig {
     ///
     /// Defaults to `false`.
     pub no_dse: bool,
+
+    /// Custom gas parameters for compile-time gas folding.
+    ///
+    /// Overrides the default gas schedule derived from `spec_id` when compiling
+    /// bytecode. Useful for custom chains with non-standard gas costs (e.g.
+    /// modified SSTORE, CREATE, or EXP costs).
+    ///
+    /// When `None`, the compiler uses `GasParams::new_spec(spec_id)`.
+    ///
+    /// Defaults to `None`.
+    pub gas_params: Option<GasParams>,
 
     /// Blocking mode: every lookup synchronously JIT-compiles on miss and never
     /// falls back to the interpreter.
@@ -117,6 +129,7 @@ impl Default for RuntimeConfig {
             debug_assertions: false,
             no_dedup: false,
             no_dse: false,
+            gas_params: None,
             blocking: false,
             on_compilation: None,
         }

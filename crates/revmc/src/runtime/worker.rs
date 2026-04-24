@@ -263,6 +263,9 @@ fn worker_loop(
         compiler.debug_assertions(config.debug_assertions);
         compiler.set_dedup(!config.no_dedup);
         compiler.set_dse(!config.no_dse);
+        if let Some(gas_params) = &config.gas_params {
+            compiler.set_gas_params(gas_params.clone());
+        }
         Ok(compiler)
     };
 
@@ -333,7 +336,7 @@ fn worker_loop(
                         .entered();
 
                 let generation = job.generation;
-                let outcome = compile_aot_artifact(&job);
+                let outcome = compile_aot_artifact(&job, config.gas_params.as_ref());
                 (
                     job.key,
                     outcome,
@@ -379,7 +382,10 @@ fn worker_loop(
 
 /// Compiles a single bytecode to a shared library and returns the raw bytes.
 #[cfg(feature = "llvm")]
-fn compile_aot_artifact(job: &AotJob) -> Result<WorkerSuccess, String> {
+fn compile_aot_artifact(
+    job: &AotJob,
+    gas_params: Option<&revm_context_interface::cfg::GasParams>,
+) -> Result<WorkerSuccess, String> {
     use crate::{EvmCompiler, EvmLlvmBackend, Linker};
     use std::io::Read;
 
@@ -387,6 +393,9 @@ fn compile_aot_artifact(job: &AotJob) -> Result<WorkerSuccess, String> {
         EvmLlvmBackend::new(true).map_err(|e| format!("AOT backend creation failed: {e}"))?;
     let mut compiler = EvmCompiler::new(backend);
     compiler.set_opt_level(job.opt_level);
+    if let Some(gas_params) = gas_params {
+        compiler.set_gas_params(gas_params.clone());
+    }
 
     compiler
         .translate(&job.symbol_name, &job.bytecode[..], job.key.spec_id)
