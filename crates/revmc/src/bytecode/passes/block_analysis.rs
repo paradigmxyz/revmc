@@ -29,7 +29,7 @@
 //! incomplete information, ensuring that only sound jump targets are reported as resolved.
 
 use super::StackSection;
-use crate::bytecode::{Bytecode, Inst, InstFlags, Interner, U256Idx};
+use crate::bytecode::{Bytecode, Inst, InstData, InstFlags, Interner, U256Idx};
 use bitvec::vec::BitVec;
 use either::Either;
 use oxc_index::{IndexVec, index_vec};
@@ -285,6 +285,21 @@ impl BlockData {
         &self,
     ) -> impl DoubleEndedIterator<Item = Inst> + ExactSizeIterator + use<> {
         (self.insts.start.index()..self.insts.end.index()).map(Inst::from_usize)
+    }
+
+    /// Returns `true` if this block is a fallthrough extension of its unique predecessor.
+    ///
+    /// A fallthrough block has exactly one predecessor and its first instruction is not a
+    /// reachable `JUMPDEST` (so the only way to enter it is sequential fallthrough from
+    /// the predecessor). Such blocks can be treated as continuations of the predecessor
+    /// for intra-region analyses like DSE.
+    #[inline]
+    pub(crate) fn is_fallthrough(
+        &self,
+        insts: &IndexVec<Inst, InstData>,
+        has_dynamic_jumps: bool,
+    ) -> bool {
+        self.preds.len() == 1 && !insts[self.insts.start].is_reachable_jumpdest(has_dynamic_jumps)
     }
 }
 
@@ -2390,5 +2405,65 @@ mod tests_edge_cases {
             bytecode.has_dynamic_jumps,
             "return jump should remain dynamic when fixpoint doesn't converge"
         );
+    }
+
+    #[test]
+    fn is_fallthrough() {
+        // bb0: PUSH, CALLDATASIZE, PUSH %target, JUMPI
+        // bb1 (fallthrough): POP, STOP          — 1 pred, not a JUMPDEST
+        // bb2: JUMPDEST, STOP                   — 1 pred, but IS a JUMPDEST
+        let bytecode = analyze_asm(
+            "
+            PUSH1 0x42
+            CALLDATASIZE
+            PUSH %target
+            JUMPI
+            POP
+            STOP
+        target:
+            JUMPDEST
+            STOP
+        ",
+        );
+        let blocks = &bytecode.cfg.blocks;
+        assert!(
+            !blocks[Block::from_usize(0)]
+                .is_fallthrough(&bytecode.insts, bytecode.has_dynamic_jumps)
+        );
+        assert!(
+            blocks[Block::from_usize(1)]
+                .is_fallthrough(&bytecode.insts, bytecode.has_dynamic_jumps)
+        );
+        assert!(
+            !blocks[Block::from_usize(2)]
+                .is_fallthrough(&bytecode.insts, bytecode.has_dynamic_jumps)
+        );
+    }
+
+    #[test]
+    fn is_fallthrough_multiple_preds() {
+        // bb1 has 2 predecessors (both JUMPs), so it's NOT a fallthrough block
+        // even though its first instruction is not a JUMPDEST... wait, with 2
+        // preds via JUMP it must be a JUMPDEST. Let's use JUMPI to create a
+        // block with 2 predecessors that IS a JUMPDEST.
+        let bytecode = analyze_asm(
+            "
+            CALLDATASIZE
+            PUSH %merge
+            JUMPI
+
+            PUSH0
+            PUSH %merge
+            JUMP
+
+        merge:
+            JUMPDEST
+            STOP
+        ",
+        );
+        let blocks = &bytecode.cfg.blocks;
+        // merge block has 2 predecessors — not a fallthrough.
+        let merge = blocks.iter_enumerated().find(|(_, b)| b.preds.len() == 2).unwrap().0;
+        assert!(!blocks[merge].is_fallthrough(&bytecode.insts, bytecode.has_dynamic_jumps));
     }
 }
