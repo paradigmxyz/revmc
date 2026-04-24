@@ -78,9 +78,6 @@ pub(super) struct FunctionCx<'a, B: Backend> {
     sp_arg: Option<B::Value>,
     /// The amount of gas remaining. `i64`. See `Gas`.
     gas_remaining: Pointer<B::Builder<'a>>,
-    /// When local gas is enabled: `(original_gas_ptr, local_gas_alloca_addr)`.
-    /// The original pointer is restored on exit after copying the local Gas back.
-    local_gas: Option<(B::Value, B::Value)>,
     /// The EVM context. Opaque pointer, only passed to builtins.
     ecx: B::Value,
     /// Stack length before the current instruction.
@@ -236,41 +233,17 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         // This is initialized later in `post_entry_block`.
         let stack_len = bcx.new_stack_slot(isize_type, "len.addr");
 
-        // Load gas pointer from ecx and set up a local Gas alloca.
-        // By copying the Gas struct onto the stack frame and patching ecx.gas to point to
-        // it, gas_remaining becomes a frame-offset address (free on x86: `sub [rsp+N], imm`)
-        // instead of requiring a register to hold the pointer. Builtins read ecx.gas, so
-        // they naturally operate on the local copy with no sync overhead.
+        // Load gas pointer from ecx.
         let ptr_type = bcx.type_ptr();
-        let ecx_gas_field =
-            get_field(&mut bcx, ecx, mem::offset_of!(EvmContext<'_>, gas), "ecx.gas.addr");
-        let gas_original = bcx.load(ptr_type, ecx_gas_field, "ecx.gas");
-
-        let gas_size = mem::size_of::<pf::Gas>() as u32;
-        // Use [N x i64] to ensure alignment matches Gas (align 8).
-        let gas_type = bcx.type_array(i64_type, gas_size / 8);
-        let local_gas = bcx.new_stack_slot(gas_type, "gas.local");
-        let local_gas_addr = local_gas.addr(&mut bcx);
-
-        // Copy the original Gas struct into the local alloca.
-        bcx.memcpy_inline(local_gas_addr, gas_original, gas_size as i64);
-
-        // Patch ecx.gas to point to the local copy so builtins use it directly.
-        bcx.store(local_gas_addr, ecx_gas_field);
-
-        // Store the original pointer so the `fail` path can restore it before revmc_exit.
-        let ecx_gas_original_field = get_field(
-            &mut bcx,
-            ecx,
-            mem::offset_of!(EvmContext<'_>, gas_original),
-            "ecx.gas_original.addr",
-        );
-        bcx.store(gas_original, ecx_gas_original_field);
-
+        let gas_ptr = {
+            let gas_field =
+                get_field(&mut bcx, ecx, mem::offset_of!(EvmContext<'_>, gas), "ecx.gas.addr");
+            bcx.load(ptr_type, gas_field, "ecx.gas")
+        };
         let gas_remaining = {
             let offset = bcx.iconst(i64_type, mem::offset_of!(pf::Gas, tracker.remaining) as i64);
             let name = "gas.remaining.addr";
-            Pointer::new_address(i64_type, bcx.gep(i8_type, local_gas_addr, &[offset], name))
+            Pointer::new_address(i64_type, bcx.gep(i8_type, gas_ptr, &[offset], name))
         };
 
         // Create all instruction entry blocks.
@@ -315,7 +288,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             stack,
             sp_arg: local_stack.then_some(sp_arg),
             gas_remaining,
-            local_gas: Some((gas_original, local_gas_addr)),
             ecx,
             len_before: zero,
             len_offset: 0,
@@ -519,7 +491,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 fx.copy_stack_to_arg();
                 fx.save_stack_len();
             }
-            fx.restore_gas();
             fx.bcx.ret(&[return_value]);
         } else {
             fx.bcx.unreachable();
@@ -1494,18 +1465,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             let word_size = 32i64;
             let byte_len = self.bcx.imul_imm(len, word_size);
             self.bcx.memcpy(dst, src, byte_len);
-        }
-    }
-
-    /// Copies the local Gas struct back to the original and restores the ecx.gas pointer.
-    fn restore_gas(&mut self) {
-        if let Some((gas_original, local_gas_addr)) = self.local_gas {
-            let gas_size = mem::size_of::<pf::Gas>() as i64;
-            self.bcx.memcpy_inline(gas_original, local_gas_addr, gas_size);
-
-            let ecx_gas_field =
-                self.get_field(self.ecx, mem::offset_of!(EvmContext<'_>, gas), "ecx.gas.addr");
-            self.bcx.store(gas_original, ecx_gas_field);
         }
     }
 

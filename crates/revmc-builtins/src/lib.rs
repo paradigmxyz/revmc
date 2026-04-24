@@ -13,7 +13,7 @@ extern crate tracing;
 use alloc::{boxed::Box, vec::Vec};
 use revm_context_interface::either::Either;
 use revm_interpreter::{
-    CallInput, CallInputs, CallScheme, CallValue, CreateInputs, CreateScheme, FrameInput, Gas,
+    CallInput, CallInputs, CallScheme, CallValue, CreateInputs, CreateScheme, FrameInput,
     InstructionResult, InterpreterAction, InterpreterResult, as_u64_saturated, as_usize_saturated,
     interpreter_types::{InputsTr, MemoryTr},
 };
@@ -79,15 +79,6 @@ pub enum CreateKind {
 #[cold]
 fn fail(ecx: &mut EvmContext<'_>, e: BuiltinError) -> ! {
     ecx.exit_result = e.into();
-    // When local gas is active, ecx.gas points to a JIT stack alloca that will be
-    // invalidated by revmc_exit. Copy the local Gas back to the original and restore
-    // the pointer so the caller sees correct gas values.
-    if !ecx.gas_original.is_null() {
-        unsafe {
-            core::ptr::copy_nonoverlapping(ecx.gas as *const Gas, ecx.gas_original, 1);
-            ecx.gas = &mut *ecx.gas_original;
-        }
-    }
     unsafe { revmc_context::revmc_exit(ecx) }
 }
 
