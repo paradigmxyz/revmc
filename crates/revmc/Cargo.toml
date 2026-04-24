@@ -28,12 +28,15 @@ revmc-llvm = { workspace = true, optional = true }
 
 alloy-primitives = { workspace = true, features = ["std", "map-fxhash"] }
 revm-bytecode.workspace = true
+revm-context.workspace = true
 revm-context-interface.workspace = true
 revm-handler.workspace = true
+revm-inspector.workspace = true
 revm-interpreter.workspace = true
 revm-primitives.workspace = true
 revm-state.workspace = true
 
+derive_more = { version = "2", default-features = false, features = ["debug"] }
 bitflags = "2.5"
 bitvec = "1.0"
 either = "1.13"

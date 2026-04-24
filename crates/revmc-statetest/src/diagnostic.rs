@@ -111,31 +111,23 @@ pub fn run_jit(
     cache_state: &database::CacheState,
 ) -> ExecutionSnapshot {
     let prestate = cache_state.clone();
-    let mut state =
+    let state =
         database::State::builder().with_cached_prestate(prestate).with_bundle_update().build();
 
-    // SAFETY: The handler and evm do not outlive `state`. The `'static` in
-    // `StateTestEvm<'static>` is required by the `Handler` trait but we
-    // guarantee the borrow is valid for the duration of `handler.run`.
-    let exec_result = unsafe {
-        let db_ref = &mut *(&mut state as *mut database::State<EmptyDB>);
-        let evm_context = Context::mainnet()
-            .with_block(block.clone())
-            .with_tx(tx.clone())
-            .with_cfg(cfg.clone())
-            .with_db(db_ref);
-        let mut handler = crate::compiled::CompiledHandler { compiled, cache, spec_id };
-        let mut evm = evm_context.build_mainnet();
-        let result = handler.run(&mut evm);
-        if result.is_ok() {
-            let s = evm.ctx.journaled_state.finalize();
-            DatabaseCommit::commit(&mut evm.ctx.journaled_state.database, s);
-        }
-        result
-    };
-    let db = &state;
+    let evm_context = Context::mainnet()
+        .with_block(block.clone())
+        .with_tx(tx.clone())
+        .with_cfg(cfg.clone())
+        .with_db(state);
+    let mut handler = crate::compiled::CompiledHandler { compiled, cache, spec_id };
+    let mut evm = evm_context.build_mainnet();
+    let exec_result = handler.run(&mut evm);
+    if exec_result.is_ok() {
+        let s = evm.ctx.journaled_state.finalize();
+        DatabaseCommit::commit(&mut evm.ctx.journaled_state.database, s);
+    }
 
-    snapshot_from_result(&exec_result, db)
+    snapshot_from_result(&exec_result, &evm.ctx.journaled_state.database)
 }
 
 /// Re-run a test case with the interpreter and EIP-3155 tracing to stderr.

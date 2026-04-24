@@ -444,7 +444,7 @@ class CodegenLines(Analysis):
         print("</details>\n")
 
 
-PHASES = ["parse", "translate", "finalize"]
+PHASES = ["parse", "translate", "finalize", "codegen"]
 
 
 class CompileTime(Analysis):
@@ -482,8 +482,8 @@ class CompileTime(Analysis):
             ]
             for name, r in rows
         ]
-        table.append(["**TOTAL**", f"**{fmt_dur(totals['total'])}**", "", "", ""])
-        print_table(["benchmark", "total", "parse", "translate", "finalize"], table)
+        table.append(["**TOTAL**", f"**{fmt_dur(totals['total'])}**", "", "", "", ""])
+        print_table(["benchmark", "total", "parse", "translate", "finalize", "codegen"], table)
 
     def report_diff(
         self, benches, dump_dir, outputs, base_dump, base_outputs, base_label
@@ -508,7 +508,7 @@ class CompileTime(Analysis):
                 *[f"**{fmt_pct(base_totals[p], cur_totals[p])}**" for p in keys],
             ]
         )
-        print_table(["benchmark", "total", "parse", "translate", "finalize"], table)
+        print_table(["benchmark", "total", "parse", "translate", "finalize", "codegen"], table)
 
         # Detailed table.
         print("<details><summary>Full compile times</summary>\n")

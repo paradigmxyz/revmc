@@ -10,7 +10,7 @@ mod bytecode;
 pub use bytecode::*;
 
 mod compiler;
-pub use compiler::{EvmCompiler, EvmCompilerInput};
+pub use compiler::{CompileTimings, EvmCompiler, EvmCompilerInput};
 
 mod linker;
 pub use linker::{Linker, shared_library_path};
@@ -43,6 +43,8 @@ pub use revmc_builtins as builtins;
 pub use revm_bytecode;
 #[doc(no_inline)]
 pub use revm_context_interface as context_interface;
+#[doc(no_inline)]
+pub use revm_inspector as inspector;
 #[doc(no_inline)]
 pub use revm_interpreter::{self as interpreter};
 #[doc(no_inline)]
