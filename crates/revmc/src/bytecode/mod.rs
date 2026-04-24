@@ -12,7 +12,7 @@ use std::{borrow::Cow, cell::RefCell};
 pub(crate) use revm_context_interface::cfg::GasParams;
 
 mod passes;
-use passes::{Cfg, GasSection, SectionsAnalysis, Snapshots, StackSection};
+use passes::{Block, Cfg, GasSection, SectionsAnalysis, Snapshots, StackSection};
 
 mod asm;
 pub use asm::parse_asm;
@@ -349,6 +349,7 @@ impl<'a> Bytecode<'a> {
 
         if tracing::enabled!(tracing::Level::TRACE) {
             self.log_const_input_stats();
+            self.log_longest_blocks();
         }
 
         Ok(())
@@ -600,6 +601,33 @@ impl<'a> Bytecode<'a> {
                     );
                 }
             }
+        }
+        trace!("{buf}");
+    }
+
+    /// Logs the top 5 longest basic blocks (by live instruction count) at trace level.
+    #[inline(never)]
+    fn log_longest_blocks(&self) {
+        use std::fmt::Write;
+
+        // Collect (block, live_len).
+        let mut block_lens: Vec<(Block, usize)> = self
+            .cfg
+            .blocks
+            .iter_enumerated()
+            .map(|(block, data)| {
+                let live = data.insts().filter(|&i| !self.inst(i).is_dead_code()).count();
+                (block, live)
+            })
+            .collect();
+        block_lens.sort_unstable_by_key(|b| std::cmp::Reverse(b.1));
+        block_lens.truncate(5);
+
+        let mut buf = String::from("top 5 longest blocks:");
+        for (block, len) in &block_lens {
+            let data = &self.cfg.blocks[*block];
+            let first = self.inst(data.insts.start);
+            let _ = write!(buf, "\n  {block} (pc={}, len={len})", first.pc);
         }
         trace!("{buf}");
     }

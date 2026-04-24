@@ -314,7 +314,7 @@ class CodegenLines(Analysis):
         rows, totals, total_size, total_spills, total_reloads = self._collect(
             benches, dump_dir
         )
-        print("### Assembly line counts\n")
+        print("### Codegen statistics\n")
         table = [
             [name, *counts, fmt_size(jit_size), spills, reloads]
             for name, counts, jit_size, spills, reloads in rows
@@ -348,7 +348,7 @@ class CodegenLines(Analysis):
         }
 
         # Summary table.
-        print("### Assembly line counts\n")
+        print("### Codegen statistics\n")
         headers = ["benchmark", "unopt.ll", "opt.ll", "opt.s", "jit size", "spills", "reloads"]
         table = []
         for name, counts, jit_size, spills, reloads in cur_rows:
@@ -360,8 +360,8 @@ class CodegenLines(Analysis):
                     name,
                     *[fmt_pct(b, c) for b, c in zip(base_counts, counts)],
                     fmt_pct(base_jit, jit_size),
-                    fmt_diff(base_sp, spills),
-                    fmt_diff(base_rl, reloads),
+                    fmt_pct(base_sp, spills),
+                    fmt_pct(base_rl, reloads),
                 ]
             )
         table.append(
@@ -369,14 +369,14 @@ class CodegenLines(Analysis):
                 "**TOTAL**",
                 *[f"**{fmt_pct(b, c)}**" for b, c in zip(base_totals, cur_totals)],
                 f"**{fmt_pct(base_total_size, cur_total_size)}**",
-                f"**{fmt_diff(base_tsp, cur_tsp)}**",
-                f"**{fmt_diff(base_trl, cur_trl)}**",
+                f"**{fmt_pct(base_tsp, cur_tsp)}**",
+                f"**{fmt_pct(base_trl, cur_trl)}**",
             ]
         )
         print_table(headers, table)
 
         # Detailed table.
-        print("<details><summary>Full line counts</summary>\n")
+        print("<details><summary>Full details</summary>\n")
         detail_headers = ["benchmark"]
         for f in ["unopt.ll", "opt.ll", "opt.s"]:
             detail_headers += [f"{f} ({base_label})", "diff"]
