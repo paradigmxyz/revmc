@@ -1355,7 +1355,8 @@ impl Builder for EvmLlvmBuilder<'_> {
         ty.into_int_type().const_int(value, false).into()
     }
 
-    fn iconst_256(&mut self, value: U256) -> Self::Value {
+    fn iconst_256(&mut self, value: impl TryInto<U256>) -> Self::Value {
+        let value = value.try_into().ok().expect("invalid U256 value");
         if let Ok(low) = value.try_into() {
             return self.ty_i256.const_int(low, false).into();
         }
