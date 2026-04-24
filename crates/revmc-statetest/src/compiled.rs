@@ -406,7 +406,11 @@ impl CompileCache {
 }
 
 fn make_compiler(aot: bool) -> RefCell<EvmCompiler<EvmLlvmBackend>> {
-    RefCell::new(EvmCompiler::new_llvm(aot).unwrap())
+    let mut c = EvmCompiler::new_llvm(aot).unwrap();
+    // Always compile with debug_assertions disabled to exercise the production
+    // attribute path (noalias, nounwind, etc.) in tests.
+    c.debug_assertions(false);
+    RefCell::new(c)
 }
 
 // ── Compiled test execution ─────────────────────────────────────────────────
