@@ -110,12 +110,13 @@ impl GasSectionAnalysis {
         }
         let section = self.section();
         if !section.is_empty() {
-            trace!(
-                inst = %self.start_inst,
-                len = %(next_section_inst - self.start_inst).0,
-                ?section,
-                "saving gas"
-            );
+            let _ = next_section_inst;
+            // trace!(
+            //     inst = %self.start_inst,
+            //     len = %(next_section_inst - self.start_inst).0,
+            //     ?section,
+            //     "saving gas"
+            // );
             let mut insts = bytecode.insts[self.start_inst..].iter_mut();
             if let Some(inst) = insts.find(|inst| !inst.is_dead_code()) {
                 inst.gas_section = section;
@@ -174,12 +175,13 @@ impl StackSectionAnalysis {
             return;
         }
         let section = self.section();
-        trace!(
-            inst = %self.start_inst,
-            len = %(next_section_inst - self.start_inst).0,
-            ?section,
-            "saving stack"
-        );
+        let _ = next_section_inst;
+        // trace!(
+        //     inst = %self.start_inst,
+        //     len = %(next_section_inst - self.start_inst).0,
+        //     ?section,
+        //     "saving stack"
+        // );
         let mut insts = bytecode.insts[self.start_inst..].iter_mut();
         if let Some(inst) = insts.find(|inst| !inst.is_dead_code()) {
             inst.flags |= InstFlags::STACK_SECTION_HEAD;
