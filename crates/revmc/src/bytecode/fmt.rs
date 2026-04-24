@@ -565,7 +565,8 @@ mod tests {
         snapbox::assert_data_eq!(
             actual,
             snapbox::str![[r#"
-               ; spec_id=Osaka has_dynamic_jumps=false may_suspend=true
+; spec_id=Osaka has_dynamic_jumps=false may_suspend=true
+; insts=19 live=19 dead=0 noops=11 suspends=1 blocks=3 block_min=2 block_max=10 block_avg=6.3 block_median=7
 
 bb0:           ; stack_in=0 max_growth=1 predecessors=
   PUSH1 0x03   ; ic= 0 pc= 0 gas=11 noop
