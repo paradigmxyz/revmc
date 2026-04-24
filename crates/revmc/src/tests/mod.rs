@@ -1488,6 +1488,108 @@ tests! {
                 }
             }),
         }),
+
+        // Pre-Berlin specs: different static gas costs for CALL (700 vs 100).
+        call_value_petersburg(@raw {
+            bytecode: &[
+                op::PUSH1, 1,   // ret length
+                op::PUSH1, 2,   // ret offset
+                op::PUSH1, 3,   // args length
+                op::PUSH1, 4,   // args offset
+                op::PUSH1, 5,   // value (non-zero)
+                op::PUSH1, 6,   // address
+                op::PUSH1, 7,   // gas
+                op::CALL,
+            ],
+            spec_id: SpecId::PETERSBURG,
+            expected_return: RETURN_WHAT_INTERPRETER_SAYS,
+            expected_memory: MEMORY_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+            expected_next_action: ACTION_WHAT_INTERPRETER_SAYS,
+        }),
+        call_no_value_petersburg(@raw {
+            bytecode: &[
+                op::PUSH1, 1,   // ret length
+                op::PUSH1, 2,   // ret offset
+                op::PUSH1, 3,   // args length
+                op::PUSH1, 4,   // args offset
+                op::PUSH1, 0,   // value = 0
+                op::PUSH1, 6,   // address
+                op::PUSH1, 7,   // gas
+                op::CALL,
+            ],
+            spec_id: SpecId::PETERSBURG,
+            expected_return: RETURN_WHAT_INTERPRETER_SAYS,
+            expected_memory: MEMORY_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+            expected_next_action: ACTION_WHAT_INTERPRETER_SAYS,
+        }),
+        staticcall_petersburg(@raw {
+            bytecode: &[
+                op::PUSH1, 1,   // ret length
+                op::PUSH1, 2,   // ret offset
+                op::PUSH1, 3,   // args length
+                op::PUSH1, 4,   // args offset
+                op::PUSH1, 5,   // address
+                op::PUSH1, 6,   // gas
+                op::STATICCALL,
+            ],
+            spec_id: SpecId::PETERSBURG,
+            expected_return: RETURN_WHAT_INTERPRETER_SAYS,
+            expected_memory: MEMORY_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+            expected_next_action: ACTION_WHAT_INTERPRETER_SAYS,
+        }),
+        call_value_istanbul(@raw {
+            bytecode: &[
+                op::PUSH1, 1,   // ret length
+                op::PUSH1, 2,   // ret offset
+                op::PUSH1, 3,   // args length
+                op::PUSH1, 4,   // args offset
+                op::PUSH1, 5,   // value (non-zero)
+                op::PUSH1, 6,   // address
+                op::PUSH1, 7,   // gas
+                op::CALL,
+            ],
+            spec_id: SpecId::ISTANBUL,
+            expected_return: RETURN_WHAT_INTERPRETER_SAYS,
+            expected_memory: MEMORY_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+            expected_next_action: ACTION_WHAT_INTERPRETER_SAYS,
+        }),
+        call_no_value_istanbul(@raw {
+            bytecode: &[
+                op::PUSH1, 1,   // ret length
+                op::PUSH1, 2,   // ret offset
+                op::PUSH1, 3,   // args length
+                op::PUSH1, 4,   // args offset
+                op::PUSH1, 0,   // value = 0
+                op::PUSH1, 6,   // address
+                op::PUSH1, 7,   // gas
+                op::CALL,
+            ],
+            spec_id: SpecId::ISTANBUL,
+            expected_return: RETURN_WHAT_INTERPRETER_SAYS,
+            expected_memory: MEMORY_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+            expected_next_action: ACTION_WHAT_INTERPRETER_SAYS,
+        }),
+        staticcall_istanbul(@raw {
+            bytecode: &[
+                op::PUSH1, 1,   // ret length
+                op::PUSH1, 2,   // ret offset
+                op::PUSH1, 3,   // args length
+                op::PUSH1, 4,   // args offset
+                op::PUSH1, 5,   // address
+                op::PUSH1, 6,   // gas
+                op::STATICCALL,
+            ],
+            spec_id: SpecId::ISTANBUL,
+            expected_return: RETURN_WHAT_INTERPRETER_SAYS,
+            expected_memory: MEMORY_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+            expected_next_action: ACTION_WHAT_INTERPRETER_SAYS,
+        }),
     }
 
     // Tests for i256 correctness under LLVM optimization (a09436d1).

@@ -420,7 +420,7 @@ pub unsafe extern "C" fn __revmc_builtin_number(ecx: &EvmContext<'_>, slot: &mut
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __revmc_builtin_difficulty(ecx: &EvmContext<'_>, slot: &mut EvmWord) {
     *slot = if ecx.spec_id.is_enabled_in(SpecId::MERGE) {
-        ecx.host.prevrandao().unwrap_or_default().into()
+        ecx.host.prevrandao().unwrap().into()
     } else {
         ecx.host.difficulty().into()
     };
@@ -688,10 +688,14 @@ pub unsafe extern "C" fn __revmc_builtin_log(
         topics.push(sp.sub(i as usize).read().to_be_bytes());
     }
 
-    ecx.host.log(Log {
+    let log = Log {
         address: ecx.input.target_address,
         data: LogData::new(topics, data).expect("too many topics"),
-    });
+    };
+    if let Some(on_log) = &mut ecx.on_log {
+        on_log(&log);
+    }
+    ecx.host.log(log);
     Ok(())
 }
 
