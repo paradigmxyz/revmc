@@ -583,6 +583,75 @@ class JumpResolution(Analysis):
 
 
 # ---------------------------------------------------------------------------
+# Block stats analysis
+# ---------------------------------------------------------------------------
+
+BLOCK_STAT_KEYS = ["blocks", "min", "max", "avg", "median", "suspends"]
+
+
+class BlockStats(Analysis):
+    def needs_codegen(self) -> bool:
+        return False
+
+    def rust_log(self) -> str | None:
+        return "revmc::bytecode=debug"
+
+    @staticmethod
+    def _parse(output: str) -> dict[str, float] | None:
+        m = re.search(
+            r"block stats"
+            r" blocks=(\d+)"
+            r" min=(\d+)"
+            r" max=(\d+)"
+            r" avg=([\d.]+)"
+            r" median=(\d+)"
+            r" suspends=(\d+)",
+            output,
+        )
+        if not m:
+            return None
+        return {
+            "blocks": int(m.group(1)),
+            "min": int(m.group(2)),
+            "max": int(m.group(3)),
+            "avg": float(m.group(4)),
+            "median": int(m.group(5)),
+            "suspends": int(m.group(6)),
+        }
+
+    def report(self, benches, dump_dir, outputs):
+        print("### Block stats\n")
+        headers = ["benchmark"] + BLOCK_STAT_KEYS
+        table = []
+        for bench in benches:
+            s = self._parse(outputs.get(bench, ""))
+            if not s:
+                continue
+            table.append([bench_name(bench)] + [s[k] for k in BLOCK_STAT_KEYS])
+        print_table(headers, table)
+
+    def report_diff(
+        self, benches, dump_dir, outputs, base_dump, base_outputs, base_label
+    ):
+        print("### Block stats\n")
+        headers = ["benchmark"] + BLOCK_STAT_KEYS
+        table = []
+        for bench in benches:
+            cur = self._parse(outputs.get(bench, ""))
+            base = self._parse(base_outputs.get(bench, ""))
+            if not cur:
+                continue
+            if not base:
+                table.append([bench_name(bench)] + [cur[k] for k in BLOCK_STAT_KEYS])
+            else:
+                table.append(
+                    [bench_name(bench)]
+                    + [fmt_pct(base[k], cur[k]) for k in BLOCK_STAT_KEYS]
+                )
+        print_table(headers, table)
+
+
+# ---------------------------------------------------------------------------
 # Constant-input stats analysis
 # ---------------------------------------------------------------------------
 
@@ -791,6 +860,11 @@ def main():
         action="store_true",
         help="Report per-opcode constant-input statistics",
     )
+    parser.add_argument(
+        "--block-stats",
+        action="store_true",
+        help="Report basic block statistics (min/max/avg/median, suspends)",
+    )
     args = parser.parse_args()
 
     # Default to codegen-lines + compile-times if no analysis flags given.
@@ -799,6 +873,7 @@ def main():
         or args.compile_times
         or args.jump_resolution
         or args.input_stats
+        or args.block_stats
     ):
         args.codegen_lines = True
         args.compile_times = True
@@ -813,6 +888,8 @@ def main():
         analyses.append(JumpResolution())
     if args.input_stats:
         analyses.append(InputStats())
+    if args.block_stats:
+        analyses.append(BlockStats())
 
     if not analyses:
         eprint("No analyses selected.")

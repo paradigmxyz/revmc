@@ -96,6 +96,7 @@ counts, compile times, jump resolution stats, and constant-input statistics.
 ./scripts/bench.py /tmp/bench --diff main --codegen-lines          # codegen lines only
 ./scripts/bench.py /tmp/bench --jump-resolution                    # jump resolution stats
 ./scripts/bench.py /tmp/bench --input-stats                        # constant-input stats
+./scripts/bench.py /tmp/bench --block-stats                        # block stats (min/max/avg/median, suspends)
 ./scripts/bench.py /tmp/bench --codegen-lines --jump-resolution    # combine multiple analyses
 ```
 
