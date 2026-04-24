@@ -110,12 +110,13 @@ impl GasSectionAnalysis {
         }
         let section = self.section();
         if !section.is_empty() {
-            trace!(
-                inst = %self.start_inst,
-                len = %(next_section_inst - self.start_inst).0,
-                ?section,
-                "saving gas"
-            );
+            let _ = next_section_inst;
+            // trace!(
+            //     inst = %self.start_inst,
+            //     len = %(next_section_inst - self.start_inst).0,
+            //     ?section,
+            //     "saving gas"
+            // );
             let mut insts = bytecode.insts[self.start_inst..].iter_mut();
             if let Some(inst) = insts.find(|inst| !inst.is_dead_code()) {
                 inst.gas_section = section;
@@ -174,12 +175,13 @@ impl StackSectionAnalysis {
             return;
         }
         let section = self.section();
-        trace!(
-            inst = %self.start_inst,
-            len = %(next_section_inst - self.start_inst).0,
-            ?section,
-            "saving stack"
-        );
+        let _ = next_section_inst;
+        // trace!(
+        //     inst = %self.start_inst,
+        //     len = %(next_section_inst - self.start_inst).0,
+        //     ?section,
+        //     "saving stack"
+        // );
         let mut insts = bytecode.insts[self.start_inst..].iter_mut();
         if let Some(inst) = insts.find(|inst| !inst.is_dead_code()) {
             inst.flags |= InstFlags::STACK_SECTION_HEAD;
@@ -250,17 +252,22 @@ impl SectionsAnalysis {
         self.stack.save_to(bytecode, last);
         if enabled!(tracing::Level::DEBUG) {
             let mut max_len = 0usize;
-            let mut current = Inst::from_usize(0);
             let mut count = 0usize;
-            for (inst, data) in bytecode.iter_insts() {
+            let mut section_len = 0usize;
+            for (_inst, data) in bytecode.iter_insts() {
+                section_len += 1;
                 if !data.is_stack_section_head() {
                     continue;
                 }
-                let len = inst.index() - current.index();
-                max_len = max_len.max(len);
-                current = inst;
+                // `section_len` includes this head; the previous section had `section_len - 1`.
+                if count > 0 {
+                    max_len = max_len.max(section_len - 1);
+                }
+                section_len = 1;
                 count += 1;
             }
+            // Account for the last section.
+            max_len = max_len.max(section_len);
             debug!(count, max_len, "sections");
         }
     }

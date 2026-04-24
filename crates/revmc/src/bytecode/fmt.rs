@@ -32,11 +32,20 @@ impl Bytecode<'_> {
         let ic_width = decimal_width(max_ic);
         let pc_width = decimal_width(max_pc);
 
+        let s = self.ir_stats();
+
         lines.push((
             String::new(),
             format!(
                 "spec_id={} has_dynamic_jumps={} may_suspend={}",
                 self.spec_id, self.has_dynamic_jumps, self.may_suspend,
+            ),
+        ));
+        lines.push((
+            String::new(),
+            format!(
+                "insts={} live={} dead={} noops={} suspends={} blocks={} block_min={} block_max={} block_avg={:.1} block_median={}",
+                s.total, s.live, s.dead, s.noops, s.suspends, s.blocks, s.block_min, s.block_max, s.block_avg, s.block_median,
             ),
         ));
         lines.push((String::new(), String::new()));
@@ -174,6 +183,8 @@ impl Bytecode<'_> {
                 writeln!(f)?;
             } else if comment.is_empty() {
                 writeln!(f, "{text}")?;
+            } else if text.is_empty() {
+                writeln!(f, "; {comment}")?;
             } else {
                 writeln!(f, "{text:<comment_col$} ; {comment}")?;
             }
@@ -554,7 +565,8 @@ mod tests {
         snapbox::assert_data_eq!(
             actual,
             snapbox::str![[r#"
-               ; spec_id=Osaka has_dynamic_jumps=false may_suspend=true
+; spec_id=Osaka has_dynamic_jumps=false may_suspend=true
+; insts=19 live=19 dead=0 noops=11 suspends=1 blocks=3 block_min=2 block_max=10 block_avg=6.3 block_median=7
 
 bb0:           ; stack_in=0 max_growth=1 predecessors=
   PUSH1 0x03   ; ic= 0 pc= 0 gas=11 noop
