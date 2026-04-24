@@ -80,8 +80,6 @@ pub(super) struct FunctionCx<'a, B: Backend> {
     gas_remaining: Pointer<B::Builder<'a>>,
     /// The EVM context. Opaque pointer, only passed to builtins.
     ecx: B::Value,
-    /// The `ecx.input` pointer (`&InputsImpl`). Loaded once at entry.
-    input: B::Value,
     /// Stack length before the current instruction.
     len_before: B::Value,
     /// Stack length offset for the current instruction, used for push/pop.
@@ -248,13 +246,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             Pointer::new_address(i64_type, bcx.gep(i8_type, gas_ptr, &[offset], name))
         };
 
-        // Load input pointer from ecx.
-        let input = {
-            let input_field =
-                get_field(&mut bcx, ecx, mem::offset_of!(EvmContext<'_>, input), "ecx.input.addr");
-            bcx.load(ptr_type, input_field, "ecx.input")
-        };
-
         // Create all instruction entry blocks.
         // Dead-code instructions map to `unreachable_block`, except when block deduplication
         // has a redirect — those are resolved in a second pass once all blocks exist.
@@ -298,7 +289,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             sp_arg: local_stack.then_some(sp_arg),
             gas_remaining,
             ecx,
-            input,
             len_before: zero,
             len_offset: 0,
             section_start_len: zero,
@@ -889,7 +879,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             }
 
             op::ADDRESS => {
-                field!(@push @[endian = "big"] self.address_type, self.input, InputsImpl; target_address);
+                let input = self.load_input();
+                field!(@push @[endian = "big"] self.address_type, input, InputsImpl; target_address);
             }
             op::BALANCE => {
                 let sp = self.sp_after_inputs();
@@ -901,10 +892,12 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 self.narrow_to_address(slot);
             }
             op::CALLER => {
-                field!(@push @[endian = "big"] self.address_type, self.input, InputsImpl; caller_address);
+                let input = self.load_input();
+                field!(@push @[endian = "big"] self.address_type, input, InputsImpl; caller_address);
             }
             op::CALLVALUE => {
-                field!(@push self.word_type, self.input, InputsImpl; call_value);
+                let input = self.load_input();
+                field!(@push self.word_type, input, InputsImpl; call_value);
             }
             op::CALLDATALOAD => {
                 let sp = self.sp_after_inputs();
@@ -1427,6 +1420,18 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     /// Gets a field at the given offset.
     fn get_field(&mut self, ptr: B::Value, offset: usize, name: &str) -> B::Value {
         get_field(&mut self.bcx, ptr, offset, name)
+    }
+
+    /// Loads the `ecx.input` pointer on demand.
+    fn load_input(&mut self) -> B::Value {
+        let ptr_type = self.bcx.type_ptr();
+        let input_field = get_field(
+            &mut self.bcx,
+            self.ecx,
+            mem::offset_of!(EvmContext<'_>, input),
+            "ecx.input.addr",
+        );
+        self.bcx.load(ptr_type, input_field, "ecx.input")
     }
 
     /// Re-loads the address at `slot` as i160, zero-extends to i256, and stores it back.
