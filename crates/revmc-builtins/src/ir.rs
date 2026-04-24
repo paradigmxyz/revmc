@@ -55,7 +55,9 @@ impl<B: Backend> Builtins<B> {
             Attribute::NoRecurse,
             Attribute::NoSync,
             Attribute::NoUnwind,
-            Attribute::ArgMemOnly,
+            // Don't use ArgMemOnly: builtins access gas through ecx.gas which
+            // may point to a local stack alloca (local gas optimization).
+            // Attribute::ArgMemOnly,
         ]);
         for attr in attrs {
             bcx.add_function_attribute(Some(f), attr, FunctionAttributeLocation::Function);
@@ -207,8 +209,12 @@ builtins! {
 
         let ecx_base = size_and_align::<revmc_context::EvmContext<'static>>();
         let mut ecx = ecx_base.clone();
+        // ecx.gas may point to a local stack alloca (local gas optimization),
+        // so ecx can alias the caller's stack. Remove NoAlias.
+        ecx.retain(|a| !matches!(a, Attribute::NoAlias));
         ecx.push(Attribute::Writable);
-        let mut ecx_ro = ecx_base;
+        let mut ecx_ro = ecx_base.clone();
+        ecx_ro.retain(|a| !matches!(a, Attribute::NoAlias));
         ecx_ro.push(Attribute::ReadOnly);
 
         let sp_base = size_and_align_with(None, core::mem::align_of::<revmc_context::EvmWord>());

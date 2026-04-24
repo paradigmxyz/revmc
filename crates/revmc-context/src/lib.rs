@@ -102,6 +102,10 @@ pub struct EvmContext<'a> {
     pub exit_result: InstructionResult,
     /// Saved RSP from the entry trampoline, used by [`revmc_exit`] to unwind.
     pub exit_sp: *mut u8,
+    /// Original gas pointer, set by the JIT when it redirects `gas` to a local stack alloca.
+    /// The `fail` path copies the local Gas back here before calling `revmc_exit`.
+    /// `null` when local gas is not active.
+    pub gas_original: *mut Gas,
     /// Cached gas parameters from the host.
     pub gas_params: GasParams,
 }
@@ -157,6 +161,7 @@ impl<'a> EvmContext<'a> {
             calldatasize,
             exit_result: InstructionResult::Stop,
             exit_sp: ptr::null_mut(),
+            gas_original: ptr::null_mut(),
             gas_params,
         };
         (this, stack, stack_len)
