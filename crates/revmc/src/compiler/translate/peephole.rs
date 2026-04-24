@@ -296,6 +296,10 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             } else {
                 self.call_fallible_builtin(builtin, args);
             }
+            // Builtin wrote output to sp; reload into virtual stack.
+            let off = self.section_len_offset - 1;
+            let value = self.load_word(sp, "builtin.out");
+            self.virtual_stack.set_virtual_at_offset(off, value);
             true
         } else {
             false
@@ -321,6 +325,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 true
             }
             (Some(offset), Some(value)) => {
+                // Both operands constant; consume from virtual stack.
+                self.pop_ignore(2);
                 let offset = self.bcx.iconst(self.isize_type, offset as i64);
                 let value = self.bcx.iconst(self.isize_type, value as i64);
                 self.call_fallible_builtin(Builtin::MstoreCC, &[self.ecx, offset, value]);
@@ -344,6 +350,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
     fn peephole_return(&mut self, op: u8) -> bool {
         if let Some((offset, len)) = self.const_memory_operands(self.const_operands()) {
+            // Both operands constant; consume from virtual stack.
+            self.pop_ignore(2);
             let ir = match op {
                 op::RETURN => InstructionResult::Return,
                 op::REVERT => InstructionResult::Revert,
