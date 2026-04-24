@@ -583,10 +583,13 @@ class JumpResolution(Analysis):
 
 
 # ---------------------------------------------------------------------------
-# Block stats analysis
+# IR stats analysis
 # ---------------------------------------------------------------------------
 
-BLOCK_STAT_KEYS = ["blocks", "min", "max", "avg", "median", "suspends"]
+IR_STAT_KEYS = [
+    "total_insts", "live", "dead", "noops", "suspends",
+    "blocks", "block_min", "block_max", "block_avg", "block_median",
+]
 
 
 class BlockStats(Analysis):
@@ -594,47 +597,55 @@ class BlockStats(Analysis):
         return False
 
     def rust_log(self) -> str | None:
-        return "revmc::bytecode=debug"
+        return "revmc::bytecode=trace"
 
     @staticmethod
     def _parse(output: str) -> dict[str, float] | None:
         m = re.search(
-            r"block stats"
+            r"ir stats"
+            r" total_insts=(\d+)"
+            r" live=(\d+)"
+            r" dead=(\d+)"
+            r" noops=(\d+)"
+            r" suspends=(\d+)"
             r" blocks=(\d+)"
-            r" min=(\d+)"
-            r" max=(\d+)"
-            r" avg=([\d.]+)"
-            r" median=(\d+)"
-            r" suspends=(\d+)",
+            r" block_min=(\d+)"
+            r" block_max=(\d+)"
+            r" block_avg=([\d.]+)"
+            r" block_median=(\d+)",
             output,
         )
         if not m:
             return None
         return {
-            "blocks": int(m.group(1)),
-            "min": int(m.group(2)),
-            "max": int(m.group(3)),
-            "avg": float(m.group(4)),
-            "median": int(m.group(5)),
-            "suspends": int(m.group(6)),
+            "total_insts": int(m.group(1)),
+            "live": int(m.group(2)),
+            "dead": int(m.group(3)),
+            "noops": int(m.group(4)),
+            "suspends": int(m.group(5)),
+            "blocks": int(m.group(6)),
+            "block_min": int(m.group(7)),
+            "block_max": int(m.group(8)),
+            "block_avg": float(m.group(9)),
+            "block_median": int(m.group(10)),
         }
 
     def report(self, benches, dump_dir, outputs):
-        print("### Block stats\n")
-        headers = ["benchmark"] + BLOCK_STAT_KEYS
+        print("### IR stats\n")
+        headers = ["benchmark"] + IR_STAT_KEYS
         table = []
         for bench in benches:
             s = self._parse(outputs.get(bench, ""))
             if not s:
                 continue
-            table.append([bench_name(bench)] + [s[k] for k in BLOCK_STAT_KEYS])
+            table.append([bench_name(bench)] + [s[k] for k in IR_STAT_KEYS])
         print_table(headers, table)
 
     def report_diff(
         self, benches, dump_dir, outputs, base_dump, base_outputs, base_label
     ):
-        print("### Block stats\n")
-        headers = ["benchmark"] + BLOCK_STAT_KEYS
+        print("### IR stats\n")
+        headers = ["benchmark"] + IR_STAT_KEYS
         table = []
         for bench in benches:
             cur = self._parse(outputs.get(bench, ""))
@@ -642,11 +653,11 @@ class BlockStats(Analysis):
             if not cur:
                 continue
             if not base:
-                table.append([bench_name(bench)] + [cur[k] for k in BLOCK_STAT_KEYS])
+                table.append([bench_name(bench)] + [cur[k] for k in IR_STAT_KEYS])
             else:
                 table.append(
                     [bench_name(bench)]
-                    + [fmt_pct(base[k], cur[k]) for k in BLOCK_STAT_KEYS]
+                    + [fmt_pct(base[k], cur[k]) for k in IR_STAT_KEYS]
                 )
         print_table(headers, table)
 
@@ -863,7 +874,7 @@ def main():
     parser.add_argument(
         "--block-stats",
         action="store_true",
-        help="Report basic block statistics (min/max/avg/median, suspends)",
+        help="Report IR stats (inst counts, block size distribution, suspends)",
     )
     args = parser.parse_args()
 
