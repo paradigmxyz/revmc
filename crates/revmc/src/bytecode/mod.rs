@@ -605,7 +605,7 @@ impl<'a> Bytecode<'a> {
         trace!("{buf}");
     }
 
-    /// Collects IR statistics: instruction counts and block count.
+    /// Collects IR statistics: instruction counts and block size distribution.
     fn ir_stats(&self) -> IrStats {
         let total = self.insts.len();
         let mut live = 0usize;
@@ -625,7 +625,28 @@ impl<'a> Bytecode<'a> {
                 }
             }
         }
-        IrStats { total, live, dead, noops, suspends, blocks: self.cfg.blocks.len() }
+
+        let mut lens: Vec<usize> = self.cfg.blocks.iter().map(|data| data.insts().len()).collect();
+        let n = lens.len();
+        lens.sort_unstable();
+        let block_min = lens.first().copied().unwrap_or(0);
+        let block_max = lens.last().copied().unwrap_or(0);
+        let sum: usize = lens.iter().sum();
+        let block_avg = if n > 0 { sum as f64 / n as f64 } else { 0.0 };
+        let block_median = if n > 0 { lens[n / 2] } else { 0 };
+
+        IrStats {
+            total,
+            live,
+            dead,
+            noops,
+            suspends,
+            blocks: n,
+            block_min,
+            block_max,
+            block_avg,
+            block_median,
+        }
     }
 
     /// Logs IR statistics and top 5 longest blocks at trace level.
@@ -634,26 +655,6 @@ impl<'a> Bytecode<'a> {
         use std::fmt::Write;
 
         let s = self.ir_stats();
-
-        let mut lens: Vec<(Block, usize)> = self
-            .cfg
-            .blocks
-            .iter_enumerated()
-            .map(|(block, data)| {
-                let n = data.insts().len();
-                debug_assert_eq!(n, data.insts().filter(|&i| !self.inst(i).is_dead_code()).count());
-                (block, n)
-            })
-            .collect();
-        let n_blocks = lens.len();
-
-        lens.sort_unstable_by_key(|b| b.1);
-        let min = lens.first().map_or(0, |b| b.1);
-        let max = lens.last().map_or(0, |b| b.1);
-        let sum: usize = lens.iter().map(|b| b.1).sum();
-        let avg = if n_blocks > 0 { sum as f64 / n_blocks as f64 } else { 0.0 };
-        let median = if n_blocks > 0 { lens[n_blocks / 2].1 } else { 0 };
-
         trace!(
             total_insts = s.total,
             live = s.live,
@@ -661,14 +662,20 @@ impl<'a> Bytecode<'a> {
             noops = s.noops,
             suspends = s.suspends,
             blocks = s.blocks,
-            block_min = min,
-            block_max = max,
-            block_avg = format_args!("{avg:.1}"),
-            block_median = median,
+            block_min = s.block_min,
+            block_max = s.block_max,
+            block_avg = format_args!("{:.1}", s.block_avg),
+            block_median = s.block_median,
             "ir stats",
         );
 
-        lens.reverse();
+        let mut lens: Vec<(Block, usize)> = self
+            .cfg
+            .blocks
+            .iter_enumerated()
+            .map(|(block, data)| (block, data.insts().len()))
+            .collect();
+        lens.sort_unstable_by_key(|b| std::cmp::Reverse(b.1));
         lens.truncate(5);
         let mut buf = String::from("top 5 longest blocks:");
         for (block, len) in &lens {
@@ -708,6 +715,10 @@ pub(crate) struct IrStats {
     pub(crate) noops: usize,
     pub(crate) suspends: usize,
     pub(crate) blocks: usize,
+    pub(crate) block_min: usize,
+    pub(crate) block_max: usize,
+    pub(crate) block_avg: f64,
+    pub(crate) block_median: usize,
 }
 
 /// A single instruction in the bytecode.

@@ -44,8 +44,8 @@ impl Bytecode<'_> {
         lines.push((
             String::new(),
             format!(
-                "insts={} live={} dead={} noops={} suspends={} blocks={}",
-                s.total, s.live, s.dead, s.noops, s.suspends, s.blocks,
+                "insts={} live={} dead={} noops={} suspends={} blocks={} block_min={} block_max={} block_avg={:.1} block_median={}",
+                s.total, s.live, s.dead, s.noops, s.suspends, s.blocks, s.block_min, s.block_max, s.block_avg, s.block_median,
             ),
         ));
         lines.push((String::new(), String::new()));
