@@ -131,6 +131,12 @@ impl<T: Copy> VStack<T> {
     /// Drops `n` elements from the top of the stack.
     pub(super) fn drop_top(&mut self, n: usize) {
         self.top_offset -= n as i32;
+        debug_assert!(
+            self.top_offset >= self.base_offset,
+            "VStack::drop_top({n}): top={} dropped below base={}",
+            self.top_offset,
+            self.base_offset,
+        );
     }
 
     /// Returns the live range of offsets (base_offset..top_offset).

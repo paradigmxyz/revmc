@@ -1269,6 +1269,13 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             return;
         }
         let delta = expected_top - current_top;
+        debug_assert!(
+            expected_top >= self.vstack.live_range().start,
+            "sync: expected_top={expected_top} < base={}, section_len_offset={}, diff={diff}, current_top={current_top}, inst={:?}",
+            self.vstack.live_range().start,
+            self.section_len_offset,
+            self.current_inst().to_op(),
+        );
         if delta < 0 {
             self.vstack.drop_top((-delta) as usize);
         } else {
