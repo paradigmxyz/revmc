@@ -1422,8 +1422,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         get_field(&mut self.bcx, ptr, offset, name)
     }
 
-    /// Re-loads the address at `slot` as i160, zero-extends to i256, and keeps it as a
-    /// virtual SSA value (avoids a store-load roundtrip).
+    /// Re-loads the address at `slot` as i160, zero-extends to i256, and stores it back.
     ///
     /// On little-endian the low 160 bits sit at byte offset 0, so a direct
     /// `load i160` + `zext i256` gives LLVM a typed narrow load — no AND needed
@@ -1433,9 +1432,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         debug_assert!(cfg!(target_endian = "little"), "big-endian not yet supported");
         let value = self.bcx.load(self.address_type, slot, "address");
         let value = self.bcx.zext(self.word_type, value);
-        // Keep as virtual SSA value — the next sync will see the vstack already at
-        // the expected height so it won't push a redundant Materialized entry.
-        self.push(value);
+        self.bcx.store(value, slot);
     }
 
     /// Loads the gas used.
