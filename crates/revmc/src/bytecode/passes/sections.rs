@@ -112,7 +112,7 @@ impl GasSectionAnalysis {
         if !section.is_empty() {
             trace!(
                 inst = %self.start_inst,
-                len = %(next_section_inst - self.start_inst),
+                len = %(next_section_inst - self.start_inst).0,
                 ?section,
                 "saving gas"
             );
@@ -176,7 +176,7 @@ impl StackSectionAnalysis {
         let section = self.section();
         trace!(
             inst = %self.start_inst,
-            len = %(next_section_inst - self.start_inst),
+            len = %(next_section_inst - self.start_inst).0,
             ?section,
             "saving stack"
         );
