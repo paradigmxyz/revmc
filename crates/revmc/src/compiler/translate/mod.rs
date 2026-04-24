@@ -87,6 +87,11 @@ pub(super) struct FunctionCx<'a, B: Backend> {
     /// Stack length offset for the current instruction, used for push/pop.
     len_offset: i8,
 
+    /// Deferred virtual value to set in the vstack after `sync_virtual_stack_diff`.
+    /// Used by sp_at_top builtins that reload the result and want to keep it as an
+    /// SSA value. The value is `(section_relative_offset, ssa_value)`.
+    deferred_virtual: Option<(i32, B::Value)>,
+
     /// Section-local virtual stack that caches values as SSA instead of
     /// immediately storing/loading from the stack alloca.
     vstack: VStack<B::Value>,
@@ -301,6 +306,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             input,
             len_before: zero,
             len_offset: 0,
+            deferred_virtual: None,
             section_start_len: zero,
             section_start_sp,
             section_len_offset: 0,
@@ -899,7 +905,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 let slot = self.sp_at_top();
                 let _ = self.call_builtin(Builtin::Origin, &[self.ecx, slot]);
                 let value = self.narrow_to_address(slot);
-                self.push(value);
+                self.deferred_virtual = Some((self.section_len_offset, value));
             }
             op::CALLER => {
                 field!(@push @[endian = "big"] self.address_type, self.input, InputsImpl; caller_address);
@@ -958,49 +964,49 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 let slot = self.sp_at_top();
                 let _ = self.call_builtin(Builtin::Coinbase, &[self.ecx, slot]);
                 let value = self.narrow_to_address(slot);
-                self.push(value);
+                self.deferred_virtual = Some((self.section_len_offset, value));
             }
             op::TIMESTAMP => {
                 let slot = self.sp_at_top();
                 let _ = self.call_builtin(Builtin::Timestamp, &[self.ecx, slot]);
                 let value = self.load_word(slot, "timestamp");
-                self.push(value);
+                self.deferred_virtual = Some((self.section_len_offset, value));
             }
             op::NUMBER => {
                 let slot = self.sp_at_top();
                 let _ = self.call_builtin(Builtin::Number, &[self.ecx, slot]);
                 let value = self.load_word(slot, "number");
-                self.push(value);
+                self.deferred_virtual = Some((self.section_len_offset, value));
             }
             op::DIFFICULTY => {
                 let slot = self.sp_at_top();
                 let _ = self.call_builtin(Builtin::Difficulty, &[self.ecx, slot]);
                 let value = self.load_word(slot, "difficulty");
-                self.push(value);
+                self.deferred_virtual = Some((self.section_len_offset, value));
             }
             op::GASLIMIT => {
                 let slot = self.sp_at_top();
                 let _ = self.call_builtin(Builtin::GasLimit, &[self.ecx, slot]);
                 let value = self.load_word(slot, "gaslimit");
-                self.push(value);
+                self.deferred_virtual = Some((self.section_len_offset, value));
             }
             op::CHAINID => {
                 let slot = self.sp_at_top();
                 let _ = self.call_builtin(Builtin::ChainId, &[self.ecx, slot]);
                 let value = self.load_word(slot, "chainid");
-                self.push(value);
+                self.deferred_virtual = Some((self.section_len_offset, value));
             }
             op::SELFBALANCE => {
                 let slot = self.sp_at_top();
                 self.call_fallible_builtin(Builtin::SelfBalance, &[self.ecx, slot]);
                 let value = self.load_word(slot, "selfbalance");
-                self.push(value);
+                self.deferred_virtual = Some((self.section_len_offset, value));
             }
             op::BASEFEE => {
                 let slot = self.sp_at_top();
                 let _ = self.call_builtin(Builtin::Basefee, &[self.ecx, slot]);
                 let value = self.load_word(slot, "basefee");
-                self.push(value);
+                self.deferred_virtual = Some((self.section_len_offset, value));
             }
             op::BLOBHASH => {
                 let sp = self.sp_after_inputs();
@@ -1010,13 +1016,13 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 let slot = self.sp_at_top();
                 let _ = self.call_builtin(Builtin::BlobBaseFee, &[self.ecx, slot]);
                 let value = self.load_word(slot, "blobbasefee");
-                self.push(value);
+                self.deferred_virtual = Some((self.section_len_offset, value));
             }
             op::SLOTNUM => {
                 let slot = self.sp_at_top();
                 let _ = self.call_builtin(Builtin::SlotNum, &[self.ecx, slot]);
                 let value = self.load_word(slot, "slotnum");
-                self.push(value);
+                self.deferred_virtual = Some((self.section_len_offset, value));
             }
 
             op::POP => {
@@ -1240,6 +1246,9 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         }
 
         self.sync_virtual_stack_diff(diff);
+        if let Some((off, value)) = self.deferred_virtual.take() {
+            self.vstack.set_at_offset(off, value);
+        }
         self.section_len_offset += diff;
         goto_return!("normal exit");
     }
