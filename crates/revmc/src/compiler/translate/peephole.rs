@@ -52,7 +52,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             // x / 0 => 0.
             Some(U256::ZERO) => {
                 self.pop_ignore(2);
-                let zero = self.bcx.iconst_256(U256::ZERO);
+                let zero = self.bcx.iconst_256(0);
                 self.push(zero);
             }
             // x / 1 => x.
@@ -70,7 +70,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             // 0 / x => 0 (EVM: 0 / 0 = 0).
             _ if dividend == Some(U256::ZERO) => {
                 self.pop_ignore(2);
-                let zero = self.bcx.iconst_256(U256::ZERO);
+                let zero = self.bcx.iconst_256(0);
                 self.push(zero);
             }
             _ => return false,
@@ -88,7 +88,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             // x / 0 => 0.
             Some(U256::ZERO) => {
                 self.pop_ignore(2);
-                let zero = self.bcx.iconst_256(U256::ZERO);
+                let zero = self.bcx.iconst_256(0);
                 self.push(zero);
             }
             // x / 1 => x.
@@ -99,7 +99,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             // x / -1 => -x.
             Some(U256::MAX) => {
                 let [a, _] = self.popn();
-                let zero = self.bcx.iconst_256(U256::ZERO);
+                let zero = self.bcx.iconst_256(0);
                 let r = self.bcx.isub(zero, a);
                 self.push(r);
             }
@@ -114,7 +114,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             // 0 / x => 0 (EVM: 0 / 0 = 0).
             _ if dividend == Some(U256::ZERO) => {
                 self.pop_ignore(2);
-                let zero = self.bcx.iconst_256(U256::ZERO);
+                let zero = self.bcx.iconst_256(0);
                 self.push(zero);
             }
             _ => return false,
@@ -131,7 +131,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             // x % 0 => 0, x % 1 => 0.
             Some(U256::ZERO) | Some(U256::ONE) => {
                 self.pop_ignore(2);
-                let zero = self.bcx.iconst_256(U256::ZERO);
+                let zero = self.bcx.iconst_256(0);
                 self.push(zero);
             }
             // x % C (pow2) => native urem, LLVM lowers to and.
@@ -144,7 +144,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             // 0 % x => 0 (EVM: 0 % 0 = 0).
             _ if dividend == Some(U256::ZERO) => {
                 self.pop_ignore(2);
-                let zero = self.bcx.iconst_256(U256::ZERO);
+                let zero = self.bcx.iconst_256(0);
                 self.push(zero);
             }
             _ => return false,
@@ -159,13 +159,13 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             // x % 0 => 0, x % 1 => 0, x % -1 => 0.
             Some(U256::ZERO) | Some(U256::ONE) | Some(U256::MAX) => {
                 self.pop_ignore(2);
-                let zero = self.bcx.iconst_256(U256::ZERO);
+                let zero = self.bcx.iconst_256(0);
                 self.push(zero);
             }
             // 0 % x => 0 (EVM: 0 % 0 = 0).
             _ if dividend == Some(U256::ZERO) => {
                 self.pop_ignore(2);
-                let zero = self.bcx.iconst_256(U256::ZERO);
+                let zero = self.bcx.iconst_256(0);
                 self.push(zero);
             }
             _ => return false,
@@ -180,14 +180,14 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             // (a + b) % 0 => 0, (a + b) % 1 => 0.
             Some(U256::ZERO) | Some(U256::ONE) => {
                 self.pop_ignore(3);
-                let zero = self.bcx.iconst_256(U256::ZERO);
+                let zero = self.bcx.iconst_256(0);
                 self.push(zero);
             }
             _ => match (a, b) {
                 // (0 + 0) % N => 0.
                 (Some(U256::ZERO), Some(U256::ZERO)) => {
                     self.pop_ignore(3);
-                    let zero = self.bcx.iconst_256(U256::ZERO);
+                    let zero = self.bcx.iconst_256(0);
                     self.push(zero);
                 }
                 _ => return false,
@@ -203,14 +203,14 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             // (a * b) % 0 => 0, (a * b) % 1 => 0.
             Some(U256::ZERO) | Some(U256::ONE) => {
                 self.pop_ignore(3);
-                let zero = self.bcx.iconst_256(U256::ZERO);
+                let zero = self.bcx.iconst_256(0);
                 self.push(zero);
             }
             _ => {
                 // a * 0 => 0, 0 * b => 0.
                 if a == Some(U256::ZERO) || b == Some(U256::ZERO) {
                     self.pop_ignore(3);
-                    let zero = self.bcx.iconst_256(U256::ZERO);
+                    let zero = self.bcx.iconst_256(0);
                     self.push(zero);
                 } else {
                     return false;
@@ -230,7 +230,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             // x ** 0 => 1.
             Some(U256::ZERO) => {
                 self.pop_ignore(2);
-                let one = self.bcx.iconst_256(U256::from(1));
+                let one = self.bcx.iconst_256(1);
                 self.push(one);
             }
             // x ** 1 => x.
@@ -270,7 +270,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             // BYTE(i, x) with i >= 32 => 0.
             Some(i) if i >= U256::from(32) => {
                 self.pop_ignore(2);
-                let zero = self.bcx.iconst_256(U256::ZERO);
+                let zero = self.bcx.iconst_256(0);
                 self.push(zero);
             }
             _ => return false,
