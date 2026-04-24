@@ -30,7 +30,7 @@ use thread_local::ThreadLocal;
 // ── Compile mode ────────────────────────────────────────────────────────────
 
 /// How to compile and execute bytecodes in the test suite.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CompileMode {
     /// Standard interpreter execution (no compilation).
     #[default]
@@ -65,7 +65,7 @@ impl CompiledContracts {
 
 // ── Handler ─────────────────────────────────────────────────────────────────
 
-type StateTestEvm<'a> = MainnetEvm<revm_handler::MainnetContext<&'a mut database::State<EmptyDB>>>;
+type StateTestEvm = MainnetEvm<revm_handler::MainnetContext<database::State<EmptyDB>>>;
 type StateTestError = EVMError<EvmDatabaseError<std::convert::Infallible>, InvalidTransaction>;
 
 /// Custom handler that dispatches to compiled functions. All bytecodes —
@@ -78,7 +78,7 @@ pub struct CompiledHandler<'a> {
 }
 
 impl Handler for CompiledHandler<'_> {
-    type Evm = StateTestEvm<'static>;
+    type Evm = StateTestEvm;
     type Error = StateTestError;
     type HaltReason = HaltReason;
 
@@ -428,31 +428,23 @@ pub struct CompiledTestContext<'a> {
 /// Execute a single test using compiled functions via the custom handler.
 pub fn execute_single_test_compiled(ctx: CompiledTestContext<'_>) -> Result<(), TestErrorKind> {
     let prestate = ctx.cache_state.clone();
-    let mut state =
+    let state =
         database::State::builder().with_cached_prestate(prestate).with_bundle_update().build();
 
     let timer = Instant::now();
-    // SAFETY: The handler and evm do not outlive `state`. The `'static` in
-    // `StateTestEvm<'static>` is required by the `Handler` trait but we
-    // guarantee the borrow is valid for the duration of `handler.run`.
-    let exec_result = unsafe {
-        let db_ref = &mut *(&mut state as *mut database::State<EmptyDB>);
-        let evm_context = Context::mainnet()
-            .with_block(ctx.block.clone())
-            .with_tx(ctx.tx.clone())
-            .with_cfg(ctx.cfg.clone())
-            .with_db(db_ref);
-        let mut handler =
-            CompiledHandler { compiled: ctx.compiled, cache: ctx.cache, spec_id: ctx.spec_id };
-        let mut evm = evm_context.build_mainnet();
-        let result = handler.run(&mut evm);
-        if result.is_ok() {
-            let s = evm.ctx.journaled_state.finalize();
-            DatabaseCommit::commit(&mut evm.ctx.journaled_state.database, s);
-        }
-        result
-    };
-    let db = &mut state;
+    let evm_context = Context::mainnet()
+        .with_block(ctx.block.clone())
+        .with_tx(ctx.tx.clone())
+        .with_cfg(ctx.cfg.clone())
+        .with_db(state);
+    let mut handler =
+        CompiledHandler { compiled: ctx.compiled, cache: ctx.cache, spec_id: ctx.spec_id };
+    let mut evm = evm_context.build_mainnet();
+    let exec_result = handler.run(&mut evm);
+    if exec_result.is_ok() {
+        let s = evm.ctx.journaled_state.finalize();
+        DatabaseCommit::commit(&mut evm.ctx.journaled_state.database, s);
+    }
     *ctx.elapsed.lock().unwrap() += timer.elapsed();
 
     check_evm_execution(
@@ -460,7 +452,7 @@ pub fn execute_single_test_compiled(ctx: CompiledTestContext<'_>) -> Result<(), 
         ctx.unit.out.as_ref(),
         ctx.name,
         &exec_result,
-        db,
+        &mut evm.ctx.journaled_state.database,
         *ctx.cfg.spec(),
         false,
     )
