@@ -13,7 +13,7 @@
 //! - POP kills its input (makes the position dead) rather than reading it.
 
 use super::{StackSectionAnalysis, block_analysis::AbsValue};
-use crate::bytecode::{AnalysisConfig, Bytecode, InstFlags};
+use crate::bytecode::{AnalysisConfig, Bytecode, Inst, InstFlags};
 use bitvec::vec::BitVec;
 use revm_bytecode::opcode as op;
 
@@ -164,19 +164,71 @@ impl Bytecode<'_> {
                 // All positions in that prefix must be physically materialized — we
                 // cannot rely on later rematerialization since the suspend path runs
                 // before any consumer.
-                //
-                // Branching instructions with a fallthrough edge (JUMPI) have a
-                // taken path that may read arbitrary stack values. Conservatively
-                // mark the stack passed to the taken edge as live.
-                if data.may_suspend() || (data.is_branching() && data.can_fall_through()) {
+                if data.may_suspend() {
                     let h_after = heights[idx + 1] as usize;
                     live[..h_after].fill(true);
+                }
+
+                // Branching instructions with a fallthrough edge (JUMPI) have a
+                // taken path that may read stack values. Compute what the taken
+                // successor actually needs from the stack and mark only those
+                // positions live instead of conservatively filling everything.
+                if data.is_branching() && data.can_fall_through() {
+                    let h_after = heights[idx + 1] as usize;
+                    let taken_inputs = self.taken_succ_inputs(inst);
+                    let needed = (taken_inputs as usize).min(h_after);
+                    live[h_after - needed..h_after].fill(true);
                 }
             }
         }
 
         if eliminated > 0 {
             debug!(eliminated, "dead stores eliminated");
+        }
+    }
+
+    /// Returns the number of stack items the taken JUMPI successor needs from entry.
+    ///
+    /// For a JUMPI instruction, finds the non-fallthrough (taken) successor and computes
+    /// a `StackSection` over its entire instruction range to determine how many items
+    /// it reads from its entry stack. If the taken block does not diverge (its items flow
+    /// to further successors), falls back to `u16::MAX` (conservative).
+    fn taken_succ_inputs(&self, jumpi_inst: Inst) -> u16 {
+        let Some(jumpi_block) = self.cfg.inst_to_block[jumpi_inst]
+            .filter(|&b| self.cfg.blocks[b].terminator() == jumpi_inst)
+        else {
+            return u16::MAX;
+        };
+        let block = &self.cfg.blocks[jumpi_block];
+        // succs[0] is fallthrough, succs[1..] are taken edges.
+        let Some(&taken) = block.succs.get(1) else {
+            return u16::MAX;
+        };
+        // Walk the taken block and any fallthrough extensions to cover the full
+        // reachable region before it branches/diverges.
+        let mut bid = taken;
+        let mut analysis = StackSectionAnalysis::default();
+        loop {
+            let b = &self.cfg.blocks[bid];
+            for i in b.insts() {
+                let (inp, out) = self.insts[i].stack_io();
+                analysis.process(inp, out);
+            }
+            let term = &self.insts[b.terminator()];
+            // If the block diverges, the section inputs are exact.
+            if term.is_diverging() {
+                return analysis.section().inputs;
+            }
+            // Follow fallthrough extensions to accumulate their stack I/O.
+            if term.can_fall_through()
+                && let Some(&succ) = b.succs.first()
+                && self.cfg.blocks[succ].is_fallthrough(&self.insts, self.has_dynamic_jumps)
+            {
+                bid = succ;
+                continue;
+            }
+            // Non-diverging, non-fallthrough: conservative.
+            return u16::MAX;
         }
     }
 }
@@ -1113,126 +1165,44 @@ mod tests {
     // --- Cross-block (fallthrough chain) DSE tests ---
 
     #[test]
-    fn cross_block_dead_across_jumpi_fallthrough() {
-        // PUSH 0x42 is produced in the first block. The fallthrough block after JUMPI
-        // POPs it and STOPs. The value is dead across the chain.
+    fn cross_block_dead_both_paths() {
+        // Value dead on both fallthrough (REVERT) and taken (STOP, needs 0 items).
+        // Cross-block DSE eliminates the PUSH+POP across the JUMPI boundary.
         let bytecode = analyze_asm(
             "
-            PUSH1 0x42      ; inst 0: dead value
+            PUSH1 0x42      ; inst 0: dead — unused on both paths
             CALLDATASIZE    ; inst 1: condition
-            PUSH %target    ; inst 2
+            PUSH %taken     ; inst 2
             JUMPI           ; inst 3
-            ; fallthrough block (1 predecessor, not a JUMPDEST):
-            POP             ; inst 4: kills the value
-            STOP            ; inst 5
-        target:
-            JUMPDEST        ; inst 6
-            POP             ; inst 7
-            STOP            ; inst 8
-        ",
-        );
-        // PUSH 0x42 is NOT dead — the taken JUMPI edge needs the value on the stack.
-        assert!(
-            !bytecode.inst(Inst::from_usize(0)).flags.contains(InstFlags::NOOP),
-            "PUSH 0x42 must NOT be nooped (live on the taken JUMPI edge)"
-        );
-    }
-
-    #[test]
-    fn cross_block_dead_chain_diverges() {
-        // A simple fallthrough chain ending in STOP. All values are dead.
-        // Block 0: PUSH 0x42, PUSH 0, PUSH %skip, JUMPI
-        // Block 1 (fallthrough): POP, STOP
-        // No JUMPDEST at block 1, so it's a fallthrough extension.
-        //
-        // But PUSH 0x42 is live on the taken edge, so it must NOT be eliminated.
-        let bytecode = analyze_asm(
-            "
-            PUSH1 0x42      ; inst 0
-            PUSH0           ; inst 1: always-false condition
-            PUSH %skip      ; inst 2
-            JUMPI           ; inst 3
-            POP             ; inst 4
-            STOP            ; inst 5
-        skip:
-            JUMPDEST        ; inst 6
-            PUSH0           ; inst 7
-            MSTORE          ; inst 8
-            STOP            ; inst 9
-        ",
-        );
-        // Even though the fallthrough chain [bb0, bb1] ends in STOP and POP kills
-        // the value, the JUMPI taken edge means 0x42 must stay live.
-        assert!(
-            !bytecode.inst(Inst::from_usize(0)).flags.contains(InstFlags::NOOP),
-            "PUSH 0x42 must stay live (JUMPI taken edge)"
-        );
-    }
-
-    #[test]
-    fn cross_block_dead_no_jumpi() {
-        // Single-block baseline: PUSH/POP/STOP with no block splits.
-        let bytecode = analyze_asm(
-            "
-            PUSH1 0x42      ; inst 0: dead
-            POP             ; inst 1
-            STOP            ; inst 2
-        ",
-        );
-        assert!(
-            bytecode.inst(Inst::from_usize(0)).flags.contains(InstFlags::NOOP),
-            "PUSH 0x42 should be nooped (single block, dead)"
-        );
-    }
-
-    #[test]
-    fn cross_block_fallthrough_chain_diverges_with_jumpi() {
-        // Chain [bb0, bb1_fallthrough] ending in REVERT. The JUMPI taken edge keeps
-        // the value live below the condition, so POP and PUSH 0x42 both stay live.
-        let bytecode = analyze_asm(
-            "
-            PUSH1 0x42      ; inst 0
-            CALLDATASIZE    ; inst 1: condition for first JUMPI
-            PUSH %target1   ; inst 2
-            JUMPI           ; inst 3
-            ; first fallthrough (not a JUMPDEST, 1 pred):
+            ; fallthrough: revert without using 0x42
             POP             ; inst 4
             PUSH0           ; inst 5
             DUP1            ; inst 6
             REVERT          ; inst 7
-        target1:
+        taken:
             JUMPDEST        ; inst 8
-            PUSH0           ; inst 9
-            MSTORE          ; inst 10
-            STOP            ; inst 11
+            STOP            ; inst 9: needs 0 items from stack
         ",
         );
+        // Taken block (JUMPDEST, STOP) needs 0 stack inputs.
+        // Fallthrough chain ends in REVERT (diverging), exit is all-dead.
+        // 0x42 is dead on both paths → eliminated.
         assert!(
-            !bytecode.inst(Inst::from_usize(0)).flags.contains(InstFlags::NOOP),
-            "PUSH 0x42 must stay live (JUMPI taken edge)"
-        );
-        // PUSH0 and DUP1 before REVERT are dead (diverging tail, no side exit).
-        assert!(
-            bytecode.inst(Inst::from_usize(5)).flags.contains(InstFlags::NOOP),
-            "PUSH0 before REVERT should be nooped"
-        );
-        assert!(
-            bytecode.inst(Inst::from_usize(6)).flags.contains(InstFlags::NOOP),
-            "DUP1 before REVERT should be nooped"
+            bytecode.inst(Inst::from_usize(0)).flags.contains(InstFlags::NOOP),
+            "PUSH 0x42 should be nooped (dead on both paths)"
         );
     }
 
     #[test]
-    fn cross_block_jumpi_value_live_on_taken_not_eliminated() {
-        // Soundness test: value is dead on fallthrough but live on the taken JUMPI path.
-        // DSE must NOT eliminate it.
+    fn cross_block_live_on_taken() {
+        // Value dead on fallthrough (REVERT) but live on taken path (MSTORE).
         let bytecode = analyze_asm(
             "
             PUSH1 0xAA      ; inst 0: needed on taken path
-            PUSH1 0xBB      ; inst 1: condition
+            CALLDATASIZE    ; inst 1: condition
             PUSH %taken     ; inst 2
             JUMPI           ; inst 3
-            ; fallthrough: 0xAA is unused
+            ; fallthrough: unused
             POP             ; inst 4
             PUSH0           ; inst 5
             DUP1            ; inst 6
@@ -1240,22 +1210,86 @@ mod tests {
         taken:
             JUMPDEST        ; inst 8
             PUSH0           ; inst 9
-            MSTORE          ; inst 10: writes 0xAA to memory
-            PUSH1 0x20      ; inst 11
-            PUSH0           ; inst 12
-            RETURN          ; inst 13
+            MSTORE          ; inst 10: reads 0xAA from stack
+            STOP            ; inst 11
+        ",
+        );
+        // Taken block needs 1 item from entry stack (consumed by MSTORE).
+        assert!(
+            !bytecode.inst(Inst::from_usize(0)).flags.contains(InstFlags::NOOP),
+            "PUSH 0xAA must NOT be eliminated — needed on taken path"
+        );
+    }
+
+    #[test]
+    fn cross_block_deep_value_dead_shallow_live() {
+        // Two values below JUMPI inputs. Taken path needs only 1 (shallow).
+        // The deep value is dead on both paths.
+        let bytecode = analyze_asm(
+            "
+            PUSH1 0xDD      ; inst 0: deep value — dead on both paths
+            PUSH1 0xAA      ; inst 1: shallow value — live on taken path
+            CALLDATASIZE    ; inst 2: condition
+            PUSH %taken     ; inst 3
+            JUMPI           ; inst 4
+            ; fallthrough: discard both and revert
+            POP             ; inst 5
+            POP             ; inst 6
+            PUSH0           ; inst 7
+            DUP1            ; inst 8
+            REVERT          ; inst 9
+        taken:
+            JUMPDEST        ; inst 10
+            PUSH0           ; inst 11
+            MSTORE          ; inst 12: reads 0xAA (TOS), pops both
+            STOP            ; inst 13
+        ",
+        );
+        // Taken block needs 1 item from entry. Stack at JUMPI exit has 2 items
+        // [0xDD, 0xAA]. Only the top 1 (0xAA) is needed → 0xDD is dead.
+        assert!(
+            bytecode.inst(Inst::from_usize(0)).flags.contains(InstFlags::NOOP),
+            "PUSH 0xDD should be nooped (dead: taken needs only 1 item)"
+        );
+        assert!(
+            !bytecode.inst(Inst::from_usize(1)).flags.contains(InstFlags::NOOP),
+            "PUSH 0xAA must NOT be nooped (live on taken path)"
+        );
+    }
+
+    #[test]
+    fn cross_block_taken_non_diverging_conservative() {
+        // Taken path doesn't diverge (ends with JUMP to elsewhere).
+        // DSE must be conservative — can't know what's needed downstream.
+        let bytecode = analyze_asm(
+            "
+            PUSH1 0x42      ; inst 0: must stay live (conservative)
+            CALLDATASIZE    ; inst 1
+            PUSH %taken     ; inst 2
+            JUMPI           ; inst 3
+            POP             ; inst 4
+            PUSH0           ; inst 5
+            DUP1            ; inst 6
+            REVERT          ; inst 7
+        taken:
+            JUMPDEST        ; inst 8
+            PUSH %done      ; inst 9
+            JUMP            ; inst 10: non-diverging → conservative
+        done:
+            JUMPDEST        ; inst 11
+            POP             ; inst 12
+            STOP            ; inst 13
         ",
         );
         assert!(
             !bytecode.inst(Inst::from_usize(0)).flags.contains(InstFlags::NOOP),
-            "PUSH 0xAA must NOT be eliminated — needed on taken JUMPI path"
+            "PUSH 0x42 must stay live (taken path is non-diverging, conservative)"
         );
     }
 
     #[test]
     fn cross_block_suspend_in_fallthrough_keeps_earlier_live() {
-        // Suspend (CALL) in a fallthrough block forces the entire stack prefix live,
-        // preventing earlier PUSHes from being eliminated.
+        // Suspend (CALL) in a fallthrough block forces the entire stack prefix live.
         let bytecode = analyze_asm(
             "
             PUSH1 0xaa      ; inst 0: must survive across CALL
