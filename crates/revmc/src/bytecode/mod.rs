@@ -347,9 +347,12 @@ impl<'a> Bytecode<'a> {
             "constant folding gas budget",
         );
 
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            self.log_block_stats();
+        }
+
         if tracing::enabled!(tracing::Level::TRACE) {
             self.log_const_input_stats();
-            self.log_longest_blocks();
         }
 
         Ok(())
@@ -605,13 +608,12 @@ impl<'a> Bytecode<'a> {
         trace!("{buf}");
     }
 
-    /// Logs the top 5 longest basic blocks (by live instruction count) at trace level.
+    /// Logs basic block statistics at debug level and top 5 longest blocks at trace level.
     #[inline(never)]
-    fn log_longest_blocks(&self) {
+    fn log_block_stats(&self) {
         use std::fmt::Write;
 
-        // Collect (block, live_len).
-        let mut block_lens: Vec<(Block, usize)> = self
+        let mut lens: Vec<(Block, usize)> = self
             .cfg
             .blocks
             .iter_enumerated()
@@ -620,16 +622,37 @@ impl<'a> Bytecode<'a> {
                 (block, live)
             })
             .collect();
-        block_lens.sort_unstable_by_key(|b| std::cmp::Reverse(b.1));
-        block_lens.truncate(5);
+        let n = lens.len();
+        let suspends = self.iter_insts().filter(|(_, d)| d.may_suspend()).count();
 
-        let mut buf = String::from("top 5 longest blocks:");
-        for (block, len) in &block_lens {
-            let data = &self.cfg.blocks[*block];
-            let first = self.inst(data.insts.start);
-            let _ = write!(buf, "\n  {block} (pc={}, len={len})", first.pc);
+        lens.sort_unstable_by_key(|b| b.1);
+        let min = lens.first().map_or(0, |b| b.1);
+        let max = lens.last().map_or(0, |b| b.1);
+        let sum: usize = lens.iter().map(|b| b.1).sum();
+        let avg = if n > 0 { sum as f64 / n as f64 } else { 0.0 };
+        let median = if n > 0 { lens[n / 2].1 } else { 0 };
+
+        debug!(
+            blocks = n,
+            min,
+            max,
+            avg = format_args!("{avg:.1}"),
+            median,
+            suspends,
+            "block stats",
+        );
+
+        if enabled!(tracing::Level::TRACE) {
+            lens.reverse();
+            lens.truncate(5);
+            let mut buf = String::from("top 5 longest blocks:");
+            for (block, len) in &lens {
+                let data = &self.cfg.blocks[*block];
+                let first = self.inst(data.insts.start);
+                let _ = write!(buf, "\n  {block} (pc={}, len={len})", first.pc);
+            }
+            trace!("{buf}");
         }
-        trace!("{buf}");
     }
 
     /// Returns the name for a basic block.
