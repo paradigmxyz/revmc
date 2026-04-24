@@ -1262,13 +1262,52 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             return;
         }
         let delta = expected_top - current_top;
-        debug_assert!(
-            expected_top >= self.vstack.live_range().start,
-            "sync: expected_top={expected_top} < base={}, section_len_offset={}, diff={diff}, current_top={current_top}, inst={:?}",
-            self.vstack.live_range().start,
-            self.section_len_offset,
-            self.current_inst().to_op(),
-        );
+        if expected_top < self.vstack.live_range().start {
+            let inst = self.current_inst.unwrap();
+            // Walk backward to find the section head for diagnostic context.
+            let mut head = inst;
+            for i in (0..inst.index()).rev() {
+                let idx = crate::Inst::from_usize(i);
+                let d = self.bytecode.inst(idx);
+                if d.is_dead_code() {
+                    continue;
+                }
+                if d.is_stack_section_head() {
+                    head = idx;
+                    break;
+                }
+            }
+            // Dump the section from head to current inst.
+            let mut section_dump = String::new();
+            for i in head.index()..=inst.index() {
+                let idx = crate::Inst::from_usize(i);
+                let d = self.bytecode.inst(idx);
+                if d.is_dead_code() {
+                    continue;
+                }
+                use std::fmt::Write;
+                let _ = write!(
+                    section_dump,
+                    "\n  ic{i} pc={} {:?} io={:?} flags={:?}{}{}",
+                    d.pc,
+                    d.to_op(),
+                    d.stack_io(),
+                    d.flags,
+                    if d.is_stack_section_head() { " SECTION_HEAD" } else { "" },
+                    if d.is_dead_code() { " DEAD" } else { "" },
+                );
+            }
+            panic!(
+                "sync: expected_top={expected_top} < base={}, section_len_offset={}, \
+                 diff={diff}, current_top={current_top}, inst={:?} (ic{})\n\
+                 section head=ic{}, section:{section_dump}",
+                self.vstack.live_range().start,
+                self.section_len_offset,
+                self.current_inst().to_op(),
+                inst.index(),
+                head.index(),
+            );
+        }
         if delta < 0 {
             self.vstack.drop_top((-delta) as usize);
         } else {
