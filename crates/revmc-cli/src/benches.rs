@@ -1,6 +1,4 @@
-use revm_bytecode::opcode as op;
 use revmc::{U256, primitives::hex};
-use std::hint::black_box;
 
 macro_rules! include_code_str {
     ($path:literal) => {
@@ -11,17 +9,15 @@ macro_rules! include_code_str {
     };
 }
 
-/// Benchmark definition. Bytecode benchmarks use the `bytecode` / `calldata` /
-/// `stack_input` fields; transaction-fixture benchmarks use `fixture_json` /
-/// `spec_id` instead.
+/// Benchmark definition. Bytecode benchmarks use the `bytecode` / `calldata`
+/// fields; transaction-fixture benchmarks use `fixture_json` / `spec_id`
+/// instead.
 #[derive(Clone, Debug, Default)]
 pub struct Bench {
     pub name: &'static str,
     pub bytecode: Vec<u8>,
     pub calldata: Vec<u8>,
-    pub stack_input: Vec<U256>,
-    pub native: Option<fn()>,
-    /// Pre-seeded storage entries `(key, value)` inserted at `Address::ZERO`.
+    /// Pre-seeded storage entries `(key, value)` inserted at `BENCH_CONTRACT`.
     pub storage: Vec<(U256, U256)>,
     /// Override for `Host::block_number()`.
     pub block_number: Option<U256>,
@@ -46,15 +42,6 @@ pub fn get_bench(name: &str) -> Option<Bench> {
 
 pub fn get_benches() -> Vec<Bench> {
     vec![
-        Bench {
-            name: "fibonacci",
-            bytecode: FIBONACCI.to_vec(),
-            stack_input: vec![U256::from(69)],
-            native: Some(|| {
-                black_box(fibonacci_rust(black_box(U256::from(70))));
-            }),
-            ..Default::default()
-        },
         // https://github.com/lambdaclass/evm_mlir/blob/b766d0bbc2093bbfa4feb3aa25baf82b512aee74/bench/revm_comparison/src/lib.rs#L12-L15
         // https://blog.lambdaclass.com/evm-performance-boosts-with-mlir/
         // > We chose 1000 as N
@@ -100,11 +87,11 @@ pub fn get_benches() -> Vec<Bench> {
                 "00000000000000000000000000000000000000000000000000000000000003e8"
             )
             .to_vec(),
-            // balanceOf[address(0)] = 1_000_000 (caller is address(0))
-            // slot = keccak256(abi.encode(address(0), uint256(3)))
+            // balanceOf[BENCH_CALLER] = 1_000_000
+            // slot = keccak256(abi.encode(0x1111..1111, uint256(3)))
             storage: vec![(
                 U256::from_str_radix(
-                    "3617319a054d772f909f7c479a2cebe5066e836a939412e32403c99029b92eff",
+                    "fc40ea33816453f766ebc0872d4b5152b468882abe7b6b35528069db4d6e41c4",
                     16,
                 )
                 .unwrap(),
@@ -232,83 +219,19 @@ pub fn get_benches() -> Vec<Bench> {
             fixture_json: Some(include_str!("../../../data/curve-stableswap-2pool.json")),
             ..Default::default()
         },
+        // https://etherscan.io/address/0x5F8E7D750E75b44747C058A204D8DEa0D18fA5d3
+        Bench {
+            name: "onchain_lm_v2",
+            spec_id: Some(revmc::primitives::hardfork::SpecId::CANCUN),
+            fixture_json: Some(include_str!("../../../data/onchain-lm-v2.json")),
+            ..Default::default()
+        },
+        // https://github.com/karalabe/burntpix-benchmark
+        Bench {
+            name: "burntpix",
+            spec_id: Some(revmc::primitives::hardfork::SpecId::CANCUN),
+            fixture_json: Some(include_str!("../../../data/burntpix.json")),
+            ..Default::default()
+        },
     ]
-}
-
-#[rustfmt::skip]
-const FIBONACCI: &[u8] = &[
-    // input to the program (which fib number we want)
-    // op::PUSH2, input[0], input[1],
-    op::JUMPDEST, op::JUMPDEST, op::JUMPDEST,
-
-    // 1st/2nd fib number
-    op::PUSH1, 0,
-    op::PUSH1, 1,
-    // 7
-
-    // MAINLOOP:
-    op::JUMPDEST,
-    op::DUP3,
-    op::ISZERO,
-    op::PUSH1, 28, // cleanup
-    op::JUMPI,
-
-    // fib step
-    op::DUP2,
-    op::DUP2,
-    op::ADD,
-    op::SWAP2,
-    op::POP,
-    op::SWAP1,
-    // 19
-
-    // decrement fib step counter
-    op::SWAP2,
-    op::PUSH1, 1,
-    op::SWAP1,
-    op::SUB,
-    op::SWAP2,
-    op::PUSH1, 7, // goto MAINLOOP
-    op::JUMP,
-    // 28
-
-    // CLEANUP:
-    op::JUMPDEST,
-    op::SWAP2,
-    op::POP,
-    op::POP,
-    // done: requested fib number is the only element on the stack!
-    op::STOP,
-];
-
-/// Literal translation of the `FIBONACCI` EVM bytecode to Rust.
-pub fn fibonacci_rust(mut i: U256) -> U256 {
-    let mut a = U256::from(0);
-    let mut b = U256::from(1);
-    while i != U256::ZERO {
-        let tmp = a;
-        a = b;
-        b = b.wrapping_add(tmp);
-        i -= U256::from(1);
-    }
-    a
-}
-
-#[test]
-fn test_fibonacci_rust() {
-    revm_primitives::uint! {
-        assert_eq!(fibonacci_rust(0_U256), 0_U256);
-        assert_eq!(fibonacci_rust(1_U256), 1_U256);
-        assert_eq!(fibonacci_rust(2_U256), 1_U256);
-        assert_eq!(fibonacci_rust(3_U256), 2_U256);
-        assert_eq!(fibonacci_rust(4_U256), 3_U256);
-        assert_eq!(fibonacci_rust(5_U256), 5_U256);
-        assert_eq!(fibonacci_rust(6_U256), 8_U256);
-        assert_eq!(fibonacci_rust(7_U256), 13_U256);
-        assert_eq!(fibonacci_rust(8_U256), 21_U256);
-        assert_eq!(fibonacci_rust(9_U256), 34_U256);
-        assert_eq!(fibonacci_rust(10_U256), 55_U256);
-        assert_eq!(fibonacci_rust(100_U256), 354224848179261915075_U256);
-        assert_eq!(fibonacci_rust(1000_U256), 0x2e3510283c1d60b00930b7e8803c312b4c8e6d5286805fc70b594dc75cc0604b_U256);
-    }
 }

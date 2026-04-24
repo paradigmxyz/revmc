@@ -5,7 +5,7 @@
 use clap::Parser;
 use eyre::Context;
 use revmc::{
-    EvmCompiler, EvmLlvmBackend, SpecId,
+    EvmCompiler, SpecId,
     context_interface::host::DummyHost,
     interpreter::{
         Interpreter,
@@ -36,8 +36,7 @@ fn main() -> eyre::Result<()> {
         .wrap_err("Failed to decode hex-encoded code")?;
 
     // Compile the code.
-    let backend = EvmLlvmBackend::new(false)?;
-    let mut compiler = EvmCompiler::new(backend);
+    let mut compiler = EvmCompiler::new_llvm(false)?;
     let f = unsafe { compiler.jit("test", &bytecode[..], SpecId::CANCUN) }
         .wrap_err("Failed to JIT-compile code")?;
 

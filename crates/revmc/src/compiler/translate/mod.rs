@@ -5,13 +5,16 @@ use crate::{
     Backend, Builder, Bytecode, EvmContext, Inst, InstData, InstFlags, IntCC, Result, decode_pair,
     decode_single,
 };
+use either::Either;
 use oxc_index::IndexVec;
 use revm_bytecode::opcode as op;
-use revm_interpreter::InstructionResult;
+use revm_interpreter::{InputsImpl, InstructionResult};
 use revm_primitives::U256;
 use revmc_backend::{Attribute, BackendTypes, FunctionAttributeLocation, Pointer, TypeMethods};
 use revmc_builtins::{Builtin, Builtins, CallKind, CreateKind};
 use std::{fmt::Write, mem};
+
+mod peephole;
 
 const STACK_CAP: usize = 1024;
 // const WORD_SIZE: usize = 32;
@@ -54,11 +57,11 @@ pub(super) struct FunctionCx<'a, B: Backend> {
     config: FcxConfig,
 
     /// The backend's function builder.
-    pub(super) bcx: B::Builder<'a>,
+    bcx: B::Builder<'a>,
 
     // Common types.
     isize_type: B::Type,
-    pub(super) word_type: B::Type,
+    word_type: B::Type,
     address_type: B::Type,
     i8_type: B::Type,
 
@@ -75,6 +78,8 @@ pub(super) struct FunctionCx<'a, B: Backend> {
     gas_remaining: Pointer<B::Builder<'a>>,
     /// The EVM context. Opaque pointer, only passed to builtins.
     ecx: B::Value,
+    /// The `ecx.input` pointer (`&InputsImpl`). Loaded once at entry.
+    input: B::Value,
     /// Stack length before the current instruction.
     len_before: B::Value,
     /// Stack length offset for the current instruction, used for push/pop.
@@ -96,13 +101,13 @@ pub(super) struct FunctionCx<'a, B: Backend> {
     stored_len_offset: i32,
 
     /// The bytecode being translated.
-    pub(super) bytecode: &'a Bytecode<'a>,
+    bytecode: &'a Bytecode<'a>,
     /// Instruction index to 1-based line number in bytecode.txt (for debug info).
     inst_lines: IndexVec<Inst, u32>,
     /// All entry blocks for each instruction.
     inst_entries: IndexVec<Inst, B::BasicBlock>,
     /// The current instruction being translated.
-    pub(super) current_inst: Option<Inst>,
+    current_inst: Option<Inst>,
 
     // Basic blocks are `None` when outside of a main function.
     /// `dynamic_jump_table` incoming values.
@@ -207,12 +212,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let address_type = bcx.type_int(160);
 
         // Set up entry block.
-        let gas_ptr = bcx.fn_param(0);
-        let gas_remaining = {
-            let offset = bcx.iconst(i64_type, mem::offset_of!(pf::Gas, tracker.remaining) as i64);
-            let name = "gas.remaining.addr";
-            Pointer::new_address(i64_type, bcx.gep(i8_type, gas_ptr, &[offset], name))
-        };
+        let ecx = bcx.fn_param(0);
 
         let sp_arg = bcx.fn_param(1);
         // Use a local alloca for the stack to allow the backend to eliminate dead stores to
@@ -230,8 +230,25 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         // This is initialized later in `post_entry_block`.
         let stack_len = bcx.new_stack_slot(isize_type, "len.addr");
 
-        let input = bcx.fn_param(3);
-        let ecx = bcx.fn_param(4);
+        // Load gas pointer from ecx.
+        let ptr_type = bcx.type_ptr();
+        let gas_ptr = {
+            let gas_field =
+                get_field(&mut bcx, ecx, mem::offset_of!(EvmContext<'_>, gas), "ecx.gas.addr");
+            bcx.load(ptr_type, gas_field, "ecx.gas")
+        };
+        let gas_remaining = {
+            let offset = bcx.iconst(i64_type, mem::offset_of!(pf::Gas, tracker.remaining) as i64);
+            let name = "gas.remaining.addr";
+            Pointer::new_address(i64_type, bcx.gep(i8_type, gas_ptr, &[offset], name))
+        };
+
+        // Load input pointer from ecx.
+        let input = {
+            let input_field =
+                get_field(&mut bcx, ecx, mem::offset_of!(EvmContext<'_>, input), "ecx.input.addr");
+            bcx.load(ptr_type, input_field, "ecx.input")
+        };
 
         // Create all instruction entry blocks.
         // Dead-code instructions map to `unreachable_block`, except when block deduplication
@@ -276,6 +293,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             sp_arg: local_stack.then_some(sp_arg),
             gas_remaining,
             ecx,
+            input,
             len_before: zero,
             len_offset: 0,
             section_start_len: zero,
@@ -306,12 +324,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
         // Add debug assertions for the parameters.
         if config.debug_assertions {
-            fx.pointer_panic_with_bool(
-                config.gas_metering,
-                gas_ptr,
-                "gas pointer",
-                "gas metering is enabled",
-            );
+            fx.pointer_panic_with_bool(true, ecx, "EVM context pointer", "");
             fx.pointer_panic_with_bool(
                 !local_stack || bytecode.may_suspend(),
                 sp_arg,
@@ -332,8 +345,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                     "bytecode suspends execution"
                 },
             );
-            fx.pointer_panic_with_bool(true, input, "input pointer", "");
-            fx.pointer_panic_with_bool(true, ecx, "EVM context pointer", "");
 
             // Assert that the runtime spec_id matches the compilation spec_id.
             let compiled_spec = fx.bcx.iconst(fx.i8_type, bytecode.spec_id as i64);
@@ -365,16 +376,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             let targets = jumpdests
                 .map(|(inst, data)| (data.pc as u64, fx.inst_entries[inst]))
                 .collect::<Vec<_>>();
-            let index = fx.bcx.phi(fx.word_type, &fx.incoming_dynamic_jumps);
-
-            // Saturating convert i256 to i64: if the value doesn't fit, select u64::MAX
-            // which won't match any valid jump target.
             let i64_type = fx.bcx.type_int(64);
-            let reduced = fx.bcx.ireduce(i64_type, index);
-            let extended = fx.bcx.zext(fx.word_type, reduced);
-            let fits = fx.bcx.icmp(IntCC::Equal, index, extended);
-            let sentinel = fx.bcx.iconst(i64_type, u64::MAX as i64);
-            let index = fx.bcx.select(fits, reduced, sentinel);
+            let index = fx.bcx.phi(i64_type, &fx.incoming_dynamic_jumps);
             fx.add_invalid_jump();
             fx.bcx.switch(index, return_block, &targets, true);
         } else {
@@ -686,7 +689,11 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
         if self.try_peephole(data) {
             self.section_len_offset += diff;
-            goto_return!("peephole");
+            if self.current_inst().is_diverging() {
+                goto_return!(no_branch);
+            } else {
+                goto_return!("peephole");
+            }
         }
 
         // Macro utils.
@@ -711,6 +718,36 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 let default = $default;
                 let r = self.bcx.select(overflow, default, r);
                 self.push(r);
+            }};
+        }
+
+        /// Gets the pointer to a field via chained `offset_of!`.
+        macro_rules! field {
+            // Gets the pointer to a field.
+            (@get $base:expr, $($paths:path),*; $($spec:tt).*) => {
+                self.get_field($base, 0 $(+ mem::offset_of!($paths, $spec))*, stringify!($($spec).*.addr))
+            };
+            // Loads a field.
+            // `@[endian]` is the endianness of the stored value. If native, omit it.
+            (@load $(@[endian = $endian:tt])? $ty:expr, $base:expr, $($paths:path),*; $($spec:tt).*) => {{
+                let ptr = field!(@get $base, $($paths),*; $($spec).*);
+                #[allow(unused_mut)]
+                let mut value = self.bcx.load_aligned($ty, ptr, 1, stringify!($($spec).*));
+                $(
+                    if !cfg!(target_endian = $endian) {
+                        value = self.bcx.bswap(value);
+                    }
+                )?
+                value
+            }};
+            // Loads, extends (if necessary), and pushes a field.
+            // `@[endian]` is the endianness of the stored value. If native, omit it.
+            (@push $(@[endian = $endian:tt])? $ty:expr, $base:expr, $($rest:tt)*) => {{
+                let mut value = field!(@load $(@[endian = $endian])? $ty, $base, $($rest)*);
+                if self.bcx.type_bit_width($ty) < 256 {
+                    value = self.bcx.zext(self.word_type, value);
+                }
+                self.push(value);
             }};
         }
 
@@ -749,8 +786,21 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 self.call_fallible_builtin(Builtin::Exp, &[self.ecx, sp]);
             }
             op::SIGNEXTEND => {
+                // let shift = 248 - 8 * ext;
+                // ext < 31
+                //   ? (x << shift) >>s shift
+                //   : x
                 let [ext, x] = self.popn();
-                let r = self.call_signextend(ext, x);
+
+                let might_do_something = self.bcx.icmp_imm(IntCC::UnsignedLessThan, ext, 31);
+
+                let shift = self.bcx.imul_imm(ext, 8);
+                let c248 = self.bcx.iconst_256(248);
+                let shift = self.bcx.isub(c248, shift);
+                let shifted = self.bcx.ishl(x, shift);
+                let sext = self.bcx.sshr(shifted, shift);
+
+                let r = self.bcx.select(might_do_something, sext, x);
                 self.push(r);
             }
 
@@ -780,16 +830,31 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             op::XOR => binop!(bitxor),
             op::NOT => unop!(bitnot),
             op::BYTE => {
+                // index < 32
+                //   ? (value >> (248 - index * 8)) & 0xFF
+                //   : 0
                 let [index, value] = self.popn();
-                let r = self.call_byte(index, value);
+
+                let in_range = self.bcx.icmp_imm(IntCC::UnsignedLessThan, index, 32);
+
+                let shift = self.bcx.imul_imm(index, 8);
+                let c248 = self.bcx.iconst_256(248);
+                let shift = self.bcx.isub(c248, shift);
+                let shifted = self.bcx.ushr(value, shift);
+                let mask = self.bcx.iconst_256(0xFF);
+                let byte = self.bcx.bitand(shifted, mask);
+
+                let zero = self.bcx.iconst_256(0);
+
+                let r = self.bcx.select(in_range, byte, zero);
                 self.push(r);
             }
-            op::SHL => binop!(@shift ishl, |value, shift| self.bcx.iconst_256(U256::ZERO)),
-            op::SHR => binop!(@shift ushr, |value, shift| self.bcx.iconst_256(U256::ZERO)),
+            op::SHL => binop!(@shift ishl, |value, shift| self.bcx.iconst_256(0)),
+            op::SHR => binop!(@shift ushr, |value, shift| self.bcx.iconst_256(0)),
             op::SAR => binop!(@shift sshr, |value, shift| {
                 let is_negative = self.bcx.icmp_imm(IntCC::SignedLessThan, value, 0);
                 let max = self.bcx.iconst_256(U256::MAX);
-                let zero = self.bcx.iconst_256(U256::ZERO);
+                let zero = self.bcx.iconst_256(0);
                 self.bcx.select(is_negative, max, zero)
             }),
             op::CLZ => unop!(clz),
@@ -800,9 +865,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             }
 
             op::ADDRESS => {
-                let slot = self.sp_at_top();
-                let _ = self.call_builtin(Builtin::Address, &[self.ecx, slot]);
-                self.narrow_to_address(slot);
+                field!(@push @[endian = "big"] self.address_type, self.input, InputsImpl; target_address);
             }
             op::BALANCE => {
                 let sp = self.sp_after_inputs();
@@ -814,22 +877,17 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 self.narrow_to_address(slot);
             }
             op::CALLER => {
-                let slot = self.sp_at_top();
-                let _ = self.call_builtin(Builtin::Caller, &[self.ecx, slot]);
-                self.narrow_to_address(slot);
+                field!(@push @[endian = "big"] self.address_type, self.input, InputsImpl; caller_address);
             }
             op::CALLVALUE => {
-                let slot = self.sp_at_top();
-                let _ = self.call_builtin(Builtin::CallValue, &[self.ecx, slot]);
+                field!(@push self.word_type, self.input, InputsImpl; call_value);
             }
             op::CALLDATALOAD => {
                 let sp = self.sp_after_inputs();
                 let _ = self.call_builtin(Builtin::CallDataLoad, &[self.ecx, sp]);
             }
             op::CALLDATASIZE => {
-                let size = self.call_builtin(Builtin::CallDataSize, &[self.ecx]).unwrap();
-                let size = self.bcx.zext(self.word_type, size);
-                self.push(size);
+                field!(@push self.isize_type, self.ecx, EvmContext<'_>; calldatasize);
             }
             op::CALLDATACOPY => {
                 let sp = self.sp_after_inputs();
@@ -857,9 +915,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 self.call_fallible_builtin(Builtin::ExtCodeCopy, &[self.ecx, sp]);
             }
             op::RETURNDATASIZE => {
-                let size = self.call_builtin(Builtin::ReturnDataSize, &[self.ecx]).unwrap();
-                let size = self.bcx.zext(self.word_type, size);
-                self.push(size);
+                field!(@push self.isize_type, self.ecx, EvmContext<'_>, pf::Slice; return_data.len);
             }
             op::RETURNDATACOPY => {
                 let sp = self.sp_after_inputs();
@@ -992,6 +1048,14 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                         // Dynamic jump.
                         debug_assert!(self.bytecode.has_dynamic_jumps());
                         let target = self.pop();
+                        // Saturating convert i256 to i64: if the value doesn't fit,
+                        // select u64::MAX which won't match any valid jump target.
+                        let i64_type = self.bcx.type_int(64);
+                        let reduced = self.bcx.ireduce(i64_type, target);
+                        let extended = self.bcx.zext(self.word_type, reduced);
+                        let fits = self.bcx.icmp(IntCC::Equal, target, extended);
+                        let sentinel = self.bcx.iconst(i64_type, u64::MAX as i64);
+                        let target = self.bcx.select(fits, reduced, sentinel);
                         self.incoming_dynamic_jumps
                             .push((target, self.bcx.current_block().unwrap()));
                         self.dynamic_jump_table
@@ -1014,7 +1078,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 goto_return!(no_branch);
             }
             op::PC => {
-                let pc = self.bcx.iconst_256(U256::from(data.pc));
+                let pc = self.bcx.iconst_256(data.pc);
                 self.push(pc);
             }
             op::MSIZE => {
@@ -1044,7 +1108,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             }
 
             op::PUSH0 => {
-                let value = self.bcx.iconst_256(U256::ZERO);
+                let value = self.bcx.iconst_256(0);
                 self.push(value);
             }
             op::PUSH1..=op::PUSH32 => {
@@ -1114,8 +1178,9 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             op::INVALID => goto_return!(fail InstructionResult::InvalidFEOpcode),
             op::SELFDESTRUCT => {
                 let sp = self.sp_after_inputs();
-                self.call_fallible_builtin(Builtin::SelfDestruct, &[self.ecx, sp]);
-                goto_return!(build InstructionResult::SelfDestruct);
+                let _ = self.call_builtin(Builtin::SelfDestruct, &[self.ecx, sp]);
+                self.bcx.unreachable();
+                goto_return!(no_branch);
             }
 
             _ => unreachable!("unimplemented instruction: {data:?}"),
@@ -1126,7 +1191,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     }
 
     /// Pushes a 256-bit value onto the stack.
-    pub(super) fn push(&mut self, value: B::Value) {
+    fn push(&mut self, value: B::Value) {
         self.pushn(&[value]);
     }
 
@@ -1142,13 +1207,13 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
     /// Returns the known constant values of the topmost `N` stack operands, in the same order
     /// as [`popn`](Self::popn): index 0 is TOS, index 1 is second from top, etc.
-    pub(super) fn const_operands<const N: usize>(&self) -> [Option<U256>; N] {
+    fn const_operands<const N: usize>(&self) -> [Option<U256>; N] {
         let inst = self.current_inst.unwrap();
         std::array::from_fn(|i| self.bytecode.const_operand(inst, i))
     }
 
     /// Consumes the topmost `n` elements from the stack without loading them.
-    pub(super) fn pop_ignore(&mut self, n: usize) {
+    fn pop_ignore(&mut self, n: usize) {
         self.len_offset -= n as i8;
     }
 
@@ -1160,7 +1225,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     /// Removes the topmost `N` elements from the stack and returns them.
     ///
     /// If `load` is `false`, returns just the pointers.
-    pub(super) fn popn<const N: usize>(&mut self) -> [B::Value; N] {
+    fn popn<const N: usize>(&mut self) -> [B::Value; N] {
         assert_ne!(N, 0);
 
         std::array::from_fn(|i| {
@@ -1211,8 +1276,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     fn return_common(&mut self, ir: InstructionResult) {
         let sp = self.sp_after_inputs();
         let ir_const = self.bcx.iconst(self.i8_type, ir as i64);
-        self.call_fallible_builtin(Builtin::DoReturn, &[self.ecx, sp, ir_const]);
-        self.build_return_imm(ir);
+        let _ = self.call_builtin(Builtin::DoReturn, &[self.ecx, sp, ir_const]);
+        self.bcx.unreachable();
     }
 
     /// Builds a `CREATE` or `CREATE2` instruction.
@@ -1318,6 +1383,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     }
 
     /// Returns the stack pointer at the top (`&stack[stack.len]`).
+    #[must_use]
     fn sp_at_top(&mut self) -> B::Value {
         self.sp_from_section(self.section_len_offset as i64)
     }
@@ -1328,14 +1394,30 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     /// For any input whose value is a known constant, the constant is written into the
     /// corresponding stack slot. This allows DSE to NOOP the producing PUSH even for
     /// builtin-delegated opcodes that read operands directly from the stack pointer.
+    #[must_use]
     fn sp_after_inputs(&mut self) -> B::Value {
+        self.sp_after_inputs_inner(None)
+    }
+
+    #[must_use]
+    fn sp_after_inputs_with(&mut self, materialize: &[usize]) -> B::Value {
+        self.sp_after_inputs_inner(Some(materialize))
+    }
+
+    #[doc(hidden)]
+    fn sp_after_inputs_inner(&mut self, materialize: Option<&[usize]>) -> B::Value {
         let inst = self.current_inst.unwrap();
         let (inputs, _) = self.current_inst().stack_io();
-        let sp = self.sp_from_section(self.section_len_offset as i64 - inputs as i64);
-        for depth in 0..inputs as usize {
+        let inputs = inputs as usize;
+        let sp = self.sp_from_top(inputs);
+        let materialize = match materialize {
+            Some(x) => Either::Left(x.iter().copied()),
+            None => Either::Right(0..inputs),
+        };
+        for depth in materialize {
             if let Some(c) = self.bytecode.const_operand(inst, depth) {
                 let value = self.bcx.iconst_256(c);
-                let slot_offset = (inputs as usize - 1 - depth) as i64;
+                let slot_offset = (inputs - 1 - depth) as i64;
                 let slot = if slot_offset == 0 {
                     sp
                 } else {
@@ -1365,7 +1447,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
     /// Returns the stack pointer at `n` from the top (`&stack[len - n]`).
     fn sp_from_top(&mut self, n: usize) -> B::Value {
-        assert_ne!(n, 0);
         self.sp_from_section(self.section_len_offset as i64 - n as i64)
     }
 
@@ -1404,16 +1485,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         // This can overflow the gas counters, which has to be adjusted for after the call.
         let gas_remaining = self.load_gas_remaining();
         let (res, overflow) = self.bcx.usub_overflow(gas_remaining, cost);
-        if self.bytecode.is_small() {
-            // Storing the result before the check significantly increases time spent in
-            // `llvm::MemoryDependenceResults::getNonLocalPointerDependency`, but it might produce
-            // slightly better code.
-            self.store_gas_remaining(res);
-            self.build_check(overflow, InstructionResult::OutOfGas);
-        } else {
-            self.build_check(overflow, InstructionResult::OutOfGas);
-            self.store_gas_remaining(res);
-        }
+        self.store_gas_remaining(res);
+        self.build_check(overflow, InstructionResult::OutOfGas);
     }
 
     /*
@@ -1424,13 +1497,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         self.build_failure_imm_inner(false, success_cond, ret);
     }
     */
-
-    /// Builds a check, failing if the builtin returned a non-zero error.
-    fn build_check_instruction_result(&mut self, ret: B::Value) {
-        let failure = self.bcx.icmp_imm(IntCC::NotEqual, ret, 0);
-        let target = self.build_check_inner(true, failure, ret);
-        self.bcx.switch_to_block(target);
-    }
 
     /// Builds a check, failing if the condition is true.
     ///
@@ -1545,8 +1611,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let target = self.create_block_after(failure, "contd");
         self.bcx.brif(cond, failure, target);
 
-        // `panic` is already marked as a cold function call.
-        // self.bcx.set_cold_block(failure);
         self.bcx.switch_to_block(failure);
         self.call_panic(msg);
 
@@ -1571,10 +1635,11 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let _ = self.bcx.call(printf, &args);
     }
 
-    /// Build a call to a builtin that returns an [`InstructionResult`].
+    /// Build a call to a fallible builtin.
+    ///
+    /// The builtin longjmps on error, so no return value check is needed.
     fn call_fallible_builtin(&mut self, builtin: Builtin, args: &[B::Value]) {
-        let ret = self.call_builtin(builtin, args).expect("builtin does not return a value");
-        self.build_check_instruction_result(ret);
+        let _ = self.call_builtin(builtin, args);
     }
 
     /// Build a call to a builtin.
@@ -1643,96 +1708,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
 /// IR builtins.
 impl<B: Backend> FunctionCx<'_, B> {
-    fn call_byte(&mut self, index: B::Value, value: B::Value) -> B::Value {
-        self.call_ir_binop_builtin("byte", index, value, Self::build_byte)
-    }
-
-    /// Builds: `fn byte(index: u256, value: u256) -> u256`
-    fn build_byte(&mut self) {
-        let index = self.bcx.fn_param(0);
-        let value = self.bcx.fn_param(1);
-
-        let cond = self.bcx.icmp_imm(IntCC::UnsignedLessThan, index, 32);
-        let byte = {
-            // (value >> (31 - index) * 8) & 0xFF
-            let thirty_one = self.bcx.iconst_256(U256::from(31));
-            let shift = self.bcx.isub(thirty_one, index);
-            let shift = self.bcx.imul_imm(shift, 8);
-            let shifted = self.bcx.ushr(value, shift);
-            let mask = self.bcx.iconst_256(U256::from(0xFF));
-            self.bcx.bitand(shifted, mask)
-        };
-        let zero = self.bcx.iconst_256(U256::ZERO);
-        let r = self.bcx.select(cond, byte, zero);
-
-        self.bcx.ret(&[r]);
-    }
-
-    fn call_signextend(&mut self, ext: B::Value, x: B::Value) -> B::Value {
-        self.call_ir_binop_builtin("signextend", ext, x, Self::build_signextend)
-    }
-
-    /// Builds: `fn signextend(ext: u256, x: u256) -> u256`
-    fn build_signextend(&mut self) {
-        // From the yellow paper:
-        /*
-        let [ext, x] = stack.pop();
-        let t = 256 - 8 * (ext + 1);
-        let mut result = x;
-        result[..t] = [x[t]; t]; // Index by bits.
-        */
-
-        let ext = self.bcx.fn_param(0);
-        let x = self.bcx.fn_param(1);
-
-        // For 31 we also don't need to do anything.
-        let might_do_something = self.bcx.icmp_imm(IntCC::UnsignedLessThan, ext, 31);
-        let r = self.bcx.lazy_select(
-            might_do_something,
-            self.bcx.type_int(256),
-            |bcx| {
-                // Adapted from revm: https://github.com/bluealloy/revm/blob/fda371f73aba2c30a83c639608be78145fd1123b/crates/interpreter/src/instructions/arithmetic.rs#L89
-                // let bit_index = 8 * ext + 7;
-                // let bit = (x >> bit_index) & 1 != 0;
-                // let mask = (1 << bit_index) - 1;
-                // let r = if bit { x | !mask } else { *x & mask };
-
-                // let bit_index = 8 * ext + 7;
-                let bit_index = bcx.imul_imm(ext, 8);
-                let bit_index = bcx.iadd_imm(bit_index, 7);
-
-                // let bit = (x >> bit_index) & 1 != 0;
-                let one = bcx.iconst_256(U256::from(1));
-                let bit = bcx.ushr(x, bit_index);
-                let bit = bcx.bitand(bit, one);
-                let bit = bcx.icmp_imm(IntCC::NotEqual, bit, 0);
-
-                // let mask = (1 << bit_index) - 1;
-                let mask = bcx.ishl(one, bit_index);
-                let mask = bcx.isub_imm(mask, 1);
-
-                // let r = if bit { x | !mask } else { *x & mask };
-                let not_mask = bcx.bitnot(mask);
-                let sext = bcx.bitor(x, not_mask);
-                let zext = bcx.bitand(x, mask);
-                bcx.select(bit, sext, zext)
-            },
-            |_bcx| x,
-        );
-        self.bcx.ret(&[r]);
-    }
-
-    fn call_ir_binop_builtin(
-        &mut self,
-        name: &str,
-        x1: B::Value,
-        x2: B::Value,
-        build: fn(&mut Self),
-    ) -> B::Value {
-        let word = self.word_type;
-        self.call_ir_builtin(name, &[x1, x2], &[word, word], Some(word), build).unwrap()
-    }
-
+    #[allow(dead_code)]
     #[must_use]
     fn call_ir_builtin(
         &mut self,
@@ -1784,30 +1760,37 @@ impl<B: Backend> FunctionCx<'_, B> {
 mod pf {
     use super::*;
 
+    #[repr(C)] // See core::ptr::metadata::PtrComponents
+    pub(super) struct Slice {
+        pub(super) ptr: *const u8,
+        pub(super) len: usize,
+    }
+    const _: [(); mem::size_of::<&'static [u8]>()] = [(); mem::size_of::<Slice>()];
+
     pub(super) struct Gas {
         /// GasTracker fields (EIP-8037 reservoir model).
         pub(super) tracker: GasTracker,
         /// Memory gas tracking (words_num: usize, expansion_cost: u64).
-        memory: MemoryGas,
+        pub(super) memory: MemoryGas,
     }
 
     pub(super) struct GasTracker {
         /// The initial gas limit.
-        limit: u64,
+        pub(super) limit: u64,
         /// The remaining gas.
         pub(super) remaining: u64,
         /// State gas reservoir (EIP-8037).
-        reservoir: u64,
+        pub(super) reservoir: u64,
         /// Total state gas spent.
-        state_gas_spent: u64,
+        pub(super) state_gas_spent: u64,
         /// Refunded gas.
-        refunded: i64,
+        pub(super) refunded: i64,
     }
 
     #[repr(C)]
-    struct MemoryGas {
-        words_num: usize,
-        expansion_cost: u64,
+    pub(super) struct MemoryGas {
+        pub(super) words_num: usize,
+        pub(super) expansion_cost: u64,
     }
     const _: [(); mem::size_of::<revm_interpreter::Gas>()] = [(); mem::size_of::<Gas>()];
 }

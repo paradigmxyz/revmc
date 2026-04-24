@@ -20,6 +20,9 @@ pub mod alloy_evm;
 
 pub mod revm_evm;
 
+mod simple_jit_evm;
+pub use simple_jit_evm::JitEvm;
+
 pub mod runtime;
 
 /// ABI version of compiled artifacts. Bump when the calling convention changes.
@@ -43,6 +46,9 @@ pub use llvm::EvmLlvmBackend;
 #[doc(inline)]
 pub use revmc_llvm as llvm;
 
+#[doc(hidden)]
+pub use revmc_builtins as builtins;
+
 #[doc(no_inline)]
 pub use revm_bytecode;
 #[doc(no_inline)]
@@ -61,7 +67,7 @@ type FxHashMap<K, V> = alloy_primitives::map::HashMap<K, V, alloy_primitives::ma
 /// Enable for `cargo asm -p revmc --lib`.
 #[cfg(any())]
 pub fn generate_all_assembly() -> EvmCompiler<EvmLlvmBackend> {
-    let mut compiler = EvmCompiler::new(EvmLlvmBackend::new(false).unwrap());
+    let mut compiler = EvmCompiler::new_llvm(false).unwrap();
     let _ = compiler.jit(None, &[], primitives::SpecId::ARROW_GLACIER).unwrap();
     unsafe { compiler.clear().unwrap() };
     compiler

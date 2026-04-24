@@ -4,7 +4,7 @@ use libfuzzer_sys::fuzz_target;
 use revmc::{
     revm_bytecode::opcode::OPCODE_INFO,
     tests::{run_test_case, TestCase},
-    EvmCompiler, EvmLlvmBackend, OpcodesIter, OptimizationLevel, SpecId,
+    EvmCompiler, OpcodesIter, OptimizationLevel, SpecId,
 };
 use std::path::PathBuf;
 
@@ -13,8 +13,7 @@ fuzz_target!(|test_case: TestCase<'_>| {
         return;
     }
 
-    let backend = EvmLlvmBackend::new(false).unwrap();
-    let mut compiler = EvmCompiler::new(backend);
+    let mut compiler = EvmCompiler::new_llvm(false).unwrap();
     compiler.set_opt_level(OptimizationLevel::None);
     if let Ok(dump_location) = std::env::var("COMPILER_DUMP") {
         compiler.set_dump_to(Some(PathBuf::from(dump_location)));

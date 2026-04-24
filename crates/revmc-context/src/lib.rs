@@ -10,9 +10,14 @@ use core::{fmt, mem::MaybeUninit, ptr};
 use revm_interpreter::{
     Gas, Host, InputsImpl, InstructionResult, Interpreter, InterpreterAction, InterpreterResult,
     SharedMemory,
+    context_interface::cfg::GasParams,
     interpreter_types::{Jumps, LegacyBytecode, ReturnData, RuntimeFlag},
 };
 use revm_primitives::{Address, B256, Bytes, Log, U256, hardfork::SpecId, ruint};
+
+mod arch;
+use arch::revmc_entry;
+pub use arch::revmc_exit;
 
 /// Resume point for compiled EVM code after a CALL/CREATE suspension.
 ///
@@ -98,17 +103,27 @@ pub struct EvmContext<'a> {
     /// Set to `None` when no inspector is active.
     #[doc(hidden)]
     pub on_log: Option<&'a mut (dyn FnMut(&Log) + 'a)>,
+    /// The size of the call input data, cached for CALLDATASIZE.
+    pub calldatasize: usize,
+    /// The result set by a builtin before exiting via [`revmc_exit`].
+    pub exit_result: InstructionResult,
+    /// Saved RSP from the entry trampoline, used by [`revmc_exit`] to unwind.
+    pub exit_sp: *mut u8,
+    /// Cached gas parameters from the host.
+    pub gas_params: GasParams,
 }
 
 // Static assertions to ensure the struct layout matches expectations.
 // These offsets are used by the JIT compiler to access fields.
 const _: () = {
     use core::mem::offset_of;
-    assert!(core::mem::size_of::<EvmContext<'_>>() == 112);
+
     // Key fields accessed by JIT code
     assert!(offset_of!(EvmContext<'_>, memory) == 0);
+    assert!(offset_of!(EvmContext<'_>, gas) == 16);
     assert!(offset_of!(EvmContext<'_>, spec_id) == 65);
     assert!(offset_of!(EvmContext<'_>, resume_at) == 72);
+    assert!(offset_of!(EvmContext<'_>, calldatasize) == 112);
 };
 
 impl fmt::Debug for EvmContext<'_> {
@@ -133,6 +148,8 @@ impl<'a> EvmContext<'a> {
         let resume_at = ResumeAt::load(interpreter);
         let (stack, stack_len) = EvmStack::from_interpreter_stack(&mut interpreter.stack);
         let bytecode = interpreter.bytecode.bytecode_slice() as *const [u8];
+        let calldatasize = interpreter.input.input.len();
+        let gas_params = host.gas_params().clone();
         let this = Self {
             memory: &mut interpreter.memory,
             input: &mut interpreter.input,
@@ -145,6 +162,10 @@ impl<'a> EvmContext<'a> {
             resume_at,
             bytecode,
             on_log: None,
+            calldatasize,
+            exit_result: InstructionResult::Stop,
+            exit_sp: ptr::null_mut(),
+            gas_params,
         };
         (this, stack, stack_len)
     }
@@ -172,11 +193,9 @@ macro_rules! extern_revmc {
             $(
                 $(#[$attr])*
                 $vis fn $name(
-                    gas: *mut $crate::private::revm_interpreter::Gas,
+                    ecx: *mut $crate::EvmContext<'_>,
                     stack: *mut $crate::EvmStack,
                     stack_len: *mut usize,
-                    input: *const $crate::private::revm_interpreter::InputsImpl,
-                    ecx: *mut $crate::EvmContext<'_>,
                 ) -> $crate::private::revm_interpreter::InstructionResult;
             )+
         }
@@ -189,11 +208,9 @@ macro_rules! extern_revmc {
 /// information.
 // When changing the signature, also update the corresponding declarations in `fn translate`.
 pub type RawEvmCompilerFn = unsafe extern "C" fn(
-    gas: *mut Gas,
+    ecx: *mut EvmContext<'_>,
     stack: *mut EvmStack,
     stack_len: *mut usize,
-    input: *const InputsImpl,
-    ecx: *mut EvmContext<'_>,
 ) -> InstructionResult;
 
 /// An EVM bytecode function.
@@ -325,7 +342,7 @@ impl EvmCompilerFn {
         stack_len: Option<&mut usize>,
         ecx: &mut EvmContext<'_>,
     ) -> InstructionResult {
-        (self.0)(ecx.gas, option_as_mut_ptr(stack), option_as_mut_ptr(stack_len), ecx.input, ecx)
+        revmc_entry(ecx, option_as_mut_ptr(stack), option_as_mut_ptr(stack_len), self.0)
     }
 
     /// Same as [`call`](Self::call) but with `#[inline(never)]`.
@@ -814,11 +831,9 @@ mod tests {
 
     #[unsafe(no_mangle)]
     extern "C" fn __test_fn(
-        _gas: *mut Gas,
+        _ecx: *mut EvmContext<'_>,
         _stack: *mut EvmStack,
         _stack_len: *mut usize,
-        _input: *const InputsImpl,
-        _ecx: *mut EvmContext<'_>,
     ) -> InstructionResult {
         InstructionResult::Stop
     }

@@ -9,9 +9,10 @@ use inkwell::{
             LLVMOrcExecutionSessionRef, LLVMOrcExecutorAddress, LLVMOrcJITDylibRef,
             lljit::{LLVMOrcLLJITBuilderRef, LLVMOrcLLJITRef},
         },
-        prelude::{LLVMAttributeRef, LLVMContextRef},
+        prelude::{LLVMAttributeRef, LLVMContextRef, LLVMValueRef},
         target_machine::{LLVMCodeGenOptLevel, LLVMTargetMachineRef},
     },
+    values::AsValueRef,
 };
 use std::{ffi::c_char, sync::atomic::AtomicUsize};
 
@@ -58,6 +59,12 @@ unsafe extern "C" {
         tm: LLVMTargetMachineRef,
         level: LLVMCodeGenOptLevel,
     );
+
+    fn revmc_llvm_set_dso_local(val: LLVMValueRef, local: bool);
+}
+
+pub(crate) fn set_dso_local(f: inkwell::values::FunctionValue<'_>) {
+    unsafe { revmc_llvm_set_dso_local(f.as_value_ref(), true) };
 }
 
 pub(crate) fn create_initializes_attr(cx: &Context, lower: i64, upper: i64) -> Attribute {

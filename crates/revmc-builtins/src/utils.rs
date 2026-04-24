@@ -1,4 +1,4 @@
-use core::num::NonZero;
+use core::{hint::cold_path, num::NonZero};
 use revm_context_interface::journaled_state::AccountInfoLoad;
 use revm_interpreter::{InstructionResult, as_usize_saturated, host::LoadError};
 use revm_primitives::Address;
@@ -6,20 +6,31 @@ use revmc_context::{EvmContext, EvmWord};
 
 pub type BuiltinResult = Result<(), BuiltinError>;
 
+/// Represents an error that occurred during a builtin execution.
 #[derive(Debug)]
 #[repr(transparent)]
 pub struct BuiltinError(NonZero<u8>);
 
+impl From<BuiltinError> for InstructionResult {
+    #[inline]
+    fn from(value: BuiltinError) -> Self {
+        // SAFETY: BuiltinError is always created from a valid InstructionResult.
+        unsafe { core::mem::transmute::<_, _>(value.0.get()) }
+    }
+}
+
 impl From<InstructionResult> for BuiltinError {
     #[inline]
     fn from(value: InstructionResult) -> Self {
-        Self(unsafe { NonZero::new(value as u8).unwrap_unchecked() })
+        cold_path();
+        Self(unsafe { NonZero::new_unchecked(value as u8) })
     }
 }
 
 impl From<LoadError> for BuiltinError {
     #[inline]
     fn from(value: LoadError) -> Self {
+        cold_path();
         match value {
             LoadError::ColdLoadSkipped => InstructionResult::OutOfGas.into(),
             LoadError::DBError => InstructionResult::FatalExternalError.into(),
@@ -35,7 +46,7 @@ pub(crate) trait OkOrFatal<T> {
 impl<T> OkOrFatal<T> for Option<T> {
     #[inline]
     fn ok_or_fatal(self) -> Result<T, BuiltinError> {
-        self.ok_or(InstructionResult::FatalExternalError.into())
+        self.ok_or_else(|| InstructionResult::FatalExternalError.into())
     }
 }
 
@@ -47,7 +58,7 @@ pub(crate) fn load_account<'a>(
     address: Address,
     load_code: bool,
 ) -> Result<AccountInfoLoad<'a>, BuiltinError> {
-    let cold_load_gas = ecx.host.gas_params().cold_account_additional_cost();
+    let cold_load_gas = ecx.gas_params.cold_account_additional_cost();
     let skip_cold_load = ecx.gas.remaining() < cold_load_gas;
     let account = ecx.host.load_account_info_skip_cold_load(address, load_code, skip_cold_load)?;
     if account.is_cold {
@@ -72,14 +83,8 @@ pub(crate) unsafe fn read_words_rev<'a, const N: usize>(sp: *mut EvmWord) -> &'a
 
 #[inline]
 pub(crate) fn ensure_memory(ecx: &mut EvmContext<'_>, offset: usize, len: usize) -> BuiltinResult {
-    revm_interpreter::interpreter::resize_memory(
-        ecx.gas,
-        ecx.memory,
-        ecx.host.gas_params(),
-        offset,
-        len,
-    )
-    .map_err(Into::into)
+    revm_interpreter::interpreter::resize_memory(ecx.gas, ecx.memory, &ecx.gas_params, offset, len)
+        .map_err(Into::into)
 }
 
 pub(crate) unsafe fn copy_operation(
@@ -89,7 +94,7 @@ pub(crate) unsafe fn copy_operation(
 ) -> BuiltinResult {
     let len = try_into_usize!(len);
     if len != 0 {
-        gas!(ecx, ecx.host.gas_params().copy_cost(len));
+        gas!(ecx, ecx.gas_params.copy_cost(len));
         let memory_offset = try_into_usize!(memory_offset);
         ensure_memory(ecx, memory_offset, len)?;
         let data_offset = data_offset.to_u256();

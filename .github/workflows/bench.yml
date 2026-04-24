@@ -8,7 +8,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  LLVM_VERSION: "22"
+  RUSTC_WRAPPER: sccache
 
 jobs:
   codspeed:

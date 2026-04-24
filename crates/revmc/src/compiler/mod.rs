@@ -4,7 +4,6 @@ use crate::{
     Backend, Builder, Bytecode, EvmCompilerFn, EvmContext, EvmStack, FxHashMap, GasParams, Result,
     bytecode::AnalysisConfig,
 };
-use revm_interpreter::{Gas, InputsImpl};
 use revm_primitives::{Bytes, hardfork::SpecId};
 use revmc_backend::{
     Attribute, BackendConfig, FunctionAttributeLocation, Linkage, OptimizationLevel, eyre::ensure,
@@ -20,8 +19,6 @@ use std::{
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
-
-mod peephole;
 
 mod translate;
 use translate::{FcxConfig, FunctionCx};
@@ -109,6 +106,14 @@ pub struct EvmCompiler<B: Backend> {
     #[debug(skip)]
     remarks: Remarks,
     finalized: bool,
+}
+
+#[cfg(feature = "llvm")]
+impl EvmCompiler<revmc_llvm::EvmLlvmBackend> {
+    /// Creates a new instance of the compiler with the LLVM backend.
+    pub fn new_llvm(aot: bool) -> Result<Self> {
+        revmc_llvm::EvmLlvmBackend::new(aot).map(Self::new)
+    }
 }
 
 impl<B: Backend> EvmCompiler<B> {
@@ -324,6 +329,18 @@ impl<B: Backend> EvmCompiler<B> {
     /// Subsequent compilers inherit the value set by the first.
     pub fn set_simple_perf(&mut self, yes: bool) {
         self.update_backend_config(|c| c.simple_perf = yes);
+    }
+
+    /// Sets whether to enable debug info emission.
+    ///
+    /// Debug info embeds DWARF metadata and annotates IR/assembly dumps with source locations
+    /// from the parsed bytecode.
+    ///
+    /// Automatically enabled by [`set_dump_to`](Self::set_dump_to).
+    ///
+    /// Defaults to `false`.
+    pub fn set_debug_info(&mut self, yes: bool) {
+        self.config.debug = yes;
     }
 
     /// Sets whether to enable frame pointers.
@@ -637,21 +654,9 @@ impl<B: Backend> EvmCompiler<B> {
         let ptr = backend.type_ptr();
         let (ret, params, param_names, ptr_attrs) = (
             Some(i8),
-            &[ptr, ptr, ptr, ptr, ptr],
-            &[
-                "arg.gas.addr",
-                "arg.stack.addr",
-                "arg.stack_len.addr",
-                "arg.input.addr",
-                "arg.ecx.addr",
-            ],
-            &[
-                size_align::<Gas>(0),
-                size_align::<EvmStack>(1),
-                size_align::<usize>(2),
-                size_align::<InputsImpl>(3),
-                size_align::<EvmContext<'_>>(4),
-            ],
+            &[ptr, ptr, ptr],
+            &["arg.ecx.addr", "arg.stack.addr", "arg.stack_len.addr"],
+            &[size_align::<EvmContext<'_>>(0), size_align::<EvmStack>(1), size_align::<usize>(2)],
         );
         debug_assert_eq!(params.len(), param_names.len());
         let (mut bcx, id) = backend.build_function(name, ret, params, param_names, linkage)?;
@@ -669,11 +674,8 @@ impl<B: Backend> EvmCompiler<B> {
         if !config.debug_assertions {
             for &(i, size, align) in ptr_attrs {
                 let attrs = default_attrs::for_sized_ptr((size, align))
-                    // `Gas` and `InputsImpl` are reachable through `EvmContext` and can alias
-                    // parameters 0 and 3. Keep `noalias` only for stack and stack_len.
-                    .chain(matches!(i, 1 | 2).then_some(Attribute::NoAlias))
                     // All parameters are `&mut`.
-                    .chain(std::iter::once(Attribute::Writable));
+                    .chain([Attribute::NoAlias, Attribute::Writable]);
                 for attr in attrs {
                     let loc = FunctionAttributeLocation::Param(i as _);
                     bcx.add_function_attribute(None, attr, loc);

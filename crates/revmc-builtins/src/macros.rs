@@ -1,18 +1,8 @@
-#[allow(unused_macros)]
-#[collapse_debuginfo(yes)]
-macro_rules! tri {
-    ($e:expr) => {
-        match $e {
-            Ok(x) => x,
-            Err(_) => return Err(InstructionResult::InvalidOperandOOG.into()),
-        }
-    };
-}
-
 #[collapse_debuginfo(yes)]
 macro_rules! gas {
     ($ecx:expr, $gas:expr) => {
         if !$ecx.gas.record_regular_cost($gas) {
+            core::hint::cold_path();
             return Err(InstructionResult::OutOfGas.into());
         }
     };
@@ -22,6 +12,7 @@ macro_rules! gas {
 macro_rules! state_gas {
     ($ecx:expr, $gas:expr) => {
         if !$ecx.gas.record_state_cost($gas) {
+            core::hint::cold_path();
             return Err(InstructionResult::OutOfGas.into());
         }
     };
@@ -31,6 +22,7 @@ macro_rules! state_gas {
 macro_rules! ensure_non_staticcall {
     ($ecx:expr) => {
         if $ecx.is_static {
+            core::hint::cold_path();
             return Err(InstructionResult::StateChangeDuringStaticCall.into());
         }
     };
@@ -60,6 +52,7 @@ macro_rules! try_into_usize {
         match $x.to_u256().as_limbs() {
             x => {
                 if (x[0] > usize::MAX as u64) | (x[1] != 0) | (x[2] != 0) | (x[3] != 0) {
+                    core::hint::cold_path();
                     return Err(InstructionResult::InvalidOperandOOG.into());
                 }
                 x[0] as usize

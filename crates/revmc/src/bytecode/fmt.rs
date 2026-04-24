@@ -16,7 +16,7 @@ impl Bytecode<'_> {
     }
 
     /// Collects formatted lines and builds the inst-to-line map stored in `self.inst_lines`.
-    fn collect_lines(&self) -> Vec<(String, String)> {
+    pub(super) fn collect_lines(&self) -> Vec<(String, String)> {
         let mut lines: Vec<(String, String)> = Vec::new();
         let mut inst_lines: IndexVec<Inst, u32> = index_vec![0u32; self.insts.len()];
 
@@ -32,11 +32,20 @@ impl Bytecode<'_> {
         let ic_width = decimal_width(max_ic);
         let pc_width = decimal_width(max_pc);
 
+        let s = self.ir_stats();
+
         lines.push((
             String::new(),
             format!(
                 "spec_id={} has_dynamic_jumps={} may_suspend={}",
                 self.spec_id, self.has_dynamic_jumps, self.may_suspend,
+            ),
+        ));
+        lines.push((
+            String::new(),
+            format!(
+                "insts={} live={} dead={} noops={} suspends={} blocks={} block_min={} block_max={} block_avg={:.1} block_median={}",
+                s.total, s.live, s.dead, s.noops, s.suspends, s.blocks, s.block_min, s.block_max, s.block_avg, s.block_median,
             ),
         ));
         lines.push((String::new(), String::new()));
@@ -60,6 +69,16 @@ impl Bytecode<'_> {
                     first.stack_section.inputs, first.stack_section.max_growth,
                 )
                 .unwrap();
+            }
+            if !comment.is_empty() {
+                comment.push(' ');
+            }
+            write!(comment, "predecessors=").unwrap();
+            for (i, pred) in block.preds.iter().enumerate() {
+                if i > 0 {
+                    comment.push(',');
+                }
+                write!(comment, "{pred}").unwrap();
             }
             // Pad header to align with indented instructions.
             while header.len() < 2 {
@@ -164,6 +183,8 @@ impl Bytecode<'_> {
                 writeln!(f)?;
             } else if comment.is_empty() {
                 writeln!(f, "{text}")?;
+            } else if text.is_empty() {
+                writeln!(f, "; {comment}")?;
             } else {
                 writeln!(f, "{text:<comment_col$} ; {comment}")?;
             }
@@ -544,13 +565,14 @@ mod tests {
         snapbox::assert_data_eq!(
             actual,
             snapbox::str![[r#"
-               ; spec_id=Osaka has_dynamic_jumps=false may_suspend=true
+; spec_id=Osaka has_dynamic_jumps=false may_suspend=true
+; insts=19 live=19 dead=0 noops=11 suspends=1 blocks=3 block_min=2 block_max=10 block_avg=6.3 block_median=7
 
-bb0:           ; stack_in=0 max_growth=1
+bb0:           ; stack_in=0 max_growth=1 predecessors=
   PUSH1 0x03   ; ic= 0 pc= 0 gas=11 noop
   JUMP %bb1    ; ic= 1 pc= 2
 
-bb1:           ; stack_in=0 max_growth=2
+bb1:           ; stack_in=0 max_growth=2 predecessors=bb0,bb1
   JUMPDEST     ; ic= 2 pc= 3 gas=7 reachable
   PUSH1 0x01   ; ic= 3 pc= 4 noop
   PUSH1 0x00   ; ic= 4 pc= 6 noop
@@ -559,7 +581,7 @@ bb1:           ; stack_in=0 max_growth=2
   PUSH1 0x03   ; ic= 7 pc=11 noop
   JUMPI %bb1   ; ic= 8 pc=13
 
-bb2:           ; stack_in=0 max_growth=7
+bb2:           ; stack_in=0 max_growth=7 predecessors=bb1
   PUSH1 0x00   ; ic= 9 pc=14 gas=121
   PUSH1 0x00   ; ic=10 pc=16 noop
   PUSH1 0x00   ; ic=11 pc=18 noop
