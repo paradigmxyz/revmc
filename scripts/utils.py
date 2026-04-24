@@ -20,8 +20,13 @@ def repo_root() -> str:
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+def _shared_target_dir() -> str:
+    """Return a shared CARGO_TARGET_DIR so worktrees reuse the same build cache."""
+    return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "target")
+
+
 def cargo_env(rust_log: str | None = None) -> dict[str, str]:
-    env = {**os.environ, "NO_COLOR": "1"}
+    env = {**os.environ, "NO_COLOR": "1", "CARGO_TARGET_DIR": _shared_target_dir()}
     if rust_log:
         env["RUST_LOG"] = rust_log
     return env
@@ -29,8 +34,10 @@ def cargo_env(rust_log: str | None = None) -> dict[str, str]:
 
 def cargo_build(root: str) -> str:
     """Build the CLI binary and return its path."""
-    subprocess.run(["cargo", "build", "--quiet"], check=True, cwd=root)
-    return os.path.join(root, "target", "debug", "revmc")
+    target_dir = _shared_target_dir()
+    env = {**os.environ, "CARGO_TARGET_DIR": target_dir}
+    subprocess.run(["cargo", "build", "--quiet"], check=True, cwd=root, env=env)
+    return os.path.join(target_dir, "debug", "revmc")
 
 
 def get_benches(binary: str) -> list[str]:

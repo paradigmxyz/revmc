@@ -12,7 +12,7 @@ use std::{borrow::Cow, cell::RefCell};
 pub(crate) use revm_context_interface::cfg::GasParams;
 
 mod passes;
-use passes::{Cfg, GasSection, SectionsAnalysis, Snapshots, StackSection};
+use passes::{Block, Cfg, GasSection, SectionsAnalysis, Snapshots, StackSection};
 
 mod asm;
 pub use asm::parse_asm;
@@ -348,6 +348,7 @@ impl<'a> Bytecode<'a> {
         );
 
         if tracing::enabled!(tracing::Level::TRACE) {
+            self.log_ir_stats();
             self.log_const_input_stats();
         }
 
@@ -604,6 +605,87 @@ impl<'a> Bytecode<'a> {
         trace!("{buf}");
     }
 
+    /// Collects IR statistics: instruction counts and block size distribution.
+    fn ir_stats(&self) -> IrStats {
+        let total = self.insts.len();
+        let mut live = 0usize;
+        let mut noops = 0usize;
+        let mut dead = 0usize;
+        let mut suspends = 0usize;
+        for (_inst, data) in self.iter_all_insts() {
+            if data.is_dead_code() {
+                dead += 1;
+            } else {
+                live += 1;
+                if data.flags.contains(InstFlags::NOOP) {
+                    noops += 1;
+                }
+                if data.may_suspend() {
+                    suspends += 1;
+                }
+            }
+        }
+
+        let mut lens: Vec<usize> = self.cfg.blocks.iter().map(|data| data.insts().len()).collect();
+        let n = lens.len();
+        lens.sort_unstable();
+        let block_min = lens.first().copied().unwrap_or(0);
+        let block_max = lens.last().copied().unwrap_or(0);
+        let sum: usize = lens.iter().sum();
+        let block_avg = if n > 0 { sum as f64 / n as f64 } else { 0.0 };
+        let block_median = if n > 0 { lens[n / 2] } else { 0 };
+
+        IrStats {
+            total,
+            live,
+            dead,
+            noops,
+            suspends,
+            blocks: n,
+            block_min,
+            block_max,
+            block_avg,
+            block_median,
+        }
+    }
+
+    /// Logs IR statistics and top 5 longest blocks at trace level.
+    #[inline(never)]
+    fn log_ir_stats(&self) {
+        use std::fmt::Write;
+
+        let s = self.ir_stats();
+        trace!(
+            total_insts = s.total,
+            live = s.live,
+            dead = s.dead,
+            noops = s.noops,
+            suspends = s.suspends,
+            blocks = s.blocks,
+            block_min = s.block_min,
+            block_max = s.block_max,
+            block_avg = format_args!("{:.1}", s.block_avg),
+            block_median = s.block_median,
+            "ir stats",
+        );
+
+        let mut lens: Vec<(Block, usize)> = self
+            .cfg
+            .blocks
+            .iter_enumerated()
+            .map(|(block, data)| (block, data.insts().len()))
+            .collect();
+        lens.sort_unstable_by_key(|b| std::cmp::Reverse(b.1));
+        lens.truncate(5);
+        let mut buf = String::from("top 5 longest blocks:");
+        for (block, len) in &lens {
+            let data = &self.cfg.blocks[*block];
+            let first = self.inst(data.insts.start);
+            let _ = write!(buf, "\n  {block} (pc={}, len={len})", first.pc);
+        }
+        trace!("{buf}");
+    }
+
     /// Returns the name for a basic block.
     pub(crate) fn op_block_name(&self, inst: Option<Inst>, name: &str) -> String {
         use std::fmt::Write;
@@ -623,6 +705,20 @@ impl<'a> Bytecode<'a> {
         }
         s
     }
+}
+
+/// Summary IR statistics for a compiled bytecode.
+pub(crate) struct IrStats {
+    pub(crate) total: usize,
+    pub(crate) live: usize,
+    pub(crate) dead: usize,
+    pub(crate) noops: usize,
+    pub(crate) suspends: usize,
+    pub(crate) blocks: usize,
+    pub(crate) block_min: usize,
+    pub(crate) block_max: usize,
+    pub(crate) block_avg: f64,
+    pub(crate) block_median: usize,
 }
 
 /// A single instruction in the bytecode.

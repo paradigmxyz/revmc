@@ -314,7 +314,7 @@ class CodegenLines(Analysis):
         rows, totals, total_size, total_spills, total_reloads = self._collect(
             benches, dump_dir
         )
-        print("### Assembly line counts\n")
+        print("### Codegen statistics\n")
         table = [
             [name, *counts, fmt_size(jit_size), spills, reloads]
             for name, counts, jit_size, spills, reloads in rows
@@ -348,7 +348,7 @@ class CodegenLines(Analysis):
         }
 
         # Summary table.
-        print("### Assembly line counts\n")
+        print("### Codegen statistics\n")
         headers = ["benchmark", "unopt.ll", "opt.ll", "opt.s", "jit size", "spills", "reloads"]
         table = []
         for name, counts, jit_size, spills, reloads in cur_rows:
@@ -360,8 +360,8 @@ class CodegenLines(Analysis):
                     name,
                     *[fmt_pct(b, c) for b, c in zip(base_counts, counts)],
                     fmt_pct(base_jit, jit_size),
-                    fmt_diff(base_sp, spills),
-                    fmt_diff(base_rl, reloads),
+                    fmt_pct(base_sp, spills),
+                    fmt_pct(base_rl, reloads),
                 ]
             )
         table.append(
@@ -369,14 +369,14 @@ class CodegenLines(Analysis):
                 "**TOTAL**",
                 *[f"**{fmt_pct(b, c)}**" for b, c in zip(base_totals, cur_totals)],
                 f"**{fmt_pct(base_total_size, cur_total_size)}**",
-                f"**{fmt_diff(base_tsp, cur_tsp)}**",
-                f"**{fmt_diff(base_trl, cur_trl)}**",
+                f"**{fmt_pct(base_tsp, cur_tsp)}**",
+                f"**{fmt_pct(base_trl, cur_trl)}**",
             ]
         )
         print_table(headers, table)
 
         # Detailed table.
-        print("<details><summary>Full line counts</summary>\n")
+        print("<details><summary>Full details</summary>\n")
         detail_headers = ["benchmark"]
         for f in ["unopt.ll", "opt.ll", "opt.s"]:
             detail_headers += [f"{f} ({base_label})", "diff"]
@@ -579,6 +579,86 @@ class JumpResolution(Analysis):
                     s["total"],
                 ]
             )
+        print_table(headers, table)
+
+
+# ---------------------------------------------------------------------------
+# IR stats analysis
+# ---------------------------------------------------------------------------
+
+IR_STAT_KEYS = [
+    "total_insts", "live", "dead", "noops", "suspends",
+    "blocks", "block_min", "block_max", "block_avg", "block_median",
+]
+
+
+class BlockStats(Analysis):
+    def needs_codegen(self) -> bool:
+        return False
+
+    def rust_log(self) -> str | None:
+        return "revmc::bytecode=trace"
+
+    @staticmethod
+    def _parse(output: str) -> dict[str, float] | None:
+        m = re.search(
+            r"ir stats"
+            r" total_insts=(\d+)"
+            r" live=(\d+)"
+            r" dead=(\d+)"
+            r" noops=(\d+)"
+            r" suspends=(\d+)"
+            r" blocks=(\d+)"
+            r" block_min=(\d+)"
+            r" block_max=(\d+)"
+            r" block_avg=([\d.]+)"
+            r" block_median=(\d+)",
+            output,
+        )
+        if not m:
+            return None
+        return {
+            "total_insts": int(m.group(1)),
+            "live": int(m.group(2)),
+            "dead": int(m.group(3)),
+            "noops": int(m.group(4)),
+            "suspends": int(m.group(5)),
+            "blocks": int(m.group(6)),
+            "block_min": int(m.group(7)),
+            "block_max": int(m.group(8)),
+            "block_avg": float(m.group(9)),
+            "block_median": int(m.group(10)),
+        }
+
+    def report(self, benches, dump_dir, outputs):
+        print("### IR stats\n")
+        headers = ["benchmark"] + IR_STAT_KEYS
+        table = []
+        for bench in benches:
+            s = self._parse(outputs.get(bench, ""))
+            if not s:
+                continue
+            table.append([bench_name(bench)] + [s[k] for k in IR_STAT_KEYS])
+        print_table(headers, table)
+
+    def report_diff(
+        self, benches, dump_dir, outputs, base_dump, base_outputs, base_label
+    ):
+        print("### IR stats\n")
+        headers = ["benchmark"] + IR_STAT_KEYS
+        table = []
+        for bench in benches:
+            cur = self._parse(outputs.get(bench, ""))
+            base = self._parse(base_outputs.get(bench, ""))
+            if not cur:
+                continue
+            if not base:
+                table.append([bench_name(bench)] + [cur[k] for k in IR_STAT_KEYS])
+            else:
+                table.append(
+                    [bench_name(bench)]
+                    + [fmt_pct(base[k], cur[k]) for k in IR_STAT_KEYS]
+                )
         print_table(headers, table)
 
 
@@ -791,6 +871,11 @@ def main():
         action="store_true",
         help="Report per-opcode constant-input statistics",
     )
+    parser.add_argument(
+        "--block-stats",
+        action="store_true",
+        help="Report IR stats (inst counts, block size distribution, suspends)",
+    )
     args = parser.parse_args()
 
     # Default to codegen-lines + compile-times if no analysis flags given.
@@ -799,6 +884,7 @@ def main():
         or args.compile_times
         or args.jump_resolution
         or args.input_stats
+        or args.block_stats
     ):
         args.codegen_lines = True
         args.compile_times = True
@@ -813,6 +899,8 @@ def main():
         analyses.append(JumpResolution())
     if args.input_stats:
         analyses.append(InputStats())
+    if args.block_stats:
+        analyses.append(BlockStats())
 
     if not analyses:
         eprint("No analyses selected.")
