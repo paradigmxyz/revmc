@@ -14,7 +14,11 @@ use revm_handler::{
     EthFrame, EvmTr, ExecuteEvm, FrameInitOrResult, FrameTr, Handler, ItemOrResult, MainnetHandler,
     PrecompileProvider, evm::ContextDbError,
 };
-use revm_interpreter::InterpreterResult;
+use revm_inspector::{
+    InspectCommitEvm, InspectEvm, Inspector, InspectorEvmTr, InspectorFrame, InspectorHandler,
+    JournalExt,
+};
+use revm_interpreter::{InstructionResult, InterpreterAction, InterpreterResult, InterpreterTypes};
 use revm_primitives::{B256, map::B256Map};
 use revm_state::EvmState;
 
@@ -185,5 +189,157 @@ where
             let state = self.ctx_mut().journal_mut().finalize();
             ResultAndState::new(result, state)
         })
+    }
+}
+
+impl<EVM, F> InspectorEvmTr for JitEvm<EVM, F>
+where
+    EVM: EvmTr<
+            Frame = EthFrame,
+            Precompiles: PrecompileProvider<EVM::Context, Output = InterpreterResult>,
+        > + InspectorEvmTr,
+    F: FnMut(B256, &[u8]) -> Option<EvmCompilerFn>,
+{
+    type Inspector = <EVM as InspectorEvmTr>::Inspector;
+
+    #[inline]
+    fn all_inspector(
+        &self,
+    ) -> (
+        &Self::Context,
+        &Self::Instructions,
+        &Self::Precompiles,
+        &revm_context_interface::FrameStack<Self::Frame>,
+        &Self::Inspector,
+    ) {
+        self.inner.all_inspector()
+    }
+
+    #[inline]
+    fn all_mut_inspector(
+        &mut self,
+    ) -> (
+        &mut Self::Context,
+        &mut Self::Instructions,
+        &mut Self::Precompiles,
+        &mut revm_context_interface::FrameStack<Self::Frame>,
+        &mut Self::Inspector,
+    ) {
+        self.inner.all_mut_inspector()
+    }
+
+    #[inline]
+    fn inspect_frame_run(
+        &mut self,
+    ) -> Result<FrameInitOrResult<Self::Frame>, ContextDbError<Self::Context>> {
+        let frame = self.inner.frame_stack().get();
+        let code_hash = frame.interpreter.bytecode.get_or_calculate_hash();
+
+        let f = if let Some(&raw_fn) = self.functions.get(&code_hash) {
+            Some(EvmCompilerFn::new(raw_fn))
+        } else {
+            let code = frame.interpreter.bytecode.original_bytes();
+            (self.on_miss)(code_hash, &code)
+        };
+
+        let Some(f) = f else {
+            return self.inner.inspect_frame_run();
+        };
+
+        // Set up the on_log callback to forward logs to the inspector during JIT execution.
+        //
+        // SAFETY: We dereference raw pointers to the inspector and context inside the closure.
+        // This creates aliasing &mut references with `ecx.host` (which borrows the context),
+        // but the inspector's `log()` implementation only accesses the inspector itself,
+        // not the journaled state already borrowed by the host.
+        let (ctx, inspector) = self.ctx_inspector();
+        let ctx_ptr: *mut EVM::Context = ctx;
+        let inspector_ptr: *mut <EVM as InspectorEvmTr>::Inspector = inspector;
+        let mut on_log = move |log: &revm_primitives::Log| unsafe {
+            (*inspector_ptr).log(&mut *ctx_ptr, log.clone());
+        };
+
+        let (ctx, _, _, frame_stack) = self.inner.all_mut();
+        let frame = frame_stack.get();
+        let action = unsafe {
+            f.call_with_interpreter_with(&mut frame.interpreter, ctx, |ecx| {
+                // SAFETY: `on_log` lives on the stack and outlives the JIT call.
+                // The closure captures raw pointers whose types may not be
+                // `'static`, so we erase the lifetime via pointer cast.
+                ecx.on_log = Some(core::mem::transmute::<
+                    &mut dyn FnMut(&revm_primitives::Log),
+                    &mut (dyn FnMut(&revm_primitives::Log) + '_),
+                >(&mut on_log));
+            })
+        };
+
+        // Handle selfdestruct.
+        let (ctx, inspector) = self.ctx_inspector();
+        if let InterpreterAction::Return(result) = &action
+            && result.result == InstructionResult::SelfDestruct
+        {
+            inspect_selfdestruct(ctx, inspector);
+        }
+
+        let (ctx, _, _, frame_stack) = self.inner.all_mut();
+        let frame = frame_stack.get();
+        let mut result = frame.process_next_action::<_, ContextDbError<Self::Context>>(ctx, action);
+
+        if let Ok(ItemOrResult::Result(frame_result)) = &mut result {
+            let (ctx, inspector, frame) = self.ctx_inspector_frame();
+            if let Some(frame) = frame.eth_frame() {
+                revm_inspector::handler::frame_end(ctx, inspector, &frame.input, frame_result);
+                frame.set_finished(true);
+            }
+        }
+        result
+    }
+}
+
+impl<EVM, F> InspectEvm for JitEvm<EVM, F>
+where
+    EVM: EvmTr<
+            Frame = EthFrame,
+            Context: ContextTr<Journal: JournalTr<State = EvmState> + JournalExt> + ContextSetters,
+            Precompiles: PrecompileProvider<EVM::Context, Output = InterpreterResult>,
+        > + InspectorEvmTr,
+    F: FnMut(B256, &[u8]) -> Option<EvmCompilerFn>,
+{
+    type Inspector = <EVM as InspectorEvmTr>::Inspector;
+
+    #[inline]
+    fn set_inspector(&mut self, inspector: Self::Inspector) {
+        *self.inner.inspector() = inspector;
+    }
+
+    #[inline]
+    fn inspect_one_tx(&mut self, tx: Self::Tx) -> Result<Self::ExecutionResult, Self::Error> {
+        self.ctx_mut().set_tx(tx);
+        MainnetHandler::default().inspect_run(self)
+    }
+}
+
+impl<EVM, F> InspectCommitEvm for JitEvm<EVM, F> where
+    Self: InspectEvm + revm_handler::ExecuteCommitEvm
+{
+}
+
+#[inline(never)]
+#[cold]
+fn inspect_selfdestruct<CTX, IT>(context: &mut CTX, inspector: &mut impl Inspector<CTX, IT>)
+where
+    CTX: ContextTr<Journal: JournalExt> + revm_context_interface::Host,
+    IT: InterpreterTypes,
+{
+    use revm_context::JournalEntry;
+
+    if let Some(
+        JournalEntry::AccountDestroyed {
+            address: contract, target: to, had_balance: balance, ..
+        }
+        | JournalEntry::BalanceTransfer { from: contract, to, balance, .. },
+    ) = context.journal_mut().journal().last()
+    {
+        inspector.selfdestruct(*contract, *to, *balance);
     }
 }
