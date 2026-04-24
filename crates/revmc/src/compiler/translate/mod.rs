@@ -551,6 +551,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                     let next = self.bytecode.inst(inst + 1);
                     if !next.is_dead_code() && next.is_stack_section_head() {
                         self.materialize_live_stack();
+                    } else {
+                        self.relieve_vstack_pressure();
                     }
                 }
                 branch_to_next_opcode(self);
@@ -1600,6 +1602,31 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     fn materialize_live_stack(&mut self) {
         let range = self.vstack.live_range();
         self.materialize_range(range.start, range.end);
+    }
+
+    /// Eagerly materializes the coldest virtual slots when too many are live,
+    /// preventing excessive register pressure in long sections.
+    fn relieve_vstack_pressure(&mut self) {
+        /// Materialize when more than this many virtual slots are live.
+        const HIGH_WATER: usize = 2;
+        /// Never materialize the top N slots (they're likely used soon).
+        const KEEP_HOT: usize = 2;
+
+        let live = self.vstack.live_range();
+        if (live.end - live.start) as usize <= HIGH_WATER {
+            return;
+        }
+
+        let virtual_count = self.vstack.virtual_count();
+        if virtual_count <= HIGH_WATER {
+            return;
+        }
+
+        // Materialize everything below the hot window.
+        let cold_end = (self.vstack.top_offset() - KEEP_HOT as i32).max(live.start);
+        if cold_end > live.start {
+            self.materialize_range(live.start, cold_end);
+        }
     }
 
     /// Materializes all virtual slots in the given section-relative offset range.

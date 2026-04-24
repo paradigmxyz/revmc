@@ -144,6 +144,11 @@ impl<T: Copy> VStack<T> {
         self.base_offset..self.top_offset
     }
 
+    /// Returns the number of virtual (non-materialized) slots in the live range.
+    pub(super) fn virtual_count(&self) -> usize {
+        self.pending_stores(self.live_range()).count()
+    }
+
     /// Returns pending virtual slots that need physical stores in the given range,
     /// yielding `(offset, value)` pairs.
     ///
