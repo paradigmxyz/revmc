@@ -96,11 +96,11 @@ pub struct EvmCompiler<B: Backend> {
     gas_params: Option<GasParams>,
 
     dedup: bool,
-
     dse: bool,
 
     dump_assembly: bool,
     dump_unopt_assembly: bool,
+
     compiler_gas_limit: u64,
 
     #[debug(skip)]
@@ -126,10 +126,10 @@ impl<B: Backend> EvmCompiler<B> {
             config: FcxConfig::default(),
             builtins: Builtins::new(),
             gas_params: None,
-            dump_assembly: true,
-            dump_unopt_assembly: false,
             dedup: true,
             dse: true,
+            dump_assembly: true,
+            dump_unopt_assembly: false,
             compiler_gas_limit: crate::bytecode::DEFAULT_COMPILER_GAS_LIMIT,
             remarks: Remarks::default(),
             finalized: false,
