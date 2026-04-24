@@ -14,8 +14,8 @@ use revmc_builtins::{Builtin, Builtins, CallKind, CreateKind};
 use std::{fmt::Write, mem};
 
 mod peephole;
-mod virtual_stack;
 
+mod virtual_stack;
 use virtual_stack::{Slot, VirtualStack};
 
 const STACK_CAP: usize = 1024;
@@ -87,6 +87,9 @@ pub(super) struct FunctionCx<'a, B: Backend> {
     /// Stack length offset for the current instruction, used for push/pop.
     len_offset: i8,
 
+    /// Section-local virtual stack that caches values as SSA instead of
+    /// immediately storing/loading from the stack alloca.
+    virtual_stack: VirtualStack<B::Value>,
     /// Stack length at the start of the current stack section, loaded once from the alloca.
     /// All intra-section `len_before` values are derived from this + `section_len_offset`.
     section_start_len: B::Value,
@@ -135,10 +138,6 @@ pub(super) struct FunctionCx<'a, B: Backend> {
 
     /// Builtins.
     builtins: &'a mut Builtins<B>,
-
-    /// Section-local virtual stack that caches values as SSA instead of
-    /// immediately storing/loading from the stack alloca.
-    virtual_stack: VirtualStack<B::Value>,
 }
 
 impl<'a, B: Backend> FunctionCx<'a, B> {
@@ -996,8 +995,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             }
 
             op::POP => {
-                self.virtual_stack.drop_top(1);
-                self.len_offset -= 1;
+                self.pop_ignore(1);
             }
             op::MLOAD => {
                 let sp = self.sp_after_inputs();
@@ -1326,8 +1324,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             let name = b'a' + i as u8;
             self.stack_value_at_depth(operand_depth, i, std::str::from_utf8(&[name]).unwrap())
         });
-        self.virtual_stack.drop_top(N);
-        self.len_offset -= N as i8;
+        self.pop_ignore(N);
         values
     }
 
@@ -1489,7 +1486,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     /// from the stack pointer.
     ///
     /// The virtual stack is synced with the builtin's stack effect at instruction end
-    /// via [`sync_virtual_stack_diff`](Self::sync_virtual_stack_diff).
+    /// via `sync_virtual_stack_diff`.
     #[must_use]
     fn sp_after_inputs(&mut self) -> B::Value {
         let (inputs, outputs) = self.current_inst().stack_io();
@@ -1584,6 +1581,12 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         }
     }
 
+    /// Materializes all live virtual slots in the current section to memory.
+    fn materialize_live_stack(&mut self) {
+        let range = self.virtual_stack.live_range();
+        self.materialize_range(range.start, range.end);
+    }
+
     /// Materializes all virtual slots in the given section-relative offset range.
     fn materialize_range(&mut self, start: i32, end: i32) {
         let pending: Vec<_> = self.virtual_stack.virtual_slots_in_range(start..end).collect();
@@ -1592,12 +1595,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             self.bcx.store(value, sp);
         }
         self.virtual_stack.mark_materialized_range(start..end);
-    }
-
-    /// Materializes all live virtual slots in the current section to memory.
-    fn materialize_live_stack(&mut self) {
-        let range = self.virtual_stack.live_range();
-        self.materialize_range(range.start, range.end);
     }
 
     /// Builds a gas cost deduction for an immediate value.
