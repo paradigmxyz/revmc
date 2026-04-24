@@ -6,9 +6,9 @@
 
 use core::ops::Range;
 
-/// State of a single stack slot.
+/// State of a single virtual stack slot.
 #[derive(Clone, Copy, Debug)]
-pub(super) enum Slot<T> {
+pub(super) enum VSlot<T> {
     /// Physical memory already contains the canonical value.
     Materialized,
     /// The canonical value exists only as an SSA value; memory may be stale.
@@ -22,30 +22,30 @@ pub(super) enum Slot<T> {
 ///   section started (the section's inputs).
 /// - Non-negative offsets represent values pushed within the section.
 #[derive(Clone, Debug)]
-pub(super) struct VirtualStack<T> {
+pub(super) struct VStack<T> {
     /// Lowest tracked offset (inclusive), relative to `section_start_sp`.
     base_offset: i32,
     /// One-past-top offset, relative to `section_start_sp`.
     /// Equivalent to `section_len_offset + len_offset` in `FunctionCx`.
     top_offset: i32,
     /// Slot states, indexed by `(offset - base_offset)`.
-    slots: Vec<Option<Slot<T>>>,
+    slots: Vec<Option<VSlot<T>>>,
 }
 
-impl<T> Default for VirtualStack<T> {
+impl<T> Default for VStack<T> {
     fn default() -> Self {
         Self { base_offset: 0, top_offset: 0, slots: Vec::new() }
     }
 }
 
-impl<T: Copy> VirtualStack<T> {
+impl<T: Copy> VStack<T> {
     /// Resets the virtual stack for a new section.
     ///
     /// `inputs` is the number of stack values consumed by the section (the section's
     /// minimum required stack depth). `max_growth` is the maximum number of slots the
     /// section pushes beyond the entry height.
     ///
-    /// All input slots start as [`Slot::Materialized`] because they were written by
+    /// All input slots start as [`VSlot::Materialized`] because they were written by
     /// the previous section (or the function entry) and are already in memory.
     pub(super) fn reset(&mut self, inputs: usize, max_growth: usize) {
         self.base_offset = -(inputs as i32);
@@ -56,7 +56,7 @@ impl<T: Copy> VirtualStack<T> {
 
         // Section inputs are already in memory.
         for i in 0..inputs {
-            self.slots[i] = Some(Slot::Materialized);
+            self.slots[i] = Some(VSlot::Materialized);
         }
     }
 
@@ -75,7 +75,7 @@ impl<T: Copy> VirtualStack<T> {
         let idx = offset - self.base_offset;
         debug_assert!(
             idx >= 0 && (idx as usize) < self.slots.len(),
-            "VirtualStack: offset {offset} out of range [{}..{}), base={}, top={}, cap={}",
+            "VStack: offset {offset} out of range [{}..{}), base={}, top={}, cap={}",
             self.base_offset,
             self.base_offset + self.slots.len() as i32,
             self.base_offset,
@@ -86,45 +86,45 @@ impl<T: Copy> VirtualStack<T> {
     }
 
     /// Returns the slot state at the given operand depth.
-    pub(super) fn get(&self, depth: usize) -> Slot<T> {
+    pub(super) fn get(&self, depth: usize) -> VSlot<T> {
         let idx = self.idx(self.offset_at_depth(depth));
         self.slots[idx].unwrap()
     }
 
     /// Returns the slot state at the given section-relative offset.
-    /// Returns `Slot::Materialized` if the offset is outside the tracked range.
-    pub(super) fn get_at_offset(&self, offset: i32) -> Slot<T> {
+    /// Returns `VSlot::Materialized` if the offset is outside the tracked range.
+    pub(super) fn get_at_offset(&self, offset: i32) -> VSlot<T> {
         let idx = offset - self.base_offset;
         if idx < 0 || idx as usize >= self.slots.len() {
-            return Slot::Materialized;
+            return VSlot::Materialized;
         }
-        self.slots[idx as usize].unwrap_or(Slot::Materialized)
+        self.slots[idx as usize].unwrap_or(VSlot::Materialized)
     }
 
     /// Sets a slot to virtual at the given operand depth.
-    pub(super) fn set_virtual(&mut self, depth: usize, value: T) {
+    pub(super) fn set(&mut self, depth: usize, value: T) {
         let idx = self.idx(self.offset_at_depth(depth));
-        self.slots[idx] = Some(Slot::Virtual(value));
+        self.slots[idx] = Some(VSlot::Virtual(value));
     }
 
     /// Sets a slot to virtual at a section-relative offset.
-    pub(super) fn set_virtual_at_offset(&mut self, offset: i32, value: T) {
+    pub(super) fn set_at_offset(&mut self, offset: i32, value: T) {
         let idx = self.idx(offset);
-        self.slots[idx] = Some(Slot::Virtual(value));
+        self.slots[idx] = Some(VSlot::Virtual(value));
     }
 
     /// Pushes a virtual value onto the top of the stack.
-    pub(super) fn push_virtual(&mut self, value: T) {
+    pub(super) fn push(&mut self, value: T) {
         let idx = self.idx(self.top_offset);
-        self.slots[idx] = Some(Slot::Virtual(value));
+        self.slots[idx] = Some(VSlot::Virtual(value));
         self.top_offset += 1;
     }
 
     /// Pushes a materialized marker onto the top of the stack.
     /// Used when a builtin writes directly to the physical stack slot.
-    pub(super) fn push_materialized(&mut self) {
+    pub(super) fn push_mem(&mut self) {
         let idx = self.idx(self.top_offset);
-        self.slots[idx] = Some(Slot::Materialized);
+        self.slots[idx] = Some(VSlot::Materialized);
         self.top_offset += 1;
     }
 
@@ -138,29 +138,37 @@ impl<T: Copy> VirtualStack<T> {
         self.base_offset..self.top_offset
     }
 
-    /// Iterates over all virtual (non-materialized) slots in the given range,
+    /// Returns pending virtual slots that need physical stores in the given range,
     /// yielding `(offset, value)` pairs.
-    pub(super) fn virtual_slots_in_range(
-        &self,
-        range: Range<i32>,
-    ) -> impl Iterator<Item = (i32, T)> + '_ {
+    ///
+    /// Offsets outside the tracked range are silently skipped (they are already materialized
+    /// by the previous section or not yet live).
+    pub(super) fn pending_stores(&self, range: Range<i32>) -> impl Iterator<Item = (i32, T)> + '_ {
         range.filter_map(|off| {
-            let idx = self.idx(off);
-            match self.slots.get(idx)?.as_ref()? {
-                Slot::Virtual(v) => Some((off, *v)),
-                Slot::Materialized => None,
+            let idx = off - self.base_offset;
+            if idx < 0 || idx as usize >= self.slots.len() {
+                return None;
+            }
+            match self.slots.get(idx as usize)?.as_ref()? {
+                VSlot::Virtual(v) => Some((off, *v)),
+                VSlot::Materialized => None,
             }
         })
     }
 
     /// Marks all slots in the given range as materialized.
+    ///
+    /// Offsets outside the tracked range are silently skipped.
     pub(super) fn mark_materialized_range(&mut self, range: Range<i32>) {
         for off in range {
-            let idx = self.idx(off);
-            if let Some(slot) = self.slots.get_mut(idx)
+            let idx = off - self.base_offset;
+            if idx < 0 || idx as usize >= self.slots.len() {
+                continue;
+            }
+            if let Some(slot) = self.slots.get_mut(idx as usize)
                 && slot.is_some()
             {
-                *slot = Some(Slot::Materialized);
+                *slot = Some(VSlot::Materialized);
             }
         }
     }
@@ -172,36 +180,36 @@ mod tests {
 
     #[test]
     fn push_pop_basic() {
-        let mut vs = VirtualStack::<i32>::default();
+        let mut vs = VStack::<i32>::default();
         // Section with 0 inputs, max_growth 4.
         vs.reset(0, 4);
         assert_eq!(vs.top_offset(), 0);
 
-        vs.push_virtual(10);
-        vs.push_virtual(20);
+        vs.push(10);
+        vs.push(20);
         assert_eq!(vs.top_offset(), 2);
 
         // Depth 0 = TOS = 20, depth 1 = 10.
         match vs.get(0) {
-            Slot::Virtual(v) => assert_eq!(v, 20),
+            VSlot::Virtual(v) => assert_eq!(v, 20),
             _ => panic!("expected virtual"),
         }
         match vs.get(1) {
-            Slot::Virtual(v) => assert_eq!(v, 10),
+            VSlot::Virtual(v) => assert_eq!(v, 10),
             _ => panic!("expected virtual"),
         }
 
         vs.drop_top(1);
         assert_eq!(vs.top_offset(), 1);
         match vs.get(0) {
-            Slot::Virtual(v) => assert_eq!(v, 10),
+            VSlot::Virtual(v) => assert_eq!(v, 10),
             _ => panic!("expected virtual"),
         }
     }
 
     #[test]
     fn section_inputs_materialized() {
-        let mut vs = VirtualStack::<i32>::default();
+        let mut vs = VStack::<i32>::default();
         // Section with 2 inputs, max_growth 2.
         vs.reset(2, 2);
         assert_eq!(vs.top_offset(), 0);
@@ -215,54 +223,54 @@ mod tests {
         // But top is the one-past-end; the values are at -2 and -1.
         // We can't use get() because top=0 and nothing is "on" the stack from the
         // virtual stack's perspective (inputs are below the section start).
-        // Instead, verify via virtual_slots_in_range.
-        let virtual_slots: Vec<_> = vs.virtual_slots_in_range(-2..0).collect();
-        assert!(virtual_slots.is_empty(), "inputs should be materialized");
+        // Instead, verify via pending_stores.
+        let pending: Vec<_> = vs.pending_stores(-2..0).collect();
+        assert!(pending.is_empty(), "inputs should be materialized");
     }
 
     #[test]
-    fn set_virtual_swap() {
-        let mut vs = VirtualStack::<i32>::default();
+    fn set_swap() {
+        let mut vs = VStack::<i32>::default();
         vs.reset(0, 4);
-        vs.push_virtual(10);
-        vs.push_virtual(20);
-        vs.push_virtual(30);
+        vs.push(10);
+        vs.push(20);
+        vs.push(30);
 
-        // Simulate swap: read both, then set_virtual.
+        // Simulate swap: read both, then set.
         let a = match vs.get(0) {
-            Slot::Virtual(v) => v,
+            VSlot::Virtual(v) => v,
             _ => panic!("expected virtual"),
         };
         let b = match vs.get(2) {
-            Slot::Virtual(v) => v,
+            VSlot::Virtual(v) => v,
             _ => panic!("expected virtual"),
         };
-        vs.set_virtual(0, b);
-        vs.set_virtual(2, a);
+        vs.set(0, b);
+        vs.set(2, a);
 
         match vs.get(0) {
-            Slot::Virtual(v) => assert_eq!(v, 10),
+            VSlot::Virtual(v) => assert_eq!(v, 10),
             _ => panic!("expected virtual"),
         }
         match vs.get(2) {
-            Slot::Virtual(v) => assert_eq!(v, 30),
+            VSlot::Virtual(v) => assert_eq!(v, 30),
             _ => panic!("expected virtual"),
         }
     }
 
     #[test]
     fn materialize_range() {
-        let mut vs = VirtualStack::<i32>::default();
+        let mut vs = VStack::<i32>::default();
         vs.reset(0, 4);
-        vs.push_virtual(10);
-        vs.push_virtual(20);
-        vs.push_virtual(30);
+        vs.push(10);
+        vs.push(20);
+        vs.push(30);
 
-        let pending: Vec<_> = vs.virtual_slots_in_range(0..3).collect();
+        let pending: Vec<_> = vs.pending_stores(0..3).collect();
         assert_eq!(pending.len(), 3);
 
         vs.mark_materialized_range(0..3);
-        let pending: Vec<_> = vs.virtual_slots_in_range(0..3).collect();
+        let pending: Vec<_> = vs.pending_stores(0..3).collect();
         assert_eq!(pending.len(), 0);
     }
 }

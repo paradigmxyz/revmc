@@ -15,8 +15,8 @@ use std::{fmt::Write, mem};
 
 mod peephole;
 
-mod virtual_stack;
-use virtual_stack::{Slot, VirtualStack};
+mod vstack;
+use vstack::{VSlot, VStack};
 
 const STACK_CAP: usize = 1024;
 // const WORD_SIZE: usize = 32;
@@ -89,7 +89,7 @@ pub(super) struct FunctionCx<'a, B: Backend> {
 
     /// Section-local virtual stack that caches values as SSA instead of
     /// immediately storing/loading from the stack alloca.
-    virtual_stack: VirtualStack<B::Value>,
+    vstack: VStack<B::Value>,
     /// Stack length at the start of the current stack section, loaded once from the alloca.
     /// All intra-section `len_before` values are derived from this + `section_len_offset`.
     section_start_len: B::Value,
@@ -326,7 +326,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
             builtins,
 
-            virtual_stack: VirtualStack::default(),
+            vstack: VStack::default(),
         };
 
         // Add debug assertions for the parameters.
@@ -612,7 +612,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             self.stored_len_offset = 0;
 
             let section = data.stack_section;
-            self.virtual_stack.reset(section.inputs as usize, section.max_growth.max(0) as usize);
+            self.vstack.reset(section.inputs as usize, section.max_growth.max(0) as usize);
         }
         self.len_before = if self.section_len_offset == 0 {
             self.section_start_len
@@ -693,11 +693,16 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         if out >= 1
             && let Some(const_out) = self.bytecode.const_output(inst)
         {
+            debug_assert!(
+                out == 1 || out == inp + 1,
+                "const_output assumes single synthesized push: inp={inp}, out={out}",
+            );
+            debug_assert!(!data.may_suspend() && !data.is_branching());
             // We push exactly 1 value, so consume `inp + 1 - out` to match the
             // real stack diff. For DUP (out = inp+1) this is 0; for ADD (out = 1)
             // this equals inp.
             let drop_count = (inp + 1 - out) as usize;
-            self.virtual_stack.drop_top(drop_count);
+            self.vstack.drop_top(drop_count);
             self.len_offset -= drop_count as i8;
             let value = self.bcx.iconst_256(const_out);
             self.push(value);
@@ -1226,13 +1231,13 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     /// `Materialized` with no actual store, leaving garbage in memory.
     fn sync_noop_diff(&mut self, inst: Inst, diff: i32) {
         let expected_top = self.section_len_offset + diff;
-        let current_top = self.virtual_stack.top_offset();
+        let current_top = self.vstack.top_offset();
         if current_top == expected_top {
             return;
         }
         let delta = expected_top - current_top;
         if delta < 0 {
-            self.virtual_stack.drop_top((-delta) as usize);
+            self.vstack.drop_top((-delta) as usize);
         } else {
             // For NOOP instructions that push values, use the known constant output
             // if available. This ensures the value can be materialized later.
@@ -1240,10 +1245,10 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 && let Some(c) = self.bytecode.const_output(inst)
             {
                 let value = self.bcx.iconst_256(c);
-                self.virtual_stack.push_virtual(value);
+                self.vstack.push(value);
             } else {
                 for _ in 0..delta {
-                    self.virtual_stack.push_materialized();
+                    self.vstack.push_mem();
                 }
             }
         }
@@ -1259,16 +1264,16 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     /// the builtin's actual output.
     fn sync_virtual_stack_diff(&mut self, diff: i32) {
         let expected_top = self.section_len_offset + diff;
-        let current_top = self.virtual_stack.top_offset();
+        let current_top = self.vstack.top_offset();
         if current_top == expected_top {
             return;
         }
         let delta = expected_top - current_top;
         if delta < 0 {
-            self.virtual_stack.drop_top((-delta) as usize);
+            self.vstack.drop_top((-delta) as usize);
         } else {
             for _ in 0..delta {
-                self.virtual_stack.push_materialized();
+                self.vstack.push_mem();
             }
         }
 
@@ -1279,11 +1284,11 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let (_, outputs) = self.current_inst().stack_io();
         let outputs = outputs as i32;
         if outputs > 0 {
-            self.virtual_stack.mark_materialized_range(expected_top - outputs..expected_top);
+            self.vstack.mark_materialized_range(expected_top - outputs..expected_top);
         }
 
         debug_assert_eq!(
-            self.virtual_stack.top_offset(),
+            self.vstack.top_offset(),
             expected_top,
             "virtual stack sync mismatch after {:?}",
             self.current_inst().to_op(),
@@ -1292,7 +1297,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
     /// Pushes a 256-bit value onto the stack.
     fn push(&mut self, value: B::Value) {
-        self.virtual_stack.push_virtual(value);
+        self.vstack.push(value);
         self.len_offset += 1;
     }
 
@@ -1303,9 +1308,16 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         std::array::from_fn(|i| self.bytecode.const_operand(inst, i))
     }
 
+    /// Discards `n` stack inputs and pushes a compile-time constant.
+    fn fold_const(&mut self, n: usize, value: U256) {
+        self.pop_ignore(n);
+        let v = self.bcx.iconst_256(value);
+        self.push(v);
+    }
+
     /// Consumes the topmost `n` elements from the stack without loading them.
     fn pop_ignore(&mut self, n: usize) {
-        self.virtual_stack.drop_top(n);
+        self.vstack.drop_top(n);
         self.len_offset -= n as i8;
     }
 
@@ -1350,8 +1362,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         assert_ne!(m, 0);
         let a = self.stack_value_at_depth(n, n, "swap.a");
         let b = self.stack_value_at_depth(n + m, n + m, "swap.b");
-        self.virtual_stack.set_virtual(n, b);
-        self.virtual_stack.set_virtual(n + m, a);
+        self.vstack.set(n, b);
+        self.vstack.set(n + m, a);
     }
 
     /// `RETURN` or `REVERT` instruction.
@@ -1410,7 +1422,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         get_field(&mut self.bcx, ptr, offset, name)
     }
 
-    /// Re-loads the address at `slot` as i160, zero-extends to i256, and stores it back.
+    /// Re-loads the address at `slot` as i160, zero-extends to i256, and keeps it as a
+    /// virtual SSA value (avoids a store-load roundtrip).
     ///
     /// On little-endian the low 160 bits sit at byte offset 0, so a direct
     /// `load i160` + `zext i256` gives LLVM a typed narrow load — no AND needed
@@ -1420,7 +1433,9 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         debug_assert!(cfg!(target_endian = "little"), "big-endian not yet supported");
         let value = self.bcx.load(self.address_type, slot, "address");
         let value = self.bcx.zext(self.word_type, value);
-        self.bcx.store(value, slot);
+        // Keep as virtual SSA value — the next sync will see the vstack already at
+        // the expected height so it won't push a redundant Materialized entry.
+        self.push(value);
     }
 
     /// Loads the gas used.
@@ -1522,7 +1537,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let top = self.section_len_offset;
         for depth in 0..inputs {
             let off = top - inputs as i32 + (inputs - 1 - depth) as i32;
-            if let Slot::Materialized = self.virtual_stack.get_at_offset(off)
+            if let VSlot::Materialized = self.vstack.get_at_offset(off)
                 && let Some(c) = self.bytecode.const_operand(inst, depth)
             {
                 let value = self.bcx.iconst_256(c);
@@ -1569,13 +1584,13 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         if let Some(c) = self.bytecode.const_operand(inst, operand_depth) {
             return self.bcx.iconst_256(c);
         }
-        match self.virtual_stack.get(live_depth) {
-            Slot::Virtual(v) => v,
-            Slot::Materialized => {
-                let off = self.virtual_stack.offset_at_depth(live_depth);
+        match self.vstack.get(live_depth) {
+            VSlot::Virtual(v) => v,
+            VSlot::Materialized => {
+                let off = self.vstack.offset_at_depth(live_depth);
                 let sp = self.sp_from_section(off as i64);
                 let value = self.load_word(sp, name);
-                self.virtual_stack.set_virtual(live_depth, value);
+                self.vstack.set(live_depth, value);
                 value
             }
         }
@@ -1583,18 +1598,18 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
     /// Materializes all live virtual slots in the current section to memory.
     fn materialize_live_stack(&mut self) {
-        let range = self.virtual_stack.live_range();
+        let range = self.vstack.live_range();
         self.materialize_range(range.start, range.end);
     }
 
     /// Materializes all virtual slots in the given section-relative offset range.
     fn materialize_range(&mut self, start: i32, end: i32) {
-        let pending: Vec<_> = self.virtual_stack.virtual_slots_in_range(start..end).collect();
+        let pending: Vec<_> = self.vstack.pending_stores(start..end).collect();
         for (off, value) in pending {
             let sp = self.sp_from_section(off as i64);
             self.bcx.store(value, sp);
         }
-        self.virtual_stack.mark_materialized_range(start..end);
+        self.vstack.mark_materialized_range(start..end);
     }
 
     /// Builds a gas cost deduction for an immediate value.
