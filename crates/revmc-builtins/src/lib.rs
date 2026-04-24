@@ -615,6 +615,12 @@ pub unsafe extern "C" fn __revmc_builtin_sstore(
 
     let gp = &ecx.gas_params;
     gas!(ecx, gp.sstore_dynamic_gas(is_istanbul, &state_load.data, state_load.is_cold));
+
+    // State gas for new slot creation (EIP-8037).
+    if ecx.host.is_amsterdam_eip8037_enabled() {
+        state_gas!(ecx, gp.sstore_state_gas(&state_load.data));
+    }
+
     ecx.gas.record_refund(gp.sstore_refund(is_istanbul, &state_load.data));
     Ok(())
 }
@@ -942,6 +948,11 @@ pub unsafe extern "C" fn __revmc_builtin_selfdestruct(
     };
 
     gas!(ecx, ecx.gas_params.selfdestruct_cost(should_charge_topup, res.is_cold));
+
+    // State gas for new account creation (EIP-8037).
+    if ecx.host.is_amsterdam_eip8037_enabled() && should_charge_topup {
+        state_gas!(ecx, ecx.gas_params.new_account_state_gas());
+    }
 
     if !res.previously_destroyed {
         ecx.gas.record_refund(ecx.gas_params.selfdestruct_refund());
