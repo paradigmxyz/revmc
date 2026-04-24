@@ -158,6 +158,22 @@ def line_count(path: str) -> int:
         return 0
 
 
+def spill_reload_counts(path: str) -> tuple[int, int]:
+    """Count spill and reload annotations in an assembly file."""
+    spills = 0
+    reloads = 0
+    try:
+        with open(path) as f:
+            for line in f:
+                if "Spill" in line:
+                    spills += 1
+                if "Reload" in line:
+                    reloads += 1
+    except FileNotFoundError:
+        pass
+    return spills, reloads
+
+
 DURATION_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(ns|µs|us|ms|s)")
 DURATION_UNITS = {"ns": 1e-9, "µs": 1e-6, "us": 1e-6, "ms": 1e-3, "s": 1.0}
 
@@ -267,53 +283,85 @@ class CodegenLines(Analysis):
         return None
 
     def _collect(self, benches, dump_dir):
-        """Collect line counts per file type + JIT size, returns (rows, totals).
+        """Collect line counts per file type + JIT size + spills/reloads.
 
-        Each row is (name, [line_counts...], jit_size).
+        Each row is (name, [line_counts...], jit_size, spills, reloads).
         """
         FILES = ["unopt.ll", "opt.ll", "opt.s"]
         rows = []
         totals = [0] * len(FILES)
         total_size = 0
+        total_spills = 0
+        total_reloads = 0
         for bench in benches:
             sub = dump_subdir(bench)
             counts = [line_count(os.path.join(dump_dir, sub, f)) for f in FILES]
             if all(c == 0 for c in counts):
                 continue
             jit_size = parse_jit_size(dump_dir, bench)
-            rows.append((bench_name(bench), counts, jit_size))
+            spills, reloads = spill_reload_counts(
+                os.path.join(dump_dir, sub, "opt.s")
+            )
+            rows.append((bench_name(bench), counts, jit_size, spills, reloads))
             for i, c in enumerate(counts):
                 totals[i] += c
             total_size += jit_size
-        return rows, totals, total_size
+            total_spills += spills
+            total_reloads += reloads
+        return rows, totals, total_size, total_spills, total_reloads
 
     def report(self, benches, dump_dir, outputs):
-        rows, totals, total_size = self._collect(benches, dump_dir)
-        print("### Assembly line counts\n")
-        table = [[name, *counts, fmt_size(jit_size)] for name, counts, jit_size in rows]
-        table.append(
-            ["**TOTAL**", *[f"**{t}**" for t in totals], f"**{fmt_size(total_size)}**"]
+        rows, totals, total_size, total_spills, total_reloads = self._collect(
+            benches, dump_dir
         )
-        print_table(["benchmark", "unopt.ll", "opt.ll", "opt.s", "jit size"], table)
+        print("### Assembly line counts\n")
+        table = [
+            [name, *counts, fmt_size(jit_size), spills, reloads]
+            for name, counts, jit_size, spills, reloads in rows
+        ]
+        table.append(
+            [
+                "**TOTAL**",
+                *[f"**{t}**" for t in totals],
+                f"**{fmt_size(total_size)}**",
+                f"**{total_spills}**",
+                f"**{total_reloads}**",
+            ]
+        )
+        print_table(
+            ["benchmark", "unopt.ll", "opt.ll", "opt.s", "jit size", "spills", "reloads"],
+            table,
+        )
 
     def report_diff(
         self, benches, dump_dir, outputs, base_dump, base_outputs, base_label
     ):
-        cur_rows, cur_totals, cur_total_size = self._collect(benches, dump_dir)
-        base_rows, base_totals, base_total_size = self._collect(benches, base_dump)
-        base_map = {name: (counts, jit_size) for name, counts, jit_size in base_rows}
+        cur_rows, cur_totals, cur_total_size, cur_tsp, cur_trl = self._collect(
+            benches, dump_dir
+        )
+        base_rows, base_totals, base_total_size, base_tsp, base_trl = self._collect(
+            benches, base_dump
+        )
+        base_map = {
+            name: (counts, jit_size, spills, reloads)
+            for name, counts, jit_size, spills, reloads in base_rows
+        }
 
         # Summary table.
         print("### Assembly line counts\n")
-        headers = ["benchmark", "unopt.ll", "opt.ll", "opt.s", "jit size"]
+        headers = ["benchmark", "unopt.ll", "opt.ll", "opt.s", "jit size", "spills", "reloads"]
         table = []
-        for name, counts, jit_size in cur_rows:
-            base_counts, base_jit = base_map.get(name, ([0] * 3, 0))
+        for name, counts, jit_size, spills, reloads in cur_rows:
+            base_counts, base_jit, base_sp, base_rl = base_map.get(
+                name, ([0] * 3, 0, 0, 0)
+            )
             table.append(
                 [
                     name,
                     *[fmt_pct(b, c) for b, c in zip(base_counts, counts)],
                     fmt_pct(base_jit, jit_size),
+                    fmt_diff(base_sp, spills),
+                    fmt_diff(base_rl, reloads),
                 ]
             )
         table.append(
@@ -321,6 +369,8 @@ class CodegenLines(Analysis):
                 "**TOTAL**",
                 *[f"**{fmt_pct(b, c)}**" for b, c in zip(base_totals, cur_totals)],
                 f"**{fmt_pct(base_total_size, cur_total_size)}**",
+                f"**{fmt_diff(base_tsp, cur_tsp)}**",
+                f"**{fmt_diff(base_trl, cur_trl)}**",
             ]
         )
         print_table(headers, table)
@@ -331,13 +381,19 @@ class CodegenLines(Analysis):
         for f in ["unopt.ll", "opt.ll", "opt.s"]:
             detail_headers += [f"{f} ({base_label})", "diff"]
         detail_headers += [f"jit size ({base_label})", "diff"]
+        detail_headers += [f"spills ({base_label})", "diff"]
+        detail_headers += [f"reloads ({base_label})", "diff"]
         detail_table = []
-        for name, counts, jit_size in cur_rows:
-            base_counts, base_jit = base_map.get(name, ([0] * 3, 0))
+        for name, counts, jit_size, spills, reloads in cur_rows:
+            base_counts, base_jit, base_sp, base_rl = base_map.get(
+                name, ([0] * 3, 0, 0, 0)
+            )
             row = [name]
             for b, c in zip(base_counts, counts):
                 row += [b, fmt_pct(b, c)]
             row += [fmt_size(base_jit), fmt_pct(base_jit, jit_size)]
+            row += [base_sp, fmt_diff(base_sp, spills)]
+            row += [base_rl, fmt_diff(base_rl, reloads)]
             detail_table.append(row)
         total_row = ["**TOTAL**"]
         for b, c in zip(base_totals, cur_totals):
@@ -346,6 +402,8 @@ class CodegenLines(Analysis):
             f"**{fmt_size(base_total_size)}**",
             f"**{fmt_pct(base_total_size, cur_total_size)}**",
         ]
+        total_row += [f"**{base_tsp}**", f"**{fmt_diff(base_tsp, cur_tsp)}**"]
+        total_row += [f"**{base_trl}**", f"**{fmt_diff(base_trl, cur_trl)}**"]
         detail_table.append(total_row)
         print_table(detail_headers, detail_table)
         print("</details>\n")
