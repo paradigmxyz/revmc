@@ -32,11 +32,24 @@ impl Bytecode<'_> {
         let ic_width = decimal_width(max_ic);
         let pc_width = decimal_width(max_pc);
 
+        let total_insts = self.insts.len();
+        let live_insts = self.iter_insts().count();
+        let dead_insts = total_insts - live_insts;
+        let noops = self.iter_insts().filter(|(_, d)| d.flags.contains(InstFlags::NOOP)).count();
+        let suspends = self.iter_insts().filter(|(_, d)| d.may_suspend()).count();
+        let n_blocks = self.cfg.blocks.len();
+
         lines.push((
             String::new(),
             format!(
                 "spec_id={} has_dynamic_jumps={} may_suspend={}",
                 self.spec_id, self.has_dynamic_jumps, self.may_suspend,
+            ),
+        ));
+        lines.push((
+            String::new(),
+            format!(
+                "insts={total_insts} live={live_insts} dead={dead_insts} noops={noops} suspends={suspends} blocks={n_blocks}",
             ),
         ));
         lines.push((String::new(), String::new()));
