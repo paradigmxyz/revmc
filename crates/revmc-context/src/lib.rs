@@ -13,7 +13,7 @@ use revm_interpreter::{
     context_interface::cfg::GasParams,
     interpreter_types::{Jumps, LegacyBytecode, ReturnData, RuntimeFlag},
 };
-use revm_primitives::{Address, B256, Bytes, U256, hardfork::SpecId, ruint};
+use revm_primitives::{Address, B256, Bytes, Log, U256, hardfork::SpecId, ruint};
 
 mod arch;
 use arch::revmc_entry;
@@ -96,6 +96,12 @@ pub struct EvmContext<'a> {
     pub resume_at: ResumeAt,
     /// The contract bytecode, for CODECOPY at runtime.
     pub bytecode: *const [u8],
+    /// Optional callback invoked by the LOG builtin after constructing the log,
+    /// **before** it is passed to [`Host::log`].
+    ///
+    /// Set to `None` when no inspector is active.
+    #[doc(hidden)]
+    pub on_log: Option<&'a mut (dyn FnMut(&Log) + 'a)>,
     /// The size of the call input data, cached for CALLDATASIZE.
     pub calldatasize: usize,
     /// The result set by a builtin before exiting via [`revmc_exit`].
@@ -116,7 +122,7 @@ const _: () = {
     assert!(offset_of!(EvmContext<'_>, gas) == 16);
     assert!(offset_of!(EvmContext<'_>, spec_id) == 65);
     assert!(offset_of!(EvmContext<'_>, resume_at) == 72);
-    assert!(offset_of!(EvmContext<'_>, calldatasize) == 96);
+    assert!(offset_of!(EvmContext<'_>, calldatasize) == 112);
 };
 
 impl fmt::Debug for EvmContext<'_> {
@@ -154,6 +160,7 @@ impl<'a> EvmContext<'a> {
             spec_id: interpreter.runtime_flag.spec_id(),
             resume_at,
             bytecode,
+            on_log: None,
             calldatasize,
             exit_result: InstructionResult::Stop,
             exit_sp: ptr::null_mut(),
@@ -249,10 +256,39 @@ impl EvmCompilerFn {
         interpreter: &mut Interpreter,
         host: &mut dyn Host,
     ) -> InterpreterAction {
+        self.call_with_interpreter_inner(interpreter, host, |_| {})
+    }
+
+    /// Like [`call_with_interpreter`](Self::call_with_interpreter), but calls `configure` on the
+    /// [`EvmContext`] before invoking the compiled function.
+    ///
+    /// This can be used to install callbacks (e.g. [`EvmContext::on_log`]) that fire during
+    /// execution.
+    ///
+    /// # Safety
+    ///
+    /// Same requirements as [`call_with_interpreter`](Self::call_with_interpreter).
+    #[doc(hidden)]
+    pub unsafe fn call_with_interpreter_with(
+        self,
+        interpreter: &mut Interpreter,
+        host: &mut dyn Host,
+        configure: impl FnOnce(&mut EvmContext<'_>),
+    ) -> InterpreterAction {
+        self.call_with_interpreter_inner(interpreter, host, configure)
+    }
+
+    unsafe fn call_with_interpreter_inner(
+        self,
+        interpreter: &mut Interpreter,
+        host: &mut dyn Host,
+        configure: impl FnOnce(&mut EvmContext<'_>),
+    ) -> InterpreterAction {
         interpreter.bytecode.action = None;
 
         let (mut ecx, stack, stack_len) =
             EvmContext::from_interpreter_with_stack(interpreter, host);
+        configure(&mut ecx);
         let result = self.call(Some(stack), Some(stack_len), &mut ecx);
 
         let resume_at = ecx.resume_at;
