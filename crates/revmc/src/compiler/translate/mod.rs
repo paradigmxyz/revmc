@@ -87,11 +87,6 @@ pub(super) struct FunctionCx<'a, B: Backend> {
     /// Stack length offset for the current instruction, used for push/pop.
     len_offset: i8,
 
-    /// Deferred virtual value to set in the vstack after `sync_virtual_stack_diff`.
-    /// Used by sp_at_top builtins that reload the result and want to keep it as an
-    /// SSA value. The value is `(section_relative_offset, ssa_value)`.
-    deferred_virtual: Option<(i32, B::Value)>,
-
     /// Section-local virtual stack that caches values as SSA instead of
     /// immediately storing/loading from the stack alloca.
     vstack: VStack<B::Value>,
@@ -306,7 +301,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             input,
             len_before: zero,
             len_offset: 0,
-            deferred_virtual: None,
             section_start_len: zero,
             section_start_sp,
             section_len_offset: 0,
@@ -904,8 +898,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             op::ORIGIN => {
                 let slot = self.sp_at_top();
                 let _ = self.call_builtin(Builtin::Origin, &[self.ecx, slot]);
-                let value = self.narrow_to_address(slot);
-                self.deferred_virtual = Some((self.section_len_offset, value));
+                self.narrow_to_address(slot);
             }
             op::CALLER => {
                 field!(@push @[endian = "big"] self.address_type, self.input, InputsImpl; caller_address);
@@ -963,8 +956,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             op::COINBASE => {
                 let slot = self.sp_at_top();
                 let _ = self.call_builtin(Builtin::Coinbase, &[self.ecx, slot]);
-                let value = self.narrow_to_address(slot);
-                self.deferred_virtual = Some((self.section_len_offset, value));
+                self.narrow_to_address(slot);
             }
             op::TIMESTAMP => {
                 let slot = self.sp_at_top();
@@ -1228,9 +1220,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         }
 
         self.sync_virtual_stack_diff(diff);
-        if let Some((off, value)) = self.deferred_virtual.take() {
-            self.vstack.set_at_offset(off, value);
-        }
         self.section_len_offset += diff;
         goto_return!("normal exit");
     }
@@ -1433,19 +1422,17 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         get_field(&mut self.bcx, ptr, offset, name)
     }
 
-    /// Re-loads the address at `slot` as i160, zero-extends to i256, stores it back,
-    /// and returns the zext'd value.
+    /// Re-loads the address at `slot` as i160, zero-extends to i256, and stores it back.
     ///
     /// On little-endian the low 160 bits sit at byte offset 0, so a direct
     /// `load i160` + `zext i256` gives LLVM a typed narrow load — no AND needed
     /// to prove the high 96 bits are zero.
     #[allow(clippy::assertions_on_constants)]
-    fn narrow_to_address(&mut self, slot: B::Value) -> B::Value {
+    fn narrow_to_address(&mut self, slot: B::Value) {
         debug_assert!(cfg!(target_endian = "little"), "big-endian not yet supported");
         let value = self.bcx.load(self.address_type, slot, "address");
         let value = self.bcx.zext(self.word_type, value);
         self.bcx.store(value, slot);
-        value
     }
 
     /// Loads the gas used.
