@@ -10,7 +10,7 @@ mod bytecode;
 pub use bytecode::*;
 
 mod compiler;
-pub use compiler::{EvmCompiler, EvmCompilerInput};
+pub use compiler::{CompileTimings, EvmCompiler, EvmCompilerInput};
 
 mod linker;
 pub use linker::{Linker, shared_library_path};

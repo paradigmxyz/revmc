@@ -30,7 +30,21 @@ struct Remarks {
     translate: Cell<Duration>,
     verify: Cell<Duration>,
     optimize: Cell<Duration>,
+    codegen: Cell<Duration>,
     finalize_total: Cell<Duration>,
+}
+
+/// Per-phase timing breakdown from a compilation.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CompileTimings {
+    /// Time spent parsing and analyzing EVM bytecode.
+    pub parse: Duration,
+    /// Time spent translating analyzed bytecode to IR.
+    pub translate: Duration,
+    /// Time spent running optimization passes.
+    pub optimize: Duration,
+    /// Time spent emitting machine code (JIT lookup or object write).
+    pub codegen: Duration,
 }
 
 impl Remarks {
@@ -69,13 +83,16 @@ impl Drop for TimingGuard<'_> {
 /// [`write_object`]: EvmCompiler::write_object
 /// [`jit_function`]: EvmCompiler::jit_function
 /// [`clear`]: EvmCompiler::clear
-#[allow(missing_debug_implementations)]
+#[derive(derive_more::Debug)]
 pub struct EvmCompiler<B: Backend> {
     name: Option<String>,
+    #[debug(skip)]
     backend: B,
     out_dir: Option<PathBuf>,
     config: FcxConfig,
+    #[debug(skip)]
     builtins: Builtins<B>,
+    #[debug(skip)]
     gas_params: Option<GasParams>,
 
     dedup: bool,
@@ -86,6 +103,7 @@ pub struct EvmCompiler<B: Backend> {
 
     compiler_gas_limit: u64,
 
+    #[debug(skip)]
     remarks: Remarks,
     finalized: bool,
 }
@@ -131,6 +149,36 @@ impl<B: Backend> EvmCompiler<B> {
 
     fn is_jit(&self) -> bool {
         !self.is_aot()
+    }
+
+    /// Returns a reference to the underlying compiler backend.
+    #[doc(hidden)]
+    #[inline]
+    pub fn backend(&self) -> &B {
+        &self.backend
+    }
+
+    /// Returns a mutable reference to the underlying compiler backend.
+    #[doc(hidden)]
+    #[inline]
+    pub fn backend_mut(&mut self) -> &mut B {
+        &mut self.backend
+    }
+
+    /// Returns the per-phase timing breakdown from the last compilation and resets the counters.
+    pub fn take_timings(&self) -> CompileTimings {
+        let r = &self.remarks;
+        let timings = CompileTimings {
+            parse: r.parse.get(),
+            translate: r.translate.get(),
+            optimize: r.optimize.get(),
+            codegen: r.codegen.get(),
+        };
+        r.parse.set(Duration::ZERO);
+        r.translate.set(Duration::ZERO);
+        r.optimize.set(Duration::ZERO);
+        r.codegen.set(Duration::ZERO);
+        timings
     }
 
     /// Clones the current backend config, applies `f`, and sends the updated snapshot.
@@ -414,7 +462,10 @@ impl<B: Backend> EvmCompiler<B> {
     pub unsafe fn jit_function(&mut self, id: B::FuncId) -> Result<EvmCompilerFn> {
         ensure!(self.is_jit(), "cannot JIT functions during AOT compilation");
         self.finalize()?;
-        let addr = self.backend.jit_function(id)?;
+        let addr = {
+            let _t = self.remarks.time(|r| &r.codegen);
+            self.backend.jit_function(id)?
+        };
         debug_assert!(addr != 0);
         if let Some(dump_dir) = &self.dump_dir() {
             self.append_jit_remarks(dump_dir);
@@ -676,7 +727,8 @@ impl<B: Backend> EvmCompiler<B> {
         let finalize = r.finalize_total.get();
         let verify = r.verify.get();
         let optimize = r.optimize.get();
-        let total = parse + translate + finalize;
+        let codegen = r.codegen.get();
+        let total = parse + translate + finalize + codegen;
         let file = fs::File::create(dump_dir.join("remarks.txt"))?;
         let mut w = io::BufWriter::new(file);
         write!(
@@ -690,6 +742,7 @@ translate:  {translate:>11.3?}
 finalize:   {finalize:>11.3?}
 - verify:   {verify:>11.3?}
 - optimize: {optimize:>11.3?}
+codegen:    {codegen:>11.3?}
 
 total:      {total:>11.3?}
 "

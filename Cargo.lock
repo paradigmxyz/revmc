@@ -2848,6 +2848,7 @@ dependencies = [
  "arbitrary",
  "bitflags",
  "bitvec",
+ "derive_more",
  "either",
  "indexmap 2.14.0",
  "oxc_index",

@@ -34,6 +34,7 @@ revm-interpreter.workspace = true
 revm-primitives.workspace = true
 revm-state.workspace = true
 
+derive_more = { version = "2", default-features = false, features = ["debug"] }
 bitflags = "2.5"
 bitvec = "1.0"
 either = "1.13"
