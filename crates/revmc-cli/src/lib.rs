@@ -7,9 +7,6 @@ use std::path::Path;
 mod benches;
 pub use benches::*;
 
-mod host;
-pub use host::BenchHost;
-
 #[cfg(feature = "llvm")]
 mod fixture;
 #[cfg(feature = "llvm")]
