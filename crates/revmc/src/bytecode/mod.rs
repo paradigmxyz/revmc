@@ -605,12 +605,9 @@ impl<'a> Bytecode<'a> {
         trace!("{buf}");
     }
 
-    /// Logs IR statistics: instruction counts, block size distribution, and top 5 longest blocks.
-    #[inline(never)]
-    fn log_ir_stats(&self) {
-        use std::fmt::Write;
-
-        let total_insts = self.insts.len();
+    /// Collects IR statistics: instruction counts and block count.
+    fn ir_stats(&self) -> IrStats {
+        let total = self.insts.len();
         let mut live = 0usize;
         let mut noops = 0usize;
         let mut dead = 0usize;
@@ -628,13 +625,23 @@ impl<'a> Bytecode<'a> {
                 }
             }
         }
+        IrStats { total, live, dead, noops, suspends, blocks: self.cfg.blocks.len() }
+    }
+
+    /// Logs IR statistics and top 5 longest blocks at trace level.
+    #[inline(never)]
+    fn log_ir_stats(&self) {
+        use std::fmt::Write;
+
+        let s = self.ir_stats();
 
         let mut lens: Vec<(Block, usize)> = self
             .cfg
             .blocks
             .iter_enumerated()
             .map(|(block, data)| {
-                let n = data.insts().filter(|&i| !self.inst(i).is_dead_code()).count();
+                let n = data.insts().len();
+                debug_assert_eq!(n, data.insts().filter(|&i| !self.inst(i).is_dead_code()).count());
                 (block, n)
             })
             .collect();
@@ -648,12 +655,12 @@ impl<'a> Bytecode<'a> {
         let median = if n_blocks > 0 { lens[n_blocks / 2].1 } else { 0 };
 
         trace!(
-            total_insts,
-            live,
-            dead,
-            noops,
-            suspends,
-            blocks = n_blocks,
+            total_insts = s.total,
+            live = s.live,
+            dead = s.dead,
+            noops = s.noops,
+            suspends = s.suspends,
+            blocks = s.blocks,
             block_min = min,
             block_max = max,
             block_avg = format_args!("{avg:.1}"),
@@ -691,6 +698,16 @@ impl<'a> Bytecode<'a> {
         }
         s
     }
+}
+
+/// Summary IR statistics for a compiled bytecode.
+pub(crate) struct IrStats {
+    pub(crate) total: usize,
+    pub(crate) live: usize,
+    pub(crate) dead: usize,
+    pub(crate) noops: usize,
+    pub(crate) suspends: usize,
+    pub(crate) blocks: usize,
 }
 
 /// A single instruction in the bytecode.
