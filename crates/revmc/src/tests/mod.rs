@@ -1147,6 +1147,20 @@ tests! {
                 assert_eq!(host.storage.get(&200_U256), Some(&100_U256));
             }),
         }),
+        sstore_const_inputs(@raw {
+            bytecode: &[op::PUSH1, 42, op::PUSH0, op::SSTORE],
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+            assert_host: Some(|host| {
+                assert_eq!(host.storage.get(&U256::ZERO), Some(&42_U256));
+            }),
+        }),
+        tstore_const_inputs(@raw {
+            bytecode: &[op::PUSH1, 42, op::PUSH1, 69, op::TSTORE],
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+            assert_host: Some(|host| {
+                assert_eq!(host.transient_storage.get(&69_U256), Some(&42_U256));
+            }),
+        }),
         sstore_constantinople(@raw {
             bytecode: &[op::PC, op::PC, op::SSTORE, op::PC, op::COINBASE],
             spec_id: SpecId::CONSTANTINOPLE,

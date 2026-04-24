@@ -12,7 +12,7 @@ use std::{borrow::Cow, cell::RefCell};
 pub(crate) use revm_context_interface::cfg::GasParams;
 
 mod passes;
-use passes::{Cfg, GasSection, SectionsAnalysis, Snapshots, StackSection};
+pub(crate) use passes::{Cfg, GasSection, SectionsAnalysis, Snapshots, StackSection};
 
 mod asm;
 pub use asm::parse_asm;

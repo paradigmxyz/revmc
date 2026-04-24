@@ -209,9 +209,7 @@ pub(crate) fn compute_stack_io(op: u8, immediate: Option<&[u8]>) -> (u8, u8) {
         op::EXCHANGE => decode_pair(imm_u8()).map(|(_n, m)| (m + 1, m + 1)),
         _ => return stack_io(op),
     }
-    // Invalid immediate: translate will emit `InvalidImmediateEncoding` and diverge,
-    // so use (0, 0) to match the zero stack effect in section analysis.
-    .unwrap_or((0, 0))
+    .unwrap_or((0, 0)) // Invalid immediate.
 }
 
 /// Decodes a DUPN/SWAPN immediate byte into a stack index.

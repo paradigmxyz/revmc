@@ -2,8 +2,8 @@
 
 use super::default_attrs;
 use crate::{
-    Backend, Builder, Bytecode, EvmContext, Inst, InstData, InstFlags, IntCC, Result, decode_pair,
-    decode_single,
+    Backend, Builder, Bytecode, EvmContext, Inst, InstData, InstFlags, IntCC, Result, StackSection,
+    decode_pair, decode_single,
 };
 use oxc_index::IndexVec;
 use revm_bytecode::opcode as op;
@@ -521,17 +521,9 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 "attempted to branch to next instruction in a diverging instruction: {data:?}",
             );
             if let Some(&next) = this.inst_entries.get(inst + 1) {
-                // Flush virtual stack before leaving the section.
-                if this.bytecode.inst(inst + 1).is_stack_section_head() {
-                    this.materialize_live_stack();
-                }
                 this.bcx.br(next);
             }
         };
-        // Currently a noop.
-        // let epilogue = |this: &mut Self| {
-        //     this.bcx.seal_block(entry_block);
-        // };
 
         /// Makes sure to run cleanup code and return.
         /// Use `no_branch` to skip the branch to the next opcode.
@@ -543,7 +535,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                         self.add_comment($comment);
                     }
                 )?
-                // epilogue(self);
                 return Ok(());
             };
             (build $ret:expr) => {{
@@ -555,6 +546,13 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 goto_return!(no_branch);
             }};
             ($($comment:expr)?) => {
+                // Flush virtual stack before leaving the section.
+                if self.inst_entries.get(inst + 1).is_some() {
+                    let next = self.bytecode.inst(inst + 1);
+                    if !next.is_dead_code() && next.is_stack_section_head() {
+                        self.materialize_live_stack();
+                    }
+                }
                 branch_to_next_opcode(self);
                 goto_return!(no_branch $($comment)?);
             };
@@ -580,20 +578,11 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         // Pay static gas for the current section.
         self.gas_cost_imm(data.gas_section.gas_cost as u64);
 
-        // NOOPs that aren't section heads need no codegen beyond gas.
-        // We only update `section_len_offset` (no store to `len.addr`); the next real
-        // instruction will reconcile `stored_len_offset` in a single store.
-        let (inp, out) = data.stack_io();
-        let diff = effective_stack_diff(inp, out, data);
-        if data.flags.contains(InstFlags::NOOP) && !data.is_stack_section_head() {
-            self.sync_noop_diff(inst, diff);
-            self.section_len_offset += diff;
-            goto_return!("noop");
-        }
-
         // Compute len_before for this instruction.
         // At section heads: load from the alloca once and reset the section offset.
         // Within a section: derive from section_start_len + compile-time offset.
+        let (inp, out) = data.stack_io();
+        let diff = effective_stack_diff(inp, out, data);
         self.len_offset = 0;
         if data.is_stack_section_head() {
             self.section_start_len = self.stack_len.load(&mut self.bcx, "stack_len");
@@ -612,51 +601,10 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
         // Check stack length for the current section.
         if self.config.stack_bound_checks {
-            let inp = data.stack_section.inputs;
-            let diff = data.stack_section.max_growth as i64;
-
-            if diff > revmc_context::EvmStack::CAPACITY as i64 {
-                goto_return!(fail InstructionResult::StackOverflow);
-            }
-
-            let underflow = |this: &mut Self| {
-                debug_assert!(inp > 0);
-                this.bcx.icmp_imm(IntCC::UnsignedLessThan, this.len_before, inp as i64)
-            };
-            let overflow = |this: &mut Self| {
-                debug_assert!(diff > 0 && diff <= STACK_CAP as i64);
-                this.bcx.icmp_imm(
-                    IntCC::UnsignedGreaterThan,
-                    this.len_before,
-                    STACK_CAP as i64 - diff,
-                )
-            };
-
-            let may_underflow = inp > 0;
-            let may_overflow = diff > 0;
-            if may_underflow && may_overflow {
-                let underflow = underflow(self);
-                let overflow = overflow(self);
-                let cond = self.bcx.bitor(underflow, overflow);
-                let ret = {
-                    let under =
-                        self.bcx.iconst(self.i8_type, InstructionResult::StackUnderflow as i64);
-                    let over =
-                        self.bcx.iconst(self.i8_type, InstructionResult::StackOverflow as i64);
-                    self.bcx.select(underflow, under, over)
-                };
-                let target = self.build_check_inner(true, cond, ret);
-                self.bcx.switch_to_block(target);
-            } else if may_underflow {
-                let cond = underflow(self);
-                self.build_check(cond, InstructionResult::StackUnderflow);
-            } else if may_overflow {
-                let cond = overflow(self);
-                self.build_check(cond, InstructionResult::StackOverflow);
-            }
+            self.check_stack_bounds(data.stack_section);
         }
 
-        // NOOP section head: still needs bounds check above, but skip the rest.
+        // NOOPs need no codegen beyond gas and bounds checks.
         if data.flags.contains(InstFlags::NOOP) {
             self.sync_noop_diff(inst, diff);
             self.section_len_offset += diff;
@@ -1288,24 +1236,28 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 use std::fmt::Write;
                 let _ = write!(
                     section_dump,
-                    "\n  ic{i} pc={} {:?} io={:?} flags={:?}{}{}",
+                    "\n  ic{i} pc={} {:?} io={:?} flags={:?} gas={:?} stack={:?}{}{}",
                     d.pc,
                     d.to_op(),
                     d.stack_io(),
                     d.flags,
+                    d.gas_section,
+                    d.stack_section,
                     if d.is_stack_section_head() { " SECTION_HEAD" } else { "" },
                     if d.is_dead_code() { " DEAD" } else { "" },
                 );
             }
+            let head_data = self.bytecode.inst(head);
             panic!(
                 "sync: expected_top={expected_top} < base={}, section_len_offset={}, \
                  diff={diff}, current_top={current_top}, inst={:?} (ic{})\n\
-                 section head=ic{}, section:{section_dump}",
+                 section head=ic{}, head_stack_section={:?}, section:{section_dump}",
                 self.vstack.live_range().start,
                 self.section_len_offset,
                 self.current_inst().to_op(),
                 inst.index(),
                 head.index(),
+                head_data.stack_section,
             );
         }
         if delta < 0 {
@@ -1691,6 +1643,45 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         self.build_failure_imm_inner(false, success_cond, ret);
     }
     */
+
+    /// Emits under/overflow bounds checks for a stack section.
+    fn check_stack_bounds(&mut self, stack_section: StackSection) {
+        let inp = stack_section.inputs;
+        let diff = stack_section.max_growth as i64;
+
+        let underflow = |this: &mut Self| {
+            debug_assert!(inp > 0);
+            this.bcx.icmp_imm(IntCC::UnsignedLessThan, this.len_before, inp as i64)
+        };
+        let overflow = |this: &mut Self| {
+            debug_assert!(diff > 0);
+            if diff > STACK_CAP as i64 {
+                return this.bcx.bool_const(true);
+            }
+            this.bcx.icmp_imm(IntCC::UnsignedGreaterThan, this.len_before, STACK_CAP as i64 - diff)
+        };
+
+        let may_underflow = inp > 0;
+        let may_overflow = diff > 0;
+        if may_underflow && may_overflow {
+            let underflow = underflow(self);
+            let overflow = overflow(self);
+            let cond = self.bcx.bitor(underflow, overflow);
+            let ret = {
+                let under = self.bcx.iconst(self.i8_type, InstructionResult::StackUnderflow as i64);
+                let over = self.bcx.iconst(self.i8_type, InstructionResult::StackOverflow as i64);
+                self.bcx.select(underflow, under, over)
+            };
+            let target = self.build_check_inner(true, cond, ret);
+            self.bcx.switch_to_block(target);
+        } else if may_underflow {
+            let cond = underflow(self);
+            self.build_check(cond, InstructionResult::StackUnderflow);
+        } else if may_overflow {
+            let cond = overflow(self);
+            self.build_check(cond, InstructionResult::StackOverflow);
+        }
+    }
 
     /// Builds a check, failing if the condition is true.
     ///

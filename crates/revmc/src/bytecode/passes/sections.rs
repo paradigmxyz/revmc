@@ -268,10 +268,14 @@ impl SectionsAnalysis {
 
 #[cfg(test)]
 mod tests {
-    use crate::bytecode::{
-        Inst,
-        passes::block_analysis::tests::{analyze_asm, analyze_asm_spec, analyze_code_spec},
+    use crate::{
+        SpecId,
+        bytecode::{
+            Inst,
+            passes::block_analysis::tests::{analyze_asm, analyze_asm_spec, analyze_code_spec},
+        },
     };
+    use revm_bytecode::opcode as op;
 
     /// Returns the gas section cost for the first non-dead instruction (the section head).
     fn section_gas(src: &str) -> u32 {
@@ -317,8 +321,6 @@ mod tests {
     /// `NotActivated` guard, producing a divergent `StackUnderflow`.
     #[test]
     fn disabled_opcode_does_not_poison_section() {
-        use crate::SpecId;
-
         // CALLDATASIZE(0→1) ; TSTORE(2→0, disabled before Cancun)
         let bytecode = analyze_asm_spec("CALLDATASIZE TSTORE", SpecId::SHANGHAI);
         let head = bytecode.inst(Inst::from_usize(0));
@@ -335,9 +337,6 @@ mod tests {
     /// cumulative diff, causing translate to underflow the virtual stack on a subsequent SSTORE.
     #[test]
     fn invalid_dupn_imm_does_not_inflate_section() {
-        use crate::SpecId;
-        use revm_bytecode::opcode as op;
-
         // PUSH0, DUPN 0x5b (invalid immediate), PUSH0, SSTORE, STOP
         // Without the fix, DUPN had stack_io=(0,1), inflating the section diff by 1.
         // Translate would skip the +1 (goto_return!(fail)), then SSTORE's diff=-2 would
