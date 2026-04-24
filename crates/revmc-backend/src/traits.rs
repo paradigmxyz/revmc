@@ -298,7 +298,7 @@ pub trait Builder: BackendTypes + TypeMethods {
     /// Sign-extends negative values to `ty`.
     fn iconst(&mut self, ty: Self::Type, value: i64) -> Self::Value;
     fn uconst(&mut self, ty: Self::Type, value: u64) -> Self::Value;
-    fn iconst_256(&mut self, value: U256) -> Self::Value;
+    fn iconst_256(&mut self, value: impl TryInto<U256>) -> Self::Value;
     fn cstr_const(&mut self, value: &std::ffi::CStr) -> Self::Value {
         self.str_const(value.to_str().unwrap())
     }

@@ -795,7 +795,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 let might_do_something = self.bcx.icmp_imm(IntCC::UnsignedLessThan, ext, 31);
 
                 let shift = self.bcx.imul_imm(ext, 8);
-                let c248 = self.bcx.iconst_256(U256::from(248));
+                let c248 = self.bcx.iconst_256(248);
                 let shift = self.bcx.isub(c248, shift);
                 let shifted = self.bcx.ishl(x, shift);
                 let sext = self.bcx.sshr(shifted, shift);
@@ -838,23 +838,23 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 let in_range = self.bcx.icmp_imm(IntCC::UnsignedLessThan, index, 32);
 
                 let shift = self.bcx.imul_imm(index, 8);
-                let c248 = self.bcx.iconst_256(U256::from(248));
+                let c248 = self.bcx.iconst_256(248);
                 let shift = self.bcx.isub(c248, shift);
                 let shifted = self.bcx.ushr(value, shift);
-                let mask = self.bcx.iconst_256(U256::from(0xFF));
+                let mask = self.bcx.iconst_256(0xFF);
                 let byte = self.bcx.bitand(shifted, mask);
 
-                let zero = self.bcx.iconst_256(U256::ZERO);
+                let zero = self.bcx.iconst_256(0);
 
                 let r = self.bcx.select(in_range, byte, zero);
                 self.push(r);
             }
-            op::SHL => binop!(@shift ishl, |value, shift| self.bcx.iconst_256(U256::ZERO)),
-            op::SHR => binop!(@shift ushr, |value, shift| self.bcx.iconst_256(U256::ZERO)),
+            op::SHL => binop!(@shift ishl, |value, shift| self.bcx.iconst_256(0)),
+            op::SHR => binop!(@shift ushr, |value, shift| self.bcx.iconst_256(0)),
             op::SAR => binop!(@shift sshr, |value, shift| {
                 let is_negative = self.bcx.icmp_imm(IntCC::SignedLessThan, value, 0);
                 let max = self.bcx.iconst_256(U256::MAX);
-                let zero = self.bcx.iconst_256(U256::ZERO);
+                let zero = self.bcx.iconst_256(0);
                 self.bcx.select(is_negative, max, zero)
             }),
             op::CLZ => unop!(clz),
@@ -1078,7 +1078,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 goto_return!(no_branch);
             }
             op::PC => {
-                let pc = self.bcx.iconst_256(U256::from(data.pc));
+                let pc = self.bcx.iconst_256(data.pc);
                 self.push(pc);
             }
             op::MSIZE => {
@@ -1108,7 +1108,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             }
 
             op::PUSH0 => {
-                let value = self.bcx.iconst_256(U256::ZERO);
+                let value = self.bcx.iconst_256(0);
                 self.push(value);
             }
             op::PUSH1..=op::PUSH32 => {
