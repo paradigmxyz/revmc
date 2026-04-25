@@ -102,6 +102,7 @@ counts, compile times, jump resolution stats, and constant-input statistics.
 
 ## Important
 
+- NEVER summarize benchmark results. Always post the entire, unedited output.
 - NEVER delete or modify `./tmp/` — it contains manually generated IR/asm dumps used for comparison.
 - `tmp/dump/` contains dumps from `main`, `tmp/dump2/` contains dumps from the current branch.
   Use these for manual `diff` comparison of LLVM IR and assembly.
