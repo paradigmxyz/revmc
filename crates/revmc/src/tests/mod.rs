@@ -1528,7 +1528,7 @@ tests! {
             expected_gas: GAS_WHAT_INTERPRETER_SAYS,
             expected_next_action: ACTION_WHAT_INTERPRETER_SAYS,
         }),
-        delegatecall_istanbul(@raw {
+        staticcall_istanbul(@raw {
             bytecode: &[
                 op::PUSH1, 1,   // ret length
                 op::PUSH1, 2,   // ret offset
@@ -1536,7 +1536,7 @@ tests! {
                 op::PUSH1, 4,   // args offset
                 op::PUSH1, 5,   // address
                 op::PUSH1, 6,   // gas
-                op::DELEGATECALL,
+                op::STATICCALL,
             ],
             spec_id: SpecId::ISTANBUL,
             expected_return: RETURN_WHAT_INTERPRETER_SAYS,

@@ -56,6 +56,8 @@ pub use revm_context_interface as context_interface;
 #[doc(no_inline)]
 pub use revm_handler as handler;
 #[doc(no_inline)]
+pub use revm_inspector as inspector;
+#[doc(no_inline)]
 pub use revm_interpreter::{self as interpreter};
 #[doc(no_inline)]
 pub use revm_primitives as primitives;

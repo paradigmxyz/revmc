@@ -663,9 +663,7 @@ impl<B: Backend> EvmCompiler<B> {
 
         // Function attributes.
         let function_attributes = default_attrs::for_fn()
-            .chain(config.frame_pointers.then_some(Attribute::AllFramePointers))
-            // We can unwind in panics, which are present only in debug assertions.
-            .chain((!config.debug_assertions).then_some(Attribute::NoUnwind));
+            .chain(config.frame_pointers.then_some(Attribute::AllFramePointers));
         for attr in function_attributes {
             bcx.add_function_attribute(None, attr, FunctionAttributeLocation::Function);
         }
