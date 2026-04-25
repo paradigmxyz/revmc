@@ -554,7 +554,7 @@ impl<'a> Bytecode<'a> {
                 entry.per_input[depth][0] += 1;
                 if let Some(val) = self.const_operand(inst, depth) {
                     entry.per_input[depth][1] += 1;
-                    if val <= U256::from(usize::MAX) {
+                    if val <= usize::MAX {
                         entry.per_input[depth][2] += 1;
                     }
                 } else {
