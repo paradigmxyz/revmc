@@ -1331,8 +1331,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     }
 
     /// Discards `n` stack inputs and pushes a compile-time constant.
-    fn fold_const(&mut self, n: usize, value: U256) {
-        self.pop_ignore(n);
+    fn fold_const(&mut self, value: impl TryInto<U256>) {
+        self.pop_ignore(self.current_inst().stack_io().0 as usize);
         let v = self.bcx.iconst_256(value);
         self.push(v);
     }
