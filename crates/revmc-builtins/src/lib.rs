@@ -11,7 +11,6 @@ extern crate alloc;
 extern crate tracing;
 
 use alloc::{boxed::Box, vec::Vec};
-
 use revm_interpreter::{
     CallInput, CallInputs, CallScheme, CallValue, CreateInputs, CreateScheme, FrameInput,
     InstructionResult, InterpreterAction, InterpreterResult, as_u64_saturated, as_usize_saturated,
@@ -463,7 +462,6 @@ pub unsafe extern "C" fn __revmc_builtin_blob_base_fee(ecx: &EvmContext<'_>, slo
     *slot = ecx.host.blob_gasprice().into();
 }
 
-#[cold]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __revmc_builtin_mresize(
     ecx: &mut EvmContext<'_>,
