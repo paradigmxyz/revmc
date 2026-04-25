@@ -96,7 +96,6 @@ pub struct EvmContext<'a> {
     pub resume_at: ResumeAt,
     /// The contract bytecode, for CODECOPY at runtime.
     pub bytecode: *const [u8],
-
     /// Optional callback invoked by the LOG builtin after constructing the log,
     /// **before** it is passed to [`Host::log`].
     ///

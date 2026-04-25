@@ -669,17 +669,11 @@ impl<B: Backend> EvmCompiler<B> {
         }
 
         // Pointer argument attributes.
-        // NOTE: We intentionally omit `noalias` / `writable` on these pointers.
-        // The `ecx` pointer is passed to extern builtin calls which modify the
-        // same allocation; with `noalias` LLVM may hoist or cache loads across
-        // those calls, leading to miscompilation.
-        if !config.debug_assertions {
-            for &(i, size, align) in ptr_attrs {
-                let attrs = default_attrs::for_sized_ptr((size, align));
-                for attr in attrs {
-                    let loc = FunctionAttributeLocation::Param(i as _);
-                    bcx.add_function_attribute(None, attr, loc);
-                }
+        for &(i, size, align) in ptr_attrs {
+            let attrs = default_attrs::for_sized_ptr((size, align));
+            for attr in attrs {
+                let loc = FunctionAttributeLocation::Param(i as _);
+                bcx.add_function_attribute(None, attr, loc);
             }
         }
 
