@@ -36,8 +36,8 @@ pub struct RuntimeStatsSnapshot {
     pub events_dropped: u64,
     /// Number of entries in the resident compiled map.
     pub resident_entries: u64,
-    /// Number of commands pending in the backend command queue.
-    pub jit_queue_len: u64,
+    /// Number of lookup-observed events pending in the bounded lookup channel.
+    pub lookup_queue_len: u64,
     /// Bytes allocated for executable JIT code sections.
     ///
     /// Sourced from the LLVM JIT memory usage plugin. Reflects live memory:
@@ -69,7 +69,7 @@ impl RuntimeStats {
     pub(crate) fn snapshot(
         &self,
         resident_entries: u64,
-        jit_queue_len: u64,
+        lookup_queue_len: u64,
     ) -> RuntimeStatsSnapshot {
         #[cfg(feature = "llvm")]
         let (jit_code_bytes, jit_data_bytes) = crate::llvm::jit_memory_usage()
@@ -84,7 +84,7 @@ impl RuntimeStats {
             events_sent: self.events_sent.load(Ordering::Relaxed),
             events_dropped: self.events_dropped.load(Ordering::Relaxed),
             resident_entries,
-            jit_queue_len,
+            lookup_queue_len,
             jit_code_bytes,
             jit_data_bytes,
             evictions: self.evictions.load(Ordering::Relaxed),

@@ -35,14 +35,8 @@ pub enum InterpretReason {
     Disabled,
     /// No compiled program is ready for this key.
     NotReady,
-    /// The JIT compile queue is saturated.
-    QueueSaturated,
     /// JIT compilation failed for this contract.
     JitFailed,
-    /// The requested backend is not available.
-    UnsupportedBackend,
-    /// The compiled artifact was invalidated.
-    Invalidated,
 }
 
 /// A compiled EVM program kept alive in the resident map.

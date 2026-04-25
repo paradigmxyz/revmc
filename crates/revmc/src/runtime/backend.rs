@@ -205,7 +205,7 @@ impl BackendState {
                 generation: self.generation,
             });
 
-            if self.workers.try_send(job) {
+            if self.workers.try_send(job).is_ok() {
                 entry.phase = EntryPhase::Working;
                 self.pending_jobs += 1;
                 self.stats.compilations_dispatched.fetch_add(1, Ordering::Relaxed);
@@ -257,15 +257,23 @@ impl BackendState {
             generation: self.generation,
         });
 
-        if self.workers.try_send(job) {
-            debug!(
-                %code_hash,
-                pending_jobs = self.pending_jobs + 1,
-                "compile_jit: dispatched to worker",
-            );
-            entry.phase = EntryPhase::Working;
-            self.pending_jobs += 1;
-            self.stats.compilations_dispatched.fetch_add(1, Ordering::Relaxed);
+        match self.workers.try_send(job) {
+            Ok(()) => {
+                debug!(
+                    %code_hash,
+                    pending_jobs = self.pending_jobs + 1,
+                    "compile_jit: dispatched to worker",
+                );
+                entry.phase = EntryPhase::Working;
+                self.pending_jobs += 1;
+                self.stats.compilations_dispatched.fetch_add(1, Ordering::Relaxed);
+            }
+            Err(WorkerJob::Jit(job)) => {
+                // Worker queue saturated — notify caller immediately so it doesn't hang.
+                warn!(%code_hash, "compile_jit: worker pool saturated, dropping request");
+                job.sync_notifier.notify();
+            }
+            Err(WorkerJob::Aot(_)) => unreachable!("sent Jit job"),
         }
     }
 
@@ -309,7 +317,7 @@ impl BackendState {
                 pending_notifiers: Vec::new(),
             });
 
-            if self.workers.try_send(job) {
+            if self.workers.try_send(job).is_ok() {
                 entry.phase = EntryPhase::Working;
                 self.pending_jobs += 1;
                 self.stats.compilations_dispatched.fetch_add(1, Ordering::Relaxed);
@@ -690,7 +698,8 @@ impl BackendState {
 
 /// Runs the backend event loop. Called on the backend thread.
 pub(crate) fn run(
-    cmd_rx: chan::Receiver<Command>,
+    lookup_rx: chan::Receiver<Command>,
+    control_rx: chan::Receiver<Command>,
     resident: Arc<ResidentMap>,
     config: RuntimeConfig,
     stats: Arc<RuntimeStats>,
@@ -727,29 +736,31 @@ pub(crate) fn run(
 
     loop {
         chan::select! {
-            recv(cmd_rx) -> msg => {
-                let cmd = match msg {
-                    Ok(cmd) => cmd,
-                    Err(_) => {
-                        debug!("backend channel closed, shutting down");
-                        break;
-                    }
-                };
-                match cmd {
-                    Command::LookupObserved(event) => state.handle_lookup_observed(event),
-                    Command::CompileJit(req) => state.handle_compile_jit(req),
-                    Command::PrepareAot(reqs) => state.handle_prepare_aot(reqs),
-                    Command::ClearResident => state.handle_clear_resident(),
-                    Command::ClearPersisted => state.handle_clear_persisted(),
-                    Command::ClearAll => state.handle_clear_all(),
-                    Command::Shutdown => {
+            // Control commands are reliable. Before processing one, drain any
+            // pending lookup events so causality (events queued before the
+            // control command) is preserved.
+            recv(control_rx) -> msg => {
+                while let Ok(cmd) = lookup_rx.try_recv() {
+                    handle_command(&mut state, cmd);
+                }
+                match msg {
+                    Ok(Command::Shutdown) => {
                         debug!("backend thread shutting down");
                         break;
                     }
+                    Ok(cmd) => handle_command(&mut state, cmd),
+                    Err(_) => {
+                        debug!("control channel closed, shutting down");
+                        break;
+                    }
                 }
-
-                // Sweep after commands, not after worker results — newly inserted
-                // entries should be visible to lookups before being evicted.
+                state.run_eviction_sweep();
+            }
+            recv(lookup_rx) -> msg => {
+                if let Ok(cmd) = msg {
+                    handle_command(&mut state, cmd);
+                }
+                // Lookup channel close is benign; control channel governs shutdown.
                 state.run_eviction_sweep();
             }
             recv(state.result_rx) -> msg => {
@@ -778,4 +789,16 @@ pub(crate) fn run(
     );
 
     state.workers.shutdown();
+}
+
+fn handle_command(state: &mut BackendState, cmd: Command) {
+    match cmd {
+        Command::LookupObserved(event) => state.handle_lookup_observed(event),
+        Command::CompileJit(req) => state.handle_compile_jit(req),
+        Command::PrepareAot(reqs) => state.handle_prepare_aot(reqs),
+        Command::ClearResident => state.handle_clear_resident(),
+        Command::ClearPersisted => state.handle_clear_persisted(),
+        Command::ClearAll => state.handle_clear_all(),
+        Command::Shutdown => unreachable!("Shutdown handled by run loop"),
+    }
 }

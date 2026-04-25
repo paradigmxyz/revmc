@@ -205,19 +205,20 @@ impl WorkerPool {
         Self { job_txs, threads, next_worker: 0 }
     }
 
-    /// Tries to send a job to a worker (round-robin). Returns false if all queues are full.
-    pub(crate) fn try_send(&mut self, mut job: WorkerJob) -> bool {
+    /// Tries to send a job to a worker (round-robin).
+    /// Returns the job back on failure (all queues full or disconnected).
+    pub(crate) fn try_send(&mut self, mut job: WorkerJob) -> Result<(), WorkerJob> {
         let count = self.job_txs.len();
         for _ in 0..count {
             let idx = self.next_worker % count;
             self.next_worker = self.next_worker.wrapping_add(1);
             match self.job_txs[idx].try_send(job) {
-                Ok(()) => return true,
+                Ok(()) => return Ok(()),
                 Err(chan::TrySendError::Full(j)) => job = j,
-                Err(chan::TrySendError::Disconnected(_)) => return false,
+                Err(chan::TrySendError::Disconnected(j)) => return Err(j),
             }
         }
-        false
+        Err(job)
     }
 
     /// Shuts down all workers by dropping job senders and joining threads.
@@ -336,7 +337,7 @@ fn worker_loop(
                         .entered();
 
                 let generation = job.generation;
-                let outcome = compile_aot_artifact(&job, config.gas_params.as_ref());
+                let outcome = compile_aot_artifact(&job, config);
                 (
                     job.key,
                     outcome,
@@ -382,10 +383,7 @@ fn worker_loop(
 
 /// Compiles a single bytecode to a shared library and returns the raw bytes.
 #[cfg(feature = "llvm")]
-fn compile_aot_artifact(
-    job: &AotJob,
-    gas_params: Option<&revm_context_interface::cfg::GasParams>,
-) -> Result<WorkerSuccess, String> {
+fn compile_aot_artifact(job: &AotJob, config: &RuntimeConfig) -> Result<WorkerSuccess, String> {
     use crate::{EvmCompiler, EvmLlvmBackend, Linker};
     use std::io::Read;
 
@@ -393,7 +391,10 @@ fn compile_aot_artifact(
         EvmLlvmBackend::new(true).map_err(|e| format!("AOT backend creation failed: {e}"))?;
     let mut compiler = EvmCompiler::new(backend);
     compiler.set_opt_level(job.opt_level);
-    if let Some(gas_params) = gas_params {
+    compiler.debug_assertions(config.debug_assertions);
+    compiler.set_dedup(!config.no_dedup);
+    compiler.set_dse(!config.no_dse);
+    if let Some(gas_params) = &config.gas_params {
         compiler.set_gas_params(gas_params.clone());
     }
 

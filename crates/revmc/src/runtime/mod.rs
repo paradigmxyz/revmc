@@ -56,9 +56,14 @@ struct BackendInner {
     enabled: AtomicBool,
     /// Blocking mode: every lookup synchronously compiles and never falls back.
     blocking: bool,
-    /// Channel for sending commands to the backend thread.
+    /// Bounded channel for fire-and-forget lookup-observed events.
+    /// May silently drop on saturation.
     #[debug(skip)]
-    tx: chan::Sender<Command>,
+    lookup_tx: chan::Sender<Command>,
+    /// Unbounded channel for reliable control commands (compile, prepare, clear, shutdown).
+    /// Never drops; uses blocking sends.
+    #[debug(skip)]
+    control_tx: chan::Sender<Command>,
     /// Shared stats counters.
     #[debug(skip)]
     stats: Arc<RuntimeStats>,
@@ -74,7 +79,8 @@ struct BackendInner {
 
 /// State kept around for lazily spawning the backend thread.
 struct LazySpawnState {
-    rx: chan::Receiver<Command>,
+    lookup_rx: chan::Receiver<Command>,
+    control_rx: chan::Receiver<Command>,
     config: RuntimeConfig,
 }
 
@@ -116,17 +122,24 @@ impl JitBackend {
         }
 
         let enabled = config.enabled;
-        let (tx, rx) = chan::bounded::<Command>(config.tuning.lookup_event_channel_capacity);
+        let (lookup_tx, lookup_rx) =
+            chan::bounded::<Command>(config.tuning.lookup_event_channel_capacity);
+        let (control_tx, control_rx) = chan::unbounded::<Command>();
         let this = Self {
             inner: Arc::new(BackendInner {
                 resident: Arc::new(ResidentMap::default()),
                 enabled: AtomicBool::new(false),
                 blocking: config.blocking,
-                tx,
+                lookup_tx,
+                control_tx,
                 stats: Arc::new(RuntimeStats::default()),
                 thread: std::sync::Mutex::new(None),
                 shutdown_timeout: config.tuning.shutdown_timeout,
-                lazy_spawn: std::sync::Mutex::new(Some(LazySpawnState { rx, config })),
+                lazy_spawn: std::sync::Mutex::new(Some(LazySpawnState {
+                    lookup_rx,
+                    control_rx,
+                    config,
+                })),
             }),
         };
         this.set_enabled(enabled)?;
@@ -167,7 +180,7 @@ impl JitBackend {
             was_hit,
             bytecode: if was_hit { None } else { Some(req.code) },
         });
-        match self.inner.tx.try_send(event) {
+        match self.inner.lookup_tx.try_send(event) {
             Ok(()) => {
                 self.inner.stats.events_sent.fetch_add(1, Ordering::Relaxed);
             }
@@ -220,8 +233,7 @@ impl JitBackend {
 
     /// Enqueues an explicit JIT compilation request for the given bytecode.
     ///
-    /// This is fire-and-forget: returns immediately and silently drops the request
-    /// if the backend channel is full.
+    /// Sent on the reliable control channel — never silently dropped.
     pub fn compile_jit(&self, req: LookupRequest) {
         let _ = self.ensure_started();
         let cmd = Command::CompileJit(CompileJitRequest {
@@ -229,7 +241,7 @@ impl JitBackend {
             bytecode: req.code,
             sync_notifier: SyncNotifier::none(),
         });
-        let _ = self.inner.tx.try_send(cmd);
+        let _ = self.inner.control_tx.send(cmd);
     }
 
     /// Enqueues a JIT compilation request and blocks until the compilation completes.
@@ -245,7 +257,7 @@ impl JitBackend {
             bytecode: req.code,
             sync_notifier: SyncNotifier::new(tx),
         });
-        self.inner.tx.try_send(cmd).map_err(|_| eyre::eyre!("backend channel full or closed"))?;
+        self.inner.control_tx.send(cmd).map_err(|_| eyre::eyre!("backend channel closed"))?;
         rx.recv().map_err(|_| eyre::eyre!("backend shut down before compilation completed"))
     }
 
@@ -260,7 +272,7 @@ impl JitBackend {
 
     /// Enqueues a batch of AOT preparation requests.
     ///
-    /// This is enqueue-only and returns immediately.
+    /// Sent on the reliable control channel — never silently dropped.
     pub fn prepare_aot_batch(&self, reqs: Vec<AotRequest>) {
         let _ = self.ensure_started();
         let owned: Vec<PrepareAotRequest> = reqs
@@ -271,7 +283,7 @@ impl JitBackend {
             })
             .collect();
         let cmd = Command::PrepareAot(owned);
-        let _ = self.inner.tx.try_send(cmd);
+        let _ = self.inner.control_tx.send(cmd);
     }
 
     /// Clears the in-memory resident compiled map.
@@ -279,17 +291,17 @@ impl JitBackend {
     /// All compiled programs are removed from the map. Active references
     /// held by callers remain valid until dropped.
     pub fn clear_resident(&self) {
-        let _ = self.inner.tx.try_send(Command::ClearResident);
+        let _ = self.inner.control_tx.send(Command::ClearResident);
     }
 
     /// Clears persisted artifacts from the artifact store.
     pub fn clear_persisted(&self) {
-        let _ = self.inner.tx.try_send(Command::ClearPersisted);
+        let _ = self.inner.control_tx.send(Command::ClearPersisted);
     }
 
     /// Clears both the resident map and persisted artifacts.
     pub fn clear_all(&self) {
-        let _ = self.inner.tx.try_send(Command::ClearAll);
+        let _ = self.inner.control_tx.send(Command::ClearAll);
     }
 
     /// Returns whether the runtime is enabled.
@@ -312,7 +324,9 @@ impl JitBackend {
 
     /// Returns a point-in-time snapshot of runtime statistics.
     pub fn stats(&self) -> RuntimeStatsSnapshot {
-        self.inner.stats.snapshot(self.inner.resident.len() as u64, self.inner.tx.len() as u64)
+        self.inner
+            .stats
+            .snapshot(self.inner.resident.len() as u64, self.inner.lookup_tx.len() as u64)
     }
 
     /// Spawns the backend thread if it hasn't been started yet.
@@ -322,7 +336,7 @@ impl JitBackend {
             return Ok(());
         };
 
-        let LazySpawnState { rx, config } = lazy;
+        let LazySpawnState { lookup_rx, control_rx, config } = lazy;
 
         debug!(
             blocking = self.inner.blocking,
@@ -341,7 +355,7 @@ impl JitBackend {
             }
             Err(e) => {
                 // Restore lazy_spawn so a subsequent attempt can retry.
-                *guard = Some(LazySpawnState { rx, config });
+                *guard = Some(LazySpawnState { lookup_rx, control_rx, config });
                 return Err(e);
             }
         }
@@ -355,7 +369,7 @@ impl JitBackend {
         let thread = std::thread::Builder::new()
             .name(config.thread_name.clone())
             .spawn(move || {
-                backend::run(rx, resident, config, stats);
+                backend::run(lookup_rx, control_rx, resident, config, stats);
                 let _ = done_tx.send(());
             })
             .wrap_err("failed to spawn backend thread")?;
@@ -436,7 +450,7 @@ impl BackendInner {
         debug!("shutting down JIT backend");
         if let Some(ct) = self.thread.lock().unwrap().take() {
             // Ignoring send error — backend may already be gone.
-            let _ = self.tx.send(Command::Shutdown);
+            let _ = self.control_tx.send(Command::Shutdown);
 
             // Wait for the thread to signal completion, with a timeout.
             match ct.done_rx.recv_timeout(self.shutdown_timeout) {

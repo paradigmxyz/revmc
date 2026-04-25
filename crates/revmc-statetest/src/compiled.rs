@@ -749,13 +749,12 @@ pub fn run(
         CompileMode::Jit | CompileMode::Aot => Some(Arc::new(CompileCache::new(mode))),
     };
 
-    // For runtime mode, start the backend with an empty store.
-    // All lookups will miss → enqueue JIT → compile on worker threads.
-    // This exercises the full JIT pipeline end-to-end.
+    // For runtime mode, start the backend in blocking mode so misses synchronously
+    // compile (instead of fire-and-forget which would mostly interpret).
     let backend = if mode == CompileMode::Runtime {
         let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
         let config = RuntimeConfig {
-            enabled: true,
+            blocking: true,
             tuning: RuntimeTuning { jit_worker_count: cpus, ..Default::default() },
             ..Default::default()
         };

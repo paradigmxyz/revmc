@@ -20,8 +20,7 @@ pub mod alloy_evm;
 
 pub mod revm_evm;
 
-mod simple_revm_evm;
-pub use simple_revm_evm::JitEvm;
+pub mod simple_revm_evm;
 
 pub mod runtime;
 

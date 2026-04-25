@@ -17,7 +17,7 @@ use revm_context_interface::result::{EVMError, HaltReason, ResultAndState};
 use revm_handler::{
     EthFrame, ExecuteEvm, PrecompileProvider, SystemCallEvm, instructions::EthInstructions,
 };
-use revm_inspector::{InspectEvm, Inspector, NoOpInspector};
+use revm_inspector::{InspectEvm, InspectSystemCallEvm, Inspector, NoOpInspector};
 use revm_interpreter::{InterpreterResult, interpreter::EthInterpreter};
 use revm_primitives::hardfork::SpecId;
 
@@ -109,7 +109,11 @@ where
         contract: Address,
         data: Bytes,
     ) -> Result<ResultAndState<Self::HaltReason>, Self::Error> {
-        self.inner.system_call_with_caller(caller, contract, data)
+        if self.inspect {
+            self.inner.inspect_system_call_with_caller(caller, contract, data)
+        } else {
+            self.inner.system_call_with_caller(caller, contract, data)
+        }
     }
 
     fn finish(self) -> (Self::DB, EvmEnv<Self::Spec>) {
