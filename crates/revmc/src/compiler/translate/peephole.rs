@@ -31,8 +31,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             op::SIGNEXTEND => self.peephole_signextend(),
             op::BYTE => self.peephole_byte(),
 
-            op::CALLDATALOAD | op::MLOAD | op::SLOAD => self.peephole_load(data.opcode),
-            op::MSTORE => self.peephole_mstore(),
+            op::CALLDATALOAD | op::SLOAD => self.peephole_load(data.opcode),
 
             op::KECCAK256 => self.peephole_keccak256(),
             op::RETURN | op::REVERT => self.peephole_return(data.opcode),
@@ -283,7 +282,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             && let Ok(offset) = u64::try_from(offset)
         {
             let builtin = match op {
-                op::MLOAD => Builtin::MloadC,
                 op::SLOAD => Builtin::SloadC,
                 op::CALLDATALOAD => Builtin::CallDataLoadC,
                 _ => unreachable!(),
@@ -299,34 +297,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             true
         } else {
             false
-        }
-    }
-
-    fn peephole_mstore(&mut self) -> bool {
-        let [offset, value] = self.const_operands();
-        let offset = offset.and_then(|x| u64::try_from(x).ok());
-        let value = value.and_then(|x| u64::try_from(x).ok());
-        match (offset, value) {
-            (Some(offset), None) => {
-                let offset = self.bcx.iconst(self.isize_type, offset as i64);
-                let sp = self.sp_after_inputs_with(&[1]);
-                self.call_fallible_builtin(Builtin::MstoreCD, &[self.ecx, offset, sp]);
-                true
-            }
-            (None, Some(value)) => {
-                let value = self.bcx.iconst(self.isize_type, value as i64);
-                let _ = self.sp_after_inputs_with(&[0]);
-                let sp = self.sp_from_top(1);
-                self.call_fallible_builtin(Builtin::MstoreDC, &[self.ecx, sp, value]);
-                true
-            }
-            (Some(offset), Some(value)) => {
-                let offset = self.bcx.iconst(self.isize_type, offset as i64);
-                let value = self.bcx.iconst(self.isize_type, value as i64);
-                self.call_fallible_builtin(Builtin::MstoreCC, &[self.ecx, offset, value]);
-                true
-            }
-            (None, None) => false,
         }
     }
 

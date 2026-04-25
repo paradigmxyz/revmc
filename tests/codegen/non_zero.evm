@@ -4,7 +4,6 @@ ISZERO
 RET_WORD
 
 ; CHECK: [[VALUE:%.*]] = load i256
-; CHECK: [[NON_ZERO:%.*]] = icmp ne i256 [[VALUE]], 0
-; CHECK-NEXT: [[EXTENDED:%.*]] = zext i1 [[NON_ZERO]] to i256
-; CHECK-NEXT: store i256 [[EXTENDED]]
-; CHECK: @__revmc_builtin_mstore
+; CHECK: icmp eq i256 [[VALUE]], 0
+; CHECK: select i1
+; CHECK: store i256

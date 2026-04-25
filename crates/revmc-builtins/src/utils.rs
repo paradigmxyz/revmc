@@ -83,8 +83,15 @@ pub(crate) unsafe fn read_words_rev<'a, const N: usize>(sp: *mut EvmWord) -> &'a
 
 #[inline]
 pub(crate) fn ensure_memory(ecx: &mut EvmContext<'_>, offset: usize, len: usize) -> BuiltinResult {
-    revm_interpreter::interpreter::resize_memory(ecx.gas, ecx.memory, &ecx.gas_params, offset, len)
-        .map_err(Into::into)
+    revm_interpreter::interpreter::resize_memory(
+        ecx.gas,
+        ecx.memory,
+        &ecx.gas_params,
+        offset,
+        len,
+    )?;
+    ecx.refresh_memory_cache();
+    Ok(())
 }
 
 pub(crate) unsafe fn copy_operation(

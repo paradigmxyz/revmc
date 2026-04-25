@@ -155,12 +155,9 @@ macro_rules! builtins {
                 const KECCAK256CC: u8 = _0_1;
 
                 const CALLDATALOADC: u8 = _0_1;
-                const MLOADC: u8 = _0_1;
                 const SLOADC: u8 = _0_1;
 
-                const MSTORECD: u8 = _1_0;
-                const MSTOREDC: u8 = _1_0;
-                const MSTORECC: u8 = _0_0;
+                const MRESIZE: u8 = _0_0;
 
                 const LOG: u8 = _0_0;
                 const DORETURN: u8 = RETURN;
@@ -267,17 +264,10 @@ builtins! {
     BlobHash       = __revmc_builtin_blob_hash(@[ecx_ro] ptr, @[sp] ptr) None,
     BlobBaseFee    = __revmc_builtin_blob_base_fee(@[ecx_ro] ptr, @[sp] ptr) None,
     SlotNum        = __revmc_builtin_slot_num(@[ecx_ro] ptr, @[sp] ptr) None,
-    Mload          = __revmc_builtin_mload(@[ecx] ptr, @[sp] ptr) None,
-    MloadC         = __revmc_builtin_mload_c(@[ecx] ptr, @[sp] ptr, usize) None,
-    Mstore         = __revmc_builtin_mstore(@[ecx] ptr, @[sp] ptr) None,
-    MstoreCD       = __revmc_builtin_mstore_cd(@[ecx] ptr, usize, @[sp] ptr) None,
-    MstoreDC       = __revmc_builtin_mstore_dc(@[ecx] ptr, @[sp] ptr, usize) None,
-    MstoreCC       = __revmc_builtin_mstore_cc(@[ecx] ptr, usize, usize) None,
-    Mstore8        = __revmc_builtin_mstore8(@[ecx] ptr, @[sp] ptr) None,
+    Mresize        = #[Cold] __revmc_builtin_mresize(@[ecx] ptr, usize) None,
     Sload          = __revmc_builtin_sload(@[ecx] ptr, @[sp] ptr) None,
     SloadC         = __revmc_builtin_sload_c(@[ecx] ptr, @[sp] ptr, usize) None,
     Sstore         = __revmc_builtin_sstore(@[ecx] ptr, @[sp] ptr) None,
-    Msize          = __revmc_builtin_msize(@[ecx_ro] ptr) Some(usize),
     Tload          = __revmc_builtin_tload(@[ecx] ptr, @[sp] ptr) None,
     Tstore         = __revmc_builtin_tstore(@[ecx] ptr, @[sp] ptr) None,
     Mcopy          = __revmc_builtin_mcopy(@[ecx] ptr, @[sp] ptr) None,

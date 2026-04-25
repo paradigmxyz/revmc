@@ -9,5 +9,5 @@ RET_WORD
 ; CHECK-NOT: and
 ; CHECK: [[ADDR:%.*]] = zext i160 {{.*}} to i256
 ; CHECK-NOT: and
-; CHECK: store i256 [[ADDR]]
-; CHECK: @__revmc_builtin_mstore
+; CHECK: bswap
+; CHECK: store i256

@@ -5,4 +5,5 @@ RET_WORD
 
 ; CHECK: load i256
 ; CHECK-NOT: and
-; CHECK: @__revmc_builtin_mstore
+; CHECK: bswap
+; CHECK: store i256

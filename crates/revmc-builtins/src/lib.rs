@@ -11,7 +11,7 @@ extern crate alloc;
 extern crate tracing;
 
 use alloc::{boxed::Box, vec::Vec};
-use revm_context_interface::either::Either;
+
 use revm_interpreter::{
     CallInput, CallInputs, CallScheme, CallValue, CreateInputs, CreateScheme, FrameInput,
     InstructionResult, InterpreterAction, InterpreterResult, as_u64_saturated, as_usize_saturated,
@@ -463,89 +463,13 @@ pub unsafe extern "C" fn __revmc_builtin_blob_base_fee(ecx: &EvmContext<'_>, slo
     *slot = ecx.host.blob_gasprice().into();
 }
 
+#[cold]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn __revmc_builtin_mload(
+pub unsafe extern "C" fn __revmc_builtin_mresize(
     ecx: &mut EvmContext<'_>,
-    offset_ptr: &mut EvmWord,
+    min_size: u64,
 ) -> BuiltinResult {
-    do_mload(ecx, offset_ptr, try_into_usize!(offset_ptr))
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn __revmc_builtin_mload_c(
-    ecx: &mut EvmContext<'_>,
-    offset_ptr: &mut EvmWord,
-    offset: u64,
-) -> BuiltinResult {
-    do_mload(ecx, offset_ptr, offset as usize)
-}
-
-fn do_mload(ecx: &mut EvmContext<'_>, out: &mut EvmWord, offset: usize) -> BuiltinResult {
-    ensure_memory(ecx, offset, 32)?;
-    *out = EvmWord::from_be_slice(&ecx.memory.slice(offset..offset + 32));
-    Ok(())
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn __revmc_builtin_mstore(
-    ecx: &mut EvmContext<'_>,
-    sp: &mut [EvmWord; 2],
-) -> BuiltinResult {
-    let rev![offset, value] = sp;
-    do_mstore(ecx, try_into_usize!(offset), Either::Left(value))
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn __revmc_builtin_mstore_cd(
-    ecx: &mut EvmContext<'_>,
-    offset: u64,
-    value: &mut EvmWord,
-) -> BuiltinResult {
-    do_mstore(ecx, offset as usize, Either::Left(value))
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn __revmc_builtin_mstore_dc(
-    ecx: &mut EvmContext<'_>,
-    offset: &mut EvmWord,
-    value: u64,
-) -> BuiltinResult {
-    do_mstore(ecx, try_into_usize!(offset), Either::Right(value))
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn __revmc_builtin_mstore_cc(
-    ecx: &mut EvmContext<'_>,
-    offset: u64,
-    value: u64,
-) -> BuiltinResult {
-    do_mstore(ecx, offset as usize, Either::Right(value))
-}
-
-fn do_mstore(
-    ecx: &mut EvmContext<'_>,
-    offset: usize,
-    value: Either<&EvmWord, u64>,
-) -> BuiltinResult {
-    ensure_memory(ecx, offset, 32)?;
-    let value = match value {
-        Either::Left(word) => word.to_u256(),
-        Either::Right(c) => U256::from(c),
-    };
-    ecx.memory.set(offset, &value.to_be_bytes::<32>());
-    Ok(())
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn __revmc_builtin_mstore8(
-    ecx: &mut EvmContext<'_>,
-    sp: &mut [EvmWord; 2],
-) -> BuiltinResult {
-    let rev![offset, value] = sp;
-    let offset = try_into_usize!(offset);
-    ensure_memory(ecx, offset, 1)?;
-    ecx.memory.set(offset, &[value.to_u256().byte(0)]);
-    Ok(())
+    ensure_memory(ecx, min_size as usize, 0)
 }
 
 #[unsafe(no_mangle)]
@@ -623,11 +547,6 @@ pub unsafe extern "C" fn __revmc_builtin_sstore(
 
     ecx.gas.record_refund(gp.sstore_refund(is_istanbul, &state_load.data));
     Ok(())
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn __revmc_builtin_msize(ecx: &EvmContext<'_>) -> usize {
-    ecx.memory.len()
 }
 
 #[unsafe(no_mangle)]
