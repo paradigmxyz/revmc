@@ -32,8 +32,6 @@ alloy-evm = { workspace = true, optional = true }
 revm-bytecode.workspace = true
 revm-context-interface.workspace = true
 revm-context.workspace = true
-revm-context.workspace = true
-revm-database-interface.workspace = true
 revm-database-interface.workspace = true
 revm-database.workspace = true
 revm-handler.workspace = true
