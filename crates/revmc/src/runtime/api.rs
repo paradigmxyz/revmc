@@ -43,12 +43,12 @@ pub enum InterpretReason {
 
 /// A compiled EVM program kept alive in the resident map.
 pub struct CompiledProgram {
+    /// The callable compiled function.
+    pub func: EvmCompilerFn,
     /// The cache key this program was compiled for.
     pub key: RuntimeCacheKey,
     /// Whether this is an AOT or JIT program.
     pub kind: ProgramKind,
-    /// The callable compiled function.
-    pub func: EvmCompilerFn,
     /// Keeps the backing memory (shared library / JIT module) alive.
     _backing: ProgramBacking,
 }

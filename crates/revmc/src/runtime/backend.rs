@@ -20,6 +20,7 @@ use crossbeam_queue::ArrayQueue;
 use dashmap::DashMap;
 use quanta::Instant;
 use std::{
+    ops::ControlFlow,
     sync::{Arc, atomic::Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -163,6 +164,18 @@ struct BackendState {
 }
 
 impl BackendState {
+    fn handle(&mut self, cmd: Command) -> ControlFlow<()> {
+        match cmd {
+            Command::CompileJit(req) => self.handle_compile_jit(req),
+            Command::PrepareAot(reqs) => self.handle_prepare_aot(reqs),
+            Command::ClearResident => self.handle_clear_resident(),
+            Command::ClearPersisted => self.handle_clear_persisted(),
+            Command::ClearAll => self.handle_clear_all(),
+            Command::Shutdown => return ControlFlow::Break(()),
+        }
+        ControlFlow::Continue(())
+    }
+
     fn tick(&mut self) {
         self.drain_events();
         self.run_eviction_sweep();
@@ -755,52 +768,32 @@ pub(crate) fn run(
     // Tick interval is min(event_drain, sweep) so we never sleep longer than
     // either. Events are drained on every wakeup regardless of cause.
     let tick = event_drain_interval.min(sweep_interval);
+    let shutdown_reason;
 
     loop {
         chan::select! {
             recv(cmd_rx) -> msg => {
-                let cmd = match msg {
-                    Ok(cmd) => cmd,
-                    Err(_) => {
-                        debug!("backend channel closed, shutting down");
-                        break;
-                    }
+                let Ok(cmd) = msg else {
+                    shutdown_reason = "channel closed";
+                    break;
                 };
-                match cmd {
-                    Command::CompileJit(req) => state.handle_compile_jit(req),
-                    Command::PrepareAot(reqs) => state.handle_prepare_aot(reqs),
-                    Command::ClearResident => state.handle_clear_resident(),
-                    Command::ClearPersisted => state.handle_clear_persisted(),
-                    Command::ClearAll => state.handle_clear_all(),
-                    Command::Shutdown => {
-                        debug!("backend thread shutting down");
-                        break;
-                    }
+                if state.handle(cmd).is_break() {
+                    shutdown_reason = "shutdown command";
+                    break;
                 }
-                // Drain on command wakeup so command handlers see fresh
-                // event-derived state. Newly inserted entries should be
-                // visible to lookups before being evicted, so sweep here too.
-                state.tick();
             }
             recv(state.result_rx) -> msg => {
-                if let Ok(result) = msg {
-                    state.handle_worker_result(result);
+                match msg {
+                    Ok(result) => state.handle_worker_result(result),
+                    Err(_) => warn!("worker unexpectedly closed"),
                 }
-                // Do NOT run eviction sweep here: a freshly inserted entry
-                // would be immediately evicted under tight memory budgets.
             }
-            default(tick) => {
-                state.tick();
-            }
+            default(tick) => {}
         }
+        state.tick();
     }
 
-    // Drain remaining worker results before shutdown.
-    while let Ok(result) = state.result_rx.try_recv() {
-        state.handle_worker_result(result);
-    }
-
-    info!(stats = ?state.inner.stats(), "backend stats at shutdown");
+    debug!(?shutdown_reason, stats = ?state.inner.stats(), "backend task shutting down");
 
     state.workers.shutdown();
 }
