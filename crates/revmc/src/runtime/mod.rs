@@ -60,11 +60,7 @@ pub(crate) struct BackendShared {
     /// Shared resident compiled map.
     #[debug(skip)]
     resident: ResidentMap,
-    /// Lock-free queue of [`LookupObservedEvent`]s.
-    ///
-    /// The lookup hot path pushes here without signaling waiters; the backend
-    /// drains on its loop iterations. Decouples lookup throughput from backend
-    /// wakeup cost.
+    /// Lock-free queue of events.
     #[debug(skip)]
     events: EventQueue,
     /// Shared stats counters.

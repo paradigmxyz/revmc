@@ -1,12 +1,3 @@
-//! Backend thread: single-threaded event loop for runtime state management.
-//!
-//! Hotness is tracked on the backend thread. The lookup hot path is push-only:
-//! it pushes a [`LookupObservedEvent`] onto a lock-free queue and returns. There is no wakeup
-//! signal to the backend, so sends are essentially free (one CAS, occasional segment alloc).
-//!
-//! The backend drains the queue on every iteration of its event loop, alongside
-//! processing explicit user commands and worker results.
-
 use crate::runtime::{
     LookupRequest,
     api::{CompiledProgram, LoadedLibrary, ProgramKind},

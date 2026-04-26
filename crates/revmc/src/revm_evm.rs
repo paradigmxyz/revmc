@@ -185,10 +185,7 @@ where
 
         let decision = self.lookup_cache.entry(code_hash).or_insert_with(|| {
             let code = frame.interpreter.bytecode.original_bytes();
-            self.backend.lookup(LookupRequest {
-                key: RuntimeCacheKey { code_hash, spec_id },
-                code,
-            })
+            self.backend.lookup(LookupRequest { key: RuntimeCacheKey { code_hash, spec_id }, code })
         });
 
         Ok(match decision {
@@ -362,10 +359,7 @@ where
 
         let decision = self.lookup_cache.entry(code_hash).or_insert_with(|| {
             let code = frame.interpreter.bytecode.original_bytes();
-            self.backend.lookup(LookupRequest {
-                key: RuntimeCacheKey { code_hash, spec_id },
-                code,
-            })
+            self.backend.lookup(LookupRequest { key: RuntimeCacheKey { code_hash, spec_id }, code })
         });
 
         let program = match decision {
