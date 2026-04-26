@@ -705,10 +705,14 @@ fn memory_budget_eviction() {
         ..Default::default()
     });
 
-    tb.trigger_jit_cancun(BYTECODE_RET42);
-
-    // Wait for budget eviction to kick in.
-    tb.wait_resident_count(0);
+    // Hammer lookups so the entry promotes; we can't observe it as Compiled
+    // (eviction races with insertion under budget pressure), so wait on the
+    // evictions counter instead.
+    let req = TestBackend::req_cancun(BYTECODE_RET42);
+    poll_until(std::time::Duration::from_secs(10), || {
+        let _ = tb.lookup(req.clone());
+        if tb.stats().evictions >= 1 { Some(()) } else { None }
+    });
 }
 
 // ===========================================================================
