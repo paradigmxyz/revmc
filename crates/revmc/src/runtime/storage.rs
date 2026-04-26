@@ -7,7 +7,7 @@ use revmc_backend::OptimizationLevel;
 use std::path::PathBuf;
 
 /// Runtime cache key: the minimal identity for a compiled program at runtime.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct RuntimeCacheKey {
     /// The code hash of the contract bytecode.
     pub code_hash: B256,

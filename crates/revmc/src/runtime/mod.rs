@@ -181,10 +181,7 @@ impl JitBackend {
         }
         if inner.blocking {
             cold_path();
-            return match self.lookup_blocking(req) {
-                Some(program) => LookupDecision::Compiled(program),
-                None => LookupDecision::Interpret(InterpretReason::JitFailed),
-            };
+            return self.lookup_blocking(req);
         }
         if !inner.tuning.should_compile(&req.code) {
             cold_path();
@@ -193,16 +190,21 @@ impl JitBackend {
 
         let key = RuntimeCacheKey { code_hash: req.code_hash, spec_id: req.spec_id };
 
-        let r = shared.resident.try_get(&key).try_unwrap();
-        let was_hit = r.is_some();
-        let (counter, decision) = if let Some(program) = { r } {
-            (&shared.stats.lookup_hits, LookupDecision::Compiled(Arc::clone(&program)))
+        let decision;
+        let counter;
+        let bytecode;
+        if let Some(program) = shared.resident.try_get(&key).try_unwrap() {
+            decision = LookupDecision::Compiled(Arc::clone(&program));
+            drop(program);
+            counter = &shared.stats.lookup_hits;
+            bytecode = None;
         } else {
-            (&shared.stats.lookup_misses, LookupDecision::Interpret(InterpretReason::NotReady))
-        };
+            decision = LookupDecision::Interpret(InterpretReason::NotReady);
+            counter = &shared.stats.lookup_misses;
+            bytecode = Some(req.code);
+        }
         counter.fetch_add(1, Ordering::Relaxed);
 
-        let bytecode = if was_hit { None } else { Some(req.code) };
         if shared.events.push(LookupObservedEvent { key, bytecode }).is_err() {
             shared.stats.events_dropped.fetch_add(1, Ordering::Relaxed);
         }
@@ -235,19 +237,24 @@ impl JitBackend {
     ///
     /// If the function is already compiled, returns it immediately. Otherwise, enqueues
     /// a synchronous JIT compilation request and blocks until the result is available.
-    /// Returns `None` if the bytecode is ineligible for compilation (see
-    /// [`RuntimeTuning::should_compile`]) or compilation fails.
-    pub fn lookup_blocking(&self, req: LookupRequest) -> Option<Arc<CompiledProgram>> {
+    /// Returns [`LookupDecision::Interpret`] if the bytecode is ineligible for
+    /// compilation (see [`RuntimeTuning::should_compile`]) or compilation fails.
+    pub fn lookup_blocking(&self, req: LookupRequest) -> LookupDecision {
         if !self.inner.tuning.should_compile(&req.code) {
-            return None;
+            return LookupDecision::Interpret(InterpretReason::Ineligible);
         }
         let code_hash = req.code_hash;
         let spec_id = req.spec_id;
         if let Some(program) = self.get_compiled_tracked(code_hash, spec_id) {
-            return Some(program);
+            return LookupDecision::Compiled(program);
         }
-        let _ = self.compile_jit_sync(req);
-        self.get_compiled_tracked(code_hash, spec_id)
+        if self.compile_jit_sync(req).is_err() {
+            return LookupDecision::Interpret(InterpretReason::JitFailed);
+        }
+        match self.get_compiled_tracked(code_hash, spec_id) {
+            Some(program) => LookupDecision::Compiled(program),
+            None => LookupDecision::Interpret(InterpretReason::JitFailed),
+        }
     }
 
     /// Enqueues an explicit JIT compilation request for the given bytecode.
