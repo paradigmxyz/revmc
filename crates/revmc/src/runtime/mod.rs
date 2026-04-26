@@ -49,30 +49,45 @@ mod worker;
 #[cfg(test)]
 mod tests;
 
-/// Shared inner state for [`JitBackend`].
+/// State shared between [`JitBackend`] (via [`BackendInner`]) and the backend
+/// thread.
+///
+/// Held by the backend thread as `Arc<BackendShared>`. Crucially, the backend
+/// thread does NOT hold an `Arc<BackendInner>` — that would create a reference
+/// cycle since `BackendInner::Drop` is what signals the thread to stop. Keeping
+/// thread-lifecycle fields outside this struct lets `BackendInner` drop (and
+/// trigger shutdown) as soon as the last `JitBackend` clone is released.
 #[derive(derive_more::Debug)]
-pub(crate) struct BackendInner {
+pub(crate) struct BackendShared {
     /// Shared resident compiled map.
     #[debug(skip)]
     resident: ResidentMap,
-    /// Global enable flag.
-    enabled: AtomicBool,
-    /// Blocking mode: every lookup synchronously compiles and never falls back.
-    blocking: bool,
-    /// Lock-free unbounded queue of [`LookupObservedEvent`]s.
+    /// Lock-free queue of [`LookupObservedEvent`]s.
     ///
     /// The lookup hot path pushes here without signaling waiters; the backend
     /// drains on its loop iterations. Decouples lookup throughput from backend
     /// wakeup cost.
     #[debug(skip)]
     events: EventQueue,
-    /// Bounded channel for control commands (compile_jit, prepare_aot, clears,
-    /// shutdown). The lookup hot path does NOT use this — see [`events`].
-    #[debug(skip)]
-    tx: chan::Sender<Command>,
     /// Shared stats counters.
     #[debug(skip)]
     stats: RuntimeStats,
+}
+
+/// Inner state for [`JitBackend`]. Owns the backend thread lifecycle.
+#[derive(derive_more::Debug)]
+pub(crate) struct BackendInner {
+    /// State shared with the backend thread.
+    shared: Arc<BackendShared>,
+    /// Global enable flag.
+    enabled: AtomicBool,
+    /// Blocking mode: every lookup synchronously compiles and never falls back.
+    blocking: bool,
+    /// Bounded channel for control commands (compile_jit, prepare_aot, clears,
+    /// shutdown). The lookup hot path does NOT use this — see
+    /// [`BackendShared::events`].
+    #[debug(skip)]
+    tx: chan::Sender<Command>,
     /// Backend thread + done signal. `None` after shutdown.
     #[debug(skip)]
     thread: std::sync::Mutex<Option<BackendThread>>,
@@ -132,14 +147,17 @@ impl JitBackend {
         let (tx, rx) = chan::bounded::<Command>(config.tuning.channel_capacity);
         let events = ArrayQueue::new(config.tuning.channel_capacity);
         let tuning = config.tuning;
+        let shared = Arc::new(BackendShared {
+            resident: ResidentMap::default(),
+            events,
+            stats: RuntimeStats::default(),
+        });
         let this = Self {
             inner: Arc::new(BackendInner {
-                resident: ResidentMap::default(),
+                shared,
                 enabled: AtomicBool::new(false),
                 blocking: config.blocking,
                 tx,
-                events,
-                stats: RuntimeStats::default(),
                 thread: std::sync::Mutex::new(None),
                 shutdown_timeout: config.tuning.shutdown_timeout,
                 tuning,
@@ -174,18 +192,21 @@ impl JitBackend {
 
         let key = RuntimeCacheKey { code_hash: req.code_hash, spec_id: req.spec_id };
 
-        let r = inner.resident.try_get(&key).try_unwrap();
+        let r = inner.shared.resident.try_get(&key).try_unwrap();
         let was_hit = r.is_some();
         let (counter, decision) = if let Some(program) = { r } {
-            (&inner.stats.lookup_hits, LookupDecision::Compiled(Arc::clone(&program)))
+            (&inner.shared.stats.lookup_hits, LookupDecision::Compiled(Arc::clone(&program)))
         } else {
-            (&inner.stats.lookup_misses, LookupDecision::Interpret(InterpretReason::NotReady))
+            (
+                &inner.shared.stats.lookup_misses,
+                LookupDecision::Interpret(InterpretReason::NotReady),
+            )
         };
         counter.fetch_add(1, Ordering::Relaxed);
 
         let bytecode = if was_hit { None } else { Some(req.code) };
-        if inner.events.push(LookupObservedEvent { key, bytecode }).is_err() {
-            inner.stats.events_dropped.fetch_add(1, Ordering::Relaxed);
+        if inner.shared.events.push(LookupObservedEvent { key, bytecode }).is_err() {
+            inner.shared.stats.events_dropped.fetch_add(1, Ordering::Relaxed);
         }
 
         decision
@@ -194,7 +215,7 @@ impl JitBackend {
     /// Checks the resident map for a compiled program without enqueuing an event.
     pub fn get_compiled(&self, code_hash: B256, spec_id: SpecId) -> Option<Arc<CompiledProgram>> {
         let key = RuntimeCacheKey { code_hash, spec_id };
-        self.inner.resident.get(&key).map(|entry| Arc::clone(&entry))
+        self.inner.shared.resident.get(&key).map(|entry| Arc::clone(&entry))
     }
 
     /// Like [`get_compiled`](Self::get_compiled), but also records hit/miss stats.
@@ -205,9 +226,9 @@ impl JitBackend {
     ) -> Option<Arc<CompiledProgram>> {
         let result = self.get_compiled(code_hash, spec_id);
         if result.is_some() {
-            self.inner.stats.lookup_hits.fetch_add(1, Ordering::Relaxed);
+            self.inner.shared.stats.lookup_hits.fetch_add(1, Ordering::Relaxed);
         } else {
-            self.inner.stats.lookup_misses.fetch_add(1, Ordering::Relaxed);
+            self.inner.shared.stats.lookup_misses.fetch_add(1, Ordering::Relaxed);
         }
         result
     }
@@ -348,7 +369,7 @@ impl JitBackend {
         match Self::preload_aot(config.store.as_deref()) {
             Ok(entries) => {
                 for (key, prog) in entries {
-                    self.inner.resident.insert(key, prog);
+                    self.inner.shared.resident.insert(key, prog);
                 }
             }
             Err(e) => {
@@ -361,12 +382,16 @@ impl JitBackend {
         drop(guard);
 
         let (done_tx, done_rx) = chan::bounded::<()>(1);
-        let inner = Arc::clone(&self.inner);
+        // Pass only `shared` (no `Arc<BackendInner>`) so that dropping the last
+        // `JitBackend` clone causes `BackendInner::Drop` to run, which signals
+        // the thread to exit. Holding `Arc<BackendInner>` here would create a
+        // cycle and leak the thread.
+        let shared = Arc::clone(&self.inner.shared);
 
         let thread = std::thread::Builder::new()
             .name(config.thread_name.clone())
             .spawn(move || {
-                backend::run(inner, rx, config);
+                backend::run(shared, rx, config);
                 let _ = done_tx.send(());
             })
             .wrap_err("failed to spawn backend thread")?;
@@ -443,14 +468,26 @@ impl JitBackend {
     }
 }
 
-impl BackendInner {
+impl BackendShared {
     /// Returns a point-in-time snapshot of runtime statistics.
+    ///
+    /// `command_queue_len` is omitted because the command channel sender lives
+    /// on [`BackendInner`], not [`BackendShared`].
     pub(crate) fn stats(&self) -> RuntimeStatsSnapshot {
         self.stats.snapshot(stats::RuntimeStatsGauges {
             resident_entries: self.resident.len() as u64,
             events_queued: self.events.len() as u64,
-            command_queue_len: self.tx.len() as u64,
+            command_queue_len: 0,
         })
+    }
+}
+
+impl BackendInner {
+    /// Returns a point-in-time snapshot of runtime statistics.
+    pub(crate) fn stats(&self) -> RuntimeStatsSnapshot {
+        let mut snap = self.shared.stats();
+        snap.command_queue_len = self.tx.len() as u64;
+        snap
     }
 
     fn shutdown(&self) -> eyre::Result<()> {

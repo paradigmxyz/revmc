@@ -139,8 +139,8 @@ enum AdmitMode {
 
 /// All backend-thread-owned mutable state.
 struct BackendState {
-    /// Shared inner state (resident map, event queue, stats).
-    inner: Arc<super::BackendInner>,
+    /// Shared state (resident map, event queue, stats).
+    inner: Arc<super::BackendShared>,
     /// Per-key metadata for eviction (backend-only).
     resident_meta: HashMap<RuntimeCacheKey, ResidentMeta>,
     /// Per-key tracking state (backend-only).
@@ -738,7 +738,7 @@ impl BackendState {
 
 /// Runs the backend event loop. Called on the backend thread.
 pub(crate) fn run(
-    inner: Arc<super::BackendInner>,
+    inner: Arc<super::BackendShared>,
     cmd_rx: chan::Receiver<Command>,
     config: RuntimeConfig,
 ) {
