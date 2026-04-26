@@ -33,6 +33,8 @@ pub enum LookupDecision {
 pub enum InterpretReason {
     /// The runtime is disabled.
     Disabled,
+    /// The contract is not eligible for compilation.
+    Ineligible,
     /// No compiled program is ready for this key.
     NotReady,
     /// JIT compilation failed for this contract.
