@@ -181,13 +181,6 @@ impl BackendState {
         self.run_eviction_sweep();
     }
 
-    /// Like [`tick`], but skips eviction. Used after handling a worker result
-    /// so a freshly inserted entry under budget pressure isn't immediately
-    /// evicted before any caller can observe it.
-    fn tick_no_evict(&mut self) {
-        self.drain_events();
-    }
-
     /// Drains all currently-queued lookup events.
     fn drain_events(&mut self) {
         // Cap per-iteration drain so a flood of events can't starve other
@@ -778,7 +771,6 @@ pub(crate) fn run(
     let shutdown_reason;
 
     loop {
-        let mut evict = true;
         chan::select! {
             recv(cmd_rx) -> msg => {
                 let Ok(cmd) = msg else {
@@ -795,18 +787,10 @@ pub(crate) fn run(
                     Ok(result) => state.handle_worker_result(result),
                     Err(_) => warn!("worker unexpectedly closed"),
                 }
-                // Don't evict on the same iteration: a freshly inserted entry
-                // under budget pressure would be evicted before any caller
-                // could observe it (e.g. a sync waiter polling lookup).
-                evict = false;
             }
             default(tick) => {}
         }
-        if evict {
-            state.tick();
-        } else {
-            state.tick_no_evict();
-        }
+        state.tick();
     }
 
     debug!(?shutdown_reason, stats = ?state.inner.stats(), "backend task shutting down");
