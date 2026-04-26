@@ -103,12 +103,6 @@ pub(crate) struct LookupObservedEvent {
     pub(crate) bytecode: Option<Bytes>,
 }
 
-impl LookupObservedEvent {
-    fn was_hit(&self) -> bool {
-        self.bytecode.is_none()
-    }
-}
-
 /// Per-key state tracked by the backend.
 struct EntryState {
     /// Number of observed misses.
@@ -195,16 +189,18 @@ impl BackendState {
     }
 
     fn handle_lookup_observed(&mut self, event: LookupObservedEvent) {
-        // Update last-hit time for eviction tracking.
-        if event.was_hit() {
-            if let Some(meta) = self.resident_meta.get_mut(&event.key) {
-                meta.last_hit_at = Instant::now();
+        match event.bytecode {
+            Some(bytecode) => {
+                self.inner.stats.lookup_misses.fetch_add(1, Ordering::Relaxed);
+                self.try_admit_jit(event.key, bytecode, SyncNotifier::none(), AdmitMode::Observed);
             }
-            return;
+            None => {
+                self.inner.stats.lookup_hits.fetch_add(1, Ordering::Relaxed);
+                if let Some(meta) = self.resident_meta.get_mut(&event.key) {
+                    meta.last_hit_at = Instant::now();
+                }
+            }
         }
-
-        let Some(bytecode) = event.bytecode else { return };
-        self.try_admit_jit(event.key, bytecode, SyncNotifier::none(), AdmitMode::Observed);
     }
 
     fn handle_compile_jit(&mut self, req: CompileJitRequest) {
@@ -226,9 +222,6 @@ impl BackendState {
     ) {
         // Already resident — nothing to do; notify any sync waiter.
         if self.inner.resident.contains_key(&key) {
-            if matches!(mode, AdmitMode::Explicit) {
-                debug!(code_hash = %key.code_hash, "compile_jit: already resident");
-            }
             sync_notifier.notify();
             return;
         }
@@ -248,7 +241,7 @@ impl BackendState {
             }
         }
 
-        let entry = self.entries.entry(key.clone()).or_insert_with(|| EntryState {
+        let entry = self.entries.entry(key).or_insert_with(|| EntryState {
             hotness: 0,
             phase: EntryPhase::Cold,
             bytecode: bytecode.clone(),
@@ -280,7 +273,7 @@ impl BackendState {
 
         let symbol = format!("jit_{:x}_{:?}", key.code_hash, key.spec_id);
         let job = WorkerJob::Jit(JitJob {
-            key: key.clone(),
+            key,
             bytecode: entry.bytecode.clone(),
             symbol_name: symbol,
             sync_notifier,
@@ -335,7 +328,7 @@ impl BackendState {
 
             let symbol = format!("aot_{:x}_{:?}", req.key.code_hash, req.key.spec_id);
             let job = WorkerJob::Aot(AotJob {
-                key: req.key.clone(),
+                key: req.key,
                 bytecode: req.bytecode.clone(),
                 symbol_name: symbol,
                 opt_level: self.tuning.aot_opt_level,
@@ -366,7 +359,7 @@ impl BackendState {
         };
 
         let artifact_key = ArtifactKey {
-            runtime: key.clone(),
+            runtime: *key,
             backend: BackendSelection::Llvm,
             opt_level: self.tuning.aot_opt_level,
         };
@@ -384,7 +377,7 @@ impl BackendState {
                         *sym
                     };
                     let library = Arc::new(LoadedLibrary::new(library));
-                    Ok(CompiledProgram::new_aot(key.clone(), func, library))
+                    Ok(CompiledProgram::new_aot(*key, func, library))
                 })() {
                     Ok(program) => {
                         debug!(
@@ -392,7 +385,7 @@ impl BackendState {
                             spec_id = ?key.spec_id,
                             "loaded existing AOT artifact from store, skipping recompilation",
                         );
-                        self.insert_resident(key.clone(), Arc::new(program));
+                        self.insert_resident(*key, Arc::new(program));
                         true
                     }
                     Err(e) => {
@@ -450,7 +443,7 @@ impl BackendState {
     }
 
     fn insert_resident(&mut self, key: RuntimeCacheKey, program: Arc<CompiledProgram>) {
-        self.inner.resident.insert(key.clone(), program);
+        self.inner.resident.insert(key, program);
         self.resident_meta.insert(key, ResidentMeta { last_hit_at: Instant::now() });
     }
 
@@ -505,13 +498,9 @@ impl BackendState {
 
         match result.outcome {
             Ok(WorkerSuccess::Jit(success)) => {
-                let program = Arc::new(CompiledProgram::new_jit(
-                    result.key.clone(),
-                    success.func,
-                    success.backing,
-                ));
-
-                self.insert_resident(result.key.clone(), program);
+                let program =
+                    Arc::new(CompiledProgram::new_jit(result.key, success.func, success.backing));
+                self.insert_resident(result.key, program);
                 self.entries.remove(&result.key);
                 self.inner.stats.compilations_succeeded.fetch_add(1, Ordering::Relaxed);
 
@@ -523,7 +512,7 @@ impl BackendState {
                 );
             }
             Ok(WorkerSuccess::Aot(success)) => {
-                self.handle_aot_success(result.key.clone(), success);
+                self.handle_aot_success(result.key, success);
             }
             Err(err) => {
                 self.entries.remove(&result.key);
@@ -547,7 +536,7 @@ impl BackendState {
         success: crate::runtime::worker::AotSuccess,
     ) {
         let artifact_key = ArtifactKey {
-            runtime: key.clone(),
+            runtime: key,
             backend: BackendSelection::Llvm,
             opt_level: self.tuning.aot_opt_level,
         };
@@ -602,10 +591,10 @@ impl BackendState {
                             *sym
                         };
                         let library = Arc::new(LoadedLibrary::new(library));
-                        Ok(CompiledProgram::new_aot(key.clone(), func, library))
+                        Ok(CompiledProgram::new_aot(key, func, library))
                     })() {
                         Ok(program) => {
-                            self.insert_resident(key.clone(), Arc::new(program));
+                            self.insert_resident(key, Arc::new(program));
                             self.entries.remove(&key);
                             self.inner.stats.compilations_succeeded.fetch_add(1, Ordering::Relaxed);
 
@@ -674,7 +663,7 @@ impl BackendState {
                 .resident_meta
                 .iter()
                 .filter(|(_, meta)| now.duration_since(meta.last_hit_at) > idle)
-                .map(|(key, _)| key.clone())
+                .map(|(key, _)| *key)
                 .collect();
 
             for key in &idle_keys {
@@ -699,7 +688,7 @@ impl BackendState {
                 .filter(|(key, _)| {
                     self.inner.resident.get(key).is_some_and(|p| matches!(p.kind, ProgramKind::Jit))
                 })
-                .map(|(key, meta)| (key.clone(), meta.last_hit_at))
+                .map(|(key, meta)| (*key, meta.last_hit_at))
                 .collect();
             entries.sort_by_key(|(_, t)| *t);
 
@@ -750,7 +739,7 @@ pub(crate) fn run(
     let now = Instant::now();
     let mut preload_meta = HashMap::default();
     for entry in inner.resident.iter() {
-        preload_meta.insert(entry.key().clone(), ResidentMeta { last_hit_at: now });
+        preload_meta.insert(*entry.key(), ResidentMeta { last_hit_at: now });
     }
 
     let mut state = BackendState {

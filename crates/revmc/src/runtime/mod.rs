@@ -175,6 +175,7 @@ impl JitBackend {
     pub fn lookup(&self, req: LookupRequest) -> LookupDecision {
         let inner = &*self.inner;
         let shared = &*inner.shared;
+
         if !inner.enabled.load(Ordering::Relaxed) {
             cold_path();
             return LookupDecision::Interpret(InterpretReason::Disabled);
@@ -191,21 +192,18 @@ impl JitBackend {
         let key = RuntimeCacheKey { code_hash: req.code_hash, spec_id: req.spec_id };
 
         let decision;
-        let counter;
         let bytecode;
         if let Some(program) = shared.resident.try_get(&key).try_unwrap() {
             decision = LookupDecision::Compiled(Arc::clone(&program));
             drop(program);
-            counter = &shared.stats.lookup_hits;
             bytecode = None;
         } else {
             decision = LookupDecision::Interpret(InterpretReason::NotReady);
-            counter = &shared.stats.lookup_misses;
             bytecode = Some(req.code);
         }
-        counter.fetch_add(1, Ordering::Relaxed);
 
-        if shared.events.push(LookupObservedEvent { key, bytecode }).is_err() {
+        if let Err(_v) = shared.events.push(LookupObservedEvent { key, bytecode }) {
+            cold_path();
             shared.stats.events_dropped.fetch_add(1, Ordering::Relaxed);
         }
 
@@ -425,8 +423,8 @@ impl JitBackend {
         for (artifact_key, stored) in artifacts {
             match Self::load_artifact(&artifact_key, &stored) {
                 Ok(program) => {
-                    let key = artifact_key.runtime.clone();
-                    if !seen.insert(key.clone()) {
+                    let key = artifact_key.runtime;
+                    if !seen.insert(key) {
                         warn!(
                             code_hash = %key.code_hash,
                             spec_id = ?key.spec_id,
@@ -465,7 +463,7 @@ impl JitBackend {
         };
 
         let library = Arc::new(LoadedLibrary::new(library));
-        Ok(CompiledProgram::new_aot(key.runtime.clone(), func, library))
+        Ok(CompiledProgram::new_aot(key.runtime, func, library))
     }
 }
 

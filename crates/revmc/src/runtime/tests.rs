@@ -110,6 +110,17 @@ impl TestBackend {
         });
     }
 
+    /// Polls until the stats snapshot satisfies the given predicate, then returns it.
+    fn wait_stats(
+        &self,
+        mut pred: impl FnMut(&RuntimeStatsSnapshot) -> bool,
+    ) -> RuntimeStatsSnapshot {
+        poll_until(std::time::Duration::from_secs(5), || {
+            let s = self.backend.stats();
+            if pred(&s) { Some(s) } else { None }
+        })
+    }
+
     fn stats(&self) -> RuntimeStatsSnapshot {
         self.backend.stats()
     }
@@ -323,8 +334,9 @@ fn lookup_miss_when_enabled() {
     let decision = tb.lookup(TestBackend::req_cancun(&[0x00]));
     assert!(matches!(decision, LookupDecision::Interpret(InterpretReason::NotReady)));
 
-    assert_eq!(tb.stats().lookup_misses, 1);
-    assert_eq!(tb.stats().lookup_hits, 0);
+    let stats = tb.wait_stats(|s| s.lookup_misses == 1);
+    assert_eq!(stats.lookup_misses, 1);
+    assert_eq!(stats.lookup_hits, 0);
 }
 
 #[test]
@@ -350,8 +362,9 @@ fn lookup_increments_miss_counter() {
     }
 
     // All 10 lookups missed (no compiled program), so misses == 10.
-    assert_eq!(tb.stats().lookup_misses, 10);
-    assert_eq!(tb.stats().lookup_hits, 0);
+    let stats = tb.wait_stats(|s| s.lookup_misses == 10);
+    assert_eq!(stats.lookup_misses, 10);
+    assert_eq!(stats.lookup_hits, 0);
 }
 
 #[test]
@@ -372,7 +385,8 @@ fn backend_clone() {
     let _ = tb.lookup(TestBackend::req_cancun(&[0x00]));
     let _ = b2.lookup(TestBackend::req_cancun(&[0x00]));
 
-    assert_eq!(tb.stats().lookup_misses, 2);
+    let stats = tb.wait_stats(|s| s.lookup_misses == 2);
+    assert_eq!(stats.lookup_misses, 2);
 }
 
 // ===========================================================================
@@ -437,8 +451,10 @@ fn sub_threshold_misses_do_not_dispatch() {
         let _ = tb.lookup(TestBackend::req_cancun(BYTECODE_RET42));
     }
 
-    let stats = tb.stats();
-    assert_eq!(stats.lookup_misses, 200);
+    // Misses are tracked asynchronously by the backend, with overflow dropped.
+    // The two together must add up to the total lookup count.
+    let stats = tb.wait_stats(|s| s.lookup_misses + s.events_dropped == 200);
+    assert_eq!(stats.lookup_misses + stats.events_dropped, 200);
     assert_eq!(stats.compilations_dispatched, 0);
 }
 
@@ -467,9 +483,9 @@ fn blocking_mode() {
     // Second lookup should hit the resident map immediately.
     assert!(matches!(tb.lookup(req()), LookupDecision::Compiled(_)));
 
-    // Empty bytecodes return JitFailed (nothing to compile).
+    // Empty bytecodes return Ineligible (nothing to compile).
     let decision = tb.lookup(TestBackend::req_cancun(&[]));
-    assert!(matches!(decision, LookupDecision::Interpret(InterpretReason::JitFailed)));
+    assert!(matches!(decision, LookupDecision::Interpret(InterpretReason::Ineligible)));
 }
 
 #[test]
@@ -489,7 +505,7 @@ fn jit_hotness_promotion() {
     let p = tb.trigger_jit_cancun(BYTECODE_RET42);
     assert_eq!(p.kind, ProgramKind::Jit);
 
-    let stats = tb.stats();
+    let stats = tb.wait_stats(|s| s.resident_entries >= 1 && s.lookup_hits >= 1);
     assert!(stats.resident_entries >= 1);
     assert!(stats.lookup_hits >= 1);
 }
@@ -750,7 +766,13 @@ fn concurrent_lookup_same_key() {
         t.join().unwrap();
     }
 
-    assert!(tb.stats().lookup_hits >= 800, "expected ≥800 hits, got {}", tb.stats().lookup_hits);
+    let stats = tb.wait_stats(|s| s.lookup_hits + s.events_dropped >= 800);
+    assert!(
+        stats.lookup_hits + stats.events_dropped >= 800,
+        "expected ≥800 hits+dropped, got hits={} dropped={}",
+        stats.lookup_hits,
+        stats.events_dropped,
+    );
 }
 
 #[test]
@@ -814,11 +836,24 @@ fn stats_accuracy_concurrent() {
         t.join().unwrap();
     }
 
-    let after = tb.stats();
     let total_lookups = n_threads * n_lookups;
+    // Stats are updated asynchronously by the backend; on overflow events drop.
+    // Pre-existing in-flight events from trigger_jit_cancun may also slip in,
+    // so use `>=` rather than equality.
+    let after = tb.wait_stats(|s| {
+        let new_hits = s.lookup_hits - before.lookup_hits;
+        let new_dropped = s.events_dropped - before.events_dropped;
+        new_hits + new_dropped >= total_lookups
+    });
     let new_hits = after.lookup_hits - before.lookup_hits;
+    let new_dropped = after.events_dropped - before.events_dropped;
+    let new_misses = after.lookup_misses - before.lookup_misses;
 
-    assert_eq!(new_hits, total_lookups, "all lookups should be hits");
+    assert!(
+        new_hits + new_dropped >= total_lookups,
+        "all lookups should be accounted for: hits={new_hits} dropped={new_dropped} total={total_lookups}",
+    );
+    assert_eq!(new_misses, 0, "all lookups should be hits");
 }
 
 // ===========================================================================
