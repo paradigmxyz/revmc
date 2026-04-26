@@ -11,7 +11,6 @@
 use crate::runtime::{
     api::{CompiledProgram, LoadedLibrary, ProgramKind},
     config::{CompilationEvent, RuntimeConfig, RuntimeTuning},
-    stats::RuntimeStats,
     storage::{ArtifactKey, ArtifactManifest, ArtifactStore, BackendSelection, RuntimeCacheKey},
     worker::{AotJob, JitJob, SyncNotifier, WorkerJob, WorkerPool, WorkerResult, WorkerSuccess},
 };
@@ -139,8 +138,8 @@ enum AdmitMode {
 
 /// All backend-thread-owned mutable state.
 struct BackendState {
-    /// The shared resident map (handles read, backend writes).
-    resident: Arc<ResidentMap>,
+    /// Shared inner state (resident map, event queue, stats).
+    inner: Arc<super::BackendInner>,
     /// Per-key metadata for eviction (backend-only).
     resident_meta: HashMap<RuntimeCacheKey, ResidentMeta>,
     /// Per-key tracking state (backend-only).
@@ -149,8 +148,6 @@ struct BackendState {
     workers: WorkerPool,
     /// Receiver for worker results.
     result_rx: chan::Receiver<WorkerResult>,
-    /// Shared lookup-observed event queue (backend drains; lookup pushes).
-    events: Arc<EventQueue>,
     /// Artifact store for persisted artifacts.
     store: Option<Arc<dyn ArtifactStore>>,
     /// Tuning knobs.
@@ -161,20 +158,23 @@ struct BackendState {
     generation: u64,
     /// Last time an eviction sweep was run.
     last_sweep: Instant,
-    /// Shared stats counters (also read by the snapshot API).
-    stats: Arc<RuntimeStats>,
     /// Optional user callback for compilation events.
     on_compilation: Option<Arc<dyn Fn(CompilationEvent) + Send + Sync>>,
 }
 
 impl BackendState {
+    fn tick(&mut self) {
+        self.drain_events();
+        self.run_eviction_sweep();
+    }
+
     /// Drains all currently-queued lookup events.
     fn drain_events(&mut self) {
         // Cap per-iteration drain so a flood of events can't starve other
         // work (commands, worker results, sweeps). Surplus events stay in the
         // queue and are picked up next iteration.
         for _ in 0..self.tuning.max_events_per_drain {
-            let Some(event) = self.events.pop() else { break };
+            let Some(event) = self.inner.events.pop() else { break };
             self.handle_lookup_observed(event);
         }
     }
@@ -210,7 +210,7 @@ impl BackendState {
         mode: AdmitMode,
     ) {
         // Already resident — nothing to do; notify any sync waiter.
-        if self.resident.contains_key(&key) {
+        if self.inner.resident.contains_key(&key) {
             if matches!(mode, AdmitMode::Explicit) {
                 debug!(code_hash = %key.code_hash, "compile_jit: already resident");
             }
@@ -283,7 +283,7 @@ impl BackendState {
                 );
                 entry.phase = EntryPhase::Working;
                 self.pending_jobs += 1;
-                self.stats.compilations_dispatched.fetch_add(1, Ordering::Relaxed);
+                self.inner.stats.compilations_dispatched.fetch_add(1, Ordering::Relaxed);
             }
             Err(WorkerJob::Jit(job)) => {
                 // Worker queue saturated — notify caller immediately so it doesn't hang.
@@ -297,7 +297,7 @@ impl BackendState {
     fn handle_prepare_aot(&mut self, reqs: Vec<PrepareAotRequest>) {
         for req in reqs {
             // Already compiled in resident map.
-            if self.resident.contains_key(&req.key) {
+            if self.inner.resident.contains_key(&req.key) {
                 continue;
             }
 
@@ -337,7 +337,7 @@ impl BackendState {
             if self.workers.try_send(job).is_ok() {
                 entry.phase = EntryPhase::Working;
                 self.pending_jobs += 1;
-                self.stats.compilations_dispatched.fetch_add(1, Ordering::Relaxed);
+                self.inner.stats.compilations_dispatched.fetch_add(1, Ordering::Relaxed);
             }
         }
     }
@@ -403,7 +403,7 @@ impl BackendState {
     }
 
     fn handle_clear_resident(&mut self) {
-        self.resident.clear();
+        self.inner.resident.clear();
         self.resident_meta.clear();
         // Notify any pending sync callers before clearing entries.
         for (_, entry) in self.entries.drain() {
@@ -413,7 +413,7 @@ impl BackendState {
         }
         // Discard pending lookup events: they were observed before the clear
         // and would otherwise get processed against the new generation.
-        while self.events.pop().is_some() {}
+        while self.inner.events.pop().is_some() {}
         // Bump generation so in-flight worker results from before the clear are discarded.
         self.generation += 1;
         debug!(generation = self.generation, "resident map cleared");
@@ -435,12 +435,12 @@ impl BackendState {
     }
 
     fn insert_resident(&mut self, key: RuntimeCacheKey, program: Arc<CompiledProgram>) {
-        self.resident.insert(key.clone(), program);
+        self.inner.resident.insert(key.clone(), program);
         self.resident_meta.insert(key, ResidentMeta { last_hit_at: Instant::now() });
     }
 
     fn remove_resident(&mut self, key: &RuntimeCacheKey) {
-        self.resident.remove(key);
+        self.inner.resident.remove(key);
         self.resident_meta.remove(key);
     }
 
@@ -498,7 +498,7 @@ impl BackendState {
 
                 self.insert_resident(result.key.clone(), program);
                 self.entries.remove(&result.key);
-                self.stats.compilations_succeeded.fetch_add(1, Ordering::Relaxed);
+                self.inner.stats.compilations_succeeded.fetch_add(1, Ordering::Relaxed);
 
                 debug!(
                     code_hash = %result.key.code_hash,
@@ -512,7 +512,7 @@ impl BackendState {
             }
             Err(err) => {
                 self.entries.remove(&result.key);
-                self.stats.compilations_failed.fetch_add(1, Ordering::Relaxed);
+                self.inner.stats.compilations_failed.fetch_add(1, Ordering::Relaxed);
 
                 warn!(
                     code_hash = %result.key.code_hash,
@@ -560,7 +560,7 @@ impl BackendState {
                     "failed to persist AOT artifact",
                 );
                 self.entries.remove(&key);
-                self.stats.compilations_failed.fetch_add(1, Ordering::Relaxed);
+                self.inner.stats.compilations_failed.fetch_add(1, Ordering::Relaxed);
                 return;
             }
 
@@ -592,7 +592,7 @@ impl BackendState {
                         Ok(program) => {
                             self.insert_resident(key.clone(), Arc::new(program));
                             self.entries.remove(&key);
-                            self.stats.compilations_succeeded.fetch_add(1, Ordering::Relaxed);
+                            self.inner.stats.compilations_succeeded.fetch_add(1, Ordering::Relaxed);
 
                             debug!(
                                 code_hash = %key.code_hash,
@@ -608,7 +608,7 @@ impl BackendState {
                             );
                             // Persisted successfully but couldn't load — remove so JIT can retry.
                             self.entries.remove(&key);
-                            self.stats.compilations_failed.fetch_add(1, Ordering::Relaxed);
+                            self.inner.stats.compilations_failed.fetch_add(1, Ordering::Relaxed);
                         }
                     }
                 }
@@ -618,7 +618,7 @@ impl BackendState {
                         "stored AOT artifact not found on reload",
                     );
                     self.entries.remove(&key);
-                    self.stats.compilations_failed.fetch_add(1, Ordering::Relaxed);
+                    self.inner.stats.compilations_failed.fetch_add(1, Ordering::Relaxed);
                 }
                 Err(e) => {
                     warn!(
@@ -627,7 +627,7 @@ impl BackendState {
                         "failed to reload persisted AOT artifact",
                     );
                     self.entries.remove(&key);
-                    self.stats.compilations_failed.fetch_add(1, Ordering::Relaxed);
+                    self.inner.stats.compilations_failed.fetch_add(1, Ordering::Relaxed);
                 }
             }
         } else {
@@ -637,7 +637,7 @@ impl BackendState {
                 "AOT compilation completed but no artifact store configured",
             );
             self.entries.remove(&key);
-            self.stats.compilations_failed.fetch_add(1, Ordering::Relaxed);
+            self.inner.stats.compilations_failed.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -670,7 +670,7 @@ impl BackendState {
                 );
                 self.remove_resident(key);
                 self.entries.remove(key);
-                self.stats.evictions.fetch_add(1, Ordering::Relaxed);
+                self.inner.stats.evictions.fetch_add(1, Ordering::Relaxed);
             }
         }
 
@@ -682,7 +682,7 @@ impl BackendState {
                 .resident_meta
                 .iter()
                 .filter(|(key, _)| {
-                    self.resident.get(key).is_some_and(|p| matches!(p.kind, ProgramKind::Jit))
+                    self.inner.resident.get(key).is_some_and(|p| matches!(p.kind, ProgramKind::Jit))
                 })
                 .map(|(key, meta)| (key.clone(), meta.last_hit_at))
                 .collect();
@@ -699,7 +699,7 @@ impl BackendState {
                 );
                 self.remove_resident(&key);
                 self.entries.remove(&key);
-                self.stats.evictions.fetch_add(1, Ordering::Relaxed);
+                self.inner.stats.evictions.fetch_add(1, Ordering::Relaxed);
             }
         }
     }
@@ -739,18 +739,16 @@ pub(crate) fn run(
     }
 
     let mut state = BackendState {
-        resident: Arc::clone(&inner.resident),
+        inner,
         resident_meta: preload_meta,
         entries: HashMap::default(),
         workers,
         result_rx,
-        events: Arc::clone(&inner.events),
         store: config.store,
         tuning: config.tuning,
         pending_jobs: 0,
         generation: 0,
         last_sweep: now,
-        stats: Arc::clone(&inner.stats),
         on_compilation: config.on_compilation,
     };
 
@@ -782,8 +780,7 @@ pub(crate) fn run(
                 // Drain on command wakeup so command handlers see fresh
                 // event-derived state. Newly inserted entries should be
                 // visible to lookups before being evicted, so sweep here too.
-                state.drain_events();
-                state.run_eviction_sweep();
+                state.tick();
             }
             recv(state.result_rx) -> msg => {
                 if let Ok(result) = msg {
@@ -793,8 +790,7 @@ pub(crate) fn run(
                 // would be immediately evicted under tight memory budgets.
             }
             default(tick) => {
-                state.drain_events();
-                state.run_eviction_sweep();
+                state.tick();
             }
         }
     }
@@ -805,11 +801,11 @@ pub(crate) fn run(
     }
 
     info!(
-        compilations_dispatched = state.stats.compilations_dispatched.load(Ordering::Relaxed),
-        compilations_succeeded = state.stats.compilations_succeeded.load(Ordering::Relaxed),
-        compilations_failed = state.stats.compilations_failed.load(Ordering::Relaxed),
-        evictions = state.stats.evictions.load(Ordering::Relaxed),
-        resident_entries = state.resident.len(),
+        compilations_dispatched = state.inner.stats.compilations_dispatched.load(Ordering::Relaxed),
+        compilations_succeeded = state.inner.stats.compilations_succeeded.load(Ordering::Relaxed),
+        compilations_failed = state.inner.stats.compilations_failed.load(Ordering::Relaxed),
+        evictions = state.inner.stats.evictions.load(Ordering::Relaxed),
+        resident_entries = state.inner.resident.len(),
         "backend stats at shutdown",
     );
 
