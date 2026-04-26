@@ -15,7 +15,7 @@ use backend::{
 };
 use crossbeam_channel as chan;
 use crossbeam_queue::ArrayQueue;
-use revm_primitives::{B256, hardfork::SpecId};
+use revm_primitives::{B256, hardfork::SpecId, hints_util::cold_path};
 use stats::RuntimeStats;
 use std::{
     sync::{
@@ -54,25 +54,25 @@ mod tests;
 pub(crate) struct BackendInner {
     /// Shared resident compiled map.
     #[debug(skip)]
-    resident: Arc<ResidentMap>,
+    resident: ResidentMap,
     /// Global enable flag.
     enabled: AtomicBool,
     /// Blocking mode: every lookup synchronously compiles and never falls back.
     blocking: bool,
-    /// Bounded channel for control commands (compile_jit, prepare_aot, clears,
-    /// shutdown). The lookup hot path does NOT use this — see [`events`].
-    #[debug(skip)]
-    tx: chan::Sender<Command>,
     /// Lock-free unbounded queue of [`LookupObservedEvent`]s.
     ///
     /// The lookup hot path pushes here without signaling waiters; the backend
     /// drains on its loop iterations. Decouples lookup throughput from backend
     /// wakeup cost.
     #[debug(skip)]
-    events: Arc<EventQueue>,
+    events: EventQueue,
+    /// Bounded channel for control commands (compile_jit, prepare_aot, clears,
+    /// shutdown). The lookup hot path does NOT use this — see [`events`].
+    #[debug(skip)]
+    tx: chan::Sender<Command>,
     /// Shared stats counters.
     #[debug(skip)]
-    stats: Arc<RuntimeStats>,
+    stats: RuntimeStats,
     /// Backend thread + done signal. `None` after shutdown.
     #[debug(skip)]
     thread: std::sync::Mutex<Option<BackendThread>>,
@@ -89,17 +89,6 @@ pub(crate) struct BackendInner {
 struct LazySpawnState {
     rx: chan::Receiver<Command>,
     config: RuntimeConfig,
-}
-
-impl BackendInner {
-    /// Returns a point-in-time snapshot of runtime statistics.
-    pub(crate) fn stats(&self) -> RuntimeStatsSnapshot {
-        self.stats.snapshot(stats::RuntimeStatsGauges {
-            resident_entries: self.resident.len() as u64,
-            events_queued: self.events.len() as u64,
-            command_queue_len: self.tx.len() as u64,
-        })
-    }
 }
 
 /// Backend thread handle and its completion signal.
@@ -141,16 +130,16 @@ impl JitBackend {
 
         let enabled = config.enabled;
         let (tx, rx) = chan::bounded::<Command>(config.tuning.channel_capacity);
-        let events = Arc::new(ArrayQueue::new(config.tuning.channel_capacity));
+        let events = ArrayQueue::new(config.tuning.channel_capacity);
         let tuning = config.tuning;
         let this = Self {
             inner: Arc::new(BackendInner {
-                resident: Arc::new(ResidentMap::default()),
+                resident: ResidentMap::default(),
                 enabled: AtomicBool::new(false),
                 blocking: config.blocking,
                 tx,
                 events,
-                stats: Arc::new(RuntimeStats::default()),
+                stats: RuntimeStats::default(),
                 thread: std::sync::Mutex::new(None),
                 shutdown_timeout: config.tuning.shutdown_timeout,
                 tuning,
@@ -166,40 +155,37 @@ impl JitBackend {
     /// In normal mode this never blocks. In [`blocking`](RuntimeConfig::blocking) mode,
     /// a miss triggers synchronous JIT compilation and the call blocks until it completes.
     pub fn lookup(&self, req: LookupRequest) -> LookupDecision {
-        if !self.inner.enabled.load(Ordering::Relaxed) {
+        let inner = &*self.inner;
+        if !inner.enabled.load(Ordering::Relaxed) {
+            cold_path();
             return LookupDecision::Interpret(InterpretReason::Disabled);
         }
-
-        // Blocking mode: synchronously compile on miss, never fall back.
-        if self.inner.blocking {
+        if inner.blocking {
+            cold_path();
             return match self.lookup_blocking(req) {
                 Some(program) => LookupDecision::Compiled(program),
                 None => LookupDecision::Interpret(InterpretReason::JitFailed),
             };
         }
+        if !inner.tuning.should_compile(&req.code) {
+            cold_path();
+            return LookupDecision::Interpret(InterpretReason::Ineligible);
+        }
 
         let key = RuntimeCacheKey { code_hash: req.code_hash, spec_id: req.spec_id };
 
-        let r = self.inner.resident.get(&key);
+        let r = inner.resident.try_get(&key).try_unwrap();
         let was_hit = r.is_some();
-        let decision = if let Some(program) = { r } {
-            self.inner.stats.lookup_hits.fetch_add(1, Ordering::Relaxed);
-            LookupDecision::Compiled(Arc::clone(&program))
+        let (counter, decision) = if let Some(program) = { r } {
+            (&inner.stats.lookup_hits, LookupDecision::Compiled(Arc::clone(&program)))
         } else {
-            self.inner.stats.lookup_misses.fetch_add(1, Ordering::Relaxed);
-            LookupDecision::Interpret(InterpretReason::NotReady)
+            (&inner.stats.lookup_misses, LookupDecision::Interpret(InterpretReason::NotReady))
         };
+        counter.fetch_add(1, Ordering::Relaxed);
 
-        if self
-            .inner
-            .events
-            .push(LookupObservedEvent {
-                key,
-                bytecode: if was_hit { None } else { Some(req.code) },
-            })
-            .is_err()
-        {
-            self.inner.stats.events_dropped.fetch_add(1, Ordering::Relaxed);
+        let bytecode = if was_hit { None } else { Some(req.code) };
+        if inner.events.push(LookupObservedEvent { key, bytecode }).is_err() {
+            inner.stats.events_dropped.fetch_add(1, Ordering::Relaxed);
         }
 
         decision
@@ -458,6 +444,15 @@ impl JitBackend {
 }
 
 impl BackendInner {
+    /// Returns a point-in-time snapshot of runtime statistics.
+    pub(crate) fn stats(&self) -> RuntimeStatsSnapshot {
+        self.stats.snapshot(stats::RuntimeStatsGauges {
+            resident_entries: self.resident.len() as u64,
+            events_queued: self.events.len() as u64,
+            command_queue_len: self.tx.len() as u64,
+        })
+    }
+
     fn shutdown(&self) -> eyre::Result<()> {
         debug!("shutting down JIT backend");
         if let Some(ct) = self.thread.lock().unwrap().take() {
