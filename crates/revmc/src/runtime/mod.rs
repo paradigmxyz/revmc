@@ -83,6 +83,8 @@ pub(crate) struct BackendInner {
     enabled: AtomicBool,
     /// Blocking mode: every lookup synchronously compiles and never falls back.
     blocking: bool,
+    /// Tuning knobs (Copy). Cached for hot-path eligibility checks.
+    tuning: crate::runtime::config::RuntimeTuning,
     /// Bounded channel for control commands (compile_jit, prepare_aot, clears,
     /// shutdown). The lookup hot path does NOT use this — see
     /// [`BackendShared::events`].
@@ -93,8 +95,6 @@ pub(crate) struct BackendInner {
     thread: std::sync::Mutex<Option<BackendThread>>,
     /// Shutdown timeout.
     shutdown_timeout: Duration,
-    /// Tuning knobs (Copy). Cached for hot-path eligibility checks.
-    tuning: crate::runtime::config::RuntimeTuning,
     /// State for lazily spawning the backend thread.
     #[debug(skip)]
     lazy_spawn: std::sync::Mutex<Option<LazySpawnState>>,
@@ -174,6 +174,7 @@ impl JitBackend {
     /// a miss triggers synchronous JIT compilation and the call blocks until it completes.
     pub fn lookup(&self, req: LookupRequest) -> LookupDecision {
         let inner = &*self.inner;
+        let shared = &*inner.shared;
         if !inner.enabled.load(Ordering::Relaxed) {
             cold_path();
             return LookupDecision::Interpret(InterpretReason::Disabled);
@@ -192,21 +193,18 @@ impl JitBackend {
 
         let key = RuntimeCacheKey { code_hash: req.code_hash, spec_id: req.spec_id };
 
-        let r = inner.shared.resident.try_get(&key).try_unwrap();
+        let r = shared.resident.try_get(&key).try_unwrap();
         let was_hit = r.is_some();
         let (counter, decision) = if let Some(program) = { r } {
-            (&inner.shared.stats.lookup_hits, LookupDecision::Compiled(Arc::clone(&program)))
+            (&shared.stats.lookup_hits, LookupDecision::Compiled(Arc::clone(&program)))
         } else {
-            (
-                &inner.shared.stats.lookup_misses,
-                LookupDecision::Interpret(InterpretReason::NotReady),
-            )
+            (&shared.stats.lookup_misses, LookupDecision::Interpret(InterpretReason::NotReady))
         };
         counter.fetch_add(1, Ordering::Relaxed);
 
         let bytecode = if was_hit { None } else { Some(req.code) };
-        if inner.shared.events.push(LookupObservedEvent { key, bytecode }).is_err() {
-            inner.shared.stats.events_dropped.fetch_add(1, Ordering::Relaxed);
+        if shared.events.push(LookupObservedEvent { key, bytecode }).is_err() {
+            shared.stats.events_dropped.fetch_add(1, Ordering::Relaxed);
         }
 
         decision
@@ -382,10 +380,6 @@ impl JitBackend {
         drop(guard);
 
         let (done_tx, done_rx) = chan::bounded::<()>(1);
-        // Pass only `shared` (no `Arc<BackendInner>`) so that dropping the last
-        // `JitBackend` clone causes `BackendInner::Drop` to run, which signals
-        // the thread to exit. Holding `Arc<BackendInner>` here would create a
-        // cycle and leak the thread.
         let shared = Arc::clone(&self.inner.shared);
 
         let thread = std::thread::Builder::new()

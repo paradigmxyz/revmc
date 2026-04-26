@@ -221,9 +221,7 @@ pub struct RuntimeTuning {
 
 impl RuntimeTuning {
     /// Returns whether `bytecode` is eligible for JIT/AOT compilation.
-    ///
-    /// Filters empty bytecodes and bytecodes exceeding
-    /// [`jit_max_bytecode_len`](Self::jit_max_bytecode_len).
+    #[inline]
     pub fn should_compile(&self, bytecode: &[u8]) -> bool {
         if bytecode.is_empty() {
             return false;
