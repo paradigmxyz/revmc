@@ -800,14 +800,7 @@ pub(crate) fn run(
         state.handle_worker_result(result);
     }
 
-    info!(
-        compilations_dispatched = state.inner.stats.compilations_dispatched.load(Ordering::Relaxed),
-        compilations_succeeded = state.inner.stats.compilations_succeeded.load(Ordering::Relaxed),
-        compilations_failed = state.inner.stats.compilations_failed.load(Ordering::Relaxed),
-        evictions = state.inner.stats.evictions.load(Ordering::Relaxed),
-        resident_entries = state.inner.resident.len(),
-        "backend stats at shutdown",
-    );
+    info!(stats = ?state.inner.stats(), "backend stats at shutdown");
 
     state.workers.shutdown();
 }

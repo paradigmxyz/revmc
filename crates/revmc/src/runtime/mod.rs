@@ -91,6 +91,17 @@ struct LazySpawnState {
     config: RuntimeConfig,
 }
 
+impl BackendInner {
+    /// Returns a point-in-time snapshot of runtime statistics.
+    pub(crate) fn stats(&self) -> RuntimeStatsSnapshot {
+        self.stats.snapshot(stats::RuntimeStatsGauges {
+            resident_entries: self.resident.len() as u64,
+            events_queued: self.events.len() as u64,
+            command_queue_len: self.tx.len() as u64,
+        })
+    }
+}
+
 /// Backend thread handle and its completion signal.
 struct BackendThread {
     handle: std::thread::JoinHandle<()>,
@@ -327,11 +338,7 @@ impl JitBackend {
 
     /// Returns a point-in-time snapshot of runtime statistics.
     pub fn stats(&self) -> RuntimeStatsSnapshot {
-        self.inner.stats.snapshot(stats::RuntimeStatsGauges {
-            resident_entries: self.inner.resident.len() as u64,
-            events_queued: self.inner.events.len() as u64,
-            command_queue_len: self.inner.tx.len() as u64,
-        })
+        self.inner.stats()
     }
 
     /// Spawns the backend thread if it hasn't been started yet.
