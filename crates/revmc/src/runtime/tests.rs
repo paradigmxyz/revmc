@@ -67,9 +67,8 @@ impl TestBackend {
     /// Builds a [`LookupRequest`] for the given bytecode and spec.
     fn req(bytecode: &[u8], spec_id: SpecId) -> LookupRequest {
         LookupRequest {
-            code_hash: alloy_primitives::keccak256(bytecode),
+            key: RuntimeCacheKey { code_hash: alloy_primitives::keccak256(bytecode), spec_id },
             code: Bytes::copy_from_slice(bytecode),
-            spec_id,
         }
     }
 

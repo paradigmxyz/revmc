@@ -4,7 +4,7 @@
 //! execution to look up compiled functions via [`JitBackend`] before falling
 //! back to the interpreter.
 
-use crate::runtime::{JitBackend, LookupDecision, LookupRequest};
+use crate::runtime::{JitBackend, LookupDecision, LookupRequest, RuntimeCacheKey};
 use alloy_primitives::{Address, Bytes};
 use revm_context::{Host, JournalEntry};
 use revm_context_interface::{
@@ -185,7 +185,10 @@ where
 
         let decision = self.lookup_cache.entry(code_hash).or_insert_with(|| {
             let code = frame.interpreter.bytecode.original_bytes();
-            self.backend.lookup(LookupRequest { code_hash, code, spec_id })
+            self.backend.lookup(LookupRequest {
+                key: RuntimeCacheKey { code_hash, spec_id },
+                code,
+            })
         });
 
         Ok(match decision {
@@ -359,7 +362,10 @@ where
 
         let decision = self.lookup_cache.entry(code_hash).or_insert_with(|| {
             let code = frame.interpreter.bytecode.original_bytes();
-            self.backend.lookup(LookupRequest { code_hash, code, spec_id })
+            self.backend.lookup(LookupRequest {
+                key: RuntimeCacheKey { code_hash, spec_id },
+                code,
+            })
         });
 
         let program = match decision {

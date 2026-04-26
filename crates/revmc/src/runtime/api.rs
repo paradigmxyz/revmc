@@ -11,12 +11,10 @@ use std::sync::Arc;
 /// Request to look up a compiled function.
 #[derive(Clone, Debug)]
 pub struct LookupRequest {
-    /// The code hash of the contract bytecode.
-    pub code_hash: B256,
+    /// The cache key (code hash + spec).
+    pub key: RuntimeCacheKey,
     /// The raw contract bytecode.
     pub code: Bytes,
-    /// The EVM spec (hardfork) for this execution.
-    pub spec_id: SpecId,
 }
 
 /// Result of a lookup.

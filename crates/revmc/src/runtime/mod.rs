@@ -10,9 +10,7 @@ use crate::{
     eyre::{self, WrapErr},
 };
 use api::LoadedLibrary;
-use backend::{
-    Command, CompileJitRequest, EventQueue, LookupObservedEvent, PrepareAotRequest, ResidentMap,
-};
+use backend::{Command, CompileJitRequest, EventQueue, PrepareAotRequest, ResidentMap};
 use crossbeam_channel as chan;
 use crossbeam_queue::ArrayQueue;
 use revm_primitives::{B256, hardfork::SpecId, hints_util::cold_path};
@@ -172,7 +170,7 @@ impl JitBackend {
     ///
     /// In normal mode this never blocks. In [`blocking`](RuntimeConfig::blocking) mode,
     /// a miss triggers synchronous JIT compilation and the call blocks until it completes.
-    pub fn lookup(&self, req: LookupRequest) -> LookupDecision {
+    pub fn lookup(&self, mut req: LookupRequest) -> LookupDecision {
         let inner = &*self.inner;
         let shared = &*inner.shared;
 
@@ -189,20 +187,16 @@ impl JitBackend {
             return LookupDecision::Interpret(InterpretReason::Ineligible);
         }
 
-        let key = RuntimeCacheKey { code_hash: req.code_hash, spec_id: req.spec_id };
-
-        let decision;
-        let bytecode;
-        if let Some(program) = shared.resident.try_get(&key).try_unwrap() {
-            decision = LookupDecision::Compiled(Arc::clone(&program));
-            drop(program);
-            bytecode = None;
+        let decision = if let Some(program_ref) = shared.resident.try_get(&req.key).try_unwrap() {
+            let program = Arc::clone(&program_ref);
+            drop(program_ref);
+            req.code.clear();
+            LookupDecision::Compiled(program)
         } else {
-            decision = LookupDecision::Interpret(InterpretReason::NotReady);
-            bytecode = Some(req.code);
-        }
+            LookupDecision::Interpret(InterpretReason::NotReady)
+        };
 
-        if let Err(_v) = shared.events.push(LookupObservedEvent { key, bytecode }) {
+        if let Err(_v) = shared.events.push(req) {
             cold_path();
             shared.stats.events_dropped.fetch_add(1, Ordering::Relaxed);
         }
@@ -241,8 +235,8 @@ impl JitBackend {
         if !self.inner.tuning.should_compile(&req.code) {
             return LookupDecision::Interpret(InterpretReason::Ineligible);
         }
-        let code_hash = req.code_hash;
-        let spec_id = req.spec_id;
+        let code_hash = req.key.code_hash;
+        let spec_id = req.key.spec_id;
         if let Some(program) = self.get_compiled_tracked(code_hash, spec_id) {
             return LookupDecision::Compiled(program);
         }
@@ -261,7 +255,7 @@ impl JitBackend {
     pub fn compile_jit(&self, req: LookupRequest) {
         let _ = self.ensure_started();
         let cmd = Command::CompileJit(CompileJitRequest {
-            key: RuntimeCacheKey { code_hash: req.code_hash, spec_id: req.spec_id },
+            key: req.key,
             bytecode: req.code,
             sync_notifier: SyncNotifier::none(),
         });
@@ -277,7 +271,7 @@ impl JitBackend {
         self.ensure_started()?;
         let (tx, rx) = chan::bounded(1);
         let cmd = Command::CompileJit(CompileJitRequest {
-            key: RuntimeCacheKey { code_hash: req.code_hash, spec_id: req.spec_id },
+            key: req.key,
             bytecode: req.code,
             sync_notifier: SyncNotifier::new(tx),
         });

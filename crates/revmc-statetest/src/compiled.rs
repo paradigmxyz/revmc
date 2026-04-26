@@ -551,7 +551,7 @@ fn execute_test_suite_compiled(
 
 use revmc::{
     revm_evm::JitEvm,
-    runtime::{JitBackend, LookupRequest, RuntimeConfig, RuntimeTuning},
+    runtime::{JitBackend, LookupRequest, RuntimeCacheKey, RuntimeConfig, RuntimeTuning},
 };
 
 /// Execute a single test using the runtime backend via [`JitEvm`].
@@ -651,8 +651,10 @@ fn execute_test_suite_runtime(
                     continue;
                 }
                 let code_hash = keccak256(&info.code);
-                let req = LookupRequest { code_hash, code: info.code.clone(), spec_id };
-                backend.compile_jit(req);
+                backend.compile_jit(LookupRequest {
+                    key: RuntimeCacheKey { code_hash, spec_id },
+                    code: info.code.clone(),
+                });
             }
 
             for test in tests.iter() {

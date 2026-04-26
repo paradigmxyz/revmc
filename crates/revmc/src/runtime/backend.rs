@@ -8,6 +8,7 @@
 //! processing explicit user commands and worker results.
 
 use crate::runtime::{
+    LookupRequest,
     api::{CompiledProgram, LoadedLibrary, ProgramKind},
     config::{CompilationEvent, RuntimeConfig, RuntimeTuning},
     storage::{ArtifactKey, ArtifactManifest, ArtifactStore, BackendSelection, RuntimeCacheKey},
@@ -35,7 +36,7 @@ pub(crate) type ResidentMap = DashMap<RuntimeCacheKey, Arc<CompiledProgram>, Def
 /// Producers (lookup hot path) push without blocking; on overflow the event
 /// is silently dropped (`stats.events_dropped` is bumped). The backend
 /// drains via `pop` on every loop iteration. Hotness signal is best-effort.
-pub(crate) type EventQueue = ArrayQueue<LookupObservedEvent>;
+pub(crate) type EventQueue = ArrayQueue<LookupRequest>;
 
 /// Per-entry metadata tracked alongside the resident map for eviction decisions.
 struct ResidentMeta {
@@ -90,17 +91,6 @@ pub(crate) struct PrepareAotRequest {
     pub(crate) key: RuntimeCacheKey,
     /// The raw bytecode.
     pub(crate) bytecode: Bytes,
-}
-
-/// A lookup-observed event pushed by the hot path.
-///
-/// `Bytes` clone is cheap (single `Arc` bump), so the bytecode is always carried
-/// for misses; the backend uses it directly when the hotness threshold trips.
-pub(crate) struct LookupObservedEvent {
-    /// The key that was looked up.
-    pub(crate) key: RuntimeCacheKey,
-    /// The bytecode, present only on misses.
-    pub(crate) bytecode: Option<Bytes>,
 }
 
 /// Per-key state tracked by the backend.
@@ -188,18 +178,16 @@ impl BackendState {
         }
     }
 
-    fn handle_lookup_observed(&mut self, event: LookupObservedEvent) {
-        match event.bytecode {
-            Some(bytecode) => {
-                self.inner.stats.lookup_misses.fetch_add(1, Ordering::Relaxed);
-                self.try_admit_jit(event.key, bytecode, SyncNotifier::none(), AdmitMode::Observed);
+    fn handle_lookup_observed(&mut self, event: LookupRequest) {
+        let hit = event.code.is_empty();
+        if hit {
+            self.inner.stats.lookup_hits.fetch_add(1, Ordering::Relaxed);
+            if let Some(meta) = self.resident_meta.get_mut(&event.key) {
+                meta.last_hit_at = Instant::now();
             }
-            None => {
-                self.inner.stats.lookup_hits.fetch_add(1, Ordering::Relaxed);
-                if let Some(meta) = self.resident_meta.get_mut(&event.key) {
-                    meta.last_hit_at = Instant::now();
-                }
-            }
+        } else {
+            self.inner.stats.lookup_misses.fetch_add(1, Ordering::Relaxed);
+            self.try_admit_jit(event.key, event.code, SyncNotifier::none(), AdmitMode::Observed);
         }
     }
 
