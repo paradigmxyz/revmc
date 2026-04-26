@@ -369,8 +369,8 @@ fn backend_clone() {
     let tb = TestBackend::new(RuntimeConfig { enabled: true, ..Default::default() });
     let b2 = tb.backend.clone();
 
-    let _ = tb.lookup(TestBackend::req_cancun(&[]));
-    let _ = b2.lookup(TestBackend::req_cancun(&[]));
+    let _ = tb.lookup(TestBackend::req_cancun(&[0x00]));
+    let _ = b2.lookup(TestBackend::req_cancun(&[0x00]));
 
     assert_eq!(tb.stats().lookup_misses, 2);
 }
@@ -513,8 +513,8 @@ fn jit_max_bytecode_len_prevents_promotion() {
     // Give the backend time to process events.
     std::thread::sleep(std::time::Duration::from_millis(200));
 
-    // Should still be NotReady — never promoted due to bytecode length.
-    assert!(matches!(tb.lookup(req()), LookupDecision::Interpret(InterpretReason::NotReady)));
+    // Should be Ineligible — bytecode length exceeds jit_max_bytecode_len.
+    assert!(matches!(tb.lookup(req()), LookupDecision::Interpret(InterpretReason::Ineligible)));
 }
 
 #[test]
