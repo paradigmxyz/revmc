@@ -240,11 +240,6 @@ impl Drop for WorkerPool {
     }
 }
 
-/// The per-worker event loop. Owns a long-lived JIT compiler.
-///
-/// With ORCv2, each compiled module's `ResourceTracker` is extracted and sent
-/// back as part of the result. The worker exits as soon as the job channel
-/// closes — no condvar wait needed.
 #[cfg(feature = "llvm")]
 fn worker_loop(
     id: usize,
@@ -374,6 +369,7 @@ fn worker_loop(
                     return;
                 }
             };
+            revmc_llvm::global_gc();
             compilations_since_recycle = 0;
         }
     }

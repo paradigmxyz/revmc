@@ -342,15 +342,16 @@ fn set_enabled_toggle() {
 }
 
 #[test]
-fn events_sent_on_lookup() {
+fn lookup_increments_miss_counter() {
     let tb = TestBackend::new(RuntimeConfig { enabled: true, ..Default::default() });
 
     for _ in 0..10 {
-        let _ = tb.lookup(TestBackend::req_cancun(&[]));
+        let _ = tb.lookup(TestBackend::req_cancun(BYTECODE_RET42));
     }
 
-    assert_eq!(tb.stats().events_sent, 10);
-    assert_eq!(tb.stats().events_dropped, 0);
+    // All 10 lookups missed (no compiled program), so misses == 10.
+    assert_eq!(tb.stats().lookup_misses, 10);
+    assert_eq!(tb.stats().lookup_hits, 0);
 }
 
 #[test]
@@ -422,20 +423,23 @@ fn clear_resident() {
 }
 
 #[test]
-fn channel_saturation_drops_events() {
+fn sub_threshold_misses_do_not_dispatch() {
+    // Inline counters live on the resident entry; threshold-crossing dispatches
+    // exactly one CompileJit. With a tiny command channel and threshold above
+    // the call count, no dispatch occurs and lookups never block.
     let tb = TestBackend::with_tuning_1w(RuntimeTuning {
-        lookup_event_channel_capacity: 2,
+        channel_capacity: 2,
         jit_hot_threshold: 1000,
         ..Default::default()
     });
 
     for _ in 0..200 {
-        let _ = tb.lookup(TestBackend::req_cancun(&[0x00]));
+        let _ = tb.lookup(TestBackend::req_cancun(BYTECODE_RET42));
     }
 
     let stats = tb.stats();
-    assert!(stats.events_dropped > 0, "expected some dropped events with tiny channel");
-    assert_eq!(stats.events_sent + stats.events_dropped, 200);
+    assert_eq!(stats.lookup_misses, 200);
+    assert_eq!(stats.compilations_dispatched, 0);
 }
 
 // ===========================================================================
@@ -809,11 +813,8 @@ fn stats_accuracy_concurrent() {
     let after = tb.stats();
     let total_lookups = n_threads * n_lookups;
     let new_hits = after.lookup_hits - before.lookup_hits;
-    let new_events =
-        (after.events_sent - before.events_sent) + (after.events_dropped - before.events_dropped);
 
     assert_eq!(new_hits, total_lookups, "all lookups should be hits");
-    assert_eq!(new_events, total_lookups, "events sent + dropped should equal lookups");
 }
 
 // ===========================================================================

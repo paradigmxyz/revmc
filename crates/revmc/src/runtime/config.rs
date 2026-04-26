@@ -139,12 +139,20 @@ impl Default for RuntimeConfig {
 /// Tuning knobs for the runtime.
 #[derive(Clone, Copy, Debug)]
 pub struct RuntimeTuning {
-    /// Capacity of the bounded channel for lookup-observed events.
-    ///
-    /// When the channel is full, events are silently dropped.
+    /// Capacity of the channel between API callers and the backend.
     ///
     /// Defaults to `4096`.
-    pub lookup_event_channel_capacity: usize,
+    pub channel_capacity: usize,
+
+    /// Maximum lookup events processed per backend wakeup.
+    ///
+    /// Defaults to `4096`.
+    pub max_events_per_drain: usize,
+
+    /// Maximum delay between lookup observation and hotness accounting.
+    ///
+    /// Defaults to `100ms`.
+    pub event_drain_interval: Duration,
 
     /// Timeout for joining the backend thread during shutdown.
     ///
@@ -156,20 +164,15 @@ pub struct RuntimeTuning {
     /// Defaults to `8`.
     pub jit_hot_threshold: usize,
 
-    /// Maximum bytecode length eligible for JIT compilation.
+    /// Maximum bytecode length eligible for compilation. `0` = no limit.
     ///
-    /// Contracts with bytecode larger than this are never promoted to JIT.
-    /// Large contracts have diminishing JIT returns and long compile times.
-    ///
-    /// `0` means no limit.
-    ///
-    /// Defaults to `0` (no limit).
+    /// Defaults to `0`.
     pub jit_max_bytecode_len: usize,
 
     /// Maximum number of JIT compilation jobs in flight.
     ///
     /// Defaults to `2048`.
-    pub max_pending_jit_jobs: usize,
+    pub jit_max_pending_jobs: usize,
 
     /// Number of JIT compilation worker threads.
     ///
@@ -191,25 +194,17 @@ pub struct RuntimeTuning {
     /// Defaults to [`OptimizationLevel::Default`](crate::OptimizationLevel::Default).
     pub aot_opt_level: crate::OptimizationLevel,
 
-    /// Maximum total resident compiled code size in bytes.
+    /// Maximum total resident compiled code size in bytes. `0` = no limit.
     ///
-    /// When the total JIT memory usage (from the LLVM memory plugin) exceeds this limit,
-    /// the backend evicts the least-recently-used entries until under budget.
+    /// When exceeded, least-recently-used entries are evicted.
     ///
-    /// `0` means no limit.
-    ///
-    /// Defaults to `0` (no limit).
+    /// Defaults to `0`.
     pub resident_code_cache_bytes: usize,
 
     /// Duration after which a resident program with no lookup hits is evicted.
+    /// `None` disables idle eviction.
     ///
-    /// When a compiled program has not been hit for this duration, the backend
-    /// removes it from the resident map. This naturally cleans up stale entries
-    /// after hardfork transitions (old `spec_id` contracts stop being looked up).
-    ///
-    /// `None` means idle eviction is disabled.
-    ///
-    /// Defaults to `None` (disabled).
+    /// Defaults to `None`.
     pub idle_evict_duration: Option<Duration>,
 
     /// How often the backend runs eviction sweeps.
@@ -217,17 +212,27 @@ pub struct RuntimeTuning {
     /// Defaults to `60s`.
     pub eviction_sweep_interval: Duration,
 
-    /// Number of compilations before recycling the compiler (destroying and
-    /// recreating the LLVM context) to reclaim accumulated allocator memory.
-    ///
-    /// LLVM's internal bump-pointer allocators never shrink, so after many
-    /// compilations the RSS grows without bound. Recycling the compiler
-    /// periodically bounds this growth.
-    ///
-    /// `0` means never recycle.
+    /// Number of compilations before recycling the compiler to reclaim
+    /// accumulated memory. `0` = never recycle.
     ///
     /// Defaults to `1000`.
     pub compiler_recycle_threshold: usize,
+}
+
+impl RuntimeTuning {
+    /// Returns whether `bytecode` is eligible for JIT/AOT compilation.
+    ///
+    /// Filters empty bytecodes and bytecodes exceeding
+    /// [`jit_max_bytecode_len`](Self::jit_max_bytecode_len).
+    pub fn should_compile(&self, bytecode: &[u8]) -> bool {
+        if bytecode.is_empty() {
+            return false;
+        }
+        if self.jit_max_bytecode_len > 0 && bytecode.len() > self.jit_max_bytecode_len {
+            return false;
+        }
+        true
+    }
 }
 
 impl Default for RuntimeTuning {
@@ -236,11 +241,13 @@ impl Default for RuntimeTuning {
         let worker_count = cpus.div_ceil(2).clamp(1, 4);
 
         Self {
-            lookup_event_channel_capacity: 4096,
+            channel_capacity: 4096,
+            max_events_per_drain: 4096,
+            event_drain_interval: Duration::from_millis(100),
             shutdown_timeout: Duration::from_secs(5),
             jit_hot_threshold: 8,
             jit_max_bytecode_len: 0,
-            max_pending_jit_jobs: 2048,
+            jit_max_pending_jobs: 2048,
             jit_worker_count: worker_count,
             jit_worker_queue_capacity: 64,
             jit_opt_level: crate::OptimizationLevel::default(),

@@ -9,9 +9,7 @@ pub(crate) struct RuntimeStats {
     pub(crate) lookup_hits: AtomicU64,
     /// Total lookups that returned interpret (not ready).
     pub(crate) lookup_misses: AtomicU64,
-    /// Lookup-observed events successfully enqueued.
-    pub(crate) events_sent: AtomicU64,
-    /// Lookup-observed events dropped (channel full).
+    /// Total lookup events dropped due to event-queue overflow.
     pub(crate) events_dropped: AtomicU64,
     /// Total number of entries evicted (idle + budget).
     pub(crate) evictions: AtomicU64,
@@ -23,6 +21,14 @@ pub(crate) struct RuntimeStats {
     pub(crate) compilations_failed: AtomicU64,
 }
 
+/// Gauge values sampled at snapshot time.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct RuntimeStatsGauges {
+    pub(crate) resident_entries: u64,
+    pub(crate) events_queued: u64,
+    pub(crate) command_queue_len: u64,
+}
+
 /// A point-in-time snapshot of runtime stats.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RuntimeStatsSnapshot {
@@ -30,14 +36,16 @@ pub struct RuntimeStatsSnapshot {
     pub lookup_hits: u64,
     /// Total lookups that returned interpret (not ready).
     pub lookup_misses: u64,
-    /// Lookup-observed events successfully enqueued.
-    pub events_sent: u64,
-    /// Lookup-observed events dropped (channel full).
+    /// Total lookup events dropped due to event-queue overflow.
     pub events_dropped: u64,
     /// Number of entries in the resident compiled map.
     pub resident_entries: u64,
-    /// Number of lookup-observed events pending in the bounded lookup channel.
-    pub lookup_queue_len: u64,
+    /// Number of lookup events currently queued for the backend.
+    pub events_queued: u64,
+    /// Number of pending control commands queued for the backend.
+    pub command_queue_len: u64,
+    /// Number of compilation jobs currently in flight (dispatched but not yet completed).
+    pub pending_jobs: u64,
     /// Bytes allocated for executable JIT code sections.
     ///
     /// Sourced from the LLVM JIT memory usage plugin. Reflects live memory:
@@ -66,11 +74,7 @@ impl RuntimeStatsSnapshot {
 }
 
 impl RuntimeStats {
-    pub(crate) fn snapshot(
-        &self,
-        resident_entries: u64,
-        lookup_queue_len: u64,
-    ) -> RuntimeStatsSnapshot {
+    pub(crate) fn snapshot(&self, gauges: RuntimeStatsGauges) -> RuntimeStatsSnapshot {
         #[cfg(feature = "llvm")]
         let (jit_code_bytes, jit_data_bytes) = crate::llvm::jit_memory_usage()
             .map(|u| (u.code_bytes as u64, u.data_bytes as u64))
@@ -78,19 +82,25 @@ impl RuntimeStats {
         #[cfg(not(feature = "llvm"))]
         let (jit_code_bytes, jit_data_bytes) = (0, 0);
 
+        let dispatched = self.compilations_dispatched.load(Ordering::Relaxed);
+        let succeeded = self.compilations_succeeded.load(Ordering::Relaxed);
+        let failed = self.compilations_failed.load(Ordering::Relaxed);
+        let pending_jobs = dispatched.saturating_sub(succeeded.saturating_add(failed));
+
         RuntimeStatsSnapshot {
             lookup_hits: self.lookup_hits.load(Ordering::Relaxed),
             lookup_misses: self.lookup_misses.load(Ordering::Relaxed),
-            events_sent: self.events_sent.load(Ordering::Relaxed),
             events_dropped: self.events_dropped.load(Ordering::Relaxed),
-            resident_entries,
-            lookup_queue_len,
+            resident_entries: gauges.resident_entries,
+            events_queued: gauges.events_queued,
+            command_queue_len: gauges.command_queue_len,
+            pending_jobs,
             jit_code_bytes,
             jit_data_bytes,
             evictions: self.evictions.load(Ordering::Relaxed),
-            compilations_dispatched: self.compilations_dispatched.load(Ordering::Relaxed),
-            compilations_succeeded: self.compilations_succeeded.load(Ordering::Relaxed),
-            compilations_failed: self.compilations_failed.load(Ordering::Relaxed),
+            compilations_dispatched: dispatched,
+            compilations_succeeded: succeeded,
+            compilations_failed: failed,
         }
     }
 }

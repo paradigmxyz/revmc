@@ -1,8 +1,12 @@
 //! Backend thread: single-threaded event loop for runtime state management.
 //!
-//! The backend thread is the sole writer of mutable state. It processes lookup-observed
-//! events, tracks hotness, admits JIT compilation jobs, and inserts results into
-//! the shared resident `DashMap`.
+//! Hotness is tracked on the backend thread. The lookup hot path is push-only:
+//! it pushes a [`LookupObservedEvent`] onto an unbounded lock-free
+//! [`SegQueue`] and returns. There is no wakeup signal to the backend, so
+//! sends are essentially free (one CAS, occasional segment alloc).
+//!
+//! The backend drains the queue on every iteration of its event loop, alongside
+//! processing explicit user commands and worker results.
 
 use crate::runtime::{
     api::{CompiledProgram, LoadedLibrary, ProgramKind},
@@ -13,6 +17,7 @@ use crate::runtime::{
 };
 use alloy_primitives::{Bytes, keccak256, map::HashMap};
 use crossbeam_channel as chan;
+use crossbeam_queue::ArrayQueue;
 use dashmap::DashMap;
 use quanta::Instant;
 use std::{
@@ -22,6 +27,13 @@ use std::{
 
 /// The resident map type: code_hash+spec_id → compiled program.
 pub(crate) type ResidentMap = DashMap<RuntimeCacheKey, Arc<CompiledProgram>>;
+
+/// Bounded MPMC lock-free queue of lookup-observed events.
+///
+/// Producers (lookup hot path) push without blocking; on overflow the event
+/// is silently dropped (`stats.events_dropped` is bumped). The backend
+/// drains via `pop` on every loop iteration. Hotness signal is best-effort.
+pub(crate) type EventQueue = ArrayQueue<LookupObservedEvent>;
 
 /// Per-entry metadata tracked alongside the resident map for eviction decisions.
 struct ResidentMeta {
@@ -41,10 +53,11 @@ fn jit_total_bytes() -> usize {
     }
 }
 
-/// Commands sent to the backend thread.
+/// Commands sent to the backend thread on the bounded command channel.
+///
+/// Lookup-observed events are NOT carried here — they go through the
+/// [`EventQueue`] to avoid waking the backend on every lookup.
 pub(crate) enum Command {
-    /// A lookup was observed on the hot path.
-    LookupObserved(LookupObservedEvent),
     /// Explicit request to JIT-compile a bytecode.
     CompileJit(CompileJitRequest),
     /// Explicit request to prepare AOT artifacts.
@@ -77,14 +90,21 @@ pub(crate) struct PrepareAotRequest {
     pub(crate) bytecode: Bytes,
 }
 
-/// A lookup-observed event.
+/// A lookup-observed event pushed by the hot path.
+///
+/// `Bytes` clone is cheap (single `Arc` bump), so the bytecode is always carried
+/// for misses; the backend uses it directly when the hotness threshold trips.
 pub(crate) struct LookupObservedEvent {
     /// The key that was looked up.
     pub(crate) key: RuntimeCacheKey,
-    /// Whether the lookup was a hit (compiled found).
-    pub(crate) was_hit: bool,
     /// The bytecode, present only on misses.
     pub(crate) bytecode: Option<Bytes>,
+}
+
+impl LookupObservedEvent {
+    fn was_hit(&self) -> bool {
+        self.bytecode.is_none()
+    }
 }
 
 /// Per-key state tracked by the backend.
@@ -108,6 +128,15 @@ enum EntryPhase {
     Working,
 }
 
+/// Whether a JIT admission request was triggered by hot-path observation
+/// (gated on hotness + cold-entry cap) or by an explicit user request
+/// (unconditional, may carry a sync notifier).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AdmitMode {
+    Observed,
+    Explicit,
+}
+
 /// All backend-thread-owned mutable state.
 struct BackendState {
     /// The shared resident map (handles read, backend writes).
@@ -120,6 +149,8 @@ struct BackendState {
     workers: WorkerPool,
     /// Receiver for worker results.
     result_rx: chan::Receiver<WorkerResult>,
+    /// Shared lookup-observed event queue (backend drains; lookup pushes).
+    events: Arc<EventQueue>,
     /// Artifact store for persisted artifacts.
     store: Option<Arc<dyn ArtifactStore>>,
     /// Tuning knobs.
@@ -137,132 +168,118 @@ struct BackendState {
 }
 
 impl BackendState {
+    /// Drains all currently-queued lookup events.
+    fn drain_events(&mut self) {
+        // Cap per-iteration drain so a flood of events can't starve other
+        // work (commands, worker results, sweeps). Surplus events stay in the
+        // queue and are picked up next iteration.
+        for _ in 0..self.tuning.max_events_per_drain {
+            let Some(event) = self.events.pop() else { break };
+            self.handle_lookup_observed(event);
+        }
+    }
+
     fn handle_lookup_observed(&mut self, event: LookupObservedEvent) {
         // Update last-hit time for eviction tracking.
-        if event.was_hit {
+        if event.was_hit() {
             if let Some(meta) = self.resident_meta.get_mut(&event.key) {
                 meta.last_hit_at = Instant::now();
             }
             return;
         }
 
-        // Already in the resident map (may have been inserted since the event was emitted).
-        if self.resident.contains_key(&event.key) {
+        let Some(bytecode) = event.bytecode else { return };
+        self.try_admit_jit(event.key, bytecode, SyncNotifier::none(), AdmitMode::Observed);
+    }
+
+    fn handle_compile_jit(&mut self, req: CompileJitRequest) {
+        self.try_admit_jit(req.key, req.bytecode, req.sync_notifier, AdmitMode::Explicit);
+    }
+
+    /// Common admission path for JIT compilation requests.
+    ///
+    /// Handles the cold→working state machine, hotness gating, in-flight
+    /// dedup, and worker dispatch. The two callers differ only in whether
+    /// promotion is gated by hotness ([`AdmitMode::Observed`]) or
+    /// unconditional ([`AdmitMode::Explicit`]).
+    fn try_admit_jit(
+        &mut self,
+        key: RuntimeCacheKey,
+        bytecode: Bytes,
+        sync_notifier: SyncNotifier,
+        mode: AdmitMode,
+    ) {
+        // Already resident — nothing to do; notify any sync waiter.
+        if self.resident.contains_key(&key) {
+            if matches!(mode, AdmitMode::Explicit) {
+                debug!(code_hash = %key.code_hash, "compile_jit: already resident");
+            }
+            sync_notifier.notify();
             return;
         }
 
-        let bytecode = match event.bytecode {
-            Some(b) => b,
-            None => return,
-        };
-
-        // Skip empty bytecodes.
-        if bytecode.is_empty() {
+        // Skip empty / oversize bytecodes.
+        if !self.tuning.should_compile(&bytecode) {
+            sync_notifier.notify();
             return;
         }
 
-        // Skip bytecodes that exceed the maximum length.
-        if self.tuning.jit_max_bytecode_len > 0 && bytecode.len() > self.tuning.jit_max_bytecode_len
-        {
-            return;
+        // Cap cold-entry count for the observed path to bound memory growth
+        // from miss tracking. Explicit requests bypass this cap.
+        if matches!(mode, AdmitMode::Observed) {
+            let max_entries = self.tuning.jit_max_pending_jobs * 10;
+            if !self.entries.contains_key(&key) && self.entries.len() >= max_entries {
+                return;
+            }
         }
 
-        // Cap cold entry count to prevent unbounded memory growth from miss tracking.
-        let max_entries = self.tuning.max_pending_jit_jobs * 10;
-        if !self.entries.contains_key(&event.key) && self.entries.len() >= max_entries {
-            return;
-        }
-
-        let entry = self.entries.entry(event.key.clone()).or_insert_with(|| EntryState {
+        let entry = self.entries.entry(key.clone()).or_insert_with(|| EntryState {
             hotness: 0,
             phase: EntryPhase::Cold,
             bytecode: bytecode.clone(),
             pending_notifiers: Vec::new(),
         });
 
-        // Only increment hotness for cold entries.
-        if entry.phase != EntryPhase::Cold {
+        // Already in flight: dedup. Observed has no notifier (None push is
+        // a harmless no-op when drained); explicit waiters wake on result.
+        if entry.phase == EntryPhase::Working {
+            entry.pending_notifiers.push(sync_notifier);
             return;
         }
 
-        entry.hotness = entry.hotness.saturating_add(1);
-
-        if (entry.hotness as usize) >= self.tuning.jit_hot_threshold
-            && self.pending_jobs < self.tuning.max_pending_jit_jobs
-        {
-            debug!(
-                code_hash = %event.key.code_hash,
-                spec_id = ?event.key.spec_id,
-                hotness = entry.hotness,
-                "promoting hot key to JIT compilation",
-            );
-            let symbol = format!("jit_{:x}_{:?}", event.key.code_hash, event.key.spec_id);
-            let job = WorkerJob::Jit(JitJob {
-                key: event.key,
-                bytecode: entry.bytecode.clone(),
-                symbol_name: symbol,
-                sync_notifier: SyncNotifier::none(),
-                generation: self.generation,
-            });
-
-            if self.workers.try_send(job).is_ok() {
-                entry.phase = EntryPhase::Working;
-                self.pending_jobs += 1;
-                self.stats.compilations_dispatched.fetch_add(1, Ordering::Relaxed);
+        // Observed path: count hotness and gate on threshold.
+        if matches!(mode, AdmitMode::Observed) {
+            entry.hotness = entry.hotness.saturating_add(1);
+            if (entry.hotness as usize) < self.tuning.jit_hot_threshold {
+                return;
             }
         }
-    }
 
-    fn handle_compile_jit(&mut self, req: CompileJitRequest) {
-        // Already compiled — notify and return.
-        if self.resident.contains_key(&req.key) {
-            debug!(code_hash = %req.key.code_hash, "compile_jit: already resident");
-            req.sync_notifier.notify();
+        // Cap in-flight jobs.
+        if self.pending_jobs >= self.tuning.jit_max_pending_jobs {
+            // Observed: leave entry Cold so we retry on next miss.
+            // Explicit: notify so the caller doesn't hang.
+            sync_notifier.notify();
             return;
         }
 
-        // Skip empty bytecodes.
-        if req.bytecode.is_empty() {
-            req.sync_notifier.notify();
-            return;
-        }
-
-        // Skip bytecodes that exceed the maximum length.
-        if self.tuning.jit_max_bytecode_len > 0
-            && req.bytecode.len() > self.tuning.jit_max_bytecode_len
-        {
-            req.sync_notifier.notify();
-            return;
-        }
-
-        let entry = self.entries.entry(req.key.clone()).or_insert_with(|| EntryState {
-            hotness: 0,
-            phase: EntryPhase::Cold,
-            bytecode: req.bytecode.clone(),
-            pending_notifiers: Vec::new(),
-        });
-        // If already working, queue the notifier to fire when the result arrives.
-        if entry.phase == EntryPhase::Working {
-            entry.pending_notifiers.push(req.sync_notifier);
-            return;
-        }
-
-        let code_hash = req.key.code_hash;
-        let symbol = format!("jit_{:x}_{:?}", req.key.code_hash, req.key.spec_id);
+        let symbol = format!("jit_{:x}_{:?}", key.code_hash, key.spec_id);
         let job = WorkerJob::Jit(JitJob {
-            key: req.key,
-            bytecode: req.bytecode,
+            key: key.clone(),
+            bytecode: entry.bytecode.clone(),
             symbol_name: symbol,
-            sync_notifier: req.sync_notifier,
+            sync_notifier,
             generation: self.generation,
         });
 
         match self.workers.try_send(job) {
             Ok(()) => {
                 debug!(
-                    %code_hash,
+                    code_hash = %key.code_hash,
+                    spec_id = ?key.spec_id,
+                    hotness = entry.hotness,
                     pending_jobs = self.pending_jobs + 1,
-                    "compile_jit: dispatched to worker",
+                    "dispatched JIT compilation",
                 );
                 entry.phase = EntryPhase::Working;
                 self.pending_jobs += 1;
@@ -270,7 +287,7 @@ impl BackendState {
             }
             Err(WorkerJob::Jit(job)) => {
                 // Worker queue saturated — notify caller immediately so it doesn't hang.
-                warn!(%code_hash, "compile_jit: worker pool saturated, dropping request");
+                warn!(code_hash = %key.code_hash, "worker pool saturated, dropping request");
                 job.sync_notifier.notify();
             }
             Err(WorkerJob::Aot(_)) => unreachable!("sent Jit job"),
@@ -284,8 +301,8 @@ impl BackendState {
                 continue;
             }
 
-            // Skip empty bytecodes.
-            if req.bytecode.is_empty() {
+            // Skip empty / oversize bytecodes.
+            if !self.tuning.should_compile(&req.bytecode) {
                 continue;
             }
 
@@ -394,6 +411,9 @@ impl BackendState {
                 n.notify();
             }
         }
+        // Discard pending lookup events: they were observed before the clear
+        // and would otherwise get processed against the new generation.
+        while self.events.pop().is_some() {}
         // Bump generation so in-flight worker results from before the clear are discarded.
         self.generation += 1;
         debug!(generation = self.generation, "resident map cleared");
@@ -698,11 +718,9 @@ impl BackendState {
 
 /// Runs the backend event loop. Called on the backend thread.
 pub(crate) fn run(
-    lookup_rx: chan::Receiver<Command>,
-    control_rx: chan::Receiver<Command>,
-    resident: Arc<ResidentMap>,
+    inner: Arc<super::BackendInner>,
+    cmd_rx: chan::Receiver<Command>,
     config: RuntimeConfig,
-    stats: Arc<RuntimeStats>,
 ) {
     debug!("backend thread started");
 
@@ -711,64 +729,71 @@ pub(crate) fn run(
     let workers = WorkerPool::new(result_tx, config.clone());
 
     let sweep_interval = config.tuning.eviction_sweep_interval;
+    let event_drain_interval = config.tuning.event_drain_interval;
 
     // Seed resident metadata from startup-preloaded AOT entries.
     let now = Instant::now();
     let mut preload_meta = HashMap::default();
-    for entry in resident.iter() {
+    for entry in inner.resident.iter() {
         preload_meta.insert(entry.key().clone(), ResidentMeta { last_hit_at: now });
     }
 
     let mut state = BackendState {
-        resident,
+        resident: Arc::clone(&inner.resident),
         resident_meta: preload_meta,
         entries: HashMap::default(),
         workers,
         result_rx,
+        events: Arc::clone(&inner.events),
         store: config.store,
         tuning: config.tuning,
         pending_jobs: 0,
         generation: 0,
         last_sweep: now,
-        stats,
+        stats: Arc::clone(&inner.stats),
         on_compilation: config.on_compilation,
     };
 
+    // Tick interval is min(event_drain, sweep) so we never sleep longer than
+    // either. Events are drained on every wakeup regardless of cause.
+    let tick = event_drain_interval.min(sweep_interval);
+
     loop {
         chan::select! {
-            // Control commands are reliable. Before processing one, drain any
-            // pending lookup events so causality (events queued before the
-            // control command) is preserved.
-            recv(control_rx) -> msg => {
-                while let Ok(cmd) = lookup_rx.try_recv() {
-                    handle_command(&mut state, cmd);
-                }
-                match msg {
-                    Ok(Command::Shutdown) => {
+            recv(cmd_rx) -> msg => {
+                let cmd = match msg {
+                    Ok(cmd) => cmd,
+                    Err(_) => {
+                        debug!("backend channel closed, shutting down");
+                        break;
+                    }
+                };
+                match cmd {
+                    Command::CompileJit(req) => state.handle_compile_jit(req),
+                    Command::PrepareAot(reqs) => state.handle_prepare_aot(reqs),
+                    Command::ClearResident => state.handle_clear_resident(),
+                    Command::ClearPersisted => state.handle_clear_persisted(),
+                    Command::ClearAll => state.handle_clear_all(),
+                    Command::Shutdown => {
                         debug!("backend thread shutting down");
                         break;
                     }
-                    Ok(cmd) => handle_command(&mut state, cmd),
-                    Err(_) => {
-                        debug!("control channel closed, shutting down");
-                        break;
-                    }
                 }
-                state.run_eviction_sweep();
-            }
-            recv(lookup_rx) -> msg => {
-                if let Ok(cmd) = msg {
-                    handle_command(&mut state, cmd);
-                }
-                // Lookup channel close is benign; control channel governs shutdown.
+                // Drain on command wakeup so command handlers see fresh
+                // event-derived state. Newly inserted entries should be
+                // visible to lookups before being evicted, so sweep here too.
+                state.drain_events();
                 state.run_eviction_sweep();
             }
             recv(state.result_rx) -> msg => {
                 if let Ok(result) = msg {
                     state.handle_worker_result(result);
                 }
+                // Do NOT run eviction sweep here: a freshly inserted entry
+                // would be immediately evicted under tight memory budgets.
             }
-            default(sweep_interval) => {
+            default(tick) => {
+                state.drain_events();
                 state.run_eviction_sweep();
             }
         }
@@ -789,16 +814,4 @@ pub(crate) fn run(
     );
 
     state.workers.shutdown();
-}
-
-fn handle_command(state: &mut BackendState, cmd: Command) {
-    match cmd {
-        Command::LookupObserved(event) => state.handle_lookup_observed(event),
-        Command::CompileJit(req) => state.handle_compile_jit(req),
-        Command::PrepareAot(reqs) => state.handle_prepare_aot(reqs),
-        Command::ClearResident => state.handle_clear_resident(),
-        Command::ClearPersisted => state.handle_clear_persisted(),
-        Command::ClearAll => state.handle_clear_all(),
-        Command::Shutdown => unreachable!("Shutdown handled by run loop"),
-    }
 }

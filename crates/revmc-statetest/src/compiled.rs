@@ -829,12 +829,8 @@ pub fn run(
     if let Some(backend) = &backend {
         let stats = backend.stats();
         println!(
-            "Runtime backend: {} hits, {} misses, {} events sent, {} events dropped, {} resident",
-            stats.lookup_hits,
-            stats.lookup_misses,
-            stats.events_sent,
-            stats.events_dropped,
-            stats.resident_entries,
+            "Runtime backend: {} hits, {} misses, {} resident",
+            stats.lookup_hits, stats.lookup_misses, stats.resident_entries,
         );
     }
 
