@@ -64,6 +64,7 @@ revm-statetest-types = { version = "17.0", default-features = false }
 crossbeam-channel = "0.5"
 crossbeam-deque = "0.8"
 crossbeam-queue = "0.3"
+rayon = "1.10"
 color-eyre = "0.6"
 criterion = { package = "codspeed-criterion-compat", version = "4", default-features = false, features = ["cargo_bench_support"] }
 eyre = "0.6"

@@ -18,16 +18,15 @@ use crate::{
 };
 use alloy_primitives::Bytes;
 use crossbeam_channel as chan;
-use crossbeam_deque::{Injector, Steal, Worker};
+use rayon::{ThreadPool, ThreadPoolBuilder};
+#[cfg(feature = "llvm")]
+use std::{cell::RefCell, fs::File, io::Read, time::Instant};
 use std::{
-    fs::File,
-    io::Read,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
-    thread::{self, JoinHandle},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 #[cfg(feature = "llvm")]
@@ -164,20 +163,20 @@ impl Drop for JitCodeBacking {
     }
 }
 
-/// Handle to the worker pool. Manages worker threads and their job queues.
+/// Handle to the worker pool.
 pub(crate) struct WorkerPool {
-    /// Global queue jobs are injected into by the backend thread.
-    injector: Arc<Injector<CompileJob>>,
-    /// Wakeup channel for sleeping workers.
-    notify_tx: Option<chan::Sender<()>>,
-    /// Number of queued jobs across the injector and worker-local queues.
+    /// Rayon pool used to execute compilation jobs.
+    pool: Option<ThreadPool>,
+    /// Sender for worker results.
+    result_tx: chan::Sender<WorkerResult>,
+    /// Runtime configuration shared by spawned jobs.
+    config: Arc<RuntimeConfig>,
+    /// Number of queued jobs waiting to start.
     queued: Arc<AtomicUsize>,
     /// Maximum queued jobs accepted by the pool.
     queue_capacity: usize,
-    /// Signals workers to stop after draining queued work.
+    /// Signals workers to stop accepting new work.
     shutdown: Arc<AtomicBool>,
-    /// Worker thread handles.
-    threads: Vec<Option<JoinHandle<()>>>,
 }
 
 impl WorkerPool {
@@ -185,40 +184,28 @@ impl WorkerPool {
     pub(crate) fn new(result_tx: chan::Sender<WorkerResult>, config: RuntimeConfig) -> Self {
         let worker_count = config.tuning.jit_worker_count;
         let queue_capacity = worker_count.saturating_mul(config.tuning.jit_worker_queue_capacity);
-        let injector = Arc::new(Injector::new());
-        let queued = Arc::new(AtomicUsize::new(0));
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let (notify_tx, notify_rx) = chan::unbounded();
-        let config = Arc::new(config);
+        let pool = (worker_count > 0).then(|| {
+            ThreadPoolBuilder::new()
+                .num_threads(worker_count)
+                .thread_name(|i| format!("revmc-{i:02}"))
+                .build()
+                .expect("failed to spawn compile workers")
+        });
 
-        let mut threads = Vec::with_capacity(worker_count);
-        for worker_id in 0..worker_count {
-            let local = Worker::new_fifo();
-            let result_tx = result_tx.clone();
-            let config = config.clone();
-            let injector = injector.clone();
-            let queued = queued.clone();
-            let shutdown = shutdown.clone();
-            let notify_rx = notify_rx.clone();
-            let thread = thread::Builder::new()
-                .name(format!("revmc-{worker_id:02}"))
-                .spawn(move || {
-                    worker_loop(
-                        worker_id, injector, local, notify_rx, queued, shutdown, result_tx, &config,
-                    );
-                })
-                .expect("failed to spawn compile worker");
-
-            threads.push(Some(thread));
+        Self {
+            pool,
+            result_tx,
+            config: Arc::new(config),
+            queued: Arc::new(AtomicUsize::new(0)),
+            queue_capacity,
+            shutdown: Arc::new(AtomicBool::new(false)),
         }
-
-        Self { injector, notify_tx: Some(notify_tx), queued, queue_capacity, shutdown, threads }
     }
 
     /// Tries to send a job to the worker pool.
     /// Returns the job back on failure (queue full or shut down).
     pub(crate) fn try_send(&mut self, job: CompileJob) -> Result<(), CompileJob> {
-        if self.threads.is_empty() || self.shutdown.load(Ordering::Acquire) {
+        if self.pool.is_none() || self.shutdown.load(Ordering::Acquire) {
             return Err(job);
         }
 
@@ -238,23 +225,22 @@ impl WorkerPool {
             }
         }
 
-        self.injector.push(job);
-        if let Some(tx) = &self.notify_tx {
-            let _ = tx.send(());
-        }
+        let pool = self.pool.as_ref().unwrap();
+        let queued = self.queued.clone();
+        let result_tx = self.result_tx.clone();
+        let config = self.config.clone();
+        pool.spawn_fifo(move || {
+            queued.fetch_sub(1, Ordering::AcqRel);
+            let result = compile_job(job, &config);
+            let _ = result_tx.send(result);
+        });
         Ok(())
     }
 
     /// Shuts down all workers after draining queued jobs.
     pub(crate) fn shutdown(&mut self) {
         self.shutdown.store(true, Ordering::Release);
-        self.notify_tx.take();
-
-        for thread in &mut self.threads {
-            if let Some(t) = thread.take() {
-                let _ = t.join();
-            }
-        }
+        self.pool.take();
     }
 }
 
@@ -264,194 +250,176 @@ impl Drop for WorkerPool {
     }
 }
 
-fn steal_job(
-    injector: &Injector<CompileJob>,
-    local: &Worker<CompileJob>,
-    queued: &AtomicUsize,
-) -> Option<CompileJob> {
-    loop {
-        if let Some(job) = local.pop() {
-            queued.fetch_sub(1, Ordering::AcqRel);
-            return Some(job);
+#[cfg(feature = "llvm")]
+fn compile_job(job: CompileJob, config: &RuntimeConfig) -> WorkerResult {
+    trace!(?job, "received job");
+    match job.kind {
+        CompilationKind::Jit => {
+            JIT_COMPILER.with_borrow_mut(|state| compile_with_state(job, config, state))
         }
-
-        match injector.steal_batch_and_pop(local) {
-            Steal::Success(job) => {
-                queued.fetch_sub(1, Ordering::AcqRel);
-                return Some(job);
-            }
-            Steal::Retry => continue,
-            Steal::Empty => {}
+        CompilationKind::Aot => {
+            AOT_COMPILER.with_borrow_mut(|state| compile_with_state(job, config, state))
         }
-
-        return None;
     }
 }
 
 #[cfg(feature = "llvm")]
-#[allow(clippy::too_many_arguments)]
-fn worker_loop(
-    id: usize,
-    injector: Arc<Injector<CompileJob>>,
-    local: Worker<CompileJob>,
-    notify_rx: chan::Receiver<()>,
-    queued: Arc<AtomicUsize>,
-    shutdown: Arc<AtomicBool>,
-    result_tx: chan::Sender<WorkerResult>,
+fn compile_with_state(
+    job: CompileJob,
     config: &RuntimeConfig,
-) {
-    let _span = debug_span!("revmc_worker", id).entered();
-    debug!("compile worker started");
-
-    let create_compiler = || -> Result<EvmCompiler<EvmLlvmBackend>, String> {
-        let backend = EvmLlvmBackend::new(false).map_err(|e| e.to_string())?;
-        let mut compiler = EvmCompiler::new(backend);
-        compiler.set_opt_level(config.tuning.jit_opt_level);
-        compiler.debug_assertions(config.debug_assertions);
-        compiler.set_dedup(!config.no_dedup);
-        compiler.set_dse(!config.no_dse);
-        if let Some(gas_params) = &config.gas_params {
-            compiler.set_gas_params(gas_params.clone());
+    state: &mut Option<CompilerState>,
+) -> WorkerResult {
+    let _span = match job.kind {
+        CompilationKind::Jit => {
+            debug_span!("jit_compile", hash=%job.key.code_hash, spec_id=?job.key.spec_id).entered()
         }
-        Ok(compiler)
-    };
-
-    let mut jit_compiler = match create_compiler() {
-        Ok(c) => c,
-        Err(e) => {
-            error!(error = %e, "failed to create LLVM backend, worker exiting");
-            return;
+        CompilationKind::Aot => {
+            debug_span!("aot_compile", hash=%job.key.code_hash, spec_id=?job.key.spec_id).entered()
         }
     };
+    let t0 = Instant::now();
 
-    let mut compilations_since_recycle: usize = 0;
-
-    loop {
-        let Some(job) = steal_job(&injector, &local, &queued) else {
-            if shutdown.load(Ordering::Acquire) && queued.load(Ordering::Acquire) == 0 {
-                break;
-            }
-            match notify_rx.recv_timeout(Duration::from_millis(10)) {
-                Ok(()) | Err(chan::RecvTimeoutError::Timeout) => continue,
-                Err(chan::RecvTimeoutError::Disconnected) => {
-                    if queued.load(Ordering::Acquire) == 0 {
-                        break;
-                    }
-                }
-            }
-            continue;
-        };
-        trace!(?job, "received job");
-        let t0 = Instant::now();
-        let kind = job.kind;
-        let (key, outcome, sync_notifier, generation, timings) = match kind {
-            CompilationKind::Jit => {
-                let _span =
-                    debug_span!("jit_compile", hash=%job.key.code_hash, spec_id=?job.key.spec_id)
-                        .entered();
-
-                if let Some(base) = &config.dump_dir {
-                    let dir = base
-                        .join(format!("{:?}", job.key.spec_id))
-                        .join(format!("{}", job.key.code_hash));
-                    jit_compiler.set_dump_to(Some(dir));
-                }
-                jit_compiler.set_opt_level(job.opt_level);
-
-                let result = unsafe {
-                    jit_compiler.jit(&job.symbol_name, &job.bytecode[..], job.key.spec_id)
+    if state.is_none() {
+        match CompilerState::new(config, job.kind) {
+            Ok(s) => *state = Some(s),
+            Err(e) => {
+                error!(error = %e, "failed to create LLVM backend");
+                return WorkerResult {
+                    key: job.key,
+                    outcome: Err(e),
+                    kind: job.kind,
+                    sync_notifier: job.sync_notifier,
+                    generation: job.generation,
+                    compile_duration: t0.elapsed(),
+                    timings: CompileTimings::default(),
                 };
-
-                let timings = jit_compiler.take_timings();
-
-                let outcome = match result {
-                    Ok(func) => {
-                        let jd_guard = jit_compiler.backend_mut().jit_dylib_guard();
-
-                        debug!("JIT compilation succeeded");
-                        // The last loaded tracker owns this module's machine code.
-                        // free_function would also work, but we need the tracker
-                        // to outlive the backend so eviction can free code after
-                        // the worker exits.
-                        let tracker = jit_compiler
-                            .backend_mut()
-                            .take_last_resource_tracker()
-                            .expect("no ResourceTracker after JIT");
-                        let backing = Arc::new(JitCodeBacking::new(tracker, jd_guard));
-                        Ok(WorkerSuccess::Jit(JitSuccess { func, backing }))
-                    }
-                    Err(err) => {
-                        warn!(%err, "JIT compilation failed");
-                        Err(format!("{err}"))
-                    }
-                };
-
-                // Reset IR so the next job can reuse this compiler.
-                if let Err(err) = jit_compiler.clear_ir() {
-                    warn!(%err, "clear_ir failed");
-                }
-
-                (job.key, outcome, job.sync_notifier, job.generation, timings)
             }
-            CompilationKind::Aot => {
-                let _span =
-                    debug_span!("aot_compile", hash=%job.key.code_hash, spec_id=?job.key.spec_id)
-                        .entered();
-
-                let generation = job.generation;
-                let outcome = compile_aot_artifact(&job, config);
-                (job.key, outcome, job.sync_notifier, generation, CompileTimings::default())
-            }
-        };
-        let compile_duration = t0.elapsed();
-
-        let _ = result_tx.send(WorkerResult {
-            key,
-            outcome,
-            kind,
-            sync_notifier,
-            generation,
-            compile_duration,
-            timings,
-        });
-
-        // Recycle the compiler to reclaim LLVM context memory.
-        compilations_since_recycle += 1;
-        if config.tuning.compiler_recycle_threshold > 0
-            && compilations_since_recycle >= config.tuning.compiler_recycle_threshold
-        {
-            debug!(compilations_since_recycle, "recycling compiler");
-            drop(jit_compiler);
-            jit_compiler = match create_compiler() {
-                Ok(c) => c,
-                Err(e) => {
-                    error!(error = %e, "failed to recreate compiler, worker exiting");
-                    return;
-                }
-            };
-            revmc_llvm::global_gc();
-            compilations_since_recycle = 0;
         }
     }
 
-    drop(jit_compiler);
-    debug!("compile worker shutting down");
+    let state = state.as_mut().unwrap();
+    let compiler = &mut state.compiler;
+
+    if job.kind == CompilationKind::Jit
+        && let Some(base) = &config.dump_dir
+    {
+        let dir =
+            base.join(format!("{:?}", job.key.spec_id)).join(format!("{}", job.key.code_hash));
+        compiler.set_dump_to(Some(dir));
+    }
+    compiler.set_opt_level(job.opt_level);
+
+    let outcome = match job.kind {
+        CompilationKind::Jit => compile_jit_artifact(&job, compiler),
+        CompilationKind::Aot => compile_aot_artifact(&job, compiler),
+    };
+    let timings = compiler.take_timings();
+
+    if let Err(err) = compiler.clear_ir() {
+        warn!(%err, "clear_ir failed");
+    }
+
+    state.compilations_since_recycle += 1;
+    if config.tuning.compiler_recycle_threshold > 0
+        && state.compilations_since_recycle >= config.tuning.compiler_recycle_threshold
+    {
+        debug!(compilations_since_recycle = state.compilations_since_recycle, "recycling compiler");
+        match CompilerState::new(config, job.kind) {
+            Ok(new_state) => {
+                *state = new_state;
+                revmc_llvm::global_gc();
+            }
+            Err(e) => {
+                error!(error = %e, "failed to recreate compiler");
+                state.compilations_since_recycle = 0;
+            }
+        }
+    }
+
+    WorkerResult {
+        key: job.key,
+        outcome,
+        kind: job.kind,
+        sync_notifier: job.sync_notifier,
+        generation: job.generation,
+        compile_duration: t0.elapsed(),
+        timings,
+    }
 }
 
-/// Compiles a single bytecode to a shared library and returns the raw bytes.
 #[cfg(feature = "llvm")]
-fn compile_aot_artifact(job: &CompileJob, config: &RuntimeConfig) -> Result<WorkerSuccess, String> {
-    let backend =
-        EvmLlvmBackend::new(true).map_err(|e| format!("AOT backend creation failed: {e}"))?;
+struct CompilerState {
+    compiler: EvmCompiler<EvmLlvmBackend>,
+    compilations_since_recycle: usize,
+}
+
+#[cfg(feature = "llvm")]
+impl CompilerState {
+    fn new(config: &RuntimeConfig, kind: CompilationKind) -> Result<Self, String> {
+        Ok(Self {
+            compiler: create_compiler(config, kind == CompilationKind::Aot)?,
+            compilations_since_recycle: 0,
+        })
+    }
+}
+
+#[cfg(feature = "llvm")]
+thread_local! {
+    static JIT_COMPILER: RefCell<Option<CompilerState>> = const { RefCell::new(None) };
+    static AOT_COMPILER: RefCell<Option<CompilerState>> = const { RefCell::new(None) };
+}
+
+#[cfg(feature = "llvm")]
+fn create_compiler(
+    config: &RuntimeConfig,
+    aot: bool,
+) -> Result<EvmCompiler<EvmLlvmBackend>, String> {
+    let backend = EvmLlvmBackend::new(aot).map_err(|e| e.to_string())?;
     let mut compiler = EvmCompiler::new(backend);
-    compiler.set_opt_level(job.opt_level);
+    compiler.set_opt_level(if aot {
+        config.tuning.aot_opt_level
+    } else {
+        config.tuning.jit_opt_level
+    });
     compiler.debug_assertions(config.debug_assertions);
     compiler.set_dedup(!config.no_dedup);
     compiler.set_dse(!config.no_dse);
     if let Some(gas_params) = &config.gas_params {
         compiler.set_gas_params(gas_params.clone());
     }
+    Ok(compiler)
+}
 
+#[cfg(feature = "llvm")]
+fn compile_jit_artifact(
+    job: &CompileJob,
+    compiler: &mut EvmCompiler<EvmLlvmBackend>,
+) -> Result<WorkerSuccess, String> {
+    let result = unsafe { compiler.jit(&job.symbol_name, &job.bytecode[..], job.key.spec_id) };
+    match result {
+        Ok(func) => {
+            let jd_guard = compiler.backend_mut().jit_dylib_guard();
+            debug!("JIT compilation succeeded");
+            let tracker = compiler
+                .backend_mut()
+                .take_last_resource_tracker()
+                .expect("no ResourceTracker after JIT");
+            let backing = Arc::new(JitCodeBacking::new(tracker, jd_guard));
+            Ok(WorkerSuccess::Jit(JitSuccess { func, backing }))
+        }
+        Err(err) => {
+            warn!(%err, "JIT compilation failed");
+            Err(format!("{err}"))
+        }
+    }
+}
+
+/// Compiles a single bytecode to a shared library and returns the raw bytes.
+#[cfg(feature = "llvm")]
+fn compile_aot_artifact(
+    job: &CompileJob,
+    compiler: &mut EvmCompiler<EvmLlvmBackend>,
+) -> Result<WorkerSuccess, String> {
     compiler
         .translate(&job.symbol_name, &job.bytecode[..], job.key.spec_id)
         .map_err(|e| format!("AOT translate failed: {e}"))?;
@@ -489,43 +457,14 @@ fn compile_aot_artifact(job: &CompileJob, config: &RuntimeConfig) -> Result<Work
 }
 
 #[cfg(not(feature = "llvm"))]
-#[allow(clippy::too_many_arguments)]
-fn worker_loop(
-    worker_id: usize,
-    injector: Arc<Injector<CompileJob>>,
-    local: Worker<CompileJob>,
-    notify_rx: chan::Receiver<()>,
-    queued: Arc<AtomicUsize>,
-    shutdown: Arc<AtomicBool>,
-    result_tx: chan::Sender<WorkerResult>,
-    _config: &RuntimeConfig,
-) {
-    debug!(worker_id, "compile worker started (no LLVM, all jobs will fail)");
-
-    loop {
-        let Some(job) = steal_job(&injector, &local, &queued) else {
-            if shutdown.load(Ordering::Acquire) && queued.load(Ordering::Acquire) == 0 {
-                break;
-            }
-            match notify_rx.recv_timeout(Duration::from_millis(10)) {
-                Ok(()) | Err(chan::RecvTimeoutError::Timeout) => continue,
-                Err(chan::RecvTimeoutError::Disconnected) => {
-                    if queued.load(Ordering::Acquire) == 0 {
-                        break;
-                    }
-                }
-            }
-            continue;
-        };
-
-        let _ = result_tx.send(WorkerResult {
-            key: job.key,
-            outcome: Err("LLVM backend not available".into()),
-            kind: job.kind,
-            sync_notifier: job.sync_notifier,
-            generation: job.generation,
-            compile_duration: Duration::ZERO,
-            timings: CompileTimings::default(),
-        });
+fn compile_job(job: CompileJob, _config: &RuntimeConfig) -> WorkerResult {
+    WorkerResult {
+        key: job.key,
+        outcome: Err("LLVM backend not available".into()),
+        kind: job.kind,
+        sync_notifier: job.sync_notifier,
+        generation: job.generation,
+        compile_duration: Duration::ZERO,
+        timings: CompileTimings::default(),
     }
 }

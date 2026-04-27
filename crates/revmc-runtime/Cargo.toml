@@ -41,7 +41,6 @@ revm-primitives.workspace = true
 revm-state.workspace = true
 
 crossbeam-channel.workspace = true
-crossbeam-deque.workspace = true
 crossbeam-queue.workspace = true
 dashmap = "6"
 derive_more = { version = "2", default-features = false, features = ["debug"] }
@@ -49,6 +48,7 @@ eyre.workspace = true
 libloading = "0.9"
 tempfile = "3.10"
 quanta.workspace = true
+rayon.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]

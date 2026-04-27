@@ -229,6 +229,22 @@ fn startup_store_failure() {
 // ===========================================================================
 
 #[test]
+fn zero_workers_fails_sync_compile_without_blocking() {
+    let tb = TestBackend::new(RuntimeConfig {
+        blocking: true,
+        tuning: RuntimeTuning { jit_worker_count: 0, ..Default::default() },
+        ..Default::default()
+    });
+
+    let decision = tb.lookup(TestBackend::req_cancun(BYTECODE_RET42));
+    assert!(matches!(decision, LookupDecision::Interpret(InterpretReason::JitFailed)));
+
+    let stats = tb.stats();
+    assert_eq!(stats.resident_entries, 0);
+    assert_eq!(stats.compilations_dispatched, 0);
+}
+
+#[test]
 fn lookup_disabled() {
     let tb = TestBackend::new(RuntimeConfig { enabled: false, ..Default::default() });
 
