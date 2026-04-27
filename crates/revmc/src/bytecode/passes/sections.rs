@@ -275,10 +275,14 @@ impl SectionsAnalysis {
 
 #[cfg(test)]
 mod tests {
-    use crate::bytecode::{
-        Inst,
-        passes::block_analysis::tests::{analyze_asm, analyze_asm_spec},
+    use crate::{
+        SpecId,
+        bytecode::{
+            Inst,
+            passes::block_analysis::tests::{analyze_asm, analyze_asm_spec, analyze_code_spec},
+        },
     };
+    use revm_bytecode::opcode as op;
 
     /// Returns the gas section cost for the first non-dead instruction (the section head).
     fn section_gas(src: &str) -> u32 {
@@ -324,8 +328,6 @@ mod tests {
     /// `NotActivated` guard, producing a divergent `StackUnderflow`.
     #[test]
     fn disabled_opcode_does_not_poison_section() {
-        use crate::SpecId;
-
         // CALLDATASIZE(0→1) ; TSTORE(2→0, disabled before Cancun)
         let bytecode = analyze_asm_spec("CALLDATASIZE TSTORE", SpecId::SHANGHAI);
         let head = bytecode.inst(Inst::from_usize(0));
@@ -334,5 +336,23 @@ mod tests {
             "CALLDATASIZE needs 0 inputs; disabled TSTORE must not inflate the section"
         );
         assert_eq!(head.gas_section.gas_cost, 2, "only CALLDATASIZE gas (2) should be charged");
+    }
+
+    /// DUPN with an invalid immediate must have stack_io = (0, 0) so that section analysis
+    /// matches translate (which emits `InvalidImmediateEncoding` and diverges).
+    /// Previously, the fallback to OPCODE_INFO's placeholder `(0, 1)` inflated the section's
+    /// cumulative diff, causing translate to underflow the virtual stack on a subsequent SSTORE.
+    #[test]
+    fn invalid_dupn_imm_does_not_inflate_section() {
+        // PUSH0, DUPN 0x5b (invalid immediate), PUSH0, SSTORE, STOP
+        // Without the fix, DUPN had stack_io=(0,1), inflating the section diff by 1.
+        // Translate would skip the +1 (goto_return!(fail)), then SSTORE's diff=-2 would
+        // underflow the virtual stack.
+        let bytecode = analyze_code_spec(
+            vec![op::PUSH0, op::DUPN, 0x5b, op::PUSH0, op::SSTORE, op::STOP],
+            SpecId::AMSTERDAM,
+        );
+        let dupn = bytecode.inst(Inst::from_usize(1));
+        assert_eq!(dupn.stack_io(), (0, 0), "DUPN with invalid immediate must have zero stack I/O");
     }
 }

@@ -2,10 +2,9 @@
 
 use super::default_attrs;
 use crate::{
-    Backend, Builder, Bytecode, EvmContext, Inst, InstData, InstFlags, IntCC, Result, decode_pair,
-    decode_single,
+    Backend, Builder, Bytecode, EvmContext, Inst, InstData, InstFlags, IntCC, Result, StackSection,
+    decode_pair, decode_single,
 };
-use either::Either;
 use oxc_index::IndexVec;
 use revm_bytecode::opcode as op;
 use revm_interpreter::{InputsImpl, InstructionResult};
@@ -15,6 +14,9 @@ use revmc_builtins::{Builtin, Builtins, CallKind, CreateKind};
 use std::mem;
 
 mod peephole;
+
+mod vstack;
+use vstack::{VSlot, VStack};
 
 const STACK_CAP: usize = 1024;
 // const WORD_SIZE: usize = 32;
@@ -83,6 +85,9 @@ pub(super) struct FunctionCx<'a, B: Backend> {
     /// Stack length offset for the current instruction, used for push/pop.
     len_offset: i8,
 
+    /// Section-local virtual stack that caches values as SSA instead of
+    /// immediately storing/loading from the stack alloca.
+    vstack: VStack<B::Value>,
     /// Stack length at the start of the current stack section, loaded once from the alloca.
     /// All intra-section `len_before` values are derived from this + `section_len_offset`.
     section_start_len: B::Value,
@@ -310,6 +315,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             suspend_block,
 
             builtins,
+
+            vstack: VStack::default(),
         };
 
         // Add debug assertions for the parameters.
@@ -491,14 +498,10 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 !this.bytecode.is_instr_diverging(inst),
                 "attempted to branch to next instruction in a diverging instruction: {data:?}",
             );
-            if let Some(next) = this.inst_entries.get(inst + 1) {
-                this.bcx.br(*next);
+            if let Some(&next) = this.inst_entries.get(inst + 1) {
+                this.bcx.br(next);
             }
         };
-        // Currently a noop.
-        // let epilogue = |this: &mut Self| {
-        //     this.bcx.seal_block(entry_block);
-        // };
 
         /// Makes sure to run cleanup code and return.
         /// Use `no_branch` to skip the branch to the next opcode.
@@ -510,7 +513,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                         self.add_comment($comment);
                     }
                 )?
-                // epilogue(self);
                 return Ok(());
             };
             (build $ret:expr) => {{
@@ -522,6 +524,15 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 goto_return!(no_branch);
             }};
             ($($comment:expr)?) => {
+                // Flush virtual stack before leaving the section.
+                if self.inst_entries.get(inst + 1).is_some() {
+                    let next = self.bytecode.inst(inst + 1);
+                    if !next.is_dead_code() && next.is_stack_section_head() {
+                        self.materialize_live_stack();
+                    } else {
+                        self.relieve_vstack_pressure();
+                    }
+                }
                 branch_to_next_opcode(self);
                 goto_return!(no_branch $($comment)?);
             };
@@ -547,25 +558,20 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         // Pay static gas for the current section.
         self.gas_cost_imm(data.gas_section.gas_cost as u64);
 
-        // NOOPs that aren't section heads need no codegen beyond gas.
-        // We only update `section_len_offset` (no store to `len.addr`); the next real
-        // instruction will reconcile `stored_len_offset` in a single store.
-        let (inp, out) = data.stack_io();
-        let diff = effective_stack_diff(inp, out, data);
-        if data.flags.contains(InstFlags::NOOP) && !data.is_stack_section_head() {
-            self.section_len_offset += diff;
-            goto_return!("noop");
-        }
-
         // Compute len_before for this instruction.
         // At section heads: load from the alloca once and reset the section offset.
         // Within a section: derive from section_start_len + compile-time offset.
+        let (inp, out) = data.stack_io();
+        let diff = effective_stack_diff(inp, out, data);
         self.len_offset = 0;
         if data.is_stack_section_head() {
             self.section_start_len = self.stack_len.load(&mut self.bcx, "stack_len");
             self.section_start_sp = self.sp_at(self.section_start_len);
             self.section_len_offset = 0;
             self.stored_len_offset = 0;
+
+            let section = data.stack_section;
+            self.vstack.reset(section.inputs as usize, section.max_growth.max(0) as usize);
         }
         self.len_before = if self.section_len_offset == 0 {
             self.section_start_len
@@ -575,52 +581,12 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
         // Check stack length for the current section.
         if self.config.stack_bound_checks {
-            let inp = data.stack_section.inputs;
-            let diff = data.stack_section.max_growth as i64;
-
-            if diff > revmc_context::EvmStack::CAPACITY as i64 {
-                goto_return!(fail InstructionResult::StackOverflow);
-            }
-
-            let underflow = |this: &mut Self| {
-                debug_assert!(inp > 0);
-                this.bcx.icmp_imm(IntCC::UnsignedLessThan, this.len_before, inp as i64)
-            };
-            let overflow = |this: &mut Self| {
-                debug_assert!(diff > 0 && diff <= STACK_CAP as i64);
-                this.bcx.icmp_imm(
-                    IntCC::UnsignedGreaterThan,
-                    this.len_before,
-                    STACK_CAP as i64 - diff,
-                )
-            };
-
-            let may_underflow = inp > 0;
-            let may_overflow = diff > 0;
-            if may_underflow && may_overflow {
-                let underflow = underflow(self);
-                let overflow = overflow(self);
-                let cond = self.bcx.bitor(underflow, overflow);
-                let ret = {
-                    let under =
-                        self.bcx.iconst(self.i8_type, InstructionResult::StackUnderflow as i64);
-                    let over =
-                        self.bcx.iconst(self.i8_type, InstructionResult::StackOverflow as i64);
-                    self.bcx.select(underflow, under, over)
-                };
-                let target = self.build_check_inner(true, cond, ret);
-                self.bcx.switch_to_block(target);
-            } else if may_underflow {
-                let cond = underflow(self);
-                self.build_check(cond, InstructionResult::StackUnderflow);
-            } else if may_overflow {
-                let cond = overflow(self);
-                self.build_check(cond, InstructionResult::StackOverflow);
-            }
+            self.check_stack_bounds(data.stack_section);
         }
 
-        // NOOP section head: still needs bounds check above, but skip the rest.
+        // NOOPs need no codegen beyond gas and bounds checks.
         if data.flags.contains(InstFlags::NOOP) {
+            self.sync_noop_diff(inst, diff);
             self.section_len_offset += diff;
             goto_return!("noop");
         }
@@ -645,10 +611,17 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         if out >= 1
             && let Some(const_out) = self.bytecode.const_output(inst)
         {
+            debug_assert!(
+                out == 1 || out == inp + 1,
+                "const_output assumes single synthesized push: inp={inp}, out={out}",
+            );
+            debug_assert!(!data.may_suspend() && !data.is_branching());
             // We push exactly 1 value, so consume `inp + 1 - out` to match the
             // real stack diff. For DUP (out = inp+1) this is 0; for ADD (out = 1)
             // this equals inp.
-            self.len_offset -= (inp + 1 - out) as i8;
+            let drop_count = (inp + 1 - out) as usize;
+            self.vstack.drop_top(drop_count);
+            self.len_offset -= drop_count as i8;
             let value = self.bcx.iconst_256(const_out);
             self.push(value);
             self.section_len_offset += diff;
@@ -656,6 +629,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         }
 
         if self.try_peephole(data) {
+            self.sync_virtual_stack_diff(diff);
             self.section_len_offset += diff;
             if self.current_inst().is_diverging() {
                 goto_return!(no_branch);
@@ -833,7 +807,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             }
 
             op::ADDRESS => {
-                let input = field!(@load self.bcx.type_ptr(), self.ecx, EvmContext<'_>; input);
+                let input = self.load_input();
                 field!(@push @[endian = "big"] self.address_type, input, InputsImpl; target_address);
             }
             op::BALANCE => {
@@ -846,11 +820,11 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 self.narrow_to_address(slot);
             }
             op::CALLER => {
-                let input = field!(@load self.bcx.type_ptr(), self.ecx, EvmContext<'_>; input);
+                let input = self.load_input();
                 field!(@push @[endian = "big"] self.address_type, input, InputsImpl; caller_address);
             }
             op::CALLVALUE => {
-                let input = field!(@load self.bcx.type_ptr(), self.ecx, EvmContext<'_>; input);
+                let input = self.load_input();
                 field!(@push self.word_type, input, InputsImpl; call_value);
             }
             op::CALLDATALOAD => {
@@ -946,7 +920,9 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 let _ = self.call_builtin(Builtin::SlotNum, &[self.ecx, slot]);
             }
 
-            op::POP => { /* Already handled in stack_io */ }
+            op::POP => {
+                self.pop_ignore(1);
+            }
             op::MLOAD => {
                 let sp = self.sp_after_inputs();
                 self.call_fallible_builtin(Builtin::Mload, &[self.ecx, sp]);
@@ -985,11 +961,14 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
                         if opcode == op::JUMPI {
                             let cond_word = self.pop();
+                            self.materialize_live_stack();
                             let cond = self.bcx.icmp_imm(IntCC::NotEqual, cond_word, 0);
                             let next = self.inst_entries[inst + 1];
                             let switch_block = self.bcx.create_block("multi_jump");
                             self.bcx.brif(cond, switch_block, next);
                             self.bcx.switch_to_block(switch_block);
+                        } else {
+                            self.materialize_live_stack();
                         }
 
                         let switch_targets: Vec<_> = targets
@@ -1034,6 +1013,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
                     if opcode == op::JUMPI {
                         let cond_word = self.pop();
+                        // Flush virtual values before leaving the section.
+                        self.materialize_live_stack();
                         let cond = self.bcx.icmp_imm(IntCC::NotEqual, cond_word, 0);
                         let next = self.inst_entries[inst + 1];
                         if target == self.return_block.unwrap() {
@@ -1041,6 +1022,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                         }
                         self.bcx.brif(cond, target, next);
                     } else {
+                        // Flush virtual values before leaving the section.
+                        self.materialize_live_stack();
                         self.bcx.br(target);
                     }
                     self.inst_entries[inst] = self.bcx.current_block().unwrap();
@@ -1157,23 +1140,136 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             _ => unreachable!("unimplemented instruction: {data:?}"),
         }
 
+        self.sync_virtual_stack_diff(diff);
         self.section_len_offset += diff;
         goto_return!("normal exit");
     }
 
-    /// Pushes a 256-bit value onto the stack.
-    fn push(&mut self, value: B::Value) {
-        self.pushn(&[value]);
+    /// Syncs the virtual stack for a NOOP instruction. Unlike `sync_virtual_stack_diff`,
+    /// this preserves known-constant outputs as `Virtual` values so that boundary
+    /// materialization (e.g. `materialize_live_stack` before branch/suspend) can flush
+    /// them to physical memory. Without this, NOOP'd constants would be marked
+    /// `Materialized` with no actual store, leaving garbage in memory.
+    fn sync_noop_diff(&mut self, inst: Inst, diff: i32) {
+        let expected_top = self.section_len_offset + diff;
+        let current_top = self.vstack.top_offset();
+        if current_top == expected_top {
+            return;
+        }
+        let delta = expected_top - current_top;
+        if delta < 0 {
+            self.vstack.drop_top((-delta) as usize);
+        } else {
+            // For NOOP instructions that push values, use the known constant output
+            // if available. This ensures the value can be materialized later.
+            if delta == 1
+                && let Some(c) = self.bytecode.const_output(inst)
+            {
+                let value = self.bcx.iconst_256(c);
+                self.vstack.push(value);
+            } else {
+                for _ in 0..delta {
+                    self.vstack.push_mem();
+                }
+            }
+        }
     }
 
-    /// Pushes 256-bit values onto the stack.
-    fn pushn(&mut self, values: &[B::Value]) {
-        for &value in values {
-            let offset = self.section_len_offset as i64 + self.len_offset as i64;
-            self.len_offset += 1;
-            let sp = self.sp_from_section(offset);
-            self.bcx.store(value, sp);
+    /// Syncs the virtual stack's `top_offset` with the expected value after applying
+    /// the instruction's stack diff. For inline ops (push/pop), the virtual stack is
+    /// already up to date. For builtin ops (sp_after_inputs/sp_at_top), this adjusts
+    /// the virtual stack to account for consumed inputs and materialized outputs.
+    ///
+    /// Also invalidates any virtual slots in the output area that the builtin may have
+    /// overwritten in physical memory, to prevent stale virtual values from shadowing
+    /// the builtin's actual output.
+    fn sync_virtual_stack_diff(&mut self, diff: i32) {
+        let expected_top = self.section_len_offset + diff;
+        let current_top = self.vstack.top_offset();
+        if current_top == expected_top {
+            return;
         }
+        let delta = expected_top - current_top;
+        if expected_top < self.vstack.live_range().start {
+            let inst = self.current_inst.unwrap();
+            // Walk backward to find the section head for diagnostic context.
+            let mut head = inst;
+            for i in (0..inst.index()).rev() {
+                let idx = crate::Inst::from_usize(i);
+                let d = self.bytecode.inst(idx);
+                if d.is_dead_code() {
+                    continue;
+                }
+                if d.is_stack_section_head() {
+                    head = idx;
+                    break;
+                }
+            }
+            // Dump the section from head to current inst.
+            let mut section_dump = String::new();
+            for i in head.index()..=inst.index() {
+                let idx = crate::Inst::from_usize(i);
+                let d = self.bytecode.inst(idx);
+                if d.is_dead_code() {
+                    continue;
+                }
+                use std::fmt::Write;
+                let _ = write!(
+                    section_dump,
+                    "\n  ic{i} pc={} {:?} io={:?} flags={:?} gas={:?} stack={:?}{}{}",
+                    d.pc,
+                    d.to_op(),
+                    d.stack_io(),
+                    d.flags,
+                    d.gas_section,
+                    d.stack_section,
+                    if d.is_stack_section_head() { " SECTION_HEAD" } else { "" },
+                    if d.is_dead_code() { " DEAD" } else { "" },
+                );
+            }
+            let head_data = self.bytecode.inst(head);
+            panic!(
+                "sync: expected_top={expected_top} < base={}, section_len_offset={}, \
+                 diff={diff}, current_top={current_top}, inst={:?} (ic{})\n\
+                 section head=ic{}, head_stack_section={:?}, section:{section_dump}",
+                self.vstack.live_range().start,
+                self.section_len_offset,
+                self.current_inst().to_op(),
+                inst.index(),
+                head.index(),
+                head_data.stack_section,
+            );
+        }
+        if delta < 0 {
+            self.vstack.drop_top((-delta) as usize);
+        } else {
+            for _ in 0..delta {
+                self.vstack.push_mem();
+            }
+        }
+
+        // Mark the builtin's output area as materialized. The builtin wrote to
+        // physical memory at `sp[0..outputs]`, which corresponds to offsets
+        // `expected_top - outputs .. expected_top`. Any pre-existing Virtual
+        // entries (e.g. from NOOP'd producers) must be invalidated.
+        let (_, outputs) = self.current_inst().stack_io();
+        let outputs = outputs as i32;
+        if outputs > 0 {
+            self.vstack.mark_materialized_range(expected_top - outputs..expected_top);
+        }
+
+        debug_assert_eq!(
+            self.vstack.top_offset(),
+            expected_top,
+            "virtual stack sync mismatch after {:?}",
+            self.current_inst().to_op(),
+        );
+    }
+
+    /// Pushes a 256-bit value onto the stack.
+    fn push(&mut self, value: B::Value) {
+        self.vstack.push(value);
+        self.len_offset += 1;
     }
 
     /// Returns the known constant values of the topmost `N` stack operands, in the same order
@@ -1183,8 +1279,16 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         std::array::from_fn(|i| self.bytecode.const_operand(inst, i))
     }
 
+    /// Discards `n` stack inputs and pushes a compile-time constant.
+    fn fold_const(&mut self, value: impl TryInto<U256>) {
+        self.pop_ignore(self.current_inst().stack_io().0 as usize);
+        let v = self.bcx.iconst_256(value);
+        self.push(v);
+    }
+
     /// Consumes the topmost `n` elements from the stack without loading them.
     fn pop_ignore(&mut self, n: usize) {
+        self.vstack.drop_top(n);
         self.len_offset -= n as i8;
     }
 
@@ -1194,22 +1298,17 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     }
 
     /// Removes the topmost `N` elements from the stack and returns them.
-    ///
-    /// If `load` is `false`, returns just the pointers.
     fn popn<const N: usize>(&mut self) -> [B::Value; N] {
         assert_ne!(N, 0);
 
-        std::array::from_fn(|i| {
-            // Compute the operand depth: how many values have been popped so far
-            // from this instruction (including any prior `pop()` calls).
-            let depth = (-self.len_offset) as usize;
-            self.len_offset -= 1;
+        let operand_depth_base = (-self.len_offset) as usize;
+        let values = std::array::from_fn(|i| {
+            let operand_depth = operand_depth_base + i;
             let name = b'a' + i as u8;
-            self.operand_value_or_load(depth, std::str::from_utf8(&[name]).unwrap(), |this| {
-                let offset = this.section_len_offset as i64 + this.len_offset as i64;
-                this.sp_from_section(offset)
-            })
-        })
+            self.stack_value_at_depth(operand_depth, i, std::str::from_utf8(&[name]).unwrap())
+        });
+        self.pop_ignore(N);
+        values
     }
 
     /// Duplicates the `n`th value from the top of the stack.
@@ -1217,7 +1316,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     fn dup(&mut self, n: usize) {
         assert_ne!(n, 0);
         let name = if self.config.debug { &format!("dup{n}") } else { "" };
-        let value = self.operand_value_or_load(n - 1, name, |this| this.sp_from_top(n));
+        let value = self.stack_value_at_depth(n - 1, n - 1, name);
         self.push(value);
     }
 
@@ -1232,15 +1331,10 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     /// `m` cannot be `0`.
     fn exchange(&mut self, n: usize, m: usize) {
         assert_ne!(m, 0);
-        // Load a.
-        let a_sp = self.sp_from_top(n + 1);
-        let a = self.operand_value_or_load(n, "swap.a", |_| a_sp);
-        // Load b.
-        let b_sp = self.sp_from_top(n + m + 1);
-        let b = self.operand_value_or_load(n + m, "swap.b", |_| b_sp);
-        // Store.
-        self.bcx.store(a, b_sp);
-        self.bcx.store(b, a_sp);
+        let a = self.stack_value_at_depth(n, n, "swap.a");
+        let b = self.stack_value_at_depth(n + m, n + m, "swap.b");
+        self.vstack.set(n, b);
+        self.vstack.set(n + m, a);
     }
 
     /// `RETURN` or `REVERT` instruction.
@@ -1269,6 +1363,9 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
     /// Suspend execution, storing the resume point in the context.
     fn suspend(&mut self) {
+        // Flush virtual stack before entering the shared suspend block.
+        self.materialize_live_stack();
+
         // Register the next instruction as the resume block.
         let idx = self.resume_blocks.len();
         self.add_resume_at(self.inst_entries[self.current_inst.unwrap() + 1]);
@@ -1296,7 +1393,19 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         get_field(&mut self.bcx, ptr, offset, name)
     }
 
-    /// Re-loads the address at `slot` as i160 and zero-extends to i256.
+    /// Loads the `ecx.input` pointer on demand.
+    fn load_input(&mut self) -> B::Value {
+        let ptr_type = self.bcx.type_ptr();
+        let input_field = get_field(
+            &mut self.bcx,
+            self.ecx,
+            mem::offset_of!(EvmContext<'_>, input),
+            "ecx.input.addr",
+        );
+        self.bcx.load(ptr_type, input_field, "ecx.input")
+    }
+
+    /// Re-loads the address at `slot` as i160, zero-extends to i256, and stores it back.
     ///
     /// On little-endian the low 160 bits sit at byte offset 0, so a direct
     /// `load i160` + `zext i256` gives LLVM a typed narrow load — no AND needed
@@ -1354,6 +1463,9 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     }
 
     /// Returns the stack pointer at the top (`&stack[stack.len]`).
+    ///
+    /// Used by builtins that write a single output directly to memory.
+    /// The virtual stack is synced at instruction end via `sync_virtual_stack_diff`.
     #[must_use]
     fn sp_at_top(&mut self) -> B::Value {
         self.sp_from_section(self.section_len_offset as i64)
@@ -1362,43 +1474,57 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     /// Returns the stack pointer after the input has been popped
     /// (`&stack[stack.len - op.input()]`).
     ///
-    /// For any input whose value is a known constant, the constant is written into the
-    /// corresponding stack slot. This allows DSE to NOOP the producing PUSH even for
-    /// builtin-delegated opcodes that read operands directly from the stack pointer.
+    /// This materializes all virtual values in the input/output window so builtins
+    /// can read/write the physical stack. For any input whose value is a known constant,
+    /// the constant is written into the corresponding stack slot. This allows DSE to NOOP
+    /// the producing PUSH even for builtin-delegated opcodes that read operands directly
+    /// from the stack pointer.
+    ///
+    /// The virtual stack is synced with the builtin's stack effect at instruction end
+    /// via `sync_virtual_stack_diff`.
     #[must_use]
     fn sp_after_inputs(&mut self) -> B::Value {
-        self.sp_after_inputs_inner(None)
+        let (inputs, outputs) = self.current_inst().stack_io();
+        let inputs = inputs as usize;
+        let outputs = outputs as usize;
+        let top = self.section_len_offset;
+        let start = top - inputs as i32;
+        let window = inputs.max(outputs) as i32;
+        self.materialize_range(start, start + window);
+        self.write_const_operands(inputs);
+        self.sp_from_top(inputs)
     }
 
+    /// Like [`sp_after_inputs`](Self::sp_after_inputs) but only materializes the
+    /// specified operand depths.
     #[must_use]
-    fn sp_after_inputs_with(&mut self, materialize: &[usize]) -> B::Value {
-        self.sp_after_inputs_inner(Some(materialize))
-    }
-
-    #[doc(hidden)]
-    fn sp_after_inputs_inner(&mut self, materialize: Option<&[usize]>) -> B::Value {
-        let inst = self.current_inst.unwrap();
+    fn sp_after_inputs_with(&mut self, depths: &[usize]) -> B::Value {
         let (inputs, _) = self.current_inst().stack_io();
         let inputs = inputs as usize;
-        let sp = self.sp_from_top(inputs);
-        let materialize = match materialize {
-            Some(x) => Either::Left(x.iter().copied()),
-            None => Either::Right(0..inputs),
-        };
-        for depth in materialize {
-            if let Some(c) = self.bytecode.const_operand(inst, depth) {
+        let top = self.section_len_offset;
+        for &depth in depths {
+            let off = top - inputs as i32 + (inputs - 1 - depth) as i32;
+            self.materialize_range(off, off + 1);
+        }
+        self.write_const_operands(inputs);
+        self.sp_from_top(inputs)
+    }
+
+    /// Writes known-constant operands into the physical stack so that builtins see
+    /// correct values even when DSE has NOOP'd the producing instruction.
+    fn write_const_operands(&mut self, inputs: usize) {
+        let inst = self.current_inst.unwrap();
+        let top = self.section_len_offset;
+        for depth in 0..inputs {
+            let off = top - inputs as i32 + (inputs - 1 - depth) as i32;
+            if let VSlot::Materialized = self.vstack.get_at_offset(off)
+                && let Some(c) = self.bytecode.const_operand(inst, depth)
+            {
                 let value = self.bcx.iconst_256(c);
-                let slot_offset = (inputs - 1 - depth) as i64;
-                let slot = if slot_offset == 0 {
-                    sp
-                } else {
-                    let offset = self.bcx.iconst(self.isize_type, slot_offset);
-                    self.bcx.gep(self.word_type, sp, &[offset], "sp.const")
-                };
-                self.bcx.store(value, slot);
+                let sp = self.sp_from_section(off as i64);
+                self.bcx.store(value, sp);
             }
         }
-        sp
     }
 
     /// Returns a stack pointer offset from `section_start_sp`.
@@ -1421,20 +1547,74 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         self.sp_from_section(self.section_len_offset as i64 - n as i64)
     }
 
-    /// Returns the known constant value of a stack operand if available, otherwise loads from the
-    /// stack. `depth` 0 is TOS (first popped), 1 is second, etc.
-    fn operand_value_or_load(
+    /// Resolves a stack value at the given depth via the virtual stack.
+    ///
+    /// - `operand_depth`: depth for `const_operand` lookup (0 = first popped by the instruction).
+    /// - `live_depth`: depth into the virtual stack's current live range (0 = current TOS).
+    ///
+    /// These differ only inside `popn` where multiple pops happen: `operand_depth` counts
+    /// from the instruction start, while `live_depth` counts from the current virtual TOS.
+    fn stack_value_at_depth(
         &mut self,
-        depth: usize,
+        operand_depth: usize,
+        live_depth: usize,
         name: &str,
-        sp: impl FnOnce(&mut Self) -> B::Value,
     ) -> B::Value {
         let inst = self.current_inst.unwrap();
-        if let Some(c) = self.bytecode.const_operand(inst, depth) {
+        if let Some(c) = self.bytecode.const_operand(inst, operand_depth) {
             return self.bcx.iconst_256(c);
         }
-        let sp = sp(self);
-        self.load_word(sp, name)
+        match self.vstack.get(live_depth) {
+            VSlot::Virtual(v) => v,
+            VSlot::Materialized => {
+                let off = self.vstack.offset_at_depth(live_depth);
+                let sp = self.sp_from_section(off as i64);
+                let value = self.load_word(sp, name);
+                self.vstack.set(live_depth, value);
+                value
+            }
+        }
+    }
+
+    /// Materializes all live virtual slots in the current section to memory.
+    fn materialize_live_stack(&mut self) {
+        let range = self.vstack.live_range();
+        self.materialize_range(range.start, range.end);
+    }
+
+    /// Eagerly materializes the coldest virtual slots when too many are live,
+    /// preventing excessive register pressure in long sections.
+    fn relieve_vstack_pressure(&mut self) {
+        /// Materialize when more than this many virtual slots are live.
+        const HIGH_WATER: usize = 2;
+        /// Never materialize the top N slots (they're likely used soon).
+        const KEEP_HOT: usize = 2;
+
+        let live = self.vstack.live_range();
+        if (live.end - live.start) as usize <= HIGH_WATER {
+            return;
+        }
+
+        let virtual_count = self.vstack.virtual_count();
+        if virtual_count <= HIGH_WATER {
+            return;
+        }
+
+        // Materialize everything below the hot window.
+        let cold_end = (self.vstack.top_offset() - KEEP_HOT as i32).max(live.start);
+        if cold_end > live.start {
+            self.materialize_range(live.start, cold_end);
+        }
+    }
+
+    /// Materializes all virtual slots in the given section-relative offset range.
+    fn materialize_range(&mut self, start: i32, end: i32) {
+        let pending: Vec<_> = self.vstack.pending_stores(start..end).collect();
+        for (off, value) in pending {
+            let sp = self.sp_from_section(off as i64);
+            self.bcx.store(value, sp);
+        }
+        self.vstack.mark_materialized_range(start..end);
     }
 
     /// Builds a gas cost deduction for an immediate value.
@@ -1468,6 +1648,45 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         self.build_failure_imm_inner(false, success_cond, ret);
     }
     */
+
+    /// Emits under/overflow bounds checks for a stack section.
+    fn check_stack_bounds(&mut self, stack_section: StackSection) {
+        let inp = stack_section.inputs;
+        let diff = stack_section.max_growth as i64;
+
+        let underflow = |this: &mut Self| {
+            debug_assert!(inp > 0);
+            this.bcx.icmp_imm(IntCC::UnsignedLessThan, this.len_before, inp as i64)
+        };
+        let overflow = |this: &mut Self| {
+            debug_assert!(diff > 0);
+            if diff > STACK_CAP as i64 {
+                return this.bcx.bool_const(true);
+            }
+            this.bcx.icmp_imm(IntCC::UnsignedGreaterThan, this.len_before, STACK_CAP as i64 - diff)
+        };
+
+        let may_underflow = inp > 0;
+        let may_overflow = diff > 0;
+        if may_underflow && may_overflow {
+            let underflow = underflow(self);
+            let overflow = overflow(self);
+            let cond = self.bcx.bitor(underflow, overflow);
+            let ret = {
+                let under = self.bcx.iconst(self.i8_type, InstructionResult::StackUnderflow as i64);
+                let over = self.bcx.iconst(self.i8_type, InstructionResult::StackOverflow as i64);
+                self.bcx.select(underflow, under, over)
+            };
+            let target = self.build_check_inner(true, cond, ret);
+            self.bcx.switch_to_block(target);
+        } else if may_underflow {
+            let cond = underflow(self);
+            self.build_check(cond, InstructionResult::StackUnderflow);
+        } else if may_overflow {
+            let cond = overflow(self);
+            self.build_check(cond, InstructionResult::StackOverflow);
+        }
+    }
 
     /// Builds a check, failing if the condition is true.
     ///
@@ -1524,6 +1743,9 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
     /// Builds a branch to the failure block.
     fn build_fail(&mut self, ret: B::Value) {
+        if self.config.inspect_stack {
+            self.materialize_live_stack();
+        }
         if let Some(block) = self.failure_block {
             self.incoming_failures.push((ret, self.bcx.current_block().unwrap()));
             self.bcx.br(block);
@@ -1543,6 +1765,9 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
     /// Builds a branch to the return block.
     fn build_return(&mut self, ret: B::Value) {
+        if self.config.inspect_stack {
+            self.materialize_live_stack();
+        }
         if let Some(block) = self.return_block {
             self.incoming_returns.push((ret, self.bcx.current_block().unwrap()));
             self.bcx.br(block);
