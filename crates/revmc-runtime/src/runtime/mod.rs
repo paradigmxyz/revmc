@@ -250,9 +250,6 @@ impl JitBackend {
     ///
     /// Blocks if the command channel is full to guarantee delivery.
     pub fn compile_jit(&self, req: LookupRequest) {
-        if self.inner.tuning.jit_worker_count == 0 {
-            return;
-        }
         let _ = self.ensure_started();
         let cmd = Command::CompileJit(CompileJitRequest {
             key: req.key,
@@ -268,9 +265,6 @@ impl JitBackend {
     /// or when the compilation fails. Use [`get_compiled`](Self::get_compiled) to
     /// retrieve the result after this returns.
     pub fn compile_jit_sync(&self, req: LookupRequest) -> eyre::Result<()> {
-        if self.inner.tuning.jit_worker_count == 0 {
-            return Ok(());
-        }
         self.ensure_started()?;
         let (tx, rx) = chan::bounded(1);
         let cmd = Command::CompileJit(CompileJitRequest {
@@ -295,9 +289,6 @@ impl JitBackend {
     ///
     /// Blocks if the command channel is full to guarantee delivery.
     pub fn prepare_aot_batch(&self, reqs: Vec<AotRequest>) {
-        if self.inner.tuning.jit_worker_count == 0 {
-            return;
-        }
         let _ = self.ensure_started();
         let owned: Vec<PrepareAotRequest> = reqs
             .into_iter()
