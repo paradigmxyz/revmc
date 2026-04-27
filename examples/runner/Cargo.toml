@@ -18,7 +18,9 @@ revmc-build.workspace = true
 cc = "1.0"
 
 [dependencies]
-revmc = { workspace = true, features = ["llvm-prefer-dynamic"] }
+revmc-builtins = { workspace = true, default-features = false }
+revmc-context = { workspace = true, default-features = false }
+revmc-evm = { workspace = true, default-features = false }
 
 revm-bytecode = { workspace = true, features = ["std"] }
 revm-context = { workspace = true, features = ["std"] }

@@ -1,15 +1,24 @@
-//! Minimal runner that hooks a statically compiled bytecode into a revm mainnet EVM.
+//! Minimal, `no_std` runner that hooks a statically compiled bytecode into a revm mainnet EVM.
+
+#![no_std]
+
+extern crate alloc;
+
+// This dependency is needed to define the necessary symbols used by the compiled bytecodes,
+// but we don't use it directly, so silence the unused crate dependency warning.
+use revmc_builtins as _;
 
 use revm_context::{BlockEnv, CfgEnv, Context, Journal, TxEnv};
 use revm_database_interface::Database;
 use revm_handler::{MainBuilder, MainnetEvm};
 use revm_primitives::{B256, hardfork::SpecId, hex, map::B256Map};
-use revmc::{JitEvm, RawEvmCompilerFn};
+use revmc_context::RawEvmCompilerFn;
+use revmc_evm::JitEvm;
 
 include!("./common.rs");
 
 // The bytecode we statically linked.
-revmc::extern_revmc! {
+revmc_context::extern_revmc! {
     fn fibonacci;
 }
 

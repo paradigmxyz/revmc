@@ -2865,6 +2865,7 @@ dependencies = [
  "revmc-build",
  "revmc-builtins",
  "revmc-context",
+ "revmc-evm",
  "revmc-llvm",
  "revmc-statetest",
  "similar-asserts",
@@ -2950,6 +2951,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "revmc-evm"
+version = "0.1.0"
+dependencies = [
+ "revm-context",
+ "revm-context-interface",
+ "revm-handler",
+ "revm-inspector",
+ "revm-interpreter",
+ "revm-primitives",
+ "revm-state",
+ "revmc-context",
+]
+
+[[package]]
 name = "revmc-examples-compiler"
 version = "0.1.0"
 dependencies = [
@@ -2973,6 +2988,9 @@ dependencies = [
  "revm-state",
  "revmc",
  "revmc-build",
+ "revmc-builtins",
+ "revmc-context",
+ "revmc-evm",
 ]
 
 [[package]]

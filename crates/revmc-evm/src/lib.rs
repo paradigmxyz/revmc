@@ -4,7 +4,8 @@
 //! `frame_run` to dispatch to JIT-compiled functions by code hash,
 //! falling back to the interpreter for unknown contracts.
 
-use crate::{EvmCompilerFn, RawEvmCompilerFn};
+#![cfg_attr(not(feature = "std"), no_std)]
+
 use revm_context_interface::{
     ContextSetters, ContextTr,
     journaled_state::JournalTr,
@@ -21,6 +22,7 @@ use revm_inspector::{
 use revm_interpreter::{InstructionResult, InterpreterAction, InterpreterResult, InterpreterTypes};
 use revm_primitives::{B256, map::B256Map};
 use revm_state::EvmState;
+use revmc_context::{EvmCompilerFn, RawEvmCompilerFn};
 
 /// Wrapper around any [`EvmTr`] that overrides [`EvmTr::frame_run`] to dispatch
 /// to JIT-compiled functions by code hash, falling back to the interpreter.
