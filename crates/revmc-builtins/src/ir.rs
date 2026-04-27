@@ -55,7 +55,6 @@ impl<B: Backend> Builtins<B> {
             Attribute::NoRecurse,
             Attribute::NoSync,
             Attribute::NoUnwind,
-            Attribute::ArgMemOnly,
         ]);
         for attr in attrs {
             bcx.add_function_attribute(Some(f), attr, FunctionAttributeLocation::Function);
