@@ -2,13 +2,13 @@ pub mod post_block;
 pub mod pre_block;
 
 use revm_bytecode::Bytecode;
-use revm_context::{cfg::CfgEnv, Context, ContextTr};
+use revm_context::{Context, ContextTr, cfg::CfgEnv};
 use revm_context_interface::{block::BlobExcessGasAndPrice, result::HaltReason};
-use revm_database::{states::bundle_state::BundleRetention, Database, EmptyDB, State};
+use revm_database::{Database, EmptyDB, State, states::bundle_state::BundleRetention};
 use revm_handler::{EvmTr, ExecuteCommitEvm, ExecuteEvm, MainBuilder, MainContext};
-use revm_inspector::{inspectors::TracerEip3155, InspectEvm};
-use revm_primitives::{hardfork::SpecId, hex, Address, AddressMap, U256Map, U256};
-use revm_state::{bal::Bal, AccountInfo};
+use revm_inspector::{InspectEvm, inspectors::TracerEip3155};
+use revm_primitives::{Address, AddressMap, U256, U256Map, hardfork::SpecId, hex};
+use revm_state::{AccountInfo, bal::Bal};
 use revm_statetest_types::blockchain::{
     Account, BlockchainTest, BlockchainTestCase, ForkSpec, Withdrawal,
 };
@@ -139,11 +139,7 @@ fn run_tests(
         println!("  Time:    {:.2}s", duration.as_secs_f64());
     }
 
-    if failed > 0 {
-        Err(Error::TestsFailed { failed })
-    } else {
-        Ok(())
-    }
+    if failed > 0 { Err(Error::TestsFailed { failed }) } else { Ok(()) }
 }
 
 /// Run tests from a single file
