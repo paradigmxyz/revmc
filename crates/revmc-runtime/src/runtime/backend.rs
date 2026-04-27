@@ -742,4 +742,5 @@ pub(crate) fn run(
     debug!(?shutdown_reason, stats = ?state.inner.stats(), "backend task shutting down");
 
     state.workers.shutdown();
+    while state.result_rx.try_recv().is_ok() {}
 }

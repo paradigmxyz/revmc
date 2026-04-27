@@ -20,7 +20,7 @@ use alloy_primitives::Bytes;
 use crossbeam_channel as chan;
 use rayon::{ThreadPool, ThreadPoolBuilder};
 #[cfg(feature = "llvm")]
-use std::{cell::RefCell, fs::File, io::Read, time::Instant};
+use std::{cell::RefCell, fs::File, io::Read, mem::ManuallyDrop, time::Instant};
 use std::{
     sync::{
         Arc,
@@ -240,9 +240,6 @@ impl WorkerPool {
     /// Shuts down all workers after draining queued jobs.
     pub(crate) fn shutdown(&mut self) {
         self.shutdown.store(true, Ordering::Release);
-        if let Some(pool) = &self.pool {
-            clear_thread_local_compilers(pool);
-        }
         self.pool.take();
     }
 }
@@ -252,17 +249,6 @@ impl Drop for WorkerPool {
         self.shutdown();
     }
 }
-
-#[cfg(feature = "llvm")]
-fn clear_thread_local_compilers(pool: &ThreadPool) {
-    pool.broadcast(|_| {
-        JIT_COMPILER.with_borrow_mut(Option::take);
-        AOT_COMPILER.with_borrow_mut(Option::take);
-    });
-}
-
-#[cfg(not(feature = "llvm"))]
-fn clear_thread_local_compilers(_pool: &ThreadPool) {}
 
 #[cfg(feature = "llvm")]
 fn compile_job(job: CompileJob, config: &RuntimeConfig) -> WorkerResult {
@@ -281,7 +267,7 @@ fn compile_job(job: CompileJob, config: &RuntimeConfig) -> WorkerResult {
 fn compile_with_state(
     job: CompileJob,
     config: &RuntimeConfig,
-    state: &mut Option<CompilerState>,
+    state_slot: &mut Option<ManuallyDrop<CompilerState>>,
 ) -> WorkerResult {
     let _span = match job.kind {
         CompilationKind::Jit => {
@@ -293,9 +279,9 @@ fn compile_with_state(
     };
     let t0 = Instant::now();
 
-    if state.is_none() {
+    if state_slot.is_none() {
         match CompilerState::new(config, job.kind) {
-            Ok(s) => *state = Some(s),
+            Ok(s) => *state_slot = Some(ManuallyDrop::new(s)),
             Err(e) => {
                 error!(error = %e, "failed to create LLVM backend");
                 return WorkerResult {
@@ -311,7 +297,7 @@ fn compile_with_state(
         }
     }
 
-    let state = state.as_mut().unwrap();
+    let state = state_slot.as_mut().unwrap();
     let compiler = &mut state.compiler;
 
     if job.kind == CompilationKind::Jit
@@ -340,7 +326,7 @@ fn compile_with_state(
         debug!(compilations_since_recycle = state.compilations_since_recycle, "recycling compiler");
         match CompilerState::new(config, job.kind) {
             Ok(new_state) => {
-                *state = new_state;
+                replace_compiler_state(state_slot, new_state);
                 revmc_llvm::global_gc();
             }
             Err(e) => {
@@ -379,8 +365,18 @@ impl CompilerState {
 
 #[cfg(feature = "llvm")]
 thread_local! {
-    static JIT_COMPILER: RefCell<Option<CompilerState>> = const { RefCell::new(None) };
-    static AOT_COMPILER: RefCell<Option<CompilerState>> = const { RefCell::new(None) };
+    static JIT_COMPILER: RefCell<Option<ManuallyDrop<CompilerState>>> = const { RefCell::new(None) };
+    static AOT_COMPILER: RefCell<Option<ManuallyDrop<CompilerState>>> = const { RefCell::new(None) };
+}
+
+#[cfg(feature = "llvm")]
+fn replace_compiler_state(
+    state: &mut Option<ManuallyDrop<CompilerState>>,
+    new_state: CompilerState,
+) {
+    if let Some(mut old_state) = state.replace(ManuallyDrop::new(new_state)) {
+        unsafe { ManuallyDrop::drop(&mut old_state) };
+    }
 }
 
 #[cfg(feature = "llvm")]
