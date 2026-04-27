@@ -207,7 +207,7 @@ pub struct RuntimeTuning {
     /// Defaults to `None`.
     pub idle_evict_duration: Option<Duration>,
 
-    /// How often the backend runs eviction sweeps.
+    /// How often the backend runs eviction sweeps, if `idle_evict_duration` is set.
     ///
     /// Defaults to `60s`.
     pub eviction_sweep_interval: Duration,

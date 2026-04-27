@@ -35,12 +35,9 @@ pub enum CompileMode {
     /// Standard interpreter execution (no compilation).
     #[default]
     Interpreter,
-    /// JIT-compile all bytecodes before execution.
-    Jit,
     /// AOT-compile all bytecodes to a shared library, then load and execute.
     Aot,
-    /// Use the runtime backend: AOT-compile, load through `JitBackend`, and look up
-    /// compiled functions via `JitBackend::lookup()`.
+    /// Use the runtime backend and look up compiled functions via `JitBackend::lookup()`.
     Runtime,
 }
 
@@ -72,8 +69,8 @@ type StateTestEvm = MainnetEvm<revm_handler::MainnetContext<database::State<Empt
 type StateTestError = EVMError<EvmDatabaseError<std::convert::Infallible>, InvalidTransaction>;
 
 /// Custom handler that dispatches to compiled functions. All bytecodes —
-/// including runtime-created ones (CREATE/CREATE2) — are JIT-compiled before
-/// execution. Never falls back to the interpreter.
+/// including runtime-created ones (CREATE/CREATE2) — are compiled before execution.
+/// Never falls back to the interpreter.
 pub struct CompiledHandler<'a> {
     pub compiled: &'a CompiledContracts,
     pub cache: &'a CompileCache,
@@ -139,7 +136,7 @@ type ClaimedEntry<'a> = (B256, &'a [u8], String, Arc<OnceLock<EvmCompilerFn>>);
 pub struct CompileCache {
     mode: CompileMode,
     functions: DashMap<(B256, SpecId), Arc<OnceLock<EvmCompilerFn>>>,
-    /// Keep AOT shared libraries alive. Unused for JIT mode.
+    /// Keep AOT shared libraries alive.
     libs: Mutex<Vec<(tempfile::TempDir, libloading::Library)>>,
     /// `ManuallyDrop` because `ThreadLocal::drop` drops values on the calling thread, but each
     /// `EvmLlvmBackend` holds a reference to a thread-local LLVM context that only lives on the
@@ -236,7 +233,6 @@ impl CompileCache {
     }
 
     /// Compile all contracts in a test unit, returning the compiled functions.
-    /// Uses the cache's mode (JIT or AOT) to determine compilation strategy.
     pub fn compile(
         &self,
         unit: &TestUnit,
@@ -253,7 +249,6 @@ impl CompileCache {
         }
 
         match self.mode {
-            CompileMode::Jit => self.compile_jit_batch(&claimed, &mut compiled, spec_id)?,
             CompileMode::Aot => self.compile_aot_batch(&claimed, &mut compiled, spec_id)?,
             CompileMode::Runtime | CompileMode::Interpreter => unreachable!(),
         }
@@ -295,7 +290,6 @@ impl CompileCache {
                 let mut compiled = CompiledContracts::new();
 
                 match self.mode {
-                    CompileMode::Jit => self.compile_jit_batch(&claimed, &mut compiled, spec_id)?,
                     CompileMode::Aot => self.compile_aot_batch(&claimed, &mut compiled, spec_id)?,
                     CompileMode::Runtime | CompileMode::Interpreter => unreachable!(),
                 }
@@ -303,35 +297,6 @@ impl CompileCache {
                 Ok(compiled.get(&code_hash).unwrap())
             }
         }
-    }
-
-    fn compile_jit_batch(
-        &self,
-        claimed: &[ClaimedEntry<'_>],
-        compiled: &mut CompiledContracts,
-        spec_id: SpecId,
-    ) -> Result<(), TestErrorKind> {
-        let mut compiler = self.compiler.get_or(|| make_compiler(false)).borrow_mut();
-
-        let mut func_ids = Vec::new();
-        for (code_hash, code, name, _) in claimed {
-            let func_id = compiler
-                .translate(name, *code, spec_id)
-                .map_err(|e| TestErrorKind::CompilationError(format!("translate {name}: {e}")))?;
-            func_ids.push((*code_hash, func_id));
-        }
-
-        for (i, (code_hash, func_id)) in func_ids.into_iter().enumerate() {
-            let func = unsafe { compiler.jit_function(func_id) }.map_err(|e| {
-                TestErrorKind::CompilationError(format!("jit {:x}: {e}", code_hash))
-            })?;
-            claimed[i].3.set(func).ok();
-            compiled.insert(code_hash, func);
-        }
-
-        let _ = compiler.clear_ir();
-
-        Ok(())
     }
 
     fn compile_aot_batch(
@@ -387,7 +352,6 @@ impl CompileCache {
         let total = hits + misses;
         if total > 0 {
             let label = match self.mode {
-                CompileMode::Jit => "JIT",
                 CompileMode::Aot => "AOT",
                 CompileMode::Runtime | CompileMode::Interpreter => unreachable!(),
             };
@@ -603,8 +567,7 @@ struct RuntimeTestContext<'a> {
 
 /// Execute a test suite file using the runtime backend.
 ///
-/// For each test unit, we enqueue JIT compilation via the backend and wait for all
-/// contracts to be compiled before executing. This exercises the full JIT pipeline.
+/// For each test unit, enqueue JIT compilation via the backend before executing.
 fn execute_test_suite_runtime(
     path: &Path,
     elapsed: &Arc<Mutex<Duration>>,
@@ -715,7 +678,7 @@ fn run_test_worker(
             CompileMode::Interpreter => {
                 execute_test_suite(&test_path, &state.elapsed, false, false)
             }
-            CompileMode::Jit | CompileMode::Aot => {
+            CompileMode::Aot => {
                 execute_test_suite_compiled(&test_path, &state.elapsed, cache.unwrap())
             }
             CompileMode::Runtime => {
@@ -748,16 +711,19 @@ pub fn run(
 
     let cache = match mode {
         CompileMode::Interpreter | CompileMode::Runtime => None,
-        CompileMode::Jit | CompileMode::Aot => Some(Arc::new(CompileCache::new(mode))),
+        CompileMode::Aot => Some(Arc::new(CompileCache::new(mode))),
     };
 
-    // For runtime mode, start the backend in blocking mode so misses synchronously
-    // compile (instead of fire-and-forget which would mostly interpret).
     let backend = if mode == CompileMode::Runtime {
         let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
         let config = RuntimeConfig {
-            blocking: true,
-            tuning: RuntimeTuning { jit_worker_count: cpus, ..Default::default() },
+            enabled: true,
+            tuning: RuntimeTuning {
+                jit_hot_threshold: 0,
+                jit_worker_count: cpus,
+                jit_max_pending_jobs: usize::MAX,
+                ..Default::default()
+            },
             ..Default::default()
         };
         Some(JitBackend::new(config).map_err(|e| TestError {

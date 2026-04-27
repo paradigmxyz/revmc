@@ -45,7 +45,7 @@ impl StatetestDiffArgs {
 
         eprintln!("Found {} test file(s)", test_files.len());
 
-        let cache = CompileCache::new(CompileMode::Jit);
+        let cache = CompileCache::new(CompileMode::Aot);
         let mut n_total = 0u64;
         let mut n_mismatches = 0u64;
         let mut n_compile_errors = 0u64;
