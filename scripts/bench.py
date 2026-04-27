@@ -217,7 +217,7 @@ def parse_remarks(dump_dir: str, bench: str) -> dict[str, float]:
     return result
 
 
-JIT_SIZE_RE = re.compile(r"\((\d+) B\)")
+JIT_SIZE_RE = re.compile(r"(?:\(|:\s)(\d+)\s*B\)?")
 
 
 def parse_jit_size(dump_dir: str, bench: str) -> int:
