@@ -88,12 +88,9 @@ pub struct EvmContext<'a> {
     pub memory: &'a mut SharedMemory,
     /// Input information (target address, caller, input data, call value).
     pub input: &'a mut InputsImpl,
-    /// The gas, stored inline to avoid an extra pointer indirection in JIT code.
-    ///
-    /// Mirrors the interpreter's [`Gas`] for the duration of the JIT call, and is written back
-    /// to [`Self::gas_ptr`] on exit.
+    /// The gas.
     pub gas: Gas,
-    /// Pointer to the original interpreter [`Gas`], used to write [`Self::gas`] back on exit.
+    /// Pointer to the original interpreter gas, written back on exit.
     #[doc(hidden)]
     pub gas_ptr: &'a mut Gas,
     /// The host.
@@ -315,7 +312,6 @@ impl EvmCompilerFn {
             ecx.gas.spend_all();
         }
 
-        // Write the inline gas back to the original interpreter `Gas` location.
         *ecx.gas_ptr = ecx.gas;
 
         let return_data_is_empty = ecx.return_data.is_empty();
