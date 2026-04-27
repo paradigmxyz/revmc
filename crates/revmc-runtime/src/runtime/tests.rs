@@ -325,13 +325,21 @@ fn backend_clone() {
 
 #[test]
 fn compile_jit_enqueue() {
-    let tb = TestBackend::with_tuning(RuntimeTuning { jit_worker_count: 0, ..Default::default() });
+    let tb = TestBackend::new(RuntimeConfig {
+        enabled: false,
+        tuning: RuntimeTuning { jit_worker_count: 0, ..Default::default() },
+        ..Default::default()
+    });
     tb.compile_jit(TestBackend::req_cancun(BYTECODE_RET42));
 }
 
 #[test]
 fn prepare_aot_enqueue() {
-    let tb = TestBackend::with_tuning(RuntimeTuning { jit_worker_count: 0, ..Default::default() });
+    let tb = TestBackend::new(RuntimeConfig {
+        enabled: false,
+        tuning: RuntimeTuning { jit_worker_count: 0, ..Default::default() },
+        ..Default::default()
+    });
     tb.prepare_aot(AotRequest {
         code_hash: alloy_primitives::keccak256(BYTECODE_RET42),
         code: Bytes::copy_from_slice(BYTECODE_RET42),
@@ -341,7 +349,11 @@ fn prepare_aot_enqueue() {
 
 #[test]
 fn prepare_aot_batch_enqueue() {
-    let tb = TestBackend::with_tuning(RuntimeTuning { jit_worker_count: 0, ..Default::default() });
+    let tb = TestBackend::new(RuntimeConfig {
+        enabled: false,
+        tuning: RuntimeTuning { jit_worker_count: 0, ..Default::default() },
+        ..Default::default()
+    });
     let reqs = vec![
         AotRequest {
             code_hash: alloy_primitives::keccak256(BYTECODE_RET42),
