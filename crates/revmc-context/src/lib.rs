@@ -164,12 +164,11 @@ impl<'a> EvmContext<'a> {
         let bytecode = interpreter.bytecode.bytecode_slice() as *const [u8];
         let calldatasize = interpreter.input.input.len();
         let gas_params = host.gas_params().clone();
-        let gas_ptr: *mut Gas = &mut interpreter.gas;
         let this = Self {
             memory: &mut interpreter.memory,
             input: &mut interpreter.input,
             gas: interpreter.gas,
-            gas_ptr,
+            gas_ptr: &mut interpreter.gas,
             host,
             next_action: &mut interpreter.bytecode.action,
             return_data: interpreter.return_data.buffer(),
@@ -317,11 +316,7 @@ impl EvmCompilerFn {
         }
 
         // Write the inline gas back to the original interpreter `Gas` location.
-        // SAFETY: `gas_ptr` was constructed from `&mut interpreter.gas` and stays valid
-        // for the lifetime of `interpreter`.
-        unsafe {
-            *ecx.gas_ptr = ecx.gas;
-        }
+        *ecx.gas_ptr = ecx.gas;
 
         let return_data_is_empty = ecx.return_data.is_empty();
 
