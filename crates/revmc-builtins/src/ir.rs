@@ -58,16 +58,15 @@ impl<B: Backend> Builtins<B> {
             Attribute::NoUnwind,
         ]);
         // `argmem` is only valid if the function does not access memory reachable through pointers
-        // *loaded* from its arguments (only memory directly derived from arguments via GEP/bitcast).
-        // Builtins that take a writable `EvmContext` mutate state through `ecx.host`, `ecx.gas`,
-        // etc., which are loaded from `ecx` and thus outside `argmem`. Apply `ArgMemOnly` only when
-        // no parameter is a writable `EvmContext`.
+        // *loaded* from its arguments (only memory directly derived from arguments via
+        // GEP/bitcast). Builtins that take a writable `EvmContext` mutate state through
+        // `ecx.host`, `ecx.gas`, etc., which are loaded from `ecx` and thus outside
+        // `argmem`. Apply `ArgMemOnly` only when no parameter is a writable `EvmContext`.
         let evm_ctx_size = core::mem::size_of::<revmc_context::EvmContext<'static>>() as u64;
         let writes_ecx = param_attrs.iter().any(|p| {
             let writable = p.iter().any(|a| matches!(a, Attribute::Writable));
-            let is_ecx = p
-                .iter()
-                .any(|a| matches!(a, Attribute::Dereferenceable(s) if *s == evm_ctx_size));
+            let is_ecx =
+                p.iter().any(|a| matches!(a, Attribute::Dereferenceable(s) if *s == evm_ctx_size));
             writable && is_ecx
         });
         if !writes_ecx {
