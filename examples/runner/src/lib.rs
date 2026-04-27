@@ -1,8 +1,8 @@
 //! Minimal, `no_std` runner that hooks a statically compiled bytecode into a revm mainnet EVM.
 
 #![no_std]
-
-extern crate alloc;
+#![cfg_attr(not(test), warn(unused_extern_crates))]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 // This dependency is needed to define the necessary symbols used by the compiled bytecodes,
 // but we don't use it directly, so silence the unused crate dependency warning.
