@@ -682,11 +682,13 @@ impl<B: Backend> EvmCompiler<B> {
         // The stack argument's contents are dead after return when the stack is not observed,
         // so the caller can elide any stores to the buffer.
         if !bytecode.stack_observed() {
-            bcx.add_function_attribute(
-                None,
-                Attribute::DeadOnReturn,
-                FunctionAttributeLocation::Param(1),
-            );
+            for param in 1..=2 {
+                bcx.add_function_attribute(
+                    None,
+                    Attribute::DeadOnReturn,
+                    FunctionAttributeLocation::Param(param),
+                );
+            }
         }
 
         Ok((bcx, id))
