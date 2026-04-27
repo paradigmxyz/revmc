@@ -258,8 +258,7 @@ impl<'a> Bytecode<'a> {
             };
 
             let data = match opcode {
-                op::PUSH0 => U256Imm::new(U256::ZERO, &mut u256_interner).to_raw(),
-                op::PUSH1..=op::PUSH32 | op::DUPN | op::SWAPN | op::EXCHANGE => {
+                op::PUSH0..=op::PUSH32 | op::DUPN | op::SWAPN | op::EXCHANGE => {
                     let imm_len = min_imm_len(opcode) as usize;
                     // `OpcodesIter` returns `None` for truncated EOF immediates; recover
                     // the available bytes directly from `code` and right-pad with zeros
@@ -277,7 +276,11 @@ impl<'a> Bytecode<'a> {
                     };
                     U256Imm::new(value, &mut u256_interner).to_raw()
                 }
-                op::JUMPDEST | op::PC => pc as u32,
+                op::JUMPDEST | op::PC => {
+                    let pc = pc as u32;
+                    debug_assert!(pc & InstData::JUMPDEST_REACHABLE == 0, "pc too large");
+                    pc
+                }
                 _ => 0,
             };
 
