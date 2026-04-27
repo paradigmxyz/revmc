@@ -130,12 +130,32 @@ impl Handler for CompiledHandler<'_> {
 
 // ── Compilation cache ────────────────────────────────────────────────────────
 
-type ClaimedEntry<'a> = (B256, &'a [u8], String, Arc<OnceLock<EvmCompilerFn>>);
+type CompiledFnResult = Result<EvmCompilerFn, String>;
+type ClaimedEntry<'a> = (B256, &'a [u8], String, Arc<OnceLock<CompiledFnResult>>);
+
+/// On drop, fills any unset `OnceLock`s in `claimed` with `Err`. Workers waiting
+/// on those locks see the error and bail out instead of hanging forever. Set
+/// `armed = false` after compilation succeeds to disarm.
+struct PoisonGuard<'a, 'b> {
+    claimed: &'a [ClaimedEntry<'b>],
+    armed: bool,
+    reason: &'static str,
+}
+
+impl Drop for PoisonGuard<'_, '_> {
+    fn drop(&mut self) {
+        if self.armed {
+            for (_, _, _, lock) in self.claimed {
+                let _ = lock.set(Err(self.reason.to_string()));
+            }
+        }
+    }
+}
 
 /// Thread-safe compilation cache shared across workers.
 pub struct CompileCache {
     mode: CompileMode,
-    functions: DashMap<(B256, SpecId), Arc<OnceLock<EvmCompilerFn>>>,
+    functions: DashMap<(B256, SpecId), Arc<OnceLock<CompiledFnResult>>>,
     /// Keep AOT shared libraries alive. Unused for JIT mode.
     libs: Mutex<Vec<(tempfile::TempDir, libloading::Library)>>,
     /// `ManuallyDrop` because `ThreadLocal::drop` drops values on the calling thread, but each
@@ -165,7 +185,7 @@ impl CompileCache {
         &self,
         unit: &'a TestUnit,
         spec_id: SpecId,
-    ) -> (CompiledContracts, Vec<ClaimedEntry<'a>>) {
+    ) -> Result<(CompiledContracts, Vec<ClaimedEntry<'a>>), TestErrorKind> {
         use dashmap::mapref::entry::Entry;
 
         let mut compiled = CompiledContracts::new();
@@ -188,9 +208,14 @@ impl CompileCache {
                     let lock = e.get().clone();
                     drop(e);
                     // Already compiled or being compiled by another thread.
-                    if let Some(f) = lock.get() {
-                        self.n_hits.fetch_add(1, Ordering::Relaxed);
-                        compiled.insert(code_hash, *f);
+                    if let Some(res) = lock.get() {
+                        match res {
+                            Ok(f) => {
+                                self.n_hits.fetch_add(1, Ordering::Relaxed);
+                                compiled.insert(code_hash, *f);
+                            }
+                            Err(s) => return Err(TestErrorKind::CompilationError(s.clone())),
+                        }
                     }
                     // Otherwise: another thread is compiling it, wait_for_all handles it.
                 }
@@ -209,12 +234,16 @@ impl CompileCache {
             }
         }
 
-        (compiled, claimed)
+        Ok((compiled, claimed))
     }
 
     /// Wait for all contracts in a test unit to be compiled, returning the
     /// fully populated `CompiledContracts`.
-    fn wait_for_all(&self, unit: &TestUnit, spec_id: SpecId) -> CompiledContracts {
+    fn wait_for_all(
+        &self,
+        unit: &TestUnit,
+        spec_id: SpecId,
+    ) -> Result<CompiledContracts, TestErrorKind> {
         let mut compiled = CompiledContracts::new();
         for info in unit.pre.values() {
             if info.code.is_empty() {
@@ -225,11 +254,13 @@ impl CompileCache {
                 continue;
             }
             if let Some(entry) = self.functions.get(&(code_hash, spec_id)) {
-                let f = entry.value().wait();
-                compiled.insert(code_hash, *f);
+                match entry.value().wait() {
+                    Ok(f) => compiled.insert(code_hash, *f),
+                    Err(s) => return Err(TestErrorKind::CompilationError(s.clone())),
+                }
             }
         }
-        compiled
+        Ok(compiled)
     }
 
     /// Compile all contracts in a test unit, returning the compiled functions.
@@ -239,10 +270,10 @@ impl CompileCache {
         unit: &TestUnit,
         spec_id: SpecId,
     ) -> Result<CompiledContracts, TestErrorKind> {
-        let (mut compiled, claimed) = self.claim_missing(unit, spec_id);
+        let (mut compiled, claimed) = self.claim_missing(unit, spec_id)?;
         if claimed.is_empty() {
             // Still need to wait for contracts another thread claimed.
-            let rest = self.wait_for_all(unit, spec_id);
+            let rest = self.wait_for_all(unit, spec_id)?;
             for (hash, f) in rest.functions {
                 compiled.functions.entry(hash).or_insert(f);
             }
@@ -256,7 +287,7 @@ impl CompileCache {
         }
 
         // Wait for contracts claimed by other threads.
-        let rest = self.wait_for_all(unit, spec_id);
+        let rest = self.wait_for_all(unit, spec_id)?;
         for (hash, f) in rest.functions {
             compiled.functions.entry(hash).or_insert(f);
         }
@@ -278,9 +309,13 @@ impl CompileCache {
             Entry::Occupied(e) => {
                 let lock = e.get().clone();
                 drop(e);
-                let f = lock.wait();
-                self.n_hits.fetch_add(1, Ordering::Relaxed);
-                Ok(*f)
+                match lock.wait() {
+                    Ok(f) => {
+                        self.n_hits.fetch_add(1, Ordering::Relaxed);
+                        Ok(*f)
+                    }
+                    Err(s) => Err(TestErrorKind::CompilationError(s.clone())),
+                }
             }
             Entry::Vacant(e) => {
                 let lock = Arc::new(OnceLock::new());
@@ -308,6 +343,7 @@ impl CompileCache {
         compiled: &mut CompiledContracts,
         spec_id: SpecId,
     ) -> Result<(), TestErrorKind> {
+        let mut guard = PoisonGuard { claimed, armed: true, reason: "jit compilation failed" };
         let mut compiler = self.compiler.get_or(|| make_compiler(false)).borrow_mut();
 
         let mut func_ids = Vec::new();
@@ -322,12 +358,13 @@ impl CompileCache {
             let func = unsafe { compiler.jit_function(func_id) }.map_err(|e| {
                 TestErrorKind::CompilationError(format!("jit {:x}: {e}", code_hash))
             })?;
-            claimed[i].3.set(func).ok();
+            claimed[i].3.set(Ok(func)).ok();
             compiled.insert(code_hash, func);
         }
 
         let _ = compiler.clear_ir();
 
+        guard.armed = false;
         Ok(())
     }
 
@@ -337,6 +374,7 @@ impl CompileCache {
         compiled: &mut CompiledContracts,
         spec_id: SpecId,
     ) -> Result<(), TestErrorKind> {
+        let mut guard = PoisonGuard { claimed, armed: true, reason: "aot compilation failed" };
         let mut compiler = self.compiler.get_or(|| make_compiler(true)).borrow_mut();
 
         let mut names: Vec<(B256, String)> = Vec::new();
@@ -367,7 +405,7 @@ impl CompileCache {
         for (i, (code_hash, name)) in names.iter().enumerate() {
             let f: libloading::Symbol<'_, EvmCompilerFn> = unsafe { lib.get(name.as_bytes()) }
                 .map_err(|e| TestErrorKind::CompilationError(format!("symbol {name}: {e}")))?;
-            claimed[i].3.set(*f).ok();
+            claimed[i].3.set(Ok(*f)).ok();
             compiled.insert(*code_hash, *f);
         }
 
@@ -375,6 +413,7 @@ impl CompileCache {
 
         let _ = compiler.clear_ir();
 
+        guard.armed = false;
         Ok(())
     }
 
