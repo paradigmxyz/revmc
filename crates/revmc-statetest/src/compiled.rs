@@ -628,9 +628,9 @@ pub fn run(
                     let pos = state.console_bar.position();
                     let errors = state.n_errors.load(Ordering::Relaxed);
                     let elapsed = start.elapsed().as_secs_f64();
-                    state.console_bar.println(format!(
+                    eprintln!(
                         "[statetest] progress: {pos}/{total} ({elapsed:.1}s elapsed, {errors} errors)"
-                    ));
+                    );
                 }
             })
             .unwrap()
