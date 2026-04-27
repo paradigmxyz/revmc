@@ -1,9 +1,14 @@
-use crate::runtime::{
-    LookupRequest,
-    api::{CompiledProgram, LoadedLibrary, ProgramKind},
-    config::{CompilationEvent, RuntimeConfig, RuntimeTuning},
-    storage::{ArtifactKey, ArtifactManifest, ArtifactStore, BackendSelection, RuntimeCacheKey},
-    worker::{AotJob, JitJob, SyncNotifier, WorkerJob, WorkerPool, WorkerResult, WorkerSuccess},
+use crate::{
+    EvmCompilerFn, eyre,
+    runtime::{
+        LookupRequest,
+        api::{CompiledProgram, LoadedLibrary, ProgramKind},
+        config::{CompilationEvent, CompilationKind, RuntimeConfig, RuntimeTuning},
+        storage::{
+            ArtifactKey, ArtifactManifest, ArtifactStore, BackendSelection, RuntimeCacheKey,
+        },
+        worker::{AotSuccess, CompileJob, SyncNotifier, WorkerPool, WorkerResult, WorkerSuccess},
+    },
 };
 use alloy_primitives::{
     Bytes, keccak256,
@@ -14,10 +19,14 @@ use crossbeam_queue::ArrayQueue;
 use dashmap::DashMap;
 use quanta::Instant;
 use std::{
+    mem,
     ops::ControlFlow,
     sync::{Arc, atomic::Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
+
+#[cfg(feature = "llvm")]
+use crate::llvm::jit_memory_usage;
 
 /// The resident map type: code_hash+spec_id → compiled program.
 pub(crate) type ResidentMap = DashMap<RuntimeCacheKey, Arc<CompiledProgram>, DefaultHashBuilder>;
@@ -39,7 +48,7 @@ struct ResidentMeta {
 fn jit_total_bytes() -> usize {
     #[cfg(feature = "llvm")]
     {
-        crate::llvm::jit_memory_usage().map(|u| u.total_bytes()).unwrap_or(0)
+        jit_memory_usage().map(|u| u.total_bytes()).unwrap_or(0)
     }
     #[cfg(not(feature = "llvm"))]
     {
@@ -130,6 +139,8 @@ struct BackendState {
     store: Option<Arc<dyn ArtifactStore>>,
     /// Tuning knobs.
     tuning: RuntimeTuning,
+    /// Whether observed misses compile AOT artifacts instead of JIT code.
+    aot: bool,
     /// Number of keys currently in Working phase.
     pending_jobs: usize,
     /// Monotonically increasing generation counter, bumped on clear/invalidation.
@@ -178,46 +189,61 @@ impl BackendState {
             }
         } else {
             self.inner.stats.lookup_misses.fetch_add(1, Ordering::Relaxed);
-            self.try_admit_jit(event.key, event.code, SyncNotifier::none(), AdmitMode::Observed);
+            let kind = if self.aot { CompilationKind::Aot } else { CompilationKind::Jit };
+            self.try_admit(kind, event.key, event.code, SyncNotifier::none(), AdmitMode::Observed);
         }
     }
 
     fn handle_compile_jit(&mut self, req: CompileJitRequest) {
-        self.try_admit_jit(req.key, req.bytecode, req.sync_notifier, AdmitMode::Explicit);
+        let kind = if self.aot { CompilationKind::Aot } else { CompilationKind::Jit };
+        self.try_admit(kind, req.key, req.bytecode, req.sync_notifier, AdmitMode::Explicit);
     }
 
-    /// Common admission path for JIT compilation requests.
+    fn handle_prepare_aot(&mut self, reqs: Vec<PrepareAotRequest>) {
+        for req in reqs {
+            self.try_admit(
+                CompilationKind::Aot,
+                req.key,
+                req.bytecode,
+                SyncNotifier::none(),
+                AdmitMode::Explicit,
+            );
+        }
+    }
+
+    /// Common admission path for JIT and AOT compilation requests.
     ///
     /// Handles the cold→working state machine, hotness gating, in-flight
-    /// dedup, and worker dispatch. The two callers differ only in whether
-    /// promotion is gated by hotness ([`AdmitMode::Observed`]) or
-    /// unconditional ([`AdmitMode::Explicit`]).
-    fn try_admit_jit(
+    /// dedup, persisted AOT probing, and worker dispatch. Observed promotion
+    /// is gated by hotness; explicit requests are unconditional.
+    fn try_admit(
         &mut self,
+        kind: CompilationKind,
         key: RuntimeCacheKey,
         bytecode: Bytes,
         sync_notifier: SyncNotifier,
         mode: AdmitMode,
     ) {
-        // Already resident — nothing to do; notify any sync waiter.
         if self.inner.resident.contains_key(&key) {
             sync_notifier.notify();
             return;
         }
 
-        // Skip empty / oversize bytecodes.
         if !self.tuning.should_compile(&bytecode) {
             sync_notifier.notify();
             return;
         }
 
-        // Cap cold-entry count for the observed path to bound memory growth
-        // from miss tracking. Explicit requests bypass this cap.
         if matches!(mode, AdmitMode::Observed) {
             let max_entries = self.tuning.jit_max_pending_jobs * 10;
             if !self.entries.contains_key(&key) && self.entries.len() >= max_entries {
                 return;
             }
+        }
+
+        if kind == CompilationKind::Aot && self.try_load_persisted_aot(&key) {
+            sync_notifier.notify();
+            return;
         }
 
         let entry = self.entries.entry(key).or_insert_with(|| EntryState {
@@ -227,14 +253,11 @@ impl BackendState {
             pending_notifiers: Vec::new(),
         });
 
-        // Already in flight: dedup. Observed has no notifier (None push is
-        // a harmless no-op when drained); explicit waiters wake on result.
         if entry.phase == EntryPhase::Working {
             entry.pending_notifiers.push(sync_notifier);
             return;
         }
 
-        // Observed path: count hotness and gate on threshold.
         if matches!(mode, AdmitMode::Observed) {
             entry.hotness = entry.hotness.saturating_add(1);
             if (entry.hotness as usize) < self.tuning.jit_hot_threshold {
@@ -242,89 +265,47 @@ impl BackendState {
             }
         }
 
-        // Cap in-flight jobs.
         if self.pending_jobs >= self.tuning.jit_max_pending_jobs {
-            // Observed: leave entry Cold so we retry on next miss.
-            // Explicit: notify so the caller doesn't hang.
             sync_notifier.notify();
             return;
         }
 
-        let symbol = format!("jit_{:x}_{:?}", key.code_hash, key.spec_id);
-        let job = WorkerJob::Jit(JitJob {
+        let prefix = match kind {
+            CompilationKind::Jit => "jit",
+            CompilationKind::Aot => "aot",
+        };
+        let opt_level = match kind {
+            CompilationKind::Jit => self.tuning.jit_opt_level,
+            CompilationKind::Aot => self.tuning.aot_opt_level,
+        };
+        let symbol = format!("{prefix}_{:x}_{:?}", key.code_hash, key.spec_id);
+        let job = CompileJob {
+            kind,
             key,
             bytecode: entry.bytecode.clone(),
             symbol_name: symbol,
+            opt_level,
             sync_notifier,
             generation: self.generation,
-        });
+        };
 
         match self.workers.try_send(job) {
             Ok(()) => {
                 debug!(
                     code_hash = %key.code_hash,
                     spec_id = ?key.spec_id,
+                    ?kind,
                     hotness = entry.hotness,
                     pending_jobs = self.pending_jobs + 1,
-                    "dispatched JIT compilation",
+                    "dispatched compilation",
                 );
                 entry.phase = EntryPhase::Working;
                 self.pending_jobs += 1;
                 self.inner.stats.compilations_dispatched.fetch_add(1, Ordering::Relaxed);
             }
-            Err(WorkerJob::Jit(job)) => {
-                // Worker queue saturated — notify caller immediately so it doesn't hang.
+            Err(job) => {
                 warn!(code_hash = %key.code_hash, "worker pool saturated, dropping request");
                 job.sync_notifier.notify();
-            }
-            Err(WorkerJob::Aot(_)) => unreachable!("sent Jit job"),
-        }
-    }
-
-    fn handle_prepare_aot(&mut self, reqs: Vec<PrepareAotRequest>) {
-        for req in reqs {
-            // Already compiled in resident map.
-            if self.inner.resident.contains_key(&req.key) {
-                continue;
-            }
-
-            // Skip empty / oversize bytecodes.
-            if !self.tuning.should_compile(&req.bytecode) {
-                continue;
-            }
-
-            // Check if already working.
-            if let Some(entry) = self.entries.get(&req.key)
-                && entry.phase == EntryPhase::Working
-            {
-                continue;
-            }
-
-            // Probe the store: if already persisted, load directly without recompiling.
-            if self.try_load_persisted_aot(&req.key) {
-                continue;
-            }
-
-            let symbol = format!("aot_{:x}_{:?}", req.key.code_hash, req.key.spec_id);
-            let job = WorkerJob::Aot(AotJob {
-                key: req.key,
-                bytecode: req.bytecode.clone(),
-                symbol_name: symbol,
-                opt_level: self.tuning.aot_opt_level,
-                generation: self.generation,
-            });
-
-            let entry = self.entries.entry(req.key).or_insert_with(|| EntryState {
-                hotness: 0,
-                phase: EntryPhase::Cold,
-                bytecode: req.bytecode,
-                pending_notifiers: Vec::new(),
-            });
-
-            if self.workers.try_send(job).is_ok() {
-                entry.phase = EntryPhase::Working;
-                self.pending_jobs += 1;
-                self.inner.stats.compilations_dispatched.fetch_add(1, Ordering::Relaxed);
             }
         }
     }
@@ -345,13 +326,13 @@ impl BackendState {
 
         match store.load(&artifact_key) {
             Ok(Some(stored)) => {
-                match (|| -> crate::eyre::Result<CompiledProgram> {
+                match (|| -> eyre::Result<CompiledProgram> {
                     let library = unsafe { libloading::Library::new(&stored.dylib_path) }
-                        .map_err(|e| crate::eyre::eyre!("dlopen {:?}: {e}", stored.dylib_path))?;
-                    let func: crate::EvmCompilerFn = unsafe {
-                        let sym: libloading::Symbol<'_, crate::EvmCompilerFn> =
+                        .map_err(|e| eyre::eyre!("dlopen {:?}: {e}", stored.dylib_path))?;
+                    let func: EvmCompilerFn = unsafe {
+                        let sym: libloading::Symbol<'_, EvmCompilerFn> =
                             library.get(stored.manifest.symbol_name.as_bytes()).map_err(|e| {
-                                crate::eyre::eyre!("symbol '{}': {e}", stored.manifest.symbol_name)
+                                eyre::eyre!("symbol '{}': {e}", stored.manifest.symbol_name)
                             })?;
                         *sym
                     };
@@ -438,7 +419,7 @@ impl BackendState {
         let pending_notifiers = self
             .entries
             .get_mut(&result.key)
-            .map(|e| std::mem::take(&mut e.pending_notifiers))
+            .map(|e| mem::take(&mut e.pending_notifiers))
             .unwrap_or_default();
 
         let notify = || {
@@ -509,11 +490,7 @@ impl BackendState {
         notify();
     }
 
-    fn handle_aot_success(
-        &mut self,
-        key: RuntimeCacheKey,
-        success: crate::runtime::worker::AotSuccess,
-    ) {
+    fn handle_aot_success(&mut self, key: RuntimeCacheKey, success: AotSuccess) {
         let artifact_key = ArtifactKey {
             runtime: key,
             backend: BackendSelection::Llvm,
@@ -557,15 +534,13 @@ impl BackendState {
             // Load from store to get the canonical path, then dlopen.
             match store.load(&artifact_key) {
                 Ok(Some(stored)) => {
-                    match (|| -> crate::eyre::Result<CompiledProgram> {
+                    match (|| -> eyre::Result<CompiledProgram> {
                         let library = unsafe { libloading::Library::new(&stored.dylib_path) }
-                            .map_err(|e| {
-                                crate::eyre::eyre!("dlopen {:?}: {e}", stored.dylib_path)
-                            })?;
-                        let func: crate::EvmCompilerFn = unsafe {
-                            let sym: libloading::Symbol<'_, crate::EvmCompilerFn> =
+                            .map_err(|e| eyre::eyre!("dlopen {:?}: {e}", stored.dylib_path))?;
+                        let func: EvmCompilerFn = unsafe {
+                            let sym: libloading::Symbol<'_, EvmCompilerFn> =
                                 library.get(success.symbol_name.as_bytes()).map_err(|e| {
-                                    crate::eyre::eyre!("symbol '{}': {e}", success.symbol_name)
+                                    eyre::eyre!("symbol '{}': {e}", success.symbol_name)
                                 })?;
                             *sym
                         };
@@ -729,6 +704,7 @@ pub(crate) fn run(
         result_rx,
         store: config.store,
         tuning: config.tuning,
+        aot: config.aot,
         pending_jobs: 0,
         generation: 0,
         last_sweep: now,

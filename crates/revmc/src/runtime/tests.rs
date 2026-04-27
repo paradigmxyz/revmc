@@ -964,6 +964,32 @@ fn prepare_aot_persist_and_load() {
 
 #[test]
 #[cfg(feature = "llvm")]
+fn aot_mode_promotes_misses_to_aot() {
+    let store = Arc::new(TempDirStore::new());
+    let tb = TestBackend::new(RuntimeConfig {
+        enabled: true,
+        aot: true,
+        store: Some(store.clone()),
+        tuning: RuntimeTuning { jit_hot_threshold: 2, jit_worker_count: 1, ..Default::default() },
+        ..Default::default()
+    });
+
+    assert!(matches!(
+        tb.lookup(TestBackend::req_cancun(BYTECODE_RET42)),
+        LookupDecision::Interpret(_)
+    ));
+    assert!(matches!(
+        tb.lookup(TestBackend::req_cancun(BYTECODE_RET42)),
+        LookupDecision::Interpret(_)
+    ));
+
+    let p = tb.wait_compiled(BYTECODE_RET42, SpecId::CANCUN);
+    assert_eq!(p.kind, ProgramKind::Aot);
+    assert_eq!(store.stored_count(), 1);
+}
+
+#[test]
+#[cfg(feature = "llvm")]
 fn prepare_aot_batch_persist_and_load() {
     let store = Arc::new(TempDirStore::new());
     let tb = TestBackend::new(RuntimeConfig {

@@ -33,7 +33,7 @@ fn run_state_tests(mode: CompileMode) {
         );
     }
 
-    // Additional test suites from ./scripts/setup-test-fixtures.sh (CI only, interpreter/runtime).
+    // Additional test suites from ./scripts/setup-test-fixtures.sh (CI only, interpreter/JIT).
     if is_ci() && !matches!(mode, CompileMode::Aot) {
         test_files.extend(collect_tests(
             revmc_statetest::get_exec_spec_stable_state_tests_path,
@@ -65,6 +65,11 @@ fn run_state_tests(mode: CompileMode) {
 #[test]
 fn interpreter() {
     run_state_tests(CompileMode::Interpreter);
+}
+
+#[test]
+fn jit() {
+    run_state_tests(CompileMode::Jit);
 }
 
 #[test]
@@ -102,9 +107,4 @@ fn run_blockchain_tests() {
 #[test]
 fn blockchain() {
     run_blockchain_tests();
-}
-
-#[test]
-fn runtime() {
-    run_state_tests(CompileMode::Runtime);
 }

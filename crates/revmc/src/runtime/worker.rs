@@ -10,12 +10,27 @@
 //! as the job channel closes.
 
 use crate::{
-    CompileTimings, EvmCompilerFn,
-    runtime::{config::RuntimeConfig, storage::RuntimeCacheKey},
+    CompileTimings, EvmCompilerFn, OptimizationLevel,
+    runtime::{
+        config::{CompilationKind, RuntimeConfig},
+        storage::RuntimeCacheKey,
+    },
 };
 use alloy_primitives::Bytes;
 use crossbeam_channel as chan;
-use std::{sync::Arc, time::Duration};
+use std::{
+    fs::File,
+    io::Read,
+    sync::Arc,
+    thread::{self, JoinHandle},
+    time::{Duration, Instant},
+};
+
+#[cfg(feature = "llvm")]
+use crate::{
+    EvmCompiler, EvmLlvmBackend, Linker,
+    llvm::{JitDylibGuard, orc::ResourceTracker},
+};
 
 /// Notifier for synchronous compilation requests.
 ///
@@ -41,41 +56,21 @@ impl SyncNotifier {
 }
 
 /// A compilation job sent from the backend to a worker.
-#[derive(Debug)]
-pub(crate) enum WorkerJob {
-    /// JIT compilation: produce an in-memory function pointer.
-    Jit(JitJob),
-    /// AOT compilation: produce shared-library bytes for persistence.
-    Aot(AotJob),
-}
-
-/// A JIT compilation job sent from the backend to a worker.
 #[derive(derive_more::Debug)]
-pub(crate) struct JitJob {
+pub(crate) struct CompileJob {
+    /// Whether this job compiles JIT or AOT output.
+    pub(crate) kind: CompilationKind,
     /// The key to compile for.
     pub(crate) key: RuntimeCacheKey,
     /// The raw bytecode to compile.
     pub(crate) bytecode: Bytes,
     /// The symbol name to use for the compiled function.
     pub(crate) symbol_name: String,
+    /// Optimization level for compilation.
+    pub(crate) opt_level: OptimizationLevel,
     /// Optional notifier for synchronous callers.
     #[debug(skip)]
     pub(crate) sync_notifier: SyncNotifier,
-    /// Generation at the time the job was dispatched.
-    pub(crate) generation: u64,
-}
-
-/// An AOT compilation job sent from the backend to a worker.
-#[derive(Debug)]
-pub(crate) struct AotJob {
-    /// The key to compile for.
-    pub(crate) key: RuntimeCacheKey,
-    /// The raw bytecode to compile.
-    pub(crate) bytecode: Bytes,
-    /// The symbol name to use for the compiled function.
-    pub(crate) symbol_name: String,
-    /// Optimization level for AOT compilation.
-    pub(crate) opt_level: crate::OptimizationLevel,
     /// Generation at the time the job was dispatched.
     pub(crate) generation: u64,
 }
@@ -87,7 +82,7 @@ pub(crate) struct WorkerResult {
     /// The compilation outcome.
     pub(crate) outcome: Result<WorkerSuccess, String>,
     /// Whether this was a JIT or AOT compilation job.
-    pub(crate) kind: crate::runtime::config::CompilationKind,
+    pub(crate) kind: CompilationKind,
     /// Optional notifier for synchronous callers, passed through from the job.
     pub(crate) sync_notifier: SyncNotifier,
     /// Generation at the time the job was dispatched.
@@ -141,18 +136,15 @@ pub(crate) struct JitCodeBacking {
     /// Must be dropped (after `remove()`) BEFORE `_jd_guard` to ensure
     /// the JITDylib is still valid when we remove resources from it.
     #[cfg(feature = "llvm")]
-    tracker: Option<crate::llvm::orc::ResourceTracker>,
+    tracker: Option<ResourceTracker>,
     /// Keeps the owning JITDylib alive. Dropped after `tracker`.
     #[cfg(feature = "llvm")]
-    _jd_guard: Arc<crate::llvm::JitDylibGuard>,
+    _jd_guard: Arc<JitDylibGuard>,
 }
 
 impl JitCodeBacking {
     #[cfg(feature = "llvm")]
-    pub(crate) fn new(
-        tracker: crate::llvm::orc::ResourceTracker,
-        jd_guard: Arc<crate::llvm::JitDylibGuard>,
-    ) -> Self {
+    pub(crate) fn new(tracker: ResourceTracker, jd_guard: Arc<JitDylibGuard>) -> Self {
         Self { tracker: Some(tracker), _jd_guard: jd_guard }
     }
 }
@@ -171,9 +163,9 @@ impl Drop for JitCodeBacking {
 /// Handle to the worker pool. Manages worker threads and their job queues.
 pub(crate) struct WorkerPool {
     /// Per-worker job senders.
-    job_txs: Vec<chan::Sender<WorkerJob>>,
+    job_txs: Vec<chan::Sender<CompileJob>>,
     /// Worker thread handles.
-    threads: Vec<Option<std::thread::JoinHandle<()>>>,
+    threads: Vec<Option<JoinHandle<()>>>,
     /// Round-robin index for job distribution.
     next_worker: usize,
 }
@@ -187,11 +179,11 @@ impl WorkerPool {
 
         for worker_id in 0..worker_count {
             let (job_tx, job_rx) =
-                chan::bounded::<WorkerJob>(config.tuning.jit_worker_queue_capacity);
+                chan::bounded::<CompileJob>(config.tuning.jit_worker_queue_capacity);
             let result_tx = result_tx.clone();
             let config = config.clone();
 
-            let thread = std::thread::Builder::new()
+            let thread = thread::Builder::new()
                 .name(format!("revmc-{worker_id:02}"))
                 .spawn(move || {
                     worker_loop(worker_id, job_rx, result_tx, &config);
@@ -207,7 +199,7 @@ impl WorkerPool {
 
     /// Tries to send a job to a worker (round-robin).
     /// Returns the job back on failure (all queues full or disconnected).
-    pub(crate) fn try_send(&mut self, mut job: WorkerJob) -> Result<(), WorkerJob> {
+    pub(crate) fn try_send(&mut self, mut job: CompileJob) -> Result<(), CompileJob> {
         let count = self.job_txs.len();
         for _ in 0..count {
             let idx = self.next_worker % count;
@@ -243,12 +235,10 @@ impl Drop for WorkerPool {
 #[cfg(feature = "llvm")]
 fn worker_loop(
     id: usize,
-    job_rx: chan::Receiver<WorkerJob>,
+    job_rx: chan::Receiver<CompileJob>,
     result_tx: chan::Sender<WorkerResult>,
     config: &RuntimeConfig,
 ) {
-    use crate::{EvmCompiler, EvmLlvmBackend, runtime::config::CompilationKind};
-
     let _span = debug_span!("revmc_worker", id).entered();
     debug!("compile worker started");
 
@@ -277,9 +267,10 @@ fn worker_loop(
 
     while let Ok(job) = job_rx.recv() {
         trace!(?job, "received job");
-        let t0 = std::time::Instant::now();
-        let (key, outcome, kind, sync_notifier, generation, timings) = match job {
-            WorkerJob::Jit(job) => {
+        let t0 = Instant::now();
+        let kind = job.kind;
+        let (key, outcome, sync_notifier, generation, timings) = match kind {
+            CompilationKind::Jit => {
                 let _span =
                     debug_span!("jit_compile", hash=%job.key.code_hash, spec_id=?job.key.spec_id)
                         .entered();
@@ -290,6 +281,7 @@ fn worker_loop(
                         .join(format!("{}", job.key.code_hash));
                     jit_compiler.set_dump_to(Some(dir));
                 }
+                jit_compiler.set_opt_level(job.opt_level);
 
                 let result = unsafe {
                     jit_compiler.jit(&job.symbol_name, &job.bytecode[..], job.key.spec_id)
@@ -324,23 +316,16 @@ fn worker_loop(
                     warn!(%err, "clear_ir failed");
                 }
 
-                (job.key, outcome, CompilationKind::Jit, job.sync_notifier, job.generation, timings)
+                (job.key, outcome, job.sync_notifier, job.generation, timings)
             }
-            WorkerJob::Aot(job) => {
+            CompilationKind::Aot => {
                 let _span =
                     debug_span!("aot_compile", hash=%job.key.code_hash, spec_id=?job.key.spec_id)
                         .entered();
 
                 let generation = job.generation;
                 let outcome = compile_aot_artifact(&job, config);
-                (
-                    job.key,
-                    outcome,
-                    CompilationKind::Aot,
-                    SyncNotifier::none(),
-                    generation,
-                    CompileTimings::default(),
-                )
+                (job.key, outcome, job.sync_notifier, generation, CompileTimings::default())
             }
         };
         let compile_duration = t0.elapsed();
@@ -379,10 +364,7 @@ fn worker_loop(
 
 /// Compiles a single bytecode to a shared library and returns the raw bytes.
 #[cfg(feature = "llvm")]
-fn compile_aot_artifact(job: &AotJob, config: &RuntimeConfig) -> Result<WorkerSuccess, String> {
-    use crate::{EvmCompiler, EvmLlvmBackend, Linker};
-    use std::io::Read;
-
+fn compile_aot_artifact(job: &CompileJob, config: &RuntimeConfig) -> Result<WorkerSuccess, String> {
     let backend =
         EvmLlvmBackend::new(true).map_err(|e| format!("AOT backend creation failed: {e}"))?;
     let mut compiler = EvmCompiler::new(backend);
@@ -413,7 +395,7 @@ fn compile_aot_artifact(job: &AotJob, config: &RuntimeConfig) -> Result<WorkerSu
         .map_err(|e| format!("AOT link failed: {e}"))?;
 
     let mut dylib_bytes = Vec::new();
-    std::fs::File::open(&so_path)
+    File::open(&so_path)
         .and_then(|mut f| f.read_to_end(&mut dylib_bytes))
         .map_err(|e| format!("failed to read linked .so: {e}"))?;
 
@@ -433,25 +415,19 @@ fn compile_aot_artifact(job: &AotJob, config: &RuntimeConfig) -> Result<WorkerSu
 #[cfg(not(feature = "llvm"))]
 fn worker_loop(
     worker_id: usize,
-    job_rx: chan::Receiver<WorkerJob>,
+    job_rx: chan::Receiver<CompileJob>,
     result_tx: chan::Sender<WorkerResult>,
     _config: &RuntimeConfig,
 ) {
-    use crate::runtime::config::CompilationKind;
-
     debug!(worker_id, "compile worker started (no LLVM, all jobs will fail)");
 
     while let Ok(job) = job_rx.recv() {
-        let (key, kind, sync_notifier, generation) = match job {
-            WorkerJob::Jit(j) => (j.key, CompilationKind::Jit, j.sync_notifier, j.generation),
-            WorkerJob::Aot(j) => (j.key, CompilationKind::Aot, SyncNotifier::none(), j.generation),
-        };
         let _ = result_tx.send(WorkerResult {
-            key,
+            key: job.key,
             outcome: Err("LLVM backend not available".into()),
-            kind,
-            sync_notifier,
-            generation,
+            kind: job.kind,
+            sync_notifier: job.sync_notifier,
+            generation: job.generation,
             compile_duration: Duration::ZERO,
             timings: CompileTimings::default(),
         });

@@ -3,11 +3,8 @@ use color_eyre::{Result, eyre::eyre};
 use revm_context::cfg::CfgEnv;
 use revm_primitives::{U256, hardfork::SpecId as SI};
 use revm_statetest_types::{SpecName, TestSuite};
-use revmc_statetest::{
-    compiled::{CompileCache, CompileMode},
-    diagnostic,
-    runner::skip_test,
-};
+use revmc::runtime::{JitBackend, RuntimeConfig, RuntimeTuning};
+use revmc_statetest::{diagnostic, runner::skip_test};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -45,10 +42,14 @@ impl StatetestDiffArgs {
 
         eprintln!("Found {} test file(s)", test_files.len());
 
-        let cache = CompileCache::new(CompileMode::Aot);
+        let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+        let backend = JitBackend::new(RuntimeConfig {
+            blocking: true,
+            tuning: RuntimeTuning { jit_worker_count: cpus, ..Default::default() },
+            ..Default::default()
+        })?;
         let mut n_total = 0u64;
         let mut n_mismatches = 0u64;
-        let mut n_compile_errors = 0u64;
         let mut n_files = 0u64;
         let mut n_skipped = 0u64;
 
@@ -100,8 +101,7 @@ impl StatetestDiffArgs {
                         }
                     }
 
-                    let spec_id = spec_name.to_spec_id();
-                    cfg.set_spec_and_mainnet_gas_params(spec_id);
+                    cfg.set_spec_and_mainnet_gas_params(spec_name.to_spec_id());
 
                     if cfg.spec().is_enabled_in(SI::OSAKA) {
                         cfg.set_max_blobs_per_tx(6);
@@ -112,15 +112,6 @@ impl StatetestDiffArgs {
                     }
 
                     let block = unit.block_env(&mut cfg);
-
-                    let compiled = match cache.compile(unit, spec_id) {
-                        Ok(c) => c,
-                        Err(e) => {
-                            eprintln!("COMPILE ERROR [{name}] spec={spec_name:?}: {e}");
-                            n_compile_errors += 1;
-                            continue;
-                        }
-                    };
 
                     for (idx, test) in tests.iter().enumerate() {
                         let tx = match test.tx_env(unit) {
@@ -137,15 +128,7 @@ impl StatetestDiffArgs {
                         n_total += 1;
 
                         let interp = diagnostic::run_interpreter(&cfg, &block, &tx, &cache_state);
-                        let jit = diagnostic::run_jit(
-                            &compiled,
-                            &cache,
-                            spec_id,
-                            &cfg,
-                            &block,
-                            &tx,
-                            &cache_state,
-                        );
+                        let jit = diagnostic::run_jit(&backend, &cfg, &block, &tx, &cache_state);
 
                         let mismatches = diagnostic::compare(&interp, &jit);
                         if mismatches.is_empty() {
@@ -187,9 +170,6 @@ impl StatetestDiffArgs {
         println!("Files processed: {n_files} ({n_skipped} skipped)");
         println!("Total test cases: {n_total}");
         println!("Mismatches: {n_mismatches}");
-        if n_compile_errors > 0 {
-            println!("Compile errors: {n_compile_errors}");
-        }
         if n_mismatches > 0 {
             std::process::exit(1);
         }

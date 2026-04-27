@@ -71,6 +71,11 @@ pub struct RuntimeConfig {
     /// Defaults to `None`.
     pub gas_params: Option<GasParams>,
 
+    /// AOT mode: observed misses are promoted to AOT compilation instead of JIT.
+    ///
+    /// Defaults to `false`.
+    pub aot: bool,
+
     /// Blocking mode: every lookup synchronously JIT-compiles on miss and never
     /// falls back to the interpreter.
     ///
@@ -130,6 +135,7 @@ impl Default for RuntimeConfig {
             no_dedup: false,
             no_dse: false,
             gas_params: None,
+            aot: false,
             blocking: false,
             on_compilation: None,
         }
