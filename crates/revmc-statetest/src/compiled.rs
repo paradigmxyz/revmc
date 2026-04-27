@@ -21,7 +21,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Barrier, Mutex, OnceLock,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -609,6 +609,33 @@ pub fn run(
 
     let barrier = Arc::new(Barrier::new(num_threads));
 
+    // Watchdog thread that logs progress every second so a deadlock or stalled
+    // worker is visible in the test log.
+    let watchdog_done = Arc::new(AtomicBool::new(false));
+    let watchdog_handle = {
+        let state = state.clone();
+        let done = watchdog_done.clone();
+        std::thread::Builder::new()
+            .name("statetest-watchdog".into())
+            .spawn(move || {
+                let start = Instant::now();
+                let total = n_files as u64;
+                loop {
+                    std::thread::sleep(Duration::from_secs(1));
+                    if done.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let pos = state.console_bar.position();
+                    let errors = state.n_errors.load(Ordering::Relaxed);
+                    let elapsed = start.elapsed().as_secs_f64();
+                    state.console_bar.println(format!(
+                        "[statetest] progress: {pos}/{total} ({elapsed:.1}s elapsed, {errors} errors)"
+                    ));
+                }
+            })
+            .unwrap()
+    };
+
     let mut handles = Vec::with_capacity(num_threads);
     for i in 0..num_threads {
         let state = state.clone();
@@ -655,6 +682,9 @@ pub fn run(
             }),
         }
     }
+
+    watchdog_done.store(true, Ordering::Relaxed);
+    let _ = watchdog_handle.join();
 
     state.console_bar.finish();
 
