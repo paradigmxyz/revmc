@@ -220,9 +220,10 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let sp_arg = bcx.fn_param(1);
         // Use a local alloca for the stack to allow the backend to eliminate dead stores to
         // stack slots above `stack_len` at function exit (e.g. `PUSH0 POP`).
-        // Disabled when `inspect_stack` is set because the caller observes every store.
-        // TODO: temporarily disabled to evaluate `dead_on_return` on the stack argument.
-        let local_stack = false;
+        // Only when the caller does not observe the stack contents on return — i.e. neither
+        // `inspect_stack` is set nor the bytecode may suspend. Otherwise the caller's buffer
+        // (`sp_arg`) must be used directly so that stores remain visible.
+        let local_stack = !bytecode.stack_observed();
         let stack = if local_stack {
             let stack_type = bcx.type_array(word_type, STACK_CAP as u32);
             bcx.new_stack_slot(stack_type, "stack.addr")
