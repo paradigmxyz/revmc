@@ -26,7 +26,7 @@ impl Bytecode<'_> {
             .blocks
             .iter()
             .flat_map(|b| {
-                b.insts().filter(|&i| !self.inst(i).is_dead_code()).map(|i| (i, self.inst(i).pc))
+                b.insts().filter(|&i| !self.inst(i).is_dead_code()).map(|i| (i, self.pc(i)))
             })
             .fold((0u32, 0u32), |(mi, mp), (i, p)| (mi.max(i.index() as u32), mp.max(p)));
         let ic_width = decimal_width(max_ic);
@@ -98,7 +98,7 @@ impl Bytecode<'_> {
 
                 // Instruction text.
                 let mut text = String::from("  ");
-                let opcode = data.to_op_in(self);
+                let opcode = self.opcode(inst);
                 write!(text, "{opcode}").unwrap();
                 if data.flags.contains(InstFlags::INVALID_JUMP) {
                     text.push_str(" %invalid");
@@ -115,7 +115,7 @@ impl Bytecode<'_> {
                         }
                     }
                 } else if data.is_static_jump() {
-                    let target = Inst::from_usize(data.data as usize);
+                    let target = data.static_jump_target();
                     match self.target_block(target) {
                         Some(b) => write!(text, " %{b}").unwrap(),
                         None => write!(text, " %inst{target}").unwrap(),
@@ -127,7 +127,7 @@ impl Bytecode<'_> {
                 // Comment with ic, pc, and flags/behavior.
                 let mut comment = String::new();
                 write!(comment, "ic={:>ic_width$}", inst.index()).unwrap();
-                write!(comment, " pc={:>pc_width$}", data.pc).unwrap();
+                write!(comment, " pc={:>pc_width$}", self.pc(inst)).unwrap();
                 if !data.gas_section.is_empty() {
                     write!(comment, " gas={}", data.gas_section.gas_cost).unwrap();
                 }
@@ -306,7 +306,6 @@ impl fmt::Debug for InstData {
             .field("opcode", &self.to_op())
             .field("flags", &format_args!("{:?}", self.flags))
             .field("data", &self.data)
-            .field("pc", &self.pc)
             .field("gas_section", &self.gas_section)
             .field("stack_section", &self.stack_section)
             .finish()
@@ -419,7 +418,7 @@ impl<'a> Bytecode<'a> {
                         data.stack_section.inputs, data.stack_section.max_growth
                     )?;
                 }
-                let opcode = data.to_op_in(self);
+                let opcode = self.opcode(inst);
                 let mut op_str =
                     abbreviate_hex(&opcode.to_string()).replace('>', "\\>").replace('<', "\\<");
                 if !data.gas_section.is_empty() {
