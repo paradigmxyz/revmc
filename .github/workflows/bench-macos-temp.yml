@@ -5,7 +5,7 @@ name: Bench macOS (temp)
 
 on:
   push:
-    branches: [dani/virtual-stack2]
+    branches: [dani/virtual-stack2, dani/jit-force-out-of-gas]
   workflow_dispatch:
 
 env:

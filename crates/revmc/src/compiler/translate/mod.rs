@@ -44,7 +44,7 @@ impl Default for FcxConfig {
             inspect_stack: false,
             stack_bound_checks: true,
             gas_metering: true,
-            force_out_of_gas: false,
+            force_out_of_gas: true,
         }
     }
 }
