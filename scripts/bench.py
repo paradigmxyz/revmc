@@ -33,6 +33,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from abc import ABC, abstractmethod
 
@@ -128,6 +129,21 @@ def fmt_pct(base: float | int, current: float | int) -> str:
     return f"{pct:+.1f}%{_indicator(pct)}"
 
 
+def is_noise(base: float | int, current: float | int, noise: float) -> bool:
+    """Whether the relative change is within ``noise`` percent (or unmeasurable)."""
+    if base == 0:
+        return current == 0
+    pct = (current - base) / base * 100
+    return abs(pct) <= noise
+
+
+# Noise thresholds for skipping rows in the always-visible summary tables.
+# Rows where every change is within the threshold are dropped from the summary
+# (the `<details>` table still shows them).
+NOISE_CODEGEN = 1.0  # codegen line counts, jit size, spills, reloads
+NOISE_TIME = 5.0  # compile times (high run-to-run variance)
+
+
 def fmt_dur(s: float) -> str:
     if s == 0:
         return "-"
@@ -184,6 +200,24 @@ def parse_duration(s: str) -> float:
     if not m:
         return 0.0
     return float(m.group(1)) * DURATION_UNITS[m.group(2)]
+
+
+class _Tee:
+    """Write to multiple streams simultaneously (e.g. stdout + a file)."""
+
+    def __init__(self, *streams):
+        self._streams = streams
+
+    def write(self, s):
+        for st in self._streams:
+            st.write(s)
+
+    def flush(self):
+        for st in self._streams:
+            st.flush()
+
+    def isatty(self):
+        return False
 
 
 def print_table(headers: list[str], rows: list[list], right_cols: int | None = None):
@@ -351,19 +385,20 @@ class CodegenLines(Analysis):
         print("### Codegen statistics\n")
         headers = ["benchmark", "unopt.ll", "opt.ll", "opt.s", "jit size", "spills", "reloads"]
         table = []
+        n = NOISE_CODEGEN
         for name, counts, jit_size, spills, reloads in cur_rows:
             base_counts, base_jit, base_sp, base_rl = base_map.get(
                 name, ([0] * 3, 0, 0, 0)
             )
-            table.append(
-                [
-                    name,
-                    *[fmt_pct(b, c) for b, c in zip(base_counts, counts)],
-                    fmt_pct(base_jit, jit_size),
-                    fmt_pct(base_sp, spills),
-                    fmt_pct(base_rl, reloads),
-                ]
-            )
+            pairs = [
+                *list(zip(base_counts, counts)),
+                (base_jit, jit_size),
+                (base_sp, spills),
+                (base_rl, reloads),
+            ]
+            if all(is_noise(b, c, n) for b, c in pairs):
+                continue
+            table.append([name, *[fmt_pct(b, c) for b, c in pairs]])
         table.append(
             [
                 "**TOTAL**",
@@ -462,11 +497,13 @@ class CompileTime(Analysis):
         # Summary table.
         print("### Compile times\n")
         table = []
+        n = NOISE_TIME
         for name, cur in cur_rows:
             base = base_map.get(name, {})
-            table.append(
-                [name, *[fmt_pct(base.get(p, 0.0), cur.get(p, 0.0)) for p in keys]]
-            )
+            pairs = [(base.get(p, 0.0), cur.get(p, 0.0)) for p in keys]
+            if all(is_noise(b, c, n) for b, c in pairs):
+                continue
+            table.append([name, *[fmt_pct(b, c) for b, c in pairs]])
         table.append(
             [
                 "**TOTAL**",
@@ -974,18 +1011,31 @@ def main():
                 if os.path.isdir(base_worktree):
                     shutil.rmtree(base_worktree)
 
-            for a in analyses:
-                a.report_diff(
-                    benches,
-                    args.dump_dir,
-                    outputs,
-                    base_dump,
-                    base_outputs,
-                    args.base_rev,
-                )
+            def run_reports():
+                for a in analyses:
+                    a.report_diff(
+                        benches,
+                        args.dump_dir,
+                        outputs,
+                        base_dump,
+                        base_outputs,
+                        args.base_rev,
+                    )
         else:
-            for a in analyses:
-                a.report(benches, args.dump_dir, outputs)
+            def run_reports():
+                for a in analyses:
+                    a.report(benches, args.dump_dir, outputs)
+
+        os.makedirs(args.dump_dir, exist_ok=True)
+        results_path = os.path.join(args.dump_dir, "results.md")
+        with open(results_path, "w") as md:
+            old_stdout = sys.stdout
+            sys.stdout = _Tee(old_stdout, md)
+            try:
+                run_reports()
+            finally:
+                sys.stdout = old_stdout
+        eprint(f"Wrote {results_path}")
 
     finally:
         shutil.rmtree(link_dir, ignore_errors=True)

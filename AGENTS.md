@@ -87,6 +87,11 @@ Use `cargo r -- run --list` to see available benchmark names.
 `./scripts/bench.py` is the unified benchmarking tool. It collects codegen line
 counts, compile times, jump resolution stats, and constant-input statistics.
 
+The script writes its full markdown output to `<dump_dir>/results.md` in
+addition to printing it to stdout. Summary tables hide changes within a noise
+threshold (1% for codegen, 5% for compile times); the `<details>` tables still
+show every change.
+
 ```bash
 ./scripts/bench.py /tmp/bench --diff main                          # codegen + compile time vs main
 ./scripts/bench.py /tmp/bench --diff main usdc_proxy seaport       # specific benchmarks
@@ -99,6 +104,21 @@ counts, compile times, jump resolution stats, and constant-input statistics.
 ./scripts/bench.py /tmp/bench --block-stats                        # block stats (min/max/avg/median, suspends)
 ./scripts/bench.py /tmp/bench --codegen-lines --jump-resolution    # combine multiple analyses
 ```
+
+## Bench-and-PR workflow
+
+When the user asks to "bench and open pr", "post results to pr", or whenever
+making a perf change that needs benchmark numbers in the PR description:
+
+1. Run `./scripts/bench.py <dump_dir> --diff <base>` (typically `--diff main`).
+2. Read `<dump_dir>/results.md` and **post its entire contents VERBATIM** in
+   the PR description, inlined as-is. Do NOT reformat, summarize, drop
+   columns, or rewrite numbers.
+3. Add any prose explaining the change ABOVE the inlined results, under a
+   `## Benchmarks` heading or similar — never edit the markdown produced by
+   the script.
+4. Update with `gh pr edit <number> --body-file <body.md>` where `<body.md>`
+   contains the prose followed by the verbatim contents of `results.md`.
 
 ## Important
 
