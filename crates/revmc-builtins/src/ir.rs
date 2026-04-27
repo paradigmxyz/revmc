@@ -164,7 +164,6 @@ macro_rules! builtins {
                 const _1_0: u8 = POP;
 
                 const PANIC: u8 = _0_0;
-                const ASSERTSPECID: u8 = _0_0;
 
                 const KECCAK256CC: u8 = _0_1;
 
@@ -247,7 +246,6 @@ builtins! {
     }
 
     Panic          = #[Cold] #[NoReturn] __revmc_builtin_panic(ptr, usize) None,
-    AssertSpecId   = __revmc_builtin_assert_spec_id(@[ecx] ptr, u8) None,
 
     Div            = __revmc_builtin_div(@[sp] ptr) None,
     SDiv           = __revmc_builtin_sdiv(@[sp] ptr) None,

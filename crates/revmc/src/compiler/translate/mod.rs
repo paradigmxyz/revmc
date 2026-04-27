@@ -322,8 +322,21 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         // Add debug assertions for the parameters.
         if config.debug_assertions {
             // Assert that the runtime spec_id matches the compilation spec_id.
-            let compiled_spec = fx.bcx.iconst(fx.i8_type, bytecode.spec_id as i64);
-            let _ = fx.call_builtin(Builtin::AssertSpecId, &[ecx, compiled_spec]);
+            let spec_id_field = get_field(
+                &mut fx.bcx,
+                ecx,
+                mem::offset_of!(EvmContext<'_>, spec_id),
+                "ecx.spec_id.addr",
+            );
+            let runtime_spec = fx.bcx.load(fx.i8_type, spec_id_field, "ecx.spec_id");
+            let cmp = fx.bcx.icmp_imm(IntCC::Equal, runtime_spec, bytecode.spec_id as i64);
+            let current_block = fx.bcx.current_block().unwrap();
+            let fail_block = fx.bcx.create_block_after(current_block, "spec_id.mismatch");
+            let ok_block = fx.bcx.create_block_after(fail_block, "spec_id.ok");
+            fx.bcx.brif_cold(cmp, ok_block, fail_block, true);
+            fx.bcx.switch_to_block(fail_block);
+            fx.call_panic("revmc panic: runtime spec_id does not match compilation spec_id");
+            fx.bcx.switch_to_block(ok_block);
         }
 
         // The bytecode is guaranteed to have at least one instruction.
