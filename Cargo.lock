@@ -2973,8 +2973,6 @@ dependencies = [
  "revm-state",
  "revmc",
  "revmc-build",
- "revmc-builtins",
- "revmc-context",
 ]
 
 [[package]]
