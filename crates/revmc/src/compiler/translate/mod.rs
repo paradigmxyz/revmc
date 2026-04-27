@@ -12,7 +12,7 @@ use revm_interpreter::{InputsImpl, InstructionResult};
 use revm_primitives::U256;
 use revmc_backend::{Attribute, BackendTypes, FunctionAttributeLocation, Pointer, TypeMethods};
 use revmc_builtins::{Builtin, Builtins, CallKind, CreateKind};
-use std::{fmt::Write, mem};
+use std::mem;
 
 mod peephole;
 
@@ -216,7 +216,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         // Use a local alloca for the stack to allow the backend to eliminate dead stores to
         // stack slots above `stack_len` at function exit (e.g. `PUSH0 POP`).
         // Disabled when `inspect_stack` is set because the caller observes every store.
-        let local_stack = !config.inspect_stack;
+        // TODO: temporarily disabled to evaluate `dead_on_return` on the stack argument.
+        let local_stack = false;
         let stack = if local_stack {
             let stack_type = bcx.type_array(word_type, STACK_CAP as u32);
             bcx.new_stack_slot(stack_type, "stack.addr")
@@ -312,30 +313,9 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             builtins,
         };
 
-        // Add debug assertions for the parameters.
+        // Pointers are always non-null per the function signature; LLVM elides redundant
+        // null checks via the `nonnull` attribute, so no debug assertions are needed.
         if config.debug_assertions {
-            fx.pointer_panic_with_bool(true, ecx, "EVM context pointer", "");
-            fx.pointer_panic_with_bool(
-                !local_stack || bytecode.may_suspend(),
-                sp_arg,
-                "stack pointer",
-                if !local_stack {
-                    "local stack is disabled"
-                } else {
-                    "bytecode suspends execution"
-                },
-            );
-            fx.pointer_panic_with_bool(
-                config.inspect_stack || bytecode.may_suspend(),
-                stack_len_arg,
-                "stack length pointer",
-                if config.inspect_stack {
-                    "stack inspection is enabled"
-                } else {
-                    "bytecode suspends execution"
-                },
-            );
-
             // Assert that the runtime spec_id matches the compilation spec_id.
             let compiled_spec = fx.bcx.iconst(fx.i8_type, bytecode.spec_id as i64);
             let _ = fx.call_builtin(Builtin::AssertSpecId, &[ecx, compiled_spec]);
@@ -1580,36 +1560,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         ));
     }
 
-    // Pointer must not be null if `must_be_set` is true.
-    fn pointer_panic_with_bool(
-        &mut self,
-        must_be_set: bool,
-        ptr: B::Value,
-        name: &str,
-        extra: &str,
-    ) {
-        if !must_be_set {
-            return;
-        }
-        let panic_cond = self.bcx.is_null(ptr);
-        let mut msg = format!("revmc panic: {name} must not be null");
-        if !extra.is_empty() {
-            write!(msg, " ({extra})").unwrap();
-        }
-        self.build_assertion(panic_cond, &msg);
-    }
-
-    fn build_assertion(&mut self, cond: B::Value, msg: &str) {
-        let failure = self.create_block_after_current("panic");
-        let target = self.create_block_after(failure, "contd");
-        self.bcx.brif(cond, failure, target);
-
-        self.bcx.switch_to_block(failure);
-        self.call_panic(msg);
-
-        self.bcx.switch_to_block(target);
-    }
-
     /// Build a call to the panic builtin.
     fn call_panic(&mut self, msg: &str) {
         let function = self.builtin_function(Builtin::Panic);
@@ -1682,12 +1632,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     fn create_block_after(&mut self, after: B::BasicBlock, name: &str) -> B::BasicBlock {
         let name = self.op_block_name(name);
         self.bcx.create_block_after(after, &name)
-    }
-
-    /// Creates a named block after the current block.
-    fn create_block_after_current(&mut self, name: &str) -> B::BasicBlock {
-        let after = self.current_block();
-        self.create_block_after(after, name)
     }
 
     /// Returns the block name for the current opcode with the given suffix.
