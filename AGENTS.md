@@ -88,11 +88,6 @@ Use `cargo r -- run --list` to see available benchmark names.
 `./scripts/bench.py` is the unified benchmarking tool. It collects codegen line
 counts, compile times, jump resolution stats, and constant-input statistics.
 
-The script writes its full markdown output to `<dump_dir>/results.md` in
-addition to printing it to stdout. Summary tables hide changes within a noise
-threshold (1% for codegen, 5% for compile times); the `<details>` tables still
-show every change.
-
 ```bash
 ./scripts/bench.py /tmp/bench --diff main                          # codegen + compile time vs main
 ./scripts/bench.py /tmp/bench --diff main usdc_proxy seaport       # specific benchmarks
@@ -106,55 +101,9 @@ show every change.
 ./scripts/bench.py /tmp/bench --codegen-lines --jump-resolution    # combine multiple analyses
 ```
 
-## Bench-and-PR workflow
-
-When the user asks to "bench and open pr", "post results to pr", or whenever
-making a perf change that needs benchmark numbers in the PR description:
-
-1. Run `./scripts/bench.py <dump_dir> --diff <base>` (typically `--diff main`).
-2. Build the PR body **in a single bash command** that inlines
-   `<dump_dir>/results.md` VERBATIM. Do NOT reformat, summarize, drop
-   columns, or rewrite the numbers in the tables — `cat` the file as-is.
-3. Add prose explaining what the PR does ABOVE the inlined results, under a
-   `## Benchmarks` (or similar) heading.
-4. Under `## Benchmarks`, ABOVE the inlined `results.md`, write a short
-   textual summary of the headline numbers (e.g. the `**TOTAL**` row diffs
-   from the codegen + compile-time tables, plus any notable per-bench wins
-   or regressions worth calling out). Keep it to a few sentences or a tight
-   bullet list — this is the at-a-glance summary readers see before the
-   tables. The tables themselves stay verbatim.
-5. Update the PR with `gh pr edit <number> --body-file <body.md>`.
-
-Example — write the body file with prose, summary, and verbatim results in
-one shot:
-
-```bash
-{
-  cat <<'EOF'
-Short description of what this PR does and why.
-
-More prose: motivation, design notes, caveats, anything reviewers need.
-
-## Benchmarks
-
-Headline numbers vs `main`: jit size -7.5%, opt.s +2.9%, total compile time
-+0.2%. `counter` regresses on opt.s (+26%); `seaport` is roughly flat.
-
-EOF
-  cat /tmp/bench/results.md
-} > /tmp/pr-body.md
-
-gh pr edit 123 --body-file /tmp/pr-body.md
-```
-
-The heredoc holds whatever prose + summary belongs in the PR; `cat results.md`
-appends the benchmark tables exactly as the script produced them.
-
 ## Important
 
-- NEVER alter or summarize the benchmark tables themselves — always post them
-  verbatim. A short textual summary of the headline numbers ABOVE the tables
-  (under `## Benchmarks`) is required.
+- NEVER summarize benchmark results. Always post the entire, unedited output.
 - NEVER delete or modify `./tmp/` — it contains manually generated IR/asm dumps used for comparison.
 - `tmp/dump/` contains dumps from `main`, `tmp/dump2/` contains dumps from the current branch.
   Use these for manual `diff` comparison of LLVM IR and assembly.
