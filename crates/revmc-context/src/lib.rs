@@ -90,9 +90,6 @@ pub struct EvmContext<'a> {
     pub input: &'a mut InputsImpl,
     /// The gas.
     pub gas: Gas,
-    /// Pointer to the original interpreter gas, written back on exit.
-    #[doc(hidden)]
-    pub gas_ptr: &'a mut Gas,
     /// The host.
     pub host: &'a mut dyn Host,
     /// The return action.
@@ -132,9 +129,9 @@ const _: () = {
     // Key fields accessed by JIT code
     assert!(offset_of!(EvmContext<'_>, memory) == 0);
     assert!(offset_of!(EvmContext<'_>, gas) == 16);
-    assert!(offset_of!(EvmContext<'_>, spec_id) == 121);
-    assert!(offset_of!(EvmContext<'_>, resume_at) == 128);
-    assert!(offset_of!(EvmContext<'_>, calldatasize) == 168);
+    assert!(offset_of!(EvmContext<'_>, spec_id) == 113);
+    assert!(offset_of!(EvmContext<'_>, resume_at) == 120);
+    assert!(offset_of!(EvmContext<'_>, calldatasize) == 160);
 };
 
 impl fmt::Debug for EvmContext<'_> {
@@ -165,7 +162,6 @@ impl<'a> EvmContext<'a> {
             memory: &mut interpreter.memory,
             input: &mut interpreter.input,
             gas: interpreter.gas,
-            gas_ptr: &mut interpreter.gas,
             host,
             next_action: &mut interpreter.bytecode.action,
             return_data: interpreter.return_data.buffer(),
@@ -312,9 +308,8 @@ impl EvmCompilerFn {
             ecx.gas.spend_all();
         }
 
-        *ecx.gas_ptr = ecx.gas;
-
         let return_data_is_empty = ecx.return_data.is_empty();
+        interpreter.gas = ecx.gas;
 
         if return_data_is_empty {
             interpreter.return_data.0.clear();
