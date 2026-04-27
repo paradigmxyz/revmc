@@ -4,7 +4,7 @@ use revm_context::{Block, ContextTr};
 use revm_database::Database;
 use revm_database_interface::DatabaseCommit;
 use revm_handler::{EvmTr, SystemCallCommitEvm};
-use revm_primitives::{address, hardfork::SpecId, Address, B256};
+use revm_primitives::{Address, B256, address, hardfork::SpecId};
 
 /// Pre block state transition
 ///

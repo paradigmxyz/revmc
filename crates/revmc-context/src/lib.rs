@@ -23,6 +23,11 @@ mod arch;
 use arch::revmc_entry;
 pub use arch::revmc_exit;
 
+#[cfg(feature = "evm")]
+mod jit_evm;
+#[cfg(feature = "evm")]
+pub use jit_evm::JitEvm;
+
 /// Resume point for compiled EVM code after a CALL/CREATE suspension.
 ///
 /// Encoded as the interpreter's bytecode PC. `0` means no resume (initial state),

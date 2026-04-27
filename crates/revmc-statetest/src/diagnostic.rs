@@ -4,13 +4,13 @@ use crate::{
     compiled::{CompileCache, CompiledContracts},
     merkle_trie::compute_test_roots,
 };
-use revm_context::{block::BlockEnv, cfg::CfgEnv, tx::TxEnv, Context};
+use revm_context::{Context, block::BlockEnv, cfg::CfgEnv, tx::TxEnv};
 use revm_context_interface::result::{EVMError, ExecutionResult, HaltReason, InvalidTransaction};
 use revm_database::{self as database, bal::EvmDatabaseError};
 use revm_database_interface::{DatabaseCommit, EmptyDB};
 use revm_handler::{ExecuteCommitEvm, Handler, MainBuilder, MainContext};
-use revm_inspector::{inspectors::TracerEip3155, InspectCommitEvm};
-use revm_primitives::{hardfork::SpecId, Bytes, B256};
+use revm_inspector::{InspectCommitEvm, inspectors::TracerEip3155};
+use revm_primitives::{B256, Bytes, hardfork::SpecId};
 use std::{convert::Infallible, io::stderr};
 
 type ExecResult =

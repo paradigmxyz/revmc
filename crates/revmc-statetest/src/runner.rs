@@ -1,14 +1,14 @@
 // Vendored from revm's `bins/revme/src/cmd/statetest/runner.rs`.
 // Keep in sync with upstream; revmc-specific code lives in `compiled.rs`.
 
-use crate::merkle_trie::{compute_test_roots, TestValidationResult};
+use crate::merkle_trie::{TestValidationResult, compute_test_roots};
 use indicatif::{ProgressBar, ProgressDrawTarget};
-use revm_context::{block::BlockEnv, cfg::CfgEnv, tx::TxEnv, Context};
+use revm_context::{Context, block::BlockEnv, cfg::CfgEnv, tx::TxEnv};
 use revm_context_interface::result::{EVMError, ExecutionResult, HaltReason, InvalidTransaction};
 use revm_database::{self as database, bal::EvmDatabaseError};
 use revm_database_interface::EmptyDB;
 use revm_handler::{ExecuteCommitEvm, MainBuilder, MainContext};
-use revm_primitives::{hardfork::SpecId, Bytes, B256, U256};
+use revm_primitives::{B256, Bytes, U256, hardfork::SpecId};
 use revm_statetest_types::{SpecName, Test, TestSuite, TestUnit};
 use serde_json::json;
 use std::{
@@ -16,8 +16,8 @@ use std::{
     fmt::Debug,
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
