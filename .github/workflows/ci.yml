@@ -66,7 +66,7 @@ jobs:
       fail-fast: false
       matrix:
         os: ["ubuntu", "macos"]
-        mode: [interpreter, aot, jit]
+        mode: [interpreter, jit, aot]
         exclude:
           - os: macos
             mode: aot

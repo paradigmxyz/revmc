@@ -39,7 +39,8 @@ pub use stats::RuntimeStatsSnapshot;
 
 mod storage;
 pub use storage::{
-    ArtifactKey, ArtifactManifest, ArtifactStore, BackendSelection, RuntimeCacheKey, StoredArtifact,
+    ArtifactKey, ArtifactManifest, ArtifactStore, BackendSelection, RuntimeArtifactStore,
+    RuntimeCacheKey, StoredArtifact,
 };
 
 mod worker;

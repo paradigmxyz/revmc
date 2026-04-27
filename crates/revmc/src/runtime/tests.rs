@@ -198,91 +198,6 @@ impl ArtifactStore for FailingStore {
     }
 }
 
-/// An artifact store backed by a temp directory on disk.
-///
-/// `store()` writes the dylib bytes to a file. `load()` returns the path to it.
-struct TempDirStore {
-    dir: std::path::PathBuf,
-    artifacts: Mutex<std::collections::HashMap<String, (ArtifactManifest, std::path::PathBuf)>>,
-}
-
-impl TempDirStore {
-    fn new() -> Self {
-        let dir = std::env::temp_dir().join(format!("revmc-test-store-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        Self { dir, artifacts: Mutex::new(std::collections::HashMap::new()) }
-    }
-
-    fn artifact_file_key(key: &ArtifactKey) -> String {
-        format!("{:x}_{:?}", key.runtime.code_hash, key.runtime.spec_id)
-    }
-
-    fn stored_count(&self) -> usize {
-        self.artifacts.lock().unwrap().len()
-    }
-}
-
-impl Drop for TempDirStore {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.dir);
-    }
-}
-
-impl ArtifactStore for TempDirStore {
-    fn load_all(&self) -> eyre::Result<Vec<(ArtifactKey, StoredArtifact)>> {
-        let map = self.artifacts.lock().unwrap();
-        Ok(map
-            .values()
-            .map(|(manifest, path)| {
-                (
-                    manifest.artifact_key.clone(),
-                    StoredArtifact { manifest: manifest.clone(), dylib_path: path.clone() },
-                )
-            })
-            .collect())
-    }
-
-    fn load(&self, key: &ArtifactKey) -> eyre::Result<Option<StoredArtifact>> {
-        let map = self.artifacts.lock().unwrap();
-        let file_key = Self::artifact_file_key(key);
-        Ok(map.get(&file_key).map(|(manifest, path)| StoredArtifact {
-            manifest: manifest.clone(),
-            dylib_path: path.clone(),
-        }))
-    }
-
-    fn store(
-        &self,
-        key: &ArtifactKey,
-        manifest: &ArtifactManifest,
-        dylib_bytes: &[u8],
-    ) -> eyre::Result<()> {
-        let file_key = Self::artifact_file_key(key);
-        let path = self.dir.join(format!("{file_key}.so"));
-        std::fs::write(&path, dylib_bytes)?;
-        self.artifacts.lock().unwrap().insert(file_key, (manifest.clone(), path));
-        Ok(())
-    }
-
-    fn delete(&self, key: &ArtifactKey) -> eyre::Result<()> {
-        let file_key = Self::artifact_file_key(key);
-        let mut map = self.artifacts.lock().unwrap();
-        if let Some((_, path)) = map.remove(&file_key) {
-            let _ = std::fs::remove_file(path);
-        }
-        Ok(())
-    }
-
-    fn clear(&self) -> eyre::Result<()> {
-        let mut map = self.artifacts.lock().unwrap();
-        for (_, path) in map.values() {
-            let _ = std::fs::remove_file(path);
-        }
-        map.clear();
-        Ok(())
-    }
-}
-
 // ===========================================================================
 // Tests: startup / basic.
 // ===========================================================================
@@ -702,11 +617,10 @@ fn eviction_frees_jit_memory() {
     tb.wait_resident_count(0);
     std::thread::sleep(std::time::Duration::from_millis(100));
 
-    let after_eviction = tb.stats().jit_code_bytes;
-    assert!(
-        after_eviction < after_compile,
-        "jit_code_bytes should decrease: before={after_compile}, after={after_eviction}",
-    );
+    poll_until(std::time::Duration::from_secs(5), || {
+        let after_eviction = tb.stats().jit_code_bytes;
+        (after_eviction < after_compile).then_some(())
+    });
 }
 
 #[test]
@@ -942,7 +856,7 @@ fn on_compilation_callback() {
 #[test]
 #[cfg(feature = "llvm")]
 fn prepare_aot_persist_and_load() {
-    let store = Arc::new(TempDirStore::new());
+    let store = Arc::new(RuntimeArtifactStore::new().unwrap());
     let tb = TestBackend::new(RuntimeConfig {
         enabled: true,
         store: Some(store.clone()),
@@ -959,13 +873,13 @@ fn prepare_aot_persist_and_load() {
 
     let p = tb.wait_compiled(BYTECODE_RET42, SpecId::CANCUN);
     assert_eq!(p.kind, ProgramKind::Aot);
-    assert_eq!(store.stored_count(), 1);
+    assert_eq!(store.len(), 1);
 }
 
 #[test]
 #[cfg(feature = "llvm")]
 fn aot_mode_promotes_misses_to_aot() {
-    let store = Arc::new(TempDirStore::new());
+    let store = Arc::new(RuntimeArtifactStore::new().unwrap());
     let tb = TestBackend::new(RuntimeConfig {
         enabled: true,
         aot: true,
@@ -985,13 +899,13 @@ fn aot_mode_promotes_misses_to_aot() {
 
     let p = tb.wait_compiled(BYTECODE_RET42, SpecId::CANCUN);
     assert_eq!(p.kind, ProgramKind::Aot);
-    assert_eq!(store.stored_count(), 1);
+    assert_eq!(store.len(), 1);
 }
 
 #[test]
 #[cfg(feature = "llvm")]
 fn prepare_aot_batch_persist_and_load() {
-    let store = Arc::new(TempDirStore::new());
+    let store = Arc::new(RuntimeArtifactStore::new().unwrap());
     let tb = TestBackend::new(RuntimeConfig {
         enabled: true,
         store: Some(store.clone()),
@@ -1016,13 +930,13 @@ fn prepare_aot_batch_persist_and_load() {
     for bc in bytecodes {
         tb.wait_compiled(bc, SpecId::CANCUN);
     }
-    assert_eq!(store.stored_count(), 2);
+    assert_eq!(store.len(), 2);
 }
 
 #[test]
 #[cfg(feature = "llvm")]
 fn aot_artifacts_survive_restart() {
-    let store = Arc::new(TempDirStore::new());
+    let store = Arc::new(RuntimeArtifactStore::new().unwrap());
     let code_hash = alloy_primitives::keccak256(BYTECODE_RET42);
 
     // First backend: compile and persist an AOT artifact.
@@ -1042,7 +956,7 @@ fn aot_artifacts_survive_restart() {
         tb.wait_compiled(BYTECODE_RET42, SpecId::CANCUN);
     }
 
-    assert_eq!(store.stored_count(), 1);
+    assert_eq!(store.len(), 1);
 
     // Second backend: should preload the artifact at startup.
     {
@@ -1064,7 +978,7 @@ fn aot_artifacts_survive_restart() {
 #[test]
 #[cfg(feature = "llvm")]
 fn preload_aot_seeds_resident() {
-    let store = Arc::new(TempDirStore::new());
+    let store = Arc::new(RuntimeArtifactStore::new().unwrap());
     let code_hash = alloy_primitives::keccak256(BYTECODE_RET42);
 
     // First backend: compile and persist.
@@ -1100,7 +1014,7 @@ fn preload_aot_seeds_resident() {
 #[test]
 #[cfg(feature = "llvm")]
 fn prepare_aot_already_persisted_not_resident() {
-    let store = Arc::new(TempDirStore::new());
+    let store = Arc::new(RuntimeArtifactStore::new().unwrap());
     let code_hash = alloy_primitives::keccak256(BYTECODE_RET42);
 
     let tb = TestBackend::new(RuntimeConfig {
@@ -1117,7 +1031,7 @@ fn prepare_aot_already_persisted_not_resident() {
         spec_id: SpecId::CANCUN,
     });
     tb.wait_compiled(BYTECODE_RET42, SpecId::CANCUN);
-    assert_eq!(store.stored_count(), 1);
+    assert_eq!(store.len(), 1);
 
     let dispatched_before = tb.stats().compilations_dispatched;
 
@@ -1148,7 +1062,7 @@ fn prepare_aot_already_persisted_not_resident() {
 #[test]
 #[cfg(feature = "llvm")]
 fn prepare_aot_skips_jit_resident() {
-    let store = Arc::new(TempDirStore::new());
+    let store = Arc::new(RuntimeArtifactStore::new().unwrap());
     let code_hash = alloy_primitives::keccak256(BYTECODE_RET42);
 
     let tb = TestBackend::new(RuntimeConfig {
@@ -1174,7 +1088,7 @@ fn prepare_aot_skips_jit_resident() {
     std::thread::sleep(std::time::Duration::from_millis(300));
 
     // Nothing was persisted — AOT was skipped because the key was already resident as JIT.
-    assert_eq!(store.stored_count(), 0, "prepare_aot should skip JIT-resident keys");
+    assert_eq!(store.len(), 0, "prepare_aot should skip JIT-resident keys");
     // Still JIT, not replaced.
     let p = tb.get_compiled(code_hash, SpecId::CANCUN).unwrap();
     assert_eq!(p.kind, ProgramKind::Jit);

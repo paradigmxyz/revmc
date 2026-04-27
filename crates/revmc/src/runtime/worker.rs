@@ -18,10 +18,14 @@ use crate::{
 };
 use alloy_primitives::Bytes;
 use crossbeam_channel as chan;
+use crossbeam_deque::{Injector, Steal, Worker};
 use std::{
     fs::File,
     io::Read,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
@@ -162,61 +166,89 @@ impl Drop for JitCodeBacking {
 
 /// Handle to the worker pool. Manages worker threads and their job queues.
 pub(crate) struct WorkerPool {
-    /// Per-worker job senders.
-    job_txs: Vec<chan::Sender<CompileJob>>,
+    /// Global queue jobs are injected into by the backend thread.
+    injector: Arc<Injector<CompileJob>>,
+    /// Wakeup channel for sleeping workers.
+    notify_tx: Option<chan::Sender<()>>,
+    /// Number of queued jobs across the injector and worker-local queues.
+    queued: Arc<AtomicUsize>,
+    /// Maximum queued jobs accepted by the pool.
+    queue_capacity: usize,
+    /// Signals workers to stop after draining queued work.
+    shutdown: Arc<AtomicBool>,
     /// Worker thread handles.
     threads: Vec<Option<JoinHandle<()>>>,
-    /// Round-robin index for job distribution.
-    next_worker: usize,
 }
 
 impl WorkerPool {
     /// Creates and starts the worker pool.
     pub(crate) fn new(result_tx: chan::Sender<WorkerResult>, config: RuntimeConfig) -> Self {
         let worker_count = config.tuning.jit_worker_count;
-        let mut job_txs = Vec::with_capacity(worker_count);
-        let mut threads = Vec::with_capacity(worker_count);
+        let queue_capacity = worker_count.saturating_mul(config.tuning.jit_worker_queue_capacity);
+        let injector = Arc::new(Injector::new());
+        let queued = Arc::new(AtomicUsize::new(0));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let (notify_tx, notify_rx) = chan::unbounded();
+        let config = Arc::new(config);
 
+        let mut threads = Vec::with_capacity(worker_count);
         for worker_id in 0..worker_count {
-            let (job_tx, job_rx) =
-                chan::bounded::<CompileJob>(config.tuning.jit_worker_queue_capacity);
+            let local = Worker::new_fifo();
             let result_tx = result_tx.clone();
             let config = config.clone();
-
+            let injector = injector.clone();
+            let queued = queued.clone();
+            let shutdown = shutdown.clone();
+            let notify_rx = notify_rx.clone();
             let thread = thread::Builder::new()
                 .name(format!("revmc-{worker_id:02}"))
                 .spawn(move || {
-                    worker_loop(worker_id, job_rx, result_tx, &config);
+                    worker_loop(
+                        worker_id, injector, local, notify_rx, queued, shutdown, result_tx, &config,
+                    );
                 })
                 .expect("failed to spawn compile worker");
 
-            job_txs.push(job_tx);
             threads.push(Some(thread));
         }
 
-        Self { job_txs, threads, next_worker: 0 }
+        Self { injector, notify_tx: Some(notify_tx), queued, queue_capacity, shutdown, threads }
     }
 
-    /// Tries to send a job to a worker (round-robin).
-    /// Returns the job back on failure (all queues full or disconnected).
-    pub(crate) fn try_send(&mut self, mut job: CompileJob) -> Result<(), CompileJob> {
-        let count = self.job_txs.len();
-        for _ in 0..count {
-            let idx = self.next_worker % count;
-            self.next_worker = self.next_worker.wrapping_add(1);
-            match self.job_txs[idx].try_send(job) {
-                Ok(()) => return Ok(()),
-                Err(chan::TrySendError::Full(j)) => job = j,
-                Err(chan::TrySendError::Disconnected(j)) => return Err(j),
+    /// Tries to send a job to the worker pool.
+    /// Returns the job back on failure (queue full or shut down).
+    pub(crate) fn try_send(&mut self, job: CompileJob) -> Result<(), CompileJob> {
+        if self.threads.is_empty() || self.shutdown.load(Ordering::Acquire) {
+            return Err(job);
+        }
+
+        let mut current = self.queued.load(Ordering::Acquire);
+        loop {
+            if current >= self.queue_capacity {
+                return Err(job);
+            }
+            match self.queued.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(next) => current = next,
             }
         }
-        Err(job)
+
+        self.injector.push(job);
+        if let Some(tx) = &self.notify_tx {
+            let _ = tx.send(());
+        }
+        Ok(())
     }
 
-    /// Shuts down all workers by dropping job senders and joining threads.
+    /// Shuts down all workers after draining queued jobs.
     pub(crate) fn shutdown(&mut self) {
-        // Drop all job senders so workers exit their recv loops.
-        self.job_txs.clear();
+        self.shutdown.store(true, Ordering::Release);
+        self.notify_tx.take();
 
         for thread in &mut self.threads {
             if let Some(t) = thread.take() {
@@ -232,10 +264,39 @@ impl Drop for WorkerPool {
     }
 }
 
+fn steal_job(
+    injector: &Injector<CompileJob>,
+    local: &Worker<CompileJob>,
+    queued: &AtomicUsize,
+) -> Option<CompileJob> {
+    loop {
+        if let Some(job) = local.pop() {
+            queued.fetch_sub(1, Ordering::AcqRel);
+            return Some(job);
+        }
+
+        match injector.steal_batch_and_pop(local) {
+            Steal::Success(job) => {
+                queued.fetch_sub(1, Ordering::AcqRel);
+                return Some(job);
+            }
+            Steal::Retry => continue,
+            Steal::Empty => {}
+        }
+
+        return None;
+    }
+}
+
 #[cfg(feature = "llvm")]
+#[allow(clippy::too_many_arguments)]
 fn worker_loop(
     id: usize,
-    job_rx: chan::Receiver<CompileJob>,
+    injector: Arc<Injector<CompileJob>>,
+    local: Worker<CompileJob>,
+    notify_rx: chan::Receiver<()>,
+    queued: Arc<AtomicUsize>,
+    shutdown: Arc<AtomicBool>,
     result_tx: chan::Sender<WorkerResult>,
     config: &RuntimeConfig,
 ) {
@@ -265,7 +326,21 @@ fn worker_loop(
 
     let mut compilations_since_recycle: usize = 0;
 
-    while let Ok(job) = job_rx.recv() {
+    loop {
+        let Some(job) = steal_job(&injector, &local, &queued) else {
+            if shutdown.load(Ordering::Acquire) && queued.load(Ordering::Acquire) == 0 {
+                break;
+            }
+            match notify_rx.recv_timeout(Duration::from_millis(10)) {
+                Ok(()) | Err(chan::RecvTimeoutError::Timeout) => continue,
+                Err(chan::RecvTimeoutError::Disconnected) => {
+                    if queued.load(Ordering::Acquire) == 0 {
+                        break;
+                    }
+                }
+            }
+            continue;
+        };
         trace!(?job, "received job");
         let t0 = Instant::now();
         let kind = job.kind;
@@ -359,6 +434,7 @@ fn worker_loop(
         }
     }
 
+    drop(jit_compiler);
     debug!("compile worker shutting down");
 }
 
@@ -413,15 +489,35 @@ fn compile_aot_artifact(job: &CompileJob, config: &RuntimeConfig) -> Result<Work
 }
 
 #[cfg(not(feature = "llvm"))]
+#[allow(clippy::too_many_arguments)]
 fn worker_loop(
     worker_id: usize,
-    job_rx: chan::Receiver<CompileJob>,
+    injector: Arc<Injector<CompileJob>>,
+    local: Worker<CompileJob>,
+    notify_rx: chan::Receiver<()>,
+    queued: Arc<AtomicUsize>,
+    shutdown: Arc<AtomicBool>,
     result_tx: chan::Sender<WorkerResult>,
     _config: &RuntimeConfig,
 ) {
     debug!(worker_id, "compile worker started (no LLVM, all jobs will fail)");
 
-    while let Ok(job) = job_rx.recv() {
+    loop {
+        let Some(job) = steal_job(&injector, &local, &queued) else {
+            if shutdown.load(Ordering::Acquire) && queued.load(Ordering::Acquire) == 0 {
+                break;
+            }
+            match notify_rx.recv_timeout(Duration::from_millis(10)) {
+                Ok(()) | Err(chan::RecvTimeoutError::Timeout) => continue,
+                Err(chan::RecvTimeoutError::Disconnected) => {
+                    if queued.load(Ordering::Acquire) == 0 {
+                        break;
+                    }
+                }
+            }
+            continue;
+        };
+
         let _ = result_tx.send(WorkerResult {
             key: job.key,
             outcome: Err("LLVM backend not available".into()),

@@ -2,6 +2,8 @@
 
 ## Commands
 
+`--all-features` does not work. Just use default features and the following commands:
+
 ```bash
 cargo cl                                   # lint
 cargo fmt --all                            # format

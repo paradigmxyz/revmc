@@ -2,9 +2,10 @@
 
 use crate::eyre;
 use alloy_primitives::B256;
+use dashmap::DashMap;
 use revm_primitives::hardfork::SpecId;
 use revmc_backend::OptimizationLevel;
-use std::path::PathBuf;
+use std::{fs, path::PathBuf};
 
 /// Runtime cache key: the minimal identity for a compiled program at runtime.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -89,4 +90,78 @@ pub trait ArtifactStore: Send + Sync + 'static {
 
     /// Clears all stored artifacts.
     fn clear(&self) -> eyre::Result<()>;
+}
+
+/// In-memory artifact index backed by dylib files in a temporary directory.
+#[derive(Debug)]
+pub struct RuntimeArtifactStore {
+    dir: tempfile::TempDir,
+    artifacts: DashMap<ArtifactKey, StoredArtifact>,
+}
+
+impl RuntimeArtifactStore {
+    /// Creates an empty temporary runtime artifact store.
+    pub fn new() -> eyre::Result<Self> {
+        Ok(Self { dir: tempfile::tempdir()?, artifacts: DashMap::default() })
+    }
+
+    /// Returns the number of artifacts tracked by this store.
+    pub fn len(&self) -> usize {
+        self.artifacts.len()
+    }
+
+    /// Returns whether this store contains no artifacts.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    fn artifact_path(&self, key: &ArtifactKey) -> PathBuf {
+        self.dir.path().join(format!(
+            "{:x}_{:?}_{:?}_{:?}.so",
+            key.runtime.code_hash, key.runtime.spec_id, key.backend, key.opt_level,
+        ))
+    }
+}
+
+impl ArtifactStore for RuntimeArtifactStore {
+    fn load_all(&self) -> eyre::Result<Vec<(ArtifactKey, StoredArtifact)>> {
+        Ok(self
+            .artifacts
+            .iter()
+            .map(|entry| (entry.key().clone(), entry.value().clone()))
+            .collect())
+    }
+
+    fn load(&self, key: &ArtifactKey) -> eyre::Result<Option<StoredArtifact>> {
+        Ok(self.artifacts.get(key).map(|entry| entry.value().clone()))
+    }
+
+    fn store(
+        &self,
+        key: &ArtifactKey,
+        manifest: &ArtifactManifest,
+        dylib_bytes: &[u8],
+    ) -> eyre::Result<()> {
+        let path = self.artifact_path(key);
+        fs::write(&path, dylib_bytes)?;
+        self.artifacts
+            .insert(key.clone(), StoredArtifact { manifest: manifest.clone(), dylib_path: path });
+        Ok(())
+    }
+
+    fn delete(&self, key: &ArtifactKey) -> eyre::Result<()> {
+        if let Some((_, artifact)) = self.artifacts.remove(key) {
+            let _ = fs::remove_file(artifact.dylib_path);
+        }
+        Ok(())
+    }
+
+    fn clear(&self) -> eyre::Result<()> {
+        let paths = self.artifacts.iter().map(|entry| entry.dylib_path.clone()).collect::<Vec<_>>();
+        self.artifacts.clear();
+        for path in paths {
+            let _ = fs::remove_file(path);
+        }
+        Ok(())
+    }
 }

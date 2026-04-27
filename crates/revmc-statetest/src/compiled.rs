@@ -3,14 +3,12 @@
 use crate::runner::{
     TestError, TestErrorKind, TestRunnerState, check_evm_execution, execute_test_suite, skip_test,
 };
-use dashmap::DashMap;
 use revm_context::{Context, block::BlockEnv, cfg::CfgEnv, tx::TxEnv};
 use revm_database::{self as database};
 use revm_database_interface::DatabaseCommit;
 use revm_handler::{Handler, MainBuilder, MainContext};
 use revm_primitives::{U256, hardfork::SpecId};
 use revm_statetest_types::{SpecName, TestSuite, TestUnit};
-use revmc::eyre;
 use std::{
     fs,
     panic::{self, AssertUnwindSafe},
@@ -39,71 +37,8 @@ pub enum CompileMode {
 
 use revmc::{
     revm_evm::JitEvm,
-    runtime::{
-        ArtifactKey, ArtifactManifest, ArtifactStore, JitBackend, RuntimeConfig, RuntimeTuning,
-        StoredArtifact,
-    },
+    runtime::{ArtifactStore, JitBackend, RuntimeArtifactStore, RuntimeConfig, RuntimeTuning},
 };
-
-#[derive(Debug)]
-struct RuntimeArtifactStore {
-    dir: tempfile::TempDir,
-    artifacts: DashMap<ArtifactKey, StoredArtifact>,
-}
-
-impl RuntimeArtifactStore {
-    fn new() -> Result<Self, TestErrorKind> {
-        let dir = tempfile::tempdir()
-            .map_err(|e| TestErrorKind::CompilationError(format!("tempdir: {e}")))?;
-        Ok(Self { dir, artifacts: Default::default() })
-    }
-}
-
-impl ArtifactStore for RuntimeArtifactStore {
-    fn load_all(&self) -> eyre::Result<Vec<(ArtifactKey, StoredArtifact)>> {
-        Ok(self
-            .artifacts
-            .iter()
-            .map(|entry| (entry.key().clone(), entry.value().clone()))
-            .collect())
-    }
-
-    fn load(&self, key: &ArtifactKey) -> eyre::Result<Option<StoredArtifact>> {
-        Ok(self.artifacts.get(key).map(|entry| entry.value().clone()))
-    }
-
-    fn store(
-        &self,
-        key: &ArtifactKey,
-        manifest: &ArtifactManifest,
-        dylib_bytes: &[u8],
-    ) -> eyre::Result<()> {
-        let path = self.dir.path().join(format!(
-            "{:x}_{:?}_{:?}.so",
-            key.runtime.code_hash, key.runtime.spec_id, key.opt_level,
-        ));
-        fs::write(&path, dylib_bytes)?;
-        self.artifacts
-            .insert(key.clone(), StoredArtifact { manifest: manifest.clone(), dylib_path: path });
-        Ok(())
-    }
-
-    fn delete(&self, key: &ArtifactKey) -> eyre::Result<()> {
-        if let Some((_, artifact)) = self.artifacts.remove(key) {
-            let _ = fs::remove_file(artifact.dylib_path);
-        }
-        Ok(())
-    }
-
-    fn clear(&self) -> eyre::Result<()> {
-        let paths: Vec<_> = self.artifacts.iter().map(|entry| entry.dylib_path.clone()).collect();
-        self.artifacts.clear();
-        for path in paths {
-            let _ = fs::remove_file(path);
-        }
-        Ok(())
-    }
-}
 
 /// Execute a single test using the runtime backend via [`JitEvm`].
 fn execute_single_test_runtime(
@@ -283,10 +218,10 @@ pub fn run(
     let backend = if matches!(mode, CompileMode::Aot | CompileMode::Jit) {
         let cpus = thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
         let store = if mode == CompileMode::Aot {
-            let store = RuntimeArtifactStore::new().map_err(|kind| TestError {
+            let store = RuntimeArtifactStore::new().map_err(|e| TestError {
                 name: "backend".to_string(),
                 path: String::new(),
-                kind,
+                kind: TestErrorKind::CompilationError(format!("tempdir: {e}")),
             })?;
             Some(Arc::new(store) as Arc<dyn ArtifactStore>)
         } else {
