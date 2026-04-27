@@ -35,6 +35,9 @@ revm-inspector.workspace = true
 revm-interpreter.workspace = true
 revm-primitives.workspace = true
 
+[build-dependencies]
+revmc-build.workspace = true
+
 [dev-dependencies]
 revmc-statetest = { path = "../revmc-statetest" }
 

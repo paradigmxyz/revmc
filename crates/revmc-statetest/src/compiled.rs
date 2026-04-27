@@ -229,10 +229,11 @@ pub fn run(
         };
         let config = RuntimeConfig {
             enabled: true,
+            blocking: true,
             aot: mode == CompileMode::Aot,
             store,
             tuning: RuntimeTuning {
-                jit_hot_threshold: 2,
+                jit_hot_threshold: 0,
                 jit_worker_count: cpus,
                 ..Default::default()
             },
