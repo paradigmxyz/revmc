@@ -63,15 +63,7 @@ pub(crate) type U256Interner = Interner<U256Idx, U256, alloy_primitives::map::Fb
 
 /// Compact handle to a `U256` constant.
 ///
-/// Encodes either:
-/// - An inline `u8` value (when the constant fits in `0..=255`), tagged with the high bit: raw =
-///   `INLINE_TAG | value`.
-/// - A reference into a [`U256Interner`], with the high bit clear: raw = `idx`. Up to 2^31 distinct
-///   non-inline constants per [`Bytecode`] are supported.
-///
-/// Distinguishing the two representations is a single bit test against `INLINE_TAG`.
-/// Constructing through [`U256Imm::new`] is canonical: equal values always produce equal
-/// `U256Imm`s, so `Eq`/`Hash` work on the raw bits.
+/// Either a `u32` inline value or a reference into a [`U256Interner`].
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) struct U256Imm(u32);
 
@@ -79,11 +71,25 @@ impl U256Imm {
     /// High bit set means the handle is an inline `u8` value.
     const INLINE_TAG: u32 = 1 << 31;
 
+    /// Decodes a handle previously produced by [`Self::to_raw`].
+    #[inline]
+    pub(crate) fn from_raw(raw: u32) -> Self {
+        Self(raw)
+    }
+
+    /// Encodes this handle as a `u32` for storage in [`InstData::data`].
+    #[inline]
+    pub(crate) fn to_raw(self) -> u32 {
+        self.0
+    }
+
     /// Constructs a handle for `value`, inlining `u8`-sized values and otherwise interning.
     #[inline]
     pub(crate) fn new(value: U256, interner: &mut U256Interner) -> Self {
-        if value.bit_len() <= 8 {
-            Self(Self::INLINE_TAG | value.byte(0) as u32)
+        if let Ok(x) = u32::try_from(value)
+            && x & Self::INLINE_TAG == 0
+        {
+            Self(Self::INLINE_TAG | x)
         } else {
             let idx = interner.intern(value).index() as u32;
             debug_assert!(
@@ -98,36 +104,23 @@ impl U256Imm {
     #[inline]
     pub(crate) fn get(self, interner: &U256Interner) -> U256 {
         if self.0 & Self::INLINE_TAG != 0 {
-            U256::from(self.0 as u8)
+            U256::from(self.0 & !Self::INLINE_TAG)
         } else {
             *interner.get(U256Idx::from_usize(self.0 as usize))
         }
     }
 
-    /// Returns the inline `u8` value, if any.
+    /// Returns the inline `u32` value, if any.
     #[inline]
-    #[allow(dead_code)]
-    pub(crate) fn as_u8(self) -> Option<u8> {
-        (self.0 & Self::INLINE_TAG != 0).then_some(self.0 as u8)
-    }
-
-    /// Encodes this handle as a `u32` for storage in [`InstData::data`].
-    #[inline]
-    pub(crate) fn to_raw(self) -> u32 {
-        self.0
-    }
-
-    /// Decodes a handle previously produced by [`Self::to_raw`].
-    #[inline]
-    pub(crate) fn from_raw(raw: u32) -> Self {
-        Self(raw)
+    pub(crate) fn get_inline(self) -> Option<u32> {
+        (self.0 & Self::INLINE_TAG != 0).then_some(self.0 & !Self::INLINE_TAG)
     }
 }
 
 impl std::fmt::Debug for U256Imm {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self.as_u8() {
-            Some(b) => write!(f, "U256Imm::Inline(0x{b:02x})"),
+        match self.get_inline() {
+            Some(x) => write!(f, "U256Imm::Inline({x})"),
             None => write!(f, "U256Imm::Idx({})", self.0),
         }
     }
@@ -235,10 +228,10 @@ impl<'a> Bytecode<'a> {
     fn new_mono(code: Cow<'a, [u8]>, spec_id: SpecId, gas_params: Option<GasParams>) -> Self {
         let gas_params = gas_params.unwrap_or_else(|| GasParams::new_spec(spec_id));
         let mut insts = IndexVec::with_capacity(code.len() + 8);
-        let mut inst_to_pc: IndexVec<Inst, u32> = IndexVec::with_capacity(code.len() + 8);
+        let mut inst_to_pc = IndexVec::with_capacity(code.len() + 8);
         let mut jumpdests = BitVec::repeat(false, code.len());
         let mut pc_to_inst = FxHashMap::with_capacity_and_hasher(code.len(), Default::default());
-        let mut u256_interner: U256Interner = Interner::new();
+        let mut u256_interner = U256Interner::new();
         let op_infos = op_info_map(spec_id);
         let mut iter = OpcodesIter::new(&code, spec_id).with_pc();
         while let Some((pc, Opcode { opcode, immediate })) = iter.next() {
@@ -264,15 +257,9 @@ impl<'a> Bytecode<'a> {
                 (info.base_gas(), compute_stack_io(opcode, immediate))
             };
 
-            // Pre-compute the immediate so the rest of the compiler never has to access
-            // the raw bytecode. PUSH values are wrapped in `U256Imm`, which inlines
-            // u8-sized values directly and otherwise interns them. DUPN/SWAPN/EXCHANGE
-            // store their immediate byte as an always-inline `U256Imm`. JUMPDEST and PC
-            // store their pc inline so jump dispatch and the PC opcode read it directly
-            // from `data`.
             let data = match opcode {
                 op::PUSH0 => U256Imm::new(U256::ZERO, &mut u256_interner).to_raw(),
-                op::PUSH1..=op::PUSH32 => {
+                op::PUSH1..=op::PUSH32 | op::DUPN | op::SWAPN | op::EXCHANGE => {
                     let imm_len = min_imm_len(opcode) as usize;
                     // `OpcodesIter` returns `None` for truncated EOF immediates; recover
                     // the available bytes directly from `code` and right-pad with zeros
@@ -289,10 +276,6 @@ impl<'a> Bytecode<'a> {
                         _ => U256::ZERO,
                     };
                     U256Imm::new(value, &mut u256_interner).to_raw()
-                }
-                op::DUPN | op::SWAPN | op::EXCHANGE => {
-                    let b = code.get(pc + 1).copied().unwrap_or(0);
-                    U256Imm::new(U256::from(b), &mut u256_interner).to_raw()
                 }
                 op::JUMPDEST | op::PC => pc as u32,
                 _ => 0,
@@ -329,7 +312,6 @@ impl<'a> Bytecode<'a> {
         if insts.last().is_none_or(|last| last.can_fall_through()) {
             trace!("adding STOP padding");
             insts.push(InstData::new(op::STOP));
-            // Synthetic padding lives one past the real bytecode.
             inst_to_pc.push(code.len() as u32);
         }
 
@@ -557,7 +539,7 @@ impl<'a> Bytecode<'a> {
         data.imm().get(&self.u256_interner.borrow())
     }
 
-    /// Returns the length of the original bytecode in bytes (for `CODESIZE`).
+    /// Returns the length of the original bytecode in bytes.
     #[inline]
     pub(crate) fn codesize(&self) -> usize {
         self.code.len()
@@ -617,7 +599,6 @@ impl<'a> Bytecode<'a> {
     ///
     /// Returns `None` if the output is unknown, the instruction has no output, or the
     /// analysis didn't cover this instruction.
-    #[allow(dead_code)]
     pub(crate) fn const_output(&self, inst: Inst) -> Option<U256> {
         let imm = self.snapshots.outputs[inst]?.as_const()?;
         Some(imm.get(&self.u256_interner.borrow()))
@@ -933,7 +914,7 @@ impl InstData {
     pub(crate) fn imm_byte(&self) -> u8 {
         debug_assert!(matches!(self.opcode, op::DUPN | op::SWAPN | op::EXCHANGE));
         // Parse-time encoding for these opcodes always produces an inline `u8`.
-        self.imm().as_u8().unwrap()
+        self.imm().get_inline().unwrap().try_into().unwrap()
     }
 
     /// Returns the program counter stored inline for a `PC` instruction.

@@ -348,7 +348,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         if bytecode.has_dynamic_jumps() {
             fx.bcx.switch_to_block(fx.dynamic_jump_table);
             let jumpdests = bytecode.iter_insts().filter(|(_, data)| data.opcode == op::JUMPDEST);
-            // JUMPDEST stores its pc inline in `data`.
             let targets = jumpdests
                 .map(|(inst, data)| (data.jumpdest_pc() as u64, fx.inst_entries[inst]))
                 .collect::<Vec<_>>();

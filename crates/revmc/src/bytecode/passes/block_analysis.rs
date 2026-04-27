@@ -34,8 +34,6 @@ use bitvec::vec::BitVec;
 use either::Either;
 use oxc_index::{IndexVec, index_vec};
 use revm_bytecode::opcode as op;
-#[cfg(test)]
-use revm_primitives::U256;
 use smallvec::SmallVec;
 use std::{cmp::Ordering, collections::VecDeque, ops::Range};
 
@@ -1065,7 +1063,7 @@ impl Bytecode<'_> {
 pub(crate) mod tests {
     use super::*;
     pub(crate) use crate::bytecode::Inst;
-    use revm_primitives::{hardfork::SpecId, hex};
+    pub(crate) use revm_primitives::{U256, hardfork::SpecId, hex};
 
     pub(crate) fn analyze_hex(hex: &str) -> Bytecode<'static> {
         let code = hex::decode(hex.trim()).unwrap();

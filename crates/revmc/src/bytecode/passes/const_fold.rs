@@ -62,7 +62,6 @@ pub(crate) fn try_const_fold(
     let result = match opcode {
         // 0 -> 1
         op::CODESIZE => U256::from(code_len),
-        // PC stores its program counter inline in `data` at parse time.
         op::PC => U256::from(inst.pc_imm()),
 
         // 1 -> 1
