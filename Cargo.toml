@@ -76,7 +76,7 @@ opt-level = 3
 
 [profile.release]
 opt-level = 3
-# lto = "thin"
+lto = "thin"
 debug = "none"
 strip = "debuginfo" # "symbols" for less binary size but no backtraces
 panic = "abort"
