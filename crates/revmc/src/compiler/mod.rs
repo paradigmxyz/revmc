@@ -679,22 +679,6 @@ impl<B: Backend> EvmCompiler<B> {
             }
         }
 
-        // The stack and stack-length buffers are uniquely owned by this function for the
-        // duration of the call (no other pointer aliases them), so they are `noalias`.
-        //
-        // `ecx` is intentionally excluded: marking it `noalias` causes state-root mismatches
-        // in tests that touch precompiles (e.g. `ecrecoverShortBuff`). `EvmContext` holds
-        // nested `&mut` references (`memory`, `host`, `gas`, …) whose pointed-to allocations
-        // are also reachable from elsewhere, and `noalias` lets LLVM cache loads through `ecx`
-        // across builtin calls that mutate those allocations.
-        for param in 1..=2 {
-            bcx.add_function_attribute(
-                None,
-                Attribute::NoAlias,
-                FunctionAttributeLocation::Param(param),
-            );
-        }
-
         // The stack argument's contents are dead after return when the stack is not observed,
         // so the caller can elide any stores to the buffer.
         if !bytecode.stack_observed() {
