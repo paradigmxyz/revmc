@@ -11,19 +11,25 @@ use oxc_index::IndexVec;
 use revm_bytecode::opcode as op;
 use smallvec::SmallVec;
 
-/// Dedup key: raw bytecode bytes, CFG successor blocks, and terminator jump kind.
+/// Dedup key: instruction-level structural fingerprint, CFG successor blocks, and terminator
+/// jump kind.
 ///
-/// Raw bytes alone are insufficient for JUMP-terminated blocks because block analysis
-/// may resolve byte-identical copies to different static targets depending on incoming
-/// stack context (e.g. different return-address values).
+/// The fingerprint encodes each instruction's opcode plus its (interned) immediate so that
+/// PUSH operations with the same value, and DUPN/SWAPN/EXCHANGE with the same operand, hash
+/// equal across blocks. Raw bytes are intentionally not consulted — all immediate data is
+/// pre-interned at parse time on `InstData`.
 ///
-/// The `is_multi_jump` discriminator prevents MULTI_JUMP dispatcher blocks from
-/// colliding with STATIC_JUMP blocks that happen to share the same bytes and
-/// successor set.
+/// Structural equality alone is insufficient for JUMP-terminated blocks because block
+/// analysis may resolve identical copies to different static targets depending on incoming
+/// stack context (e.g. different return-address values), so successors are part of the key.
+///
+/// The `is_multi_jump` discriminator prevents MULTI_JUMP dispatcher blocks from colliding
+/// with STATIC_JUMP blocks that happen to share the same fingerprint and successor set.
 #[derive(Clone, PartialEq, Eq, Hash)]
-struct DedupKey<'a> {
-    bytes: &'a [u8],
-    /// CFG successors for this block. Two byte-identical blocks are only merged when
+struct DedupKey {
+    /// Instruction fingerprint: per-instruction `(opcode, immediate)` tuples encoded as bytes.
+    fingerprint: SmallVec<[u8; 32]>,
+    /// CFG successors for this block. Two structurally identical blocks are only merged when
     /// their successor sets also match.
     succs: SmallVec<[Block; 4]>,
     /// Whether the block's terminator is a MULTI_JUMP.
@@ -46,14 +52,11 @@ impl<'a> Bytecode<'a> {
     /// and stale once multiple predecessors are merged.
     #[instrument(name = "dedup", level = "debug", skip_all)]
     pub(crate) fn dedup_blocks(&mut self, local_snapshots: &Snapshots) {
-        // Borrow code separately so we can pass `&mut self` to `dedup_blocks_once`.
-        // SAFETY: `self.code` is not modified during dedup.
-        let code: &[u8] = unsafe { &*std::ptr::from_ref::<[u8]>(&self.code) };
-        let mut key_to_blocks = HashMap::<DedupKey<'_>, SmallVec<[Block; 4]>>::default();
+        let mut key_to_blocks = HashMap::<DedupKey, SmallVec<[Block; 4]>>::default();
         let mut total_deduped = 0usize;
         loop {
             key_to_blocks.clear();
-            let deduped = self.dedup_blocks_once(code, &mut key_to_blocks, local_snapshots);
+            let deduped = self.dedup_blocks_once(&mut key_to_blocks, local_snapshots);
             total_deduped += deduped;
             if deduped == 0 {
                 break;
@@ -79,10 +82,9 @@ impl<'a> Bytecode<'a> {
     }
 
     /// Single dedup iteration. Returns the number of blocks deduped.
-    fn dedup_blocks_once<'b>(
+    fn dedup_blocks_once(
         &mut self,
-        code: &'b [u8],
-        key_to_blocks: &mut HashMap<DedupKey<'b>, SmallVec<[Block; 4]>>,
+        key_to_blocks: &mut HashMap<DedupKey, SmallVec<[Block; 4]>>,
         local_snapshots: &Snapshots,
     ) -> usize {
         for bid in self.cfg.blocks.indices() {
@@ -114,14 +116,14 @@ impl<'a> Bytecode<'a> {
                 continue;
             }
 
-            let bytes = block_bytes(code, &self.insts, block);
-            if bytes.is_empty() {
+            let fingerprint = block_fingerprint(&self.insts, block);
+            if fingerprint.is_empty() {
                 continue;
             }
 
             let is_multi_jump = term.flags.contains(InstFlags::MULTI_JUMP);
             key_to_blocks
-                .entry(DedupKey { bytes, succs: block.succs.clone(), is_multi_jump })
+                .entry(DedupKey { fingerprint, succs: block.succs.clone(), is_multi_jump })
                 .or_default()
                 .push(bid);
         }
@@ -155,8 +157,11 @@ impl<'a> Bytecode<'a> {
 
                 // If the duplicate was a reachable JUMPDEST, the canonical must be too
                 // so that sections/gas-checks treat it as a jump target entry point.
-                if self.insts[dup_first_inst].data == 1 {
-                    self.insts[canonical_first_inst].data = 1;
+                if self.insts[dup_first_inst].is_jumpdest()
+                    && self.insts[dup_first_inst].is_jumpdest_reachable()
+                    && self.insts[canonical_first_inst].is_jumpdest()
+                {
+                    self.insts[canonical_first_inst].set_jumpdest_reachable();
                 }
 
                 // Merge multi-jump targets from the duplicate into the canonical block.
@@ -183,9 +188,9 @@ impl<'a> Bytecode<'a> {
                     let is_static = term.is_static_jump()
                         && !term.flags.contains(InstFlags::INVALID_JUMP)
                         && !term.flags.contains(InstFlags::MULTI_JUMP)
-                        && term.data == dup_first_inst.index() as u32;
+                        && term.static_jump_target() == dup_first_inst;
                     if is_static {
-                        self.insts[term_inst].data = canonical_first_inst.index() as u32;
+                        self.insts[term_inst].set_static_jump_target(canonical_first_inst);
                     }
                     // Multi-jump target PCs are not rewritten here: each carries a
                     // distinct PC that callers push as a return address. The targets
@@ -200,17 +205,27 @@ impl<'a> Bytecode<'a> {
     }
 }
 
-/// Returns the raw bytecode bytes for a block's PC range, or empty if the block
-/// extends past the original code (e.g. the synthetic STOP padding).
-fn block_bytes<'a>(
-    code: &'a [u8],
-    insts: &IndexVec<Inst, InstData>,
-    block: &BlockData,
-) -> &'a [u8] {
-    let start_pc = insts[block.insts.start].pc as usize;
-    let end_inst = &insts[block.terminator()];
-    let end_pc = end_inst.pc as usize + 1 + end_inst.imm_len() as usize;
-    code.get(start_pc..end_pc).unwrap_or_default()
+/// Builds a structural fingerprint of a block from instruction data, without consulting the
+/// raw bytecode.
+///
+/// For each non-dead instruction in the block, encodes the opcode followed by the immediate
+/// payload (interned U256Idx for `PUSH*`, immediate byte for `DUPN`/`SWAPN`/`EXCHANGE`).
+/// JUMP/JUMPI carry no immediate and so contribute only their opcode; jump targets are
+/// already factored into the surrounding `DedupKey` via the block's CFG successors.
+fn block_fingerprint(insts: &IndexVec<Inst, InstData>, block: &BlockData) -> SmallVec<[u8; 32]> {
+    let mut buf: SmallVec<[u8; 32]> = SmallVec::new();
+    for i in block.insts() {
+        let data = &insts[i];
+        buf.push(data.opcode);
+        if data.imm_len() > 0 {
+            let mut imm = &data.data.to_ne_bytes()[..];
+            while let [0, rest @ ..] = imm {
+                imm = rest;
+            }
+            buf.extend_from_slice(imm);
+        }
+    }
+    buf
 }
 
 #[cfg(test)]

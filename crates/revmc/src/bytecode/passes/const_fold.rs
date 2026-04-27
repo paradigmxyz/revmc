@@ -3,7 +3,7 @@
 use super::block_analysis::AbsValue;
 use crate::{
     InstData,
-    bytecode::{Interner, U256Idx},
+    bytecode::{U256Imm, U256Interner},
 };
 use revm_bytecode::opcode as op;
 use revm_interpreter::instructions::i256::{i256_cmp, i256_div, i256_mod};
@@ -19,7 +19,7 @@ use std::cmp::Ordering;
 pub(crate) fn const_fold_gas(
     opcode: u8,
     inputs: &[AbsValue],
-    interner: &Interner<U256Idx, U256, alloy_primitives::map::FbBuildHasher<32>>,
+    interner: &U256Interner,
 ) -> Option<u64> {
     let gas: u64 = match opcode {
         op::CODESIZE | op::PC => 2,
@@ -36,8 +36,8 @@ pub(crate) fn const_fold_gas(
             // EXP: 10 + 50 * byte_size(exponent).
             // The exponent is the second operand (TOS - 1 in EVM stack order, inputs[0] here).
             let exponent_bytes = match inputs.first() {
-                Some(&AbsValue::Const(idx)) => {
-                    let val = interner.get(idx);
+                Some(&AbsValue::Const(imm)) => {
+                    let val = imm.get(interner);
                     (256 - val.leading_zeros()).div_ceil(8)
                 }
                 _ => return None,
@@ -55,21 +55,22 @@ pub(crate) fn const_fold_gas(
 pub(crate) fn try_const_fold(
     inst: &InstData,
     inputs: &[AbsValue],
-    interner: &mut Interner<U256Idx, U256, alloy_primitives::map::FbBuildHasher<32>>,
+    interner: &mut U256Interner,
     code_len: usize,
 ) -> Option<AbsValue> {
     let opcode = inst.opcode;
     let result = match opcode {
         // 0 -> 1
         op::CODESIZE => U256::from(code_len),
-        op::PC => U256::from(inst.pc),
+        // PC stores its program counter inline in `data` at parse time.
+        op::PC => U256::from(inst.pc_imm()),
 
         // 1 -> 1
         op::ISZERO | op::NOT | op::CLZ => {
             let &[AbsValue::Const(ai)] = inputs else {
                 return None;
             };
-            let a = *interner.get(ai);
+            let a = ai.get(interner);
             match opcode {
                 op::ISZERO => U256::from(a.is_zero()),
                 op::NOT => !a,
@@ -103,8 +104,8 @@ pub(crate) fn try_const_fold(
             let &[AbsValue::Const(bi), AbsValue::Const(ai)] = inputs else {
                 return None;
             };
-            let a = *interner.get(ai);
-            let b = *interner.get(bi);
+            let a = ai.get(interner);
+            let b = bi.get(interner);
             match opcode {
                 op::ADD => a.wrapping_add(b),
                 op::MUL => a.wrapping_mul(b),
@@ -176,9 +177,9 @@ pub(crate) fn try_const_fold(
             let &[AbsValue::Const(ci), AbsValue::Const(bi), AbsValue::Const(ai)] = inputs else {
                 return None;
             };
-            let a = *interner.get(ai);
-            let b = *interner.get(bi);
-            let n = *interner.get(ci);
+            let a = ai.get(interner);
+            let b = bi.get(interner);
+            let n = ci.get(interner);
             match opcode {
                 op::ADDMOD => a.add_mod(b, n),
                 op::MULMOD => a.mul_mod(b, n),
@@ -193,7 +194,7 @@ pub(crate) fn try_const_fold(
         "try_const_fold handled opcode {} but const_fold_gas did not",
         inst.opcode,
     );
-    Some(AbsValue::Const(interner.intern(result)))
+    Some(AbsValue::Const(U256Imm::new(result, interner)))
 }
 
 #[cfg(test)]
@@ -569,16 +570,16 @@ mod tests {
     /// must also return `Some`, and vice versa.
     #[test]
     fn const_fold_gas_sync() {
-        let mut interner = crate::bytecode::Interner::new();
-        let one = interner.intern(U256::from(1));
-        let two = interner.intern(U256::from(2));
-        let three = interner.intern(U256::from(3));
+        let mut interner: crate::bytecode::U256Interner = crate::bytecode::Interner::new();
+        let one = U256Imm::new(U256::from(1), &mut interner);
+        let two = U256Imm::new(U256::from(2), &mut interner);
+        let three = U256Imm::new(U256::from(3), &mut interner);
         let c1 = AbsValue::Const(one);
         let c2 = AbsValue::Const(two);
         let c3 = AbsValue::Const(three);
 
         for opcode in 0..=u8::MAX {
-            let inst = crate::InstData { opcode, pc: 0, ..crate::InstData::new(opcode) };
+            let inst = crate::InstData { opcode, ..crate::InstData::new(opcode) };
             let (inp, _) = inst.stack_io();
 
             let inputs: &[AbsValue] = match inp {

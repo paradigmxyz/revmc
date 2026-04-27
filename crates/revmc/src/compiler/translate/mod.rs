@@ -348,8 +348,9 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         if bytecode.has_dynamic_jumps() {
             fx.bcx.switch_to_block(fx.dynamic_jump_table);
             let jumpdests = bytecode.iter_insts().filter(|(_, data)| data.opcode == op::JUMPDEST);
+            // JUMPDEST stores its pc inline in `data`.
             let targets = jumpdests
-                .map(|(inst, data)| (data.pc as u64, fx.inst_entries[inst]))
+                .map(|(inst, data)| (data.jumpdest_pc() as u64, fx.inst_entries[inst]))
                 .collect::<Vec<_>>();
             let i64_type = fx.bcx.type_int(64);
             let index = fx.bcx.phi(i64_type, &fx.incoming_dynamic_jumps);
@@ -839,7 +840,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 self.call_fallible_builtin(Builtin::CallDataCopy, &[self.ecx, sp]);
             }
             op::CODESIZE => {
-                let len = self.bcx.iconst(self.word_type, self.bytecode.code.len() as i64);
+                let len = self.bcx.iconst(self.word_type, self.bytecode.codesize() as i64);
                 self.push(len);
             }
             op::CODECOPY => {
@@ -974,7 +975,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                         let switch_targets: Vec<_> = targets
                             .iter()
                             .map(|&t| {
-                                let pc = self.bytecode.inst(t).pc as u64;
+                                let pc = self.bytecode.inst(t).jumpdest_pc() as u64;
                                 (pc, self.inst_entries[t])
                             })
                             .collect();
@@ -987,7 +988,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                     } else if data.flags.contains(InstFlags::STATIC_JUMP) {
                         // Pop and discard the target; it's always on the stack.
                         self.pop_ignore(1);
-                        let target_inst = Inst::from_usize(data.data as usize);
+                        let target_inst = data.static_jump_target();
                         debug_assert_eq!(
                             *self.bytecode.inst(target_inst),
                             op::JUMPDEST,
@@ -1032,7 +1033,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 goto_return!(no_branch);
             }
             op::PC => {
-                let pc = self.bcx.iconst_256(data.pc);
+                let pc = self.bcx.iconst_256(data.pc_imm());
                 self.push(pc);
             }
             op::MSIZE => {
@@ -1061,29 +1062,23 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 self.call_fallible_builtin(Builtin::Mcopy, &[self.ecx, sp]);
             }
 
-            op::PUSH0 => {
-                let value = self.bcx.iconst_256(0);
-                self.push(value);
-            }
-            op::PUSH1..=op::PUSH32 => {
-                let value = self.bytecode.get_push_value(data);
-                let value = self.bcx.iconst_256(value);
-                self.push(value);
+            op::PUSH0..=op::PUSH32 => {
+                unreachable!("handled in const_output");
             }
 
             op::DUP1..=op::DUP16 => self.dup((opcode - op::DUP1 + 1) as usize),
-            op::DUPN => match decode_single(self.bytecode.get_u8_imm(data)) {
+            op::DUPN => match decode_single(data.imm_byte()) {
                 Some(n) => self.dup(n as usize),
                 None => goto_return!(fail InstructionResult::InvalidImmediateEncoding),
             },
 
             op::SWAP1..=op::SWAP16 => self.swap((opcode - op::SWAP1 + 1) as usize),
-            op::SWAPN => match decode_single(self.bytecode.get_u8_imm(data)) {
+            op::SWAPN => match decode_single(data.imm_byte()) {
                 Some(n) => self.swap(n as usize),
                 None => goto_return!(fail InstructionResult::InvalidImmediateEncoding),
             },
 
-            op::EXCHANGE => match decode_pair(self.bytecode.get_u8_imm(data)) {
+            op::EXCHANGE => match decode_pair(data.imm_byte()) {
                 Some((n, m)) => self.exchange(n as usize, (m - n) as usize),
                 None => goto_return!(fail InstructionResult::InvalidImmediateEncoding),
             },
@@ -1217,7 +1212,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 let _ = write!(
                     section_dump,
                     "\n  ic{i} pc={} {:?} io={:?} flags={:?} gas={:?} stack={:?}{}{}",
-                    d.pc,
+                    self.bytecode.pc(idx),
                     d.to_op(),
                     d.stack_io(),
                     d.flags,
