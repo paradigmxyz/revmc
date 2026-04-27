@@ -1,5 +1,6 @@
 use super::{EXIT_RESULT_OFFSET, EXIT_SP_OFFSET};
 use crate::{EvmContext, EvmStack, RawEvmCompilerFn};
+use core::ptr::NonNull;
 use revm_interpreter::InstructionResult;
 
 /// Entry trampoline: saves callee-saved registers, stores SP into
@@ -10,9 +11,9 @@ use revm_interpreter::InstructionResult;
 /// returns the `exit_result` stored in `EvmContext`.
 #[unsafe(naked)]
 pub(crate) unsafe extern "C" fn revmc_entry(
-    ecx: *mut EvmContext<'_>,
-    stack: *mut EvmStack,
-    stack_len: *mut usize,
+    ecx: NonNull<EvmContext<'_>>,
+    stack: NonNull<EvmStack>,
+    stack_len: NonNull<usize>,
     f: RawEvmCompilerFn,
 ) -> InstructionResult {
     // AAPCS64: x0=ecx, x1=stack, x2=stack_len, x3=f
