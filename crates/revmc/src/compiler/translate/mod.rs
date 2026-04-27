@@ -1024,7 +1024,9 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 self.push(msize);
             }
             op::GAS => {
-                let remaining = self.load_gas_remaining();
+                let addr = self.gas_remaining_addr();
+                let i64_type = self.bcx.type_int(64);
+                let remaining = self.bcx.load(i64_type, addr, "gas.remaining");
                 let remaining = self.bcx.zext(self.word_type, remaining);
                 self.push(remaining);
             }
@@ -1402,19 +1404,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         self.bcx.gep(self.i8_type, self.ecx, &[offset], "gas.remaining.addr")
     }
 
-    /// Loads the gas used.
-    fn load_gas_remaining(&mut self) -> B::Value {
-        let addr = self.gas_remaining_addr();
-        let i64_type = self.bcx.type_int(64);
-        self.bcx.load(i64_type, addr, "gas.remaining")
-    }
-
-    /// Stores the gas used.
-    fn store_gas_remaining(&mut self, value: B::Value) {
-        let addr = self.gas_remaining_addr();
-        self.bcx.store(value, addr);
-    }
-
     /// Saves the local `stack_len` to `stack_len_arg`.
     fn save_stack_len(&mut self) {
         let len = self.stack_len.load(&mut self.bcx, "stack_len");
@@ -1621,9 +1610,11 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
         // Modified from `Gas::record_cost`.
         // This can overflow the gas counters, which has to be adjusted for after the call.
-        let gas_remaining = self.load_gas_remaining();
+        let addr = self.gas_remaining_addr();
+        let i64_type = self.bcx.type_int(64);
+        let gas_remaining = self.bcx.load(i64_type, addr, "gas.remaining");
         let (res, overflow) = self.bcx.usub_overflow(gas_remaining, cost);
-        self.store_gas_remaining(res);
+        self.bcx.store(res, addr);
         self.build_check(overflow, InstructionResult::OutOfGas);
     }
 
