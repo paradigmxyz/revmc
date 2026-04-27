@@ -6,7 +6,11 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
-use core::{fmt, mem::MaybeUninit, ptr};
+use core::{
+    fmt,
+    mem::MaybeUninit,
+    ptr::{self, NonNull},
+};
 use revm_interpreter::{
     Gas, Host, InputsImpl, InstructionResult, Interpreter, InterpreterAction, InterpreterResult,
     SharedMemory,
@@ -18,6 +22,11 @@ use revm_primitives::{Address, B256, Bytes, Log, U256, hardfork::SpecId, ruint};
 mod arch;
 use arch::revmc_entry;
 pub use arch::revmc_exit;
+
+#[cfg(feature = "evm")]
+mod jit_evm;
+#[cfg(feature = "evm")]
+pub use jit_evm::JitEvm;
 
 /// Resume point for compiled EVM code after a CALL/CREATE suspension.
 ///
@@ -80,7 +89,7 @@ pub struct EvmContext<'a> {
     /// Input information (target address, caller, input data, call value).
     pub input: &'a mut InputsImpl,
     /// The gas.
-    pub gas: &'a mut Gas,
+    pub gas: Gas,
     /// The host.
     pub host: &'a mut dyn Host,
     /// The return action.
@@ -120,9 +129,9 @@ const _: () = {
     // Key fields accessed by JIT code
     assert!(offset_of!(EvmContext<'_>, memory) == 0);
     assert!(offset_of!(EvmContext<'_>, gas) == 16);
-    assert!(offset_of!(EvmContext<'_>, spec_id) == 65);
-    assert!(offset_of!(EvmContext<'_>, resume_at) == 72);
-    assert!(offset_of!(EvmContext<'_>, calldatasize) == 112);
+    assert!(offset_of!(EvmContext<'_>, spec_id) == 113);
+    assert!(offset_of!(EvmContext<'_>, resume_at) == 120);
+    assert!(offset_of!(EvmContext<'_>, calldatasize) == 160);
 };
 
 impl fmt::Debug for EvmContext<'_> {
@@ -152,7 +161,7 @@ impl<'a> EvmContext<'a> {
         let this = Self {
             memory: &mut interpreter.memory,
             input: &mut interpreter.input,
-            gas: &mut interpreter.gas,
+            gas: interpreter.gas,
             host,
             next_action: &mut interpreter.bytecode.action,
             return_data: interpreter.return_data.buffer(),
@@ -192,9 +201,9 @@ macro_rules! extern_revmc {
             $(
                 $(#[$attr])*
                 $vis fn $name(
-                    ecx: *mut $crate::EvmContext<'_>,
-                    stack: *mut $crate::EvmStack,
-                    stack_len: *mut usize,
+                    ecx: ::core::ptr::NonNull<$crate::EvmContext<'_>>,
+                    stack: ::core::ptr::NonNull<$crate::EvmStack>,
+                    stack_len: ::core::ptr::NonNull<usize>,
                 ) -> $crate::private::revm_interpreter::InstructionResult;
             )+
         }
@@ -207,9 +216,9 @@ macro_rules! extern_revmc {
 /// information.
 // When changing the signature, also update the corresponding declarations in `fn translate`.
 pub type RawEvmCompilerFn = unsafe extern "C" fn(
-    ecx: *mut EvmContext<'_>,
-    stack: *mut EvmStack,
-    stack_len: *mut usize,
+    ecx: NonNull<EvmContext<'_>>,
+    stack: NonNull<EvmStack>,
+    stack_len: NonNull<usize>,
 ) -> InstructionResult;
 
 /// An EVM bytecode function.
@@ -289,7 +298,7 @@ impl EvmCompilerFn {
         let (mut ecx, stack, stack_len) =
             EvmContext::from_interpreter_with_stack(interpreter, host);
         configure(&mut ecx);
-        let result = self.call(Some(stack), Some(stack_len), &mut ecx);
+        let result = self.call(stack, stack_len, &mut ecx);
 
         let resume_at = ecx.resume_at;
 
@@ -300,6 +309,7 @@ impl EvmCompilerFn {
         }
 
         let return_data_is_empty = ecx.return_data.is_empty();
+        interpreter.gas = ecx.gas;
 
         if return_data_is_empty {
             interpreter.return_data.0.clear();
@@ -321,13 +331,9 @@ impl EvmCompilerFn {
     /// Calls the function.
     ///
     /// Arguments:
-    /// - `stack`: Pointer to the stack. Must be `Some` if `local_stack` is set to `false`, or if
-    ///   the bytecode may suspend (contains `CALL`/`CREATE`-family opcodes).
-    /// - `stack_len`: Pointer to the stack length. Must be `Some` if `inspect_stack` is set to
-    ///   `true`, or if the bytecode may suspend.
+    /// - `stack`: The stack buffer.
+    /// - `stack_len`: The stack length.
     /// - `ecx`: The context object.
-    ///
-    /// These conditions are enforced at runtime if `debug_assertions` is set to `true`.
     ///
     /// Use of this method is discouraged, as setup and cleanup need to be done manually.
     ///
@@ -337,11 +343,11 @@ impl EvmCompilerFn {
     #[inline]
     pub unsafe fn call(
         self,
-        stack: Option<&mut EvmStack>,
-        stack_len: Option<&mut usize>,
+        stack: &mut EvmStack,
+        stack_len: &mut usize,
         ecx: &mut EvmContext<'_>,
     ) -> InstructionResult {
-        revmc_entry(ecx, option_as_mut_ptr(stack), option_as_mut_ptr(stack_len), self.0)
+        revmc_entry(NonNull::from(ecx), NonNull::from(stack), NonNull::from(stack_len), self.0)
     }
 
     /// Same as [`call`](Self::call) but with `#[inline(never)]`.
@@ -354,8 +360,8 @@ impl EvmCompilerFn {
     #[inline(never)]
     pub unsafe fn call_noinline(
         self,
-        stack: Option<&mut EvmStack>,
-        stack_len: Option<&mut usize>,
+        stack: &mut EvmStack,
+        stack_len: &mut usize,
         ecx: &mut EvmContext<'_>,
     ) -> InstructionResult {
         self.call(stack, stack_len, ecx)
@@ -795,14 +801,6 @@ impl EvmWord {
     }
 }
 
-#[inline(always)]
-fn option_as_mut_ptr<T>(opt: Option<&mut T>) -> *mut T {
-    match opt {
-        Some(ref_) => ref_,
-        None => ptr::null_mut(),
-    }
-}
-
 // Macro re-exports.
 // Not public API.
 #[doc(hidden)]
@@ -830,9 +828,9 @@ mod tests {
 
     #[unsafe(no_mangle)]
     extern "C" fn __test_fn(
-        _ecx: *mut EvmContext<'_>,
-        _stack: *mut EvmStack,
-        _stack_len: *mut usize,
+        _ecx: NonNull<EvmContext<'_>>,
+        _stack: NonNull<EvmStack>,
+        _stack_len: NonNull<usize>,
     ) -> InstructionResult {
         InstructionResult::Stop
     }

@@ -1,27 +1,27 @@
 // revmc-specific code: compilation, handler integration, and test orchestration.
 
 use crate::runner::{
-    check_evm_execution, execute_test_suite, skip_test, TestError, TestErrorKind, TestRunnerState,
+    TestError, TestErrorKind, TestRunnerState, check_evm_execution, execute_test_suite, skip_test,
 };
 use dashmap::DashMap;
-use revm_context::{block::BlockEnv, cfg::CfgEnv, tx::TxEnv, Context};
+use revm_context::{Context, block::BlockEnv, cfg::CfgEnv, tx::TxEnv};
 use revm_context_interface::result::{EVMError, HaltReason, InvalidTransaction};
 use revm_database::{self as database, bal::EvmDatabaseError};
 use revm_database_interface::{DatabaseCommit, EmptyDB};
 use revm_handler::{
     EvmTr, FrameResult, Handler, ItemOrResult, MainBuilder, MainContext, MainnetEvm,
 };
-use revm_primitives::{hardfork::SpecId, keccak256, B256, U256};
+use revm_primitives::{B256, U256, hardfork::SpecId, keccak256};
 use revm_statetest_types::{SpecName, TestSuite, TestUnit};
-use revmc::{shared_library_path, EvmCompiler, EvmCompilerFn, EvmLlvmBackend, Linker};
+use revmc::{EvmCompiler, EvmCompilerFn, EvmLlvmBackend, Linker, shared_library_path};
 use std::{
     cell::RefCell,
     collections::HashMap,
     mem::ManuallyDrop,
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc, Barrier, Mutex, OnceLock,
+        atomic::{AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -790,13 +790,25 @@ pub fn run(
         let thread = std::thread::Builder::new()
             .name(format!("runner-{i}"))
             .spawn(move || {
-                let result =
-                    run_test_worker(state, keep_going, mode, cache.as_deref(), backend.as_ref());
+                // Catch panics so we always reach `barrier.wait()` below; otherwise a
+                // panicking worker would never advance the barrier and the remaining
+                // workers would deadlock waiting for it. Also flips the shared `stop`
+                // flag so siblings exit promptly instead of finishing the whole queue.
+                let stop = state.stop.clone();
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    run_test_worker(state, keep_going, mode, cache.as_deref(), backend.as_ref())
+                }));
+                if result.is_err() {
+                    stop.store(true, Ordering::SeqCst);
+                }
                 // Wait for all threads before exiting. Each thread holds a thread-local
                 // LLVM context that is destroyed on thread exit; concurrent context
                 // disposal crashes LLVM.
                 barrier.wait();
-                result
+                match result {
+                    Ok(r) => r,
+                    Err(payload) => std::panic::resume_unwind(payload),
+                }
             })
             .unwrap();
 

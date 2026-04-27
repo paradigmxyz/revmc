@@ -19,10 +19,9 @@ impl<I: Idx, T: Hash + Eq, S: BuildHasher + Default> Default for Interner<I, T, 
 
 impl<I: Idx, T: Hash + Eq, S: BuildHasher + Default> Interner<I, T, S> {
     pub(crate) fn new() -> Self {
-        Self { set: IndexSet::default(), _marker: std::marker::PhantomData }
+        Self::with_capacity(0)
     }
 
-    #[allow(dead_code)]
     pub(crate) fn with_capacity(capacity: usize) -> Self {
         Self {
             set: IndexSet::with_capacity_and_hasher(capacity, S::default()),

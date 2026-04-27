@@ -105,6 +105,9 @@ pub struct EvmCompiler<B: Backend> {
 
     #[debug(skip)]
     remarks: Remarks,
+    /// Function sizes accumulated across all `jit_function`/`write_object` calls
+    /// in the current finalize cycle. Reset by `clear` / `clear_ir`.
+    compiled_sizes: Vec<(String, usize)>,
     finalized: bool,
 }
 
@@ -132,6 +135,7 @@ impl<B: Backend> EvmCompiler<B> {
             dump_unopt_assembly: false,
             compiler_gas_limit: crate::bytecode::DEFAULT_COMPILER_GAS_LIMIT,
             remarks: Remarks::default(),
+            compiled_sizes: Vec::new(),
             finalized: false,
         }
     }
@@ -467,8 +471,9 @@ impl<B: Backend> EvmCompiler<B> {
             self.backend.jit_function(id)?
         };
         debug_assert!(addr != 0);
+        self.record_compiled_sizes();
         if let Some(dump_dir) = &self.dump_dir() {
-            self.append_jit_remarks(dump_dir);
+            self.dump_remarks(dump_dir)?;
         }
         Ok(EvmCompilerFn::new(unsafe { std::mem::transmute::<usize, RawEvmCompilerFn>(addr) }))
     }
@@ -486,7 +491,14 @@ impl<B: Backend> EvmCompiler<B> {
     pub fn write_object<W: io::Write>(&mut self, w: W) -> Result<()> {
         ensure!(self.is_aot(), "cannot write AOT object during JIT compilation");
         self.finalize()?;
-        self.backend.write_object(w)
+        {
+            let _t = self.remarks.time(|r| &r.codegen);
+            self.backend.write_object(w)?;
+        }
+        if let Some(dump_dir) = &self.dump_dir() {
+            self.dump_remarks(dump_dir)?;
+        }
+        Ok(())
     }
 
     /// (JIT) Frees the memory associated with a single function.
@@ -512,6 +524,7 @@ impl<B: Backend> EvmCompiler<B> {
     pub fn clear_ir(&mut self) -> Result<()> {
         self.builtins.clear();
         self.remarks.clear();
+        self.compiled_sizes.clear();
         self.finalized = false;
         self.backend.clear_ir()
     }
@@ -527,6 +540,7 @@ impl<B: Backend> EvmCompiler<B> {
     pub unsafe fn clear(&mut self) -> Result<()> {
         self.builtins.clear();
         self.remarks.clear();
+        self.compiled_sizes.clear();
         self.finalized = false;
         unsafe { self.backend.free_all_functions() }
     }
@@ -632,10 +646,6 @@ impl<B: Backend> EvmCompiler<B> {
         let finalize_total = &self.remarks.finalize_total;
         finalize_total.set(finalize_total.get() + finalize_start.elapsed());
 
-        if let Some(dump_dir) = &dump_dir {
-            self.dump_remarks(dump_dir)?;
-        }
-
         Ok(())
     }
 
@@ -670,7 +680,7 @@ impl<B: Backend> EvmCompiler<B> {
 
         // Pointer argument attributes.
         for &(i, size, align) in ptr_attrs {
-            let attrs = default_attrs::for_sized_ptr((size, align));
+            let attrs = default_attrs::for_sized_ref((size, align));
             for attr in attrs {
                 let loc = FunctionAttributeLocation::Param(i as _);
                 bcx.add_function_attribute(None, attr, loc);
@@ -760,28 +770,33 @@ total:      {total:>11.3?}
             }
         }
 
+        // Cumulative JIT code sizes (across all jit_function calls in this finalize cycle).
+        if !self.compiled_sizes.is_empty() {
+            let total: usize = self.compiled_sizes.iter().map(|(_, s)| *s).sum();
+            writeln!(w)?;
+            writeln!(w, "JIT code sizes (estimated)")?;
+            writeln!(w, "==========================")?;
+            for (name, size) in &self.compiled_sizes {
+                writeln!(w, "{name}: {}", format_bytes(*size))?;
+            }
+            if self.compiled_sizes.len() > 1 {
+                writeln!(w, "total: {}", format_bytes(total))?;
+            }
+        }
+
         w.flush()?;
         Ok(())
     }
 
-    fn append_jit_remarks(&self, dump_dir: &Path) {
-        let sizes = self.backend.function_sizes();
-        if sizes.is_empty() {
-            return;
-        }
-        let remarks_path = dump_dir.join("remarks.txt");
-        let Ok(mut file) = fs::OpenOptions::new().append(true).open(&remarks_path) else {
-            return;
-        };
-        let total: usize = sizes.iter().map(|(_, s)| *s).sum();
-        let _ = writeln!(file);
-        let _ = writeln!(file, "JIT code sizes (estimated)");
-        let _ = writeln!(file, "==========================");
-        for (name, size) in &sizes {
-            let _ = writeln!(file, "{name}: {}", format_bytes(*size));
-        }
-        if sizes.len() > 1 {
-            let _ = writeln!(file, "total: {}", format_bytes(total));
+    /// Pull the latest compiled function sizes from the backend and merge them into
+    /// `compiled_sizes`, deduplicating by name (later entries overwrite earlier ones).
+    fn record_compiled_sizes(&mut self) {
+        for (name, size) in self.backend.function_sizes() {
+            if let Some(slot) = self.compiled_sizes.iter_mut().find(|(n, _)| *n == name) {
+                slot.1 = size;
+            } else {
+                self.compiled_sizes.push((name, size));
+            }
         }
     }
 

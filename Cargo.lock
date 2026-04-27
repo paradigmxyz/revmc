@@ -3201,8 +3201,13 @@ dependencies = [
 name = "revmc-context"
 version = "0.1.0"
 dependencies = [
+ "revm-context",
+ "revm-context-interface",
+ "revm-handler",
+ "revm-inspector",
  "revm-interpreter",
  "revm-primitives",
+ "revm-state",
  "ruint",
 ]
 
@@ -3258,7 +3263,7 @@ dependencies = [
 
 [[package]]
 name = "revmc-statetest"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "alloy-rlp",
  "alloy-trie",

@@ -1,9 +1,9 @@
 use std::convert::Infallible;
 
-use alloy_trie::{root::storage_root_unhashed, HashBuilder, Nibbles, TrieAccount};
+use alloy_trie::{HashBuilder, Nibbles, TrieAccount, root::storage_root_unhashed};
 use revm_context_interface::result::{EVMError, ExecutionResult, HaltReason, InvalidTransaction};
-use revm_database::{bal::EvmDatabaseError, EmptyDB, PlainAccount, State};
-use revm_primitives::{keccak256, Address, Log, B256};
+use revm_database::{EmptyDB, PlainAccount, State, bal::EvmDatabaseError};
+use revm_primitives::{Address, B256, Log, keccak256};
 
 pub struct TestValidationResult {
     pub logs_root: B256,
@@ -38,7 +38,7 @@ pub fn state_merkle_trie_root<'a>(
             let storage_root = storage_root_unhashed(
                 acc.storage
                     .iter()
-                    .filter(|(_k, &v)| !v.is_zero())
+                    .filter(|(_k, v)| !v.is_zero())
                     .map(|(k, v)| (B256::from(*k), *v)),
             );
             (
