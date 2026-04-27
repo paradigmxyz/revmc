@@ -31,6 +31,7 @@ pub(super) struct FcxConfig {
     pub(super) inspect_stack: bool,
     pub(super) stack_bound_checks: bool,
     pub(super) gas_metering: bool,
+    pub(super) force_out_of_gas: bool,
 }
 
 impl Default for FcxConfig {
@@ -43,6 +44,7 @@ impl Default for FcxConfig {
             inspect_stack: false,
             stack_bound_checks: true,
             gas_metering: true,
+            force_out_of_gas: false,
         }
     }
 }
@@ -464,7 +466,11 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         // Finalize the return block.
         fx.bcx.switch_to_block(fx.return_block.unwrap());
         if !fx.incoming_returns.is_empty() {
-            let return_value = fx.bcx.phi(fx.i8_type, &fx.incoming_returns);
+            let return_value = if config.force_out_of_gas {
+                fx.bcx.iconst(fx.i8_type, InstructionResult::OutOfGas as i64)
+            } else {
+                fx.bcx.phi(fx.i8_type, &fx.incoming_returns)
+            };
             if config.inspect_stack {
                 fx.copy_stack_to_arg();
                 fx.save_stack_len();

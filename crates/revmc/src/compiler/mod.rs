@@ -414,6 +414,21 @@ impl<B: Backend> EvmCompiler<B> {
         self.config.gas_metering = yes;
     }
 
+    /// Sets whether all return paths in the JIT-compiled function should yield
+    /// [`OutOfGas`](crate::interpreter::InstructionResult::OutOfGas) instead of their normal
+    /// [`InstructionResult`](crate::interpreter::InstructionResult).
+    ///
+    /// Useful for benchmarking the cost of return-value materialization and the phi node merging
+    /// every return path through.
+    ///
+    /// Note that this changes program behavior: the function will report `OutOfGas` for every
+    /// exit, including normal `STOP`/`RETURN`/`REVERT`.
+    ///
+    /// Defaults to `false`.
+    pub fn force_out_of_gas(&mut self, yes: bool) {
+        self.config.force_out_of_gas = yes;
+    }
+
     /// Sets custom gas parameters.
     ///
     /// Overrides the default gas schedule derived from the spec_id.

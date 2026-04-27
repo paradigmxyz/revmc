@@ -79,6 +79,9 @@ pub(crate) struct RunArgs {
     no_gas: bool,
     #[arg(long)]
     no_len_checks: bool,
+    /// Force all return paths to yield `OutOfGas`.
+    #[arg(long)]
+    force_out_of_gas: bool,
     /// Inspect the stack after the function has been executed.
     #[arg(long)]
     inspect_stack: bool,
@@ -154,6 +157,7 @@ impl RunArgs {
             compiler.gas_metering(!self.no_gas);
             unsafe { compiler.stack_bound_checks(!self.no_len_checks) };
             compiler.debug_assertions(self.debug_assertions);
+            compiler.force_out_of_gas(self.force_out_of_gas);
 
             compiler.set_module_name(name);
             if let Some(dump_dir) = compiler.dump_dir() {
