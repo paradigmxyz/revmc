@@ -41,7 +41,6 @@ revmc-backend = { version = "0.1.0", path = "crates/revmc-backend", default-feat
 revmc-build = { version = "0.1.0", path = "crates/revmc-build", default-features = false }
 revmc-builtins = { version = "0.1.0", path = "crates/revmc-builtins", default-features = false }
 revmc-context = { version = "0.1.0", path = "crates/revmc-context", default-features = false }
-revmc-evm = { version = "0.1.0", path = "crates/revmc-evm", default-features = false }
 revmc-llvm = { version = "0.1.0", path = "crates/revmc-llvm", default-features = false }
 
 alloy-primitives = { version = "1.5", default-features = false }

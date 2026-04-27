@@ -17,10 +17,23 @@ exclude.workspace = true
 workspace = true
 
 [dependencies]
+revm-context.workspace = true
+revm-context-interface.workspace = true
+revm-handler.workspace = true
+revm-inspector.workspace = true
 revm-interpreter.workspace = true
 revm-primitives.workspace = true
+revm-state.workspace = true
 ruint.workspace = true
 
 [features]
 default = ["std"]
-std = ["revm-interpreter/std", "revm-primitives/std"]
+std = [
+    "revm-context/std",
+    "revm-context-interface/std",
+    "revm-handler/std",
+    "revm-inspector/std",
+    "revm-interpreter/std",
+    "revm-primitives/std",
+    "revm-state/std",
+]

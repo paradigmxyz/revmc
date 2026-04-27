@@ -15,9 +15,6 @@ pub use compiler::{CompileTimings, EvmCompiler, EvmCompilerInput};
 mod linker;
 pub use linker::{Linker, shared_library_path};
 
-#[doc(inline)]
-pub use revmc_evm::JitEvm;
-
 /// Internal tests and testing utilities. Not public API.
 #[cfg(any(test, feature = "__fuzzing"))]
 pub mod tests;

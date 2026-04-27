@@ -12,8 +12,7 @@ use revm_context::{BlockEnv, CfgEnv, Context, Journal, TxEnv};
 use revm_database_interface::Database;
 use revm_handler::{MainBuilder, MainnetEvm};
 use revm_primitives::{B256, hardfork::SpecId, hex, map::B256Map};
-use revmc_context::RawEvmCompilerFn;
-use revmc_evm::JitEvm;
+use revmc_context::{JitEvm, RawEvmCompilerFn};
 
 include!("./common.rs");
 
