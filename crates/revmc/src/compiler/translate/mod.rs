@@ -316,24 +316,16 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         if config.debug_assertions {
             fx.pointer_panic_with_bool(true, ecx, "EVM context pointer", "");
             fx.pointer_panic_with_bool(
-                !local_stack || bytecode.may_suspend(),
+                bytecode.stack_observed(),
                 sp_arg,
                 "stack pointer",
-                if !local_stack {
-                    "local stack is disabled"
-                } else {
-                    "bytecode suspends execution"
-                },
+                "stack is observed",
             );
             fx.pointer_panic_with_bool(
-                config.inspect_stack || bytecode.may_suspend(),
+                bytecode.stack_observed(),
                 stack_len_arg,
                 "stack length pointer",
-                if config.inspect_stack {
-                    "stack inspection is enabled"
-                } else {
-                    "bytecode suspends execution"
-                },
+                "stack is observed",
             );
 
             // Assert that the runtime spec_id matches the compilation spec_id.

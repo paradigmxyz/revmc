@@ -468,6 +468,12 @@ impl<'a> Bytecode<'a> {
         self.may_suspend
     }
 
+    /// Returns `true` if the stack argument's contents are observed by the caller after the
+    /// function returns (either through `inspect_stack` mode or because execution may suspend).
+    pub(crate) fn stack_observed(&self) -> bool {
+        self.config.contains(AnalysisConfig::INSPECT_STACK) || self.may_suspend()
+    }
+
     /// Returns `true` if any dead-block redirects exist.
     pub(crate) fn has_redirects(&self) -> bool {
         !self.redirects.is_empty()

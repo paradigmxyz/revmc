@@ -2072,6 +2072,7 @@ fn convert_attribute(bcx: &EvmLlvmBuilder<'_>, attr: revmc_backend::Attribute) -
         OurAttr::Writable => ("writable", AttrValue::Enum(0)),
         // memory(argmem: readwrite) = ModRef(3) << ArgMem(0) = 3.
         OurAttr::ArgMemOnly => ("memory", AttrValue::Enum(3)),
+        OurAttr::DeadOnReturn => ("dead_on_return", AttrValue::Enum(0)),
 
         OurAttr::Initializes(size) => {
             return cpp::create_initializes_attr(bcx.cx, 0, size as i64);

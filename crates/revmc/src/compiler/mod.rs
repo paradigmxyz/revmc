@@ -571,7 +571,8 @@ impl<B: Backend> EvmCompiler<B> {
         }
 
         let linkage = Linkage::Public;
-        let (bcx, id) = Self::make_builder(&mut self.backend, &self.config, name, linkage)?;
+        let (bcx, id) =
+            Self::make_builder(&mut self.backend, &self.config, bytecode, name, linkage)?;
         FunctionCx::translate(bcx, self.config, &mut self.builtins, bytecode)?;
         Ok(id)
     }
@@ -643,6 +644,7 @@ impl<B: Backend> EvmCompiler<B> {
     fn make_builder<'a>(
         backend: &'a mut B,
         config: &FcxConfig,
+        bytecode: &Bytecode<'_>,
         name: &str,
         linkage: Linkage,
     ) -> Result<(B::Builder<'a>, B::FuncId)> {
@@ -675,6 +677,16 @@ impl<B: Backend> EvmCompiler<B> {
                 let loc = FunctionAttributeLocation::Param(i as _);
                 bcx.add_function_attribute(None, attr, loc);
             }
+        }
+
+        // The stack argument's contents are dead after return when the stack is not observed,
+        // so the caller can elide any stores to the buffer.
+        if !bytecode.stack_observed() {
+            bcx.add_function_attribute(
+                None,
+                Attribute::DeadOnReturn,
+                FunctionAttributeLocation::Param(1),
+            );
         }
 
         Ok((bcx, id))
