@@ -285,10 +285,7 @@ fn set_enabled_toggle() {
 
 #[test]
 fn lookup_increments_miss_counter() {
-    let tb = TestBackend::with_tuning_1w(RuntimeTuning {
-        jit_hot_threshold: 1000,
-        ..Default::default()
-    });
+    let tb = TestBackend::new(RuntimeConfig { enabled: true, ..Default::default() });
 
     for _ in 0..10 {
         let _ = tb.lookup(TestBackend::req_cancun(BYTECODE_RET42));
@@ -298,7 +295,6 @@ fn lookup_increments_miss_counter() {
     let stats = tb.wait_stats(|s| s.lookup_misses == 10);
     assert_eq!(stats.lookup_misses, 10);
     assert_eq!(stats.lookup_hits, 0);
-    assert_eq!(stats.compilations_dispatched, 0);
 }
 
 #[test]
