@@ -58,6 +58,74 @@ oxc_index::define_nonmax_u32_index_type! {
 }
 impl_index_display!(U256Idx, "{}");
 
+/// Type alias for the bytecode-level U256 constant interner.
+pub(crate) type U256Interner = Interner<U256Idx, U256, alloy_primitives::map::FbBuildHasher<32>>;
+
+/// Compact handle to a `U256` constant.
+///
+/// Either a `u32` inline value or a reference into a [`U256Interner`].
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) struct U256Imm(u32);
+
+impl U256Imm {
+    /// High bit set means the handle is an inline `u8` value.
+    const INLINE_TAG: u32 = 1 << 31;
+
+    /// Decodes a handle previously produced by [`Self::to_raw`].
+    #[inline]
+    pub(crate) fn from_raw(raw: u32) -> Self {
+        Self(raw)
+    }
+
+    /// Encodes this handle as a `u32` for storage in [`InstData::data`].
+    #[inline]
+    pub(crate) fn to_raw(self) -> u32 {
+        self.0
+    }
+
+    /// Constructs a handle for `value`, inlining `u8`-sized values and otherwise interning.
+    #[inline]
+    pub(crate) fn new(value: U256, interner: &mut U256Interner) -> Self {
+        if let Ok(x) = u32::try_from(value)
+            && x & Self::INLINE_TAG == 0
+        {
+            Self(Self::INLINE_TAG | x)
+        } else {
+            let idx = interner.intern(value).index() as u32;
+            debug_assert!(
+                idx & Self::INLINE_TAG == 0,
+                "U256 interner exceeded 2^31 entries; bump `U256Imm` encoding",
+            );
+            Self(idx)
+        }
+    }
+
+    /// Returns the underlying `U256` value.
+    #[inline]
+    pub(crate) fn get(self, interner: &U256Interner) -> U256 {
+        if self.0 & Self::INLINE_TAG != 0 {
+            U256::from(self.0 & !Self::INLINE_TAG)
+        } else {
+            *interner.get(U256Idx::from_usize(self.0 as usize))
+        }
+    }
+
+    /// Returns the inline `u32` value, if any.
+    #[inline]
+    pub(crate) fn get_inline(self) -> Option<u32> {
+        (self.0 & Self::INLINE_TAG != 0).then_some(self.0 & !Self::INLINE_TAG)
+    }
+}
+
+impl std::fmt::Debug for U256Imm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.get_inline() {
+            Some(x) => write!(f, "U256Imm::Inline({x})"),
+            None => write!(f, "U256Imm::Idx({})", self.0),
+        }
+    }
+}
+
 bitflags::bitflags! {
     /// Controls which analysis passes run during [`Bytecode::analyze`].
     #[derive(Clone, Copy, Debug)]
@@ -104,9 +172,14 @@ pub struct Bytecode<'a> {
     may_suspend: bool,
     /// Mapping from program counter to instruction.
     pc_to_inst: FxHashMap<u32, Inst>,
+    /// Mapping from instruction index to its program counter (`code[pc]` is the opcode byte).
+    ///
+    /// `JUMPDEST` and `PC` mirror this in `data` for hot codegen access; everything else
+    /// reads it through [`Bytecode::pc`].
+    inst_to_pc: IndexVec<Inst, u32>,
 
     /// Deduplicated constant pool for U256 values.
-    u256_interner: RefCell<Interner<U256Idx, U256, alloy_primitives::map::FbBuildHasher<32>>>,
+    u256_interner: RefCell<U256Interner>,
 
     /// Per-instruction operand snapshots computed by block analysis.
     snapshots: Snapshots,
@@ -155,19 +228,20 @@ impl<'a> Bytecode<'a> {
     fn new_mono(code: Cow<'a, [u8]>, spec_id: SpecId, gas_params: Option<GasParams>) -> Self {
         let gas_params = gas_params.unwrap_or_else(|| GasParams::new_spec(spec_id));
         let mut insts = IndexVec::with_capacity(code.len() + 8);
+        let mut inst_to_pc = IndexVec::with_capacity(code.len() + 8);
         let mut jumpdests = BitVec::repeat(false, code.len());
         let mut pc_to_inst = FxHashMap::with_capacity_and_hasher(code.len(), Default::default());
+        let mut u256_interner = U256Interner::new();
         let op_infos = op_info_map(spec_id);
         let mut iter = OpcodesIter::new(&code, spec_id).with_pc();
         while let Some((pc, Opcode { opcode, immediate })) = iter.next() {
             let inst: Inst = insts.next_idx();
             pc_to_inst.insert(pc as u32, inst);
+            inst_to_pc.push(pc as u32);
 
             if opcode == op::JUMPDEST {
                 jumpdests.set(pc, true)
             }
-
-            let data = 0;
 
             let mut flags = InstFlags::empty();
             let info = op_infos[opcode as usize];
@@ -183,6 +257,33 @@ impl<'a> Bytecode<'a> {
                 (info.base_gas(), compute_stack_io(opcode, immediate))
             };
 
+            let data = match opcode {
+                op::PUSH0..=op::PUSH32 | op::DUPN | op::SWAPN | op::EXCHANGE => {
+                    let imm_len = min_imm_len(opcode) as usize;
+                    // `OpcodesIter` returns `None` for truncated EOF immediates; recover
+                    // the available bytes directly from `code` and right-pad with zeros
+                    // per EVM spec.
+                    let start = pc + 1;
+                    let avail = code.get(start..).map(|s| &s[..s.len().min(imm_len)]);
+                    let value = match avail {
+                        Some(slice) if slice.len() == imm_len => U256::from_be_slice(slice),
+                        Some(slice) if !slice.is_empty() => {
+                            let mut padded = [0u8; 32];
+                            padded[..slice.len()].copy_from_slice(slice);
+                            U256::from_be_slice(&padded[..imm_len])
+                        }
+                        _ => U256::ZERO,
+                    };
+                    U256Imm::new(value, &mut u256_interner).to_raw()
+                }
+                op::JUMPDEST | op::PC => {
+                    let pc = pc as u32;
+                    debug_assert!(pc & InstData::JUMPDEST_REACHABLE == 0, "pc too large");
+                    pc
+                }
+                _ => 0,
+            };
+
             let gas_section = GasSection::default();
             let stack_section = StackSection::default();
 
@@ -192,7 +293,6 @@ impl<'a> Bytecode<'a> {
                 base_gas,
                 stack_io,
                 data,
-                pc: pc as u32,
                 gas_section,
                 stack_section,
             });
@@ -215,6 +315,7 @@ impl<'a> Bytecode<'a> {
         if insts.last().is_none_or(|last| last.can_fall_through()) {
             trace!("adding STOP padding");
             insts.push(InstData::new(op::STOP));
+            inst_to_pc.push(code.len() as u32);
         }
 
         Self {
@@ -226,9 +327,10 @@ impl<'a> Bytecode<'a> {
             has_dynamic_jumps: false,
             may_suspend: false,
             snapshots: Snapshots::default(),
-            u256_interner: RefCell::new(Interner::new()),
+            u256_interner: RefCell::new(u256_interner),
             multi_jump_targets: FxHashMap::default(),
             pc_to_inst,
+            inst_to_pc,
             inst_lines: RefCell::new(IndexVec::new()),
             redirects: FxHashMap::default(),
             cfg: Cfg::default(),
@@ -270,11 +372,10 @@ impl<'a> Bytecode<'a> {
         &mut self.insts[inst]
     }
 
-    /// Returns the opcode at the given instruction counter.
+    /// Returns the opcode + immediate slice for the given instruction.
     #[inline]
-    #[allow(dead_code)]
     pub(crate) fn opcode(&self, inst: Inst) -> Opcode<'_> {
-        self.inst(inst).to_op_in(self)
+        Opcode { opcode: self.inst(inst).opcode, immediate: self.get_imm(inst) }
     }
 
     /// Returns an iterator over the instructions.
@@ -409,16 +510,17 @@ impl<'a> Bytecode<'a> {
         analysis.finish(self);
     }
 
-    /// Returns the immediate value of the given instruction data, if any.
+    /// Returns the immediate value of the given instruction, if any.
     ///
     /// For truncated immediates at EOF, returns the available bytes (which may be shorter than
     /// `imm_len`). Returns `None` only when `imm_len` is 0 or `start` is completely out of bounds.
-    pub(crate) fn get_imm(&self, data: &InstData) -> Option<&[u8]> {
+    pub(crate) fn get_imm(&self, inst: Inst) -> Option<&[u8]> {
+        let data = self.inst(inst);
         let imm_len = data.imm_len() as usize;
         if imm_len == 0 {
             return None;
         }
-        let start = data.pc as usize + 1;
+        let start = self.pc(inst) as usize + 1;
         let end = (start + imm_len).min(self.code.len());
         if start >= end {
             return None;
@@ -426,31 +528,24 @@ impl<'a> Bytecode<'a> {
         Some(&self.code[start..end])
     }
 
-    /// Returns the value of a PUSH instruction, right-padding truncated EOF immediates with zeros
-    /// per EVM spec.
-    pub(crate) fn get_push_value(&self, data: &InstData) -> U256 {
-        match self.get_imm(data) {
-            Some(slice) => {
-                let imm_len = data.imm_len() as usize;
-                if slice.len() == imm_len {
-                    U256::from_be_slice(slice)
-                } else {
-                    let mut padded = [0u8; 32];
-                    padded[..slice.len()].copy_from_slice(slice);
-                    U256::from_be_slice(&padded[..imm_len])
-                }
-            }
-            None => U256::ZERO,
-        }
+    /// Returns the program counter (offset into the original bytecode) of the given instruction.
+    #[inline]
+    pub(crate) fn pc(&self, inst: Inst) -> u32 {
+        self.inst_to_pc[inst]
     }
 
-    /// Returns the first immediate byte, defaulting to `0` if truncated or missing.
-    ///
-    /// This matches upstream `revm-bytecode` legacy analysis which zero-pads incomplete
-    /// trailing immediates.
-    pub(crate) fn get_u8_imm(&self, data: &InstData) -> u8 {
-        let start = data.pc as usize + 1;
-        self.code.get(start).copied().unwrap_or(0)
+    /// Returns the value of a PUSH instruction, right-padding truncated EOF immediates with zeros
+    /// per EVM spec.
+    #[cfg(test)]
+    pub(crate) fn get_push_value(&self, data: &InstData) -> U256 {
+        debug_assert!(matches!(data.opcode, op::PUSH0..=op::PUSH32));
+        data.imm().get(&self.u256_interner.borrow())
+    }
+
+    /// Returns the length of the original bytecode in bytes.
+    #[inline]
+    pub(crate) fn codesize(&self) -> usize {
+        self.code.len()
     }
 
     /// Returns `true` if the given program counter is a valid jump destination.
@@ -487,11 +582,6 @@ impl<'a> Bytecode<'a> {
         }
     }
 
-    /// Interns a U256 constant, returning its deduplicated index.
-    pub(crate) fn intern_u256(&self, value: U256) -> U256Idx {
-        self.u256_interner.borrow_mut().intern(value)
-    }
-
     /// Returns the multi-target jump table entry for the given instruction, if any.
     pub(crate) fn multi_jump_targets(&self, inst: Inst) -> Option<&[Inst]> {
         self.multi_jump_targets.get(&inst).map(|v| v.as_slice())
@@ -504,18 +594,17 @@ impl<'a> Bytecode<'a> {
     #[allow(dead_code)]
     pub(crate) fn const_operand(&self, inst: Inst, depth: usize) -> Option<U256> {
         let snap = &self.snapshots.inputs[inst];
-        let idx = snap.get(snap.len().checked_sub(1 + depth)?)?.as_const()?;
-        Some(*self.u256_interner.borrow().get(idx))
+        let imm = snap.get(snap.len().checked_sub(1 + depth)?)?.as_const()?;
+        Some(imm.get(&self.u256_interner.borrow()))
     }
 
     /// Returns the known constant output value of the given instruction.
     ///
     /// Returns `None` if the output is unknown, the instruction has no output, or the
     /// analysis didn't cover this instruction.
-    #[allow(dead_code)]
     pub(crate) fn const_output(&self, inst: Inst) -> Option<U256> {
-        let idx = self.snapshots.outputs[inst]?.as_const()?;
-        Some(*self.u256_interner.borrow().get(idx))
+        let imm = self.snapshots.outputs[inst]?.as_const()?;
+        Some(imm.get(&self.u256_interner.borrow()))
     }
 
     /// Logs per-opcode constant-input statistics at trace level.
@@ -680,8 +769,7 @@ impl<'a> Bytecode<'a> {
         let mut buf = String::from("top 5 longest blocks:");
         for (block, len) in &lens {
             let data = &self.cfg.blocks[*block];
-            let first = self.inst(data.insts.start);
-            let _ = write!(buf, "\n  {block} (pc={}, len={len})", first.pc);
+            let _ = write!(buf, "\n  {block} (pc={}, len={len})", self.pc(data.insts.start));
         }
         trace!("{buf}");
     }
@@ -732,16 +820,17 @@ pub(crate) struct InstData {
     ///
     /// This may not be the final/full gas cost of the opcode as it may also have a dynamic cost.
     base_gas: u16,
-    /// Stack inputs and outputs, decoded from the immediate for `DUPN`/`SWAPN`/`EXCHANGE`.
+    /// Stack inputs and outputs.
     stack_io: (u8, u8),
-    /// Instruction-specific data:
-    /// - if the instruction has immediate data, this is a packed offset+length into the bytecode;
-    /// - `JUMP{,I} && STATIC_JUMP in kind`: the jump target, `Instr`;
-    /// - `JUMPDEST`: `1` if the jump destination is reachable, `0` otherwise;
-    /// - otherwise: no meaning.
+    /// Instruction-specific data, populated at parse time and refined by analysis.
+    /// Interpretation depends on `opcode`; access via the typed methods on [`InstData`]:
+    /// - `PUSH0..=PUSH32`, `DUPN | SWAPN | EXCHANGE`: encoded [`U256Imm`].
+    /// - `PC`: program counter of this instruction.
+    /// - `JUMPDEST`: program counter in low 31 bits, reachable flag in high bit
+    ///   ([`InstData::JUMPDEST_REACHABLE`]).
+    /// - `JUMP | JUMPI` with [`InstFlags::STATIC_JUMP`]: target instruction index.
+    /// - otherwise: unused.
     pub(crate) data: u32,
-    /// The program counter, meaning `code[pc]` is this instruction's opcode.
-    pub(crate) pc: u32,
     /// The gas section this instruction belongs to.
     pub(crate) gas_section: GasSection,
     /// The stack section this instruction belongs to.
@@ -788,13 +877,6 @@ impl InstData {
         Opcode { opcode: self.opcode, immediate: None }
     }
 
-    /// Converts this instruction to a raw opcode in the given bytecode.
-    #[inline]
-    #[allow(dead_code)]
-    pub(crate) fn to_op_in<'a>(&self, bytecode: &'a Bytecode<'_>) -> Opcode<'a> {
-        Opcode { opcode: self.opcode, immediate: bytecode.get_imm(self) }
-    }
-
     /// Returns `true` if this instruction is a jump instruction (`JUMP`/`JUMPI`).
     #[inline]
     pub(crate) fn is_jump(&self) -> bool {
@@ -816,8 +898,71 @@ impl InstData {
 
     /// Returns `true` if this instruction is a reachable `JUMPDEST`.
     #[inline]
-    pub(crate) const fn is_reachable_jumpdest(&self, has_dynamic_jumps: bool) -> bool {
-        self.is_jumpdest() && (has_dynamic_jumps || self.data == 1)
+    pub(crate) fn is_reachable_jumpdest(&self, has_dynamic_jumps: bool) -> bool {
+        self.is_jumpdest() && (has_dynamic_jumps || self.is_jumpdest_reachable())
+    }
+
+    /// Returns the [`U256Imm`] of a `PUSH*`/`DUPN`/`SWAPN`/`EXCHANGE` instruction.
+    #[inline]
+    pub(crate) fn imm(&self) -> U256Imm {
+        debug_assert!(matches!(
+            self.opcode,
+            op::PUSH0..=op::PUSH32 | op::DUPN | op::SWAPN | op::EXCHANGE
+        ));
+        U256Imm::from_raw(self.data)
+    }
+
+    /// Returns the inline `u8` immediate of a `DUPN`/`SWAPN`/`EXCHANGE` instruction.
+    #[inline]
+    pub(crate) fn imm_byte(&self) -> u8 {
+        debug_assert!(matches!(self.opcode, op::DUPN | op::SWAPN | op::EXCHANGE));
+        // Parse-time encoding for these opcodes always produces an inline `u8`.
+        self.imm().get_inline().unwrap().try_into().unwrap()
+    }
+
+    /// Returns the program counter stored inline for a `PC` instruction.
+    #[inline]
+    pub(crate) fn pc_imm(&self) -> u32 {
+        debug_assert_eq!(self.opcode, op::PC);
+        self.data
+    }
+
+    /// High bit of `data` set when a `JUMPDEST` is a reachable static jump target.
+    pub(crate) const JUMPDEST_REACHABLE: u32 = 1 << 31;
+
+    /// Returns the program counter of a `JUMPDEST`.
+    #[inline]
+    pub(crate) fn jumpdest_pc(&self) -> u32 {
+        debug_assert_eq!(self.opcode, op::JUMPDEST);
+        self.data & !Self::JUMPDEST_REACHABLE
+    }
+
+    /// Returns `true` if this `JUMPDEST` is the target of a resolved static jump.
+    #[inline]
+    pub(crate) fn is_jumpdest_reachable(&self) -> bool {
+        debug_assert_eq!(self.opcode, op::JUMPDEST);
+        self.data & Self::JUMPDEST_REACHABLE != 0
+    }
+
+    /// Marks this `JUMPDEST` as a reachable static jump target.
+    #[inline]
+    pub(crate) fn set_jumpdest_reachable(&mut self) {
+        debug_assert_eq!(self.opcode, op::JUMPDEST);
+        self.data |= Self::JUMPDEST_REACHABLE;
+    }
+
+    /// Returns the static target of a `JUMP`/`JUMPI` with [`InstFlags::STATIC_JUMP`].
+    #[inline]
+    pub(crate) fn static_jump_target(&self) -> Inst {
+        debug_assert!(self.is_static_jump());
+        Inst::from_usize(self.data as usize)
+    }
+
+    /// Sets the static jump target. Caller must also set [`InstFlags::STATIC_JUMP`].
+    #[inline]
+    pub(crate) fn set_static_jump_target(&mut self, target: Inst) {
+        debug_assert!(self.is_jump());
+        self.data = target.index() as u32;
     }
 
     /// Returns `true` if this instruction starts a new stack section.
@@ -939,22 +1084,25 @@ mod tests {
         // EVM spec: missing bytes are zero, so the value is 0x4200.
         let code = [op::PUSH2, 0x42];
         let bc = Bytecode::test(&code);
-        let data = bc.inst(Inst::from_usize(0));
-        assert_eq!(bc.get_imm(data), Some([0x42].as_slice()));
+        let inst = Inst::from_usize(0);
+        let data = bc.inst(inst);
+        assert_eq!(bc.get_imm(inst), Some([0x42].as_slice()));
         assert_eq!(bc.get_push_value(data), U256::from(0x4200));
 
         // PUSH3 followed by two bytes — truncated at EOF.
         let code = [op::PUSH3, 0xAB, 0xCD];
         let bc = Bytecode::test(&code);
-        let data = bc.inst(Inst::from_usize(0));
-        assert_eq!(bc.get_imm(data), Some([0xAB, 0xCD].as_slice()));
+        let inst = Inst::from_usize(0);
+        let data = bc.inst(inst);
+        assert_eq!(bc.get_imm(inst), Some([0xAB, 0xCD].as_slice()));
         assert_eq!(bc.get_push_value(data), U256::from(0xABCD00));
 
         // PUSH1 with no immediate bytes at all.
         let code = [op::PUSH1];
         let bc = Bytecode::test(&code);
-        let data = bc.inst(Inst::from_usize(0));
-        assert_eq!(bc.get_imm(data), None);
+        let inst = Inst::from_usize(0);
+        let data = bc.inst(inst);
+        assert_eq!(bc.get_imm(inst), None);
         assert_eq!(bc.get_push_value(data), U256::ZERO);
 
         // Non-truncated PUSH2 — full immediate.

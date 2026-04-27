@@ -13,7 +13,7 @@
 //! ## Abstract domain
 //!
 //! Per-value lattice (ascending order):
-//! - `Const(U256Idx)` — a single known constant.
+//! - `Const(U256Imm)` — a single known constant.
 //! - `ConstSet(ConstSetIdx)` — multiple known constants (interned, sorted, deduplicated).
 //! - `Top` — reachable but unknown.
 //!
@@ -29,12 +29,11 @@
 //! incomplete information, ensuring that only sound jump targets are reported as resolved.
 
 use super::StackSection;
-use crate::bytecode::{Bytecode, Inst, InstFlags, Interner, U256Idx};
+use crate::bytecode::{Bytecode, Inst, InstFlags, Interner, U256Imm};
 use bitvec::vec::BitVec;
 use either::Either;
 use oxc_index::{IndexVec, index_vec};
 use revm_bytecode::opcode as op;
-use revm_primitives::U256;
 use smallvec::SmallVec;
 use std::{cmp::Ordering, collections::VecDeque, ops::Range};
 
@@ -72,7 +71,7 @@ impl Snapshots {
 /// Abstract value on the stack.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum AbsValue {
-    Const(U256Idx),
+    Const(U256Imm),
     /// Multiple known constant values (interned, sorted, deduplicated).
     ConstSet(ConstSetIdx),
     /// Top value (unknown concrete value).
@@ -82,7 +81,7 @@ pub(crate) enum AbsValue {
 
 impl AbsValue {
     /// Returns the single constant if this is `Const`, or `None` otherwise.
-    pub(crate) fn as_const(self) -> Option<U256Idx> {
+    pub(crate) fn as_const(self) -> Option<U256Imm> {
         match self {
             Self::Const(v) => Some(v),
             _ => None,
@@ -92,7 +91,7 @@ impl AbsValue {
 
 /// Constant-set interner used by the abstract interpreter.
 struct ConstSetInterner {
-    interner: Interner<ConstSetIdx, Box<[U256Idx]>>,
+    interner: Interner<ConstSetIdx, Box<[U256Imm]>>,
 }
 
 impl ConstSetInterner {
@@ -101,12 +100,12 @@ impl ConstSetInterner {
     }
 
     /// Returns the constants in the given set.
-    fn get(&self, idx: ConstSetIdx) -> &[U256Idx] {
+    fn get(&self, idx: ConstSetIdx) -> &[U256Imm] {
         self.interner.get(idx)
     }
 
     /// Returns the set of known constants for an abstract value, or `None` if `Top`.
-    fn abs_const_set<'a>(&'a self, val: &'a AbsValue) -> Option<&'a [U256Idx]> {
+    fn abs_const_set<'a>(&'a self, val: &'a AbsValue) -> Option<&'a [U256Imm]> {
         match val {
             AbsValue::Top => None,
             AbsValue::Const(v) => Some(std::slice::from_ref(v)),
@@ -115,7 +114,7 @@ impl ConstSetInterner {
     }
 
     /// Interns a sorted, deduplicated set and returns the corresponding `AbsValue`.
-    fn intern_set(&mut self, set: &[U256Idx]) -> AbsValue {
+    fn intern_set(&mut self, set: &[U256Imm]) -> AbsValue {
         match set.len() {
             0 => unreachable!("empty const set"),
             1 => AbsValue::Const(set[0]),
@@ -132,10 +131,10 @@ impl ConstSetInterner {
                 let a = self.abs_const_set(&a).unwrap();
                 let b = self.abs_const_set(&b).unwrap();
                 // Sorted merge with dedup.
-                let mut merged = SmallVec::<[U256Idx; 8]>::new();
+                let mut merged = SmallVec::<[U256Imm; 8]>::new();
                 let (mut i, mut j) = (0, 0);
                 while i < a.len() && j < b.len() {
-                    match a[i].index().cmp(&b[j].index()) {
+                    match a[i].cmp(&b[j]) {
                         Ordering::Less => {
                             merged.push(a[i]);
                             i += 1;
@@ -384,7 +383,7 @@ impl Bytecode<'_> {
                 })
                 && !is_adjacent
             {
-                trace!(%term_inst, %target_inst, pc = self.insts[term_inst].pc, "resolved non-adjacent jump");
+                trace!(%term_inst, %target_inst, pc = self.pc(term_inst), "resolved non-adjacent jump");
             }
 
             resolved.push((term_inst, target));
@@ -443,11 +442,11 @@ impl Bytecode<'_> {
                             op::JUMPDEST,
                             "block_analysis resolved to non-JUMPDEST"
                         );
-                        self.insts[target_inst].data = 1;
+                        self.insts[target_inst].set_jumpdest_reachable();
                     }
                     if targets.len() == 1 {
                         self.insts[jump_inst].flags |= InstFlags::STATIC_JUMP;
-                        self.insts[jump_inst].data = targets[0].index() as u32;
+                        self.insts[jump_inst].set_static_jump_target(targets[0]);
                         trace!(%jump_inst, target_inst = %targets[0], "resolved jump");
                     } else {
                         self.insts[jump_inst].flags |=
@@ -592,7 +591,7 @@ impl Bytecode<'_> {
                 }
             } else if term.is_static_jump()
                 && !term.flags.contains(InstFlags::INVALID_JUMP)
-                && let Some(target_block) = resolve(Inst::from_usize(term.data as usize))
+                && let Some(target_block) = resolve(term.static_jump_target())
             {
                 cfg.blocks[target_block].preds.push(bid);
                 cfg.blocks[bid].succs.push(target_block);
@@ -642,7 +641,7 @@ impl Bytecode<'_> {
                 Some(&operand) => self.resolve_jump_operand(operand, &const_sets),
                 None => {
                     // No snapshot means the block was never interpreted (unreachable).
-                    trace!(%jump_inst, pc = self.insts[jump_inst].pc, "jump in unreached block");
+                    trace!(%jump_inst, pc = self.pc(jump_inst), "jump in unreached block");
                     JumpTarget::Bottom
                 }
             };
@@ -675,8 +674,8 @@ impl Bytecode<'_> {
     /// Resolves a jump target from the snapshot operand recorded during the fixpoint.
     fn resolve_jump_operand(&self, operand: AbsValue, const_sets: &ConstSetInterner) -> JumpTarget {
         match operand {
-            AbsValue::Const(idx) => {
-                let val = *self.u256_interner.borrow().get(idx);
+            AbsValue::Const(imm) => {
+                let val = imm.get(&self.u256_interner.borrow());
                 match usize::try_from(val) {
                     Ok(target_pc) if self.is_valid_jump(target_pc) => {
                         JumpTarget::single(self.pc_to_inst(target_pc))
@@ -688,8 +687,8 @@ impl Bytecode<'_> {
                 let consts = const_sets.get(set_idx);
                 let interner = self.u256_interner.borrow();
                 let mut targets = SmallVec::new();
-                for &idx in consts {
-                    let val = *interner.get(idx);
+                for &imm in consts {
+                    let val = imm.get(&interner);
                     match usize::try_from(val) {
                         Ok(pc) if self.is_valid_jump(pc) => {
                             targets.push(self.pc_to_inst(pc));
@@ -721,13 +720,13 @@ impl Bytecode<'_> {
         disc_preds: &mut IndexVec<Block, SmallVec<[Block; 4]>>,
     ) {
         let consts = match operand {
-            AbsValue::Const(idx) => Either::Left(std::iter::once(idx)),
+            AbsValue::Const(imm) => Either::Left(std::iter::once(imm)),
             AbsValue::ConstSet(set_idx) => Either::Right(const_sets.get(set_idx).iter().copied()),
             AbsValue::Top => return,
         };
         let interner = self.u256_interner.borrow();
-        for idx in consts {
-            let Ok(target_pc) = usize::try_from(*interner.get(idx)) else { continue };
+        for imm in consts {
+            let Ok(target_pc) = usize::try_from(imm.get(&interner)) else { continue };
             if !self.is_valid_jump(target_pc) {
                 continue;
             }
@@ -918,12 +917,8 @@ impl Bytecode<'_> {
             }
 
             match inst.opcode {
-                op::PUSH0 => {
-                    stack.push(AbsValue::Const(self.intern_u256(U256::ZERO)));
-                }
-                op::PUSH1..=op::PUSH32 => {
-                    let value = self.get_push_value(inst);
-                    stack.push(AbsValue::Const(self.intern_u256(value)));
+                op::PUSH0..=op::PUSH32 => {
+                    stack.push(AbsValue::Const(inst.imm()));
                 }
                 op::POP => {
                     if stack.pop().is_none() {
@@ -946,7 +941,7 @@ impl Bytecode<'_> {
                     stack.swap(len - 1, len - 1 - depth);
                 }
                 op::DUPN => {
-                    let depth = crate::decode_single(self.get_u8_imm(inst));
+                    let depth = crate::decode_single(inst.imm_byte());
                     match depth {
                         Some(n) => {
                             let n = n as usize;
@@ -963,7 +958,7 @@ impl Bytecode<'_> {
                     }
                 }
                 op::SWAPN => {
-                    let depth = crate::decode_single(self.get_u8_imm(inst));
+                    let depth = crate::decode_single(inst.imm_byte());
                     match depth {
                         Some(n) => {
                             let n = n as usize;
@@ -982,7 +977,7 @@ impl Bytecode<'_> {
                     }
                 }
                 op::EXCHANGE => {
-                    let pair = crate::decode_pair(self.get_u8_imm(inst));
+                    let pair = crate::decode_pair(inst.imm_byte());
                     match pair {
                         Some((n, m)) => {
                             let (n, m) = (n as usize, m as usize);
@@ -1068,7 +1063,7 @@ impl Bytecode<'_> {
 pub(crate) mod tests {
     use super::*;
     pub(crate) use crate::bytecode::Inst;
-    use revm_primitives::{hardfork::SpecId, hex};
+    pub(crate) use revm_primitives::{U256, hardfork::SpecId, hex};
 
     pub(crate) fn analyze_hex(hex: &str) -> Bytecode<'static> {
         let code = hex::decode(hex.trim()).unwrap();
@@ -1403,7 +1398,7 @@ pub(crate) mod tests {
         // The return JUMP at pc=24 should NOT be resolved — the opaque jump at
         // pc=16 can reach fn_entry with any return address. But the current
         // invalidation misses this because fn_entry's block is Known, not Bottom.
-        let return_jump = bytecode.iter_insts().find(|(_, d)| d.pc == 24 && d.is_jump());
+        let return_jump = bytecode.iter_insts().find(|(i, d)| bytecode.pc(*i) == 24 && d.is_jump());
         let (_, rj) = return_jump.unwrap();
         assert!(
             !rj.flags.contains(InstFlags::STATIC_JUMP),
@@ -1526,7 +1521,7 @@ pub(crate) mod tests {
             assert!(
                 !data.flags.contains(InstFlags::INVALID_JUMP),
                 "JUMP inst={inst} pc={} incorrectly marked INVALID_JUMP",
-                data.pc,
+                bytecode.pc(inst),
             );
         }
     }
@@ -1821,7 +1816,7 @@ mod tests_edge_cases {
 
         // The fn return JUMP at pc=32 must NOT be resolved — the trampoline
         // can reach fn_entry with any return address.
-        let return_jump = bytecode.iter_insts().find(|(_, d)| d.pc == 32 && d.is_jump());
+        let return_jump = bytecode.iter_insts().find(|(i, d)| bytecode.pc(*i) == 32 && d.is_jump());
         let (_, rj) = return_jump.unwrap();
         assert!(
             !rj.flags.contains(InstFlags::STATIC_JUMP),
@@ -1870,7 +1865,8 @@ mod tests_edge_cases {
 
         // The JUMPI at pc=27 should NOT be resolved — opaque jump can reach
         // fn_entry with any return address.
-        let return_jumpi = bytecode.iter_insts().find(|(_, d)| d.pc == 27 && d.is_jump());
+        let return_jumpi =
+            bytecode.iter_insts().find(|(i, d)| bytecode.pc(*i) == 27 && d.is_jump());
         let (_, rj) = return_jumpi.unwrap();
         assert!(
             !rj.flags.contains(InstFlags::STATIC_JUMP),
@@ -1923,7 +1919,7 @@ mod tests_edge_cases {
 
         // The return JUMP at pc=30 must NOT be resolved — the opaque caller
         // at pc=25 reaches fn_entry with an arbitrary return address.
-        let return_jump = bytecode.iter_insts().find(|(_, d)| d.pc == 30 && d.is_jump());
+        let return_jump = bytecode.iter_insts().find(|(i, d)| bytecode.pc(*i) == 30 && d.is_jump());
         let (_, rj) = return_jump.unwrap();
         assert!(
             !rj.flags.contains(InstFlags::STATIC_JUMP),
@@ -2107,7 +2103,7 @@ mod tests_edge_cases {
         let lt_inst = bytecode
             .insts
             .iter_enumerated()
-            .find(|(_, inst)| inst.opcode == op::LT && inst.pc == 416)
+            .find(|(i, inst)| inst.opcode == op::LT && bytecode.pc(*i) == 416)
             .map(|(i, _)| i)
             .expect("LT at pc=416 not found");
         assert_eq!(bytecode.const_operand(lt_inst, 0), None);
