@@ -7,13 +7,15 @@
 )]
 
 use crate::*;
-use context_interface;
 use revm_bytecode::opcode as op;
+use revm_context_interface as context_interface;
 use revm_interpreter as interpreter;
 use revm_interpreter::{
     CreateInputs, FrameInput, Gas, InstructionResult, InterpreterAction, InterpreterResult,
 };
-use revm_primitives::{Address, B256, Bytes, KECCAK_EMPTY, LogData, hex, keccak256};
+use revm_primitives::{
+    Address, B256, Bytes, KECCAK_EMPTY, Log, LogData, hardfork::SpecId, hex, keccak256,
+};
 use revmc_builtins::gas;
 
 /// `KECCAK256` opcode gas cost (base + dynamic).
@@ -61,8 +63,8 @@ mod statetest;
 
 #[cfg(feature = "llvm")]
 pub fn with_jit_compiler<R>(
-    opt_level: OptimizationLevel,
-    f: fn(&mut EvmCompiler<crate::llvm::EvmLlvmBackend>) -> R,
+    opt_level: revmc_backend::OptimizationLevel,
+    f: fn(&mut EvmCompiler<revmc_llvm::EvmLlvmBackend>) -> R,
 ) -> R {
     init_tracing();
     let mut compiler = EvmCompiler::new_llvm(false).unwrap();
@@ -1187,7 +1189,7 @@ tests! {
             bytecode: &[op::PUSH0, op::PUSH0, op::LOG0],
             expected_gas: 2 + 2 + log_cost(0, 0).unwrap(),
             assert_host: Some(|host| {
-                assert_eq!(host.logs, [primitives::Log {
+                assert_eq!(host.logs, [Log {
                     address: DEF_ADDR,
                     data: LogData::new(vec![], Bytes::new()).unwrap(),
                 }]);
@@ -1198,7 +1200,7 @@ tests! {
             expected_memory: &0x6942_U256.to_be_bytes::<32>(),
             expected_gas: 3 + 2 + (3 + memory_gas_cost(1)) + 3 + 2 + log_cost(0, 32).unwrap(),
             assert_host: Some(|host| {
-                assert_eq!(host.logs, [primitives::Log {
+                assert_eq!(host.logs, [Log {
                     address: DEF_ADDR,
                     data: LogData::new(vec![], Bytes::copy_from_slice(&0x6942_U256.to_be_bytes::<32>())).unwrap(),
                 }]);
@@ -1208,7 +1210,7 @@ tests! {
             bytecode: &[op::PUSH0, op::PUSH0, op::PUSH0, op::LOG1],
             expected_gas: 2 + 2 + 2 + log_cost(1, 0).unwrap(),
             assert_host: Some(|host| {
-                assert_eq!(host.logs, [primitives::Log {
+                assert_eq!(host.logs, [Log {
                     address: DEF_ADDR,
                     data: LogData::new(vec![B256::ZERO], Bytes::new()).unwrap(),
                 }]);
@@ -1224,7 +1226,7 @@ tests! {
             expected_memory: &[0; 64],
             expected_gas: 3 + 3 + 2 + (log_cost(1, 50).unwrap() + memory_gas_cost(2)),
             assert_host: Some(|host| {
-                assert_eq!(host.logs, [primitives::Log {
+                assert_eq!(host.logs, [Log {
                     address: DEF_ADDR,
                     data: LogData::new(
                         vec![0xffffffffffffffffffffffffffffffffffffffff_U256.into()],

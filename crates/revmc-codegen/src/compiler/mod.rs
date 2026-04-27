@@ -379,8 +379,8 @@ impl<B: Backend> EvmCompiler<B> {
     /// in **undefined behavior** if the stack length overflows at runtime, rather than a
     /// [`StackUnderflow`]/[`StackOverflow`] result.
     ///
-    /// [`StackUnderflow`]: crate::interpreter::InstructionResult::StackUnderflow
-    /// [`StackOverflow`]: crate::interpreter::InstructionResult::StackOverflow
+    /// [`StackUnderflow`]: revm_interpreter::InstructionResult::StackUnderflow
+    /// [`StackOverflow`]: revm_interpreter::InstructionResult::StackOverflow
     pub unsafe fn stack_bound_checks(&mut self, yes: bool) {
         self.config.stack_bound_checks = yes;
     }

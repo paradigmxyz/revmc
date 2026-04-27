@@ -3112,44 +3112,18 @@ dependencies = [
 name = "revmc"
 version = "0.1.0"
 dependencies = [
- "alloy-evm",
- "alloy-primitives",
- "arbitrary",
- "bitflags",
- "bitvec",
- "crossbeam-channel",
- "crossbeam-deque",
- "crossbeam-queue",
- "dashmap",
- "derive_more",
- "either",
- "indexmap 2.14.0",
- "libloading",
- "oxc_index",
- "paste",
- "quanta",
  "revm-bytecode",
- "revm-context",
  "revm-context-interface",
- "revm-database",
- "revm-database-interface",
  "revm-handler",
  "revm-inspector",
  "revm-interpreter",
  "revm-primitives",
- "revm-state",
  "revmc-backend",
- "revmc-build",
  "revmc-builtins",
+ "revmc-codegen",
  "revmc-context",
  "revmc-llvm",
- "revmc-statetest",
- "similar-asserts",
- "smallvec",
- "snapbox",
- "tempfile",
- "tracing",
- "tracing-subscriber 0.3.23",
+ "revmc-runtime",
 ]
 
 [[package]]
@@ -3218,6 +3192,42 @@ dependencies = [
 ]
 
 [[package]]
+name = "revmc-codegen"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "arbitrary",
+ "bitflags",
+ "bitvec",
+ "derive_more",
+ "either",
+ "indexmap 2.14.0",
+ "oxc_index",
+ "paste",
+ "revm-bytecode",
+ "revm-context",
+ "revm-context-interface",
+ "revm-database-interface",
+ "revm-handler",
+ "revm-inspector",
+ "revm-interpreter",
+ "revm-primitives",
+ "revm-state",
+ "revmc-backend",
+ "revmc-build",
+ "revmc-builtins",
+ "revmc-context",
+ "revmc-llvm",
+ "revmc-statetest",
+ "similar-asserts",
+ "smallvec",
+ "snapbox",
+ "tempfile",
+ "tracing",
+ "tracing-subscriber 0.3.23",
+]
+
+[[package]]
 name = "revmc-context"
 version = "0.1.0"
 dependencies = [
@@ -3279,6 +3289,42 @@ dependencies = [
  "object 0.39.0",
  "revmc-backend",
  "tracing",
+]
+
+[[package]]
+name = "revmc-runtime"
+version = "0.1.0"
+dependencies = [
+ "alloy-evm",
+ "alloy-primitives",
+ "crossbeam-channel",
+ "crossbeam-deque",
+ "crossbeam-queue",
+ "dashmap",
+ "derive_more",
+ "eyre",
+ "libloading",
+ "paste",
+ "quanta",
+ "revm-bytecode",
+ "revm-context",
+ "revm-context-interface",
+ "revm-database",
+ "revm-database-interface",
+ "revm-handler",
+ "revm-inspector",
+ "revm-interpreter",
+ "revm-primitives",
+ "revm-state",
+ "revmc-backend",
+ "revmc-codegen",
+ "revmc-context",
+ "revmc-llvm",
+ "revmc-statetest",
+ "similar-asserts",
+ "tempfile",
+ "tracing",
+ "tracing-subscriber 0.3.23",
 ]
 
 [[package]]

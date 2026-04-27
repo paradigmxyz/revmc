@@ -38,10 +38,12 @@ all = "warn"
 [workspace.dependencies]
 revmc = { version = "0.1.0", path = "crates/revmc", default-features = false }
 revmc-backend = { version = "0.1.0", path = "crates/revmc-backend", default-features = false }
+revmc-codegen = { version = "0.1.0", path = "crates/revmc-codegen", default-features = false }
 revmc-build = { version = "0.1.0", path = "crates/revmc-build", default-features = false }
 revmc-builtins = { version = "0.1.0", path = "crates/revmc-builtins", default-features = false }
 revmc-context = { version = "0.1.0", path = "crates/revmc-context", default-features = false }
 revmc-llvm = { version = "0.1.0", path = "crates/revmc-llvm", default-features = false }
+revmc-runtime = { version = "0.1.0", path = "crates/revmc-runtime", default-features = false }
 
 alloy-primitives = { version = "1.5", default-features = false }
 ruint = { version = "1.17", default-features = false }

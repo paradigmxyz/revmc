@@ -125,7 +125,7 @@ pub(crate) struct AotSuccess {
 }
 
 /// Owns JIT-compiled machine code via an ORCv2 `ResourceTracker` and a
-/// [`JitDylibGuard`](crate::llvm::JitDylibGuard).
+/// [`JitDylibGuard`].
 ///
 /// The tracker provides per-entry code removal: dropping it calls
 /// `tracker.remove()` which frees this entry's machine code.

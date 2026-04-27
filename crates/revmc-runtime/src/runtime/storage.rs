@@ -1,10 +1,9 @@
 //! Artifact storage trait and data model.
 
-use crate::eyre;
+use crate::{OptimizationLevel, eyre};
 use alloy_primitives::B256;
 use dashmap::DashMap;
 use revm_primitives::hardfork::SpecId;
-use revmc_backend::OptimizationLevel;
 use std::{fs, path::PathBuf};
 
 /// Runtime cache key: the minimal identity for a compiled program at runtime.
