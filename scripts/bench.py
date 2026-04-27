@@ -190,6 +190,22 @@ def spill_reload_counts(path: str) -> tuple[int, int]:
     return spills, reloads
 
 
+def i256_load_store_counts(path: str) -> tuple[int, int]:
+    """Count 'load i256' and 'store i256' instructions in an LLVM IR file."""
+    loads = 0
+    stores = 0
+    try:
+        with open(path) as f:
+            for line in f:
+                if "load i256" in line:
+                    loads += 1
+                if "store i256" in line:
+                    stores += 1
+    except FileNotFoundError:
+        pass
+    return loads, stores
+
+
 DURATION_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(ns|µs|us|ms|s)")
 DURATION_UNITS = {"ns": 1e-9, "µs": 1e-6, "us": 1e-6, "ms": 1e-3, "s": 1.0}
 
@@ -317,14 +333,16 @@ class CodegenLines(Analysis):
         return None
 
     def _collect(self, benches, dump_dir):
-        """Collect line counts per file type + JIT size + spills/reloads.
+        """Collect line counts per file type + JIT size + i256 loads/stores + spills/reloads.
 
-        Each row is (name, [line_counts...], jit_size, spills, reloads).
+        Each row is (name, [line_counts...], jit_size, i256_loads, i256_stores, spills, reloads).
         """
         FILES = ["unopt.ll", "opt.ll", "opt.s"]
         rows = []
         totals = [0] * len(FILES)
         total_size = 0
+        total_i256_loads = 0
+        total_i256_stores = 0
         total_spills = 0
         total_reloads = 0
         for bench in benches:
@@ -333,66 +351,75 @@ class CodegenLines(Analysis):
             if all(c == 0 for c in counts):
                 continue
             jit_size = parse_jit_size(dump_dir, bench)
+            i256_loads, i256_stores = i256_load_store_counts(
+                os.path.join(dump_dir, sub, "opt.ll")
+            )
             spills, reloads = spill_reload_counts(
                 os.path.join(dump_dir, sub, "opt.s")
             )
-            rows.append((bench_name(bench), counts, jit_size, spills, reloads))
+            rows.append((bench_name(bench), counts, jit_size, i256_loads, i256_stores, spills, reloads))
             for i, c in enumerate(counts):
                 totals[i] += c
             total_size += jit_size
+            total_i256_loads += i256_loads
+            total_i256_stores += i256_stores
             total_spills += spills
             total_reloads += reloads
-        return rows, totals, total_size, total_spills, total_reloads
+        return rows, totals, total_size, total_i256_loads, total_i256_stores, total_spills, total_reloads
 
     def report(self, benches, dump_dir, outputs):
-        rows, totals, total_size, total_spills, total_reloads = self._collect(
+        rows, totals, total_size, total_i256_ld, total_i256_st, total_spills, total_reloads = self._collect(
             benches, dump_dir
         )
         print("### Codegen statistics\n")
         table = [
-            [name, *counts, fmt_size(jit_size), spills, reloads]
-            for name, counts, jit_size, spills, reloads in rows
+            [name, *counts, fmt_size(jit_size), i256_ld, i256_st, spills, reloads]
+            for name, counts, jit_size, i256_ld, i256_st, spills, reloads in rows
         ]
         table.append(
             [
                 "**TOTAL**",
                 *[f"**{t}**" for t in totals],
                 f"**{fmt_size(total_size)}**",
+                f"**{total_i256_ld}**",
+                f"**{total_i256_st}**",
                 f"**{total_spills}**",
                 f"**{total_reloads}**",
             ]
         )
         print_table(
-            ["benchmark", "unopt.ll", "opt.ll", "opt.s", "jit size", "spills", "reloads"],
+            ["benchmark", "unopt.ll", "opt.ll", "opt.s", "jit size", "i256 loads", "i256 stores", "spills", "reloads"],
             table,
         )
 
     def report_diff(
         self, benches, dump_dir, outputs, base_dump, base_outputs, base_label
     ):
-        cur_rows, cur_totals, cur_total_size, cur_tsp, cur_trl = self._collect(
+        cur_rows, cur_totals, cur_total_size, cur_tld, cur_tst, cur_tsp, cur_trl = self._collect(
             benches, dump_dir
         )
-        base_rows, base_totals, base_total_size, base_tsp, base_trl = self._collect(
+        base_rows, base_totals, base_total_size, base_tld, base_tst, base_tsp, base_trl = self._collect(
             benches, base_dump
         )
         base_map = {
-            name: (counts, jit_size, spills, reloads)
-            for name, counts, jit_size, spills, reloads in base_rows
+            name: (counts, jit_size, i256_ld, i256_st, spills, reloads)
+            for name, counts, jit_size, i256_ld, i256_st, spills, reloads in base_rows
         }
 
         # Summary table.
         print("### Codegen statistics\n")
-        headers = ["benchmark", "unopt.ll", "opt.ll", "opt.s", "jit size", "spills", "reloads"]
+        headers = ["benchmark", "unopt.ll", "opt.ll", "opt.s", "jit size", "i256 loads", "i256 stores", "spills", "reloads"]
         table = []
         n = NOISE_CODEGEN
-        for name, counts, jit_size, spills, reloads in cur_rows:
-            base_counts, base_jit, base_sp, base_rl = base_map.get(
-                name, ([0] * 3, 0, 0, 0)
+        for name, counts, jit_size, i256_ld, i256_st, spills, reloads in cur_rows:
+            base_counts, base_jit, base_ld, base_st, base_sp, base_rl = base_map.get(
+                name, ([0] * 3, 0, 0, 0, 0, 0)
             )
             pairs = [
                 *list(zip(base_counts, counts)),
                 (base_jit, jit_size),
+                (base_ld, i256_ld),
+                (base_st, i256_st),
                 (base_sp, spills),
                 (base_rl, reloads),
             ]
@@ -404,6 +431,8 @@ class CodegenLines(Analysis):
                 "**TOTAL**",
                 *[f"**{fmt_pct(b, c)}**" for b, c in zip(base_totals, cur_totals)],
                 f"**{fmt_pct(base_total_size, cur_total_size)}**",
+                f"**{fmt_pct(base_tld, cur_tld)}**",
+                f"**{fmt_pct(base_tst, cur_tst)}**",
                 f"**{fmt_pct(base_tsp, cur_tsp)}**",
                 f"**{fmt_pct(base_trl, cur_trl)}**",
             ]
@@ -416,17 +445,21 @@ class CodegenLines(Analysis):
         for f in ["unopt.ll", "opt.ll", "opt.s"]:
             detail_headers += [f"{f} ({base_label})", "diff"]
         detail_headers += [f"jit size ({base_label})", "diff"]
+        detail_headers += [f"i256 loads ({base_label})", "diff"]
+        detail_headers += [f"i256 stores ({base_label})", "diff"]
         detail_headers += [f"spills ({base_label})", "diff"]
         detail_headers += [f"reloads ({base_label})", "diff"]
         detail_table = []
-        for name, counts, jit_size, spills, reloads in cur_rows:
-            base_counts, base_jit, base_sp, base_rl = base_map.get(
-                name, ([0] * 3, 0, 0, 0)
+        for name, counts, jit_size, i256_ld, i256_st, spills, reloads in cur_rows:
+            base_counts, base_jit, base_ld, base_st, base_sp, base_rl = base_map.get(
+                name, ([0] * 3, 0, 0, 0, 0, 0)
             )
             row = [name]
             for b, c in zip(base_counts, counts):
                 row += [b, fmt_pct(b, c)]
             row += [fmt_size(base_jit), fmt_pct(base_jit, jit_size)]
+            row += [base_ld, fmt_diff(base_ld, i256_ld)]
+            row += [base_st, fmt_diff(base_st, i256_st)]
             row += [base_sp, fmt_diff(base_sp, spills)]
             row += [base_rl, fmt_diff(base_rl, reloads)]
             detail_table.append(row)
@@ -437,6 +470,8 @@ class CodegenLines(Analysis):
             f"**{fmt_size(base_total_size)}**",
             f"**{fmt_pct(base_total_size, cur_total_size)}**",
         ]
+        total_row += [f"**{base_tld}**", f"**{fmt_diff(base_tld, cur_tld)}**"]
+        total_row += [f"**{base_tst}**", f"**{fmt_diff(base_tst, cur_tst)}**"]
         total_row += [f"**{base_tsp}**", f"**{fmt_diff(base_tsp, cur_tsp)}**"]
         total_row += [f"**{base_trl}**", f"**{fmt_diff(base_trl, cur_trl)}**"]
         detail_table.append(total_row)

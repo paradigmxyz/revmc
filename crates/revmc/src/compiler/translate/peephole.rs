@@ -50,11 +50,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let [dividend, divisor] = self.const_operands();
         match divisor {
             // x / 0 => 0.
-            Some(U256::ZERO) => {
-                self.pop_ignore(2);
-                let zero = self.bcx.iconst_256(0);
-                self.push(zero);
-            }
+            Some(U256::ZERO) => self.fold_const(0),
             // x / 1 => x.
             Some(U256::ONE) => {
                 let [a, _] = self.popn();
@@ -68,11 +64,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 self.push(r);
             }
             // 0 / x => 0 (EVM: 0 / 0 = 0).
-            _ if dividend == Some(U256::ZERO) => {
-                self.pop_ignore(2);
-                let zero = self.bcx.iconst_256(0);
-                self.push(zero);
-            }
+            _ if dividend == Some(U256::ZERO) => self.fold_const(0),
             _ => return false,
         }
         true
@@ -86,11 +78,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let [dividend, divisor] = self.const_operands();
         match divisor {
             // x / 0 => 0.
-            Some(U256::ZERO) => {
-                self.pop_ignore(2);
-                let zero = self.bcx.iconst_256(0);
-                self.push(zero);
-            }
+            Some(U256::ZERO) => self.fold_const(0),
             // x / 1 => x.
             Some(U256::ONE) => {
                 let [a, _] = self.popn();
@@ -112,11 +100,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 self.push(r);
             }
             // 0 / x => 0 (EVM: 0 / 0 = 0).
-            _ if dividend == Some(U256::ZERO) => {
-                self.pop_ignore(2);
-                let zero = self.bcx.iconst_256(0);
-                self.push(zero);
-            }
+            _ if dividend == Some(U256::ZERO) => self.fold_const(0),
             _ => return false,
         }
         true
@@ -129,11 +113,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let [dividend, modulus] = self.const_operands();
         match modulus {
             // x % 0 => 0, x % 1 => 0.
-            Some(U256::ZERO) | Some(U256::ONE) => {
-                self.pop_ignore(2);
-                let zero = self.bcx.iconst_256(0);
-                self.push(zero);
-            }
+            Some(U256::ZERO) | Some(U256::ONE) => self.fold_const(0),
             // x % C (pow2) => native urem, LLVM lowers to and.
             Some(m) if m.is_power_of_two() => {
                 let [a, _] = self.popn();
@@ -142,11 +122,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 self.push(r);
             }
             // 0 % x => 0 (EVM: 0 % 0 = 0).
-            _ if dividend == Some(U256::ZERO) => {
-                self.pop_ignore(2);
-                let zero = self.bcx.iconst_256(0);
-                self.push(zero);
-            }
+            _ if dividend == Some(U256::ZERO) => self.fold_const(0),
             _ => return false,
         }
         true
@@ -157,17 +133,9 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let [dividend, modulus] = self.const_operands();
         match modulus {
             // x % 0 => 0, x % 1 => 0, x % -1 => 0.
-            Some(U256::ZERO) | Some(U256::ONE) | Some(U256::MAX) => {
-                self.pop_ignore(2);
-                let zero = self.bcx.iconst_256(0);
-                self.push(zero);
-            }
+            Some(U256::ZERO) | Some(U256::ONE) | Some(U256::MAX) => self.fold_const(0),
             // 0 % x => 0 (EVM: 0 % 0 = 0).
-            _ if dividend == Some(U256::ZERO) => {
-                self.pop_ignore(2);
-                let zero = self.bcx.iconst_256(0);
-                self.push(zero);
-            }
+            _ if dividend == Some(U256::ZERO) => self.fold_const(0),
             _ => return false,
         }
         true
@@ -178,18 +146,10 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let [a, b, modulus] = self.const_operands();
         match modulus {
             // (a + b) % 0 => 0, (a + b) % 1 => 0.
-            Some(U256::ZERO) | Some(U256::ONE) => {
-                self.pop_ignore(3);
-                let zero = self.bcx.iconst_256(0);
-                self.push(zero);
-            }
+            Some(U256::ZERO) | Some(U256::ONE) => self.fold_const(0),
             _ => match (a, b) {
                 // (0 + 0) % N => 0.
-                (Some(U256::ZERO), Some(U256::ZERO)) => {
-                    self.pop_ignore(3);
-                    let zero = self.bcx.iconst_256(0);
-                    self.push(zero);
-                }
+                (Some(U256::ZERO), Some(U256::ZERO)) => self.fold_const(0),
                 _ => return false,
             },
         }
@@ -201,17 +161,11 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let [a, b, modulus] = self.const_operands();
         match modulus {
             // (a * b) % 0 => 0, (a * b) % 1 => 0.
-            Some(U256::ZERO) | Some(U256::ONE) => {
-                self.pop_ignore(3);
-                let zero = self.bcx.iconst_256(0);
-                self.push(zero);
-            }
+            Some(U256::ZERO) | Some(U256::ONE) => self.fold_const(0),
             _ => {
                 // a * 0 => 0, 0 * b => 0.
                 if a == Some(U256::ZERO) || b == Some(U256::ZERO) {
-                    self.pop_ignore(3);
-                    let zero = self.bcx.iconst_256(0);
-                    self.push(zero);
+                    self.fold_const(0);
                 } else {
                     return false;
                 }
@@ -228,18 +182,14 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let [_base, exponent] = self.const_operands();
         match exponent {
             // x ** 0 => 1.
-            Some(U256::ZERO) => {
-                self.pop_ignore(2);
-                let one = self.bcx.iconst_256(1);
-                self.push(one);
-            }
+            Some(U256::ZERO) => self.fold_const(1),
             // x ** 1 => x.
             Some(U256::ONE) => {
                 let [a, _] = self.popn();
                 self.push(a);
             }
             // x ** 2 => x * x.
-            Some(e) if e == U256::from(2) => {
+            Some(e) if e == 2 => {
                 let [a, _] = self.popn();
                 let r = self.bcx.imul(a, a);
                 self.push(r);
@@ -254,7 +204,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let [ext, _x] = self.const_operands();
         match ext {
             // SIGNEXTEND(e, x) with e >= 31 => x (no-op, value already fills 32 bytes).
-            Some(e) if e >= U256::from(31) => {
+            Some(e) if e >= 31 => {
                 let [_, x] = self.popn();
                 self.push(x);
             }
@@ -268,11 +218,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let [index, _value] = self.const_operands();
         match index {
             // BYTE(i, x) with i >= 32 => 0.
-            Some(i) if i >= U256::from(32) => {
-                self.pop_ignore(2);
-                let zero = self.bcx.iconst_256(0);
-                self.push(zero);
-            }
+            Some(i) if i >= 32 => self.fold_const(0),
             _ => return false,
         }
         true
@@ -296,6 +242,10 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             } else {
                 self.call_fallible_builtin(builtin, args);
             }
+            // Builtin wrote output to sp; reload into virtual stack.
+            let off = self.section_len_offset - 1;
+            let value = self.load_word(sp, "builtin.out");
+            self.vstack.set_at_offset(off, value);
             true
         } else {
             false
@@ -321,6 +271,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 true
             }
             (Some(offset), Some(value)) => {
+                // Both operands constant; consume from virtual stack.
+                self.pop_ignore(2);
                 let offset = self.bcx.iconst(self.isize_type, offset as i64);
                 let value = self.bcx.iconst(self.isize_type, value as i64);
                 self.call_fallible_builtin(Builtin::MstoreCC, &[self.ecx, offset, value]);
@@ -344,6 +296,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
     fn peephole_return(&mut self, op: u8) -> bool {
         if let Some((offset, len)) = self.const_memory_operands(self.const_operands()) {
+            // Both operands constant; consume from virtual stack.
+            self.pop_ignore(2);
             let ir = match op {
                 op::RETURN => InstructionResult::Return,
                 op::REVERT => InstructionResult::Revert,

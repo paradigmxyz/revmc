@@ -618,12 +618,25 @@ pub fn run(
         let thread = std::thread::Builder::new()
             .name(format!("runner-{i}"))
             .spawn(move || {
-                let result = run_test_worker(state, keep_going, mode, cache.as_deref());
+                // Catch panics so we always reach `barrier.wait()` below; otherwise a
+                // panicking worker would never advance the barrier and the remaining
+                // workers would deadlock waiting for it. Also flips the shared `stop`
+                // flag so siblings exit promptly instead of finishing the whole queue.
+                let stop = state.stop.clone();
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    run_test_worker(state, keep_going, mode, cache.as_deref())
+                }));
+                if result.is_err() {
+                    stop.store(true, Ordering::SeqCst);
+                }
                 // Wait for all threads before exiting. Each thread holds a thread-local
                 // LLVM context that is destroyed on thread exit; concurrent context
                 // disposal crashes LLVM.
                 barrier.wait();
-                result
+                match result {
+                    Ok(r) => r,
+                    Err(payload) => std::panic::resume_unwind(payload),
+                }
             })
             .unwrap();
 

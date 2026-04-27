@@ -1,0 +1,44 @@
+name: Bench macOS (temp)
+
+# TEMPORARY workflow to investigate macOS jit perf regression on dani/virtual-stack2.
+# Delete this file once the investigation is complete.
+
+on:
+  push:
+    branches: [dani/virtual-stack2]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTC_WRAPPER: sccache
+
+jobs:
+  bench-macos:
+    runs-on: depot-macos-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install LLVM (brew)
+        run: |
+          v=22
+          HOMEBREW_NO_AUTO_UPDATE=1 brew install "llvm@${v}"
+          prefix="$(brew --prefix llvm@${v})"
+          echo "LLVM_SYS_${v}1_PREFIX=${prefix}" >> $GITHUB_ENV
+          echo "${prefix}/bin" >> $GITHUB_PATH
+      - name: llvm-config
+        run: llvm-config --version --bindir --libdir
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: mozilla-actions/sccache-action@v0.0.9
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+      - name: Ensure main is available
+        run: git fetch origin main:main || git fetch origin main
+      - name: Run bench script (diff vs main)
+        run: ./scripts/bench.py /tmp/bench --diff main

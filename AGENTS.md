@@ -31,6 +31,7 @@ during development.
 ```bash
 cargo r -- run --list                      # list available benchmarks
 cargo r -- run usdc_proxy                  # compile and run a benchmark
+cargo r -- run usdc_proxy -o tmp/dump      # compile and run a benchmark; dump files like opt.ll, remarks.txt to tmp/dump
 cargo r -- run usdc_proxy --parse-only     # parse and analyze only (no codegen)
 cargo r -- run usdc_proxy --display        # print parsed bytecode IR
 cargo r -- run usdc_proxy --dot            # render CFG as DOT/SVG

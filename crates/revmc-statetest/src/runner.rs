@@ -384,6 +384,8 @@ pub(crate) struct TestRunnerState {
     pub(crate) console_bar: Arc<ProgressBar>,
     pub(crate) queue: Arc<Mutex<(usize, Vec<PathBuf>)>>,
     pub(crate) elapsed: Arc<Mutex<Duration>>,
+    /// Set when any worker thread requests all others to stop (e.g. on panic).
+    pub(crate) stop: Arc<AtomicBool>,
 }
 
 impl TestRunnerState {
@@ -397,10 +399,14 @@ impl TestRunnerState {
             )),
             queue: Arc::new(Mutex::new((0usize, test_files))),
             elapsed: Arc::new(Mutex::new(Duration::ZERO)),
+            stop: Arc::new(AtomicBool::new(false)),
         }
     }
 
     pub(crate) fn next_test(&self) -> Option<PathBuf> {
+        if self.stop.load(Ordering::Relaxed) {
+            return None;
+        }
         let (current_idx, queue) = &mut *self.queue.lock().unwrap();
         let idx = *current_idx;
         let test_path = queue.get(idx).cloned()?;
