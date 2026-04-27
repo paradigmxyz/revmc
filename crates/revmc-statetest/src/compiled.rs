@@ -798,7 +798,7 @@ pub fn run(
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     run_test_worker(state, keep_going, mode, cache.as_deref(), backend.as_ref())
                 }));
-                if result.is_err() {
+                if result.is_err() || result.as_ref().is_ok_and(|r| r.is_err()) {
                     stop.store(true, Ordering::SeqCst);
                 }
                 // Wait for all threads before exiting. Each thread holds a thread-local
