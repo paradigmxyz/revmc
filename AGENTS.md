@@ -5,18 +5,21 @@
 `--all-features` does not work. Just use default features and the following commands:
 
 ```bash
-cargo cl                                   # lint
-cargo fmt --all                            # format
-cargo docs                                 # check docs
+cargo cl                                                      # lint
+cargo fmt --all                                               # format
+cargo docs                                                    # check docs
 
-cargo nextest run --workspace              # test all
-cargo nextest run "test_name"              # test single
-cargo nextest run "statetest"              # test statetests
-SUBDIR=stRevertTest cargo nextest run "statetest" # test single statetest
+cargo nextest run --workspace                                 # test all
+cargo nextest run --workspace "test_name"                     # test single
+cargo nextest run --workspace "statetest"                     # test statetests
+SUBDIR=stRevertTest cargo nextest run --workspace "statetest" # test single statetest
 ```
 
 ## Architecture
-- `revmc` — main crate: EVM compiler, bytecode analysis, linker, and test infrastructure.
+
+- `revmc` — thin umbrella crate that re-exports codegen and runtime APIs.
+- `revmc-codegen` — EVM compiler, bytecode analysis, linker, and compiler test infrastructure.
+- `revmc-runtime` — runtime JIT/AOT backend, worker pool, artifact store, and revm integration.
 - `revmc-backend` — abstract compiler backend trait. `revmc-llvm` is the main implementation.
 - `revmc-builtins` — runtime builtins called by JIT-compiled code (host calls, gas accounting).
 - `revmc-context` — EVM execution context types bridging revm and compiled code.

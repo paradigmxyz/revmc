@@ -58,9 +58,6 @@ mod resume_at_call;
 mod runner;
 pub use runner::*;
 
-#[cfg(test)]
-mod statetest;
-
 #[cfg(feature = "llvm")]
 pub fn with_jit_compiler<R>(
     opt_level: revmc_backend::OptimizationLevel,
@@ -2125,5 +2122,5 @@ fn bytecode_ternop_opaque(opcode: u8, a: U256, b: U256, c: U256) -> Vec<u8> {
 }
 
 fn asm(s: &str) -> Vec<u8> {
-    crate::bytecode::parse_asm(s).unwrap()
+    crate::parse_asm(s).unwrap()
 }

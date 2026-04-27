@@ -40,6 +40,10 @@ pub use revm_primitives as primitives;
 #[doc(no_inline)]
 pub use revm_primitives::hardfork::SpecId;
 
+/// Internal tests and testing utilities. Not public API.
+#[cfg(test)]
+pub mod tests;
+
 #[cfg(feature = "alloy-evm")]
 #[doc(inline)]
 pub use revmc_runtime::alloy_evm;

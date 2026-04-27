@@ -35,6 +35,9 @@ revm-inspector.workspace = true
 revm-interpreter.workspace = true
 revm-primitives.workspace = true
 
+[dev-dependencies]
+revmc-statetest = { path = "../revmc-statetest" }
+
 [features]
 default = ["llvm"]
 llvm = ["dep:revmc-llvm", "revmc-codegen/llvm", "revmc-runtime/llvm"]

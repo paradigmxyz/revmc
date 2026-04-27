@@ -3124,6 +3124,7 @@ dependencies = [
  "revmc-context",
  "revmc-llvm",
  "revmc-runtime",
+ "revmc-statetest",
 ]
 
 [[package]]
