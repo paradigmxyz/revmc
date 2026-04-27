@@ -497,7 +497,7 @@ fn run_compiled_test_case(test_case: &TestCase<'_>, f: EvmCompilerFn) {
             ecx.is_static = true;
         }
         if gas_limit != DEF_GAS_LIMIT {
-            *ecx.gas = Gas::new(gas_limit);
+            ecx.gas = Gas::new(gas_limit);
         }
         if let Some(modify_ecx) = modify_ecx {
             modify_ecx(ecx);

@@ -23,7 +23,7 @@ workspace = true
 [dependencies]
 revmc-backend.workspace = true
 revmc-builtins = { workspace = true, features = ["ir"] }
-revmc-context.workspace = true
+revmc-context = { workspace = true, features = ["evm"] }
 revmc-llvm = { workspace = true, optional = true }
 
 alloy-primitives = { workspace = true, features = ["std", "map-fxhash"] }

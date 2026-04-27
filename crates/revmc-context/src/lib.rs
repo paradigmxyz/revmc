@@ -23,6 +23,11 @@ mod arch;
 use arch::revmc_entry;
 pub use arch::revmc_exit;
 
+#[cfg(feature = "evm")]
+mod jit_evm;
+#[cfg(feature = "evm")]
+pub use jit_evm::JitEvm;
+
 /// Resume point for compiled EVM code after a CALL/CREATE suspension.
 ///
 /// Encoded as the interpreter's bytecode PC. `0` means no resume (initial state),
@@ -84,7 +89,7 @@ pub struct EvmContext<'a> {
     /// Input information (target address, caller, input data, call value).
     pub input: &'a mut InputsImpl,
     /// The gas.
-    pub gas: &'a mut Gas,
+    pub gas: Gas,
     /// The host.
     pub host: &'a mut dyn Host,
     /// The return action.
@@ -124,9 +129,9 @@ const _: () = {
     // Key fields accessed by JIT code
     assert!(offset_of!(EvmContext<'_>, memory) == 0);
     assert!(offset_of!(EvmContext<'_>, gas) == 16);
-    assert!(offset_of!(EvmContext<'_>, spec_id) == 65);
-    assert!(offset_of!(EvmContext<'_>, resume_at) == 72);
-    assert!(offset_of!(EvmContext<'_>, calldatasize) == 112);
+    assert!(offset_of!(EvmContext<'_>, spec_id) == 113);
+    assert!(offset_of!(EvmContext<'_>, resume_at) == 120);
+    assert!(offset_of!(EvmContext<'_>, calldatasize) == 160);
 };
 
 impl fmt::Debug for EvmContext<'_> {
@@ -156,7 +161,7 @@ impl<'a> EvmContext<'a> {
         let this = Self {
             memory: &mut interpreter.memory,
             input: &mut interpreter.input,
-            gas: &mut interpreter.gas,
+            gas: interpreter.gas,
             host,
             next_action: &mut interpreter.bytecode.action,
             return_data: interpreter.return_data.buffer(),
@@ -304,6 +309,7 @@ impl EvmCompilerFn {
         }
 
         let return_data_is_empty = ecx.return_data.is_empty();
+        interpreter.gas = ecx.gas;
 
         if return_data_is_empty {
             interpreter.return_data.0.clear();

@@ -1,8 +1,8 @@
-//! Minimal, `no_std` runner.
+//! Minimal, `no_std` runner that hooks a statically compiled bytecode into a revm mainnet EVM.
 
 #![no_std]
-
-extern crate alloc;
+#![cfg_attr(not(test), warn(unused_extern_crates))]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 // This dependency is needed to define the necessary symbols used by the compiled bytecodes,
 // but we don't use it directly, so silence the unused crate dependency warning.
@@ -11,8 +11,8 @@ use revmc_builtins as _;
 use revm_context::{BlockEnv, CfgEnv, Context, Journal, TxEnv};
 use revm_database_interface::Database;
 use revm_handler::{MainBuilder, MainnetEvm};
-use revm_primitives::{B256, hardfork::SpecId, hex};
-use revmc_context::EvmCompilerFn;
+use revm_primitives::{B256, hardfork::SpecId, hex, map::B256Map};
+use revmc_context::{JitEvm, RawEvmCompilerFn};
 
 include!("./common.rs");
 
@@ -21,35 +21,17 @@ revmc_context::extern_revmc! {
     fn fibonacci;
 }
 
-/// External context for tracking compiled functions.
-#[derive(Clone, Default)]
-pub struct ExternalContext;
-
-impl ExternalContext {
-    /// Creates a new external context.
-    pub fn new() -> Self {
-        Self
-    }
-
-    /// Get a compiled function for the given bytecode hash.
-    pub fn get_function(&self, bytecode_hash: B256) -> Option<EvmCompilerFn> {
-        // Can use any mapping between bytecode hash and function.
-        if bytecode_hash == B256::from(FIBONACCI_HASH) {
-            return Some(EvmCompilerFn::new(fibonacci));
-        }
-        None
-    }
-}
-
 /// Type alias for mainnet context with custom database.
 pub type MainnetContext<DB> = Context<BlockEnv, TxEnv, CfgEnv, DB, Journal<DB>, ()>;
 
-/// Build a mainnet EVM.
-///
-/// Note: In revm v34, the frame execution is handled differently.
-/// For now, this returns a standard mainnet EVM. To integrate compiled
-/// bytecode, you would need to customize the instruction handler or
-/// use the revmc-context's call_with_interpreter method directly.
-pub fn build_evm<DB: Database>(db: DB) -> MainnetEvm<MainnetContext<DB>> {
-    Context::<BlockEnv, TxEnv, CfgEnv, DB, Journal<DB>, ()>::new(db, SpecId::CANCUN).build_mainnet()
+/// Build a mainnet EVM wrapped in [`JitEvm`] so that calls to known code hashes
+/// are dispatched to compiled functions instead of the interpreter.
+pub fn build_evm<DB: Database>(db: DB) -> JitEvm<MainnetEvm<MainnetContext<DB>>> {
+    let inner = Context::<BlockEnv, TxEnv, CfgEnv, DB, Journal<DB>, ()>::new(db, SpecId::CANCUN)
+        .build_mainnet();
+
+    let mut functions = B256Map::default();
+    functions.insert(B256::from(FIBONACCI_HASH), fibonacci as RawEvmCompilerFn);
+
+    JitEvm::new(inner, functions)
 }

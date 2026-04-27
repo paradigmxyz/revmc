@@ -904,7 +904,7 @@ pub unsafe extern "C" fn __revmc_builtin_do_return(
         Bytes::new()
     };
     *ecx.next_action =
-        Some(InterpreterAction::Return(InterpreterResult { output, gas: *ecx.gas, result }));
+        Some(InterpreterAction::Return(InterpreterResult { output, gas: ecx.gas, result }));
     Err(result.into())
 }
 
@@ -924,7 +924,7 @@ pub unsafe extern "C" fn __revmc_builtin_do_return_cc(
         Bytes::new()
     };
     *ecx.next_action =
-        Some(InterpreterAction::Return(InterpreterResult { output, gas: *ecx.gas, result }));
+        Some(InterpreterAction::Return(InterpreterResult { output, gas: ecx.gas, result }));
     Err(result.into())
 }
 

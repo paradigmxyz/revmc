@@ -76,8 +76,6 @@ pub(super) struct FunctionCx<'a, B: Backend> {
     /// The stack argument pointer. Only used when `local_stack` is enabled and the stack needs
     /// to be copied in/out at entry/exit boundaries.
     sp_arg: Option<B::Value>,
-    /// The amount of gas remaining. `i64`. See `Gas`.
-    gas_remaining: Pointer<B::Builder<'a>>,
     /// The EVM context. Opaque pointer, only passed to builtins.
     ecx: B::Value,
     /// Stack length before the current instruction.
@@ -210,7 +208,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         // Get common types.
         let isize_type = bcx.type_ptr_sized_int();
         let i8_type = bcx.type_int(8);
-        let i64_type = bcx.type_int(64);
         let word_type = bcx.type_int(256);
         let address_type = bcx.type_int(160);
 
@@ -234,19 +231,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let stack_len_arg = bcx.fn_param(2);
         // This is initialized later in `post_entry_block`.
         let stack_len = bcx.new_stack_slot(isize_type, "len.addr");
-
-        // Load gas pointer from ecx.
-        let ptr_type = bcx.type_ptr();
-        let gas_ptr = {
-            let gas_field =
-                get_field(&mut bcx, ecx, mem::offset_of!(EvmContext<'_>, gas), "ecx.gas.addr");
-            bcx.load(ptr_type, gas_field, "ecx.gas")
-        };
-        let gas_remaining = {
-            let offset = bcx.iconst(i64_type, mem::offset_of!(pf::Gas, tracker.remaining) as i64);
-            let name = "gas.remaining.addr";
-            Pointer::new_address(i64_type, bcx.gep(i8_type, gas_ptr, &[offset], name))
-        };
 
         // Create all instruction entry blocks.
         // Dead-code instructions map to `unreachable_block`, except when block deduplication
@@ -289,7 +273,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             stack_len,
             stack,
             sp_arg: local_stack.then_some(sp_arg),
-            gas_remaining,
             ecx,
             len_before: zero,
             len_offset: 0,
@@ -1043,7 +1026,9 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 self.push(msize);
             }
             op::GAS => {
-                let remaining = self.load_gas_remaining();
+                let addr = self.gas_remaining_addr();
+                let i64_type = self.bcx.type_int(64);
+                let remaining = self.bcx.load(i64_type, addr, "gas.remaining");
                 let remaining = self.bcx.zext(self.word_type, remaining);
                 self.push(remaining);
             }
@@ -1414,14 +1399,11 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         self.bcx.store(value, slot);
     }
 
-    /// Loads the gas used.
-    fn load_gas_remaining(&mut self) -> B::Value {
-        self.gas_remaining.load(&mut self.bcx, "gas.remaining")
-    }
-
-    /// Stores the gas used.
-    fn store_gas_remaining(&mut self, value: B::Value) {
-        self.gas_remaining.store(&mut self.bcx, value);
+    fn gas_remaining_addr(&mut self) -> B::Value {
+        const OFFSET: usize =
+            mem::offset_of!(EvmContext<'_>, gas) + mem::offset_of!(pf::Gas, tracker.remaining);
+        let offset = self.bcx.iconst(self.isize_type, OFFSET as i64);
+        self.bcx.gep(self.i8_type, self.ecx, &[offset], "gas.remaining.addr")
     }
 
     /// Saves the local `stack_len` to `stack_len_arg`.
@@ -1630,9 +1612,11 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
         // Modified from `Gas::record_cost`.
         // This can overflow the gas counters, which has to be adjusted for after the call.
-        let gas_remaining = self.load_gas_remaining();
+        let addr = self.gas_remaining_addr();
+        let i64_type = self.bcx.type_int(64);
+        let gas_remaining = self.bcx.load(i64_type, addr, "gas.remaining");
         let (res, overflow) = self.bcx.usub_overflow(gas_remaining, cost);
-        self.store_gas_remaining(res);
+        self.bcx.store(res, addr);
         self.build_check(overflow, InstructionResult::OutOfGas);
     }
 
