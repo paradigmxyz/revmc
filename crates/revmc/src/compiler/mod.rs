@@ -671,7 +671,7 @@ impl<B: Backend> EvmCompiler<B> {
         // Pointer argument attributes. All pointers are non-null (the function signature uses
         // `NonNull<T>`).
         for &(i, size, align) in ptr_attrs {
-            let attrs = default_attrs::for_sized_ptr((size, align)).chain([Attribute::NonNull]);
+            let attrs = default_attrs::for_sized_ref((size, align));
             for attr in attrs {
                 let loc = FunctionAttributeLocation::Param(i as _);
                 bcx.add_function_attribute(None, attr, loc);
