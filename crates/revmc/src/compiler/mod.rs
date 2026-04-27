@@ -468,6 +468,7 @@ impl<B: Backend> EvmCompiler<B> {
         };
         debug_assert!(addr != 0);
         if let Some(dump_dir) = &self.dump_dir() {
+            self.dump_remarks(dump_dir)?;
             self.append_jit_remarks(dump_dir);
         }
         Ok(EvmCompilerFn::new(unsafe { std::mem::transmute::<usize, RawEvmCompilerFn>(addr) }))
@@ -486,7 +487,14 @@ impl<B: Backend> EvmCompiler<B> {
     pub fn write_object<W: io::Write>(&mut self, w: W) -> Result<()> {
         ensure!(self.is_aot(), "cannot write AOT object during JIT compilation");
         self.finalize()?;
-        self.backend.write_object(w)
+        {
+            let _t = self.remarks.time(|r| &r.codegen);
+            self.backend.write_object(w)?;
+        }
+        if let Some(dump_dir) = &self.dump_dir() {
+            self.dump_remarks(dump_dir)?;
+        }
+        Ok(())
     }
 
     /// (JIT) Frees the memory associated with a single function.
@@ -631,10 +639,6 @@ impl<B: Backend> EvmCompiler<B> {
 
         let finalize_total = &self.remarks.finalize_total;
         finalize_total.set(finalize_total.get() + finalize_start.elapsed());
-
-        if let Some(dump_dir) = &dump_dir {
-            self.dump_remarks(dump_dir)?;
-        }
 
         Ok(())
     }
