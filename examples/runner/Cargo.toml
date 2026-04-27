@@ -19,7 +19,7 @@ cc = "1.0"
 
 [dependencies]
 revmc-builtins = { workspace = true, default-features = false }
-revmc-context = { workspace = true, default-features = false }
+revmc-context = { workspace = true, default-features = false, features = ["evm"] }
 
 revm-bytecode = { workspace = true, features = ["std"] }
 revm-context = { workspace = true, features = ["std"] }
