@@ -88,8 +88,14 @@ pub struct EvmContext<'a> {
     pub memory: &'a mut SharedMemory,
     /// Input information (target address, caller, input data, call value).
     pub input: &'a mut InputsImpl,
-    /// The gas.
-    pub gas: &'a mut Gas,
+    /// The gas, stored inline to avoid an extra pointer indirection in JIT code.
+    ///
+    /// Mirrors the interpreter's [`Gas`] for the duration of the JIT call, and is written back
+    /// to [`Self::gas_ptr`] on exit.
+    pub gas: Gas,
+    /// Pointer to the original interpreter [`Gas`], used to write [`Self::gas`] back on exit.
+    #[doc(hidden)]
+    pub gas_ptr: &'a mut Gas,
     /// The host.
     pub host: &'a mut dyn Host,
     /// The return action.
@@ -129,9 +135,9 @@ const _: () = {
     // Key fields accessed by JIT code
     assert!(offset_of!(EvmContext<'_>, memory) == 0);
     assert!(offset_of!(EvmContext<'_>, gas) == 16);
-    assert!(offset_of!(EvmContext<'_>, spec_id) == 65);
-    assert!(offset_of!(EvmContext<'_>, resume_at) == 72);
-    assert!(offset_of!(EvmContext<'_>, calldatasize) == 112);
+    assert!(offset_of!(EvmContext<'_>, spec_id) == 121);
+    assert!(offset_of!(EvmContext<'_>, resume_at) == 128);
+    assert!(offset_of!(EvmContext<'_>, calldatasize) == 168);
 };
 
 impl fmt::Debug for EvmContext<'_> {
@@ -158,10 +164,12 @@ impl<'a> EvmContext<'a> {
         let bytecode = interpreter.bytecode.bytecode_slice() as *const [u8];
         let calldatasize = interpreter.input.input.len();
         let gas_params = host.gas_params().clone();
+        let gas_ptr: *mut Gas = &mut interpreter.gas;
         let this = Self {
             memory: &mut interpreter.memory,
             input: &mut interpreter.input,
-            gas: &mut interpreter.gas,
+            gas: interpreter.gas,
+            gas_ptr,
             host,
             next_action: &mut interpreter.bytecode.action,
             return_data: interpreter.return_data.buffer(),
@@ -306,6 +314,13 @@ impl EvmCompilerFn {
         // as it might have overflown inside of the function.
         if result == InstructionResult::OutOfGas {
             ecx.gas.spend_all();
+        }
+
+        // Write the inline gas back to the original interpreter `Gas` location.
+        // SAFETY: `gas_ptr` was constructed from `&mut interpreter.gas` and stays valid
+        // for the lifetime of `interpreter`.
+        unsafe {
+            *ecx.gas_ptr = ecx.gas;
         }
 
         let return_data_is_empty = ecx.return_data.is_empty();

@@ -233,13 +233,9 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         // This is initialized later in `post_entry_block`.
         let stack_len = bcx.new_stack_slot(isize_type, "len.addr");
 
-        // Load gas pointer from ecx.
-        let ptr_type = bcx.type_ptr();
-        let gas_ptr = {
-            let gas_field =
-                get_field(&mut bcx, ecx, mem::offset_of!(EvmContext<'_>, gas), "ecx.gas.addr");
-            bcx.load(ptr_type, gas_field, "ecx.gas")
-        };
+        // `gas` is stored inline in `ecx`; the gas pointer is just `ecx + offset_of(gas)`.
+        let gas_ptr =
+            get_field(&mut bcx, ecx, mem::offset_of!(EvmContext<'_>, gas), "ecx.gas.addr");
         let gas_remaining = {
             let offset = bcx.iconst(i64_type, mem::offset_of!(pf::Gas, tracker.remaining) as i64);
             let name = "gas.remaining.addr";
