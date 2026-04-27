@@ -240,6 +240,9 @@ impl WorkerPool {
     /// Shuts down all workers after draining queued jobs.
     pub(crate) fn shutdown(&mut self) {
         self.shutdown.store(true, Ordering::Release);
+        if let Some(pool) = &self.pool {
+            clear_thread_local_compilers(pool);
+        }
         self.pool.take();
     }
 }
@@ -249,6 +252,17 @@ impl Drop for WorkerPool {
         self.shutdown();
     }
 }
+
+#[cfg(feature = "llvm")]
+fn clear_thread_local_compilers(pool: &ThreadPool) {
+    pool.broadcast(|_| {
+        JIT_COMPILER.with_borrow_mut(Option::take);
+        AOT_COMPILER.with_borrow_mut(Option::take);
+    });
+}
+
+#[cfg(not(feature = "llvm"))]
+fn clear_thread_local_compilers(_pool: &ThreadPool) {}
 
 #[cfg(feature = "llvm")]
 fn compile_job(job: CompileJob, config: &RuntimeConfig) -> WorkerResult {
