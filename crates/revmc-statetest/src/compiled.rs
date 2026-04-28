@@ -3,12 +3,13 @@
 use crate::runner::{
     TestError, TestErrorKind, TestRunnerState, check_evm_execution, execute_test_suite, skip_test,
 };
-use revm_context::{Context, block::BlockEnv, cfg::CfgEnv, tx::TxEnv};
+use revm_context::{Cfg, Context, Journal, cfg::CfgEnv, tx::TxEnv};
+use revm_context_interface::journaled_state::JournalTr;
 use revm_database::{self as database};
-use revm_database_interface::DatabaseCommit;
-use revm_handler::{Handler, MainBuilder, MainContext};
+use revm_database_interface::{DatabaseCommit, EmptyDB};
+use revm_handler::{Handler, MainBuilder, MainContext, MainnetContext, MainnetEvm};
 use revm_primitives::{U256, hardfork::SpecId};
-use revm_statetest_types::{SpecName, TestSuite, TestUnit};
+use revm_statetest_types::{SpecName, TestSuite};
 use std::{
     fs,
     panic::{self, AssertUnwindSafe},
@@ -40,48 +41,52 @@ use revmc::{
     runtime::{ArtifactStore, JitBackend, RuntimeArtifactStore, RuntimeConfig, RuntimeTuning},
 };
 
+type RuntimeState = database::State<EmptyDB>;
+type RuntimeEvm = JitEvm<MainnetEvm<MainnetContext<RuntimeState>>>;
+
 /// Execute a single test using the runtime backend via [`JitEvm`].
 fn execute_single_test_runtime(
-    backend: &JitBackend,
+    evm: &mut RuntimeEvm,
     ctx: RuntimeTestContext<'_>,
 ) -> Result<(), TestErrorKind> {
     let prestate = ctx.cache_state.clone();
     let state =
         database::State::builder().with_cached_prestate(prestate).with_bundle_update().build();
+    let mut journal = Journal::new(state);
+    journal.set_spec_id(*evm.ctx.cfg.spec());
+    journal.set_eip7708_config(
+        evm.ctx.cfg.is_eip7708_disabled(),
+        evm.ctx.cfg.is_eip7708_delayed_burn_disabled(),
+    );
 
     let timer = Instant::now();
-    let evm_context = Context::mainnet()
-        .with_block(ctx.block.clone())
-        .with_tx(ctx.tx.clone())
-        .with_cfg(ctx.cfg.clone())
-        .with_db(state);
-    let inner = evm_context.build_mainnet();
-    let mut evm = JitEvm::new(inner, backend.clone());
+    evm.ctx.tx = ctx.tx.clone();
+    evm.ctx.journaled_state = journal;
+
     let mut handler = revm_handler::MainnetHandler::default();
-    let exec_result = handler.run(&mut evm);
+    let exec_result = handler.run(evm);
     if exec_result.is_ok() {
         let s = evm.ctx.journaled_state.finalize();
         DatabaseCommit::commit(&mut evm.ctx.journaled_state.database, s);
     }
     *ctx.elapsed.lock().unwrap() += timer.elapsed();
 
+    let spec = *evm.ctx.cfg.spec();
     check_evm_execution(
         ctx.test,
-        ctx.unit.out.as_ref(),
+        ctx.expected_output,
         ctx.name,
         &exec_result,
         &mut evm.ctx.journaled_state.database,
-        *ctx.cfg.spec(),
+        spec,
         false,
     )
 }
 
 struct RuntimeTestContext<'a> {
     test: &'a revm_statetest_types::Test,
-    unit: &'a TestUnit,
+    expected_output: Option<&'a revm_primitives::Bytes>,
     name: &'a str,
-    cfg: &'a CfgEnv,
-    block: &'a BlockEnv,
     tx: &'a TxEnv,
     cache_state: &'a database::CacheState,
     elapsed: &'a Arc<Mutex<Duration>>,
@@ -143,6 +148,16 @@ fn execute_test_suite_runtime(
             }
 
             let block = unit.block_env(&mut cfg);
+            let initial_state = database::State::builder()
+                .with_cached_prestate(cache_state.clone())
+                .with_bundle_update()
+                .build();
+            let evm_context = Context::mainnet()
+                .with_block(block.clone())
+                .with_cfg(cfg.clone())
+                .with_db(initial_state);
+            let inner = evm_context.build_mainnet();
+            let mut evm = JitEvm::new(inner, backend.clone());
 
             for test in tests.iter() {
                 let tx = match test.tx_env(&unit) {
@@ -158,13 +173,11 @@ fn execute_test_suite_runtime(
                 };
 
                 let result = execute_single_test_runtime(
-                    backend,
+                    &mut evm,
                     RuntimeTestContext {
                         test,
-                        unit: &unit,
+                        expected_output: unit.out.as_ref(),
                         name: &name,
-                        cfg: &cfg,
-                        block: &block,
                         tx: &tx,
                         cache_state: &cache_state,
                         elapsed,

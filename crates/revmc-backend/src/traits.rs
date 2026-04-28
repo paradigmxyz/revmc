@@ -153,6 +153,9 @@ pub enum Attribute {
     ArgMemOnly,
     /// `initializes((0, N))` — function initializes bytes `[0, N)` through this pointer.
     Initializes(u64),
+    /// `dead_on_return` — the contents of the pointed-to memory are dead after the function
+    /// returns, allowing the caller to elide stores to the memory.
+    DeadOnReturn,
     // TODO: Range?
 }
 

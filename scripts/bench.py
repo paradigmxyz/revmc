@@ -54,11 +54,12 @@ from utils import (
 # ---------------------------------------------------------------------------
 
 
-def find_extra_benches(extra_dirs: list[str], root: str, tmp_dir: str) -> list[str]:
-    """Find .bin files in extra directories.
+def find_extra_benches(extra_dirs: list[str], root: str) -> list[str]:
+    """Find benchmarks in extra directories.
 
-    For directories containing ``bytecode.bin``, creates a uniquely-named
-    symlink so the CLI dumps each into its own subdirectory.
+    For directories containing ``bytecode.bin``, returns the directory path —
+    the CLI accepts those directly and uses the directory name as the bench
+    name. For bare ``.bin`` files, returns the absolute path.
     """
     paths = []
     for d in extra_dirs:
@@ -68,12 +69,11 @@ def find_extra_benches(extra_dirs: list[str], root: str, tmp_dir: str) -> list[s
             continue
         for entry in sorted(os.listdir(d)):
             entry_path = os.path.join(d, entry)
-            # Directory containing bytecode.bin — symlink with the dir name.
-            bin_file = os.path.join(entry_path, "bytecode.bin")
-            if os.path.isdir(entry_path) and os.path.isfile(bin_file):
-                link = os.path.join(tmp_dir, entry + ".bin")
-                os.symlink(os.path.abspath(bin_file), link)
-                paths.append(link)
+            # Directory containing bytecode.bin — pass the directory.
+            if os.path.isdir(entry_path) and os.path.isfile(
+                os.path.join(entry_path, "bytecode.bin")
+            ):
+                paths.append(os.path.abspath(entry_path))
             # Direct .bin file.
             elif os.path.isfile(entry_path) and entry.endswith(".bin"):
                 paths.append(os.path.abspath(entry_path))
@@ -354,10 +354,18 @@ class CodegenLines(Analysis):
             i256_loads, i256_stores = i256_load_store_counts(
                 os.path.join(dump_dir, sub, "opt.ll")
             )
-            spills, reloads = spill_reload_counts(
-                os.path.join(dump_dir, sub, "opt.s")
+            spills, reloads = spill_reload_counts(os.path.join(dump_dir, sub, "opt.s"))
+            rows.append(
+                (
+                    bench_name(bench),
+                    counts,
+                    jit_size,
+                    i256_loads,
+                    i256_stores,
+                    spills,
+                    reloads,
+                )
             )
-            rows.append((bench_name(bench), counts, jit_size, i256_loads, i256_stores, spills, reloads))
             for i, c in enumerate(counts):
                 totals[i] += c
             total_size += jit_size
@@ -365,12 +373,26 @@ class CodegenLines(Analysis):
             total_i256_stores += i256_stores
             total_spills += spills
             total_reloads += reloads
-        return rows, totals, total_size, total_i256_loads, total_i256_stores, total_spills, total_reloads
+        return (
+            rows,
+            totals,
+            total_size,
+            total_i256_loads,
+            total_i256_stores,
+            total_spills,
+            total_reloads,
+        )
 
     def report(self, benches, dump_dir, outputs):
-        rows, totals, total_size, total_i256_ld, total_i256_st, total_spills, total_reloads = self._collect(
-            benches, dump_dir
-        )
+        (
+            rows,
+            totals,
+            total_size,
+            total_i256_ld,
+            total_i256_st,
+            total_spills,
+            total_reloads,
+        ) = self._collect(benches, dump_dir)
         print("### Codegen statistics\n")
         table = [
             [name, *counts, fmt_size(jit_size), i256_ld, i256_st, spills, reloads]
@@ -388,19 +410,35 @@ class CodegenLines(Analysis):
             ]
         )
         print_table(
-            ["benchmark", "unopt.ll", "opt.ll", "opt.s", "jit size", "i256 loads", "i256 stores", "spills", "reloads"],
+            [
+                "benchmark",
+                "unopt.ll",
+                "opt.ll",
+                "opt.s",
+                "jit size",
+                "i256 loads",
+                "i256 stores",
+                "spills",
+                "reloads",
+            ],
             table,
         )
 
     def report_diff(
         self, benches, dump_dir, outputs, base_dump, base_outputs, base_label
     ):
-        cur_rows, cur_totals, cur_total_size, cur_tld, cur_tst, cur_tsp, cur_trl = self._collect(
-            benches, dump_dir
+        cur_rows, cur_totals, cur_total_size, cur_tld, cur_tst, cur_tsp, cur_trl = (
+            self._collect(benches, dump_dir)
         )
-        base_rows, base_totals, base_total_size, base_tld, base_tst, base_tsp, base_trl = self._collect(
-            benches, base_dump
-        )
+        (
+            base_rows,
+            base_totals,
+            base_total_size,
+            base_tld,
+            base_tst,
+            base_tsp,
+            base_trl,
+        ) = self._collect(benches, base_dump)
         base_map = {
             name: (counts, jit_size, i256_ld, i256_st, spills, reloads)
             for name, counts, jit_size, i256_ld, i256_st, spills, reloads in base_rows
@@ -408,7 +446,17 @@ class CodegenLines(Analysis):
 
         # Summary table.
         print("### Codegen statistics\n")
-        headers = ["benchmark", "unopt.ll", "opt.ll", "opt.s", "jit size", "i256 loads", "i256 stores", "spills", "reloads"]
+        headers = [
+            "benchmark",
+            "unopt.ll",
+            "opt.ll",
+            "opt.s",
+            "jit size",
+            "i256 loads",
+            "i256 stores",
+            "spills",
+            "reloads",
+        ]
         table = []
         n = NOISE_CODEGEN
         for name, counts, jit_size, i256_ld, i256_st, spills, reloads in cur_rows:
@@ -518,7 +566,9 @@ class CompileTime(Analysis):
             for name, r in rows
         ]
         table.append(["**TOTAL**", f"**{fmt_dur(totals['total'])}**", "", "", "", ""])
-        print_table(["benchmark", "total", "parse", "translate", "finalize", "codegen"], table)
+        print_table(
+            ["benchmark", "total", "parse", "translate", "finalize", "codegen"], table
+        )
 
     def report_diff(
         self, benches, dump_dir, outputs, base_dump, base_outputs, base_label
@@ -545,7 +595,9 @@ class CompileTime(Analysis):
                 *[f"**{fmt_pct(base_totals[p], cur_totals[p])}**" for p in keys],
             ]
         )
-        print_table(["benchmark", "total", "parse", "translate", "finalize", "codegen"], table)
+        print_table(
+            ["benchmark", "total", "parse", "translate", "finalize", "codegen"], table
+        )
 
         # Detailed table.
         print("<details><summary>Full compile times</summary>\n")
@@ -659,8 +711,16 @@ class JumpResolution(Analysis):
 # ---------------------------------------------------------------------------
 
 IR_STAT_KEYS = [
-    "total_insts", "live", "dead", "noops", "suspends",
-    "blocks", "block_min", "block_max", "block_avg", "block_median",
+    "total_insts",
+    "live",
+    "dead",
+    "noops",
+    "suspends",
+    "blocks",
+    "block_min",
+    "block_max",
+    "block_avg",
+    "block_median",
 ]
 
 
@@ -918,8 +978,9 @@ def main():
     parser.add_argument(
         "--extra-dir",
         action="append",
-        default=[],
-        help="Extra directory with .bin files to benchmark (can be repeated)",
+        default=None,
+        help="Extra directory with .bin files to benchmark (can be repeated). "
+        "Defaults to ['tmp/mainnet']; pass any --extra-dir to override.",
     )
 
     # Analysis selectors. Default: --codegen-lines --compile-times.
@@ -984,96 +1045,99 @@ def main():
     rust_log = ",".join(sorted(rust_log_parts)) if rust_log_parts else None
 
     root = repo_root()
-    link_dir = tempfile.mkdtemp(prefix="revmc-bench-links-")
 
-    try:
-        binary = cargo_build(root)
-        builtin = args.benches or get_benches(binary)
-        extra = find_extra_benches(args.extra_dir, root, link_dir)
-        benches = builtin + extra
+    binary = cargo_build(root)
+    builtin = args.benches or get_benches(binary)
+    extra_dirs = args.extra_dir if args.extra_dir is not None else ["tmp/mainnet"]
+    extra = find_extra_benches(extra_dirs, root)
+    benches = builtin + extra
 
-        if not benches:
-            eprint("No benchmarks found.")
-            return
+    if not benches:
+        eprint("No benchmarks found.")
+        return
 
-        eprint(f"Benchmarks: {len(builtin)} built-in + {len(extra)} extra")
+    eprint(f"Benchmarks: {len(builtin)} built-in + {len(extra)} extra")
 
-        dump_dir = args.dump_dir if need_codegen else None
-        outputs = collect(benches, binary, dump_dir, rust_log)
+    dump_dir = args.dump_dir if need_codegen else None
+    outputs = collect(benches, binary, dump_dir, rust_log)
 
-        if args.base_rev:
-            # Detect self-diff: abort if base_rev resolves to the same commit as HEAD.
-            head_sha = subprocess.run(
-                ["git", "rev-parse", "HEAD"],
-                capture_output=True, text=True, check=True, cwd=root,
-            ).stdout.strip()
-            base_sha = subprocess.run(
-                ["git", "rev-parse", args.base_rev],
-                capture_output=True, text=True, check=True, cwd=root,
-            ).stdout.strip()
-            if head_sha == base_sha:
-                eprint(
-                    f"error: --diff {args.base_rev!r} resolves to HEAD ({head_sha[:12]}); "
-                    f"diffing a branch against itself is pointless"
+    if args.base_rev:
+        # Detect self-diff: abort if base_rev resolves to the same commit as HEAD.
+        head_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=True,
+            cwd=root,
+        ).stdout.strip()
+        base_sha = subprocess.run(
+            ["git", "rev-parse", args.base_rev],
+            capture_output=True,
+            text=True,
+            check=True,
+            cwd=root,
+        ).stdout.strip()
+        if head_sha == base_sha:
+            eprint(
+                f"error: --diff {args.base_rev!r} resolves to HEAD ({head_sha[:12]}); "
+                f"diffing a branch against itself is pointless"
+            )
+            raise SystemExit(1)
+
+        base_dump = args.dump_dir + ".base"
+        base_worktree = tempfile.mkdtemp()
+        try:
+            subprocess.run(
+                [
+                    "git",
+                    "worktree",
+                    "add",
+                    "--detach",
+                    "--quiet",
+                    base_worktree,
+                    args.base_rev,
+                ],
+                check=True,
+                cwd=root,
+            )
+            base_binary = cargo_build(base_worktree)
+            base_dump_dir = base_dump if need_codegen else None
+            base_outputs = collect(benches, base_binary, base_dump_dir, rust_log)
+        finally:
+            subprocess.run(
+                ["git", "worktree", "remove", "--force", base_worktree],
+                capture_output=True,
+                cwd=root,
+            )
+            if os.path.isdir(base_worktree):
+                shutil.rmtree(base_worktree)
+
+        def run_reports():
+            for a in analyses:
+                a.report_diff(
+                    benches,
+                    args.dump_dir,
+                    outputs,
+                    base_dump,
+                    base_outputs,
+                    args.base_rev,
                 )
-                raise SystemExit(1)
+    else:
 
-            base_dump = args.dump_dir + ".base"
-            base_worktree = tempfile.mkdtemp()
-            try:
-                subprocess.run(
-                    [
-                        "git",
-                        "worktree",
-                        "add",
-                        "--detach",
-                        "--quiet",
-                        base_worktree,
-                        args.base_rev,
-                    ],
-                    check=True,
-                    cwd=root,
-                )
-                base_binary = cargo_build(base_worktree)
-                base_dump_dir = base_dump if need_codegen else None
-                base_outputs = collect(benches, base_binary, base_dump_dir, rust_log)
-            finally:
-                subprocess.run(
-                    ["git", "worktree", "remove", "--force", base_worktree],
-                    capture_output=True,
-                    cwd=root,
-                )
-                if os.path.isdir(base_worktree):
-                    shutil.rmtree(base_worktree)
+        def run_reports():
+            for a in analyses:
+                a.report(benches, args.dump_dir, outputs)
 
-            def run_reports():
-                for a in analyses:
-                    a.report_diff(
-                        benches,
-                        args.dump_dir,
-                        outputs,
-                        base_dump,
-                        base_outputs,
-                        args.base_rev,
-                    )
-        else:
-            def run_reports():
-                for a in analyses:
-                    a.report(benches, args.dump_dir, outputs)
-
-        os.makedirs(args.dump_dir, exist_ok=True)
-        results_path = os.path.join(args.dump_dir, "results.md")
-        with open(results_path, "w") as md:
-            old_stdout = sys.stdout
-            sys.stdout = _Tee(old_stdout, md)
-            try:
-                run_reports()
-            finally:
-                sys.stdout = old_stdout
-        eprint(f"Wrote {results_path}")
-
-    finally:
-        shutil.rmtree(link_dir, ignore_errors=True)
+    os.makedirs(args.dump_dir, exist_ok=True)
+    results_path = os.path.join(args.dump_dir, "results.md")
+    with open(results_path, "w") as md:
+        old_stdout = sys.stdout
+        sys.stdout = _Tee(old_stdout, md)
+        try:
+            run_reports()
+        finally:
+            sys.stdout = old_stdout
+    eprint(f"Wrote {results_path}")
 
 
 if __name__ == "__main__":

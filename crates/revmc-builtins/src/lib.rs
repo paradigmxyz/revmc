@@ -693,9 +693,11 @@ pub unsafe extern "C" fn __revmc_builtin_log(
         data: LogData::new(topics, data).expect("too many topics"),
     };
     if let Some(on_log) = &mut ecx.on_log {
+        ecx.host.log(log.clone());
         on_log(&log);
+    } else {
+        ecx.host.log(log);
     }
-    ecx.host.log(log);
     Ok(())
 }
 

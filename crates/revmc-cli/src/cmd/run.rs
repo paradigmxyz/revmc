@@ -3,7 +3,7 @@ use color_eyre::{Result, eyre::eyre};
 use revmc::{
     EvmCompiler, OptimizationLevel, eyre::ensure, primitives::hardfork::SpecId, shared_library_path,
 };
-use revmc_cli::{Bench, PreparedBench, get_benches, read_code};
+use revmc_cli::{Bench, PreparedBench, get_benches, read_code_path, read_code_string};
 use std::{
     hint::black_box,
     path::{Path, PathBuf},
@@ -11,7 +11,8 @@ use std::{
 
 #[derive(Parser)]
 pub(crate) struct RunArgs {
-    /// Benchmark name, "custom", path to a file, or a symbol to load from a shared object.
+    /// Benchmark name, path to a file or revmc dump dir, raw hex bytecode, or
+    /// EVM assembly. Auto-detected from the input.
     ///
     /// Use `--list` to see all available benchmark names.
     bench_name: Option<String>,
@@ -22,10 +23,6 @@ pub(crate) struct RunArgs {
     #[arg(long)]
     list: bool,
 
-    #[arg(long)]
-    code: Option<String>,
-    #[arg(long, conflicts_with = "code")]
-    code_path: Option<PathBuf>,
     #[arg(long)]
     calldata: Option<String>,
 
@@ -85,6 +82,12 @@ pub(crate) struct RunArgs {
     /// Inspect the stack after the function has been executed.
     #[arg(long)]
     inspect_stack: bool,
+    /// Disable frame pointers in the JIT'd function. Frees up `rbp` for the
+    /// register allocator (15 GPRs instead of 14 on x86_64) at the cost of
+    /// not having `rbp`-based stack walks. DWARF `.eh_frame` unwinding still
+    /// works.
+    #[arg(long)]
+    no_frame_pointers: bool,
     #[arg(long, default_value = "1000000000")]
     gas_limit: u64,
 }
@@ -102,28 +105,45 @@ impl RunArgs {
             return Err(eyre!("missing <BENCH_NAME>; use `--list` to see available benchmarks"));
         };
 
-        // Resolve bench entry first (before any partial moves of self).
-        let bench_entry = if bench_name == "custom" {
-            Bench {
-                name: "custom",
-                bytecode: read_code(self.code.as_deref(), self.code_path.as_deref())?,
-                ..Default::default()
-            }
+        // Resolve bench entry. Auto-detected from the input:
+        //   1. Match against the built-in benchmark catalog by name.
+        //   2. If a path exists, load from file or revmc dump dir.
+        //   3. Otherwise parse as inline EVM hex/asm.
+        let bench_entry = if let Some(b) = get_benches().into_iter().find(|b| b.name == bench_name)
+        {
+            b
         } else if Path::new(&bench_name).exists() {
             let path = Path::new(&bench_name);
-            ensure!(path.is_file(), "argument must be a file");
-            ensure!(self.code.is_none(), "--code is not allowed with a file argument");
-            ensure!(self.code_path.is_none(), "--code-path is not allowed with a file argument");
+            let (name, bytecode_path): (String, PathBuf) = if path.is_dir() {
+                let bin = path.join("bytecode.bin");
+                ensure!(bin.is_file(), "{} not found in directory", bin.display());
+                let dir_name = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .ok_or_else(|| eyre!("invalid directory name: {}", path.display()))?
+                    .to_string();
+                (dir_name, bin)
+            } else {
+                let stem = path
+                    .file_stem()
+                    .and_then(|n| n.to_str())
+                    .ok_or_else(|| eyre!("invalid file name: {}", path.display()))?
+                    .to_string();
+                (stem, path.to_path_buf())
+            };
             Bench {
-                name: path.file_stem().unwrap().to_str().unwrap().to_string().leak(),
-                bytecode: read_code(None, Some(path))?,
+                name: name.leak(),
+                bytecode: read_code_path(&bytecode_path)?,
                 ..Default::default()
             }
         } else {
-            match get_benches().into_iter().find(|b| b.name == bench_name) {
-                Some(b) => b,
-                None => return Err(eyre!("unknown benchmark: {bench_name}")),
-            }
+            let bytecode = read_code_string(bench_name.trim().as_bytes(), None).map_err(|e| {
+                eyre!(
+                    "{bench_name:?} is not a known benchmark, an existing path, \
+                     or valid EVM hex/asm: {e}"
+                )
+            })?;
+            Bench { name: "custom", bytecode, ..Default::default() }
         };
 
         let name = bench_entry.name;
@@ -167,6 +187,9 @@ impl RunArgs {
             }
 
             compiler.inspect_stack(self.inspect_stack);
+            if self.no_frame_pointers {
+                compiler.frame_pointers(false);
+            }
 
             let parsed = compiler.parse(bytecode.as_slice().into(), compile_spec_id)?;
             if self.display || self.parse_only {
