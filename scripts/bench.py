@@ -354,10 +354,18 @@ class CodegenLines(Analysis):
             i256_loads, i256_stores = i256_load_store_counts(
                 os.path.join(dump_dir, sub, "opt.ll")
             )
-            spills, reloads = spill_reload_counts(
-                os.path.join(dump_dir, sub, "opt.s")
+            spills, reloads = spill_reload_counts(os.path.join(dump_dir, sub, "opt.s"))
+            rows.append(
+                (
+                    bench_name(bench),
+                    counts,
+                    jit_size,
+                    i256_loads,
+                    i256_stores,
+                    spills,
+                    reloads,
+                )
             )
-            rows.append((bench_name(bench), counts, jit_size, i256_loads, i256_stores, spills, reloads))
             for i, c in enumerate(counts):
                 totals[i] += c
             total_size += jit_size
@@ -365,12 +373,26 @@ class CodegenLines(Analysis):
             total_i256_stores += i256_stores
             total_spills += spills
             total_reloads += reloads
-        return rows, totals, total_size, total_i256_loads, total_i256_stores, total_spills, total_reloads
+        return (
+            rows,
+            totals,
+            total_size,
+            total_i256_loads,
+            total_i256_stores,
+            total_spills,
+            total_reloads,
+        )
 
     def report(self, benches, dump_dir, outputs):
-        rows, totals, total_size, total_i256_ld, total_i256_st, total_spills, total_reloads = self._collect(
-            benches, dump_dir
-        )
+        (
+            rows,
+            totals,
+            total_size,
+            total_i256_ld,
+            total_i256_st,
+            total_spills,
+            total_reloads,
+        ) = self._collect(benches, dump_dir)
         print("### Codegen statistics\n")
         table = [
             [name, *counts, fmt_size(jit_size), i256_ld, i256_st, spills, reloads]
@@ -388,19 +410,35 @@ class CodegenLines(Analysis):
             ]
         )
         print_table(
-            ["benchmark", "unopt.ll", "opt.ll", "opt.s", "jit size", "i256 loads", "i256 stores", "spills", "reloads"],
+            [
+                "benchmark",
+                "unopt.ll",
+                "opt.ll",
+                "opt.s",
+                "jit size",
+                "i256 loads",
+                "i256 stores",
+                "spills",
+                "reloads",
+            ],
             table,
         )
 
     def report_diff(
         self, benches, dump_dir, outputs, base_dump, base_outputs, base_label
     ):
-        cur_rows, cur_totals, cur_total_size, cur_tld, cur_tst, cur_tsp, cur_trl = self._collect(
-            benches, dump_dir
+        cur_rows, cur_totals, cur_total_size, cur_tld, cur_tst, cur_tsp, cur_trl = (
+            self._collect(benches, dump_dir)
         )
-        base_rows, base_totals, base_total_size, base_tld, base_tst, base_tsp, base_trl = self._collect(
-            benches, base_dump
-        )
+        (
+            base_rows,
+            base_totals,
+            base_total_size,
+            base_tld,
+            base_tst,
+            base_tsp,
+            base_trl,
+        ) = self._collect(benches, base_dump)
         base_map = {
             name: (counts, jit_size, i256_ld, i256_st, spills, reloads)
             for name, counts, jit_size, i256_ld, i256_st, spills, reloads in base_rows
@@ -408,7 +446,17 @@ class CodegenLines(Analysis):
 
         # Summary table.
         print("### Codegen statistics\n")
-        headers = ["benchmark", "unopt.ll", "opt.ll", "opt.s", "jit size", "i256 loads", "i256 stores", "spills", "reloads"]
+        headers = [
+            "benchmark",
+            "unopt.ll",
+            "opt.ll",
+            "opt.s",
+            "jit size",
+            "i256 loads",
+            "i256 stores",
+            "spills",
+            "reloads",
+        ]
         table = []
         n = NOISE_CODEGEN
         for name, counts, jit_size, i256_ld, i256_st, spills, reloads in cur_rows:
@@ -518,7 +566,9 @@ class CompileTime(Analysis):
             for name, r in rows
         ]
         table.append(["**TOTAL**", f"**{fmt_dur(totals['total'])}**", "", "", "", ""])
-        print_table(["benchmark", "total", "parse", "translate", "finalize", "codegen"], table)
+        print_table(
+            ["benchmark", "total", "parse", "translate", "finalize", "codegen"], table
+        )
 
     def report_diff(
         self, benches, dump_dir, outputs, base_dump, base_outputs, base_label
@@ -545,7 +595,9 @@ class CompileTime(Analysis):
                 *[f"**{fmt_pct(base_totals[p], cur_totals[p])}**" for p in keys],
             ]
         )
-        print_table(["benchmark", "total", "parse", "translate", "finalize", "codegen"], table)
+        print_table(
+            ["benchmark", "total", "parse", "translate", "finalize", "codegen"], table
+        )
 
         # Detailed table.
         print("<details><summary>Full compile times</summary>\n")
@@ -659,8 +711,16 @@ class JumpResolution(Analysis):
 # ---------------------------------------------------------------------------
 
 IR_STAT_KEYS = [
-    "total_insts", "live", "dead", "noops", "suspends",
-    "blocks", "block_min", "block_max", "block_avg", "block_median",
+    "total_insts",
+    "live",
+    "dead",
+    "noops",
+    "suspends",
+    "blocks",
+    "block_min",
+    "block_max",
+    "block_avg",
+    "block_median",
 ]
 
 
@@ -918,8 +978,9 @@ def main():
     parser.add_argument(
         "--extra-dir",
         action="append",
-        default=[],
-        help="Extra directory with .bin files to benchmark (can be repeated)",
+        default=None,
+        help="Extra directory with .bin files to benchmark (can be repeated). "
+        "Defaults to ['tmp/mainnet']; pass any --extra-dir to override.",
     )
 
     # Analysis selectors. Default: --codegen-lines --compile-times.
@@ -989,7 +1050,8 @@ def main():
     try:
         binary = cargo_build(root)
         builtin = args.benches or get_benches(binary)
-        extra = find_extra_benches(args.extra_dir, root, link_dir)
+        extra_dirs = args.extra_dir if args.extra_dir is not None else ["tmp/mainnet"]
+        extra = find_extra_benches(extra_dirs, root, link_dir)
         benches = builtin + extra
 
         if not benches:
@@ -1005,11 +1067,17 @@ def main():
             # Detect self-diff: abort if base_rev resolves to the same commit as HEAD.
             head_sha = subprocess.run(
                 ["git", "rev-parse", "HEAD"],
-                capture_output=True, text=True, check=True, cwd=root,
+                capture_output=True,
+                text=True,
+                check=True,
+                cwd=root,
             ).stdout.strip()
             base_sha = subprocess.run(
                 ["git", "rev-parse", args.base_rev],
-                capture_output=True, text=True, check=True, cwd=root,
+                capture_output=True,
+                text=True,
+                check=True,
+                cwd=root,
             ).stdout.strip()
             if head_sha == base_sha:
                 eprint(
@@ -1057,6 +1125,7 @@ def main():
                         args.base_rev,
                     )
         else:
+
             def run_reports():
                 for a in analyses:
                     a.report(benches, args.dump_dir, outputs)
