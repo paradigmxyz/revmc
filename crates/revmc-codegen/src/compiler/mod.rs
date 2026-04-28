@@ -415,7 +415,7 @@ impl<B: Backend> EvmCompiler<B> {
     }
 
     /// Sets whether to collapse every JIT failure path to a single
-    /// [`OutOfGas`](crate::interpreter::InstructionResult::OutOfGas) constant.
+    /// [`OutOfGas`](revm_interpreter::InstructionResult::OutOfGas) constant.
     ///
     /// Failures (stack under/overflow, invalid jump, real OOG, invalid opcode, etc.) are
     /// semantically interchangeable for callers that only branch on success vs failure, so
