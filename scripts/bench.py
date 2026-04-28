@@ -980,7 +980,9 @@ def main():
         action="append",
         default=None,
         help="Extra directory with .bin files to benchmark (can be repeated). "
-        "Defaults to ['tmp/mainnet']; pass any --extra-dir to override.",
+        "Defaults to ['tmp/mainnet'] when running all benchmarks; "
+        "pass any --extra-dir to override or to include extras with explicit "
+        "benchmarks.",
     )
 
     # Analysis selectors. Default: --codegen-lines --compile-times.
@@ -1048,7 +1050,11 @@ def main():
 
     binary = cargo_build(root)
     builtin = args.benches or get_benches(binary)
-    extra_dirs = [] if args.benches else (args.extra_dir if args.extra_dir is not None else ["tmp/mainnet"])
+    extra_dirs = (
+        args.extra_dir
+        if args.extra_dir is not None
+        else ([] if args.benches else ["tmp/mainnet"])
+    )
     extra = find_extra_benches(extra_dirs, root)
     benches = builtin + extra
 
