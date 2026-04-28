@@ -2,7 +2,8 @@
 // Keep in sync with upstream; revmc-specific code lives in `compiled.rs`.
 
 use crate::merkle_trie::{TestValidationResult, compute_test_roots};
-use indicatif::{ProgressBar, ProgressDrawTarget};
+use console::Term;
+use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use revm_context::{Context, block::BlockEnv, cfg::CfgEnv, tx::TxEnv};
 use revm_context_interface::result::{EVMError, ExecutionResult, HaltReason, InvalidTransaction};
 use revm_database::{self as database, bal::EvmDatabaseError};
@@ -388,15 +389,28 @@ pub(crate) struct TestRunnerState {
     pub(crate) stop: Arc<AtomicBool>,
 }
 
+fn console_bar(n_files: usize) -> ProgressBar {
+    let bar = ProgressBar::with_draw_target(
+        Some(n_files as u64),
+        ProgressDrawTarget::term_like_with_hz(Box::new(Term::buffered_stderr()), 1),
+    );
+    bar.set_style(
+        ProgressStyle::with_template(
+            "[{elapsed_precise}] {wide_bar} {pos}/{len} ({per_sec}, eta {eta})",
+        )
+        .unwrap()
+        .progress_chars("=>-"),
+    );
+    bar.enable_steady_tick(Duration::from_secs(1));
+    bar
+}
+
 impl TestRunnerState {
     pub(crate) fn new(test_files: Vec<PathBuf>) -> Self {
         let n_files = test_files.len();
         Self {
             n_errors: Arc::new(AtomicUsize::new(0)),
-            console_bar: Arc::new(ProgressBar::with_draw_target(
-                Some(n_files as u64),
-                ProgressDrawTarget::stdout(),
-            )),
+            console_bar: Arc::new(console_bar(n_files)),
             queue: Arc::new(Mutex::new((0usize, test_files))),
             elapsed: Arc::new(Mutex::new(Duration::ZERO)),
             stop: Arc::new(AtomicBool::new(false)),

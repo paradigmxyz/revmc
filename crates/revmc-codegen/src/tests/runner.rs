@@ -10,7 +10,7 @@ use revm_interpreter::{
     CallInput, Host, InputsImpl, Interpreter, SharedMemory,
     instructions::instruction_table_gas_changes_spec, interpreter::ExtBytecode,
 };
-use revm_primitives::{B256, HashMap};
+use revm_primitives::{B256, HashMap, Log, hardfork::SpecId};
 use similar_asserts::assert_eq;
 use std::{fmt, path::Path, sync::OnceLock};
 
@@ -241,7 +241,7 @@ pub struct TestHost {
     pub transient_storage: HashMap<U256, U256>,
     pub code_map: &'static HashMap<Address, revm_bytecode::Bytecode>,
     pub selfdestructs: Vec<(Address, Address)>,
-    pub logs: Vec<primitives::Log>,
+    pub logs: Vec<Log>,
     pub gas_params: GasParams,
 }
 
@@ -357,7 +357,7 @@ impl Host for TestHost {
         ))
     }
 
-    fn log(&mut self, log: primitives::Log) {
+    fn log(&mut self, log: Log) {
         self.logs.push(log);
     }
 
@@ -718,9 +718,9 @@ fn assert_actions(actual: &InterpreterAction, expected: &InterpreterAction) {
             assert_eq!(actual_call.value, expected_call.value, "value mismatch");
             assert_eq!(actual_call.scheme, expected_call.scheme, "scheme mismatch");
             assert_eq!(actual_call.is_static, expected_call.is_static, "is_static mismatch");
-            // Note: We don't compare `input` directly as JIT uses Bytes, interpreter may use
-            // SharedBuffer Note: We don't compare `known_bytecode` as JIT doesn't
-            // preload
+            // Note: We don't compare `input` directly as it may use different shared-memory
+            // ranges.
+            // Note: We don't compare `known_bytecode` as JIT doesn't preload.
         }
         (
             InterpreterAction::NewFrame(FrameInput::Create(actual_create)),

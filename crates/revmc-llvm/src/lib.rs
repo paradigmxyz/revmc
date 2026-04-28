@@ -57,6 +57,7 @@ pub mod orc;
 mod utils;
 pub(crate) use utils::*;
 
+/// Branch weight for non-cold branches.
 const DEFAULT_WEIGHT: u32 = 20000;
 
 /// Current JIT memory usage counters.
@@ -113,6 +114,13 @@ impl JitMemoryCounters {
 /// Returns `None` if the JIT has not been initialized yet.
 pub fn jit_memory_usage() -> Option<JitMemoryUsage> {
     GlobalOrcJit::try_get().map(|g| g.memory_counters.get())
+}
+
+/// Collect garbage on the global JIT.
+pub fn global_gc() {
+    if let Some(orc) = GlobalOrcJit::try_get() {
+        orc.gc();
+    }
 }
 
 type FxHashMap<K, V> = alloy_primitives::map::HashMap<K, V, FxBuildHasher>;
@@ -321,7 +329,7 @@ impl GlobalOrcJit {
                     self.jit.mangle_and_intern(name),
                     orc::EvaluatedSymbol::new(
                         *addr as u64,
-                        orc::SymbolFlags::none().with_exported().callable(),
+                        orc::SymbolFlags::none().exported().callable(),
                     ),
                 )
             })
@@ -333,6 +341,10 @@ impl GlobalOrcJit {
         {
             error!("failed to define builtins: {e}");
         }
+    }
+
+    fn gc(&self) {
+        self.jit.get_execution_session().get_symbol_string_pool().clear_dead_entries();
     }
 }
 

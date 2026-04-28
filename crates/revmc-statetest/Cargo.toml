@@ -30,6 +30,7 @@ revm-statetest-types.workspace = true
 
 alloy-rlp = { version = "0.3", features = ["arrayvec", "derive"] }
 alloy-trie = { version = "0.9", features = ["ethereum"] }
+console = "0.16"
 dashmap = "6"
 eyre.workspace = true
 indicatif = "0.18"
