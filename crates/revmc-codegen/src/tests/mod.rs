@@ -824,9 +824,8 @@ tests! {
             expected_gas: 2 + 3 + gas::KECCAK256,
         }),
         keccak256_empty_dynamic_offset(@raw {
-            bytecode: &[op::ADDRESS, op::PUSH0, op::KECCAK256],
-            expected_return: InstructionResult::InvalidOperandOOG,
-            expected_stack: STACK_WHAT_INTERPRETER_SAYS,
+            bytecode: &[op::PUSH0, op::ADDRESS, op::KECCAK256],
+            expected_stack: &[KECCAK_EMPTY.into()],
             expected_gas: GAS_WHAT_INTERPRETER_SAYS,
         }),
         keccak256_1(@raw {
@@ -1372,9 +1371,8 @@ tests! {
             expected_next_action: ACTION_WHAT_INTERPRETER_SAYS,
         }),
         ret_empty_dynamic_offset(@raw {
-            bytecode: &[op::ADDRESS, op::PUSH0, op::RETURN],
-            expected_return: InstructionResult::InvalidOperandOOG,
-            expected_stack: STACK_WHAT_INTERPRETER_SAYS,
+            bytecode: &[op::PUSH0, op::ADDRESS, op::RETURN],
+            expected_return: InstructionResult::Return,
             expected_gas: GAS_WHAT_INTERPRETER_SAYS,
         }),
         ret(@raw {

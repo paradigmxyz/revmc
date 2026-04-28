@@ -373,7 +373,10 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     fn const_memory_operands(&self, args: [Option<U256>; 2]) -> Option<(u64, u64)> {
         if let [offset, Some(len)] = args
             && let Ok(len) = u64::try_from(len)
-            && let Some(offset) = offset.and_then(|offset| u64::try_from(offset).ok())
+            // For len == 0 offset is ignored.
+            && let Some(offset) = offset
+                .and_then(|offset| u64::try_from(offset).ok())
+                .or_else(|| (len == 0).then_some(0))
         {
             Some((offset, len))
         } else {
