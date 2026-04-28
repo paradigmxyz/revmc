@@ -32,10 +32,12 @@ def cargo_env(rust_log: str | None = None) -> dict[str, str]:
     return env
 
 
-def cargo_build(root: str) -> str:
+def cargo_build(root: str, incremental: bool = True) -> str:
     """Build the CLI binary and return its path."""
     target_dir = _shared_target_dir()
     env = {**os.environ, "CARGO_TARGET_DIR": target_dir}
+    if not incremental:
+        env["CARGO_INCREMENTAL"] = "0"
     subprocess.run(["cargo", "build", "--quiet"], check=True, cwd=root, env=env)
     return os.path.join(target_dir, "debug", "revmc")
 

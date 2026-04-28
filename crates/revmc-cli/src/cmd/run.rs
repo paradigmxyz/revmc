@@ -1,5 +1,6 @@
 use clap::{Parser, ValueEnum};
 use color_eyre::{Result, eyre::eyre};
+use revm_primitives::{B256Map, keccak256};
 use revmc::{
     EvmCompiler, OptimizationLevel, eyre::ensure, primitives::hardfork::SpecId, shared_library_path,
 };
@@ -150,6 +151,7 @@ impl RunArgs {
         let is_fixture = bench_entry.is_fixture();
         let default_aot_dir = || std::env::temp_dir().join("revmc-cli").join(&bench_name);
         let mut aot_dir = None;
+        let mut pending_jit = None;
 
         // Compile the entry-point contract: parse, display, dot, dump, aot.
         // For fixture benchmarks, extract the tx-target bytecode.
@@ -205,10 +207,6 @@ impl RunArgs {
             let f_id = compiler.translate_inner(name, &parsed)?;
 
             // Finalize the module (verify + optimize + dump IR/asm).
-            if !self.aot {
-                let _ = unsafe { compiler.jit_function(f_id)? };
-            }
-
             if self.aot {
                 let out_dir = if let Some(out_dir) = compiler.out_dir() {
                     out_dir.join(&bench_name)
@@ -235,6 +233,8 @@ impl RunArgs {
                 if self.load.is_none() {
                     return Ok(());
                 }
+            } else if self.load.is_none() {
+                pending_jit = Some((compiler, vec![(keccak256(&bytecode), f_id)]));
             }
         }
 
@@ -254,6 +254,16 @@ impl RunArgs {
                 PreparedBench::load_from_library(&bench_entry, spec_id, load_path, name);
             _compiler = None;
             _lib = Some(lib);
+        } else if let Some((mut compiler, pending)) = pending_jit {
+            prepared = PreparedBench::load_with_pending_functions(
+                &bench_entry,
+                spec_id,
+                &mut compiler,
+                B256Map::default(),
+                pending,
+            );
+            _compiler = Some(compiler);
+            _lib = None;
         } else {
             let compiler;
             (prepared, compiler) = PreparedBench::load(&bench_entry, spec_id);
@@ -261,11 +271,11 @@ impl RunArgs {
             _lib = None;
         };
 
-        prepared.sanity_check();
-
         if self.n_iters == 0 {
             return Ok(());
         }
+
+        prepared.sanity_check();
 
         if self.interpret {
             prepared.run_interpreter();

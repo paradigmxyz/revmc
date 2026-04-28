@@ -166,6 +166,7 @@ macro_rules! builtins {
                 const PANIC: u8 = _0_0;
                 const ASSERTSPECID: u8 = _0_0;
 
+                const EXPGAS: u8 = _1_0;
                 const KECCAK256CC: u8 = _0_1;
 
                 const CALLDATALOADC: u8 = _0_1;
@@ -253,6 +254,7 @@ builtins! {
     AddMod         = __revmc_builtin_addmod(@[sp] ptr) None,
     MulMod         = __revmc_builtin_mulmod(@[sp] ptr) None,
     Exp            = __revmc_builtin_exp(@[ecx] ptr, @[sp] ptr) None,
+    ExpGas         = __revmc_builtin_exp_gas(@[ecx] ptr, @[sp] ptr) None,
     Keccak256      = __revmc_builtin_keccak256(@[ecx] ptr, @[sp] ptr) None,
     Keccak256CC    = __revmc_builtin_keccak256_cc(@[ecx] ptr, @[sp] ptr, usize, usize) None,
     Balance        = __revmc_builtin_balance(@[ecx] ptr, @[sp] ptr) None,

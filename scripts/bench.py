@@ -129,6 +129,14 @@ def fmt_pct(base: float | int, current: float | int) -> str:
     return f"{pct:+.1f}%{_indicator(pct)}"
 
 
+def fmt_detail(current: str | int, base: str | int, diff: str) -> str:
+    return f"{base}<br>{current}<br>{diff}"
+
+
+def fmt_detail_bold(current: str | int, base: str | int, diff: str) -> str:
+    return f"**{fmt_detail(current, base, diff)}**"
+
+
 def is_noise(base: float | int, current: float | int, noise: float) -> bool:
     """Whether the relative change is within ``noise`` percent (or unmeasurable)."""
     if base == 0:
@@ -489,14 +497,17 @@ class CodegenLines(Analysis):
 
         # Detailed table.
         print("<details><summary>Full details</summary>\n")
-        detail_headers = ["benchmark"]
-        for f in ["unopt.ll", "opt.ll", "opt.s"]:
-            detail_headers += [f"{f} ({base_label})", "diff"]
-        detail_headers += [f"jit size ({base_label})", "diff"]
-        detail_headers += [f"i256 loads ({base_label})", "diff"]
-        detail_headers += [f"i256 stores ({base_label})", "diff"]
-        detail_headers += [f"spills ({base_label})", "diff"]
-        detail_headers += [f"reloads ({base_label})", "diff"]
+        detail_headers = [
+            "benchmark",
+            "unopt.ll",
+            "opt.ll",
+            "opt.s",
+            "jit size",
+            "i256 loads",
+            "i256 stores",
+            "spills",
+            "reloads",
+        ]
         detail_table = []
         for name, counts, jit_size, i256_ld, i256_st, spills, reloads in cur_rows:
             base_counts, base_jit, base_ld, base_st, base_sp, base_rl = base_map.get(
@@ -504,24 +515,29 @@ class CodegenLines(Analysis):
             )
             row = [name]
             for b, c in zip(base_counts, counts):
-                row += [b, fmt_pct(b, c)]
-            row += [fmt_size(base_jit), fmt_pct(base_jit, jit_size)]
-            row += [base_ld, fmt_diff(base_ld, i256_ld)]
-            row += [base_st, fmt_diff(base_st, i256_st)]
-            row += [base_sp, fmt_diff(base_sp, spills)]
-            row += [base_rl, fmt_diff(base_rl, reloads)]
+                row.append(fmt_detail(c, b, fmt_pct(b, c)))
+            row.append(
+                fmt_detail(fmt_size(jit_size), fmt_size(base_jit), fmt_pct(base_jit, jit_size))
+            )
+            row.append(fmt_detail(i256_ld, base_ld, fmt_pct(base_ld, i256_ld)))
+            row.append(fmt_detail(i256_st, base_st, fmt_pct(base_st, i256_st)))
+            row.append(fmt_detail(spills, base_sp, fmt_pct(base_sp, spills)))
+            row.append(fmt_detail(reloads, base_rl, fmt_pct(base_rl, reloads)))
             detail_table.append(row)
         total_row = ["**TOTAL**"]
         for b, c in zip(base_totals, cur_totals):
-            total_row += [f"**{b}**", f"**{fmt_pct(b, c)}**"]
-        total_row += [
-            f"**{fmt_size(base_total_size)}**",
-            f"**{fmt_pct(base_total_size, cur_total_size)}**",
-        ]
-        total_row += [f"**{base_tld}**", f"**{fmt_diff(base_tld, cur_tld)}**"]
-        total_row += [f"**{base_tst}**", f"**{fmt_diff(base_tst, cur_tst)}**"]
-        total_row += [f"**{base_tsp}**", f"**{fmt_diff(base_tsp, cur_tsp)}**"]
-        total_row += [f"**{base_trl}**", f"**{fmt_diff(base_trl, cur_trl)}**"]
+            total_row.append(fmt_detail_bold(c, b, fmt_pct(b, c)))
+        total_row.append(
+            fmt_detail_bold(
+                fmt_size(cur_total_size),
+                fmt_size(base_total_size),
+                fmt_pct(base_total_size, cur_total_size),
+            )
+        )
+        total_row.append(fmt_detail_bold(cur_tld, base_tld, fmt_pct(base_tld, cur_tld)))
+        total_row.append(fmt_detail_bold(cur_tst, base_tst, fmt_pct(base_tst, cur_tst)))
+        total_row.append(fmt_detail_bold(cur_tsp, base_tsp, fmt_pct(base_tsp, cur_tsp)))
+        total_row.append(fmt_detail_bold(cur_trl, base_trl, fmt_pct(base_trl, cur_trl)))
         detail_table.append(total_row)
         print_table(detail_headers, detail_table)
         print("</details>\n")
@@ -601,34 +617,32 @@ class CompileTime(Analysis):
 
         # Detailed table.
         print("<details><summary>Full compile times</summary>\n")
-        detail_headers = ["benchmark", base_label, "branch", "diff"]
-        for phase in PHASES:
-            detail_headers += [
-                f"{phase} ({base_label})",
-                f"{phase} (branch)",
-                f"{phase} diff",
-            ]
+        detail_headers = ["benchmark", "total", *PHASES]
         detail_table = []
         for name, cur in cur_rows:
             base = base_map.get(name, {})
             bt, ct = base.get("total", 0.0), cur.get("total", 0.0)
-            row = [name, fmt_dur(bt), fmt_dur(ct), fmt_pct(bt, ct)]
+            row = [name, fmt_detail(fmt_dur(ct), fmt_dur(bt), fmt_pct(bt, ct))]
             for phase in PHASES:
                 bp, cp = base.get(phase, 0.0), cur.get(phase, 0.0)
-                row += [fmt_dur(bp), fmt_dur(cp), fmt_pct(bp, cp)]
+                row.append(fmt_detail(fmt_dur(cp), fmt_dur(bp), fmt_pct(bp, cp)))
             detail_table.append(row)
         total_row = [
             "**TOTAL**",
-            f"**{fmt_dur(base_totals['total'])}**",
-            f"**{fmt_dur(cur_totals['total'])}**",
-            f"**{fmt_pct(base_totals['total'], cur_totals['total'])}**",
+            fmt_detail_bold(
+                fmt_dur(cur_totals["total"]),
+                fmt_dur(base_totals["total"]),
+                fmt_pct(base_totals["total"], cur_totals["total"]),
+            ),
         ]
         for phase in PHASES:
-            total_row += [
-                f"**{fmt_dur(base_totals[phase])}**",
-                f"**{fmt_dur(cur_totals[phase])}**",
-                f"**{fmt_pct(base_totals[phase], cur_totals[phase])}**",
-            ]
+            total_row.append(
+                fmt_detail_bold(
+                    fmt_dur(cur_totals[phase]),
+                    fmt_dur(base_totals[phase]),
+                    fmt_pct(base_totals[phase], cur_totals[phase]),
+                )
+            )
         detail_table.append(total_row)
         print_table(detail_headers, detail_table)
         print("</details>\n")
@@ -644,7 +658,7 @@ class JumpResolution(Analysis):
         return False
 
     def rust_log(self) -> str | None:
-        return "revmc::bytecode=trace"
+        return "revmc_codegen::bytecode=trace"
 
     @staticmethod
     def _last_match(pattern: str, text: str) -> int:
@@ -729,7 +743,7 @@ class BlockStats(Analysis):
         return False
 
     def rust_log(self) -> str | None:
-        return "revmc::bytecode=trace"
+        return "revmc_codegen::bytecode=trace"
 
     @staticmethod
     def _parse(output: str) -> dict[str, float] | None:
@@ -804,7 +818,7 @@ class InputStats(Analysis):
         return False
 
     def rust_log(self) -> str | None:
-        return "revmc::bytecode=trace"
+        return "revmc_codegen::bytecode=trace"
 
     @staticmethod
     def _pct(a, b):
@@ -980,7 +994,9 @@ def main():
         action="append",
         default=None,
         help="Extra directory with .bin files to benchmark (can be repeated). "
-        "Defaults to ['tmp/mainnet']; pass any --extra-dir to override.",
+        "Defaults to ['tmp/mainnet'] when running all benchmarks; "
+        "pass any --extra-dir to override or to include extras with explicit "
+        "benchmarks.",
     )
 
     # Analysis selectors. Default: --codegen-lines --compile-times.
@@ -1048,7 +1064,11 @@ def main():
 
     binary = cargo_build(root)
     builtin = args.benches or get_benches(binary)
-    extra_dirs = args.extra_dir if args.extra_dir is not None else ["tmp/mainnet"]
+    extra_dirs = (
+        args.extra_dir
+        if args.extra_dir is not None
+        else ([] if args.benches else ["tmp/mainnet"])
+    )
     extra = find_extra_benches(extra_dirs, root)
     benches = builtin + extra
 
@@ -1100,7 +1120,7 @@ def main():
                 check=True,
                 cwd=root,
             )
-            base_binary = cargo_build(base_worktree)
+            base_binary = cargo_build(base_worktree, incremental=False)
             base_dump_dir = base_dump if need_codegen else None
             base_outputs = collect(benches, base_binary, base_dump_dir, rust_log)
         finally:

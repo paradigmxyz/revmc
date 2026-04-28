@@ -167,6 +167,15 @@ pub unsafe extern "C" fn __revmc_builtin_exp(
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn __revmc_builtin_exp_gas(
+    ecx: &mut EvmContext<'_>,
+    exponent: &EvmWord,
+) -> BuiltinResult {
+    gas!(ecx, ecx.gas_params.exp_cost(exponent.to_u256()));
+    Ok(())
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn __revmc_builtin_keccak256(
     ecx: &mut EvmContext<'_>,
     sp: &mut [EvmWord; 2],

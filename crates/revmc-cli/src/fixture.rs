@@ -7,7 +7,7 @@ use revm_handler::{ExecuteEvm, MainBuilder, MainnetEvm};
 use revm_primitives::{Address, B256, B256Map, Bytes, StorageKeyMap, StorageValue, TxKind, U256};
 use revm_state::AccountInfo;
 use revmc::{
-    EvmCompiler, EvmLlvmBackend, RawEvmCompilerFn, primitives::hardfork::SpecId,
+    Backend, EvmCompiler, EvmLlvmBackend, RawEvmCompilerFn, primitives::hardfork::SpecId,
     simple_revm_evm::JitEvm,
 };
 use serde::Deserialize;
@@ -138,16 +138,42 @@ impl PreparedBench {
         default_spec_id: SpecId,
         compiler: &mut EvmCompiler<EvmLlvmBackend>,
     ) -> Self {
+        Self::load_with_functions(bench, default_spec_id, compiler, B256Map::default())
+    }
+
+    /// Load a benchmark, reusing already-JIT'd functions and compiling any missing bytecodes.
+    ///
+    /// The caller must keep `compiler` alive as long as the returned `PreparedBench` is used.
+    pub fn load_with_functions(
+        bench: &Bench,
+        default_spec_id: SpecId,
+        compiler: &mut EvmCompiler<EvmLlvmBackend>,
+        functions: B256Map<RawEvmCompilerFn>,
+    ) -> Self {
+        Self::load_with_pending_functions(bench, default_spec_id, compiler, functions, Vec::new())
+    }
+
+    /// Load a benchmark, reusing already-translated and already-JIT'd functions.
+    ///
+    /// The caller must keep `compiler` alive as long as the returned `PreparedBench` is used.
+    pub fn load_with_pending_functions(
+        bench: &Bench,
+        default_spec_id: SpecId,
+        compiler: &mut EvmCompiler<EvmLlvmBackend>,
+        mut functions: B256Map<RawEvmCompilerFn>,
+        mut pending: Vec<(B256, <EvmLlvmBackend as Backend>::FuncId)>,
+    ) -> Self {
         let (accounts, block, cfg, tx) = if bench.is_fixture() {
             Self::parse_fixture(bench)
         } else {
             Self::from_bytecode(bench, default_spec_id)
         };
 
-        // JIT compile all contract bytecodes.
+        // JIT compile all contract bytecodes that were not provided by the caller.
         let spec_id = cfg.spec;
         let mut seen = HashSet::new();
-        let mut pending = Vec::new();
+        seen.extend(functions.keys().copied());
+        seen.extend(pending.iter().map(|(hash, _)| *hash));
         for acct in &accounts {
             if acct.bytecode.is_empty() || !seen.insert(acct.code_hash) {
                 continue;
@@ -158,7 +184,6 @@ impl PreparedBench {
                 .expect("translation failed");
             pending.push((acct.code_hash, func_id));
         }
-        let mut functions = B256Map::default();
         for (hash, func_id) in pending {
             let fn_ptr = unsafe { compiler.jit_function(func_id).expect("JIT failed") };
             functions.insert(hash, fn_ptr.into_inner());
