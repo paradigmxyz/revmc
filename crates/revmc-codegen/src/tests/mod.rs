@@ -66,6 +66,8 @@ pub fn with_jit_compiler<R>(
     init_tracing();
     let mut compiler = EvmCompiler::new_llvm(false).unwrap();
     compiler.set_opt_level(opt_level);
+    compiler.set_profiling_support(false);
+    compiler.set_simple_perf(false);
     f(&mut compiler)
 }
 

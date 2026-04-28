@@ -12,18 +12,11 @@ mod fixture;
 #[cfg(feature = "llvm")]
 pub use fixture::*;
 
-pub fn read_code(code: Option<&str>, code_path: Option<&Path>) -> Result<Vec<u8>> {
-    if let Some(code) = code {
-        return read_code_string(code.trim().as_bytes(), None);
-    }
-
-    if let Some(code_path) = code_path {
-        let contents = std::fs::read(code_path)?;
-        let ext = code_path.extension().and_then(|s| s.to_str());
-        return read_code_string(&contents, ext);
-    }
-
-    Err(eyre!("one of --code, --code-path is required when argument is 'custom'"))
+/// Reads bytecode from `path`, auto-detecting hex/asm/binary by extension and contents.
+pub fn read_code_path(path: &Path) -> Result<Vec<u8>> {
+    let contents = std::fs::read(path)?;
+    let ext = path.extension().and_then(|s| s.to_str());
+    read_code_string(&contents, ext)
 }
 
 pub fn read_code_string(contents: &[u8], ext: Option<&str>) -> Result<Vec<u8>> {

@@ -336,8 +336,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 .collect::<Vec<_>>();
             let i64_type = fx.bcx.type_int(64);
             let index = fx.bcx.phi(i64_type, &fx.incoming_dynamic_jumps);
-            fx.add_invalid_jump();
-            fx.bcx.switch(index, return_block, &targets, true);
+            let invalid_jump = fx.add_invalid_jump();
+            fx.bcx.switch(index, invalid_jump, &targets, true);
         } else {
             // No dynamic jumps.
             debug_assert!(fx.incoming_dynamic_jumps.is_empty());
@@ -944,7 +944,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                         debug_assert_eq!(*data, op::JUMPI);
                         // The jump target is invalid, but we still need to pop it.
                         self.pop_ignore(1);
-                        self.return_block.unwrap()
+                        self.add_invalid_jump()
                     } else if data.flags.contains(InstFlags::MULTI_JUMP) {
                         let target_value = self.pop();
                         let targets = self.bytecode.multi_jump_targets(inst).unwrap();
@@ -968,9 +968,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                                 (pc, self.inst_entries[t])
                             })
                             .collect();
-                        self.add_invalid_jump();
-                        let return_block = self.return_block.unwrap();
-                        self.bcx.switch(target_value, return_block, &switch_targets, true);
+                        let invalid_jump = self.add_invalid_jump();
+                        self.bcx.switch(target_value, invalid_jump, &switch_targets, true);
 
                         self.inst_entries[inst] = self.bcx.current_block().unwrap();
                         goto_return!(no_branch);
@@ -1000,9 +999,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                         self.materialize_live_stack();
                         let cond = self.bcx.icmp_imm(IntCC::NotEqual, cond_word, 0);
                         let next = self.inst_entries[inst + 1];
-                        if target == self.return_block.unwrap() {
-                            self.add_invalid_jump();
-                        }
                         self.bcx.brif(cond, target, next);
                     } else {
                         // Flush virtual values before leaving the section.
@@ -1738,18 +1734,27 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let current_block = self.current_block();
         let target = self.create_block_after(current_block, "contd");
 
-        let return_block = if let Some(return_block) = self.return_block {
+        let exit_block = if is_failure {
+            if let Some(failure_block) = self.failure_block {
+                self.incoming_failures.push((ret, current_block));
+                failure_block
+            } else {
+                self.create_block_after(target, "failure")
+            }
+        } else if let Some(return_block) = self.return_block {
             self.incoming_returns.push((ret, current_block));
             return_block
         } else {
             self.create_block_after(target, "return")
         };
-        let then_block = if is_failure { return_block } else { target };
-        let else_block = if is_failure { target } else { return_block };
+        let then_block = if is_failure { exit_block } else { target };
+        let else_block = if is_failure { target } else { exit_block };
         self.bcx.brif_cold(cond, then_block, else_block, is_failure);
 
-        if self.return_block.is_none() {
-            self.bcx.switch_to_block(return_block);
+        if (is_failure && self.failure_block.is_none())
+            || (!is_failure && self.return_block.is_none())
+        {
+            self.bcx.switch_to_block(exit_block);
             self.bcx.ret(&[ret]);
         }
 
@@ -1800,11 +1805,13 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         }
     }
 
-    fn add_invalid_jump(&mut self) {
-        self.incoming_returns.push((
+    fn add_invalid_jump(&mut self) -> B::BasicBlock {
+        let block = self.failure_block.unwrap();
+        self.incoming_failures.push((
             self.bcx.iconst(self.i8_type, InstructionResult::InvalidJump as i64),
             self.bcx.current_block().unwrap(),
         ));
+        block
     }
 
     /// Build a call to the panic builtin.
