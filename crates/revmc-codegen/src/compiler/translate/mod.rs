@@ -439,9 +439,10 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         // Finalize the failure block.
         fx.bcx.switch_to_block(fx.failure_block.unwrap());
         if !fx.incoming_failures.is_empty() {
-            // `single_error` collapses every error path to a generic OOG; this is
-            // safe because failures are semantically interchangeable for callers that
-            // only branch on success vs failure.
+            // Semantically, the EVM has only one halt; the distinct failure
+            // `InstructionResult` codes exist purely for debugging and error messages.
+            // `single_error` collapses every failure path to a single placeholder
+            // (OOG), letting LLVM DCE the per-site materialization and the phi.
             let failure_value = if config.single_error {
                 fx.bcx.iconst(fx.i8_type, InstructionResult::OutOfGas as i64)
             } else {
