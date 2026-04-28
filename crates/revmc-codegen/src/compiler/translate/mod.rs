@@ -31,6 +31,7 @@ pub(super) struct FcxConfig {
     pub(super) inspect_stack: bool,
     pub(super) stack_bound_checks: bool,
     pub(super) gas_metering: bool,
+    pub(super) single_error: bool,
 }
 
 impl Default for FcxConfig {
@@ -43,6 +44,7 @@ impl Default for FcxConfig {
             inspect_stack: false,
             stack_bound_checks: true,
             gas_metering: true,
+            single_error: true,
         }
     }
 }
@@ -437,7 +439,15 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         // Finalize the failure block.
         fx.bcx.switch_to_block(fx.failure_block.unwrap());
         if !fx.incoming_failures.is_empty() {
-            let failure_value = fx.bcx.phi(fx.i8_type, &fx.incoming_failures);
+            // Semantically, the EVM has only one halt; the distinct failure
+            // `InstructionResult` codes exist purely for debugging and error messages.
+            // `single_error` collapses every failure path to a single placeholder
+            // (OOG), letting LLVM DCE the per-site materialization and the phi.
+            let failure_value = if config.single_error {
+                fx.bcx.iconst(fx.i8_type, InstructionResult::OutOfGas as i64)
+            } else {
+                fx.bcx.phi(fx.i8_type, &fx.incoming_failures)
+            };
             fx.bcx.set_current_block_cold();
             fx.build_return(failure_value);
         } else {
