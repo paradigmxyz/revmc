@@ -68,6 +68,7 @@ pub fn with_jit_compiler<R>(
     compiler.set_opt_level(opt_level);
     compiler.set_profiling_support(false);
     compiler.set_simple_perf(false);
+    compiler.single_error(false);
     f(&mut compiler)
 }
 
