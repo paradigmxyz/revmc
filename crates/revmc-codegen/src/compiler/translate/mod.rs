@@ -1893,13 +1893,14 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         self.bytecode.op_block_name(self.current_inst, name)
     }
 
-    /// Converts a 256-bit unsigned integer to a 64-bit unsigned integer, saturating at `u64::MAX`.
+    /// Converts a 256-bit unsigned integer to a 64-bit unsigned integer, saturating at
+    /// `2^bits - 1`.
     fn u256_to_u64_saturating(&mut self, value: B::Value, bits: usize) -> B::Value {
         let i64_type = self.bcx.type_int(64);
         let reduced = self.bcx.ireduce(i64_type, value);
-        let extended = self.bcx.zext(self.word_type, reduced);
-        let fits = self.bcx.icmp(IntCC::Equal, value, extended);
         let sentinel_lit = 1u128.checked_shl(bits as u32).unwrap_or(0).wrapping_sub(1);
+        let sentinel_u256 = self.bcx.iconst_256(U256::from(sentinel_lit));
+        let fits = self.bcx.icmp(IntCC::UnsignedLessThanOrEqual, value, sentinel_u256);
         let sentinel = self.bcx.iconst(i64_type, sentinel_lit as i64);
         self.bcx.select(fits, reduced, sentinel)
     }

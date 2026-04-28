@@ -250,37 +250,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         }
     }
 
-    fn peephole_mstore(&mut self) -> bool {
-        let [offset, value] = self.const_operands();
-        let offset = offset.and_then(|x| u64::try_from(x).ok());
-        let value = value.and_then(|x| u64::try_from(x).ok());
-        match (offset, value) {
-            (Some(offset), None) => {
-                let offset = self.bcx.iconst(self.isize_type, offset as i64);
-                let sp = self.sp_after_inputs_with(&[1]);
-                self.call_fallible_builtin(Builtin::MstoreCD, &[self.ecx, offset, sp]);
-                true
-            }
-            (None, Some(value)) => {
-                let value = self.bcx.iconst(self.isize_type, value as i64);
-                let _ = self.sp_after_inputs_with(&[0]);
-                let sp = self.sp_from_top(1);
-                self.call_fallible_builtin(Builtin::MstoreDC, &[self.ecx, sp, value]);
-                true
-            }
-            (Some(offset), Some(value)) => {
-                // Both operands constant; consume from virtual stack.
-                self.pop_ignore(2);
-                let offset = self.bcx.iconst(self.isize_type, offset as i64);
-                let value = self.bcx.iconst(self.isize_type, value as i64);
-                self.call_fallible_builtin(Builtin::MstoreCC, &[self.ecx, offset, value]);
-                true
-            }
-            (None, None) => false,
-        }
-    }
-
-
     fn peephole_keccak256(&mut self) -> bool {
         if let Some((offset, len)) = self.const_memory_operands(self.const_operands()) {
             let offset = self.bcx.iconst(self.isize_type, offset as i64);
