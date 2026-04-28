@@ -109,7 +109,7 @@ mod tests {
     #[cfg(feature = "llvm")]
     #[test]
     fn basic() {
-        use crate::SpecId;
+        use revm_primitives::hardfork::SpecId;
 
         let tmp = tempfile::tempdir().expect("could not create temp dir");
         let obj = tmp.path().join("out.o");

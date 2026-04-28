@@ -6,7 +6,7 @@ macro_rules! matrix_tests {
             #[allow(unused_imports)]
             use similar_asserts::assert_eq;
 
-            fn run_llvm(compiler: &mut EvmCompiler<crate::llvm::EvmLlvmBackend>) {
+            fn run_llvm(compiler: &mut EvmCompiler<revmc_llvm::EvmLlvmBackend>) {
                 if std::env::var_os("REVMC_TEST_DUMP").is_some() {
                     crate::tests::set_test_dump(compiler, module_path!());
                 }
@@ -15,12 +15,15 @@ macro_rules! matrix_tests {
 
             #[test]
             fn unopt() {
-                crate::tests::with_jit_compiler(crate::OptimizationLevel::None, run_llvm);
+                crate::tests::with_jit_compiler(revmc_backend::OptimizationLevel::None, run_llvm);
             }
 
             #[test]
             fn opt() {
-                crate::tests::with_jit_compiler(crate::OptimizationLevel::default(), run_llvm);
+                crate::tests::with_jit_compiler(
+                    revmc_backend::OptimizationLevel::default(),
+                    run_llvm,
+                );
             }
         }
     };

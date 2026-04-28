@@ -1,0 +1,67 @@
+[package]
+name = "revmc-runtime"
+description = "Runtime JIT backend for revmc"
+homepage = "https://github.com/danipopes/revmc/tree/main/crates/revmc-runtime"
+
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+categories.workspace = true
+keywords.workspace = true
+repository.workspace = true
+exclude.workspace = true
+
+[package.metadata.docs.rs]
+no-default-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[lints]
+workspace = true
+
+[dependencies]
+revmc-backend.workspace = true
+revmc-codegen.workspace = true
+revmc-context = { workspace = true, features = ["evm"] }
+revmc-llvm = { workspace = true, optional = true }
+
+alloy-primitives = { workspace = true, features = ["std", "map-fxhash"] }
+alloy-evm = { workspace = true, optional = true }
+
+revm-bytecode.workspace = true
+revm-context-interface.workspace = true
+revm-context.workspace = true
+revm-database-interface.workspace = true
+revm-database.workspace = true
+revm-handler.workspace = true
+revm-inspector.workspace = true
+revm-interpreter.workspace = true
+revm-primitives.workspace = true
+revm-state.workspace = true
+
+crossbeam-channel.workspace = true
+crossbeam-queue.workspace = true
+dashmap = "6"
+derive_more = { version = "2", default-features = false, features = ["debug"] }
+eyre.workspace = true
+libloading = "0.9"
+tempfile = "3.10"
+quanta.workspace = true
+rayon.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+revmc-statetest = { path = "../revmc-statetest" }
+alloy-evm.workspace = true
+paste.workspace = true
+similar-asserts = "2.0"
+tracing-subscriber = { workspace = true, features = ["fmt"] }
+
+[features]
+default = ["llvm"]
+llvm = ["revmc-codegen/llvm", "dep:revmc-llvm"]
+llvm-prefer-static = ["llvm", "revmc-codegen/llvm-prefer-static", "revmc-llvm?/prefer-static"]
+llvm-prefer-dynamic = ["llvm", "revmc-codegen/llvm-prefer-dynamic", "revmc-llvm?/prefer-dynamic"]
+alloy-evm = ["dep:alloy-evm"]
+asm-keccak = ["revmc-codegen/asm-keccak", "alloy-primitives/asm-keccak"]
