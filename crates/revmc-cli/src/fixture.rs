@@ -7,7 +7,7 @@ use revm_handler::{ExecuteEvm, MainBuilder, MainnetEvm};
 use revm_primitives::{Address, B256, B256Map, Bytes, StorageKeyMap, StorageValue, TxKind, U256};
 use revm_state::AccountInfo;
 use revmc::{
-    EvmCompiler, EvmLlvmBackend, RawEvmCompilerFn, primitives::hardfork::SpecId,
+    Backend, EvmCompiler, EvmLlvmBackend, RawEvmCompilerFn, primitives::hardfork::SpecId,
     simple_revm_evm::JitEvm,
 };
 use serde::Deserialize;
@@ -148,7 +148,20 @@ impl PreparedBench {
         bench: &Bench,
         default_spec_id: SpecId,
         compiler: &mut EvmCompiler<EvmLlvmBackend>,
+        functions: B256Map<RawEvmCompilerFn>,
+    ) -> Self {
+        Self::load_with_pending_functions(bench, default_spec_id, compiler, functions, Vec::new())
+    }
+
+    /// Load a benchmark, reusing already-translated and already-JIT'd functions.
+    ///
+    /// The caller must keep `compiler` alive as long as the returned `PreparedBench` is used.
+    pub fn load_with_pending_functions(
+        bench: &Bench,
+        default_spec_id: SpecId,
+        compiler: &mut EvmCompiler<EvmLlvmBackend>,
         mut functions: B256Map<RawEvmCompilerFn>,
+        mut pending: Vec<(B256, <EvmLlvmBackend as Backend>::FuncId)>,
     ) -> Self {
         let (accounts, block, cfg, tx) = if bench.is_fixture() {
             Self::parse_fixture(bench)
@@ -159,12 +172,10 @@ impl PreparedBench {
         // JIT compile all contract bytecodes that were not provided by the caller.
         let spec_id = cfg.spec;
         let mut seen = HashSet::new();
-        let mut pending = Vec::new();
+        seen.extend(functions.keys().copied());
+        seen.extend(pending.iter().map(|(hash, _)| *hash));
         for acct in &accounts {
-            if acct.bytecode.is_empty()
-                || functions.contains_key(&acct.code_hash)
-                || !seen.insert(acct.code_hash)
-            {
+            if acct.bytecode.is_empty() || !seen.insert(acct.code_hash) {
                 continue;
             }
             let name = format!("contract_{}", revmc::primitives::hex::encode(acct.code_hash));
