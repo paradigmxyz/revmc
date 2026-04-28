@@ -596,7 +596,6 @@ impl<B: Backend> EvmCompiler<B> {
         if self.finalized {
             return Ok(());
         }
-        self.finalized = true;
 
         let finalize_start = Instant::now();
 
@@ -643,6 +642,7 @@ impl<B: Backend> EvmCompiler<B> {
                 }
             }
         }
+        self.finalized = true;
 
         let finalize_total = &self.remarks.finalize_total;
         finalize_total.set(finalize_total.get() + finalize_start.elapsed());
