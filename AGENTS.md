@@ -101,7 +101,7 @@ show every change.
 ```bash
 ./scripts/bench.py /tmp/bench --diff main                          # codegen + compile time vs main
 ./scripts/bench.py /tmp/bench --diff main usdc_proxy seaport       # specific benchmarks
-./scripts/bench.py /tmp/bench --diff main --extra-dir path/to/bins  # override default tmp/mainnet
+./scripts/bench.py /tmp/bench --diff main --extra-dir tmp/mainnet  # include mainnet .bin files
 ./scripts/bench.py /tmp/bench                                      # current branch only (no diff)
 ./scripts/bench.py /tmp/bench --diff main --compile-times          # compile times only
 ./scripts/bench.py /tmp/bench --diff main --codegen-lines          # codegen lines only
