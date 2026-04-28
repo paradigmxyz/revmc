@@ -644,7 +644,7 @@ class JumpResolution(Analysis):
         return False
 
     def rust_log(self) -> str | None:
-        return "revmc::bytecode=trace"
+        return "revmc_codegen::bytecode=trace"
 
     @staticmethod
     def _last_match(pattern: str, text: str) -> int:
@@ -729,7 +729,7 @@ class BlockStats(Analysis):
         return False
 
     def rust_log(self) -> str | None:
-        return "revmc::bytecode=trace"
+        return "revmc_codegen::bytecode=trace"
 
     @staticmethod
     def _parse(output: str) -> dict[str, float] | None:
@@ -804,7 +804,7 @@ class InputStats(Analysis):
         return False
 
     def rust_log(self) -> str | None:
-        return "revmc::bytecode=trace"
+        return "revmc_codegen::bytecode=trace"
 
     @staticmethod
     def _pct(a, b):
@@ -1048,7 +1048,7 @@ def main():
 
     binary = cargo_build(root)
     builtin = args.benches or get_benches(binary)
-    extra_dirs = args.extra_dir if args.extra_dir is not None else ["tmp/mainnet"]
+    extra_dirs = [] if args.benches else (args.extra_dir if args.extra_dir is not None else ["tmp/mainnet"])
     extra = find_extra_benches(extra_dirs, root)
     benches = builtin + extra
 
