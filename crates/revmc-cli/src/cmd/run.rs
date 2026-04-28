@@ -76,6 +76,9 @@ pub(crate) struct RunArgs {
     no_gas: bool,
     #[arg(long)]
     no_len_checks: bool,
+    /// Preserve distinct failure results instead of yielding a single `OutOfGas`.
+    #[arg(long)]
+    no_single_error: bool,
     /// Inspect the stack after the function has been executed.
     #[arg(long)]
     inspect_stack: bool,
@@ -174,6 +177,7 @@ impl RunArgs {
             compiler.gas_metering(!self.no_gas);
             unsafe { compiler.stack_bound_checks(!self.no_len_checks) };
             compiler.debug_assertions(self.debug_assertions);
+            compiler.single_error(!self.no_single_error);
 
             compiler.set_module_name(name);
             if let Some(dump_dir) = compiler.dump_dir() {
