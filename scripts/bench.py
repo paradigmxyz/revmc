@@ -1100,7 +1100,7 @@ def main():
                 check=True,
                 cwd=root,
             )
-            base_binary = cargo_build(base_worktree)
+            base_binary = cargo_build(base_worktree, incremental=False)
             base_dump_dir = base_dump if need_codegen else None
             base_outputs = collect(benches, base_binary, base_dump_dir, rust_log)
         finally:
