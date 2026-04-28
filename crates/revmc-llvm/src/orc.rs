@@ -283,6 +283,12 @@ pub struct SymbolFlags {
     pub target: u8,
 }
 
+impl Default for SymbolFlags {
+    fn default() -> Self {
+        Self::none()
+    }
+}
+
 impl SymbolFlags {
     /// Create a new, empty SymbolFlags.
     pub fn none() -> Self {
@@ -295,7 +301,7 @@ impl SymbolFlags {
     }
 
     /// Set the `Exported` flag.
-    pub fn with_exported(mut self) -> Self {
+    pub fn exported(mut self) -> Self {
         self.set_exported();
         self
     }
@@ -1815,15 +1821,15 @@ mod tests {
         let _ext_fn =
             m.add_function("my_external", ext_ty, Some(inkwell::module::Linkage::External));
         let ext_name = CString::new("my_external").unwrap();
-        let sym = crate::orc::SymbolMapPair::new(
+        let sym = SymbolMapPair::new(
             jit.mangle_and_intern(&ext_name),
-            crate::orc::EvaluatedSymbol::new(
+            EvaluatedSymbol::new(
                 my_external as *const () as u64,
-                crate::orc::SymbolFlags::none().with_exported().callable(),
+                SymbolFlags::none().exported().callable(),
             ),
         );
         jit.get_main_jit_dylib()
-            .define(crate::orc::MaterializationUnit::absolute_symbols(vec![sym]))
+            .define(MaterializationUnit::absolute_symbols(vec![sym]))
             .map_err(|(e, _)| e)
             .unwrap();
 
