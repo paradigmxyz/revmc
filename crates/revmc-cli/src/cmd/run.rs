@@ -151,7 +151,7 @@ impl RunArgs {
         let is_fixture = bench_entry.is_fixture();
         let default_aot_dir = || std::env::temp_dir().join("revmc-cli").join(&bench_name);
         let mut aot_dir = None;
-        let mut compiled_jit = None;
+        let mut pending_jit = None;
 
         // Compile the entry-point contract: parse, display, dot, dump, aot.
         // For fixture benchmarks, extract the tx-target bytecode.
@@ -234,15 +234,8 @@ impl RunArgs {
                     return Ok(());
                 }
             } else if self.load.is_none() {
-                let fn_ptr = unsafe { compiler.jit_function(f_id)? };
-                let mut functions = B256Map::default();
-                functions.insert(keccak256(&bytecode), fn_ptr.into_inner());
-                compiled_jit = Some((compiler, functions));
+                pending_jit = Some((compiler, vec![(keccak256(&bytecode), f_id)]));
             }
-        }
-
-        if self.n_iters == 0 {
-            return Ok(());
         }
 
         // Unified runtime path for both bytecode, fixture, and loaded benchmarks.
@@ -261,9 +254,14 @@ impl RunArgs {
                 PreparedBench::load_from_library(&bench_entry, spec_id, load_path, name);
             _compiler = None;
             _lib = Some(lib);
-        } else if let Some((mut compiler, functions)) = compiled_jit {
-            prepared =
-                PreparedBench::load_with_functions(&bench_entry, spec_id, &mut compiler, functions);
+        } else if let Some((mut compiler, pending)) = pending_jit {
+            prepared = PreparedBench::load_with_pending_functions(
+                &bench_entry,
+                spec_id,
+                &mut compiler,
+                B256Map::default(),
+                pending,
+            );
             _compiler = Some(compiler);
             _lib = None;
         } else {
@@ -272,6 +270,10 @@ impl RunArgs {
             _compiler = Some(compiler);
             _lib = None;
         };
+
+        if self.n_iters == 0 {
+            return Ok(());
+        }
 
         prepared.sanity_check();
 
