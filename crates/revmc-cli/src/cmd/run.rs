@@ -82,6 +82,12 @@ pub(crate) struct RunArgs {
     /// Inspect the stack after the function has been executed.
     #[arg(long)]
     inspect_stack: bool,
+    /// Disable frame pointers in the JIT'd function. Frees up `rbp` for the
+    /// register allocator (15 GPRs instead of 14 on x86_64) at the cost of
+    /// not having `rbp`-based stack walks. DWARF `.eh_frame` unwinding still
+    /// works.
+    #[arg(long)]
+    no_frame_pointers: bool,
     #[arg(long, default_value = "1000000000")]
     gas_limit: u64,
 }
@@ -161,6 +167,9 @@ impl RunArgs {
             }
 
             compiler.inspect_stack(self.inspect_stack);
+            if self.no_frame_pointers {
+                compiler.frame_pointers(false);
+            }
 
             let parsed = compiler.parse(bytecode.as_slice().into(), compile_spec_id)?;
             if self.display || self.parse_only {
