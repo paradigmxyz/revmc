@@ -718,9 +718,9 @@ fn assert_actions(actual: &InterpreterAction, expected: &InterpreterAction) {
             assert_eq!(actual_call.value, expected_call.value, "value mismatch");
             assert_eq!(actual_call.scheme, expected_call.scheme, "scheme mismatch");
             assert_eq!(actual_call.is_static, expected_call.is_static, "is_static mismatch");
-            // Note: We don't compare `input` directly as JIT uses Bytes, interpreter may use
-            // SharedBuffer Note: We don't compare `known_bytecode` as JIT doesn't
-            // preload
+            // Note: We don't compare `input` directly as it may use different shared-memory
+            // ranges.
+            // Note: We don't compare `known_bytecode` as JIT doesn't preload.
         }
         (
             InterpreterAction::NewFrame(FrameInput::Create(actual_create)),
