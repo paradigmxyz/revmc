@@ -106,6 +106,9 @@ pub struct PreparedBench {
     cfg: CfgEnv,
     tx: TxEnv,
     functions: B256Map<RawEvmCompilerFn>,
+    /// Set when the JIT was compiled with [`EvmCompiler::force_out_of_gas`].
+    /// Sanity checks tolerate the resulting OOG halt instead of demanding result equality.
+    force_out_of_gas: bool,
 }
 
 /// Caller address used for synthetic bytecode benchmarks.
@@ -165,7 +168,15 @@ impl PreparedBench {
         }
         compiler.clear_ir().expect("clear_ir failed");
 
-        Self { name: bench.name, accounts, block, cfg, tx, functions }
+        Self {
+            name: bench.name,
+            accounts,
+            block,
+            cfg,
+            tx,
+            functions,
+            force_out_of_gas: compiler.is_force_out_of_gas(),
+        }
     }
 
     /// Load a benchmark from a pre-compiled shared library instead of JIT-compiling.
@@ -196,7 +207,10 @@ impl PreparedBench {
             functions.insert(acct.code_hash, (*f).into_inner());
         }
 
-        (Self { name: bench.name, accounts, block, cfg, tx, functions }, lib)
+        (
+            Self { name: bench.name, accounts, block, cfg, tx, functions, force_out_of_gas: false },
+            lib,
+        )
     }
 
     /// Convert a bytecode [`Bench`] into fixture state.
@@ -403,9 +417,25 @@ impl PreparedBench {
     }
 
     /// Sanity-check that interpreter and JIT produce matching results.
+    ///
+    /// When [`Self::force_out_of_gas`] is set, the JIT and interpreter routinely diverge
+    /// because every JIT exit is rewritten to `OutOfGas`. Sub-calls that succeed under the
+    /// interpreter can revert under the JIT, which then propagates to the caller. The check
+    /// is relaxed to "JIT must not claim success when the interpreter failed" — any other
+    /// divergence is expected.
     pub fn sanity_check(&self) {
         let interp = self.run_interpreter();
         let jit = self.run_jit();
+        if self.force_out_of_gas {
+            assert!(
+                interp.result.is_success() || !jit.result.is_success(),
+                "force_out_of_gas: JIT succeeded where the interpreter failed:\n  \
+                 interpreter: {:?}\n  JIT: {:?}",
+                interp.result,
+                jit.result,
+            );
+            return;
+        }
         assert_eq!(
             interp.result.is_success(),
             jit.result.is_success(),

@@ -429,6 +429,11 @@ impl<B: Backend> EvmCompiler<B> {
         self.config.force_out_of_gas = yes;
     }
 
+    /// Returns whether [`force_out_of_gas`](Self::force_out_of_gas) is enabled.
+    pub fn is_force_out_of_gas(&self) -> bool {
+        self.config.force_out_of_gas
+    }
+
     /// Sets custom gas parameters.
     ///
     /// Overrides the default gas schedule derived from the spec_id.
