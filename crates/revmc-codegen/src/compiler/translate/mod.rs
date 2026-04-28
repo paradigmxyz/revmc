@@ -439,7 +439,14 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         // Finalize the failure block.
         fx.bcx.switch_to_block(fx.failure_block.unwrap());
         if !fx.incoming_failures.is_empty() {
-            let failure_value = fx.bcx.phi(fx.i8_type, &fx.incoming_failures);
+            // `force_out_of_gas` collapses every error path to a generic OOG; this is
+            // safe because failures are semantically interchangeable for callers that
+            // only branch on success vs failure.
+            let failure_value = if config.force_out_of_gas {
+                fx.bcx.iconst(fx.i8_type, InstructionResult::OutOfGas as i64)
+            } else {
+                fx.bcx.phi(fx.i8_type, &fx.incoming_failures)
+            };
             fx.bcx.set_current_block_cold();
             fx.build_return(failure_value);
         } else {
@@ -449,11 +456,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         // Finalize the return block.
         fx.bcx.switch_to_block(fx.return_block.unwrap());
         if !fx.incoming_returns.is_empty() {
-            let return_value = if config.force_out_of_gas {
-                fx.bcx.iconst(fx.i8_type, InstructionResult::OutOfGas as i64)
-            } else {
-                fx.bcx.phi(fx.i8_type, &fx.incoming_returns)
-            };
+            let return_value = fx.bcx.phi(fx.i8_type, &fx.incoming_returns);
             if config.inspect_stack {
                 fx.copy_stack_to_arg();
                 fx.save_stack_len();

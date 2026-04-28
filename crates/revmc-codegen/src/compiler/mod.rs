@@ -414,24 +414,19 @@ impl<B: Backend> EvmCompiler<B> {
         self.config.gas_metering = yes;
     }
 
-    /// Sets whether all return paths in the JIT-compiled function should yield
-    /// [`OutOfGas`](crate::interpreter::InstructionResult::OutOfGas) instead of their normal
-    /// [`InstructionResult`](crate::interpreter::InstructionResult).
+    /// Sets whether to collapse every JIT failure path to a single
+    /// [`OutOfGas`](crate::interpreter::InstructionResult::OutOfGas) constant.
     ///
-    /// Useful for benchmarking the cost of return-value materialization and the phi node merging
-    /// every return path through.
+    /// Failures (stack under/overflow, invalid jump, real OOG, invalid opcode, etc.) are
+    /// semantically interchangeable for callers that only branch on success vs failure, so
+    /// this lets LLVM DCE the per-failure-site materialization and the failure-block phi.
+    /// Successful exits (`STOP`/`RETURN`/`REVERT`) keep their original codes.
     ///
-    /// Note that this changes program behavior: the function will report `OutOfGas` for every
-    /// exit, including normal `STOP`/`RETURN`/`REVERT`.
+    /// Useful for benchmarking the cost of failure-result materialization.
     ///
     /// Defaults to `false`.
     pub fn force_out_of_gas(&mut self, yes: bool) {
         self.config.force_out_of_gas = yes;
-    }
-
-    /// Returns whether [`force_out_of_gas`](Self::force_out_of_gas) is enabled.
-    pub fn is_force_out_of_gas(&self) -> bool {
-        self.config.force_out_of_gas
     }
 
     /// Sets custom gas parameters.
