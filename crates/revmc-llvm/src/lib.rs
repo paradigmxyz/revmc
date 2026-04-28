@@ -1963,6 +1963,11 @@ fn init_() -> Result<()> {
         // which produce identical codegen at that scale. Small functions still benefit from
         // CGP's address sinking and branch optimizations.
         c"--cgpp-huge-func=1000".as_ptr(),
+        // Greedy register allocation's global live range splitting is superlinear on large
+        // functions with many long-lived values. Treat smaller live ranges as huge so LLVM uses
+        // the cheaper splitting path; this preserves code size on snailtracer while cutting llc
+        // time by ~3x.
+        c"--huge-size-for-split=64".as_ptr(),
     ];
     args.extend(extra.iter().map(|s| s.as_ptr()));
     unsafe {
