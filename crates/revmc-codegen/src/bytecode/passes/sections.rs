@@ -275,14 +275,12 @@ impl SectionsAnalysis {
 
 #[cfg(test)]
 mod tests {
-    use crate::{
-        SpecId,
-        bytecode::{
-            Inst,
-            passes::block_analysis::tests::{analyze_asm, analyze_asm_spec, analyze_code_spec},
-        },
+    use crate::bytecode::{
+        Inst,
+        passes::block_analysis::tests::{analyze_asm, analyze_asm_spec, analyze_code_spec},
     };
     use revm_bytecode::opcode as op;
+    use revm_primitives::hardfork::SpecId;
 
     /// Returns the gas section cost for the first non-dead instruction (the section head).
     fn section_gas(src: &str) -> u32 {

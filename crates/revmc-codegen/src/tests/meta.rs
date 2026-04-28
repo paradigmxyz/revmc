@@ -1,8 +1,8 @@
 use super::with_evm_context;
-use crate::{Backend, EvmCompiler, SpecId};
+use crate::{Backend, EvmCompiler};
 use revm_bytecode::opcode as op;
 use revm_interpreter::InstructionResult;
-use revm_primitives::U256;
+use revm_primitives::{U256, hardfork::SpecId};
 
 // Also tests multiple functions in the same module.
 matrix_tests!(
@@ -181,9 +181,9 @@ matrix_tests!(
 #[test]
 fn jit_memory_usage_tracking() {
     use super::with_jit_compiler;
-    use crate::llvm::jit_memory_usage;
+    use revmc_llvm::jit_memory_usage;
 
-    with_jit_compiler(crate::OptimizationLevel::default(), |compiler| {
+    with_jit_compiler(revmc_backend::OptimizationLevel::default(), |compiler| {
         let baseline = jit_memory_usage().map(|u| u.total_bytes()).unwrap_or(0);
 
         let code_a = push_stop(0x42);

@@ -1,8 +1,8 @@
 use super::{DEF_SPEC, with_evm_context};
-use crate::{Backend, EvmCompiler, SpecId, TEST_SUSPEND};
+use crate::{Backend, EvmCompiler, TEST_SUSPEND};
 use revm_bytecode::opcode as op;
 use revm_interpreter::InstructionResult;
-use revm_primitives::U256;
+use revm_primitives::{U256, hardfork::SpecId};
 
 matrix_tests!(legacy = |compiler| run(compiler, TEST, DEF_SPEC));
 

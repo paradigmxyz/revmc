@@ -7,7 +7,7 @@
         },
         "cargo": {
           "allTargets": true,
-          "features": ["llvm"],
+          "features": ["llvm", "alloy-evm"],
           "sysroot": "discover",
         },
         "diagnostics": {
