@@ -193,11 +193,9 @@ impl<'a> EvmContext<'a> {
     /// Must be called after any operation that may resize memory.
     #[inline]
     pub fn refresh_memory_cache(&mut self) {
-        let mut ctx_mem = self.memory.context_memory_mut();
-        let (ptr, len) = (ctx_mem.as_mut_ptr(), ctx_mem.len());
-        drop(ctx_mem);
-        self.mem_base = ptr;
-        self.mem_len = len;
+        let mut slice = self.memory.context_memory_mut();
+        self.mem_base = slice.as_mut_ptr();
+        self.mem_len = slice.len();
     }
 }
 
