@@ -20,7 +20,7 @@ use alloy_primitives::Bytes;
 use crossbeam_channel as chan;
 use rayon::{ThreadPool, ThreadPoolBuilder};
 #[cfg(feature = "llvm")]
-use std::{fs::File, io::Read, time::Instant};
+use std::{cell::RefCell, fs::File, io::Read, time::Instant};
 use std::{
     sync::{
         Arc,
@@ -188,6 +188,7 @@ impl WorkerPool {
             ThreadPoolBuilder::new()
                 .num_threads(worker_count)
                 .thread_name(|i| format!("revmc-{i:02}"))
+                .exit_handler(|_| clear_thread_local_compilers())
                 .build()
                 .expect("failed to spawn compile workers")
         });
@@ -240,6 +241,9 @@ impl WorkerPool {
     /// Shuts down all workers after draining queued jobs.
     pub(crate) fn shutdown(&mut self) {
         self.shutdown.store(true, Ordering::Release);
+        if let Some(pool) = &self.pool {
+            pool.broadcast(|_| clear_thread_local_compilers());
+        }
         self.pool.take();
     }
 }
@@ -251,8 +255,33 @@ impl Drop for WorkerPool {
 }
 
 #[cfg(feature = "llvm")]
+fn clear_thread_local_compilers() {
+    JIT_COMPILER.with_borrow_mut(Option::take);
+    AOT_COMPILER.with_borrow_mut(Option::take);
+}
+
+#[cfg(not(feature = "llvm"))]
+fn clear_thread_local_compilers() {}
+
+#[cfg(feature = "llvm")]
 fn compile_job(job: CompileJob, config: &RuntimeConfig) -> WorkerResult {
     trace!(?job, "received job");
+    match job.kind {
+        CompilationKind::Jit => {
+            JIT_COMPILER.with_borrow_mut(|state| compile_with_state(job, config, state))
+        }
+        CompilationKind::Aot => {
+            AOT_COMPILER.with_borrow_mut(|state| compile_with_state(job, config, state))
+        }
+    }
+}
+
+#[cfg(feature = "llvm")]
+fn compile_with_state(
+    job: CompileJob,
+    config: &RuntimeConfig,
+    state_slot: &mut Option<CompilerState>,
+) -> WorkerResult {
     let _span = match job.kind {
         CompilationKind::Jit => {
             debug_span!("jit_compile", hash=%job.key.code_hash, spec_id=?job.key.spec_id).entered()
@@ -263,21 +292,26 @@ fn compile_job(job: CompileJob, config: &RuntimeConfig) -> WorkerResult {
     };
     let t0 = Instant::now();
 
-    let mut compiler = match create_compiler(config, job.kind == CompilationKind::Aot) {
-        Ok(compiler) => compiler,
-        Err(e) => {
-            error!(error = %e, "failed to create LLVM backend");
-            return WorkerResult {
-                key: job.key,
-                outcome: Err(e),
-                kind: job.kind,
-                sync_notifier: job.sync_notifier,
-                generation: job.generation,
-                compile_duration: t0.elapsed(),
-                timings: CompileTimings::default(),
-            };
+    if state_slot.is_none() {
+        match CompilerState::new(config, job.kind) {
+            Ok(s) => *state_slot = Some(s),
+            Err(e) => {
+                error!(error = %e, "failed to create LLVM backend");
+                return WorkerResult {
+                    key: job.key,
+                    outcome: Err(e),
+                    kind: job.kind,
+                    sync_notifier: job.sync_notifier,
+                    generation: job.generation,
+                    compile_duration: t0.elapsed(),
+                    timings: CompileTimings::default(),
+                };
+            }
         }
-    };
+    }
+
+    let state = state_slot.as_mut().unwrap();
+    let compiler = &mut state.compiler;
 
     if job.kind == CompilationKind::Jit
         && let Some(base) = &config.dump_dir
@@ -289,10 +323,31 @@ fn compile_job(job: CompileJob, config: &RuntimeConfig) -> WorkerResult {
     compiler.set_opt_level(job.opt_level);
 
     let outcome = match job.kind {
-        CompilationKind::Jit => compile_jit_artifact(&job, &mut compiler),
-        CompilationKind::Aot => compile_aot_artifact(&job, &mut compiler),
+        CompilationKind::Jit => compile_jit_artifact(&job, compiler),
+        CompilationKind::Aot => compile_aot_artifact(&job, compiler),
     };
     let timings = compiler.take_timings();
+
+    if let Err(err) = compiler.clear_ir() {
+        warn!(%err, "clear_ir failed");
+    }
+
+    state.compilations_since_recycle += 1;
+    if config.tuning.compiler_recycle_threshold > 0
+        && state.compilations_since_recycle >= config.tuning.compiler_recycle_threshold
+    {
+        debug!(compilations_since_recycle = state.compilations_since_recycle, "recycling compiler");
+        match CompilerState::new(config, job.kind) {
+            Ok(new_state) => {
+                *state_slot = Some(new_state);
+                revmc_llvm::global_gc();
+            }
+            Err(e) => {
+                error!(error = %e, "failed to recreate compiler");
+                state.compilations_since_recycle = 0;
+            }
+        }
+    }
 
     WorkerResult {
         key: job.key,
@@ -303,6 +358,28 @@ fn compile_job(job: CompileJob, config: &RuntimeConfig) -> WorkerResult {
         compile_duration: t0.elapsed(),
         timings,
     }
+}
+
+#[cfg(feature = "llvm")]
+struct CompilerState {
+    compiler: EvmCompiler<EvmLlvmBackend>,
+    compilations_since_recycle: usize,
+}
+
+#[cfg(feature = "llvm")]
+impl CompilerState {
+    fn new(config: &RuntimeConfig, kind: CompilationKind) -> Result<Self, String> {
+        Ok(Self {
+            compiler: create_compiler(config, kind == CompilationKind::Aot)?,
+            compilations_since_recycle: 0,
+        })
+    }
+}
+
+#[cfg(feature = "llvm")]
+thread_local! {
+    static JIT_COMPILER: RefCell<Option<CompilerState>> = const { RefCell::new(None) };
+    static AOT_COMPILER: RefCell<Option<CompilerState>> = const { RefCell::new(None) };
 }
 
 #[cfg(feature = "llvm")]
