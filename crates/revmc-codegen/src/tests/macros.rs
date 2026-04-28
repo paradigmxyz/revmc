@@ -81,12 +81,12 @@ macro_rules! tests {
         )*
     };
 
-    // Generate an `_opaque` companion test for each arity.
-    // Uses MSTORE+MLOAD to make operands invisible to the compiler.
+    // Generate companion tests for every const/dynamic operand combination.
+    // Dynamic operands use MSTORE+MLOAD to make them invisible to the compiler.
     (@maybe_opaque $name:ident(@raw { $($fields:tt)* })) => {};
     (@maybe_opaque $name:ident($op:expr, $a:expr => $($ret:expr),* $(; $($_r1:tt)*)?)) => {
         paste::paste! {
-            matrix_tests!([<$name _opaque>] = |jit| run_test_case(
+            matrix_tests!([<$name _dyn>] = |jit| run_test_case(
                 &TestCase {
                     bytecode: &bytecode_unop_opaque($op, $a),
                     expected_stack: &[$($ret),*],
@@ -100,31 +100,47 @@ macro_rules! tests {
     };
     (@maybe_opaque $name:ident($op:expr, $a:expr, $b:expr => $($ret:expr),* $(; $($_r2:tt)*)?)) => {
         paste::paste! {
-            matrix_tests!([<$name _opaque>] = |jit| run_test_case(
-                &TestCase {
-                    bytecode: &bytecode_binop_opaque($op, $a, $b),
-                    expected_stack: &[$($ret),*],
-                    expected_memory: MEMORY_WHAT_INTERPRETER_SAYS,
-                    expected_gas: GAS_WHAT_INTERPRETER_SAYS,
-                    ..Default::default()
-                },
-                jit,
-            ));
+            tests!(@mixed_binop [<$name _const_dyn>] $op, $a, $b, true, false => $($ret),*);
+            tests!(@mixed_binop [<$name _dyn_const>] $op, $a, $b, false, true => $($ret),*);
+            tests!(@mixed_binop [<$name _dyn_dyn>] $op, $a, $b, false, false => $($ret),*);
         }
     };
     (@maybe_opaque $name:ident($op:expr, $a:expr, $b:expr, $c:expr => $($ret:expr),* $(; $($_r3:tt)*)?)) => {
         paste::paste! {
-            matrix_tests!([<$name _opaque>] = |jit| run_test_case(
-                &TestCase {
-                    bytecode: &bytecode_ternop_opaque($op, $a, $b, $c),
-                    expected_stack: &[$($ret),*],
-                    expected_memory: MEMORY_WHAT_INTERPRETER_SAYS,
-                    expected_gas: GAS_WHAT_INTERPRETER_SAYS,
-                    ..Default::default()
-                },
-                jit,
-            ));
+            tests!(@mixed_ternop [<$name _const_const_dyn>] $op, $a, $b, $c, true, true, false => $($ret),*);
+            tests!(@mixed_ternop [<$name _const_dyn_const>] $op, $a, $b, $c, true, false, true => $($ret),*);
+            tests!(@mixed_ternop [<$name _const_dyn_dyn>] $op, $a, $b, $c, true, false, false => $($ret),*);
+            tests!(@mixed_ternop [<$name _dyn_const_const>] $op, $a, $b, $c, false, true, true => $($ret),*);
+            tests!(@mixed_ternop [<$name _dyn_const_dyn>] $op, $a, $b, $c, false, true, false => $($ret),*);
+            tests!(@mixed_ternop [<$name _dyn_dyn_const>] $op, $a, $b, $c, false, false, true => $($ret),*);
+            tests!(@mixed_ternop [<$name _dyn_dyn_dyn>] $op, $a, $b, $c, false, false, false => $($ret),*);
         }
+    };
+
+    (@mixed_binop $name:ident $op:expr, $a:expr, $b:expr, $a_const:expr, $b_const:expr => $($ret:expr),*) => {
+        matrix_tests!($name = |jit| run_test_case(
+            &TestCase {
+                bytecode: &bytecode_binop_mixed($op, $a, $b, $a_const, $b_const),
+                expected_stack: &[$($ret),*],
+                expected_memory: MEMORY_WHAT_INTERPRETER_SAYS,
+                expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+                ..Default::default()
+            },
+            jit,
+        ));
+    };
+
+    (@mixed_ternop $name:ident $op:expr, $a:expr, $b:expr, $c:expr, $a_const:expr, $b_const:expr, $c_const:expr => $($ret:expr),*) => {
+        matrix_tests!($name = |jit| run_test_case(
+            &TestCase {
+                bytecode: &bytecode_ternop_mixed($op, $a, $b, $c, $a_const, $b_const, $c_const),
+                expected_stack: &[$($ret),*],
+                expected_memory: MEMORY_WHAT_INTERPRETER_SAYS,
+                expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+                ..Default::default()
+            },
+            jit,
+        ));
     };
 
     (@case @raw { $($fields:tt)* }) => { &TestCase { $($fields)* ..Default::default() } };
