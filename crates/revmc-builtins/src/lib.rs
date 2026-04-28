@@ -692,10 +692,10 @@ pub unsafe extern "C" fn __revmc_builtin_log(
         address: ecx.input.target_address,
         data: LogData::new(topics, data).expect("too many topics"),
     };
+    ecx.host.log(log.clone());
     if let Some(on_log) = &mut ecx.on_log {
         on_log(&log);
     }
-    ecx.host.log(log);
     Ok(())
 }
 
