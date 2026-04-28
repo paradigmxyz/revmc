@@ -1644,7 +1644,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let mem_len = self.bcx.load(isize_type, mem_len_field, "ecx.mem_len");
         let exceeds = self.bcx.icmp(IntCC::UnsignedGreaterThan, min_size, mem_len);
 
-        self.bcx.brif_cold(exceeds, resize_block, contd_block, true);
+        self.bcx.brif(exceeds, resize_block, contd_block);
 
         // Cold path: call mresize builtin.
         self.bcx.switch_to_block(resize_block);
