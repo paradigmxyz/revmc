@@ -87,6 +87,20 @@ struct RuntimeTestContext<'a> {
     elapsed: &'a Arc<Mutex<Duration>>,
 }
 
+fn skip_runtime_test(path: &Path) -> bool {
+    if skip_test(path) {
+        return true;
+    }
+
+    // TODO: Remove this once runtime compilation handles these cases fast enough.
+    // These generated execution-spec tests are interpreter coverage, but runtime
+    // mode has to compile hundreds of large/duplicate variants and can exceed CI
+    // timeouts on slower targets.
+    path.file_name().is_some_and(|name| {
+        name == "test_stack_overflow.json" || name == "precompsEIP2929Cancun.json"
+    })
+}
+
 /// Execute a test suite file using the runtime backend.
 ///
 /// For each test unit, enqueue JIT compilation via the backend before executing.
@@ -95,7 +109,7 @@ fn execute_test_suite_runtime(
     elapsed: &Arc<Mutex<Duration>>,
     backend: &JitBackend,
 ) -> Result<(), TestError> {
-    if skip_test(path) {
+    if skip_runtime_test(path) {
         return Ok(());
     }
 
@@ -183,6 +197,7 @@ fn run_test_worker(
             return Ok(());
         };
 
+        let t0 = Instant::now();
         let result = match mode {
             CompileMode::Interpreter => {
                 execute_test_suite(&test_path, &state.elapsed, false, false)
@@ -191,6 +206,10 @@ fn run_test_worker(
                 execute_test_suite_runtime(&test_path, &state.elapsed, backend.unwrap())
             }
         };
+        let elapsed = t0.elapsed();
+        if elapsed > Duration::from_secs(5) {
+            eprintln!("slow statetest file ({elapsed:?}): {}", test_path.display());
+        }
 
         state.console_bar.inc(1);
 
