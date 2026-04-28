@@ -424,7 +424,7 @@ impl<B: Backend> EvmCompiler<B> {
     ///
     /// Useful for benchmarking the cost of failure-result materialization.
     ///
-    /// Defaults to `false`.
+    /// Defaults to `true`.
     pub fn single_error(&mut self, yes: bool) {
         self.config.single_error = yes;
     }
