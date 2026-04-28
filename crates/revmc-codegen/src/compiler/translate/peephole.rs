@@ -1,7 +1,7 @@
 //! Peephole optimizations applied during translation.
 //!
 //! These fire when abstract interpretation has proven one or more operands are constant,
-//! replacing expensive opaque builtins (DIV, MOD, SDIV, SMOD, ADDMOD, MULMOD) with native
+//! replacing expensive opaque builtins (DIV, MOD, SDIV, SMOD, ADDMOD, MULMOD, EXP) with native
 //! LLVM operations that it can optimize further (e.g. pow2 udiv → lshr, pow2 urem → and).
 
 use super::FunctionCx;
@@ -178,8 +178,10 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     ///
     /// Dynamic gas is folded into the section gas cost by `SectionsAnalysis` when the
     /// exponent is a compile-time constant, so the section gas check already covers it.
+    /// For constant-base cases with a dynamic exponent, call `ExpGas` to charge only the
+    /// dynamic gas and compute the result inline.
     fn peephole_exp(&mut self) -> bool {
-        let [_base, exponent] = self.const_operands();
+        let [base, exponent] = self.const_operands();
         match exponent {
             // x ** 0 => 1.
             Some(U256::ZERO) => self.fold_const(1),
@@ -194,9 +196,61 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 let r = self.bcx.imul(a, a);
                 self.push(r);
             }
+            Some(_) => return false,
+            None => {}
+        }
+        if exponent.is_some() {
+            return true;
+        }
+        match base {
+            // 0 ** x => x == 0 ? 1 : 0.
+            Some(U256::ZERO) => {
+                self.pay_exp_dynamic_gas();
+                let [_, exponent] = self.popn();
+                let is_zero = self.bcx.icmp_imm(IntCC::Equal, exponent, 0);
+                let one = self.bcx.iconst_256(1);
+                let zero = self.bcx.iconst_256(0);
+                let r = self.bcx.select(is_zero, one, zero);
+                self.push(r);
+            }
+            // 1 ** x => 1.
+            Some(U256::ONE) => {
+                self.pay_exp_dynamic_gas();
+                self.fold_const(1);
+            }
+            // (-1) ** x => x % 2 == 0 ? 1 : -1.
+            Some(U256::MAX) => {
+                self.pay_exp_dynamic_gas();
+                let [_, exponent] = self.popn();
+                let is_odd = self.bcx.bitand_imm(exponent, 1);
+                let is_even = self.bcx.icmp_imm(IntCC::Equal, is_odd, 0);
+                let one = self.bcx.iconst_256(1);
+                let minus_one = self.bcx.iconst_256(U256::MAX);
+                let r = self.bcx.select(is_even, one, minus_one);
+                self.push(r);
+            }
+            // (2 ** k) ** x => x < ceil(256 / k) ? 1 << (k * x) : 0.
+            Some(base) if base.is_power_of_two() => {
+                self.pay_exp_dynamic_gas();
+                let k = base.trailing_zeros();
+                let threshold = i64::from(256_u16.div_ceil(k as u16));
+                let [_, exponent] = self.popn();
+                let in_range = self.bcx.icmp_imm(IntCC::UnsignedLessThan, exponent, threshold);
+                let shift = if k == 1 { exponent } else { self.bcx.imul_imm(exponent, k as i64) };
+                let one = self.bcx.iconst_256(1);
+                let shifted = self.bcx.ishl(one, shift);
+                let zero = self.bcx.iconst_256(0);
+                let r = self.bcx.select(in_range, shifted, zero);
+                self.push(r);
+            }
             _ => return false,
         }
         true
+    }
+
+    fn pay_exp_dynamic_gas(&mut self) {
+        let exponent = self.sp_after_inputs_with(&[1]);
+        self.call_fallible_builtin(Builtin::ExpGas, &[self.ecx, exponent]);
     }
 
     /// SIGNEXTEND ext, x => sign-extend x from (ext+1) bytes.

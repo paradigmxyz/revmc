@@ -694,6 +694,14 @@ tests! {
         exp4(op::EXP, 2_U256, 2_U256 => 4_U256; op_gas(60)),
         exp5(op::EXP, 2_U256, 3_U256 => 8_U256; op_gas(60)),
         exp6(op::EXP, 2_U256, 4_U256 => 16_U256; op_gas(60)),
+        exp_zero_base_zero_exp(op::EXP, 0_U256, 0_U256 => 1_U256; op_gas(10)),
+        exp_zero_base_nonzero_exp(op::EXP, 0_U256, 5_U256 => 0_U256; op_gas(60)),
+        exp_one_base_large_exp(op::EXP, 1_U256, U256::MAX => 1_U256; op_gas(1610)),
+        exp_minus_one_base_even_exp(op::EXP, -1_U256, 4_U256 => 1_U256; op_gas(60)),
+        exp_minus_one_base_odd_exp(op::EXP, -1_U256, 5_U256 => -1_U256; op_gas(60)),
+        exp_pow4_base_in_range(op::EXP, 4_U256, 63_U256 => 1_U256 << 126; op_gas(60)),
+        exp_pow4_base_overflow(op::EXP, 4_U256, 128_U256 => 0_U256; op_gas(60)),
+        exp_non_pow2_base(op::EXP, 3_U256, 5_U256 => 243_U256; op_gas(60)),
         exp_overflow(op::EXP, 2_U256, 256_U256 => 0_U256; op_gas(110)),
         // Large exponent spanning multiple bytes.
         exp_large(op::EXP, 2_U256, 0xFFFF_U256 => 2_U256.pow(0xFFFF_U256); op_gas(110)),
@@ -814,6 +822,11 @@ tests! {
             bytecode: &[op::PUSH0, op::PUSH1, 32, op::KECCAK256],
             expected_stack: &[KECCAK_EMPTY.into()],
             expected_gas: 2 + 3 + gas::KECCAK256,
+        }),
+        keccak256_empty_dynamic_offset(@raw {
+            bytecode: &[op::PUSH0, op::ADDRESS, op::KECCAK256],
+            expected_stack: &[KECCAK_EMPTY.into()],
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
         }),
         keccak256_1(@raw {
             bytecode: &[op::PUSH1, 32, op::PUSH0, op::KECCAK256],
@@ -1073,10 +1086,37 @@ tests! {
             expected_stack: &[DEF_ADDR.into_word().into()],
             expected_gas: 5,
         }),
+        mload_const_offset_too_large(@raw {
+            bytecode: &{
+                let mut code = Vec::new();
+                code.push(op::PUSH9);
+                code.extend_from_slice(&0x1_0000_0000_0000_0000_U256.to_be_bytes::<32>()[23..]);
+                code.push(op::MLOAD);
+                code
+            },
+            expected_return: InstructionResult::InvalidOperandOOG,
+            expected_stack: &[0x1_0000_0000_0000_0000_U256],
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+        }),
         mstore1(@raw {
             bytecode: &[op::PUSH0, op::PUSH0, op::MSTORE],
             expected_memory: &[0; 32],
             expected_gas: 2 + 2 + (3 + memory_gas_cost(1)),
+        }),
+        mstore_const_offset_dyn_value(@raw {
+            bytecode: &bytecode_binop_mixed(op::MSTORE, 0_U256, 0x69_U256, true, false),
+            expected_memory: MEMORY_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+        }),
+        mstore_dyn_offset_const_value(@raw {
+            bytecode: &bytecode_binop_mixed(op::MSTORE, 0_U256, 0x69_U256, false, true),
+            expected_memory: MEMORY_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+        }),
+        mstore_dyn_offset_dyn_value(@raw {
+            bytecode: &bytecode_binop_mixed(op::MSTORE, 0_U256, 0x69_U256, false, false),
+            expected_memory: MEMORY_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
         }),
         mstore8_1(@raw {
             bytecode: &[op::PUSH0, op::PUSH0, op::MSTORE8],
@@ -1329,6 +1369,11 @@ tests! {
             expected_memory: MEMORY_WHAT_INTERPRETER_SAYS,
             expected_gas: GAS_WHAT_INTERPRETER_SAYS,
             expected_next_action: ACTION_WHAT_INTERPRETER_SAYS,
+        }),
+        ret_empty_dynamic_offset(@raw {
+            bytecode: &[op::PUSH0, op::ADDRESS, op::RETURN],
+            expected_return: InstructionResult::Return,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
         }),
         ret(@raw {
             bytecode: &[op::PUSH1, 0x69, op::PUSH0, op::MSTORE, op::PUSH1, 32, op::PUSH0, op::RETURN],
@@ -2078,48 +2123,55 @@ fn bytecode_unop_opaque(opcode: u8, a: U256) -> Vec<u8> {
     code
 }
 
-/// Build bytecode: MSTORE(a, 0), MSTORE(b, 32), MLOAD(32), MLOAD(0), `<op>`
-///
-/// The operands pass through MLOAD (an opaque builtin), preventing the compiler
-/// from constant-folding or exploiting UB at compile time.
-fn bytecode_binop_opaque(opcode: u8, a: U256, b: U256) -> Vec<u8> {
-    let mut code = Vec::with_capacity(128);
-    code.push(op::PUSH32);
-    code.extend_from_slice(&a.to_be_bytes::<32>());
-    code.push(op::PUSH1);
-    code.push(0x00);
-    code.push(op::MSTORE);
-    code.push(op::PUSH32);
-    code.extend_from_slice(&b.to_be_bytes::<32>());
-    code.push(op::PUSH1);
-    code.push(0x20);
-    code.push(op::MSTORE);
-    code.push(op::PUSH1);
-    code.push(0x20);
-    code.push(op::MLOAD);
-    code.push(op::PUSH1);
-    code.push(0x00);
-    code.push(op::MLOAD);
-    code.push(opcode);
-    code
-}
-
-/// Build opaque ternop bytecode: MSTORE(a,0), MSTORE(b,32), MSTORE(c,64),
-/// MLOAD(64), MLOAD(32), MLOAD(0), `<op>`.
-fn bytecode_ternop_opaque(opcode: u8, a: U256, b: U256, c: U256) -> Vec<u8> {
-    let mut code = Vec::with_capacity(192);
-    for (val, offset) in [(a, 0u8), (b, 0x20), (c, 0x40)] {
+fn push_const_or_load(code: &mut Vec<u8>, value: U256, is_const: bool, offset: u8) {
+    if is_const {
         code.push(op::PUSH32);
-        code.extend_from_slice(&val.to_be_bytes::<32>());
-        code.push(op::PUSH1);
-        code.push(offset);
-        code.push(op::MSTORE);
-    }
-    for offset in [0x40u8, 0x20, 0x00] {
+        code.extend_from_slice(&value.to_be_bytes::<32>());
+    } else {
         code.push(op::PUSH1);
         code.push(offset);
         code.push(op::MLOAD);
     }
+}
+
+fn store_dynamic_operands(code: &mut Vec<u8>, operands: &[(U256, bool, u8)]) {
+    for &(value, is_const, offset) in operands {
+        if !is_const {
+            code.push(op::PUSH32);
+            code.extend_from_slice(&value.to_be_bytes::<32>());
+            code.push(op::PUSH1);
+            code.push(offset);
+            code.push(op::MSTORE);
+        }
+    }
+}
+
+fn bytecode_binop_mixed(opcode: u8, a: U256, b: U256, a_const: bool, b_const: bool) -> Vec<u8> {
+    let mut code = Vec::with_capacity(128);
+    store_dynamic_operands(&mut code, &[(a, a_const, 0x00), (b, b_const, 0x20)]);
+    push_const_or_load(&mut code, b, b_const, 0x20);
+    push_const_or_load(&mut code, a, a_const, 0x00);
+    code.push(opcode);
+    code
+}
+
+fn bytecode_ternop_mixed(
+    opcode: u8,
+    a: U256,
+    b: U256,
+    c: U256,
+    a_const: bool,
+    b_const: bool,
+    c_const: bool,
+) -> Vec<u8> {
+    let mut code = Vec::with_capacity(192);
+    store_dynamic_operands(
+        &mut code,
+        &[(a, a_const, 0x00), (b, b_const, 0x20), (c, c_const, 0x40)],
+    );
+    push_const_or_load(&mut code, c, c_const, 0x40);
+    push_const_or_load(&mut code, b, b_const, 0x20);
+    push_const_or_load(&mut code, a, a_const, 0x00);
     code.push(opcode);
     code
 }
