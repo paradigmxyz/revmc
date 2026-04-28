@@ -1,8 +1,17 @@
 [package]
 name = "revmc-statetest"
-version = "0.0.0"
-publish = false
-edition = "2021"
+description = "EVM statetest runner"
+homepage = "https://github.com/danipopes/revmc/tree/main/crates/revmc-statetest"
+
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+categories.workspace = true
+keywords.workspace = true
+repository.workspace = true
+exclude.workspace = true
 
 [dependencies]
 revmc = { workspace = true, features = ["llvm"] }
@@ -21,6 +30,7 @@ revm-statetest-types.workspace = true
 
 alloy-rlp = { version = "0.3", features = ["arrayvec", "derive"] }
 alloy-trie = { version = "0.9", features = ["ethereum"] }
+console = "0.16"
 dashmap = "6"
 eyre.workspace = true
 indicatif = "0.18"

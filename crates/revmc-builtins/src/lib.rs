@@ -724,9 +724,11 @@ pub unsafe extern "C" fn __revmc_builtin_call(
     let input = if in_len != 0 {
         let in_offset = try_into_usize!(in_offset);
         ensure_memory(ecx, in_offset, in_len)?;
-        Bytes::copy_from_slice(&ecx.memory.slice(in_offset..in_offset + in_len))
+        let local_offset = ecx.memory.local_memory_offset();
+        let start = in_offset.saturating_add(local_offset);
+        start..start.saturating_add(in_len)
     } else {
-        Bytes::new()
+        usize::MAX..usize::MAX
     };
 
     let out_len = try_into_usize!(out_len);
@@ -776,7 +778,7 @@ pub unsafe extern "C" fn __revmc_builtin_call(
 
     *ecx.next_action = Some(InterpreterAction::NewFrame(revm_interpreter::FrameInput::Call(
         Box::new(CallInputs {
-            input: CallInput::Bytes(input),
+            input: CallInput::SharedBuffer(input),
             return_memory_offset: out_offset..out_offset + out_len,
             gas_limit,
             bytecode_address: to,
@@ -821,7 +823,7 @@ pub unsafe extern "C" fn __revmc_builtin_do_return(
         Bytes::new()
     };
     *ecx.next_action =
-        Some(InterpreterAction::Return(InterpreterResult { output, gas: *ecx.gas, result }));
+        Some(InterpreterAction::Return(InterpreterResult { output, gas: ecx.gas, result }));
     Err(result.into())
 }
 
@@ -841,7 +843,7 @@ pub unsafe extern "C" fn __revmc_builtin_do_return_cc(
         Bytes::new()
     };
     *ecx.next_action =
-        Some(InterpreterAction::Return(InterpreterResult { output, gas: *ecx.gas, result }));
+        Some(InterpreterAction::Return(InterpreterResult { output, gas: ecx.gas, result }));
     Err(result.into())
 }
 

@@ -1,16 +1,14 @@
 // Diagnostic utilities for comparing interpreter vs JIT execution.
 
-use crate::{
-    compiled::{CompileCache, CompiledContracts},
-    merkle_trie::compute_test_roots,
-};
-use revm_context::{block::BlockEnv, cfg::CfgEnv, tx::TxEnv, Context};
+use crate::merkle_trie::compute_test_roots;
+use revm_context::{Context, block::BlockEnv, cfg::CfgEnv, tx::TxEnv};
 use revm_context_interface::result::{EVMError, ExecutionResult, HaltReason, InvalidTransaction};
 use revm_database::{self as database, bal::EvmDatabaseError};
 use revm_database_interface::{DatabaseCommit, EmptyDB};
 use revm_handler::{ExecuteCommitEvm, Handler, MainBuilder, MainContext};
-use revm_inspector::{inspectors::TracerEip3155, InspectCommitEvm};
-use revm_primitives::{hardfork::SpecId, Bytes, B256};
+use revm_inspector::{InspectCommitEvm, inspectors::TracerEip3155};
+use revm_primitives::{B256, Bytes};
+use revmc::{revm_evm::JitEvm, runtime::JitBackend};
 use std::{convert::Infallible, io::stderr};
 
 type ExecResult =
@@ -102,9 +100,7 @@ pub fn run_interpreter(
 
 /// Run a single test case with JIT-compiled functions, returning an execution snapshot.
 pub fn run_jit(
-    compiled: &CompiledContracts,
-    cache: &CompileCache,
-    spec_id: SpecId,
+    backend: &JitBackend,
     cfg: &CfgEnv,
     block: &BlockEnv,
     tx: &TxEnv,
@@ -119,8 +115,9 @@ pub fn run_jit(
         .with_tx(tx.clone())
         .with_cfg(cfg.clone())
         .with_db(state);
-    let mut handler = crate::compiled::CompiledHandler { compiled, cache, spec_id };
-    let mut evm = evm_context.build_mainnet();
+    let inner = evm_context.build_mainnet();
+    let mut evm = JitEvm::new(inner, backend.clone());
+    let mut handler = revm_handler::MainnetHandler::default();
     let exec_result = handler.run(&mut evm);
     if exec_result.is_ok() {
         let s = evm.ctx.journaled_state.finalize();

@@ -1,15 +1,16 @@
 #![doc = include_str!("../README.md")]
 #![cfg_attr(not(test), warn(unused_extern_crates))]
 #![cfg_attr(docsrs, feature(doc_cfg))]
-#![allow(clippy::incompatible_msrv)]
-
-#[allow(
+#![allow(
+    clippy::incompatible_msrv,
     clippy::needless_update,
+    clippy::collapsible_if,
     unreachable_pub,
     dead_code,
     missing_docs,
     missing_debug_implementations
 )]
+
 pub mod btest;
 pub mod compiled;
 pub mod diagnostic;
@@ -61,11 +62,7 @@ pub fn get_ethtests_path() -> PathBuf {
     }
     let root = workspace_root();
     let path = root.join(DEFAULT_ETHTESTS_PATH);
-    if path.exists() {
-        path
-    } else {
-        PathBuf::from(DEFAULT_ETHTESTS_PATH)
-    }
+    if path.exists() { path } else { PathBuf::from(DEFAULT_ETHTESTS_PATH) }
 }
 
 /// Get the path to downloaded test fixtures (`test-fixtures/`).

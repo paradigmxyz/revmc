@@ -3,24 +3,10 @@
 #![cfg_attr(not(test), warn(unused_extern_crates))]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
-#[macro_use]
-extern crate tracing;
-
-mod bytecode;
-pub use bytecode::*;
-
-mod compiler;
-pub use compiler::{CompileTimings, EvmCompiler, EvmCompilerInput};
-
-mod linker;
-pub use linker::{Linker, shared_library_path};
-
-mod revm_evm;
-pub use revm_evm::JitEvm;
-
-/// Internal tests and testing utilities. Not public API.
-#[cfg(any(test, feature = "__fuzzing"))]
-pub mod tests;
+#[doc(inline)]
+pub use revmc_codegen::*;
+#[doc(inline)]
+pub use revmc_runtime::{revm_evm, runtime};
 
 #[allow(ambiguous_glob_reexports)]
 #[doc(inline)]
@@ -44,6 +30,8 @@ pub use revm_bytecode;
 #[doc(no_inline)]
 pub use revm_context_interface as context_interface;
 #[doc(no_inline)]
+pub use revm_handler as handler;
+#[doc(no_inline)]
 pub use revm_inspector as inspector;
 #[doc(no_inline)]
 pub use revm_interpreter::{self as interpreter};
@@ -52,13 +40,10 @@ pub use revm_primitives as primitives;
 #[doc(no_inline)]
 pub use revm_primitives::hardfork::SpecId;
 
-type FxHashMap<K, V> = alloy_primitives::map::HashMap<K, V, alloy_primitives::map::FxBuildHasher>;
+/// Internal tests and testing utilities. Not public API.
+#[cfg(test)]
+pub mod tests;
 
-/// Enable for `cargo asm -p revmc --lib`.
-#[cfg(any())]
-pub fn generate_all_assembly() -> EvmCompiler<EvmLlvmBackend> {
-    let mut compiler = EvmCompiler::new_llvm(false).unwrap();
-    let _ = compiler.jit(None, &[], primitives::SpecId::ARROW_GLACIER).unwrap();
-    unsafe { compiler.clear().unwrap() };
-    compiler
-}
+#[cfg(feature = "alloy-evm")]
+#[doc(inline)]
+pub use revmc_runtime::alloy_evm;

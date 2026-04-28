@@ -6,7 +6,10 @@ use revm_database::{CacheDB, EmptyDB};
 use revm_handler::{ExecuteEvm, MainBuilder, MainnetEvm};
 use revm_primitives::{Address, B256, B256Map, Bytes, StorageKeyMap, StorageValue, TxKind, U256};
 use revm_state::AccountInfo;
-use revmc::{EvmCompiler, EvmLlvmBackend, JitEvm, RawEvmCompilerFn, primitives::hardfork::SpecId};
+use revmc::{
+    EvmCompiler, EvmLlvmBackend, RawEvmCompilerFn, primitives::hardfork::SpecId,
+    simple_revm_evm::JitEvm,
+};
 use serde::Deserialize;
 use std::{
     collections::{BTreeMap, HashSet},
