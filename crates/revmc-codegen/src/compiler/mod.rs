@@ -425,8 +425,8 @@ impl<B: Backend> EvmCompiler<B> {
     /// Useful for benchmarking the cost of failure-result materialization.
     ///
     /// Defaults to `false`.
-    pub fn force_out_of_gas(&mut self, yes: bool) {
-        self.config.force_out_of_gas = yes;
+    pub fn single_error(&mut self, yes: bool) {
+        self.config.single_error = yes;
     }
 
     /// Sets custom gas parameters.

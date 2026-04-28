@@ -31,7 +31,7 @@ pub(super) struct FcxConfig {
     pub(super) inspect_stack: bool,
     pub(super) stack_bound_checks: bool,
     pub(super) gas_metering: bool,
-    pub(super) force_out_of_gas: bool,
+    pub(super) single_error: bool,
 }
 
 impl Default for FcxConfig {
@@ -44,7 +44,7 @@ impl Default for FcxConfig {
             inspect_stack: false,
             stack_bound_checks: true,
             gas_metering: true,
-            force_out_of_gas: true,
+            single_error: true,
         }
     }
 }
@@ -439,10 +439,10 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         // Finalize the failure block.
         fx.bcx.switch_to_block(fx.failure_block.unwrap());
         if !fx.incoming_failures.is_empty() {
-            // `force_out_of_gas` collapses every error path to a generic OOG; this is
+            // `single_error` collapses every error path to a generic OOG; this is
             // safe because failures are semantically interchangeable for callers that
             // only branch on success vs failure.
-            let failure_value = if config.force_out_of_gas {
+            let failure_value = if config.single_error {
                 fx.bcx.iconst(fx.i8_type, InstructionResult::OutOfGas as i64)
             } else {
                 fx.bcx.phi(fx.i8_type, &fx.incoming_failures)

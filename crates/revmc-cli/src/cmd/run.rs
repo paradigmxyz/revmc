@@ -79,9 +79,9 @@ pub(crate) struct RunArgs {
     no_gas: bool,
     #[arg(long)]
     no_len_checks: bool,
-    /// Force all return paths to yield `OutOfGas`.
+    /// Force all failure paths to yield a single `OutOfGas`.
     #[arg(long)]
-    force_out_of_gas: bool,
+    single_error: bool,
     /// Inspect the stack after the function has been executed.
     #[arg(long)]
     inspect_stack: bool,
@@ -157,8 +157,8 @@ impl RunArgs {
             compiler.gas_metering(!self.no_gas);
             unsafe { compiler.stack_bound_checks(!self.no_len_checks) };
             compiler.debug_assertions(self.debug_assertions);
-            if self.force_out_of_gas {
-                compiler.force_out_of_gas(true);
+            if self.single_error {
+                compiler.single_error(true);
             }
 
             compiler.set_module_name(name);
