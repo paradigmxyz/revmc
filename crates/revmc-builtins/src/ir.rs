@@ -48,6 +48,7 @@ impl<B: Backend> Builtins<B> {
         let address = builtin.addr();
         let linkage = revmc_backend::Linkage::Import;
         let f = bcx.add_function(name, &params, ret, Some(address), linkage);
+        let param_attrs = builtin.param_attrs();
         let mut attrs = Vec::with_capacity(16);
         attrs.extend(builtin.attrs());
         attrs.extend([
@@ -55,12 +56,25 @@ impl<B: Backend> Builtins<B> {
             Attribute::NoRecurse,
             Attribute::NoSync,
             Attribute::NoUnwind,
-            Attribute::ArgMemOnly,
         ]);
+        // `argmem` is only valid if the function does not access memory reachable through pointers
+        // *loaded* from its arguments (only memory directly derived from arguments via
+        // GEP/bitcast). Builtins that take a writable `EvmContext` mutate state through
+        // `ecx.host`, `ecx.gas`, etc., which are loaded from `ecx` and thus outside
+        // `argmem`. Apply `ArgMemOnly` only when no parameter is a writable `EvmContext`.
+        let evm_ctx_size = core::mem::size_of::<revmc_context::EvmContext<'static>>() as u64;
+        let writes_ecx = param_attrs.iter().any(|p| {
+            let writable = p.iter().any(|a| matches!(a, Attribute::Writable));
+            let is_ecx =
+                p.iter().any(|a| matches!(a, Attribute::Dereferenceable(s) if *s == evm_ctx_size));
+            writable && is_ecx
+        });
+        if !writes_ecx {
+            attrs.push(Attribute::ArgMemOnly);
+        }
         for attr in attrs {
             bcx.add_function_attribute(Some(f), attr, FunctionAttributeLocation::Function);
         }
-        let param_attrs = builtin.param_attrs();
         for (i, param_attrs) in param_attrs.iter().enumerate() {
             for attr in param_attrs {
                 bcx.add_function_attribute(
@@ -244,11 +258,8 @@ builtins! {
     Exp            = __revmc_builtin_exp(@[ecx] ptr, @[sp] ptr) None,
     Keccak256      = __revmc_builtin_keccak256(@[ecx] ptr, @[sp] ptr) None,
     Keccak256CC    = __revmc_builtin_keccak256_cc(@[ecx] ptr, @[sp] ptr, usize, usize) None,
-    Address        = __revmc_builtin_address(@[ecx_ro] ptr, @[sp] ptr) None,
     Balance        = __revmc_builtin_balance(@[ecx] ptr, @[sp] ptr) None,
     Origin         = __revmc_builtin_origin(@[ecx_ro] ptr, @[sp] ptr) None,
-    Caller         = __revmc_builtin_caller(@[ecx_ro] ptr, @[sp] ptr) None,
-    CallValue      = __revmc_builtin_call_value(@[ecx_ro] ptr, @[sp] ptr) None,
     CallDataLoad   = __revmc_builtin_calldataload(@[ecx_ro] ptr, @[sp] ptr) None,
     CallDataLoadC  = __revmc_builtin_calldataload_c(@[ecx_ro] ptr, @[sp] ptr, usize) None,
     CallDataCopy   = __revmc_builtin_calldatacopy(@[ecx] ptr, @[sp] ptr) None,
@@ -256,7 +267,6 @@ builtins! {
     GasPrice       = __revmc_builtin_gas_price(@[ecx_ro] ptr, @[sp] ptr) None,
     ExtCodeSize    = __revmc_builtin_extcodesize(@[ecx] ptr, @[sp] ptr) None,
     ExtCodeCopy    = __revmc_builtin_extcodecopy(@[ecx] ptr, @[sp] ptr) None,
-    ReturnDataSize = __revmc_builtin_returndatasize(@[ecx_ro] ptr) Some(usize),
     ReturnDataCopy = __revmc_builtin_returndatacopy(@[ecx] ptr, @[sp] ptr) None,
     ExtCodeHash    = __revmc_builtin_extcodehash(@[ecx] ptr, @[sp] ptr) None,
     BlockHash      = __revmc_builtin_blockhash(@[ecx] ptr, @[sp] ptr) None,

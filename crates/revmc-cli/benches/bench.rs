@@ -1,14 +1,9 @@
 #![allow(missing_docs, unexpected_cfgs)]
 
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
-use revm_bytecode::Bytecode;
 use revm_handler::ExecuteEvm;
-use revm_interpreter::{InputsImpl, SharedMemory, interpreter::ExtBytecode};
-use revmc::{
-    EvmCompiler, EvmContext, EvmLlvmBackend, EvmStack, OptimizationLevel,
-    primitives::hardfork::SpecId,
-};
-use revmc_cli::{BenchHost, PreparedBench};
+use revmc::{EvmCompiler, EvmLlvmBackend, OptimizationLevel, primitives::hardfork::SpecId};
+use revmc_cli::PreparedBench;
 use std::time::Duration;
 
 const SPEC_ID: SpecId = SpecId::OSAKA;
@@ -49,7 +44,7 @@ fn run_bench(
     let is_fixture = def.is_fixture();
 
     let prepared = PreparedBench::load_with(def, SPEC_ID, compiler);
-    if cfg!(any(debug_assertions, not(codspeed))) && prepared.is_runnable() {
+    if cfg!(any(debug_assertions, not(codspeed))) {
         prepared.sanity_check();
     }
 
@@ -61,11 +56,6 @@ fn run_bench(
     // ── Bytecode-only benchmarks ────────────────────────────────────────
 
     if !is_fixture {
-        let gas_limit = u64::MAX / 2;
-        let calldata: revmc::primitives::Bytes = def.calldata.clone().into();
-        let bytecode_raw =
-            Bytecode::new_raw(revmc::primitives::Bytes::copy_from_slice(&def.bytecode));
-
         // Compile-time.
         g.bench_function(format!("{name}/compile/translate"), |b| {
             b.iter_batched_ref(
@@ -93,102 +83,29 @@ fn run_bench(
                 )
             });
         }
-
-        // Native baseline.
-        if let Some(native) = def.native {
-            g.bench_function(format!("{name}/rt/native"), |b| {
-                b.iter_batched(|| (), |()| native(), BatchSize::SmallInput)
-            });
-        }
-
-        // JIT variants (no_gas etc.).
-        let mut host = BenchHost::new(SPEC_ID);
-        host.apply_bench(def);
-
-        let mut compiler = EvmCompiler::new_llvm(false).unwrap();
-        compiler.inspect_stack(!def.stack_input.is_empty());
-        compiler.gas_metering(true);
-
-        let new_interpreter = || {
-            let ext_bytecode = ExtBytecode::new(bytecode_raw.clone());
-            let input = InputsImpl {
-                input: revm_interpreter::CallInput::Bytes(calldata.clone()),
-                ..Default::default()
-            };
-            revm_interpreter::Interpreter::new(
-                SharedMemory::new(),
-                ext_bytecode,
-                input,
-                false,
-                SPEC_ID,
-                gas_limit,
-            )
-        };
-
-        const NO_GAS_BENCHES: &[&str] = &["fibonacci", "fibonacci-calldata", "factorial"];
-        let mut jit_variants: Vec<(&str, (bool, bool))> = vec![("default", (true, true))];
-        if NO_GAS_BENCHES.contains(&name) {
-            jit_variants.push(("no_gas", (false, true)));
-        }
-        let jit_ids: Vec<_> = jit_variants
-            .iter()
-            .map(|&(kind, (gas, stack))| {
-                compiler.gas_metering(gas);
-                unsafe { compiler.stack_bound_checks(stack) };
-                let sym = format!("{name}/{kind}");
-                (
-                    kind,
-                    compiler
-                        .translate(&sym, bytecode_raw.original_byte_slice(), SPEC_ID)
-                        .expect(kind),
-                )
-            })
-            .collect();
-        for &(kind, fn_id) in &jit_ids {
-            let jit = unsafe { compiler.jit_function(fn_id) }.expect(kind);
-            g.bench_function(format!("{name}/rt/jit/{kind}"), |b| {
-                b.iter_batched_ref(
-                    || {
-                        let mut stack = EvmStack::new();
-                        for (i, input) in def.stack_input.iter().enumerate() {
-                            stack.set(i, (*input).into());
-                        }
-                        (new_interpreter(), stack)
-                    },
-                    |(interpreter, stack)| {
-                        let mut stack_len = def.stack_input.len();
-                        let mut ecx = EvmContext::from_interpreter(interpreter, &mut host);
-                        unsafe { jit.call(Some(stack), Some(&mut stack_len), &mut ecx) }
-                    },
-                    BatchSize::SmallInput,
-                )
-            });
-        }
     }
 
     // ── Unified runtime benchmarks ──────────────────────────────────────
 
-    if prepared.is_runnable() {
-        let tx = prepared.tx().clone();
+    let tx = prepared.tx().clone();
 
-        let mut interp_evm = prepared.new_interpreter_evm();
-        g.bench_function(format!("{name}/rt/interpreter"), |b| {
-            b.iter_batched(
-                || tx.clone(),
-                |tx| interp_evm.transact_one(tx).unwrap(),
-                BatchSize::SmallInput,
-            );
-        });
+    let mut interp_evm = prepared.new_interpreter_evm();
+    g.bench_function(format!("{name}/rt/interpreter"), |b| {
+        b.iter_batched(
+            || tx.clone(),
+            |tx| interp_evm.transact_one(tx).unwrap(),
+            BatchSize::SmallInput,
+        );
+    });
 
-        let mut jit_evm = prepared.new_jit_evm();
-        g.bench_function(format!("{name}/rt/jit"), |b| {
-            b.iter_batched(
-                || tx.clone(),
-                |tx| jit_evm.transact_one(tx).unwrap(),
-                BatchSize::SmallInput,
-            );
-        });
-    }
+    let mut jit_evm = prepared.new_jit_evm();
+    g.bench_function(format!("{name}/rt/jit"), |b| {
+        b.iter_batched(
+            || tx.clone(),
+            |tx| jit_evm.transact_one(tx).unwrap(),
+            BatchSize::SmallInput,
+        );
+    });
 
     g.finish();
 }
