@@ -1904,18 +1904,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let sentinel = self.bcx.iconst(i64_type, sentinel_lit as i64);
         self.bcx.select(fits, reduced, sentinel)
     }
-
-    /// Converts a 256-bit unsigned integer to a 64-bit unsigned integer, failing with
-    /// `InvalidOperandOOG` if the value doesn't fit.
-    #[allow(dead_code)]
-    fn u256_to_u64_checked(&mut self, value: B::Value) -> B::Value {
-        let i64_type = self.bcx.type_int(64);
-        let reduced = self.bcx.ireduce(i64_type, value);
-        let extended = self.bcx.zext(self.word_type, reduced);
-        let fits = self.bcx.icmp(IntCC::Equal, value, extended);
-        let sentinel = self.bcx.iconst(i64_type, u64::MAX as i64);
-        self.bcx.select(fits, reduced, sentinel)
-    }
 }
 
 /// IR builtins.
