@@ -184,11 +184,10 @@ pub enum FunctionAttributeLocation {
 /// Calling convention.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CallConv {
-    /// Backend default calling convention.
     #[default]
     Default,
-    /// Preserve most caller registers across the call.
-    PreserveMost,
+    /// Preserve most caller registers across the call to reduce callsite register pressure.
+    Cold,
 }
 
 /// Tail call kind.

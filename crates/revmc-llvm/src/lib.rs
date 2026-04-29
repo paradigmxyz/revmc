@@ -2196,7 +2196,7 @@ fn set_function_call_conv(function: FunctionValue<'_>, call_conv: CallConv) {
 fn convert_call_conv(call_conv: CallConv) -> Option<inkwell::llvm_sys::LLVMCallConv> {
     match call_conv {
         CallConv::Default => None,
-        CallConv::PreserveMost => Some(inkwell::llvm_sys::LLVMCallConv::LLVMPreserveMostCallConv),
+        CallConv::Cold => Some(inkwell::llvm_sys::LLVMCallConv::LLVMPreserveMostCallConv),
     }
 }
 

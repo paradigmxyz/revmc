@@ -55,10 +55,18 @@ impl<B: Backend> Builtins<B> {
         let address = builtin.addr();
         let linkage = revmc_backend::Linkage::Import;
         let f = bcx.add_function(name, &params, ret, Some(address), linkage, CallConv::Default);
-        let f = match builtin.call_conv() {
+        Self::add_attrs(builtin, f, bcx);
+        match builtin.call_conv() {
             CallConv::Default => f,
-            call_conv => bcx.add_function_stub(f, call_conv),
-        };
+            call_conv => {
+                let f = bcx.add_function_stub(f, call_conv);
+                Self::add_attrs(builtin, f, bcx);
+                f
+            }
+        }
+    }
+
+    fn add_attrs(builtin: Builtin, f: B::Function, bcx: &mut B::Builder<'_>) {
         let param_attrs = builtin.param_attrs();
         let mut attrs = Vec::with_capacity(16);
         attrs.extend(builtin.attrs());
@@ -95,7 +103,6 @@ impl<B: Backend> Builtins<B> {
                 );
             }
         }
-        f
     }
 }
 
@@ -129,13 +136,6 @@ macro_rules! builtins {
             pub fn addr(self) -> usize {
                 match self {
                     $(Self::$ident => crate::$name as *const () as usize,)*
-                }
-            }
-
-            pub const fn call_conv(self) -> CallConv {
-                match self {
-                    Self::Mresize => CallConv::PreserveMost,
-                    _ => CallConv::Default,
                 }
             }
 
@@ -312,4 +312,13 @@ builtins! {
     DoReturn       = #[NoReturn] __revmc_builtin_do_return(@[ecx] ptr, @[sp] ptr, u8) None,
     DoReturnCC     = #[NoReturn] __revmc_builtin_do_return_cc(@[ecx] ptr, usize, usize, u8) None,
     SelfDestruct   = #[NoReturn] __revmc_builtin_selfdestruct(@[ecx] ptr, @[sp] ptr) None,
+}
+
+impl Builtin {
+    pub const fn call_conv(self) -> CallConv {
+        match self {
+            Self::Mresize => CallConv::Cold,
+            _ => CallConv::Default,
+        }
+    }
 }
