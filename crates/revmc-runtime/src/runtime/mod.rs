@@ -30,7 +30,7 @@ pub use api::{
 };
 
 mod config;
-pub use config::{CompilationEvent, CompilationKind, RuntimeConfig, RuntimeTuning};
+pub use config::{CompilationEvent, CompilationKind, JitMode, RuntimeConfig, RuntimeTuning};
 
 mod backend;
 
@@ -44,6 +44,26 @@ pub use storage::{
 };
 
 mod worker;
+
+/// Runs the out-of-process JIT helper if this process was launched as one.
+///
+/// Returns `Ok(true)` after the helper request has been handled and the caller
+/// should exit immediately. Normal application startup should continue on
+/// `Ok(false)`.
+pub fn maybe_run_jit_helper() -> eyre::Result<bool> {
+    if std::env::var_os("REVMC_JIT_HELPER").is_none() {
+        return Ok(false);
+    }
+    #[cfg(feature = "llvm")]
+    {
+        worker::run_jit_helper_stdio()?;
+        Ok(true)
+    }
+    #[cfg(not(feature = "llvm"))]
+    {
+        eyre::bail!("LLVM backend not available")
+    }
+}
 
 #[cfg(test)]
 mod tests;
@@ -354,6 +374,7 @@ impl JitBackend {
         debug!(
             blocking = self.inner.blocking,
             workers = config.tuning.jit_worker_count,
+            jit_mode = ?config.jit_mode,
             hot_threshold = config.tuning.jit_hot_threshold,
             channel_capacity = config.tuning.channel_capacity,
             "spawning backend thread",

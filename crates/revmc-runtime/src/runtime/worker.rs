@@ -10,20 +10,28 @@
 //! as the job channel closes.
 
 use crate::{
-    CompileTimings, EvmCompilerFn, OptimizationLevel,
+    CompileTimings, EvmCompilerFn, OptimizationLevel, eyre,
     runtime::{
-        config::{CompilationKind, RuntimeConfig},
+        config::{CompilationKind, JitMode, RuntimeConfig},
         storage::RuntimeCacheKey,
     },
 };
-use alloy_primitives::Bytes;
+use alloy_primitives::{B256, Bytes};
 use crossbeam_channel as chan;
 use rayon::{ThreadPool, ThreadPoolBuilder};
 #[cfg(feature = "llvm")]
-use std::{cell::RefCell, fs::File, io::Read, time::Instant};
+use std::{
+    cell::RefCell,
+    fs::File,
+    io::{BufRead, BufReader, Read, Write},
+    path::PathBuf,
+    process::{Child, ChildStdin, Command, Stdio},
+    thread::JoinHandle,
+    time::Instant,
+};
 use std::{
     sync::{
-        Arc,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
@@ -34,6 +42,10 @@ use crate::{
     EvmCompiler, EvmLlvmBackend, Linker,
     llvm::{JitDylibGuard, orc::ResourceTracker},
 };
+#[cfg(feature = "llvm")]
+use revm_primitives::hardfork::SpecId;
+#[cfg(feature = "llvm")]
+use serde::{Deserialize, Serialize};
 
 /// Notifier for synchronous compilation requests.
 ///
@@ -102,6 +114,8 @@ pub(crate) enum WorkerSuccess {
     Jit(JitSuccess),
     /// AOT compilation produced shared-library bytes.
     Aot(AotSuccess),
+    /// JIT compilation produced relocatable object bytes to link in the parent.
+    JitObject(JitObjectSuccess),
 }
 
 /// Successful JIT compilation output.
@@ -114,6 +128,15 @@ pub(crate) struct JitSuccess {
 }
 
 /// Successful AOT compilation output.
+pub(crate) struct JitObjectSuccess {
+    /// The symbol name in the object file.
+    pub(crate) symbol_name: String,
+    /// The raw relocatable object bytes.
+    pub(crate) object_bytes: Bytes,
+    /// Builtin absolute symbols referenced by the object.
+    pub(crate) builtin_symbols: Vec<String>,
+}
+
 pub(crate) struct AotSuccess {
     /// The symbol name in the shared library.
     pub(crate) symbol_name: String,
@@ -267,6 +290,9 @@ fn clear_thread_local_compilers() {}
 fn compile_job(job: CompileJob, config: &RuntimeConfig) -> WorkerResult {
     trace!(?job, "received job");
     match job.kind {
+        CompilationKind::Jit if config.jit_mode == JitMode::OutOfProcess => {
+            compile_job_out_of_process(job, config)
+        }
         CompilationKind::Jit => {
             JIT_COMPILER.with_borrow_mut(|state| compile_with_state(job, config, state))
         }
@@ -274,6 +300,303 @@ fn compile_job(job: CompileJob, config: &RuntimeConfig) -> WorkerResult {
             AOT_COMPILER.with_borrow_mut(|state| compile_with_state(job, config, state))
         }
     }
+}
+
+#[cfg(feature = "llvm")]
+fn compile_job_out_of_process(job: CompileJob, config: &RuntimeConfig) -> WorkerResult {
+    let t0 = Instant::now();
+    let outcome = run_helper_job(&job, config);
+    WorkerResult {
+        key: job.key,
+        outcome,
+        kind: job.kind,
+        sync_notifier: job.sync_notifier,
+        generation: job.generation,
+        compile_duration: t0.elapsed(),
+        timings: CompileTimings::default(),
+    }
+}
+
+const HELPER_ENV: &str = "REVMC_JIT_HELPER";
+
+#[cfg(feature = "llvm")]
+fn run_helper_job(job: &CompileJob, config: &RuntimeConfig) -> Result<WorkerSuccess, String> {
+    if config.gas_params.is_some() {
+        return Err("out-of-process JIT does not support custom gas params yet".into());
+    }
+    if config.dump_dir.is_some() {
+        return Err("out-of-process JIT does not support debug dumps yet".into());
+    }
+
+    helper_process().compile(job, config)
+}
+
+#[cfg(feature = "llvm")]
+fn helper_process() -> &'static HelperProcess {
+    static HELPER: OnceLock<HelperProcess> = OnceLock::new();
+    HELPER.get_or_init(HelperProcess::default)
+}
+
+#[cfg(feature = "llvm")]
+#[derive(Default)]
+struct HelperProcess {
+    inner: Mutex<Option<HelperProcessInner>>,
+}
+
+#[cfg(feature = "llvm")]
+impl HelperProcess {
+    fn compile(&self, job: &CompileJob, config: &RuntimeConfig) -> Result<WorkerSuccess, String> {
+        let mut slot = self.inner.lock().unwrap();
+        if slot.as_ref().is_none_or(|helper| !helper.matches_config(config)) {
+            *slot = Some(HelperProcessInner::spawn(config)?);
+        }
+
+        let helper = slot.as_mut().unwrap();
+        match helper.compile(job, config) {
+            Ok(result) => Ok(result),
+            Err(err) => {
+                *slot = None;
+                Err(err)
+            }
+        }
+    }
+}
+
+#[cfg(feature = "llvm")]
+struct HelperProcessInner {
+    path: PathBuf,
+    child: Child,
+    stdin: ChildStdin,
+    result_rx: chan::Receiver<Result<WorkerSuccess, String>>,
+    reader: Option<JoinHandle<()>>,
+}
+
+#[cfg(feature = "llvm")]
+impl HelperProcessInner {
+    fn spawn(config: &RuntimeConfig) -> Result<Self, String> {
+        let path = match &config.jit_helper_path {
+            Some(path) => path.clone(),
+            None => {
+                std::env::current_exe().map_err(|e| format!("failed to locate current exe: {e}"))?
+            }
+        };
+        let mut child = Command::new(&path)
+            .env(HELPER_ENV, "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .map_err(|e| format!("failed to spawn JIT helper: {e}"))?;
+        let stdin = child.stdin.take().ok_or("helper stdin unavailable")?;
+        let stdout = child.stdout.take().ok_or("helper stdout unavailable")?;
+        let (result_tx, result_rx) = chan::bounded(1);
+        let reader = std::thread::spawn(move || {
+            let mut stdout = BufReader::new(stdout);
+            loop {
+                let result = read_helper_result(&mut stdout);
+                if result_tx.send(result).is_err() {
+                    break;
+                }
+            }
+        });
+        Ok(Self { path, child, stdin, result_rx, reader: Some(reader) })
+    }
+
+    fn matches_config(&self, config: &RuntimeConfig) -> bool {
+        match &config.jit_helper_path {
+            Some(path) => self.path == *path,
+            None => std::env::current_exe().map(|path| self.path == path).unwrap_or(false),
+        }
+    }
+
+    fn compile(
+        &mut self,
+        job: &CompileJob,
+        config: &RuntimeConfig,
+    ) -> Result<WorkerSuccess, String> {
+        write_job(&mut self.stdin, job, config)
+            .map_err(|e| format!("failed to write helper job: {e}"))?;
+        self.stdin.flush().map_err(|e| format!("failed to flush helper job: {e}"))?;
+
+        match self.result_rx.recv_timeout(config.tuning.jit_timeout) {
+            Ok(result) => result,
+            Err(chan::RecvTimeoutError::Timeout) => {
+                let _ = self.child.kill();
+                Err(format!("JIT helper timed out after {:?}", config.tuning.jit_timeout))
+            }
+            Err(chan::RecvTimeoutError::Disconnected) => {
+                let status = self.child.try_wait().ok().flatten();
+                Err(match status {
+                    Some(status) => format!("JIT helper exited with {status}"),
+                    None => "JIT helper disconnected".into(),
+                })
+            }
+        }
+    }
+}
+
+#[cfg(feature = "llvm")]
+impl Drop for HelperProcessInner {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        if let Some(reader) = self.reader.take() {
+            let _ = reader.join();
+        }
+    }
+}
+
+#[cfg(feature = "llvm")]
+#[derive(Serialize, Deserialize)]
+struct HelperRequest {
+    code_hash: B256,
+    spec_id: u8,
+    opt_level: u8,
+    debug_assertions: bool,
+    no_dedup: bool,
+    no_dse: bool,
+    symbol_name: String,
+    bytecode: Bytes,
+}
+
+#[cfg(feature = "llvm")]
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum HelperResponse {
+    Ok { symbol_name: String, object_bytes: Bytes, builtin_symbols: Vec<String> },
+    Err { error: String },
+}
+
+#[cfg(feature = "llvm")]
+fn write_job(mut w: impl Write, job: &CompileJob, config: &RuntimeConfig) -> std::io::Result<()> {
+    let req = HelperRequest {
+        code_hash: job.key.code_hash,
+        spec_id: job.key.spec_id as u8,
+        opt_level: opt_level_to_u8(job.opt_level),
+        debug_assertions: config.debug_assertions,
+        no_dedup: config.no_dedup,
+        no_dse: config.no_dse,
+        symbol_name: job.symbol_name.clone(),
+        bytecode: job.bytecode.clone(),
+    };
+    serde_json::to_writer(&mut w, &req)?;
+    w.write_all(b"\n")
+}
+
+#[cfg(feature = "llvm")]
+fn read_helper_result(r: &mut impl BufRead) -> Result<WorkerSuccess, String> {
+    let mut line = String::new();
+    let n = r.read_line(&mut line).map_err(|e| format!("failed to read helper result: {e}"))?;
+    if n == 0 {
+        return Err("JIT helper closed stdout".into());
+    }
+    match serde_json::from_str::<HelperResponse>(&line)
+        .map_err(|e| format!("failed to decode helper result: {e}"))?
+    {
+        HelperResponse::Ok { symbol_name, object_bytes, builtin_symbols } => {
+            Ok(WorkerSuccess::JitObject(JitObjectSuccess {
+                symbol_name,
+                object_bytes,
+                builtin_symbols,
+            }))
+        }
+        HelperResponse::Err { error } => Err(error),
+    }
+}
+
+#[cfg(feature = "llvm")]
+pub(super) fn run_jit_helper_stdio() -> eyre::Result<()> {
+    let mut stdin = std::io::stdin().lock();
+    let mut stdout = std::io::stdout().lock();
+    let mut compiler: Option<EvmCompiler<EvmLlvmBackend>> = None;
+
+    while let Some((job, config)) = read_helper_job(&mut stdin)? {
+        if compiler.is_none() {
+            compiler = Some(create_compiler(&config, false).map_err(|e| eyre::eyre!(e))?);
+        }
+        let compiler = compiler.as_mut().unwrap();
+        compiler.set_opt_level(job.opt_level);
+        compiler.debug_assertions(config.debug_assertions);
+        compiler.set_dedup(!config.no_dedup);
+        compiler.set_dse(!config.no_dse);
+
+        let result = compile_jit_object_artifact(&job, compiler);
+        if let Err(err) = compiler.clear_ir() {
+            warn!(%err, "clear_ir failed");
+        }
+        write_helper_result(&mut stdout, result)?;
+        stdout.flush()?;
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "llvm")]
+fn read_helper_job(stdin: &mut impl BufRead) -> eyre::Result<Option<(CompileJob, RuntimeConfig)>> {
+    let mut line = String::new();
+    if stdin.read_line(&mut line)? == 0 {
+        return Ok(None);
+    }
+    let req: HelperRequest = serde_json::from_str(&line)?;
+    let spec_id = SpecId::try_from_u8(req.spec_id).ok_or_else(|| eyre::eyre!("invalid spec id"))?;
+    let opt_level = opt_level_from_u8(req.opt_level)?;
+
+    let config = RuntimeConfig {
+        debug_assertions: req.debug_assertions,
+        no_dedup: req.no_dedup,
+        no_dse: req.no_dse,
+        ..Default::default()
+    };
+    let job = CompileJob {
+        kind: CompilationKind::Jit,
+        key: RuntimeCacheKey { code_hash: req.code_hash, spec_id },
+        bytecode: req.bytecode,
+        symbol_name: req.symbol_name,
+        opt_level,
+        sync_notifier: SyncNotifier::none(),
+        generation: 0,
+    };
+    Ok(Some((job, config)))
+}
+
+#[cfg(feature = "llvm")]
+fn write_helper_result(
+    mut stdout: impl Write,
+    result: Result<WorkerSuccess, String>,
+) -> eyre::Result<()> {
+    let response = match result {
+        Ok(WorkerSuccess::JitObject(success)) => HelperResponse::Ok {
+            symbol_name: success.symbol_name,
+            object_bytes: success.object_bytes,
+            builtin_symbols: success.builtin_symbols,
+        },
+        Ok(_) => unreachable!(),
+        Err(error) => HelperResponse::Err { error },
+    };
+    serde_json::to_writer(&mut stdout, &response)?;
+    stdout.write_all(b"\n")?;
+    Ok(())
+}
+
+#[cfg(feature = "llvm")]
+fn opt_level_to_u8(level: OptimizationLevel) -> u8 {
+    match level {
+        OptimizationLevel::None => 0,
+        OptimizationLevel::Less => 1,
+        OptimizationLevel::Default => 2,
+        OptimizationLevel::Aggressive => 3,
+    }
+}
+
+#[cfg(feature = "llvm")]
+fn opt_level_from_u8(level: u8) -> eyre::Result<OptimizationLevel> {
+    Ok(match level {
+        0 => OptimizationLevel::None,
+        1 => OptimizationLevel::Less,
+        2 => OptimizationLevel::Default,
+        3 => OptimizationLevel::Aggressive,
+        _ => eyre::bail!("invalid optimization level"),
+    })
 }
 
 #[cfg(feature = "llvm")]
@@ -323,6 +646,9 @@ fn compile_with_state(
     compiler.set_opt_level(job.opt_level);
 
     let outcome = match job.kind {
+        CompilationKind::Jit if config.jit_mode == JitMode::OutOfProcess => {
+            compile_jit_object_artifact(&job, compiler)
+        }
         CompilationKind::Jit => compile_jit_artifact(&job, compiler),
         CompilationKind::Aot => compile_aot_artifact(&job, compiler),
     };
@@ -429,6 +755,38 @@ fn compile_jit_artifact(
 
 /// Compiles a single bytecode to a shared library and returns the raw bytes.
 #[cfg(feature = "llvm")]
+fn compile_jit_object_artifact(
+    job: &CompileJob,
+    compiler: &mut EvmCompiler<EvmLlvmBackend>,
+) -> Result<WorkerSuccess, String> {
+    compiler
+        .translate(&job.symbol_name, &job.bytecode[..], job.key.spec_id)
+        .map_err(|e| format!("JIT object translate failed: {e}"))?;
+
+    let mut object_bytes = Vec::new();
+    compiler
+        .write_object(&mut object_bytes)
+        .map_err(|e| format!("JIT object write failed: {e}"))?;
+    let builtin_symbols = compiler
+        .backend()
+        .pending_symbol_names()
+        .into_iter()
+        .map(|name| name.to_string_lossy().into_owned())
+        .collect();
+
+    debug!(
+        bytecode_len = job.bytecode.len(),
+        object_len = object_bytes.len(),
+        "JIT object compilation succeeded",
+    );
+
+    Ok(WorkerSuccess::JitObject(JitObjectSuccess {
+        symbol_name: job.symbol_name.clone(),
+        object_bytes: Bytes::from(object_bytes),
+        builtin_symbols,
+    }))
+}
+
 fn compile_aot_artifact(
     job: &CompileJob,
     compiler: &mut EvmCompiler<EvmLlvmBackend>,

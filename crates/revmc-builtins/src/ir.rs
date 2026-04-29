@@ -132,6 +132,13 @@ macro_rules! builtins {
                 }
             }
 
+            pub fn parse(name: &str) -> Option<Self> {
+                match name {
+                    $(stringify!($name) => Some(Self::$ident),)*
+                    _ => None,
+                }
+            }
+
             pub const fn call_conv(self) -> CallConv {
                 match self {
                     Self::Mresize => CallConv::PreserveMost,

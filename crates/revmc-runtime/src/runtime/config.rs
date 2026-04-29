@@ -76,6 +76,18 @@ pub struct RuntimeConfig {
     /// Defaults to `false`.
     pub aot: bool,
 
+    /// Where JIT compilation work runs.
+    ///
+    /// Defaults to [`JitMode::InProcess`].
+    pub jit_mode: JitMode,
+
+    /// Helper executable used when [`jit_mode`](Self::jit_mode)
+    /// is [`JitMode::OutOfProcess`].
+    ///
+    /// When `None`, the runtime spawns `std::env::current_exe()` and expects it
+    /// to call [`super::maybe_run_jit_helper`] during startup.
+    pub jit_helper_path: Option<PathBuf>,
+
     /// Blocking mode: every lookup synchronously JIT-compiles on miss and never
     /// falls back to the interpreter.
     ///
@@ -123,6 +135,19 @@ pub enum CompilationKind {
     Aot,
 }
 
+/// Where JIT compilation work runs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum JitMode {
+    /// Compile on background threads in this process.
+    #[default]
+    InProcess,
+    /// Compile in a helper process and link the result into this process.
+    ///
+    /// This is reserved for the out-of-process JIT implementation and is
+    /// disabled by default.
+    OutOfProcess,
+}
+
 impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
@@ -136,6 +161,8 @@ impl Default for RuntimeConfig {
             no_dse: false,
             gas_params: None,
             aot: false,
+            jit_mode: JitMode::default(),
+            jit_helper_path: None,
             blocking: false,
             on_compilation: None,
         }
@@ -184,6 +211,14 @@ pub struct RuntimeTuning {
     ///
     /// Defaults to `min(max(1, cpus/2), 4)`.
     pub jit_worker_count: usize,
+
+    /// Timeout for a single out-of-process JIT compilation job.
+    ///
+    /// When exceeded, the helper process is killed and a fresh helper is spawned for
+    /// the next job. Only applies to [`JitMode::OutOfProcess`].
+    ///
+    /// Defaults to `5s`.
+    pub jit_timeout: Duration,
 
     /// Capacity of the per-worker job queue.
     ///
@@ -253,6 +288,7 @@ impl Default for RuntimeTuning {
             jit_max_bytecode_len: 0,
             jit_max_pending_jobs: 2048,
             jit_worker_count: worker_count,
+            jit_timeout: Duration::from_secs(5),
             jit_worker_queue_capacity: 64,
             jit_opt_level: crate::OptimizationLevel::default(),
             aot_opt_level: crate::OptimizationLevel::default(),

@@ -36,7 +36,7 @@ use revmc_backend::{
 };
 use std::{
     cell::Cell,
-    ffi::CString,
+    ffi::{CStr, CString},
     fmt::{self, Write},
     iter,
     mem::ManuallyDrop,
@@ -736,6 +736,31 @@ impl EvmLlvmBackend {
         self.module = create_module(self.cx, &self.machine, self.aot)?;
 
         Ok(())
+    }
+
+    /// Returns pending absolute symbols collected while translating the current JIT module.
+    pub fn pending_symbol_names(&self) -> Vec<CString> {
+        self.orc
+            .as_ref()
+            .map(|orc| orc.pending_symbols.iter().map(|(name, _)| name.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    /// Links a relocatable object into this backend's JITDylib and returns the function address
+    /// and resource tracker that owns the linked code.
+    pub fn link_jit_object(
+        &mut self,
+        symbol_name: &CStr,
+        object: &[u8],
+        symbols: &[(CString, usize)],
+    ) -> Result<(usize, orc::ResourceTracker)> {
+        let orc = self.ensure_orc()?;
+        orc.global.define_builtins(symbols);
+        let tracker = orc.jd().create_resource_tracker();
+        orc.global.jit.add_object_with_rt(object, &tracker).map_err(error_msg)?;
+        let addr = orc.global.jit.lookup_in(orc.jd(), symbol_name).map_err(error_msg)?;
+        orc.loaded_trackers.push(tracker);
+        Ok((addr, orc.loaded_trackers.pop().unwrap()))
     }
 
     /// Pops and returns the [`ResourceTracker`](orc::ResourceTracker) for the last committed

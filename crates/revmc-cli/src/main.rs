@@ -21,6 +21,9 @@ enum Command {
 }
 
 fn main() -> Result<()> {
+    if revmc::runtime::maybe_run_jit_helper()? {
+        return Ok(());
+    }
     if std::env::var_os("RUST_BACKTRACE").is_none() {
         // SAFETY: This is called at the very beginning of main, before any other threads are
         // spawned.
