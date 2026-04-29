@@ -317,6 +317,13 @@ const HELPER_ENV: &str = "REVMC_JIT_HELPER";
 
 #[cfg(feature = "llvm")]
 fn run_helper_job(job: &CompileJob, config: &RuntimeConfig) -> Result<WorkerSuccess, String> {
+    if config.gas_params.is_some() {
+        return Err("out-of-process JIT does not support custom gas params yet".into());
+    }
+    if config.dump_dir.is_some() {
+        return Err("out-of-process JIT does not support debug dumps yet".into());
+    }
+
     let exe = match &config.jit_helper_path {
         Some(path) => path.clone(),
         None => {
