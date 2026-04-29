@@ -231,3 +231,230 @@ fn opcode_name(opcode: u8) -> &'static str {
         _ => "UNKNOWN",
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{MemorySection, memory_size_for_access};
+    use crate::bytecode::{
+        Bytecode, Inst,
+        passes::block_analysis::tests::{analyze_asm, analyze_asm_spec},
+    };
+    use revm_bytecode::opcode as op;
+    use revm_primitives::hardfork::SpecId;
+
+    fn nth_inst(bytecode: &Bytecode<'_>, opcode: u8, n: usize) -> Inst {
+        bytecode
+            .iter_all_insts()
+            .filter_map(|(inst, data)| (data.opcode == opcode).then_some(inst))
+            .nth(n)
+            .unwrap()
+    }
+
+    fn section(bytecode: &Bytecode<'_>, inst: Inst) -> MemorySection {
+        bytecode.memory_section(inst)
+    }
+
+    fn assert_section(bytecode: &Bytecode<'_>, inst: Inst, known_size: u64, required_size: u64) {
+        assert_eq!(section(bytecode, inst), MemorySection { known_size, required_size });
+    }
+
+    #[test]
+    fn exact_memory_size_rounds_up_to_words() {
+        assert_eq!(memory_size_for_access(Some(0), Some(0)), Some(0));
+        assert_eq!(memory_size_for_access(Some(0), Some(1)), Some(32));
+        assert_eq!(memory_size_for_access(Some(1), Some(32)), Some(64));
+        assert_eq!(memory_size_for_access(Some(64), Some(32)), Some(96));
+    }
+
+    #[test]
+    fn unknown_offset_or_len_has_no_exact_required_size() {
+        assert_eq!(memory_size_for_access(None, Some(32)), None);
+        assert_eq!(memory_size_for_access(Some(32), None), None);
+        assert_eq!(memory_size_for_access(None, None), None);
+        assert_eq!(memory_size_for_access(None, Some(0)), Some(0));
+    }
+
+    #[test]
+    fn same_block_accesses_use_previous_known_size() {
+        let bytecode = analyze_asm("PUSH0 PUSH 64 MSTORE PUSH0 MLOAD STOP");
+        let mstore = nth_inst(&bytecode, op::MSTORE, 0);
+        let mload = nth_inst(&bytecode, op::MLOAD, 0);
+
+        assert_section(&bytecode, mstore, 0, 96);
+        assert_section(&bytecode, mload, 96, 32);
+    }
+
+    #[test]
+    fn known_size_propagates_across_blocks() {
+        let bytecode = analyze_asm(
+            "
+            PUSH0
+            PUSH 64
+            MSTORE
+            PUSH %target
+            JUMP
+        target:
+            JUMPDEST
+            PUSH0
+            MLOAD
+            STOP
+        ",
+        );
+        let mload = nth_inst(&bytecode, op::MLOAD, 0);
+        assert_section(&bytecode, mload, 96, 32);
+    }
+
+    #[test]
+    fn branch_join_uses_minimum_predecessor_size() {
+        let bytecode = analyze_asm(
+            "
+            PUSH0
+            PUSH 64
+            MSTORE
+            PUSH 1
+            PUSH %large
+            JUMPI
+            PUSH %join
+            JUMP
+        large:
+            JUMPDEST
+            PUSH0
+            PUSH 128
+            MSTORE
+        join:
+            JUMPDEST
+            PUSH0
+            MLOAD
+            STOP
+        ",
+        );
+        let mload = nth_inst(&bytecode, op::MLOAD, 0);
+        assert_section(&bytecode, mload, 96, 32);
+    }
+
+    #[test]
+    fn loop_backedge_does_not_inflate_entry_known_size() {
+        let bytecode = analyze_asm(
+            "
+        loop:
+            JUMPDEST
+            PUSH 128
+            MLOAD
+            PUSH0
+            PUSH 49984
+            MSTORE
+            PUSH %loop
+            JUMP
+        ",
+        );
+        let mload = nth_inst(&bytecode, op::MLOAD, 0);
+        let mstore = nth_inst(&bytecode, op::MSTORE, 0);
+
+        assert_section(&bytecode, mload, 0, 160);
+        assert_section(&bytecode, mstore, 160, 50016);
+    }
+
+    #[test]
+    fn unknown_nonzero_access_does_not_create_exact_section() {
+        let bytecode = analyze_asm(
+            "
+            PUSH0
+            PUSH 64
+            MSTORE
+            PUSH0
+            CALLDATALOAD
+            PUSH0
+            SWAP1
+            MSTORE
+            STOP
+        ",
+        );
+        let dynamic_mstore = nth_inst(&bytecode, op::MSTORE, 1);
+
+        assert_eq!(bytecode.const_memory_access(dynamic_mstore), Some((None, Some(32))));
+        assert_eq!(section(&bytecode, dynamic_mstore), MemorySection::default());
+    }
+
+    #[test]
+    fn zero_len_access_is_exact_even_with_unknown_offset() {
+        let bytecode = analyze_asm("PUSH0 PUSH0 PUSH0 CALLDATALOAD CALLDATACOPY STOP");
+        let copy = nth_inst(&bytecode, op::CALLDATACOPY, 0);
+
+        assert_eq!(bytecode.const_memory_access(copy), Some((None, Some(0))));
+        assert_eq!(section(&bytecode, copy), MemorySection::default());
+    }
+
+    #[test]
+    fn log0_uses_memory_offset_and_len() {
+        let bytecode = analyze_asm("PUSH 32 PUSH 64 LOG0 STOP");
+        let log0 = nth_inst(&bytecode, op::LOG0, 0);
+
+        assert_eq!(bytecode.const_memory_access(log0), Some((Some(64), Some(32))));
+        assert_section(&bytecode, log0, 0, 96);
+    }
+
+    #[test]
+    fn call_tracks_input_and_output_memory_ranges() {
+        let bytecode = analyze_asm(
+            "
+            PUSH 64     ; out len
+            PUSH 96     ; out offset
+            PUSH 32     ; in len
+            PUSH 0      ; in offset
+            PUSH 0      ; value
+            PUSH 1      ; to
+            PUSH 50000  ; gas
+            CALL
+            STOP
+        ",
+        );
+        let call = nth_inst(&bytecode, op::CALL, 0);
+
+        assert_eq!(
+            bytecode.const_memory_accesses(call),
+            [Some((Some(0), Some(32))), Some((Some(96), Some(64)))]
+        );
+        assert_section(&bytecode, call, 0, 160);
+    }
+
+    #[test]
+    fn staticcall_tracks_input_and_output_memory_ranges() {
+        let bytecode = analyze_asm(
+            "
+            PUSH 32     ; out len
+            PUSH 128    ; out offset
+            PUSH 64     ; in len
+            PUSH 0      ; in offset
+            PUSH 1      ; to
+            PUSH 50000  ; gas
+            STATICCALL
+            STOP
+        ",
+        );
+        let call = nth_inst(&bytecode, op::STATICCALL, 0);
+
+        assert_eq!(
+            bytecode.const_memory_accesses(call),
+            [Some((Some(0), Some(64))), Some((Some(128), Some(32)))]
+        );
+        assert_section(&bytecode, call, 0, 160);
+    }
+
+    #[test]
+    fn create_tracks_initcode_memory_range() {
+        let bytecode = analyze_asm("PUSH 32 PUSH 64 PUSH0 CREATE STOP");
+        let create = nth_inst(&bytecode, op::CREATE, 0);
+
+        assert_eq!(bytecode.const_memory_access(create), Some((Some(64), Some(32))));
+        assert_section(&bytecode, create, 0, 96);
+    }
+
+    #[test]
+    fn disabled_memory_opcode_is_ignored() {
+        let bytecode = analyze_asm_spec("PUSH 32 PUSH0 PUSH0 MCOPY STOP", SpecId::SHANGHAI);
+        let mcopy = nth_inst(&bytecode, op::MCOPY, 0);
+
+        assert_eq!(bytecode.const_memory_access(mcopy), None);
+        assert_eq!(section(&bytecode, mcopy), MemorySection::default());
+    }
+}
