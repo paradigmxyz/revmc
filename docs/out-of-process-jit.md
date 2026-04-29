@@ -21,11 +21,18 @@ Using LLVM ORC's remote executor APIs (`ExecutorProcessControl`, `SimpleRemoteEP
 
 ## Runtime/IPC work
 
-- Add a helper-process entrypoint, preferably the same binary invoked with a hidden argument or environment variable.
-- Spawn one helper process from the backend thread when `jit_process_mode == OutOfProcess`.
-- The helper owns the existing Rayon worker pool and thread-local `EvmCompiler` instances.
-- Define a framed IPC protocol for `CompileJob` and `WorkerResult` data: key, bytecode, symbol name, spec id, optimization level, gas params, debug flags, dedup/DSE flags, dump settings, generation, timings, object bytes, and errors.
-- In the parent, turn a successful JIT worker result into a resident program by linking object bytes into ORC, looking up the symbol, and constructing `JitCodeBacking`.
+Current prototype:
+
+- `RuntimeConfig::jit_process_mode = JitProcessMode::OutOfProcess` makes JIT workers spawn a helper process via `std::env::current_exe()`.
+- Binaries must call `revmc::runtime::maybe_run_jit_helper()` at process startup. `revmc-cli` does this already.
+- The helper compiles one JIT object request from stdin and writes one framed response to stdout.
+- The parent links returned object bytes into its local ORC instance, resolves the symbol, and constructs `JitCodeBacking` with a parent-owned `ResourceTracker`.
+
+Still needed:
+
+- Keep one long-lived helper process instead of spawning per job.
+- Move the worker pool into the helper process; the parent should only enqueue IPC requests.
+- Define a versioned framed IPC protocol for `CompileJob` and `WorkerResult` data: key, bytecode, symbol name, spec id, optimization level, gas params, debug flags, dedup/DSE flags, dump settings, generation, timings, object bytes, and errors.
 - Keep AOT jobs either in the helper too or explicitly route them through the existing in-process AOT path; the first option gives consistent isolation.
 - Define shutdown semantics: close IPC, let the helper drain or cancel queued jobs, then kill on timeout.
 - Treat helper crash as worker-pool failure: fail pending synchronous jobs, drop pending async jobs, and optionally respawn.
