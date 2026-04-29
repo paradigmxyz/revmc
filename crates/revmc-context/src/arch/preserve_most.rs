@@ -12,7 +12,8 @@ macro_rules! preserve_most {
             $($arg:ident : $ty:ty),* $(,)?
         ) $body:block
     ) => {
-        unsafe fn $inner($($arg: $ty),*) $body
+        #[inline(never)]
+        unsafe extern "C" fn $inner($($arg: $ty),*) $body
 
         $(#[$attr])*
         #[unsafe(naked)]
@@ -56,7 +57,8 @@ macro_rules! preserve_most {
             $($arg:ident : $ty:ty),* $(,)?
         ) $body:block
     ) => {
-        unsafe fn $inner($($arg: $ty),*) $body
+        #[inline(never)]
+        unsafe extern "C" fn $inner($($arg: $ty),*) $body
 
         $(#[$attr])*
         #[unsafe(naked)]
