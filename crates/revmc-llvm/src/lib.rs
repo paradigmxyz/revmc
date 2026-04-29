@@ -1777,7 +1777,7 @@ impl Builder for EvmLlvmBuilder<'_> {
     ) -> Option<Self::Value> {
         let args = args.iter().copied().map(Into::into).collect::<Vec<_>>();
         let callsite = self.bcx.build_call(function, &args, "").unwrap();
-        if let Some(call_conv) = function_call_conv(function, self.aot) {
+        if let Some(call_conv) = function_call_conv(function) {
             unsafe {
                 inkwell::llvm_sys::core::LLVMSetInstructionCallConv(
                     callsite.as_value_ref(),
@@ -1868,16 +1868,12 @@ impl Builder for EvmLlvmBuilder<'_> {
         address: Option<usize>,
         linkage: revmc_backend::Linkage,
     ) -> Self::Function {
+        if name == "__revmc_builtin_mresize" {
+            return self.add_preserve_most_stub(name, params, ret, address, linkage);
+        }
+
         let func_ty = self.fn_type(ret, params);
         let function = self.module().add_function(name, func_ty, Some(convert_linkage(linkage)));
-        if let Some(call_conv) = function_call_conv(function, self.aot) {
-            unsafe {
-                inkwell::llvm_sys::core::LLVMSetFunctionCallConv(
-                    function.as_value_ref(),
-                    call_conv as _,
-                );
-            }
-        }
         cpp::set_dso_local(function);
         if let Some(address) = address
             && let Some(orc) = &mut self.orc
@@ -1897,6 +1893,61 @@ impl Builder for EvmLlvmBuilder<'_> {
         let loc = convert_attribute_loc(loc);
         let attr = convert_attribute(self, attribute);
         func.add_attribute(loc, attr);
+    }
+}
+
+impl EvmLlvmBuilder<'_> {
+    fn add_preserve_most_stub(
+        &mut self,
+        name: &str,
+        params: &[BasicTypeEnum<'static>],
+        ret: Option<BasicTypeEnum<'static>>,
+        address: Option<usize>,
+        linkage: revmc_backend::Linkage,
+    ) -> FunctionValue<'static> {
+        let func_ty = self.fn_type(ret, params);
+        let real = self.module().add_function(name, func_ty, Some(convert_linkage(linkage)));
+        cpp::set_dso_local(real);
+        if let Some(address) = address
+            && let Some(orc) = &mut self.orc
+        {
+            orc.pending_symbols.push((CString::new(name).unwrap(), address));
+        }
+
+        let stub_name = format!("{name}.preserve_most");
+        if let Some(stub) = self.module().get_function(&stub_name) {
+            return stub;
+        }
+
+        let stub = self.module().add_function(
+            &stub_name,
+            func_ty,
+            Some(inkwell::module::Linkage::Internal),
+        );
+        unsafe {
+            inkwell::llvm_sys::core::LLVMSetFunctionCallConv(
+                stub.as_value_ref(),
+                inkwell::llvm_sys::LLVMCallConv::LLVMPreserveMostCallConv as _,
+            );
+        }
+        cpp::set_dso_local(stub);
+
+        let before = self.bcx.get_insert_block();
+        let entry = self.cx.append_basic_block(stub, self.name("preserve_most"));
+        self.bcx.position_at_end(entry);
+        let args = (0..stub.count_params())
+            .map(|i| stub.get_nth_param(i).unwrap().into())
+            .collect::<Vec<_>>();
+        self.bcx.build_call(real, &args, "").unwrap();
+        match ret {
+            Some(_) => unreachable!("preserve-most stubs only support void functions"),
+            None => self.bcx.build_return(None).unwrap(),
+        };
+        if let Some(before) = before {
+            self.bcx.position_at_end(before);
+        }
+
+        stub
     }
 }
 
@@ -2134,16 +2185,9 @@ fn convert_attribute_loc(loc: revmc_backend::FunctionAttributeLocation) -> Attri
     }
 }
 
-fn function_call_conv(
-    function: FunctionValue<'_>,
-    aot: bool,
-) -> Option<inkwell::llvm_sys::LLVMCallConv> {
-    if aot {
-        return None;
-    }
-
+fn function_call_conv(function: FunctionValue<'_>) -> Option<inkwell::llvm_sys::LLVMCallConv> {
     match function.get_name().to_bytes() {
-        b"__revmc_builtin_mresize" => {
+        b"__revmc_builtin_mresize.preserve_most" => {
             Some(inkwell::llvm_sys::LLVMCallConv::LLVMPreserveMostCallConv)
         }
         _ => None,
