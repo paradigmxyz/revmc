@@ -1,6 +1,6 @@
 use crate::bytecode::{Block, Bytecode, Inst, InstFlags};
 use core::fmt;
-use oxc_index::{IndexVec, index_vec};
+use oxc_index::{Idx, IndexVec, index_vec};
 use std::collections::VecDeque;
 
 /// Memory-size facts before a memory access.
@@ -40,6 +40,29 @@ impl MemorySection {
     }
 }
 
+#[derive(Clone)]
+struct IndexBitSet<I: Idx> {
+    bits: IndexVec<I, bool>,
+}
+
+impl<I: Idx> IndexBitSet<I> {
+    fn new(len: usize) -> Self {
+        Self { bits: index_vec![false; len] }
+    }
+
+    fn insert(&mut self, index: I) {
+        self.bits[index] = true;
+    }
+
+    fn contains(&self, index: I) -> bool {
+        self.bits[index]
+    }
+
+    fn iter(&self) -> impl Iterator<Item = I> + '_ {
+        self.bits.iter_enumerated().filter_map(|(index, &set)| set.then_some(index))
+    }
+}
+
 /// Memory section analysis state.
 pub(crate) struct MemorySectionAnalysis {
     /// Minimum memory size required by all constant-size accesses in each block.
@@ -51,21 +74,21 @@ pub(crate) struct MemorySectionAnalysis {
     /// This is dropped to `None` at joins with different predecessor sizes, loops, and unknown
     /// accesses. It is used only to prove direct `mresize` calls.
     block_entry_exact_known_sizes: IndexVec<Block, Option<u64>>,
-    dynamic_jump_blocks: Vec<Block>,
-    dynamic_jump_targets: Vec<Block>,
+    dynamic_jump_blocks: IndexBitSet<Block>,
+    dynamic_jump_targets: IndexBitSet<Block>,
     sections: IndexVec<Inst, MemorySection>,
 }
 
 impl MemorySectionAnalysis {
     pub(crate) fn new(bytecode: &Bytecode<'_>) -> Self {
-        let mut dynamic_jump_blocks = Vec::new();
-        let mut dynamic_jump_targets = Vec::new();
+        let mut dynamic_jump_blocks = IndexBitSet::new(bytecode.cfg.blocks.len());
+        let mut dynamic_jump_targets = IndexBitSet::new(bytecode.cfg.blocks.len());
         if bytecode.has_dynamic_jumps() {
             for bid in bytecode.cfg.blocks.indices() {
                 let block = &bytecode.cfg.blocks[bid];
                 let head = bytecode.inst(block.insts.start);
                 if head.is_reachable_jumpdest(true) {
-                    dynamic_jump_targets.push(bid);
+                    dynamic_jump_targets.insert(bid);
                 }
 
                 let term = bytecode.inst(block.terminator());
@@ -73,7 +96,7 @@ impl MemorySectionAnalysis {
                     && !term.is_static_jump()
                     && !term.flags.contains(InstFlags::INVALID_JUMP)
                 {
-                    dynamic_jump_blocks.push(bid);
+                    dynamic_jump_blocks.insert(bid);
                 }
             }
         }
@@ -124,9 +147,9 @@ impl MemorySectionAnalysis {
             for &succ in &bytecode.cfg.blocks[bid].succs {
                 self.update_entry_size(bytecode, succ, &mut queue);
             }
-            if self.dynamic_jump_blocks.contains(&bid) {
+            if self.dynamic_jump_blocks.contains(bid) {
                 let targets = self.dynamic_jump_targets.clone();
-                for succ in targets {
+                for succ in targets.iter() {
                     self.update_entry_size(bytecode, succ, &mut queue);
                 }
             }
@@ -155,7 +178,7 @@ impl MemorySectionAnalysis {
         }
 
         if bytecode.inst(block.insts.start).is_reachable_jumpdest(true) {
-            for &pred in &self.dynamic_jump_blocks {
+            for pred in self.dynamic_jump_blocks.iter() {
                 entry_size = join_size(entry_size, self.block_exit_size(pred));
             }
         }
@@ -183,9 +206,9 @@ impl MemorySectionAnalysis {
             for &succ in &bytecode.cfg.blocks[bid].succs {
                 self.update_exact_known_entry_size(bytecode, succ, &mut queue);
             }
-            if self.dynamic_jump_blocks.contains(&bid) {
+            if self.dynamic_jump_blocks.contains(bid) {
                 let targets = self.dynamic_jump_targets.clone();
-                for succ in targets {
+                for succ in targets.iter() {
                     self.update_exact_known_entry_size(bytecode, succ, &mut queue);
                 }
             }
@@ -215,7 +238,7 @@ impl MemorySectionAnalysis {
         }
 
         if bytecode.inst(block.insts.start).is_reachable_jumpdest(true) {
-            for &pred in &self.dynamic_jump_blocks {
+            for pred in self.dynamic_jump_blocks.iter() {
                 entry_size = join_exact_known_size(
                     entry_size,
                     self.block_exact_known_exit_size(bytecode, pred),
@@ -344,8 +367,7 @@ mod tests {
     }
 
     fn assert_section(bytecode: &Bytecode<'_>, inst: Inst, known_size: u64, required_size: u64) {
-        let direct_resize_size =
-            (known_size < required_size).then_some(required_size).unwrap_or_default();
+        let direct_resize_size = if known_size < required_size { required_size } else { 0 };
         assert_eq!(
             section(bytecode, inst),
             MemorySection { known_size, required_size, direct_resize_size }
