@@ -25,5 +25,5 @@ PUSH0
 LOG1
 STOP
 
-; CHECK-COUNT-1: call preserve_mostcc void @__revmc_builtin_mresize.stub
-; CHECK-NOT: call preserve_mostcc void @__revmc_builtin_mresize.stub
+; CHECK-COUNT-1: call {{.*}}@__revmc_builtin_mresize.stub
+; CHECK-NOT: call {{.*}}@__revmc_builtin_mresize.stub

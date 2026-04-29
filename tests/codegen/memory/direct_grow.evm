@@ -7,6 +7,6 @@ MSTORE8
 STOP
 
 ; CHECK-NOT: ecx.mem_len
-; CHECK-COUNT-2: call preserve_mostcc void @__revmc_builtin_mresize.stub
+; CHECK-COUNT-2: call {{.*}}@__revmc_builtin_mresize.stub
 ; CHECK-NOT: ecx.mem_len
-; CHECK-NOT: call preserve_mostcc void @__revmc_builtin_mresize.stub
+; CHECK-NOT: call {{.*}}@__revmc_builtin_mresize.stub

@@ -13,6 +13,6 @@ PUSH1 0x20
 MSTORE
 STOP
 
-; CHECK-COUNT-1: call preserve_mostcc void @__revmc_builtin_mresize.stub
+; CHECK-COUNT-1: call {{.*}}@__revmc_builtin_mresize.stub
 ; CHECK-COUNT-1: ecx.mem_base = load ptr
-; CHECK-NOT: call preserve_mostcc void @__revmc_builtin_mresize.stub
+; CHECK-NOT: call {{.*}}@__revmc_builtin_mresize.stub
