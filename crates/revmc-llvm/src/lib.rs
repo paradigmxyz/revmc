@@ -2135,8 +2135,8 @@ fn convert_attribute_loc(loc: revmc_backend::FunctionAttributeLocation) -> Attri
 }
 
 fn function_call_conv(function: FunctionValue<'_>) -> Option<inkwell::llvm_sys::LLVMCallConv> {
-    match function.get_name() {
-        c"__revmc_builtin_mresize" => {
+    match function.get_name().to_bytes() {
+        b"__revmc_builtin_mresize" => {
             Some(inkwell::llvm_sys::LLVMCallConv::LLVMPreserveMostCallConv)
         }
         _ => None,
