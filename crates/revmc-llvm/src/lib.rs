@@ -1777,7 +1777,7 @@ impl Builder for EvmLlvmBuilder<'_> {
     ) -> Option<Self::Value> {
         let args = args.iter().copied().map(Into::into).collect::<Vec<_>>();
         let callsite = self.bcx.build_call(function, &args, "").unwrap();
-        if let Some(call_conv) = function_call_conv(function) {
+        if let Some(call_conv) = function_call_conv(function, self.aot) {
             unsafe {
                 inkwell::llvm_sys::core::LLVMSetInstructionCallConv(
                     callsite.as_value_ref(),
@@ -1870,7 +1870,7 @@ impl Builder for EvmLlvmBuilder<'_> {
     ) -> Self::Function {
         let func_ty = self.fn_type(ret, params);
         let function = self.module().add_function(name, func_ty, Some(convert_linkage(linkage)));
-        if let Some(call_conv) = function_call_conv(function) {
+        if let Some(call_conv) = function_call_conv(function, self.aot) {
             unsafe {
                 inkwell::llvm_sys::core::LLVMSetFunctionCallConv(
                     function.as_value_ref(),
@@ -2134,7 +2134,14 @@ fn convert_attribute_loc(loc: revmc_backend::FunctionAttributeLocation) -> Attri
     }
 }
 
-fn function_call_conv(function: FunctionValue<'_>) -> Option<inkwell::llvm_sys::LLVMCallConv> {
+fn function_call_conv(
+    function: FunctionValue<'_>,
+    aot: bool,
+) -> Option<inkwell::llvm_sys::LLVMCallConv> {
+    if aot {
+        return None;
+    }
+
     match function.get_name().to_bytes() {
         b"__revmc_builtin_mresize" => {
             Some(inkwell::llvm_sys::LLVMCallConv::LLVMPreserveMostCallConv)
