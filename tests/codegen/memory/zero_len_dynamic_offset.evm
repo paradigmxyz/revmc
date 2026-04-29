@@ -1,0 +1,5 @@
+PUSH0
+CALLVALUE
+RETURN
+
+; CHECK-NOT: call preserve_mostcc void @__revmc_builtin_mresize.stub
