@@ -10,4 +10,6 @@ mod dead_store_elim;
 mod dedup;
 
 mod sections;
-pub(crate) use sections::{GasSection, SectionsAnalysis, StackSection, StackSectionAnalysis};
+pub(crate) use sections::{
+    GasSection, MemorySection, SectionsAnalysis, StackSection, StackSectionAnalysis,
+};

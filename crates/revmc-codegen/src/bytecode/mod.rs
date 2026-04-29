@@ -12,7 +12,9 @@ use std::{borrow::Cow, cell::RefCell};
 pub(crate) use revm_context_interface::cfg::GasParams;
 
 mod passes;
-pub(crate) use passes::{Block, Cfg, GasSection, SectionsAnalysis, Snapshots, StackSection};
+pub(crate) use passes::{
+    Block, Cfg, GasSection, MemorySection, SectionsAnalysis, Snapshots, StackSection,
+};
 
 mod asm;
 pub use asm::parse_asm;
@@ -183,6 +185,8 @@ pub struct Bytecode<'a> {
 
     /// Per-instruction operand snapshots computed by block analysis.
     snapshots: Snapshots,
+    /// Per-instruction memory sections computed by section analysis.
+    memory_sections: IndexVec<Inst, MemorySection>,
     /// Multi-target jump table: maps a JUMP/JUMPI instruction to its set of known targets.
     /// Only populated for jumps resolved to multiple targets by block analysis.
     multi_jump_targets: FxHashMap<Inst, SmallVec<[Inst; 4]>>,
@@ -327,6 +331,7 @@ impl<'a> Bytecode<'a> {
             has_dynamic_jumps: false,
             may_suspend: false,
             snapshots: Snapshots::default(),
+            memory_sections: IndexVec::new(),
             u256_interner: RefCell::new(u256_interner),
             multi_jump_targets: FxHashMap::default(),
             pc_to_inst,
@@ -501,13 +506,13 @@ impl<'a> Bytecode<'a> {
     /// Constructs the sections in the bytecode.
     #[instrument(name = "sections", level = "debug", skip_all)]
     fn construct_sections(&mut self) {
-        let mut analysis = SectionsAnalysis::default();
+        let mut analysis = SectionsAnalysis::new(self);
         for inst in self.insts.indices() {
             if !self.inst(inst).is_dead_code() {
                 analysis.process(self, inst);
             }
         }
-        analysis.finish(self);
+        self.memory_sections = analysis.finish(self);
     }
 
     /// Returns the immediate value of the given instruction, if any.
@@ -611,6 +616,34 @@ impl<'a> Bytecode<'a> {
     pub(crate) fn const_output(&self, inst: Inst) -> Option<U256> {
         let imm = self.snapshots.outputs[inst]?.as_const()?;
         Some(imm.get(&self.u256_interner.borrow()))
+    }
+
+    /// Returns the constant EVM memory access `(offset, len)` for the given instruction.
+    pub(crate) fn const_memory_access(&self, inst: Inst) -> Option<(Option<u64>, Option<u64>)> {
+        let operand =
+            |depth| self.const_operand(inst, depth).and_then(|value| u64::try_from(value).ok());
+        let data = self.inst(inst);
+        match data.opcode {
+            op::KECCAK256 | op::RETURN | op::REVERT | op::LOG0 => Some((operand(0), operand(1))),
+            op::MLOAD | op::MSTORE => Some((operand(0), Some(32))),
+            op::MSTORE8 => Some((operand(0), Some(1))),
+            op::CALLDATACOPY | op::CODECOPY | op::RETURNDATACOPY => Some((operand(0), operand(2))),
+            op::EXTCODECOPY => Some((operand(1), operand(3))),
+            op::MCOPY => {
+                Some((operand(0).zip(operand(1)).map(|(dst, src)| dst.max(src)), operand(2)))
+            }
+            op::LOG1 => Some((operand(1), operand(2))),
+            op::LOG2 => Some((operand(2), operand(3))),
+            op::LOG3 => Some((operand(3), operand(4))),
+            op::LOG4 => Some((operand(4), operand(5))),
+            _ => None,
+        }
+    }
+
+    /// Returns the memory section for the given instruction.
+    #[allow(dead_code)]
+    pub(crate) fn memory_section(&self, inst: Inst) -> MemorySection {
+        self.memory_sections.get(inst).copied().unwrap_or_default()
     }
 
     /// Logs per-opcode constant-input statistics at trace level.
