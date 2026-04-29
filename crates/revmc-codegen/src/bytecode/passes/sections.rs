@@ -1,6 +1,5 @@
 use crate::bytecode::{Bytecode, Inst, InstFlags};
 use core::fmt;
-use oxc_index::{IndexVec, index_vec};
 use revm_bytecode::opcode as op;
 use revm_primitives::U256;
 
@@ -71,31 +70,6 @@ impl StackSection {
             analysis.process(inp, out);
         }
         analysis.section()
-    }
-}
-
-/// A memory section tracks the maximum constant memory size required by a sequence of instructions.
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct MemorySection {
-    /// The maximum constant memory size required by the section.
-    pub(crate) memory_size: u64,
-}
-
-impl fmt::Debug for MemorySection {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.is_empty() {
-            f.write_str("MemorySection::EMPTY")
-        } else {
-            f.debug_struct("MemorySection").field("memory_size", &self.memory_size).finish()
-        }
-    }
-}
-
-impl MemorySection {
-    /// Returns `true` if the section is empty.
-    #[inline]
-    pub(crate) fn is_empty(self) -> bool {
-        self == Self::default()
     }
 }
 
@@ -229,103 +203,26 @@ impl StackSectionAnalysis {
     }
 }
 
-/// Memory section analysis state.
-pub(crate) struct MemorySectionAnalysis {
-    memory_size: u64,
-    start_inst: Inst,
-}
-
-impl Default for MemorySectionAnalysis {
-    fn default() -> Self {
-        Self { memory_size: 0, start_inst: Inst::from_usize(0) }
-    }
-}
-
-impl MemorySectionAnalysis {
-    /// Accumulates a constant memory access.
-    #[inline]
-    pub(crate) fn process(&mut self, offset: Option<u64>, len: Option<u64>) {
-        let memory_size = offset.unwrap_or(0).saturating_add(len.unwrap_or(0));
-        let memory_size = memory_size.saturating_add(31) / 32 * 32;
-        self.memory_size = self.memory_size.max(memory_size);
-    }
-
-    fn save_to_reset(
-        &mut self,
-        bytecode: &Bytecode<'_>,
-        memory_sections: &mut IndexVec<Inst, MemorySection>,
-        next_section_inst: Inst,
-    ) {
-        self.save_to(bytecode, memory_sections, next_section_inst);
-        self.reset(next_section_inst);
-    }
-
-    /// Saves the current memory section.
-    fn save_to(
-        &self,
-        bytecode: &Bytecode<'_>,
-        memory_sections: &mut IndexVec<Inst, MemorySection>,
-        next_section_inst: Inst,
-    ) {
-        if self.start_inst >= bytecode.insts.len_idx() {
-            return;
-        }
-        let section = self.section();
-        if section.is_empty() {
-            return;
-        }
-        let _ = next_section_inst;
-        let mut insts = bytecode.insts[self.start_inst..].iter_enumerated();
-        if let Some((inst, _)) = insts.find(|(_, inst)| !inst.is_dead_code()) {
-            memory_sections[inst] = section;
-        }
-    }
-
-    /// Resets the analysis for a new section.
-    pub(crate) fn reset(&mut self, inst: Inst) {
-        *self = Self { start_inst: inst, ..Default::default() };
-    }
-
-    /// Returns the current memory section.
-    pub(crate) fn section(&self) -> MemorySection {
-        MemorySection { memory_size: self.memory_size }
-    }
-}
-
-/// Instruction section analysis, tracking gas, stack, and memory sections separately.
+/// Instruction section analysis, tracking gas and stack sections separately.
+#[derive(Default)]
 pub(crate) struct SectionsAnalysis {
     gas: GasSectionAnalysis,
     stack: StackSectionAnalysis,
-    memory: MemorySectionAnalysis,
-    memory_sections: IndexVec<Inst, MemorySection>,
 }
 
 impl SectionsAnalysis {
-    pub(crate) fn new(bytecode: &Bytecode<'_>) -> Self {
-        Self {
-            gas: GasSectionAnalysis::default(),
-            stack: StackSectionAnalysis::default(),
-            memory: MemorySectionAnalysis::default(),
-            memory_sections: index_vec![MemorySection::default(); bytecode.insts.len()],
-        }
-    }
-
     /// Process a single instruction.
     pub(crate) fn process(&mut self, bytecode: &mut Bytecode<'_>, inst: Inst) {
-        // JUMPDEST starts all sections.
+        // JUMPDEST starts both gas and stack sections.
         if bytecode.inst(inst).is_reachable_jumpdest(bytecode.has_dynamic_jumps()) {
             self.stack.save_to_reset(bytecode, inst);
             self.gas.save_to_reset(bytecode, inst);
-            self.memory.save_to_reset(bytecode, &mut self.memory_sections, inst);
         }
 
         let data = bytecode.inst(inst);
         let (inp, out) = data.stack_io();
         self.stack.process(inp, out);
         self.gas.process(data.base_gas);
-        if let Some((offset, len)) = bytecode.const_memory_access(inst) {
-            self.memory.process(offset, len);
-        }
 
         // When EXP's builtin will be skipped — either because both operands are known
         // (const_output) or because the exponent is known and handled by a peephole (≤ 2) —
@@ -343,18 +240,16 @@ impl SectionsAnalysis {
         if data.may_suspend() || data.is_branching() {
             self.stack.save_to_reset(bytecode, next);
             self.gas.save_to_reset(bytecode, next);
-            self.memory.save_to_reset(bytecode, &mut self.memory_sections, next);
         } else if data.requires_gasleft(bytecode.spec_id) {
             self.gas.save_to_reset(bytecode, next);
         }
     }
 
     /// Finishes the analysis.
-    pub(crate) fn finish(mut self, bytecode: &mut Bytecode<'_>) -> IndexVec<Inst, MemorySection> {
+    pub(crate) fn finish(self, bytecode: &mut Bytecode<'_>) {
         let last = bytecode.insts.len_idx() - 1;
         self.gas.save_to(bytecode, last);
         self.stack.save_to(bytecode, last);
-        self.memory.save_to(bytecode, &mut self.memory_sections, last);
         if enabled!(tracing::Level::DEBUG) {
             let mut max_len = 0usize;
             let mut count = 0usize;
@@ -375,7 +270,6 @@ impl SectionsAnalysis {
             max_len = max_len.max(section_len);
             debug!(count, max_len, "sections");
         }
-        self.memory_sections
     }
 }
 

@@ -9,7 +9,8 @@ mod dead_store_elim;
 
 mod dedup;
 
+mod memory_sections;
+pub(crate) use memory_sections::{MemorySection, MemorySectionAnalysis};
+
 mod sections;
-pub(crate) use sections::{
-    GasSection, MemorySection, SectionsAnalysis, StackSection, StackSectionAnalysis,
-};
+pub(crate) use sections::{GasSection, SectionsAnalysis, StackSection, StackSectionAnalysis};

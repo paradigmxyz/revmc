@@ -13,7 +13,8 @@ pub(crate) use revm_context_interface::cfg::GasParams;
 
 mod passes;
 pub(crate) use passes::{
-    Block, Cfg, GasSection, MemorySection, SectionsAnalysis, Snapshots, StackSection,
+    Block, Cfg, GasSection, MemorySection, MemorySectionAnalysis, SectionsAnalysis, Snapshots,
+    StackSection,
 };
 
 mod asm;
@@ -446,6 +447,7 @@ impl<'a> Bytecode<'a> {
         self.calc_may_suspend();
 
         self.construct_sections();
+        self.construct_memory_sections();
 
         debug!(
             compiler_gas_used = self.compiler_gas_used,
@@ -506,13 +508,19 @@ impl<'a> Bytecode<'a> {
     /// Constructs the sections in the bytecode.
     #[instrument(name = "sections", level = "debug", skip_all)]
     fn construct_sections(&mut self) {
-        let mut analysis = SectionsAnalysis::new(self);
+        let mut analysis = SectionsAnalysis::default();
         for inst in self.insts.indices() {
             if !self.inst(inst).is_dead_code() {
                 analysis.process(self, inst);
             }
         }
-        self.memory_sections = analysis.finish(self);
+        analysis.finish(self);
+    }
+
+    /// Constructs the memory sections in the bytecode.
+    #[instrument(name = "memory_sections", level = "debug", skip_all)]
+    fn construct_memory_sections(&mut self) {
+        self.memory_sections = MemorySectionAnalysis::new(self).run(self);
     }
 
     /// Returns the immediate value of the given instruction, if any.
