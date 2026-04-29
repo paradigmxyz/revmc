@@ -1637,6 +1637,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     fn build_ensure_memory(&mut self, offset: B::Value, len: u64) -> B::Value {
         // 63 bits lets us avoid overflow in the addition below.
         let offset = self.u256_to_u64_saturating(offset, 63);
+        // Analysis proved this access is already covered on every path.
         if self.current_inst.is_some_and(|inst| self.can_skip_ensure_memory(inst)) {
             return self.build_memory_addr(offset);
         }
@@ -1649,6 +1650,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             .current_inst
             .map(|inst| self.bytecode.memory_section(inst).direct_resize_size)
             .unwrap_or_default();
+        // Analysis proved this access always grows memory to exactly `min_size`.
         if direct_resize_size != 0 {
             self.call_fallible_builtin(Builtin::Mresize, &[self.ecx, min_size]);
             self.cached_mem_base = None;
@@ -1659,6 +1661,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let resize_block = self.create_block_after(current_block, "mresize");
         let contd_block = self.create_block_after(resize_block, "mresize.contd");
 
+        // Otherwise emit the normal checked-resize diamond.
         // Fast path: offset + len <= mem_len (no overflow).
         let mem_len_field =
             self.get_field(self.ecx, mem::offset_of!(EvmContext<'_>, mem_len), "ecx.mem_len.addr");
