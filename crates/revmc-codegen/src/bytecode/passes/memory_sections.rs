@@ -86,7 +86,7 @@ impl MemorySectionAnalysis {
         for bid in bytecode.cfg.blocks.indices() {
             let block = &bytecode.cfg.blocks[bid];
             for inst in block.insts() {
-                if let Some((offset, len)) = bytecode.const_memory_access(inst) {
+                for (offset, len) in bytecode.const_memory_accesses(inst).into_iter().flatten() {
                     self.block_required_sizes[bid] =
                         self.block_required_sizes[bid].max(memory_size_for_access(offset, len));
                 }
@@ -159,23 +159,28 @@ impl MemorySectionAnalysis {
             let block = &bytecode.cfg.blocks[bid];
 
             for inst in block.insts() {
-                let Some((offset, len)) = bytecode.const_memory_access(inst) else { continue };
-                let required_size = memory_size_for_access(offset, len);
-                trace!(
-                    %bid,
-                    %inst,
-                    pc = bytecode.pc(inst),
-                    opcode = opcode_name(bytecode.inst(inst).opcode),
-                    ?offset,
-                    ?len,
-                    known_size,
-                    required_size,
-                    "memory access"
-                );
-                if known_size != 0 || required_size != 0 {
-                    self.sections[inst] = MemorySection { known_size, required_size };
+                for (offset, len) in bytecode.const_memory_accesses(inst).into_iter().flatten() {
+                    let required_size = memory_size_for_access(offset, len);
+                    trace!(
+                        %bid,
+                        %inst,
+                        pc = bytecode.pc(inst),
+                        opcode = opcode_name(bytecode.inst(inst).opcode),
+                        ?offset,
+                        ?len,
+                        known_size,
+                        required_size,
+                        "memory access"
+                    );
+                    if known_size != 0 || required_size != 0 {
+                        let section = &mut self.sections[inst];
+                        if section.known_size == 0 && section.required_size == 0 {
+                            section.known_size = known_size;
+                        }
+                        section.required_size = section.required_size.max(required_size);
+                    }
+                    known_size = known_size.max(required_size);
                 }
-                known_size = known_size.max(required_size);
             }
         }
     }
@@ -188,6 +193,9 @@ fn join_size(entry_size: Option<u64>, pred_exit_size: Option<u64>) -> Option<u64
 
 #[inline]
 fn memory_size_for_access(offset: Option<u64>, len: Option<u64>) -> u64 {
+    if matches!(len, Some(0)) {
+        return 0;
+    }
     offset.unwrap_or(0).saturating_add(len.unwrap_or(0)).saturating_add(31) / 32 * 32
 }
 
@@ -202,6 +210,12 @@ fn opcode_name(opcode: u8) -> &'static str {
         op::EXTCODECOPY => "EXTCODECOPY",
         op::RETURNDATACOPY => "RETURNDATACOPY",
         op::MCOPY => "MCOPY",
+        op::CREATE => "CREATE",
+        op::CALL => "CALL",
+        op::CALLCODE => "CALLCODE",
+        op::DELEGATECALL => "DELEGATECALL",
+        op::CREATE2 => "CREATE2",
+        op::STATICCALL => "STATICCALL",
         op::LOG0 => "LOG0",
         op::LOG1 => "LOG1",
         op::LOG2 => "LOG2",
