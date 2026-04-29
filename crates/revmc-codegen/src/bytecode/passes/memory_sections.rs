@@ -1,6 +1,6 @@
 use crate::bytecode::{Block, Bytecode, Inst, InstFlags};
-use bitvec::vec::BitVec;
 use core::fmt;
+use fixedbitset::FixedBitSet;
 use oxc_index::{Idx, IndexVec, index_vec};
 use std::collections::VecDeque;
 
@@ -43,43 +43,43 @@ impl MemorySection {
 
 #[derive(Clone)]
 struct IndexBitSet<I: Idx> {
-    bits: BitVec,
+    bits: FixedBitSet,
     _marker: std::marker::PhantomData<fn() -> I>,
 }
 
 impl<I: Idx> IndexBitSet<I> {
     fn new(len: usize) -> Self {
-        Self { bits: bitvec::bitvec![0; len], _marker: std::marker::PhantomData }
+        Self { bits: FixedBitSet::with_capacity(len), _marker: std::marker::PhantomData }
     }
 
     fn insert(&mut self, index: I) {
-        self.bits.set(index.index(), true);
+        self.bits.insert(index.index());
     }
 
     fn contains(&self, index: I) -> bool {
-        self.bits[index.index()]
+        self.bits.contains(index.index())
     }
 
     fn iter(&self) -> impl Iterator<Item = I> + '_ {
-        self.bits.iter_ones().map(I::from_usize)
+        self.bits.ones().map(I::from_usize)
     }
 }
 
 /// FIFO worklist with deduplication.
 struct Worklist {
     queue: VecDeque<Block>,
-    in_queue: BitVec,
+    in_queue: FixedBitSet,
 }
 
 impl Worklist {
     fn new(size: usize) -> Self {
-        Self { queue: VecDeque::new(), in_queue: BitVec::repeat(false, size) }
+        Self { queue: VecDeque::new(), in_queue: FixedBitSet::with_capacity(size) }
     }
 
     fn push(&mut self, id: Block) {
         let idx = id.index();
-        if !self.in_queue[idx] {
-            self.in_queue.set(idx, true);
+        if !self.in_queue.contains(idx) {
+            self.in_queue.insert(idx);
             self.queue.push_back(id);
         }
     }
