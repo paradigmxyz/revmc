@@ -212,6 +212,14 @@ pub struct RuntimeTuning {
     /// Defaults to `min(max(1, cpus/2), 4)`.
     pub jit_worker_count: usize,
 
+    /// Timeout for a single out-of-process JIT compilation job.
+    ///
+    /// When exceeded, the helper process is killed and a fresh helper is spawned for
+    /// the next job. Only applies to [`JitProcessMode::OutOfProcess`].
+    ///
+    /// Defaults to `5s`.
+    pub jit_helper_timeout: Duration,
+
     /// Capacity of the per-worker job queue.
     ///
     /// Defaults to `64`.
@@ -280,6 +288,7 @@ impl Default for RuntimeTuning {
             jit_max_bytecode_len: 0,
             jit_max_pending_jobs: 2048,
             jit_worker_count: worker_count,
+            jit_helper_timeout: Duration::from_secs(5),
             jit_worker_queue_capacity: 64,
             jit_opt_level: crate::OptimizationLevel::default(),
             aot_opt_level: crate::OptimizationLevel::default(),

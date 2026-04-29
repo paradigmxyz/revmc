@@ -24,7 +24,9 @@ use std::{
     cell::RefCell,
     fs::File,
     io::{Read, Write},
-    process::{Command, Stdio},
+    path::PathBuf,
+    process::{Child, ChildStdin, Command, Stdio},
+    thread::JoinHandle,
     time::Instant,
 };
 use std::{
@@ -277,6 +279,7 @@ impl Drop for WorkerPool {
 fn clear_thread_local_compilers() {
     JIT_COMPILER.with_borrow_mut(Option::take);
     AOT_COMPILER.with_borrow_mut(Option::take);
+    JIT_HELPER.with_borrow_mut(Option::take);
 }
 
 #[cfg(not(feature = "llvm"))]
@@ -324,32 +327,104 @@ fn run_helper_job(job: &CompileJob, config: &RuntimeConfig) -> Result<WorkerSucc
         return Err("out-of-process JIT does not support debug dumps yet".into());
     }
 
-    let exe = match &config.jit_helper_path {
-        Some(path) => path.clone(),
-        None => {
-            std::env::current_exe().map_err(|e| format!("failed to locate current exe: {e}"))?
+    JIT_HELPER.with_borrow_mut(|slot| {
+        if slot.as_ref().is_none_or(|helper| !helper.matches_config(config)) {
+            *slot = Some(HelperProcess::spawn(config)?);
         }
-    };
-    let mut child = Command::new(exe)
-        .env(HELPER_ENV, "1")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .map_err(|e| format!("failed to spawn JIT helper: {e}"))?;
 
-    {
-        let stdin = child.stdin.as_mut().ok_or("helper stdin unavailable")?;
-        write_job(stdin, job, config).map_err(|e| format!("failed to write helper job: {e}"))?;
+        let helper = slot.as_mut().unwrap();
+        match helper.compile(job, config) {
+            Ok(result) => Ok(result),
+            Err(err) => {
+                *slot = None;
+                Err(err)
+            }
+        }
+    })
+}
+
+#[cfg(feature = "llvm")]
+struct HelperProcess {
+    path: PathBuf,
+    child: Child,
+    stdin: ChildStdin,
+    result_rx: chan::Receiver<Result<WorkerSuccess, String>>,
+    reader: Option<JoinHandle<()>>,
+}
+
+#[cfg(feature = "llvm")]
+impl HelperProcess {
+    fn spawn(config: &RuntimeConfig) -> Result<Self, String> {
+        let path = match &config.jit_helper_path {
+            Some(path) => path.clone(),
+            None => {
+                std::env::current_exe().map_err(|e| format!("failed to locate current exe: {e}"))?
+            }
+        };
+        let mut child = Command::new(&path)
+            .env(HELPER_ENV, "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .map_err(|e| format!("failed to spawn JIT helper: {e}"))?;
+        let stdin = child.stdin.take().ok_or("helper stdin unavailable")?;
+        let stdout = child.stdout.take().ok_or("helper stdout unavailable")?;
+        let (result_tx, result_rx) = chan::bounded(1);
+        let reader = std::thread::spawn(move || {
+            let mut stdout = stdout;
+            loop {
+                let result = read_helper_result(&mut stdout);
+                if result_tx.send(result).is_err() {
+                    break;
+                }
+            }
+        });
+        Ok(Self { path, child, stdin, result_rx, reader: Some(reader) })
     }
 
-    let mut stdout = child.stdout.take().ok_or("helper stdout unavailable")?;
-    let result = read_helper_result(&mut stdout);
-    let status = child.wait().map_err(|e| format!("failed to wait for JIT helper: {e}"))?;
-    if !status.success() {
-        return Err(format!("JIT helper exited with {status}"));
+    fn matches_config(&self, config: &RuntimeConfig) -> bool {
+        match &config.jit_helper_path {
+            Some(path) => self.path == *path,
+            None => std::env::current_exe().map(|path| self.path == path).unwrap_or(false),
+        }
     }
-    result
+
+    fn compile(
+        &mut self,
+        job: &CompileJob,
+        config: &RuntimeConfig,
+    ) -> Result<WorkerSuccess, String> {
+        write_job(&mut self.stdin, job, config)
+            .map_err(|e| format!("failed to write helper job: {e}"))?;
+        self.stdin.flush().map_err(|e| format!("failed to flush helper job: {e}"))?;
+
+        match self.result_rx.recv_timeout(config.tuning.jit_helper_timeout) {
+            Ok(result) => result,
+            Err(chan::RecvTimeoutError::Timeout) => {
+                let _ = self.child.kill();
+                Err(format!("JIT helper timed out after {:?}", config.tuning.jit_helper_timeout))
+            }
+            Err(chan::RecvTimeoutError::Disconnected) => {
+                let status = self.child.try_wait().ok().flatten();
+                Err(match status {
+                    Some(status) => format!("JIT helper exited with {status}"),
+                    None => "JIT helper disconnected".into(),
+                })
+            }
+        }
+    }
+}
+
+#[cfg(feature = "llvm")]
+impl Drop for HelperProcess {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        if let Some(reader) = self.reader.take() {
+            let _ = reader.join();
+        }
+    }
 }
 
 #[cfg(feature = "llvm")]
@@ -404,8 +479,38 @@ fn read_helper_result(mut r: impl Read) -> Result<WorkerSuccess, String> {
 #[cfg(feature = "llvm")]
 pub(super) fn run_jit_helper_stdio() -> eyre::Result<()> {
     let mut stdin = std::io::stdin().lock();
+    let mut stdout = std::io::stdout().lock();
+    let mut compiler: Option<EvmCompiler<EvmLlvmBackend>> = None;
+
+    while let Some((job, config)) = read_helper_job(&mut stdin)? {
+        if compiler.is_none() {
+            compiler = Some(create_compiler(&config, false).map_err(|e| eyre::eyre!(e))?);
+        }
+        let compiler = compiler.as_mut().unwrap();
+        compiler.set_opt_level(job.opt_level);
+        compiler.debug_assertions(config.debug_assertions);
+        compiler.set_dedup(!config.no_dedup);
+        compiler.set_dse(!config.no_dse);
+
+        let result = compile_jit_object_artifact(&job, compiler);
+        if let Err(err) = compiler.clear_ir() {
+            warn!(%err, "clear_ir failed");
+        }
+        write_helper_result(&mut stdout, result)?;
+        stdout.flush()?;
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "llvm")]
+fn read_helper_job(mut stdin: impl Read) -> eyre::Result<Option<(CompileJob, RuntimeConfig)>> {
     let mut magic = [0u8; 5];
-    stdin.read_exact(&mut magic)?;
+    match stdin.read_exact(&mut magic) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(e) => return Err(e.into()),
+    }
     eyre::ensure!(&magic == b"RJIT\0", "invalid JIT helper request");
 
     let mut hash = [0u8; 32];
@@ -432,12 +537,14 @@ pub(super) fn run_jit_helper_stdio() -> eyre::Result<()> {
         sync_notifier: SyncNotifier::none(),
         generation: 0,
     };
+    Ok(Some((job, config)))
+}
 
-    let mut compiler = create_compiler(&config, false).map_err(|e| eyre::eyre!(e))?;
-    compiler.set_opt_level(opt_level);
-    let result = compile_jit_object_artifact(&job, &mut compiler);
-
-    let mut stdout = std::io::stdout().lock();
+#[cfg(feature = "llvm")]
+fn write_helper_result(
+    mut stdout: impl Write,
+    result: Result<WorkerSuccess, String>,
+) -> eyre::Result<()> {
     match result {
         Ok(WorkerSuccess::JitObject(success)) => {
             stdout.write_all(&[1])?;
@@ -454,7 +561,6 @@ pub(super) fn run_jit_helper_stdio() -> eyre::Result<()> {
             write_bytes(&mut stdout, err.as_bytes())?;
         }
     }
-    stdout.flush()?;
     Ok(())
 }
 
@@ -613,6 +719,7 @@ impl CompilerState {
 thread_local! {
     static JIT_COMPILER: RefCell<Option<CompilerState>> = const { RefCell::new(None) };
     static AOT_COMPILER: RefCell<Option<CompilerState>> = const { RefCell::new(None) };
+    static JIT_HELPER: RefCell<Option<HelperProcess>> = const { RefCell::new(None) };
 }
 
 #[cfg(feature = "llvm")]

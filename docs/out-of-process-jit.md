@@ -23,15 +23,15 @@ Using LLVM ORC's remote executor APIs (`ExecutorProcessControl`, `SimpleRemoteEP
 
 Current prototype:
 
-- `RuntimeConfig::jit_process_mode = JitProcessMode::OutOfProcess` makes JIT workers spawn a helper process via `RuntimeConfig::jit_helper_path`, or `std::env::current_exe()` when unset.
+- `RuntimeConfig::jit_process_mode = JitProcessMode::OutOfProcess` makes each JIT worker keep a persistent helper process spawned via `RuntimeConfig::jit_helper_path`, or `std::env::current_exe()` when unset.
 - Helper binaries must call `revmc::runtime::maybe_run_jit_helper()` at process startup. `revmc-cli` does this already.
-- The helper compiles one JIT object request from stdin and writes one framed response to stdout.
+- Each worker sends a stream of JIT object requests to its helper over stdin and receives framed responses from stdout.
 - The parent links returned object bytes into its local ORC instance, resolves the symbol, and constructs `JitCodeBacking` with a parent-owned `ResourceTracker`.
+- `RuntimeTuning::jit_helper_timeout` bounds each helper compilation; timed-out helpers are killed and replaced on the next job.
 
 Still needed:
 
-- Keep one long-lived helper process instead of spawning per job.
-- Move the worker pool into the helper process; the parent should only enqueue IPC requests.
+- Move the worker pool into a single helper process; the parent should only enqueue IPC requests.
 - Define a versioned framed IPC protocol for `CompileJob` and `WorkerResult` data: key, bytecode, symbol name, spec id, optimization level, gas params, debug flags, dedup/DSE flags, dump settings, generation, timings, object bytes, and errors.
 - Keep AOT jobs either in the helper too or explicitly route them through the existing in-process AOT path; the first option gives consistent isolation.
 - Define shutdown semantics: close IPC, let the helper drain or cancel queued jobs, then kill on timeout.
