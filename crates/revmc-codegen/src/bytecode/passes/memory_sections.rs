@@ -1,6 +1,7 @@
 use crate::bytecode::{Block, Bytecode, Inst};
 use core::fmt;
 use oxc_index::{IndexVec, index_vec};
+use revm_bytecode::opcode as op;
 use std::collections::VecDeque;
 
 /// A memory section tracks known memory-size facts for a basic block.
@@ -63,7 +64,7 @@ impl MemorySectionAnalysis {
             for inst in block.insts() {
                 if let Some((offset, len)) = bytecode.const_memory_access(inst) {
                     self.block_memory_sizes[bid] =
-                        self.block_memory_sizes[bid].max(memory_size(offset, len));
+                        self.block_memory_sizes[bid].max(memory_size_for_access(offset, len));
                 }
             }
         }
@@ -130,16 +131,55 @@ impl MemorySectionAnalysis {
         for bid in bytecode.cfg.blocks.indices() {
             let Some(min_memory_size) = self.block_entry_sizes[bid] else { continue };
             let memory_size = self.block_memory_sizes[bid];
+            let block = &bytecode.cfg.blocks[bid];
+
+            for inst in block.insts() {
+                let Some((offset, len)) = bytecode.const_memory_access(inst) else { continue };
+                trace!(
+                    %bid,
+                    %inst,
+                    pc = bytecode.pc(inst),
+                    opcode = opcode_name(bytecode.inst(inst).opcode),
+                    ?offset,
+                    ?len,
+                    min_memory_size,
+                    block_memory_size = memory_size,
+                    required_memory_size = memory_size_for_access(offset, len),
+                    "memory access"
+                );
+            }
+
             if min_memory_size == 0 && memory_size == 0 {
                 continue;
             }
-            let inst = bytecode.cfg.blocks[bid].insts.start;
-            self.sections[inst] = MemorySection { min_memory_size, memory_size };
+            self.sections[block.insts.start] = MemorySection { min_memory_size, memory_size };
         }
     }
 }
 
 #[inline]
-fn memory_size(offset: Option<u64>, len: Option<u64>) -> u64 {
+fn memory_size_for_access(offset: Option<u64>, len: Option<u64>) -> u64 {
     offset.unwrap_or(0).saturating_add(len.unwrap_or(0)).saturating_add(31) / 32 * 32
+}
+
+fn opcode_name(opcode: u8) -> &'static str {
+    match opcode {
+        op::KECCAK256 => "KECCAK256",
+        op::MLOAD => "MLOAD",
+        op::MSTORE => "MSTORE",
+        op::MSTORE8 => "MSTORE8",
+        op::CALLDATACOPY => "CALLDATACOPY",
+        op::CODECOPY => "CODECOPY",
+        op::EXTCODECOPY => "EXTCODECOPY",
+        op::RETURNDATACOPY => "RETURNDATACOPY",
+        op::MCOPY => "MCOPY",
+        op::LOG0 => "LOG0",
+        op::LOG1 => "LOG1",
+        op::LOG2 => "LOG2",
+        op::LOG3 => "LOG3",
+        op::LOG4 => "LOG4",
+        op::RETURN => "RETURN",
+        op::REVERT => "REVERT",
+        _ => "UNKNOWN",
+    }
 }
