@@ -90,11 +90,11 @@ pub(super) struct FunctionCx<'a, B: Backend> {
     vstack: VStack<B::Value>,
     /// Stack length at the start of the current stack section, loaded once from the alloca.
     /// All intra-section `len_before` values are derived from this + `section_len_offset`.
-    section_start_len: B::Value,
+    section_start_len: Option<B::Value>,
     /// Stack pointer at the start of the current stack section (`&stack[section_start_len]`).
     /// All intra-section stack pointer GEPs are derived from this base to preserve pointer
     /// provenance, which lets LLVM prove aliasing and fold redundant operations.
-    section_start_sp: B::Value,
+    section_start_sp: Option<B::Value>,
     /// Cumulative stack diff from the section start to the current instruction (compile-time).
     /// Updated after the opcode handler so that push/pop/sp helpers see the pre-diff value.
     section_len_offset: i32,
@@ -261,7 +261,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let failure_block = bcx.create_block("failure");
         let return_block = bcx.create_block("return");
 
-        let section_start_sp = stack.addr(&mut bcx);
         let zero = bcx.iconst(isize_type, 0);
         let mut fx = FunctionCx {
             config,
@@ -276,8 +275,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             ecx,
             len_before: zero,
             len_offset: 0,
-            section_start_len: zero,
-            section_start_sp,
+            section_start_len: Some(zero),
+            section_start_sp: None,
             section_len_offset: 0,
             stored_len_offset: 0,
             bcx,
@@ -521,6 +520,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 if self.inst_entries.get(inst + 1).is_some() {
                     let next = self.bytecode.inst(inst + 1);
                     if !next.is_dead_code() && next.is_stack_section_head() {
+                        self.materialize_stack_len();
                         self.materialize_live_stack();
                     } else {
                         self.relieve_vstack_pressure();
@@ -536,6 +536,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
         #[cfg(test)]
         if opcode == crate::TEST_SUSPEND {
+            self.materialize_stack_len();
             self.suspend();
             goto_return!(no_branch);
         }
@@ -558,8 +559,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let diff = effective_stack_diff(inp, out, data);
         self.len_offset = 0;
         if data.is_stack_section_head() {
-            self.section_start_len = self.stack_len.load(&mut self.bcx, "stack_len");
-            self.section_start_sp = self.sp_at(self.section_start_len);
+            self.section_start_len = None;
+            self.section_start_sp = None;
             self.section_len_offset = 0;
             self.stored_len_offset = 0;
 
@@ -585,13 +586,11 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             self.len_before = self.len_from_section(self.section_len_offset);
         }
 
-        // Store the updated stack length. Skip when `len.addr` already holds the
-        // correct value, i.e. the offset we'd write matches what's already stored.
+        // Branching and suspending instructions leave the current stack section,
+        // so their successors must be able to reload the updated length.
         let new_len_offset = self.section_len_offset + diff;
-        if new_len_offset != self.stored_len_offset {
-            let len_changed = self.len_from_section(new_len_offset);
-            self.stack_len.store(&mut self.bcx, len_changed);
-            self.stored_len_offset = new_len_offset;
+        if data.is_branching() || data.may_suspend() {
+            self.materialize_stack_len_at(new_len_offset);
         }
 
         // If the output is a known constant and the opcode has no dynamic gas or side effects,
@@ -1515,21 +1514,59 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         }
     }
 
+    /// Stores the current stack length if it is not already materialized.
+    fn materialize_stack_len(&mut self) {
+        self.materialize_stack_len_at(self.section_len_offset);
+    }
+
+    /// Stores the stack length at an offset from the section start.
+    fn materialize_stack_len_at(&mut self, offset: i32) {
+        if offset == self.stored_len_offset {
+            return;
+        }
+        let len = self.len_from_section(offset);
+        self.stack_len.store(&mut self.bcx, len);
+        self.stored_len_offset = offset;
+    }
+
+    /// Returns the stack length at the start of the current stack section.
+    fn section_start_len(&mut self) -> B::Value {
+        if let Some(len) = self.section_start_len {
+            return len;
+        }
+        let len = self.stack_len.load(&mut self.bcx, "stack_len");
+        self.section_start_len = Some(len);
+        len
+    }
+
     /// Returns the stack length at an offset from `section_start_len`.
     fn len_from_section(&mut self, offset: i32) -> B::Value {
+        let len = self.section_start_len();
         if offset == 0 {
-            return self.section_start_len;
+            return len;
         }
-        self.bcx.iadd_imm(self.section_start_len, offset as i64)
+        self.bcx.iadd_imm(len, offset as i64)
+    }
+
+    /// Returns the stack pointer at the start of the current stack section.
+    fn section_start_sp(&mut self) -> B::Value {
+        if let Some(sp) = self.section_start_sp {
+            return sp;
+        }
+        let len = self.section_start_len();
+        let sp = self.sp_at(len);
+        self.section_start_sp = Some(sp);
+        sp
     }
 
     /// Returns a stack pointer offset from `section_start_sp`.
     fn sp_from_section(&mut self, offset: i64) -> B::Value {
+        let sp = self.section_start_sp();
         if offset == 0 {
-            return self.section_start_sp;
+            return sp;
         }
         let offset = self.bcx.iconst(self.isize_type, offset);
-        self.bcx.gep(self.word_type, self.section_start_sp, &[offset], "sp")
+        self.bcx.gep(self.word_type, sp, &[offset], "sp")
     }
 
     /// Returns the stack pointer at `len` (`&stack[len]`).
