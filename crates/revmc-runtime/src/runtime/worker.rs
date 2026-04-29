@@ -10,17 +10,23 @@
 //! as the job channel closes.
 
 use crate::{
-    CompileTimings, EvmCompilerFn, OptimizationLevel,
+    CompileTimings, EvmCompilerFn, OptimizationLevel, eyre,
     runtime::{
         config::{CompilationKind, JitProcessMode, RuntimeConfig},
         storage::RuntimeCacheKey,
     },
 };
-use alloy_primitives::Bytes;
+use alloy_primitives::{B256, Bytes};
 use crossbeam_channel as chan;
 use rayon::{ThreadPool, ThreadPoolBuilder};
 #[cfg(feature = "llvm")]
-use std::{cell::RefCell, fs::File, io::Read, time::Instant};
+use std::{
+    cell::RefCell,
+    fs::File,
+    io::{Read, Write},
+    process::{Command, Stdio},
+    time::Instant,
+};
 use std::{
     sync::{
         Arc,
@@ -34,6 +40,8 @@ use crate::{
     EvmCompiler, EvmLlvmBackend, Linker,
     llvm::{JitDylibGuard, orc::ResourceTracker},
 };
+#[cfg(feature = "llvm")]
+use revm_primitives::hardfork::SpecId;
 
 /// Notifier for synchronous compilation requests.
 ///
@@ -278,6 +286,9 @@ fn clear_thread_local_compilers() {}
 fn compile_job(job: CompileJob, config: &RuntimeConfig) -> WorkerResult {
     trace!(?job, "received job");
     match job.kind {
+        CompilationKind::Jit if config.jit_process_mode == JitProcessMode::OutOfProcess => {
+            compile_job_out_of_process(job, config)
+        }
         CompilationKind::Jit => {
             JIT_COMPILER.with_borrow_mut(|state| compile_with_state(job, config, state))
         }
@@ -285,6 +296,202 @@ fn compile_job(job: CompileJob, config: &RuntimeConfig) -> WorkerResult {
             AOT_COMPILER.with_borrow_mut(|state| compile_with_state(job, config, state))
         }
     }
+}
+
+#[cfg(feature = "llvm")]
+fn compile_job_out_of_process(job: CompileJob, config: &RuntimeConfig) -> WorkerResult {
+    let t0 = Instant::now();
+    let outcome = run_helper_job(&job, config);
+    WorkerResult {
+        key: job.key,
+        outcome,
+        kind: job.kind,
+        sync_notifier: job.sync_notifier,
+        generation: job.generation,
+        compile_duration: t0.elapsed(),
+        timings: CompileTimings::default(),
+    }
+}
+
+const HELPER_ENV: &str = "REVMC_JIT_HELPER";
+
+#[cfg(feature = "llvm")]
+fn run_helper_job(job: &CompileJob, config: &RuntimeConfig) -> Result<WorkerSuccess, String> {
+    let exe = std::env::current_exe().map_err(|e| format!("failed to locate current exe: {e}"))?;
+    let mut child = Command::new(exe)
+        .env(HELPER_ENV, "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .map_err(|e| format!("failed to spawn JIT helper: {e}"))?;
+
+    {
+        let stdin = child.stdin.as_mut().ok_or("helper stdin unavailable")?;
+        write_job(stdin, job, config).map_err(|e| format!("failed to write helper job: {e}"))?;
+    }
+
+    let mut stdout = child.stdout.take().ok_or("helper stdout unavailable")?;
+    let result = read_helper_result(&mut stdout);
+    let status = child.wait().map_err(|e| format!("failed to wait for JIT helper: {e}"))?;
+    if !status.success() {
+        return Err(format!("JIT helper exited with {status}"));
+    }
+    result
+}
+
+#[cfg(feature = "llvm")]
+fn write_job(mut w: impl Write, job: &CompileJob, config: &RuntimeConfig) -> std::io::Result<()> {
+    w.write_all(b"RJIT\0")?;
+    w.write_all(&job.key.code_hash.0)?;
+    w.write_all(&[job.key.spec_id as u8, opt_level_to_u8(job.opt_level)])?;
+    w.write_all(&[
+        u8::from(config.debug_assertions),
+        u8::from(config.no_dedup),
+        u8::from(config.no_dse),
+    ])?;
+    write_bytes(&mut w, job.symbol_name.as_bytes())?;
+    write_bytes(&mut w, &job.bytecode)?;
+    Ok(())
+}
+
+#[cfg(feature = "llvm")]
+fn read_helper_result(mut r: impl Read) -> Result<WorkerSuccess, String> {
+    let mut tag = [0u8; 1];
+    r.read_exact(&mut tag).map_err(|e| format!("failed to read helper result: {e}"))?;
+    match tag[0] {
+        0 => {
+            let msg =
+                read_string(&mut r).map_err(|e| format!("failed to read helper error: {e}"))?;
+            Err(msg)
+        }
+        1 => {
+            let symbol_name =
+                read_string(&mut r).map_err(|e| format!("failed to read symbol name: {e}"))?;
+            let object_bytes =
+                read_vec(&mut r).map_err(|e| format!("failed to read object bytes: {e}"))?;
+            let count =
+                read_u32(&mut r).map_err(|e| format!("failed to read symbol count: {e}"))?;
+            let mut builtin_symbols = Vec::with_capacity(count as usize);
+            for _ in 0..count {
+                builtin_symbols.push(
+                    read_string(&mut r)
+                        .map_err(|e| format!("failed to read builtin symbol: {e}"))?,
+                );
+            }
+            Ok(WorkerSuccess::JitObject(JitObjectSuccess {
+                symbol_name,
+                object_bytes,
+                builtin_symbols,
+            }))
+        }
+        tag => Err(format!("unknown helper result tag {tag}")),
+    }
+}
+
+#[cfg(feature = "llvm")]
+pub(super) fn run_jit_helper_stdio() -> eyre::Result<()> {
+    let mut stdin = std::io::stdin().lock();
+    let mut magic = [0u8; 5];
+    stdin.read_exact(&mut magic)?;
+    eyre::ensure!(&magic == b"RJIT\0", "invalid JIT helper request");
+
+    let mut hash = [0u8; 32];
+    stdin.read_exact(&mut hash)?;
+    let mut fixed = [0u8; 5];
+    stdin.read_exact(&mut fixed)?;
+    let spec_id = SpecId::try_from_u8(fixed[0]).ok_or_else(|| eyre::eyre!("invalid spec id"))?;
+    let opt_level = opt_level_from_u8(fixed[1])?;
+    let symbol_name = read_string(&mut stdin)?;
+    let bytecode = Bytes::from(read_vec(&mut stdin)?);
+
+    let config = RuntimeConfig {
+        debug_assertions: fixed[2] != 0,
+        no_dedup: fixed[3] != 0,
+        no_dse: fixed[4] != 0,
+        ..Default::default()
+    };
+    let job = CompileJob {
+        kind: CompilationKind::Jit,
+        key: RuntimeCacheKey { code_hash: B256::from(hash), spec_id },
+        bytecode,
+        symbol_name,
+        opt_level,
+        sync_notifier: SyncNotifier::none(),
+        generation: 0,
+    };
+
+    let mut compiler = create_compiler(&config, false).map_err(|e| eyre::eyre!(e))?;
+    compiler.set_opt_level(opt_level);
+    let result = compile_jit_object_artifact(&job, &mut compiler);
+
+    let mut stdout = std::io::stdout().lock();
+    match result {
+        Ok(WorkerSuccess::JitObject(success)) => {
+            stdout.write_all(&[1])?;
+            write_bytes(&mut stdout, success.symbol_name.as_bytes())?;
+            write_bytes(&mut stdout, &success.object_bytes)?;
+            stdout.write_all(&(success.builtin_symbols.len() as u32).to_le_bytes())?;
+            for symbol in success.builtin_symbols {
+                write_bytes(&mut stdout, symbol.as_bytes())?;
+            }
+        }
+        Ok(_) => unreachable!(),
+        Err(err) => {
+            stdout.write_all(&[0])?;
+            write_bytes(&mut stdout, err.as_bytes())?;
+        }
+    }
+    stdout.flush()?;
+    Ok(())
+}
+
+#[cfg(feature = "llvm")]
+fn write_bytes(mut w: impl Write, bytes: &[u8]) -> std::io::Result<()> {
+    w.write_all(&(bytes.len() as u32).to_le_bytes())?;
+    w.write_all(bytes)
+}
+
+#[cfg(feature = "llvm")]
+fn read_string(r: impl Read) -> std::io::Result<String> {
+    String::from_utf8(read_vec(r)?)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+}
+
+#[cfg(feature = "llvm")]
+fn read_vec(mut r: impl Read) -> std::io::Result<Vec<u8>> {
+    let len = read_u32(&mut r)? as usize;
+    let mut bytes = vec![0; len];
+    r.read_exact(&mut bytes)?;
+    Ok(bytes)
+}
+
+#[cfg(feature = "llvm")]
+fn read_u32(mut r: impl Read) -> std::io::Result<u32> {
+    let mut bytes = [0u8; 4];
+    r.read_exact(&mut bytes)?;
+    Ok(u32::from_le_bytes(bytes))
+}
+
+#[cfg(feature = "llvm")]
+fn opt_level_to_u8(level: OptimizationLevel) -> u8 {
+    match level {
+        OptimizationLevel::None => 0,
+        OptimizationLevel::Less => 1,
+        OptimizationLevel::Default => 2,
+        OptimizationLevel::Aggressive => 3,
+    }
+}
+
+#[cfg(feature = "llvm")]
+fn opt_level_from_u8(level: u8) -> eyre::Result<OptimizationLevel> {
+    Ok(match level {
+        0 => OptimizationLevel::None,
+        1 => OptimizationLevel::Less,
+        2 => OptimizationLevel::Default,
+        3 => OptimizationLevel::Aggressive,
+        _ => eyre::bail!("invalid optimization level"),
+    })
 }
 
 #[cfg(feature = "llvm")]

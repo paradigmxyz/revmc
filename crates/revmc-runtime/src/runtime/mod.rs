@@ -45,6 +45,26 @@ pub use storage::{
 
 mod worker;
 
+/// Runs the out-of-process JIT helper if this process was launched as one.
+///
+/// Returns `Ok(true)` after the helper request has been handled and the caller
+/// should exit immediately. Normal application startup should continue on
+/// `Ok(false)`.
+pub fn maybe_run_jit_helper() -> eyre::Result<bool> {
+    if std::env::var_os("REVMC_JIT_HELPER").is_none() {
+        return Ok(false);
+    }
+    #[cfg(feature = "llvm")]
+    {
+        worker::run_jit_helper_stdio()?;
+        Ok(true)
+    }
+    #[cfg(not(feature = "llvm"))]
+    {
+        eyre::bail!("LLVM backend not available")
+    }
+}
+
 #[cfg(test)]
 mod tests;
 
