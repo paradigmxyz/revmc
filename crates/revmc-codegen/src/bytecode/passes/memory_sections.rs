@@ -188,6 +188,7 @@ impl MemorySectionAnalysis {
             BlockMemoryState { known_size: Some(0), exact_known_size: Some(0) };
 
         let dynamic_jump_targets = self.dynamic_jump_targets.clone();
+        let mut dynamic_exit_state = BlockMemoryState::default();
 
         let mut worklist = Worklist::new(bytecode.cfg.blocks.len());
         worklist.push(entry);
@@ -201,9 +202,9 @@ impl MemorySectionAnalysis {
             for &succ in &bytecode.cfg.blocks[bid].succs {
                 self.update_entry_state(succ, exit_state, &mut worklist);
             }
-            if self.dynamic_jump_blocks.contains(bid) {
+            if self.dynamic_jump_blocks.contains(bid) && dynamic_exit_state.join(exit_state) {
                 for succ in dynamic_jump_targets.iter() {
-                    self.update_entry_state(succ, exit_state, &mut worklist);
+                    self.update_entry_state(succ, dynamic_exit_state, &mut worklist);
                 }
             }
         }
