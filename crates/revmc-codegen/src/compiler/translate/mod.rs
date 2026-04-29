@@ -1912,7 +1912,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
     /// Adds a comment to the current instruction.
     fn add_comment(&mut self, comment: &str) {
-        if comment.is_empty() {
+        if comment.is_empty() || !self.config.comments {
             return;
         }
         self.bcx.add_comment_to_current_inst(comment);

@@ -1325,6 +1325,9 @@ impl Builder for EvmLlvmBuilder<'_> {
     }
 
     fn add_comment_to_current_inst(&mut self, comment: &str) {
+        if !self.backend_config.is_dumping {
+            return;
+        }
         let Some(block) = self.current_block() else { return };
         let Some(ins) = block.get_last_instruction() else { return };
         let metadata = self.cx.metadata_string(comment);
