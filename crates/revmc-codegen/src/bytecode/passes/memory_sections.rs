@@ -1,7 +1,6 @@
 use crate::bytecode::{Block, Bytecode, Inst, InstFlags};
 use core::fmt;
 use oxc_index::{IndexVec, index_vec};
-use revm_bytecode::opcode as op;
 use std::collections::VecDeque;
 
 /// Known memory-size facts before a memory access.
@@ -36,7 +35,7 @@ impl MemorySection {
 
 /// Memory section analysis state.
 pub(crate) struct MemorySectionAnalysis {
-    block_required_sizes: IndexVec<Block, u64>,
+    block_min_required_sizes: IndexVec<Block, u64>,
     block_entry_known_sizes: IndexVec<Block, Option<u64>>,
     dynamic_jump_blocks: Vec<Block>,
     dynamic_jump_targets: Vec<Block>,
@@ -66,7 +65,7 @@ impl MemorySectionAnalysis {
         }
 
         Self {
-            block_required_sizes: index_vec![0; bytecode.cfg.blocks.len()],
+            block_min_required_sizes: index_vec![0; bytecode.cfg.blocks.len()],
             block_entry_known_sizes: index_vec![None; bytecode.cfg.blocks.len()],
             dynamic_jump_blocks,
             dynamic_jump_targets,
@@ -76,21 +75,19 @@ impl MemorySectionAnalysis {
 
     /// Runs memory section analysis.
     pub(crate) fn run(mut self, bytecode: &Bytecode<'_>) -> IndexVec<Inst, MemorySection> {
-        self.compute_block_required_sizes(bytecode);
+        self.compute_block_min_required_sizes(bytecode);
         self.compute_block_entry_known_sizes(bytecode);
         self.save_sections(bytecode);
         self.sections
     }
 
-    fn compute_block_required_sizes(&mut self, bytecode: &Bytecode<'_>) {
+    fn compute_block_min_required_sizes(&mut self, bytecode: &Bytecode<'_>) {
         for bid in bytecode.cfg.blocks.indices() {
             let block = &bytecode.cfg.blocks[bid];
             for inst in block.insts() {
                 for (offset, len) in bytecode.const_memory_accesses(inst).into_iter().flatten() {
-                    if let Some(required_size) = memory_size_for_access(offset, len) {
-                        self.block_required_sizes[bid] =
-                            self.block_required_sizes[bid].max(required_size);
-                    }
+                    self.block_min_required_sizes[bid] = self.block_min_required_sizes[bid]
+                        .max(min_memory_size_for_access(offset, len));
                 }
             }
         }
@@ -152,7 +149,7 @@ impl MemorySectionAnalysis {
 
     fn block_exit_size(&self, bid: Block) -> Option<u64> {
         self.block_entry_known_sizes[bid]
-            .map(|known_size| known_size.max(self.block_required_sizes[bid]))
+            .map(|known_size| known_size.max(self.block_min_required_sizes[bid]))
     }
 
     fn save_sections(&mut self, bytecode: &Bytecode<'_>) {
@@ -162,7 +159,8 @@ impl MemorySectionAnalysis {
 
             for inst in block.insts() {
                 for (offset, len) in bytecode.const_memory_accesses(inst).into_iter().flatten() {
-                    let required_size = memory_size_for_access(offset, len);
+                    let exact_required_size = exact_memory_size_for_access(offset, len);
+                    let min_required_size = min_memory_size_for_access(offset, len);
                     trace!(
                         %bid,
                         %inst,
@@ -171,19 +169,20 @@ impl MemorySectionAnalysis {
                         ?offset,
                         ?len,
                         known_size,
-                        ?required_size,
+                        min_required_size,
+                        ?exact_required_size,
                         "memory access"
                     );
-                    if let Some(required_size) = required_size {
-                        if known_size != 0 || required_size != 0 {
-                            let section = &mut self.sections[inst];
-                            if section.known_size == 0 && section.required_size == 0 {
-                                section.known_size = known_size;
-                            }
-                            section.required_size = section.required_size.max(required_size);
+                    if known_size != 0 || exact_required_size.is_some_and(|size| size != 0) {
+                        let section = &mut self.sections[inst];
+                        if section.known_size == 0 && section.required_size == 0 {
+                            section.known_size = known_size;
                         }
-                        known_size = known_size.max(required_size);
+                        if let Some(exact_required_size) = exact_required_size {
+                            section.required_size = section.required_size.max(exact_required_size);
+                        }
                     }
+                    known_size = known_size.max(min_required_size);
                 }
             }
         }
@@ -196,17 +195,30 @@ fn join_size(entry_size: Option<u64>, pred_exit_size: Option<u64>) -> Option<u64
 }
 
 #[inline]
-fn memory_size_for_access(offset: Option<u64>, len: Option<u64>) -> Option<u64> {
+fn exact_memory_size_for_access(offset: Option<u64>, len: Option<u64>) -> Option<u64> {
     if matches!(len, Some(0)) {
         return Some(0);
     }
     let size = offset?.saturating_add(len?);
-    Some(size.saturating_add(31) / 32 * 32)
+    Some(round_memory_size(size))
+}
+
+fn min_memory_size_for_access(offset: Option<u64>, len: Option<u64>) -> u64 {
+    match (offset, len) {
+        (_, Some(0)) | (_, None) => 0,
+        (Some(offset), Some(len)) => round_memory_size(offset.saturating_add(len)),
+        (None, Some(len)) => round_memory_size(len),
+    }
+}
+
+#[inline]
+fn round_memory_size(size: u64) -> u64 {
+    size.saturating_add(31) / 32 * 32
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{MemorySection, memory_size_for_access};
+    use super::{MemorySection, exact_memory_size_for_access, min_memory_size_for_access};
     use crate::bytecode::{
         Bytecode, Inst,
         passes::block_analysis::tests::{analyze_asm, analyze_asm_spec},
@@ -232,18 +244,26 @@ mod tests {
 
     #[test]
     fn exact_memory_size_rounds_up_to_words() {
-        assert_eq!(memory_size_for_access(Some(0), Some(0)), Some(0));
-        assert_eq!(memory_size_for_access(Some(0), Some(1)), Some(32));
-        assert_eq!(memory_size_for_access(Some(1), Some(32)), Some(64));
-        assert_eq!(memory_size_for_access(Some(64), Some(32)), Some(96));
+        assert_eq!(exact_memory_size_for_access(Some(0), Some(0)), Some(0));
+        assert_eq!(exact_memory_size_for_access(Some(0), Some(1)), Some(32));
+        assert_eq!(exact_memory_size_for_access(Some(1), Some(32)), Some(64));
+        assert_eq!(exact_memory_size_for_access(Some(64), Some(32)), Some(96));
     }
 
     #[test]
     fn unknown_offset_or_len_has_no_exact_required_size() {
-        assert_eq!(memory_size_for_access(None, Some(32)), None);
-        assert_eq!(memory_size_for_access(Some(32), None), None);
-        assert_eq!(memory_size_for_access(None, None), None);
-        assert_eq!(memory_size_for_access(None, Some(0)), Some(0));
+        assert_eq!(exact_memory_size_for_access(None, Some(32)), None);
+        assert_eq!(exact_memory_size_for_access(Some(32), None), None);
+        assert_eq!(exact_memory_size_for_access(None, None), None);
+        assert_eq!(exact_memory_size_for_access(None, Some(0)), Some(0));
+    }
+
+    #[test]
+    fn unknown_accesses_have_conservative_min_required_size() {
+        assert_eq!(min_memory_size_for_access(None, Some(32)), 32);
+        assert_eq!(min_memory_size_for_access(Some(32), None), 0);
+        assert_eq!(min_memory_size_for_access(None, None), 0);
+        assert_eq!(min_memory_size_for_access(None, Some(0)), 0);
     }
 
     #[test]
@@ -344,7 +364,26 @@ mod tests {
         let dynamic_mstore = nth_inst(&bytecode, op::MSTORE, 1);
 
         assert_eq!(bytecode.const_memory_access(dynamic_mstore), Some((None, Some(32))));
-        assert_eq!(section(&bytecode, dynamic_mstore), MemorySection::default());
+        assert_section(&bytecode, dynamic_mstore, 96, 0);
+    }
+
+    #[test]
+    fn unknown_offset_known_len_propagates_minimum_size() {
+        let bytecode = analyze_asm(
+            "
+            PUSH0
+            CALLDATALOAD
+            PUSH0
+            SWAP1
+            MSTORE
+            PUSH0
+            MLOAD
+            STOP
+        ",
+        );
+        let mload = nth_inst(&bytecode, op::MLOAD, 0);
+
+        assert_section(&bytecode, mload, 32, 32);
     }
 
     #[test]
