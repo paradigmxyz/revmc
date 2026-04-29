@@ -4,13 +4,13 @@ use oxc_index::{IndexVec, index_vec};
 use revm_bytecode::opcode as op;
 use std::collections::VecDeque;
 
-/// A memory section tracks known memory-size facts for a basic block.
+/// Known memory-size facts before a memory access.
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct MemorySection {
-    /// The memory size known at section entry.
-    pub(crate) min_memory_size: u64,
-    /// The maximum constant memory size required by the section.
-    pub(crate) memory_size: u64,
+    /// The memory size known before the instruction executes.
+    pub(crate) known_size: u64,
+    /// The memory size required by this instruction, if known.
+    pub(crate) required_size: u64,
 }
 
 impl fmt::Debug for MemorySection {
@@ -19,8 +19,8 @@ impl fmt::Debug for MemorySection {
             f.write_str("MemorySection::EMPTY")
         } else {
             f.debug_struct("MemorySection")
-                .field("min_memory_size", &self.min_memory_size)
-                .field("memory_size", &self.memory_size)
+                .field("known_size", &self.known_size)
+                .field("required_size", &self.required_size)
                 .finish()
         }
     }
@@ -36,8 +36,8 @@ impl MemorySection {
 
 /// Memory section analysis state.
 pub(crate) struct MemorySectionAnalysis {
-    block_memory_sizes: IndexVec<Block, u64>,
-    block_entry_sizes: IndexVec<Block, Option<u64>>,
+    block_required_sizes: IndexVec<Block, u64>,
+    block_entry_known_sizes: IndexVec<Block, Option<u64>>,
     dynamic_jump_blocks: Vec<Block>,
     dynamic_jump_targets: Vec<Block>,
     sections: IndexVec<Inst, MemorySection>,
@@ -66,8 +66,8 @@ impl MemorySectionAnalysis {
         }
 
         Self {
-            block_memory_sizes: index_vec![0; bytecode.cfg.blocks.len()],
-            block_entry_sizes: index_vec![None; bytecode.cfg.blocks.len()],
+            block_required_sizes: index_vec![0; bytecode.cfg.blocks.len()],
+            block_entry_known_sizes: index_vec![None; bytecode.cfg.blocks.len()],
             dynamic_jump_blocks,
             dynamic_jump_targets,
             sections: index_vec![MemorySection::default(); bytecode.insts.len()],
@@ -76,33 +76,33 @@ impl MemorySectionAnalysis {
 
     /// Runs memory section analysis.
     pub(crate) fn run(mut self, bytecode: &Bytecode<'_>) -> IndexVec<Inst, MemorySection> {
-        self.compute_block_memory_sizes(bytecode);
-        self.compute_block_entry_sizes(bytecode);
+        self.compute_block_required_sizes(bytecode);
+        self.compute_block_entry_known_sizes(bytecode);
         self.save_sections(bytecode);
         self.sections
     }
 
-    fn compute_block_memory_sizes(&mut self, bytecode: &Bytecode<'_>) {
+    fn compute_block_required_sizes(&mut self, bytecode: &Bytecode<'_>) {
         for bid in bytecode.cfg.blocks.indices() {
             let block = &bytecode.cfg.blocks[bid];
             for inst in block.insts() {
                 if let Some((offset, len)) = bytecode.const_memory_access(inst) {
-                    self.block_memory_sizes[bid] =
-                        self.block_memory_sizes[bid].max(memory_size_for_access(offset, len));
+                    self.block_required_sizes[bid] =
+                        self.block_required_sizes[bid].max(memory_size_for_access(offset, len));
                 }
             }
         }
     }
 
-    fn compute_block_entry_sizes(&mut self, bytecode: &Bytecode<'_>) {
+    fn compute_block_entry_known_sizes(&mut self, bytecode: &Bytecode<'_>) {
         let entry = Block::from_usize(0);
-        self.block_entry_sizes[entry] = Some(0);
+        self.block_entry_known_sizes[entry] = Some(0);
 
         let mut queue = VecDeque::new();
         queue.push_back(entry);
 
         while let Some(bid) = queue.pop_front() {
-            if self.block_entry_sizes[bid].is_none() {
+            if self.block_entry_known_sizes[bid].is_none() {
                 continue;
             }
 
@@ -125,8 +125,8 @@ impl MemorySectionAnalysis {
         queue: &mut VecDeque<Block>,
     ) {
         let new_entry_size = self.join_entry_size(bytecode, bid);
-        if self.block_entry_sizes[bid] != new_entry_size {
-            self.block_entry_sizes[bid] = new_entry_size;
+        if self.block_entry_known_sizes[bid] != new_entry_size {
+            self.block_entry_known_sizes[bid] = new_entry_size;
             queue.push_back(bid);
         }
     }
@@ -149,17 +149,18 @@ impl MemorySectionAnalysis {
     }
 
     fn block_exit_size(&self, bid: Block) -> Option<u64> {
-        self.block_entry_sizes[bid].map(|entry_size| entry_size.max(self.block_memory_sizes[bid]))
+        self.block_entry_known_sizes[bid]
+            .map(|known_size| known_size.max(self.block_required_sizes[bid]))
     }
 
     fn save_sections(&mut self, bytecode: &Bytecode<'_>) {
         for bid in bytecode.cfg.blocks.indices() {
-            let Some(min_memory_size) = self.block_entry_sizes[bid] else { continue };
-            let memory_size = self.block_memory_sizes[bid];
+            let Some(mut known_size) = self.block_entry_known_sizes[bid] else { continue };
             let block = &bytecode.cfg.blocks[bid];
 
             for inst in block.insts() {
                 let Some((offset, len)) = bytecode.const_memory_access(inst) else { continue };
+                let required_size = memory_size_for_access(offset, len);
                 trace!(
                     %bid,
                     %inst,
@@ -167,17 +168,15 @@ impl MemorySectionAnalysis {
                     opcode = opcode_name(bytecode.inst(inst).opcode),
                     ?offset,
                     ?len,
-                    min_memory_size,
-                    block_memory_size = memory_size,
-                    required_memory_size = memory_size_for_access(offset, len),
+                    known_size,
+                    required_size,
                     "memory access"
                 );
+                if known_size != 0 || required_size != 0 {
+                    self.sections[inst] = MemorySection { known_size, required_size };
+                }
+                known_size = known_size.max(required_size);
             }
-
-            if min_memory_size == 0 && memory_size == 0 {
-                continue;
-            }
-            self.sections[block.insts.start] = MemorySection { min_memory_size, memory_size };
         }
     }
 }

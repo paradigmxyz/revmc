@@ -1632,14 +1632,15 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     /// Ensures the memory is large enough for `offset + len` bytes, calling the `mresize`
     /// builtin on the cold path if needed. Returns the pointer to `mem_base + offset`.
     fn build_ensure_memory(&mut self, offset: B::Value, len: u64) -> B::Value {
+        let offset = self.u256_to_u64_saturating(offset, 63);
+        if self.current_inst.is_some_and(|inst| self.can_skip_ensure_memory(inst)) {
+            return self.build_memory_addr(offset);
+        }
+
         let current_block = self.current_block();
         let resize_block = self.create_block_after(current_block, "mresize");
         let contd_block = self.create_block_after(resize_block, "mresize.contd");
 
-        // 63 bits lets us avoid overflow in the addition below.
-        let offset = self.u256_to_u64_saturating(offset, 63);
-
-        let i8_type = self.i8_type;
         let isize_type = self.isize_type;
 
         // Fast path: offset + len <= mem_len (no overflow).
@@ -1663,6 +1664,21 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let mem_len = self.bcx.load(isize_type, mem_len_field, "ecx.mem_len");
         let memory_resized = self.bcx.icmp(IntCC::UnsignedGreaterThanOrEqual, mem_len, min_size);
         self.bcx.assume(memory_resized);
+        self.build_memory_addr(offset)
+    }
+
+    fn can_skip_ensure_memory(&self, inst: Inst) -> bool {
+        let section = self.bytecode.memory_section(inst);
+        if section.known_size < section.required_size {
+            return false;
+        }
+        let Some((Some(_), Some(_))) = self.bytecode.const_memory_access(inst) else {
+            return false;
+        };
+        true
+    }
+
+    fn build_memory_addr(&mut self, offset: B::Value) -> B::Value {
         let ptr_type = self.bcx.type_ptr();
         let mem_base_field = self.get_field(
             self.ecx,
@@ -1670,7 +1686,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             "ecx.mem_base.addr",
         );
         let mem_base = self.bcx.load(ptr_type, mem_base_field, "ecx.mem_base");
-        self.bcx.gep(i8_type, mem_base, &[offset], "mem.addr")
+        self.bcx.gep(self.i8_type, mem_base, &[offset], "mem.addr")
     }
 
     /*
