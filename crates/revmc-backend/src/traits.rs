@@ -487,20 +487,17 @@ pub trait Builder: BackendTypes + TypeMethods {
         ret: Option<Self::Type>,
         address: Option<usize>,
         linkage: Linkage,
+        call_conv: CallConv,
     ) -> Self::Function;
 
-    /// Adds a local stub with the given calling convention for an external function.
+    /// Adds a local stub with the given calling convention for an existing function.
     fn add_function_stub(
         &mut self,
-        name: &str,
-        params: &[Self::Type],
-        ret: Option<Self::Type>,
-        address: Option<usize>,
-        linkage: Linkage,
+        function: Self::Function,
         call_conv: CallConv,
     ) -> Self::Function {
         let _ = call_conv;
-        self.add_function(name, params, ret, address, linkage)
+        function
     }
 
     /// Adds an attribute to a function, one of its parameters, or its return value.

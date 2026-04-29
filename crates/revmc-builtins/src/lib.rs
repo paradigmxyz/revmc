@@ -472,10 +472,8 @@ pub unsafe extern "C" fn __revmc_builtin_blob_base_fee(ecx: &EvmContext<'_>, slo
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn __revmc_builtin_mresize(ecx: &mut EvmContext<'_>, min_size: u64) {
-    if let Err(e) = ensure_memory(ecx, min_size as usize, 0) {
-        fail(ecx, e);
-    }
+pub unsafe extern "C" fn __revmc_builtin_mresize(ecx: &mut EvmContext<'_>, min_size: u64) -> BuiltinResult {
+    ensure_memory(ecx, min_size as usize, 0)
 }
 
 #[unsafe(no_mangle)]

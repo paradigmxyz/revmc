@@ -37,11 +37,16 @@ impl<B: Backend> Builtins<B> {
     fn init(builtin: Builtin, bcx: &mut B::Builder<'_>) -> B::Function {
         let name = builtin.name();
         debug_assert!(name.starts_with(MANGLE_PREFIX), "{name:?}");
-        bcx.get_function(name).inspect(|r| trace!(name, ?r, "pre-existing")).unwrap_or_else(|| {
-            let r = Self::build(name, builtin, bcx);
-            trace!(name, ?r, "built");
-            r
-        })
+        if builtin.call_conv() == CallConv::Default
+            && let Some(r) = bcx.get_function(name)
+        {
+            trace!(name, ?r, "pre-existing");
+            return r;
+        }
+
+        let r = Self::build(name, builtin, bcx);
+        trace!(name, ?r, "built");
+        r
     }
 
     fn build(name: &str, builtin: Builtin, bcx: &mut B::Builder<'_>) -> B::Function {
@@ -49,11 +54,10 @@ impl<B: Backend> Builtins<B> {
         let params = builtin.params(bcx);
         let address = builtin.addr();
         let linkage = revmc_backend::Linkage::Import;
+        let f = bcx.add_function(name, &params, ret, Some(address), linkage, CallConv::Default);
         let f = match builtin.call_conv() {
-            CallConv::Default => bcx.add_function(name, &params, ret, Some(address), linkage),
-            call_conv => {
-                bcx.add_function_stub(name, &params, ret, Some(address), linkage, call_conv)
-            }
+            CallConv::Default => f,
+            call_conv => bcx.add_function_stub(f, call_conv),
         };
         let param_attrs = builtin.param_attrs();
         let mut attrs = Vec::with_capacity(16);

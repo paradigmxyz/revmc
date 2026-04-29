@@ -1867,9 +1867,11 @@ impl Builder for EvmLlvmBuilder<'_> {
         ret: Option<Self::Type>,
         address: Option<usize>,
         linkage: revmc_backend::Linkage,
+        call_conv: CallConv,
     ) -> Self::Function {
         let func_ty = self.fn_type(ret, params);
         let function = self.module().add_function(name, func_ty, Some(convert_linkage(linkage)));
+        set_function_call_conv(function, call_conv);
         cpp::set_dso_local(function);
         if let Some(address) = address
             && let Some(orc) = &mut self.orc
@@ -1881,27 +1883,16 @@ impl Builder for EvmLlvmBuilder<'_> {
 
     fn add_function_stub(
         &mut self,
-        name: &str,
-        params: &[Self::Type],
-        ret: Option<Self::Type>,
-        address: Option<usize>,
-        linkage: revmc_backend::Linkage,
+        function: Self::Function,
         call_conv: CallConv,
     ) -> Self::Function {
-        let func_ty = self.fn_type(ret, params);
-        let real = self.module().add_function(name, func_ty, Some(convert_linkage(linkage)));
-        cpp::set_dso_local(real);
-        if let Some(address) = address
-            && let Some(orc) = &mut self.orc
-        {
-            orc.pending_symbols.push((CString::new(name).unwrap(), address));
-        }
-
+        let name = function.get_name().to_string_lossy();
         let stub_name = format!("{name}.stub");
         if let Some(stub) = self.module().get_function(&stub_name) {
             return stub;
         }
 
+        let func_ty = function.get_type();
         let stub = self.module().add_function(
             &stub_name,
             func_ty,
@@ -1914,16 +1905,17 @@ impl Builder for EvmLlvmBuilder<'_> {
         let debug_location = self.debug_scope.and_then(|_| self.bcx.get_current_debug_location());
         self.bcx.unset_current_debug_location();
 
-        let entry = self.cx.append_basic_block(stub, self.name("preserve_most"));
+        let entry = self.cx.append_basic_block(stub, self.name("stub"));
         self.bcx.position_at_end(entry);
         let args = (0..stub.count_params())
             .map(|i| stub.get_nth_param(i).unwrap().into())
             .collect::<Vec<_>>();
-        self.bcx.build_call(real, &args, "").unwrap();
-        match ret {
-            Some(_) => unreachable!("preserve-most stubs only support void functions"),
-            None => self.bcx.build_return(None).unwrap(),
-        };
+        let callsite = self.bcx.build_call(function, &args, "").unwrap();
+        if let Some(value) = callsite.try_as_basic_value().basic() {
+            self.bcx.build_return(Some(&value)).unwrap();
+        } else {
+            self.bcx.build_return(None).unwrap();
+        }
 
         if let Some(before) = before {
             self.bcx.position_at_end(before);
