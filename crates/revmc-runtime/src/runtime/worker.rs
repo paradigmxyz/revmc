@@ -326,29 +326,42 @@ fn run_helper_job(job: &CompileJob, config: &RuntimeConfig) -> Result<WorkerSucc
         return Err("out-of-process JIT does not support debug dumps yet".into());
     }
 
-    let mut slot = helper_process().lock().unwrap();
-    if slot.as_ref().is_none_or(|helper| !helper.matches_config(config)) {
-        *slot = Some(HelperProcess::spawn(config)?);
-    }
+    helper_process().compile(job, config)
+}
 
-    let helper = slot.as_mut().unwrap();
-    match helper.compile(job, config) {
-        Ok(result) => Ok(result),
-        Err(err) => {
-            *slot = None;
-            Err(err)
+#[cfg(feature = "llvm")]
+fn helper_process() -> &'static HelperProcess {
+    static HELPER: OnceLock<HelperProcess> = OnceLock::new();
+    HELPER.get_or_init(HelperProcess::default)
+}
+
+#[cfg(feature = "llvm")]
+#[derive(Default)]
+struct HelperProcess {
+    inner: Mutex<Option<HelperProcessInner>>,
+}
+
+#[cfg(feature = "llvm")]
+impl HelperProcess {
+    fn compile(&self, job: &CompileJob, config: &RuntimeConfig) -> Result<WorkerSuccess, String> {
+        let mut slot = self.inner.lock().unwrap();
+        if slot.as_ref().is_none_or(|helper| !helper.matches_config(config)) {
+            *slot = Some(HelperProcessInner::spawn(config)?);
+        }
+
+        let helper = slot.as_mut().unwrap();
+        match helper.compile(job, config) {
+            Ok(result) => Ok(result),
+            Err(err) => {
+                *slot = None;
+                Err(err)
+            }
         }
     }
 }
 
 #[cfg(feature = "llvm")]
-fn helper_process() -> &'static Mutex<Option<HelperProcess>> {
-    static HELPER: OnceLock<Mutex<Option<HelperProcess>>> = OnceLock::new();
-    HELPER.get_or_init(|| Mutex::new(None))
-}
-
-#[cfg(feature = "llvm")]
-struct HelperProcess {
+struct HelperProcessInner {
     path: PathBuf,
     child: Child,
     stdin: ChildStdin,
@@ -357,7 +370,7 @@ struct HelperProcess {
 }
 
 #[cfg(feature = "llvm")]
-impl HelperProcess {
+impl HelperProcessInner {
     fn spawn(config: &RuntimeConfig) -> Result<Self, String> {
         let path = match &config.jit_helper_path {
             Some(path) => path.clone(),
@@ -421,7 +434,7 @@ impl HelperProcess {
 }
 
 #[cfg(feature = "llvm")]
-impl Drop for HelperProcess {
+impl Drop for HelperProcessInner {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
