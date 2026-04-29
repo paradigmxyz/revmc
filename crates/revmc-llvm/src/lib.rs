@@ -1915,6 +1915,7 @@ impl Builder for EvmLlvmBuilder<'_> {
         cpp::set_dso_local(stub);
 
         let before = self.bcx.get_insert_block();
+        let debug_location = self.debug_scope.and_then(|_| self.bcx.get_current_debug_location());
         self.bcx.unset_current_debug_location();
 
         let entry = self.cx.append_basic_block(stub, self.name("preserve_most"));
@@ -1927,8 +1928,12 @@ impl Builder for EvmLlvmBuilder<'_> {
             Some(_) => unreachable!("preserve-most stubs only support void functions"),
             None => self.bcx.build_return(None).unwrap(),
         };
+
         if let Some(before) = before {
             self.bcx.position_at_end(before);
+        }
+        if let Some(debug_location) = debug_location {
+            self.bcx.set_current_debug_location(debug_location);
         }
 
         stub
