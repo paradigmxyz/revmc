@@ -13,6 +13,6 @@
     MSTORE
     STOP
 
-; CHECK-COUNT-1: call {{.*}}@__revmc_builtin_mresize.stub
+; CHECK-COUNT-1: call {{.*}}@__revmc_builtin_mresize
 ; CHECK-COUNT-1: ecx.mem_base = load ptr
-; CHECK-NOT: call {{.*}}@__revmc_builtin_mresize.stub
+; CHECK-NOT: call {{.*}}@__revmc_builtin_mresize

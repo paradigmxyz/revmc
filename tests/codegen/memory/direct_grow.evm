@@ -7,6 +7,6 @@
     STOP
 
 ; CHECK-NOT: ecx.mem_len
-; CHECK-COUNT-2: call {{.*}}@__revmc_builtin_mresize.stub
+; CHECK-COUNT-2: call {{.*}}@__revmc_builtin_mresize
 ; CHECK-NOT: ecx.mem_len
-; CHECK-NOT: call {{.*}}@__revmc_builtin_mresize.stub
+; CHECK-NOT: call {{.*}}@__revmc_builtin_mresize

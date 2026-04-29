@@ -1951,7 +1951,7 @@ impl Builder for EvmLlvmBuilder<'_> {
 
 /// Builds the LLVM pass pipeline string. See [`EvmLlvmBackend::optimize_module`].
 fn build_pass_pipeline(with_licm: bool) -> String {
-    let mut passes = String::from("function(");
+    let mut passes = String::from("module(globalopt,cgscc(inline),globalopt,function(");
     let function_passes: &[&str] = &[
         "simplifycfg",
         "sroa",
@@ -1981,7 +1981,7 @@ fn build_pass_pipeline(with_licm: bool) -> String {
         }
         passes.push_str(pass);
     }
-    passes.push_str("),globaldce");
+    passes.push_str("),globaldce)");
     passes
 }
 

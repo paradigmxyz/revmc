@@ -2,4 +2,4 @@
     CALLVALUE
     RETURN
 
-; CHECK-NOT: call {{.*}}@__revmc_builtin_mresize.stub
+; CHECK-NOT: call {{.*}}@__revmc_builtin_mresize

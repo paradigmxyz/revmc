@@ -12,8 +12,8 @@
     MSTORE
     STOP
 
-; CHECK-COUNT-2: call {{.*}}@__revmc_builtin_mresize.stub
-; CHECK-NOT: call {{.*}}@__revmc_builtin_mresize.stub
+; CHECK-COUNT-2: call {{.*}}@__revmc_builtin_mresize
+; CHECK-NOT: call {{.*}}@__revmc_builtin_mresize
 ; CHECK: @__revmc_builtin_keccak256
 ; CHECK-NOT: load ptr
-; CHECK-NOT: call {{.*}}@__revmc_builtin_mresize.stub
+; CHECK-NOT: call {{.*}}@__revmc_builtin_mresize
