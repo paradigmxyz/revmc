@@ -1683,10 +1683,14 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         if section.known_size < section.required_size {
             return false;
         }
-        let Some((Some(_), Some(_))) = self.bytecode.const_memory_access(inst) else {
-            return false;
-        };
-        true
+        let mut has_memory_access = false;
+        for (offset, len) in self.bytecode.const_memory_accesses(inst).into_iter().flatten() {
+            has_memory_access = true;
+            if offset.is_none() || len.is_none() {
+                return false;
+            }
+        }
+        has_memory_access
     }
 
     fn build_memory_addr(&mut self, offset: B::Value) -> B::Value {
@@ -1892,8 +1896,12 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         //     format_printf!("{} - calling {}\n", self.op_block_name(""), builtin.name()),
         //     &[],
         // );
+        let invalidate_mem_base =
+            !self.current_inst.is_some_and(|inst| self.can_skip_ensure_memory(inst));
         let value = self.bcx.call(function, args);
-        self.cached_mem_base = None;
+        if invalidate_mem_base {
+            self.cached_mem_base = None;
+        }
         value
     }
 
