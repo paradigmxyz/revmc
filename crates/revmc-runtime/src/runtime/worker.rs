@@ -23,7 +23,7 @@ use rayon::{ThreadPool, ThreadPoolBuilder};
 use std::{
     cell::RefCell,
     fs::File,
-    io::{Read, Write},
+    io::{BufRead, BufReader, Read, Write},
     path::PathBuf,
     process::{Child, ChildStdin, Command, Stdio},
     thread::JoinHandle,
@@ -44,6 +44,8 @@ use crate::{
 };
 #[cfg(feature = "llvm")]
 use revm_primitives::hardfork::SpecId;
+#[cfg(feature = "llvm")]
+use serde::{Deserialize, Serialize};
 
 /// Notifier for synchronous compilation requests.
 ///
@@ -389,7 +391,7 @@ impl HelperProcessInner {
         let stdout = child.stdout.take().ok_or("helper stdout unavailable")?;
         let (result_tx, result_rx) = chan::bounded(1);
         let reader = std::thread::spawn(move || {
-            let mut stdout = stdout;
+            let mut stdout = BufReader::new(stdout);
             loop {
                 let result = read_helper_result(&mut stdout);
                 if result_tx.send(result).is_err() {
@@ -445,51 +447,60 @@ impl Drop for HelperProcessInner {
 }
 
 #[cfg(feature = "llvm")]
-fn write_job(mut w: impl Write, job: &CompileJob, config: &RuntimeConfig) -> std::io::Result<()> {
-    w.write_all(b"RJIT\0")?;
-    w.write_all(&job.key.code_hash.0)?;
-    w.write_all(&[job.key.spec_id as u8, opt_level_to_u8(job.opt_level)])?;
-    w.write_all(&[
-        u8::from(config.debug_assertions),
-        u8::from(config.no_dedup),
-        u8::from(config.no_dse),
-    ])?;
-    write_bytes(&mut w, job.symbol_name.as_bytes())?;
-    write_bytes(&mut w, &job.bytecode)?;
-    Ok(())
+#[derive(Serialize, Deserialize)]
+struct HelperRequest {
+    code_hash: [u8; 32],
+    spec_id: u8,
+    opt_level: u8,
+    debug_assertions: bool,
+    no_dedup: bool,
+    no_dse: bool,
+    symbol_name: String,
+    bytecode: Vec<u8>,
 }
 
 #[cfg(feature = "llvm")]
-fn read_helper_result(mut r: impl Read) -> Result<WorkerSuccess, String> {
-    let mut tag = [0u8; 1];
-    r.read_exact(&mut tag).map_err(|e| format!("failed to read helper result: {e}"))?;
-    match tag[0] {
-        0 => {
-            let msg =
-                read_string(&mut r).map_err(|e| format!("failed to read helper error: {e}"))?;
-            Err(msg)
-        }
-        1 => {
-            let symbol_name =
-                read_string(&mut r).map_err(|e| format!("failed to read symbol name: {e}"))?;
-            let object_bytes =
-                read_vec(&mut r).map_err(|e| format!("failed to read object bytes: {e}"))?;
-            let count =
-                read_u32(&mut r).map_err(|e| format!("failed to read symbol count: {e}"))?;
-            let mut builtin_symbols = Vec::with_capacity(count as usize);
-            for _ in 0..count {
-                builtin_symbols.push(
-                    read_string(&mut r)
-                        .map_err(|e| format!("failed to read builtin symbol: {e}"))?,
-                );
-            }
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum HelperResponse {
+    Ok { symbol_name: String, object_bytes: Vec<u8>, builtin_symbols: Vec<String> },
+    Err { error: String },
+}
+
+#[cfg(feature = "llvm")]
+fn write_job(mut w: impl Write, job: &CompileJob, config: &RuntimeConfig) -> std::io::Result<()> {
+    let req = HelperRequest {
+        code_hash: job.key.code_hash.0,
+        spec_id: job.key.spec_id as u8,
+        opt_level: opt_level_to_u8(job.opt_level),
+        debug_assertions: config.debug_assertions,
+        no_dedup: config.no_dedup,
+        no_dse: config.no_dse,
+        symbol_name: job.symbol_name.clone(),
+        bytecode: job.bytecode.to_vec(),
+    };
+    serde_json::to_writer(&mut w, &req)?;
+    w.write_all(b"\n")
+}
+
+#[cfg(feature = "llvm")]
+fn read_helper_result(r: &mut impl BufRead) -> Result<WorkerSuccess, String> {
+    let mut line = String::new();
+    let n = r.read_line(&mut line).map_err(|e| format!("failed to read helper result: {e}"))?;
+    if n == 0 {
+        return Err("JIT helper closed stdout".into());
+    }
+    match serde_json::from_str::<HelperResponse>(&line)
+        .map_err(|e| format!("failed to decode helper result: {e}"))?
+    {
+        HelperResponse::Ok { symbol_name, object_bytes, builtin_symbols } => {
             Ok(WorkerSuccess::JitObject(JitObjectSuccess {
                 symbol_name,
                 object_bytes,
                 builtin_symbols,
             }))
         }
-        tag => Err(format!("unknown helper result tag {tag}")),
+        HelperResponse::Err { error } => Err(error),
     }
 }
 
@@ -521,35 +532,26 @@ pub(super) fn run_jit_helper_stdio() -> eyre::Result<()> {
 }
 
 #[cfg(feature = "llvm")]
-fn read_helper_job(mut stdin: impl Read) -> eyre::Result<Option<(CompileJob, RuntimeConfig)>> {
-    let mut magic = [0u8; 5];
-    match stdin.read_exact(&mut magic) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
-        Err(e) => return Err(e.into()),
+fn read_helper_job(stdin: &mut impl BufRead) -> eyre::Result<Option<(CompileJob, RuntimeConfig)>> {
+    let mut line = String::new();
+    if stdin.read_line(&mut line)? == 0 {
+        return Ok(None);
     }
-    eyre::ensure!(&magic == b"RJIT\0", "invalid JIT helper request");
-
-    let mut hash = [0u8; 32];
-    stdin.read_exact(&mut hash)?;
-    let mut fixed = [0u8; 5];
-    stdin.read_exact(&mut fixed)?;
-    let spec_id = SpecId::try_from_u8(fixed[0]).ok_or_else(|| eyre::eyre!("invalid spec id"))?;
-    let opt_level = opt_level_from_u8(fixed[1])?;
-    let symbol_name = read_string(&mut stdin)?;
-    let bytecode = Bytes::from(read_vec(&mut stdin)?);
+    let req: HelperRequest = serde_json::from_str(&line)?;
+    let spec_id = SpecId::try_from_u8(req.spec_id).ok_or_else(|| eyre::eyre!("invalid spec id"))?;
+    let opt_level = opt_level_from_u8(req.opt_level)?;
 
     let config = RuntimeConfig {
-        debug_assertions: fixed[2] != 0,
-        no_dedup: fixed[3] != 0,
-        no_dse: fixed[4] != 0,
+        debug_assertions: req.debug_assertions,
+        no_dedup: req.no_dedup,
+        no_dse: req.no_dse,
         ..Default::default()
     };
     let job = CompileJob {
         kind: CompilationKind::Jit,
-        key: RuntimeCacheKey { code_hash: B256::from(hash), spec_id },
-        bytecode,
-        symbol_name,
+        key: RuntimeCacheKey { code_hash: B256::from(req.code_hash), spec_id },
+        bytecode: Bytes::from(req.bytecode),
+        symbol_name: req.symbol_name,
         opt_level,
         sync_notifier: SyncNotifier::none(),
         generation: 0,
@@ -562,50 +564,18 @@ fn write_helper_result(
     mut stdout: impl Write,
     result: Result<WorkerSuccess, String>,
 ) -> eyre::Result<()> {
-    match result {
-        Ok(WorkerSuccess::JitObject(success)) => {
-            stdout.write_all(&[1])?;
-            write_bytes(&mut stdout, success.symbol_name.as_bytes())?;
-            write_bytes(&mut stdout, &success.object_bytes)?;
-            stdout.write_all(&(success.builtin_symbols.len() as u32).to_le_bytes())?;
-            for symbol in success.builtin_symbols {
-                write_bytes(&mut stdout, symbol.as_bytes())?;
-            }
-        }
+    let response = match result {
+        Ok(WorkerSuccess::JitObject(success)) => HelperResponse::Ok {
+            symbol_name: success.symbol_name,
+            object_bytes: success.object_bytes,
+            builtin_symbols: success.builtin_symbols,
+        },
         Ok(_) => unreachable!(),
-        Err(err) => {
-            stdout.write_all(&[0])?;
-            write_bytes(&mut stdout, err.as_bytes())?;
-        }
-    }
+        Err(error) => HelperResponse::Err { error },
+    };
+    serde_json::to_writer(&mut stdout, &response)?;
+    stdout.write_all(b"\n")?;
     Ok(())
-}
-
-#[cfg(feature = "llvm")]
-fn write_bytes(mut w: impl Write, bytes: &[u8]) -> std::io::Result<()> {
-    w.write_all(&(bytes.len() as u32).to_le_bytes())?;
-    w.write_all(bytes)
-}
-
-#[cfg(feature = "llvm")]
-fn read_string(r: impl Read) -> std::io::Result<String> {
-    String::from_utf8(read_vec(r)?)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
-}
-
-#[cfg(feature = "llvm")]
-fn read_vec(mut r: impl Read) -> std::io::Result<Vec<u8>> {
-    let len = read_u32(&mut r)? as usize;
-    let mut bytes = vec![0; len];
-    r.read_exact(&mut bytes)?;
-    Ok(bytes)
-}
-
-#[cfg(feature = "llvm")]
-fn read_u32(mut r: impl Read) -> std::io::Result<u32> {
-    let mut bytes = [0u8; 4];
-    r.read_exact(&mut bytes)?;
-    Ok(u32::from_le_bytes(bytes))
 }
 
 #[cfg(feature = "llvm")]

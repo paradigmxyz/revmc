@@ -3344,6 +3344,8 @@ dependencies = [
  "revmc-context",
  "revmc-llvm",
  "revmc-statetest",
+ "serde",
+ "serde_json",
  "similar-asserts",
  "tempfile",
  "tracing",

@@ -25,14 +25,14 @@ Current prototype:
 
 - `RuntimeConfig::jit_mode = JitMode::OutOfProcess` makes the runtime keep a global persistent helper process spawned via `RuntimeConfig::jit_helper_path`, or `std::env::current_exe()` when unset.
 - Helper binaries must call `revmc::runtime::maybe_run_jit_helper()` at process startup. `revmc-cli` does this already.
-- Workers send a stream of JIT object requests to the helper over stdin and receive framed responses from stdout.
+- Workers send newline-delimited JSON JIT object requests to the helper over stdin and receive newline-delimited JSON responses from stdout.
 - The parent links returned object bytes into its local ORC instance, resolves the symbol, and constructs `JitCodeBacking` with a parent-owned `ResourceTracker`.
 - `RuntimeTuning::jit_timeout` bounds each helper compilation; timed-out helpers are killed and replaced on the next job.
 
 Still needed:
 
 - Move the worker pool into a single helper process; the parent should only enqueue IPC requests.
-- Define a versioned framed IPC protocol for `CompileJob` and `WorkerResult` data: key, bytecode, symbol name, spec id, optimization level, gas params, debug flags, dedup/DSE flags, dump settings, generation, timings, object bytes, and errors.
+- Add protocol versioning to the JSON IPC payloads and carry the remaining data: gas params, dump settings, generation, timings, object bytes, and errors.
 - Keep AOT jobs either in the helper too or explicitly route them through the existing in-process AOT path; the first option gives consistent isolation.
 - Define shutdown semantics: close IPC, let the helper drain or cancel queued jobs, then kill on timeout.
 - Treat helper crash as worker-pool failure: fail pending synchronous jobs, drop pending async jobs, and optionally respawn.
