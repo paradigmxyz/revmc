@@ -1,4 +1,4 @@
-use crate::bytecode::{Block, Bytecode, Inst};
+use crate::bytecode::{Block, Bytecode, Inst, InstFlags};
 use core::fmt;
 use oxc_index::{IndexVec, index_vec};
 use revm_bytecode::opcode as op;
@@ -38,14 +38,38 @@ impl MemorySection {
 pub(crate) struct MemorySectionAnalysis {
     block_memory_sizes: IndexVec<Block, u64>,
     block_entry_sizes: IndexVec<Block, Option<u64>>,
+    dynamic_jump_blocks: Vec<Block>,
+    dynamic_jump_targets: Vec<Block>,
     sections: IndexVec<Inst, MemorySection>,
 }
 
 impl MemorySectionAnalysis {
     pub(crate) fn new(bytecode: &Bytecode<'_>) -> Self {
+        let mut dynamic_jump_blocks = Vec::new();
+        let mut dynamic_jump_targets = Vec::new();
+        if bytecode.has_dynamic_jumps() {
+            for bid in bytecode.cfg.blocks.indices() {
+                let block = &bytecode.cfg.blocks[bid];
+                let head = bytecode.inst(block.insts.start);
+                if head.is_reachable_jumpdest(true) {
+                    dynamic_jump_targets.push(bid);
+                }
+
+                let term = bytecode.inst(block.terminator());
+                if term.is_jump()
+                    && !term.is_static_jump()
+                    && !term.flags.contains(InstFlags::INVALID_JUMP)
+                {
+                    dynamic_jump_blocks.push(bid);
+                }
+            }
+        }
+
         Self {
             block_memory_sizes: index_vec![0; bytecode.cfg.blocks.len()],
             block_entry_sizes: index_vec![None; bytecode.cfg.blocks.len()],
+            dynamic_jump_blocks,
+            dynamic_jump_targets,
             sections: index_vec![MemorySection::default(); bytecode.insts.len()],
         }
     }
@@ -77,54 +101,55 @@ impl MemorySectionAnalysis {
         let mut queue = VecDeque::new();
         queue.push_back(entry);
 
-        if bytecode.has_dynamic_jumps() {
-            for bid in bytecode.cfg.blocks.indices() {
-                let block = &bytecode.cfg.blocks[bid];
-                if bytecode.inst(block.insts.start).is_reachable_jumpdest(true)
-                    && self.block_entry_sizes[bid].is_none()
-                {
-                    self.block_entry_sizes[bid] = Some(0);
-                    queue.push_back(bid);
-                }
-            }
-        }
-
         while let Some(bid) = queue.pop_front() {
             if self.block_entry_sizes[bid].is_none() {
                 continue;
             }
 
             for &succ in &bytecode.cfg.blocks[bid].succs {
-                let new_entry_size = self.join_entry_size(bytecode, succ);
-                if self.block_entry_sizes[succ] != new_entry_size {
-                    self.block_entry_sizes[succ] = new_entry_size;
-                    queue.push_back(succ);
+                self.update_entry_size(bytecode, succ, &mut queue);
+            }
+            if self.dynamic_jump_blocks.contains(&bid) {
+                let targets = self.dynamic_jump_targets.clone();
+                for succ in targets {
+                    self.update_entry_size(bytecode, succ, &mut queue);
                 }
             }
         }
     }
 
+    fn update_entry_size(
+        &mut self,
+        bytecode: &Bytecode<'_>,
+        bid: Block,
+        queue: &mut VecDeque<Block>,
+    ) {
+        let new_entry_size = self.join_entry_size(bytecode, bid);
+        if self.block_entry_sizes[bid] != new_entry_size {
+            self.block_entry_sizes[bid] = new_entry_size;
+            queue.push_back(bid);
+        }
+    }
+
     fn join_entry_size(&self, bytecode: &Bytecode<'_>, bid: Block) -> Option<u64> {
         let block = &bytecode.cfg.blocks[bid];
-        let mut entry_size = if bytecode.has_dynamic_jumps()
-            && bytecode.inst(block.insts.start).is_reachable_jumpdest(true)
-        {
-            Some(0)
-        } else {
-            None
-        };
+        let mut entry_size = None;
 
         for &pred in &block.preds {
-            if let Some(pred_exit_size) = self.block_entry_sizes[pred]
-                .map(|entry_size| entry_size.max(self.block_memory_sizes[pred]))
-            {
-                entry_size = Some(
-                    entry_size.map_or(pred_exit_size, |entry_size| entry_size.min(pred_exit_size)),
-                );
+            entry_size = join_size(entry_size, self.block_exit_size(pred));
+        }
+
+        if bytecode.inst(block.insts.start).is_reachable_jumpdest(true) {
+            for &pred in &self.dynamic_jump_blocks {
+                entry_size = join_size(entry_size, self.block_exit_size(pred));
             }
         }
 
         entry_size
+    }
+
+    fn block_exit_size(&self, bid: Block) -> Option<u64> {
+        self.block_entry_sizes[bid].map(|entry_size| entry_size.max(self.block_memory_sizes[bid]))
     }
 
     fn save_sections(&mut self, bytecode: &Bytecode<'_>) {
@@ -155,6 +180,11 @@ impl MemorySectionAnalysis {
             self.sections[block.insts.start] = MemorySection { min_memory_size, memory_size };
         }
     }
+}
+
+fn join_size(entry_size: Option<u64>, pred_exit_size: Option<u64>) -> Option<u64> {
+    let Some(pred_exit_size) = pred_exit_size else { return entry_size };
+    Some(entry_size.map_or(pred_exit_size, |entry_size| entry_size.min(pred_exit_size)))
 }
 
 #[inline]
