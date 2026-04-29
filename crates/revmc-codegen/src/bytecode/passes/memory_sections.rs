@@ -205,7 +205,7 @@ fn exact_memory_size_for_access(offset: Option<u64>, len: Option<u64>) -> Option
 
 fn min_memory_size_for_access(offset: Option<u64>, len: Option<u64>) -> u64 {
     match (offset, len) {
-        (_, Some(0)) | (_, None) => 0,
+        (_, Some(0) | None) => 0,
         (Some(offset), Some(len)) => round_memory_size(offset.saturating_add(len)),
         (None, Some(len)) => round_memory_size(len),
     }
