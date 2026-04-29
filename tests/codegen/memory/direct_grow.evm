@@ -1,10 +1,10 @@
-PUSH1 0x60
-PUSH1 0x40
-MSTORE
-PUSH1 0x01
-PUSH1 0x80
-MSTORE8
-STOP
+    PUSH1 0x60
+    PUSH1 0x40
+    MSTORE
+    PUSH1 0x01
+    PUSH1 0x80
+    MSTORE8
+    STOP
 
 ; CHECK-NOT: ecx.mem_len
 ; CHECK-COUNT-2: call {{.*}}@__revmc_builtin_mresize.stub

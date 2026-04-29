@@ -1,7 +1,7 @@
-CALLVALUE
-PUSH0
-MSTORE
-STOP
+    CALLVALUE
+    PUSH0
+    MSTORE
+    STOP
 
 ; CHECK-NOT: ecx.mem_len
 ; CHECK-COUNT-1: call {{.*}}@__revmc_builtin_mresize.stub

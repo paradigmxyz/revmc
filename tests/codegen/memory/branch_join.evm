@@ -1,21 +1,21 @@
-CALLVALUE
-PUSH %large
-JUMPI
-PUSH0
-PUSH0
-MSTORE
-PUSH %join
-JUMP
+    CALLVALUE
+    PUSH %large
+    JUMPI
+    PUSH0
+    PUSH0
+    MSTORE
+    PUSH %join
+    JUMP
 large:
-JUMPDEST
-PUSH0
-PUSH0
-MSTORE
+    JUMPDEST
+    PUSH0
+    PUSH0
+    MSTORE
 join:
-JUMPDEST
-PUSH0
-MLOAD
-STOP
+    JUMPDEST
+    PUSH0
+    MLOAD
+    STOP
 
 ; CHECK-COUNT-2: call {{.*}}@__revmc_builtin_mresize.stub
 ; CHECK-NOT: call {{.*}}@__revmc_builtin_mresize.stub

@@ -1,13 +1,13 @@
-CALLVALUE
-PUSH0
-MSTORE
-PUSH0
-SLOAD
-POP
-CALLVALUE
-PUSH0
-MSTORE
-STOP
+    CALLVALUE
+    PUSH0
+    MSTORE
+    PUSH0
+    SLOAD
+    POP
+    CALLVALUE
+    PUSH0
+    MSTORE
+    STOP
 
 ; CHECK-COUNT-1: call {{.*}}@__revmc_builtin_mresize.stub
 ; CHECK-COUNT-2: = load ptr, ptr %ecx.mem_base.addr

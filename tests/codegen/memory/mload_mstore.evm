@@ -1,17 +1,17 @@
-CALLVALUE
-PUSH1 0x40
-MSTORE
-PUSH0
-MLOAD
-PUSH1 0x40
-MLOAD
-CALLVALUE
-PUSH0
-MSTORE
-CALLVALUE
-PUSH1 0x20
-MSTORE
-STOP
+    CALLVALUE
+    PUSH1 0x40
+    MSTORE
+    PUSH0
+    MLOAD
+    PUSH1 0x40
+    MLOAD
+    CALLVALUE
+    PUSH0
+    MSTORE
+    CALLVALUE
+    PUSH1 0x20
+    MSTORE
+    STOP
 
 ; CHECK-COUNT-1: call {{.*}}@__revmc_builtin_mresize.stub
 ; CHECK-COUNT-1: ecx.mem_base = load ptr

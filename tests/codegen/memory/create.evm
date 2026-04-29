@@ -1,16 +1,16 @@
-CALLVALUE
-PUSH0
-MSTORE
-PUSH1 0x20
-PUSH0
-PUSH0
-CREATE
-PUSH1 0x20
-PUSH0
-PUSH0
-PUSH0
-CREATE2
-STOP
+    CALLVALUE
+    PUSH0
+    MSTORE
+    PUSH1 0x20
+    PUSH0
+    PUSH0
+    CREATE
+    PUSH1 0x20
+    PUSH0
+    PUSH0
+    PUSH0
+    CREATE2
+    STOP
 
 ; CHECK-COUNT-1: call {{.*}}@__revmc_builtin_mresize.stub
 ; CHECK-NOT: call {{.*}}@__revmc_builtin_mresize.stub

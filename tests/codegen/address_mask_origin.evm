@@ -1,7 +1,7 @@
-ORIGIN
-PUSH20 0xffffffffffffffffffffffffffffffffffffffff
-AND
-RET_WORD
+    ORIGIN
+    PUSH20 0xffffffffffffffffffffffffffffffffffffffff
+    AND
+    RET_WORD
 
 ; CHECK: call void @__revmc_builtin_origin(
 ; CHECK-NOT: and

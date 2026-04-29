@@ -1,7 +1,7 @@
-CALLER
-PUSH20 0xffffffffffffffffffffffffffffffffffffffff
-AND
-RET_WORD
+    CALLER
+    PUSH20 0xffffffffffffffffffffffffffffffffffffffff
+    AND
+    RET_WORD
 
 ; CHECK: load i160
 ; CHECK-NOT: and
