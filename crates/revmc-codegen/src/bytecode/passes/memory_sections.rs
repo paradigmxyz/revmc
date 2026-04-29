@@ -87,8 +87,10 @@ impl MemorySectionAnalysis {
             let block = &bytecode.cfg.blocks[bid];
             for inst in block.insts() {
                 for (offset, len) in bytecode.const_memory_accesses(inst).into_iter().flatten() {
-                    self.block_required_sizes[bid] =
-                        self.block_required_sizes[bid].max(memory_size_for_access(offset, len));
+                    if let Some(required_size) = memory_size_for_access(offset, len) {
+                        self.block_required_sizes[bid] =
+                            self.block_required_sizes[bid].max(required_size);
+                    }
                 }
             }
         }
@@ -133,7 +135,7 @@ impl MemorySectionAnalysis {
 
     fn join_entry_size(&self, bytecode: &Bytecode<'_>, bid: Block) -> Option<u64> {
         let block = &bytecode.cfg.blocks[bid];
-        let mut entry_size = None;
+        let mut entry_size = (bid == Block::from_usize(0)).then_some(0);
 
         for &pred in &block.preds {
             entry_size = join_size(entry_size, self.block_exit_size(pred));
@@ -169,17 +171,19 @@ impl MemorySectionAnalysis {
                         ?offset,
                         ?len,
                         known_size,
-                        required_size,
+                        ?required_size,
                         "memory access"
                     );
-                    if known_size != 0 || required_size != 0 {
-                        let section = &mut self.sections[inst];
-                        if section.known_size == 0 && section.required_size == 0 {
-                            section.known_size = known_size;
+                    if let Some(required_size) = required_size {
+                        if known_size != 0 || required_size != 0 {
+                            let section = &mut self.sections[inst];
+                            if section.known_size == 0 && section.required_size == 0 {
+                                section.known_size = known_size;
+                            }
+                            section.required_size = section.required_size.max(required_size);
                         }
-                        section.required_size = section.required_size.max(required_size);
+                        known_size = known_size.max(required_size);
                     }
-                    known_size = known_size.max(required_size);
                 }
             }
         }
@@ -192,11 +196,12 @@ fn join_size(entry_size: Option<u64>, pred_exit_size: Option<u64>) -> Option<u64
 }
 
 #[inline]
-fn memory_size_for_access(offset: Option<u64>, len: Option<u64>) -> u64 {
+fn memory_size_for_access(offset: Option<u64>, len: Option<u64>) -> Option<u64> {
     if matches!(len, Some(0)) {
-        return 0;
+        return Some(0);
     }
-    offset.unwrap_or(0).saturating_add(len.unwrap_or(0)).saturating_add(31) / 32 * 32
+    let size = offset?.saturating_add(len?);
+    Some(size.saturating_add(31) / 32 * 32)
 }
 
 fn opcode_name(opcode: u8) -> &'static str {
