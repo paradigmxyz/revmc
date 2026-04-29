@@ -566,14 +566,11 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             let section = data.stack_section;
             self.vstack.reset(section.inputs as usize, section.max_growth.max(0) as usize);
         }
-        self.len_before = if self.section_len_offset == 0 {
-            self.section_start_len
-        } else {
-            self.bcx.iadd_imm(self.section_start_len, self.section_len_offset as i64)
-        };
-
         // Check stack length for the current section.
-        if self.config.stack_bound_checks {
+        let needs_bounds_check = self.config.stack_bound_checks
+            && (data.stack_section.inputs > 0 || data.stack_section.max_growth > 0);
+        if needs_bounds_check {
+            self.len_before = self.len_from_section(self.section_len_offset);
             self.check_stack_bounds(data.stack_section);
         }
 
@@ -584,11 +581,15 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             goto_return!("noop");
         }
 
+        if !needs_bounds_check {
+            self.len_before = self.len_from_section(self.section_len_offset);
+        }
+
         // Store the updated stack length. Skip when `len.addr` already holds the
         // correct value, i.e. the offset we'd write matches what's already stored.
         let new_len_offset = self.section_len_offset + diff;
         if new_len_offset != self.stored_len_offset {
-            let len_changed = self.bcx.iadd_imm(self.len_before, diff as i64);
+            let len_changed = self.len_from_section(new_len_offset);
             self.stack_len.store(&mut self.bcx, len_changed);
             self.stored_len_offset = new_len_offset;
         }
@@ -1512,6 +1513,14 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 self.bcx.store(value, sp);
             }
         }
+    }
+
+    /// Returns the stack length at an offset from `section_start_len`.
+    fn len_from_section(&mut self, offset: i32) -> B::Value {
+        if offset == 0 {
+            return self.section_start_len;
+        }
+        self.bcx.iadd_imm(self.section_start_len, offset as i64)
     }
 
     /// Returns a stack pointer offset from `section_start_sp`.

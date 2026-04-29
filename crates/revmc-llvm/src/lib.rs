@@ -1617,6 +1617,9 @@ impl Builder for EvmLlvmBuilder<'_> {
     }
 
     fn iadd_imm(&mut self, lhs: Self::Value, rhs: i64) -> Self::Value {
+        if rhs == 0 {
+            return lhs;
+        }
         let rhs = self.iconst(lhs.get_type(), rhs);
         self.iadd(lhs, rhs)
     }
