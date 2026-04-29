@@ -627,6 +627,7 @@ impl<'a> Bytecode<'a> {
     }
 
     /// Returns the first constant EVM memory access `(offset, len)` for the given instruction.
+    #[allow(dead_code)]
     pub(crate) fn const_memory_access(&self, inst: Inst) -> Option<(Option<u64>, Option<u64>)> {
         self.const_memory_accesses(inst).into_iter().flatten().next()
     }
