@@ -1,4 +1,6 @@
-use revmc_backend::{Attribute, Backend, Builder, FunctionAttributeLocation, TypeMethods};
+use revmc_backend::{
+    Attribute, Backend, Builder, CallConv, FunctionAttributeLocation, TypeMethods,
+};
 
 // Must be kept in sync with `remvc-build`.
 const MANGLE_PREFIX: &str = "__revmc_builtin_";
@@ -35,11 +37,16 @@ impl<B: Backend> Builtins<B> {
     fn init(builtin: Builtin, bcx: &mut B::Builder<'_>) -> B::Function {
         let name = builtin.name();
         debug_assert!(name.starts_with(MANGLE_PREFIX), "{name:?}");
-        bcx.get_function(name).inspect(|r| trace!(name, ?r, "pre-existing")).unwrap_or_else(|| {
-            let r = Self::build(name, builtin, bcx);
-            trace!(name, ?r, "built");
-            r
-        })
+        if builtin.call_conv() == CallConv::Default
+            && let Some(r) = bcx.get_function(name)
+        {
+            trace!(name, ?r, "pre-existing");
+            return r;
+        }
+
+        let r = Self::build(name, builtin, bcx);
+        trace!(name, ?r, "built");
+        r
     }
 
     fn build(name: &str, builtin: Builtin, bcx: &mut B::Builder<'_>) -> B::Function {
@@ -47,7 +54,11 @@ impl<B: Backend> Builtins<B> {
         let params = builtin.params(bcx);
         let address = builtin.addr();
         let linkage = revmc_backend::Linkage::Import;
-        let f = bcx.add_function(name, &params, ret, Some(address), linkage);
+        let f = bcx.add_function(name, &params, ret, Some(address), linkage, CallConv::Default);
+        let f = match builtin.call_conv() {
+            CallConv::Default => f,
+            call_conv => bcx.add_function_stub(f, call_conv),
+        };
         let param_attrs = builtin.param_attrs();
         let mut attrs = Vec::with_capacity(16);
         attrs.extend(builtin.attrs());
@@ -121,6 +132,13 @@ macro_rules! builtins {
                 }
             }
 
+            pub const fn call_conv(self) -> CallConv {
+                match self {
+                    Self::Mresize => CallConv::PreserveMost,
+                    _ => CallConv::Default,
+                }
+            }
+
             pub fn ret<B: TypeMethods>(self, $bcx: &mut B) -> Option<B::Type> {
                 $($types_init)*
                 match self {
@@ -170,12 +188,9 @@ macro_rules! builtins {
                 const KECCAK256CC: u8 = _0_1;
 
                 const CALLDATALOADC: u8 = _0_1;
-                const MLOADC: u8 = _0_1;
                 const SLOADC: u8 = _0_1;
 
-                const MSTORECD: u8 = _1_0;
-                const MSTOREDC: u8 = _1_0;
-                const MSTORECC: u8 = _0_0;
+                const MRESIZE: u8 = _0_0;
 
                 const LOG: u8 = _0_0;
                 const DORETURN: u8 = RETURN;
@@ -283,17 +298,10 @@ builtins! {
     BlobHash       = __revmc_builtin_blob_hash(@[ecx_ro] ptr, @[sp] ptr) None,
     BlobBaseFee    = __revmc_builtin_blob_base_fee(@[ecx_ro] ptr, @[sp] ptr) None,
     SlotNum        = __revmc_builtin_slot_num(@[ecx_ro] ptr, @[sp] ptr) None,
-    Mload          = __revmc_builtin_mload(@[ecx] ptr, @[sp] ptr) None,
-    MloadC         = __revmc_builtin_mload_c(@[ecx] ptr, @[sp] ptr, usize) None,
-    Mstore         = __revmc_builtin_mstore(@[ecx] ptr, @[sp] ptr) None,
-    MstoreCD       = __revmc_builtin_mstore_cd(@[ecx] ptr, usize, @[sp] ptr) None,
-    MstoreDC       = __revmc_builtin_mstore_dc(@[ecx] ptr, @[sp] ptr, usize) None,
-    MstoreCC       = __revmc_builtin_mstore_cc(@[ecx] ptr, usize, usize) None,
-    Mstore8        = __revmc_builtin_mstore8(@[ecx] ptr, @[sp] ptr) None,
+    Mresize        = #[Cold] __revmc_builtin_mresize(@[ecx] ptr, usize) None,
     Sload          = __revmc_builtin_sload(@[ecx] ptr, @[sp] ptr) None,
     SloadC         = __revmc_builtin_sload_c(@[ecx] ptr, @[sp] ptr, usize) None,
     Sstore         = __revmc_builtin_sstore(@[ecx] ptr, @[sp] ptr) None,
-    Msize          = __revmc_builtin_msize(@[ecx_ro] ptr) Some(usize),
     Tload          = __revmc_builtin_tload(@[ecx] ptr, @[sp] ptr) None,
     Tstore         = __revmc_builtin_tstore(@[ecx] ptr, @[sp] ptr) None,
     Mcopy          = __revmc_builtin_mcopy(@[ecx] ptr, @[sp] ptr) None,

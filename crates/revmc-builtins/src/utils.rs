@@ -89,8 +89,9 @@ pub(crate) fn ensure_memory(ecx: &mut EvmContext<'_>, offset: usize, len: usize)
         &ecx.gas_params,
         offset,
         len,
-    )
-    .map_err(Into::into)
+    )?;
+    ecx.refresh_memory_cache();
+    Ok(())
 }
 
 pub(crate) unsafe fn copy_operation(

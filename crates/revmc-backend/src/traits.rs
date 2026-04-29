@@ -181,6 +181,16 @@ pub enum FunctionAttributeLocation {
     Function,
 }
 
+/// Calling convention.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CallConv {
+    /// Backend default calling convention.
+    #[default]
+    Default,
+    /// Preserve most caller registers across the call.
+    PreserveMost,
+}
+
 /// Tail call kind.
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
 pub enum TailCallKind {
@@ -477,7 +487,18 @@ pub trait Builder: BackendTypes + TypeMethods {
         ret: Option<Self::Type>,
         address: Option<usize>,
         linkage: Linkage,
+        call_conv: CallConv,
     ) -> Self::Function;
+
+    /// Adds a local stub with the given calling convention for an existing function.
+    fn add_function_stub(
+        &mut self,
+        function: Self::Function,
+        call_conv: CallConv,
+    ) -> Self::Function {
+        let _ = call_conv;
+        function
+    }
 
     /// Adds an attribute to a function, one of its parameters, or its return value.
     ///

@@ -917,16 +917,23 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 self.pop_ignore(1);
             }
             op::MLOAD => {
-                let sp = self.sp_after_inputs();
-                self.call_fallible_builtin(Builtin::Mload, &[self.ecx, sp]);
+                let offset = self.pop();
+                let addr = self.build_ensure_memory(offset, 32);
+                let value = self.bcx.load_aligned(self.word_type, addr, 1, "mload.value");
+                let value = if self.little_endian() { self.bcx.bswap(value) } else { value };
+                self.push(value);
             }
             op::MSTORE => {
-                let sp = self.sp_after_inputs();
-                self.call_fallible_builtin(Builtin::Mstore, &[self.ecx, sp]);
+                let [offset, value] = self.popn();
+                let addr = self.build_ensure_memory(offset, 32);
+                let value = if self.little_endian() { self.bcx.bswap(value) } else { value };
+                self.bcx.store_aligned(value, addr, 1);
             }
             op::MSTORE8 => {
-                let sp = self.sp_after_inputs();
-                self.call_fallible_builtin(Builtin::Mstore8, &[self.ecx, sp]);
+                let [offset, value] = self.popn();
+                let addr = self.build_ensure_memory(offset, 1);
+                let value = self.bcx.ireduce(self.i8_type, value);
+                self.bcx.store_aligned(value, addr, 1);
             }
             op::SLOAD => {
                 let sp = self.sp_after_inputs();
@@ -990,14 +997,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                         // Dynamic jump.
                         debug_assert!(self.bytecode.has_dynamic_jumps());
                         let target = self.pop();
-                        // Saturating convert i256 to i64: if the value doesn't fit,
-                        // select u64::MAX which won't match any valid jump target.
-                        let i64_type = self.bcx.type_int(64);
-                        let reduced = self.bcx.ireduce(i64_type, target);
-                        let extended = self.bcx.zext(self.word_type, reduced);
-                        let fits = self.bcx.icmp(IntCC::Equal, target, extended);
-                        let sentinel = self.bcx.iconst(i64_type, u64::MAX as i64);
-                        let target = self.bcx.select(fits, reduced, sentinel);
+                        let target = self.u256_to_u64_saturating(target, 64);
                         self.incoming_dynamic_jumps
                             .push((target, self.bcx.current_block().unwrap()));
                         self.dynamic_jump_table
@@ -1025,8 +1025,13 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 self.push(pc);
             }
             op::MSIZE => {
-                let msize = self.call_builtin(Builtin::Msize, &[self.ecx]).unwrap();
-                let msize = self.bcx.zext(self.word_type, msize);
+                let mem_len_field = self.get_field(
+                    self.ecx,
+                    mem::offset_of!(EvmContext<'_>, mem_len),
+                    "ecx.mem_len.addr",
+                );
+                let mem_len = self.bcx.load(self.isize_type, mem_len_field, "ecx.mem_len");
+                let msize = self.bcx.zext(self.word_type, mem_len);
                 self.push(msize);
             }
             op::GAS => {
@@ -1397,7 +1402,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     /// to prove the high 96 bits are zero.
     #[allow(clippy::assertions_on_constants)]
     fn narrow_to_address(&mut self, slot: B::Value) {
-        debug_assert!(cfg!(target_endian = "little"), "big-endian not yet supported");
+        debug_assert!(self.little_endian(), "big-endian not yet supported");
         let value = self.bcx.load(self.address_type, slot, "address");
         let value = self.bcx.zext(self.word_type, value);
         self.bcx.store(value, slot);
@@ -1624,6 +1629,48 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         self.build_check(overflow, InstructionResult::OutOfGas);
     }
 
+    /// Ensures the memory is large enough for `offset + len` bytes, calling the `mresize`
+    /// builtin on the cold path if needed. Returns the pointer to `mem_base + offset`.
+    fn build_ensure_memory(&mut self, offset: B::Value, len: u64) -> B::Value {
+        let current_block = self.current_block();
+        let resize_block = self.create_block_after(current_block, "mresize");
+        let contd_block = self.create_block_after(resize_block, "mresize.contd");
+
+        // 63 bits lets us avoid overflow in the addition below.
+        let offset = self.u256_to_u64_saturating(offset, 63);
+
+        let i8_type = self.i8_type;
+        let isize_type = self.isize_type;
+
+        // Fast path: offset + len <= mem_len (no overflow).
+        let len_const = self.bcx.iconst(isize_type, len as i64);
+        let min_size = self.bcx.iadd(offset, len_const);
+        let mem_len_field =
+            self.get_field(self.ecx, mem::offset_of!(EvmContext<'_>, mem_len), "ecx.mem_len.addr");
+        let mem_len = self.bcx.load(isize_type, mem_len_field, "ecx.mem_len");
+        let exceeds = self.bcx.icmp(IntCC::UnsignedGreaterThan, min_size, mem_len);
+
+        self.bcx.brif(exceeds, resize_block, contd_block);
+
+        // Cold path: call mresize builtin.
+        self.bcx.switch_to_block(resize_block);
+        self.bcx.set_current_block_cold();
+        self.call_fallible_builtin(Builtin::Mresize, &[self.ecx, min_size]);
+        self.bcx.br(contd_block);
+
+        // Continue: load mem_base from ecx.
+        self.bcx.switch_to_block(contd_block);
+        self.bcx.seal_block(contd_block);
+        let ptr_type = self.bcx.type_ptr();
+        let mem_base_field = self.get_field(
+            self.ecx,
+            mem::offset_of!(EvmContext<'_>, mem_base),
+            "ecx.mem_base.addr",
+        );
+        let mem_base = self.bcx.load(ptr_type, mem_base_field, "ecx.mem_base");
+        self.bcx.gep(i8_type, mem_base, &[offset], "mem.addr")
+    }
+
     /*
     /// Builds a check, failing if the condition is false.
     ///
@@ -1838,6 +1885,10 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         self.bcx.current_block().expect("no blocks")
     }
 
+    fn little_endian(&self) -> bool {
+        true
+    }
+
     /*
     /// Creates a named block.
     fn create_block(&mut self, name: &str) -> B::BasicBlock {
@@ -1858,6 +1909,18 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             return String::new();
         }
         self.bytecode.op_block_name(self.current_inst, name)
+    }
+
+    /// Converts a 256-bit unsigned integer to a 64-bit unsigned integer, saturating at
+    /// `2^bits - 1`.
+    fn u256_to_u64_saturating(&mut self, value: B::Value, bits: usize) -> B::Value {
+        let i64_type = self.bcx.type_int(64);
+        let reduced = self.bcx.ireduce(i64_type, value);
+        let sentinel_lit = 1u128.checked_shl(bits as u32).unwrap_or(0).wrapping_sub(1);
+        let sentinel_u256 = self.bcx.iconst_256(U256::from(sentinel_lit));
+        let fits = self.bcx.icmp(IntCC::UnsignedLessThanOrEqual, value, sentinel_u256);
+        let sentinel = self.bcx.iconst(i64_type, sentinel_lit as i64);
+        self.bcx.select(fits, reduced, sentinel)
     }
 }
 
@@ -1883,6 +1946,13 @@ impl<B: Backend> FunctionCx<'_, B> {
         // SAFETY: `this` aliases `self` to work around the borrow checker: we need `self.bcx`
         // borrowed by `get_or_build_function` while also swapping `self.bcx` inside the closure.
         // The closure's `bcx` is a fresh builder (not `self.bcx`), so the swap is safe.
+        let debug_location = self
+            .config
+            .debug
+            .then(|| self.current_inst.map(|inst| self.inst_lines[inst]))
+            .flatten();
+        self.bcx.clear_debug_location();
+
         let this = unsafe { &mut *(self as *mut Self) };
         let f = self.bcx.get_or_build_function(name, arg_types, ret, linkage, |bcx| {
             let prev_return_block = this.return_block.take();
@@ -1905,6 +1975,9 @@ impl<B: Backend> FunctionCx<'_, B> {
             this.failure_block = prev_failure_block;
             this.return_block = prev_return_block;
         });
+        if let Some(line) = debug_location {
+            self.bcx.set_debug_location(line, 1);
+        }
         self.bcx.call(f, args)
     }
 }

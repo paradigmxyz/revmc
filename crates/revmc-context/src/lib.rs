@@ -119,6 +119,13 @@ pub struct EvmContext<'a> {
     pub exit_sp: *mut u8,
     /// Cached gas parameters from the host.
     pub gas_params: GasParams,
+    /// Cached base pointer for the current memory context.
+    /// Points to `memory[checkpoint..]`, i.e. the start of the current context's memory.
+    /// Refreshed after any memory resize.
+    pub mem_base: *mut u8,
+    /// Cached length of the current memory context in bytes.
+    /// Refreshed after any memory resize.
+    pub mem_len: usize,
 }
 
 // Static assertions to ensure the struct layout matches expectations.
@@ -158,7 +165,7 @@ impl<'a> EvmContext<'a> {
         let bytecode = interpreter.bytecode.bytecode_slice() as *const [u8];
         let calldatasize = interpreter.input.input.len();
         let gas_params = host.gas_params().clone();
-        let this = Self {
+        let mut this = Self {
             memory: &mut interpreter.memory,
             input: &mut interpreter.input,
             gas: interpreter.gas,
@@ -174,8 +181,21 @@ impl<'a> EvmContext<'a> {
             exit_result: InstructionResult::Stop,
             exit_sp: ptr::null_mut(),
             gas_params,
+            mem_base: ptr::null_mut(),
+            mem_len: 0,
         };
+        this.refresh_memory_cache();
         (this, stack, stack_len)
+    }
+
+    /// Refreshes the cached memory base pointer and length from `SharedMemory`.
+    ///
+    /// Must be called after any operation that may resize memory.
+    #[inline]
+    pub fn refresh_memory_cache(&mut self) {
+        let mut slice = self.memory.context_memory_mut();
+        self.mem_base = slice.as_mut_ptr();
+        self.mem_len = slice.len();
     }
 }
 
