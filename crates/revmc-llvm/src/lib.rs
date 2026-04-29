@@ -738,6 +738,14 @@ impl EvmLlvmBackend {
         Ok(())
     }
 
+    /// Returns pending absolute symbols collected while translating the current JIT module.
+    pub fn pending_symbol_names(&self) -> Vec<CString> {
+        self.orc
+            .as_ref()
+            .map(|orc| orc.pending_symbols.iter().map(|(name, _)| name.clone()).collect())
+            .unwrap_or_default()
+    }
+
     /// Links a relocatable object into this backend's JITDylib and returns the function address
     /// and resource tracker that owns the linked code.
     pub fn link_jit_object(
