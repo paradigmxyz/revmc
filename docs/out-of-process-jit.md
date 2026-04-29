@@ -23,8 +23,8 @@ Using LLVM ORC's remote executor APIs (`ExecutorProcessControl`, `SimpleRemoteEP
 
 Current prototype:
 
-- `RuntimeConfig::jit_process_mode = JitProcessMode::OutOfProcess` makes JIT workers spawn a helper process via `std::env::current_exe()`.
-- Binaries must call `revmc::runtime::maybe_run_jit_helper()` at process startup. `revmc-cli` does this already.
+- `RuntimeConfig::jit_process_mode = JitProcessMode::OutOfProcess` makes JIT workers spawn a helper process via `RuntimeConfig::jit_helper_path`, or `std::env::current_exe()` when unset.
+- Helper binaries must call `revmc::runtime::maybe_run_jit_helper()` at process startup. `revmc-cli` does this already.
 - The helper compiles one JIT object request from stdin and writes one framed response to stdout.
 - The parent links returned object bytes into its local ORC instance, resolves the symbol, and constructs `JitCodeBacking` with a parent-owned `ResourceTracker`.
 

@@ -317,7 +317,12 @@ const HELPER_ENV: &str = "REVMC_JIT_HELPER";
 
 #[cfg(feature = "llvm")]
 fn run_helper_job(job: &CompileJob, config: &RuntimeConfig) -> Result<WorkerSuccess, String> {
-    let exe = std::env::current_exe().map_err(|e| format!("failed to locate current exe: {e}"))?;
+    let exe = match &config.jit_helper_path {
+        Some(path) => path.clone(),
+        None => {
+            std::env::current_exe().map_err(|e| format!("failed to locate current exe: {e}"))?
+        }
+    };
     let mut child = Command::new(exe)
         .env(HELPER_ENV, "1")
         .stdin(Stdio::piped())

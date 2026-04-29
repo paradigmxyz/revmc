@@ -81,6 +81,13 @@ pub struct RuntimeConfig {
     /// Defaults to [`JitProcessMode::InProcess`].
     pub jit_process_mode: JitProcessMode,
 
+    /// Helper executable used when [`jit_process_mode`](Self::jit_process_mode)
+    /// is [`JitProcessMode::OutOfProcess`].
+    ///
+    /// When `None`, the runtime spawns `std::env::current_exe()` and expects it
+    /// to call [`super::maybe_run_jit_helper`] during startup.
+    pub jit_helper_path: Option<PathBuf>,
+
     /// Blocking mode: every lookup synchronously JIT-compiles on miss and never
     /// falls back to the interpreter.
     ///
@@ -155,6 +162,7 @@ impl Default for RuntimeConfig {
             gas_params: None,
             aot: false,
             jit_process_mode: JitProcessMode::default(),
+            jit_helper_path: None,
             blocking: false,
             on_compilation: None,
         }
