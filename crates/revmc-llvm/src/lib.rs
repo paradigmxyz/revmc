@@ -25,8 +25,8 @@ use inkwell::{
         StringRadix, VoidType,
     },
     values::{
-        AsValueRef, BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue,
-        InstructionValue, PointerValue,
+        AsValueRef, BasicMetadataValueEnum, BasicValue, BasicValueEnum, CallSiteValue,
+        FunctionValue, InstructionValue, PointerValue,
     },
 };
 use object::{Object, ObjectSymbol};
@@ -1248,6 +1248,13 @@ impl EvmLlvmBuilder<'_> {
         let kind_id = self.cx.get_kind_id("prof");
         inst.set_metadata(metadata, kind_id).unwrap();
     }
+
+    fn assume_inner(&mut self, cond: BasicValueEnum<'static>) -> CallSiteValue<'static> {
+        let function = self.get_or_add_function("llvm.assume", |this| {
+            this.ty_void.fn_type(&[this.ty_i1.into()], false)
+        });
+        self.bcx.build_call(function, &[cond.into()], "").unwrap()
+    }
 }
 
 impl BackendTypes for EvmLlvmBuilder<'_> {
@@ -1302,19 +1309,9 @@ impl Builder for EvmLlvmBuilder<'_> {
         // Nothing to do.
     }
 
-    fn assume(&mut self, cond: Self::Value) {
-        let function = self.get_or_add_function("llvm.assume", |this| {
-            this.ty_void.fn_type(&[this.ty_i1.into()], false)
-        });
-        self.bcx.build_call(function, &[cond.into()], "").unwrap();
-    }
-
     fn set_current_block_cold(&mut self) {
-        let function = self.get_or_add_function("llvm.assume", |this| {
-            this.ty_void.fn_type(&[this.ty_i1.into()], false)
-        });
         let true_ = self.bool_const(true);
-        let callsite = self.bcx.build_call(function, &[true_.into()], "cold").unwrap();
+        let callsite = self.assume_inner(true_);
         let cold = self.cx.create_enum_attribute(Attribute::get_named_enum_kind_id("cold"), 0);
         callsite.add_attribute(AttributeLoc::Function, cold);
     }
@@ -1462,6 +1459,10 @@ impl Builder for EvmLlvmBuilder<'_> {
             values => self.bcx.build_aggregate_return(values),
         }
         .unwrap();
+    }
+
+    fn assume(&mut self, cond: Self::Value) {
+        self.assume_inner(cond);
     }
 
     fn icmp(&mut self, cond: IntCC, lhs: Self::Value, rhs: Self::Value) -> Self::Value {

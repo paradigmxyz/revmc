@@ -292,9 +292,6 @@ pub trait Builder: BackendTypes + TypeMethods {
     fn switch_to_block(&mut self, block: Self::BasicBlock);
     fn seal_block(&mut self, block: Self::BasicBlock);
     fn seal_all_blocks(&mut self);
-    fn assume(&mut self, cond: Self::Value) {
-        let _ = cond;
-    }
     fn set_current_block_cold(&mut self);
     fn current_block(&mut self) -> Option<Self::BasicBlock>;
     fn block_addr(&mut self, block: Self::BasicBlock) -> Option<Self::Value>;
@@ -346,6 +343,9 @@ pub trait Builder: BackendTypes + TypeMethods {
 
     fn nop(&mut self);
     fn ret(&mut self, values: &[Self::Value]);
+    fn assume(&mut self, cond: Self::Value) {
+        let _ = cond;
+    }
 
     fn icmp(&mut self, cond: IntCC, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
     fn icmp_imm(&mut self, cond: IntCC, lhs: Self::Value, rhs: i64) -> Self::Value;
