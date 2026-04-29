@@ -167,7 +167,7 @@ impl MemorySectionAnalysis {
                         %bid,
                         %inst,
                         pc = bytecode.pc(inst),
-                        opcode = opcode_name(bytecode.inst(inst).opcode),
+                        opcode = %bytecode.inst(inst).to_op(),
                         ?offset,
                         ?len,
                         known_size,
@@ -202,34 +202,6 @@ fn memory_size_for_access(offset: Option<u64>, len: Option<u64>) -> Option<u64> 
     }
     let size = offset?.saturating_add(len?);
     Some(size.saturating_add(31) / 32 * 32)
-}
-
-fn opcode_name(opcode: u8) -> &'static str {
-    match opcode {
-        op::KECCAK256 => "KECCAK256",
-        op::MLOAD => "MLOAD",
-        op::MSTORE => "MSTORE",
-        op::MSTORE8 => "MSTORE8",
-        op::CALLDATACOPY => "CALLDATACOPY",
-        op::CODECOPY => "CODECOPY",
-        op::EXTCODECOPY => "EXTCODECOPY",
-        op::RETURNDATACOPY => "RETURNDATACOPY",
-        op::MCOPY => "MCOPY",
-        op::CREATE => "CREATE",
-        op::CALL => "CALL",
-        op::CALLCODE => "CALLCODE",
-        op::DELEGATECALL => "DELEGATECALL",
-        op::CREATE2 => "CREATE2",
-        op::STATICCALL => "STATICCALL",
-        op::LOG0 => "LOG0",
-        op::LOG1 => "LOG1",
-        op::LOG2 => "LOG2",
-        op::LOG3 => "LOG3",
-        op::LOG4 => "LOG4",
-        op::RETURN => "RETURN",
-        op::REVERT => "REVERT",
-        _ => "UNKNOWN",
-    }
 }
 
 #[cfg(test)]
