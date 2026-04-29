@@ -1667,7 +1667,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             self.get_field(self.ecx, mem::offset_of!(EvmContext<'_>, mem_len), "ecx.mem_len.addr");
         let mem_len = self.bcx.load(isize_type, mem_len_field, "ecx.mem_len");
         let exceeds = self.bcx.icmp(IntCC::UnsignedGreaterThan, min_size, mem_len);
-        let cached_mem_base = self.cached_mem_base;
+        self.cached_mem_base = None;
 
         self.bcx.brif(exceeds, resize_block, contd_block);
 
@@ -1675,18 +1675,9 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         self.bcx.switch_to_block(resize_block);
         self.bcx.set_current_block_cold();
         self.call_fallible_builtin(Builtin::Mresize, &[self.ecx, min_size]);
-        let resized_mem_base = cached_mem_base.map(|_| self.load_memory_base());
         self.bcx.br(contd_block);
 
         self.bcx.switch_to_block(contd_block);
-        if let (Some(cached_mem_base), Some(resized_mem_base)) = (cached_mem_base, resized_mem_base)
-        {
-            let mem_base = self.bcx.phi(
-                self.bcx.type_ptr(),
-                &[(cached_mem_base, current_block), (resized_mem_base, resize_block)],
-            );
-            self.cached_mem_base = Some(mem_base);
-        }
         self.exact_mem_len = None;
         self.build_memory_addr(offset)
     }
