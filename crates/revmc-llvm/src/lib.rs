@@ -31,8 +31,8 @@ use inkwell::{
 };
 use object::{Object, ObjectSymbol};
 use revmc_backend::{
-    Backend, BackendConfig, BackendTypes, Builder, IntCC, OptimizationLevel, Result, TailCallKind,
-    TypeMethods, U256, eyre, format_bytes,
+    Backend, BackendConfig, BackendTypes, Builder, CallConv, IntCC, OptimizationLevel, Result,
+    TailCallKind, TypeMethods, U256, eyre, format_bytes,
 };
 use std::{
     cell::Cell,
@@ -1879,13 +1879,14 @@ impl Builder for EvmLlvmBuilder<'_> {
         function
     }
 
-    fn add_preserve_most_stub(
+    fn add_function_stub(
         &mut self,
         name: &str,
         params: &[Self::Type],
         ret: Option<Self::Type>,
         address: Option<usize>,
         linkage: revmc_backend::Linkage,
+        call_conv: CallConv,
     ) -> Self::Function {
         let func_ty = self.fn_type(ret, params);
         let real = self.module().add_function(name, func_ty, Some(convert_linkage(linkage)));
@@ -1896,7 +1897,7 @@ impl Builder for EvmLlvmBuilder<'_> {
             orc.pending_symbols.push((CString::new(name).unwrap(), address));
         }
 
-        let stub_name = format!("{name}.preserve_most");
+        let stub_name = format!("{name}.stub");
         if let Some(stub) = self.module().get_function(&stub_name) {
             return stub;
         }
@@ -1906,12 +1907,7 @@ impl Builder for EvmLlvmBuilder<'_> {
             func_ty,
             Some(inkwell::module::Linkage::Internal),
         );
-        unsafe {
-            inkwell::llvm_sys::core::LLVMSetFunctionCallConv(
-                stub.as_value_ref(),
-                inkwell::llvm_sys::LLVMCallConv::LLVMPreserveMostCallConv as _,
-            );
-        }
+        set_function_call_conv(stub, call_conv);
         cpp::set_dso_local(stub);
 
         let before = self.bcx.get_insert_block();
@@ -2190,6 +2186,20 @@ fn function_call_conv(function: FunctionValue<'_>) -> Option<u32> {
     let call_conv =
         unsafe { inkwell::llvm_sys::core::LLVMGetFunctionCallConv(function.as_value_ref()) };
     (call_conv != inkwell::llvm_sys::LLVMCallConv::LLVMCCallConv as u32).then_some(call_conv)
+}
+
+fn set_function_call_conv(function: FunctionValue<'_>, call_conv: CallConv) {
+    let Some(call_conv) = convert_call_conv(call_conv) else { return };
+    unsafe {
+        inkwell::llvm_sys::core::LLVMSetFunctionCallConv(function.as_value_ref(), call_conv as _);
+    }
+}
+
+fn convert_call_conv(call_conv: CallConv) -> Option<inkwell::llvm_sys::LLVMCallConv> {
+    match call_conv {
+        CallConv::Default => None,
+        CallConv::PreserveMost => Some(inkwell::llvm_sys::LLVMCallConv::LLVMPreserveMostCallConv),
+    }
 }
 
 fn convert_linkage(linkage: revmc_backend::Linkage) -> inkwell::module::Linkage {

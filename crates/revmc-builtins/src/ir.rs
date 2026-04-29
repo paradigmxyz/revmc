@@ -1,4 +1,6 @@
-use revmc_backend::{Attribute, Backend, Builder, FunctionAttributeLocation, TypeMethods};
+use revmc_backend::{
+    Attribute, Backend, Builder, CallConv, FunctionAttributeLocation, TypeMethods,
+};
 
 // Must be kept in sync with `remvc-build`.
 const MANGLE_PREFIX: &str = "__revmc_builtin_";
@@ -47,10 +49,11 @@ impl<B: Backend> Builtins<B> {
         let params = builtin.params(bcx);
         let address = builtin.addr();
         let linkage = revmc_backend::Linkage::Import;
-        let f = if builtin.needs_preserve_most_stub() {
-            bcx.add_preserve_most_stub(name, &params, ret, Some(address), linkage)
-        } else {
-            bcx.add_function(name, &params, ret, Some(address), linkage)
+        let f = match builtin.call_conv() {
+            CallConv::Default => bcx.add_function(name, &params, ret, Some(address), linkage),
+            call_conv => {
+                bcx.add_function_stub(name, &params, ret, Some(address), linkage, call_conv)
+            }
         };
         let param_attrs = builtin.param_attrs();
         let mut attrs = Vec::with_capacity(16);
@@ -125,8 +128,11 @@ macro_rules! builtins {
                 }
             }
 
-            pub const fn needs_preserve_most_stub(self) -> bool {
-                matches!(self, Self::Mresize)
+            pub const fn call_conv(self) -> CallConv {
+                match self {
+                    Self::Mresize => CallConv::PreserveMost,
+                    _ => CallConv::Default,
+                }
             }
 
             pub fn ret<B: TypeMethods>(self, $bcx: &mut B) -> Option<B::Type> {

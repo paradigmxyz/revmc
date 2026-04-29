@@ -1946,6 +1946,13 @@ impl<B: Backend> FunctionCx<'_, B> {
         // SAFETY: `this` aliases `self` to work around the borrow checker: we need `self.bcx`
         // borrowed by `get_or_build_function` while also swapping `self.bcx` inside the closure.
         // The closure's `bcx` is a fresh builder (not `self.bcx`), so the swap is safe.
+        let debug_location = self
+            .config
+            .debug
+            .then(|| self.current_inst.map(|inst| self.inst_lines[inst]))
+            .flatten();
+        self.bcx.clear_debug_location();
+
         let this = unsafe { &mut *(self as *mut Self) };
         let f = self.bcx.get_or_build_function(name, arg_types, ret, linkage, |bcx| {
             let prev_return_block = this.return_block.take();
@@ -1968,6 +1975,9 @@ impl<B: Backend> FunctionCx<'_, B> {
             this.failure_block = prev_failure_block;
             this.return_block = prev_return_block;
         });
+        if let Some(line) = debug_location {
+            self.bcx.set_debug_location(line, 1);
+        }
         self.bcx.call(f, args)
     }
 }
