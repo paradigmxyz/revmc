@@ -1654,6 +1654,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
         // Cold path: call mresize builtin.
         self.bcx.switch_to_block(resize_block);
+        self.bcx.set_current_block_cold();
         self.call_fallible_builtin(Builtin::Mresize, &[self.ecx, min_size]);
         self.bcx.br(contd_block);
 
