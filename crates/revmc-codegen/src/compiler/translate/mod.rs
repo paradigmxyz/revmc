@@ -1645,7 +1645,11 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let len_const = self.bcx.iconst(isize_type, len as i64);
         let min_size = self.bcx.iadd(offset, len_const);
 
-        if self.current_inst.is_some_and(|inst| self.bytecode.memory_section(inst).min_size != 0) {
+        let direct_resize_size = self
+            .current_inst
+            .map(|inst| self.bytecode.memory_section(inst).direct_resize_size)
+            .unwrap_or_default();
+        if direct_resize_size != 0 {
             self.call_fallible_builtin(Builtin::Mresize, &[self.ecx, min_size]);
             self.cached_mem_base = None;
             return self.build_memory_addr(offset);
