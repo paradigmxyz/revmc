@@ -1302,6 +1302,13 @@ impl Builder for EvmLlvmBuilder<'_> {
         // Nothing to do.
     }
 
+    fn assume(&mut self, cond: Self::Value) {
+        let function = self.get_or_add_function("llvm.assume", |this| {
+            this.ty_void.fn_type(&[this.ty_i1.into()], false)
+        });
+        self.bcx.build_call(function, &[cond.into()], "").unwrap();
+    }
+
     fn set_current_block_cold(&mut self) {
         let function = self.get_or_add_function("llvm.assume", |this| {
             this.ty_void.fn_type(&[this.ty_i1.into()], false)
