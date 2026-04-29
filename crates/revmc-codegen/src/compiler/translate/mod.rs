@@ -103,7 +103,6 @@ pub(super) struct FunctionCx<'a, B: Backend> {
     /// `section_len_offset + diff`. Stores are skipped when the new offset matches this value.
     stored_len_offset: i32,
     cached_mem_base: Option<B::Value>,
-    exact_mem_len: Option<u64>,
 
     /// The bytecode being translated.
     bytecode: &'a Bytecode<'a>,
@@ -283,7 +282,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             section_len_offset: 0,
             stored_len_offset: 0,
             cached_mem_base: None,
-            exact_mem_len: Some(0),
             bcx,
 
             bytecode,
@@ -567,7 +565,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             self.section_len_offset = 0;
             self.stored_len_offset = 0;
             self.cached_mem_base = None;
-            self.exact_mem_len = (inst == Inst::from_usize(0)).then_some(0);
 
             let section = data.stack_section;
             self.vstack.reset(section.inputs as usize, section.max_growth.max(0) as usize);
@@ -1648,13 +1645,9 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let len_const = self.bcx.iconst(isize_type, len as i64);
         let min_size = self.bcx.iadd(offset, len_const);
 
-        if let Some(required_size) =
-            self.current_inst.and_then(|inst| self.required_memory_size(inst))
-            && self.exact_mem_len.is_some_and(|len| len < required_size)
-        {
+        if self.current_inst.is_some_and(|inst| self.bytecode.memory_section(inst).min_size != 0) {
             self.call_fallible_builtin(Builtin::Mresize, &[self.ecx, min_size]);
             self.cached_mem_base = None;
-            self.exact_mem_len = Some(required_size);
             return self.build_memory_addr(offset);
         }
 
@@ -1678,7 +1671,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         self.bcx.br(contd_block);
 
         self.bcx.switch_to_block(contd_block);
-        self.exact_mem_len = None;
         self.build_memory_addr(offset)
     }
 
@@ -1691,13 +1683,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             return false;
         };
         true
-    }
-
-    fn required_memory_size(&self, inst: Inst) -> Option<u64> {
-        let (Some(offset), Some(len)) = self.bytecode.const_memory_access(inst)? else {
-            return None;
-        };
-        Some(offset.saturating_add(len).saturating_add(31) / 32 * 32)
     }
 
     fn build_memory_addr(&mut self, offset: B::Value) -> B::Value {
@@ -1903,8 +1888,12 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         //     format_printf!("{} - calling {}\n", self.op_block_name(""), builtin.name()),
         //     &[],
         // );
+        let preserves_mem_base = matches!(builtin, Builtin::Keccak256 | Builtin::Keccak256CC)
+            && self.current_inst.is_some_and(|inst| self.can_skip_ensure_memory(inst));
         let value = self.bcx.call(function, args);
-        self.cached_mem_base = None;
+        if !preserves_mem_base {
+            self.cached_mem_base = None;
+        }
         value
     }
 
