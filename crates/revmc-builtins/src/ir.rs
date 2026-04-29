@@ -298,7 +298,7 @@ builtins! {
     BlobHash       = __revmc_builtin_blob_hash(@[ecx_ro] ptr, @[sp] ptr) None,
     BlobBaseFee    = __revmc_builtin_blob_base_fee(@[ecx_ro] ptr, @[sp] ptr) None,
     SlotNum        = __revmc_builtin_slot_num(@[ecx_ro] ptr, @[sp] ptr) None,
-    Mresize        = #[Cold] __revmc_builtin_mresize(@[ecx] ptr, usize) None,
+    Mresize        = __revmc_builtin_mresize(@[ecx] ptr, usize) None,
     Sload          = __revmc_builtin_sload(@[ecx] ptr, @[sp] ptr) None,
     SloadC         = __revmc_builtin_sload_c(@[ecx] ptr, @[sp] ptr, usize) None,
     Sstore         = __revmc_builtin_sstore(@[ecx] ptr, @[sp] ptr) None,
