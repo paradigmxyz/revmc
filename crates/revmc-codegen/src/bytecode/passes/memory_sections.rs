@@ -65,6 +65,32 @@ impl<I: Idx> IndexBitSet<I> {
     }
 }
 
+/// FIFO worklist with deduplication.
+struct Worklist {
+    queue: VecDeque<Block>,
+    in_queue: BitVec,
+}
+
+impl Worklist {
+    fn new(size: usize) -> Self {
+        Self { queue: VecDeque::new(), in_queue: BitVec::repeat(false, size) }
+    }
+
+    fn push(&mut self, id: Block) {
+        let idx = id.index();
+        if !self.in_queue[idx] {
+            self.in_queue.set(idx, true);
+            self.queue.push_back(id);
+        }
+    }
+
+    fn pop(&mut self) -> Option<Block> {
+        let id = self.queue.pop_front()?;
+        self.in_queue.set(id.index(), false);
+        Some(id)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct BlockMemoryState {
     /// Lower-bound memory size known at block entry.
@@ -74,6 +100,14 @@ struct BlockMemoryState {
     /// This is dropped to `None` at joins with different predecessor sizes, loops, and unknown
     /// accesses. It is used only to prove direct `mresize` calls.
     exact_known_size: Option<u64>,
+}
+
+impl BlockMemoryState {
+    fn join(&mut self, incoming: Self) -> bool {
+        let old = *self;
+        *self = join_state(*self, incoming);
+        *self != old
+    }
 }
 
 /// Memory section analysis state.
@@ -153,22 +187,23 @@ impl MemorySectionAnalysis {
         self.block_entry_states[entry] =
             BlockMemoryState { known_size: Some(0), exact_known_size: Some(0) };
 
-        let dynamic_jump_targets: Vec<_> = self.dynamic_jump_targets.iter().collect();
+        let dynamic_jump_targets = self.dynamic_jump_targets.clone();
 
-        let mut queue = VecDeque::new();
-        queue.push_back(entry);
+        let mut worklist = Worklist::new(bytecode.cfg.blocks.len());
+        worklist.push(entry);
 
-        while let Some(bid) = queue.pop_front() {
-            if self.block_entry_states[bid].known_size.is_none() {
+        while let Some(bid) = worklist.pop() {
+            let exit_state = self.block_exit_state(bid);
+            if exit_state.known_size.is_none() {
                 continue;
             }
 
             for &succ in &bytecode.cfg.blocks[bid].succs {
-                self.update_entry_state(bytecode, succ, &mut queue);
+                self.update_entry_state(succ, exit_state, &mut worklist);
             }
             if self.dynamic_jump_blocks.contains(bid) {
-                for &succ in &dynamic_jump_targets {
-                    self.update_entry_state(bytecode, succ, &mut queue);
+                for succ in dynamic_jump_targets.iter() {
+                    self.update_entry_state(succ, exit_state, &mut worklist);
                 }
             }
         }
@@ -176,36 +211,13 @@ impl MemorySectionAnalysis {
 
     fn update_entry_state(
         &mut self,
-        bytecode: &Bytecode<'_>,
         bid: Block,
-        queue: &mut VecDeque<Block>,
+        incoming: BlockMemoryState,
+        worklist: &mut Worklist,
     ) {
-        let new_entry_state = self.join_entry_state(bytecode, bid);
-        if self.block_entry_states[bid] != new_entry_state {
-            self.block_entry_states[bid] = new_entry_state;
-            queue.push_back(bid);
+        if self.block_entry_states[bid].join(incoming) {
+            worklist.push(bid);
         }
-    }
-
-    fn join_entry_state(&self, bytecode: &Bytecode<'_>, bid: Block) -> BlockMemoryState {
-        let block = &bytecode.cfg.blocks[bid];
-        let mut state = if bid == Block::from_usize(0) {
-            BlockMemoryState { known_size: Some(0), exact_known_size: Some(0) }
-        } else {
-            BlockMemoryState::default()
-        };
-
-        for &pred in &block.preds {
-            state = join_state(state, self.block_exit_state(pred));
-        }
-
-        if bytecode.inst(block.insts.start).is_reachable_jumpdest(true) {
-            for pred in self.dynamic_jump_blocks.iter() {
-                state = join_state(state, self.block_exit_state(pred));
-            }
-        }
-
-        state
     }
 
     fn block_exit_state(&self, bid: Block) -> BlockMemoryState {
