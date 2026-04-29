@@ -111,8 +111,10 @@ pub struct EvmContext<'a> {
     /// Set to `None` when no inspector is active.
     #[doc(hidden)]
     pub on_log: Option<&'a mut (dyn FnMut(&Log) + 'a)>,
-    /// The size of the call input data, cached for CALLDATASIZE.
+    /// The size of the call input data.
     pub calldatasize: usize,
+    /// Cached base pointer for the current call input data.
+    pub calldata_base: *const u8,
     /// The result set by a builtin before exiting via [`revmc_exit`].
     pub exit_result: InstructionResult,
     /// Saved RSP from the entry trampoline, used by [`revmc_exit`] to unwind.
@@ -177,6 +179,7 @@ impl<'a> EvmContext<'a> {
             resume_at,
             bytecode,
             on_log: None,
+            calldata_base: ptr::null(),
             calldatasize,
             exit_result: InstructionResult::Stop,
             exit_sp: ptr::null_mut(),
@@ -193,9 +196,18 @@ impl<'a> EvmContext<'a> {
     /// Must be called after any operation that may resize memory.
     #[inline]
     pub fn refresh_memory_cache(&mut self) {
-        let mut slice = self.memory.context_memory_mut();
-        self.mem_base = slice.as_mut_ptr();
-        self.mem_len = slice.len();
+        {
+            let mut slice = self.memory.context_memory_mut();
+            self.mem_base = slice.as_mut_ptr();
+            self.mem_len = slice.len();
+        }
+
+        let input = &self.input.input;
+        self.calldata_base = if input.is_empty() {
+            ptr::null()
+        } else {
+            input.as_bytes_memory(self.memory).as_ptr()
+        };
     }
 }
 

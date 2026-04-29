@@ -336,6 +336,16 @@ pub trait Builder: BackendTypes + TypeMethods {
         align: usize,
         name: &str,
     ) -> Self::Value;
+    /// Loads a value from a pointer whose contents are invariant for the current invocation.
+    fn load_invariant_aligned(
+        &mut self,
+        ty: Self::Type,
+        ptr: Self::Value,
+        align: usize,
+        name: &str,
+    ) -> Self::Value {
+        self.load_aligned(ty, ptr, align, name)
+    }
     /// Stores a value to a pointer, assuming natural alignment.
     fn store(&mut self, value: Self::Value, ptr: Self::Value);
     /// Stores a value to a pointer with an explicit alignment override.

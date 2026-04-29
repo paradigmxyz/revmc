@@ -821,8 +821,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 field!(@push self.word_type, input, InputsImpl; call_value);
             }
             op::CALLDATALOAD => {
-                let sp = self.sp_after_inputs();
-                let _ = self.call_builtin(Builtin::CallDataLoad, &[self.ecx, sp]);
+                self.calldataload();
             }
             op::CALLDATASIZE => {
                 field!(@push self.isize_type, self.ecx, EvmContext<'_>; calldatasize);
@@ -1333,6 +1332,50 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let ir_const = self.bcx.iconst(self.i8_type, ir as i64);
         let _ = self.call_builtin(Builtin::DoReturn, &[self.ecx, sp, ir_const]);
         self.bcx.unreachable();
+    }
+
+    /// Builds a `CALLDATALOAD` instruction.
+    fn calldataload(&mut self) {
+        let offset_word = self.pop();
+        let offset = self.bcx.ireduce(self.isize_type, offset_word);
+
+        let calldatasize_field = self.get_field(
+            self.ecx,
+            mem::offset_of!(EvmContext<'_>, calldatasize),
+            "ecx.calldatasize.addr",
+        );
+        let calldatasize = self.bcx.load(self.isize_type, calldatasize_field, "ecx.calldatasize");
+        let calldata_base_field = self.get_field(
+            self.ecx,
+            mem::offset_of!(EvmContext<'_>, calldata_base),
+            "ecx.calldata_base.addr",
+        );
+        let calldata_base =
+            self.bcx.load(self.bcx.type_ptr(), calldata_base_field, "ecx.calldata_base");
+
+        let extended = self.bcx.zext(self.word_type, offset);
+        let fits = self.bcx.icmp(IntCC::Equal, offset_word, extended);
+        let in_bounds = self.bcx.icmp(IntCC::UnsignedLessThan, offset, calldatasize);
+        let valid = self.bcx.bitand(fits, in_bounds);
+
+        let remaining = self.bcx.isub(calldatasize, offset);
+        let src = self.bcx.gep(self.i8_type, calldata_base, &[offset], "calldata.src");
+
+        let full_avail = self.bcx.icmp_imm(IntCC::UnsignedGreaterThanOrEqual, remaining, 32);
+        let fast = self.bcx.bitand(valid, full_avail);
+
+        let result = self.lazy_select(
+            fast,
+            self.word_type,
+            |this| this.bcx.load_aligned(this.word_type, src, 1, "calldataload.full"),
+            |this| {
+                let zero_isize = this.bcx.iconst(this.isize_type, 0);
+                let safe_remaining = this.bcx.select(valid, remaining, zero_isize);
+                this.call_calldataload_slow(src, safe_remaining)
+            },
+        );
+        let result = if self.little_endian() { self.bcx.bswap(result) } else { result };
+        self.push(result);
     }
 
     /// Builds a `CREATE` or `CREATE2` instruction.
@@ -1879,6 +1922,34 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         self.bytecode.inst(self.current_inst.unwrap())
     }
 
+    fn lazy_select(
+        &mut self,
+        cond: B::Value,
+        ty: B::Type,
+        then_value: impl FnOnce(&mut Self) -> B::Value,
+        else_value: impl FnOnce(&mut Self) -> B::Value,
+    ) -> B::Value {
+        let current_block = self.current_block();
+        let then_block = self.create_block_after(current_block, "then");
+        let else_block = self.create_block_after(then_block, "else");
+        let done_block = self.create_block_after(else_block, "contd");
+
+        self.bcx.brif(cond, then_block, else_block);
+
+        self.bcx.switch_to_block(then_block);
+        let then_value = then_value(self);
+        self.bcx.br(done_block);
+        let then_block = self.current_block();
+
+        self.bcx.switch_to_block(else_block);
+        let else_value = else_value(self);
+        self.bcx.br(done_block);
+        let else_block = self.current_block();
+
+        self.bcx.switch_to_block(done_block);
+        self.bcx.phi(ty, &[(then_value, then_block), (else_value, else_block)])
+    }
+
     /// Returns the current block.
     fn current_block(&mut self) -> B::BasicBlock {
         // There always is a block present.
@@ -1926,6 +1997,44 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
 /// IR builtins.
 impl<B: Backend> FunctionCx<'_, B> {
+    /// Calls the cold calldataload slow path: `fn(src: *const u8, remaining: isize) -> i256`.
+    fn call_calldataload_slow(&mut self, src: B::Value, remaining: B::Value) -> B::Value {
+        let ptr_type = self.bcx.type_ptr();
+        let isize_type = self.isize_type;
+        let word_type = self.word_type;
+        self.call_ir_builtin(
+            "calldataload_slow",
+            &[src, remaining],
+            &[ptr_type, isize_type],
+            Some(word_type),
+            Self::build_calldataload_slow,
+        )
+        .unwrap()
+    }
+
+    fn build_calldataload_slow(&mut self) {
+        self.bcx.add_function_attribute(None, Attribute::Cold, FunctionAttributeLocation::Function);
+
+        let src = self.bcx.fn_param(0);
+        let remaining = self.bcx.fn_param(1);
+        let zero = self.bcx.iconst_256(U256::ZERO);
+
+        let has_data = self.bcx.icmp_imm(IntCC::SignedGreaterThan, remaining, 0);
+        let r = self.lazy_select(
+            has_data,
+            self.word_type,
+            |this| {
+                let slot = this.bcx.new_stack_slot_raw(this.word_type, "tmp");
+                let slot_ptr = this.bcx.stack_addr(this.word_type, slot);
+                this.bcx.store(zero, slot_ptr);
+                this.bcx.memcpy(slot_ptr, src, remaining);
+                this.bcx.load(this.word_type, slot_ptr, "partial")
+            },
+            |_this| zero,
+        );
+        self.bcx.ret(&[r]);
+    }
+
     #[allow(dead_code)]
     #[must_use]
     fn call_ir_builtin(

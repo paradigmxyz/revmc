@@ -1432,6 +1432,24 @@ impl Builder for EvmLlvmBuilder<'_> {
         value
     }
 
+    fn load_invariant_aligned(
+        &mut self,
+        ty: Self::Type,
+        ptr: Self::Value,
+        align: usize,
+        name: &str,
+    ) -> Self::Value {
+        let value = self.load_aligned(ty, ptr, align, name);
+        let metadata = self.cx.metadata_node(&[]);
+        self.current_block()
+            .unwrap()
+            .get_last_instruction()
+            .unwrap()
+            .set_metadata(metadata, self.cx.get_kind_id("invariant.load"))
+            .unwrap();
+        value
+    }
+
     fn store(&mut self, value: Self::Value, ptr: Self::Value) {
         let inst = self.bcx.build_store(ptr.into_pointer_value(), value).unwrap();
         if value.get_type() == self.ty_i256.into() {
