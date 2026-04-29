@@ -1907,11 +1907,9 @@ impl Builder for EvmLlvmBuilder<'_> {
 
         let entry = self.cx.append_basic_block(stub, self.name("stub"));
         self.bcx.position_at_end(entry);
-        let args = (0..stub.count_params())
-            .map(|i| stub.get_nth_param(i).unwrap().into())
-            .collect::<Vec<_>>();
-        let callsite = self.bcx.build_call(function, &args, "").unwrap();
-        if let Some(value) = callsite.try_as_basic_value().basic() {
+        let args =
+            (0..stub.count_params()).map(|i| stub.get_nth_param(i).unwrap()).collect::<Vec<_>>();
+        if let Some(value) = self.call(function, &args) {
             self.bcx.build_return(Some(&value)).unwrap();
         } else {
             self.bcx.build_return(None).unwrap();
