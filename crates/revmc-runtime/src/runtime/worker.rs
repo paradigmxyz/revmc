@@ -132,7 +132,7 @@ pub(crate) struct JitObjectSuccess {
     /// The symbol name in the object file.
     pub(crate) symbol_name: String,
     /// The raw relocatable object bytes.
-    pub(crate) object_bytes: Vec<u8>,
+    pub(crate) object_bytes: Bytes,
     /// Builtin absolute symbols referenced by the object.
     pub(crate) builtin_symbols: Vec<String>,
 }
@@ -449,35 +449,35 @@ impl Drop for HelperProcessInner {
 #[cfg(feature = "llvm")]
 #[derive(Serialize, Deserialize)]
 struct HelperRequest {
-    code_hash: [u8; 32],
+    code_hash: B256,
     spec_id: u8,
     opt_level: u8,
     debug_assertions: bool,
     no_dedup: bool,
     no_dse: bool,
     symbol_name: String,
-    bytecode: Vec<u8>,
+    bytecode: Bytes,
 }
 
 #[cfg(feature = "llvm")]
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 enum HelperResponse {
-    Ok { symbol_name: String, object_bytes: Vec<u8>, builtin_symbols: Vec<String> },
+    Ok { symbol_name: String, object_bytes: Bytes, builtin_symbols: Vec<String> },
     Err { error: String },
 }
 
 #[cfg(feature = "llvm")]
 fn write_job(mut w: impl Write, job: &CompileJob, config: &RuntimeConfig) -> std::io::Result<()> {
     let req = HelperRequest {
-        code_hash: job.key.code_hash.0,
+        code_hash: job.key.code_hash,
         spec_id: job.key.spec_id as u8,
         opt_level: opt_level_to_u8(job.opt_level),
         debug_assertions: config.debug_assertions,
         no_dedup: config.no_dedup,
         no_dse: config.no_dse,
         symbol_name: job.symbol_name.clone(),
-        bytecode: job.bytecode.to_vec(),
+        bytecode: job.bytecode.clone(),
     };
     serde_json::to_writer(&mut w, &req)?;
     w.write_all(b"\n")
@@ -549,8 +549,8 @@ fn read_helper_job(stdin: &mut impl BufRead) -> eyre::Result<Option<(CompileJob,
     };
     let job = CompileJob {
         kind: CompilationKind::Jit,
-        key: RuntimeCacheKey { code_hash: B256::from(req.code_hash), spec_id },
-        bytecode: Bytes::from(req.bytecode),
+        key: RuntimeCacheKey { code_hash: req.code_hash, spec_id },
+        bytecode: req.bytecode,
         symbol_name: req.symbol_name,
         opt_level,
         sync_notifier: SyncNotifier::none(),
@@ -782,7 +782,7 @@ fn compile_jit_object_artifact(
 
     Ok(WorkerSuccess::JitObject(JitObjectSuccess {
         symbol_name: job.symbol_name.clone(),
-        object_bytes,
+        object_bytes: Bytes::from(object_bytes),
         builtin_symbols,
     }))
 }
