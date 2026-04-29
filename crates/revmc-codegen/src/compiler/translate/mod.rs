@@ -1892,12 +1892,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         //     format_printf!("{} - calling {}\n", self.op_block_name(""), builtin.name()),
         //     &[],
         // );
-        let preserves_mem_base = matches!(builtin, Builtin::Keccak256 | Builtin::Keccak256CC)
-            && self.current_inst.is_some_and(|inst| self.can_skip_ensure_memory(inst));
         let value = self.bcx.call(function, args);
-        if !preserves_mem_base {
-            self.cached_mem_base = None;
-        }
+        self.cached_mem_base = None;
         value
     }
 

@@ -14,5 +14,5 @@ STOP
 
 ; CHECK-COUNT-2: call {{.*}}@__revmc_builtin_mresize.stub
 ; CHECK: @__revmc_builtin_keccak256
-; CHECK-NOT: load ptr
+; CHECK: load ptr
 ; CHECK-NOT: call {{.*}}@__revmc_builtin_mresize.stub
