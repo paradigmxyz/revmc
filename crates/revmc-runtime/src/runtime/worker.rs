@@ -12,7 +12,7 @@
 use crate::{
     CompileTimings, EvmCompilerFn, OptimizationLevel,
     runtime::{
-        config::{CompilationKind, RuntimeConfig},
+        config::{CompilationKind, JitProcessMode, RuntimeConfig},
         storage::RuntimeCacheKey,
     },
 };
@@ -102,6 +102,8 @@ pub(crate) enum WorkerSuccess {
     Jit(JitSuccess),
     /// AOT compilation produced shared-library bytes.
     Aot(AotSuccess),
+    /// JIT compilation produced relocatable object bytes to link in the parent.
+    JitObject(JitObjectSuccess),
 }
 
 /// Successful JIT compilation output.
@@ -114,6 +116,15 @@ pub(crate) struct JitSuccess {
 }
 
 /// Successful AOT compilation output.
+pub(crate) struct JitObjectSuccess {
+    /// The symbol name in the object file.
+    pub(crate) symbol_name: String,
+    /// The raw relocatable object bytes.
+    pub(crate) object_bytes: Vec<u8>,
+    /// Builtin absolute symbols referenced by the object.
+    pub(crate) builtin_symbols: Vec<String>,
+}
+
 pub(crate) struct AotSuccess {
     /// The symbol name in the shared library.
     pub(crate) symbol_name: String,
@@ -323,6 +334,9 @@ fn compile_with_state(
     compiler.set_opt_level(job.opt_level);
 
     let outcome = match job.kind {
+        CompilationKind::Jit if config.jit_process_mode == JitProcessMode::OutOfProcess => {
+            compile_jit_object_artifact(&job, compiler)
+        }
         CompilationKind::Jit => compile_jit_artifact(&job, compiler),
         CompilationKind::Aot => compile_aot_artifact(&job, compiler),
     };
@@ -429,6 +443,38 @@ fn compile_jit_artifact(
 
 /// Compiles a single bytecode to a shared library and returns the raw bytes.
 #[cfg(feature = "llvm")]
+fn compile_jit_object_artifact(
+    job: &CompileJob,
+    compiler: &mut EvmCompiler<EvmLlvmBackend>,
+) -> Result<WorkerSuccess, String> {
+    compiler
+        .translate(&job.symbol_name, &job.bytecode[..], job.key.spec_id)
+        .map_err(|e| format!("JIT object translate failed: {e}"))?;
+
+    let mut object_bytes = Vec::new();
+    compiler
+        .write_object(&mut object_bytes)
+        .map_err(|e| format!("JIT object write failed: {e}"))?;
+    let builtin_symbols = compiler
+        .backend()
+        .pending_symbol_names()
+        .into_iter()
+        .map(|name| name.to_string_lossy().into_owned())
+        .collect();
+
+    debug!(
+        bytecode_len = job.bytecode.len(),
+        object_len = object_bytes.len(),
+        "JIT object compilation succeeded",
+    );
+
+    Ok(WorkerSuccess::JitObject(JitObjectSuccess {
+        symbol_name: job.symbol_name.clone(),
+        object_bytes,
+        builtin_symbols,
+    }))
+}
+
 fn compile_aot_artifact(
     job: &CompileJob,
     compiler: &mut EvmCompiler<EvmLlvmBackend>,

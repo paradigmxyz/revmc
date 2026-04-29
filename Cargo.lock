@@ -3339,6 +3339,7 @@ dependencies = [
  "revm-primitives",
  "revm-state",
  "revmc-backend",
+ "revmc-builtins",
  "revmc-codegen",
  "revmc-context",
  "revmc-llvm",

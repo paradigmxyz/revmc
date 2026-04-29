@@ -25,6 +25,7 @@ revmc-backend.workspace = true
 revmc-codegen.workspace = true
 revmc-context = { workspace = true, features = ["evm"] }
 revmc-llvm = { workspace = true, optional = true }
+revmc-builtins = { workspace = true, features = ["ir"] }
 
 alloy-primitives = { workspace = true, features = ["std", "map-fxhash"] }
 alloy-evm = { workspace = true, optional = true }

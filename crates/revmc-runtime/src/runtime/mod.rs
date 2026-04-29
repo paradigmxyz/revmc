@@ -349,12 +349,6 @@ impl JitBackend {
         };
 
         let LazySpawnState { rx, config } = lazy;
-        if config.jit_process_mode == JitProcessMode::OutOfProcess {
-            *guard = Some(LazySpawnState { rx, config });
-            eyre::bail!(
-                "out-of-process JIT is not implemented yet; see docs/out-of-process-jit.md"
-            );
-        }
 
         debug!(
             blocking = self.inner.blocking,

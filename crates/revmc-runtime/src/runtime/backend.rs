@@ -7,7 +7,10 @@ use crate::{
         storage::{
             ArtifactKey, ArtifactManifest, ArtifactStore, BackendSelection, RuntimeCacheKey,
         },
-        worker::{AotSuccess, CompileJob, SyncNotifier, WorkerPool, WorkerResult, WorkerSuccess},
+        worker::{
+            AotSuccess, CompileJob, JitCodeBacking, JitObjectSuccess, SyncNotifier, WorkerPool,
+            WorkerResult, WorkerSuccess,
+        },
     },
 };
 use alloy_primitives::{
@@ -19,6 +22,7 @@ use crossbeam_queue::ArrayQueue;
 use dashmap::DashMap;
 use quanta::Instant;
 use std::{
+    ffi::CString,
     mem,
     ops::ControlFlow,
     sync::{Arc, atomic::Ordering},
@@ -27,6 +31,8 @@ use std::{
 
 #[cfg(feature = "llvm")]
 use crate::llvm::jit_memory_usage;
+#[cfg(feature = "llvm")]
+use revmc_context::RawEvmCompilerFn;
 
 /// The resident map type: code_hash+spec_id → compiled program.
 pub(crate) type ResidentMap = DashMap<RuntimeCacheKey, Arc<CompiledProgram>, DefaultHashBuilder>;
@@ -54,6 +60,35 @@ fn jit_total_bytes() -> usize {
     {
         0
     }
+}
+
+#[cfg(feature = "llvm")]
+fn link_jit_object(
+    success: &JitObjectSuccess,
+) -> eyre::Result<(EvmCompilerFn, Arc<JitCodeBacking>)> {
+    let mut backend = crate::EvmLlvmBackend::new(false)?;
+    let symbol_name = CString::new(success.symbol_name.clone())?;
+    let builtin_symbols = success
+        .builtin_symbols
+        .iter()
+        .map(|name| {
+            let addr = revmc_builtins::Builtin::addr_by_name(name)
+                .ok_or_else(|| eyre::eyre!("unknown builtin symbol: {name}"))?;
+            Ok((CString::new(name.as_str())?, addr))
+        })
+        .collect::<eyre::Result<Vec<_>>>()?;
+    let (addr, tracker) =
+        backend.link_jit_object(&symbol_name, &success.object_bytes, &builtin_symbols)?;
+    let jd_guard = backend.jit_dylib_guard();
+    let func = EvmCompilerFn::new(unsafe { std::mem::transmute::<usize, RawEvmCompilerFn>(addr) });
+    Ok((func, Arc::new(JitCodeBacking::new(tracker, jd_guard))))
+}
+
+#[cfg(not(feature = "llvm"))]
+fn link_jit_object(
+    _success: &JitObjectSuccess,
+) -> eyre::Result<(EvmCompilerFn, Arc<JitCodeBacking>)> {
+    eyre::bail!("LLVM backend not available")
 }
 
 /// Commands sent to the backend thread on the bounded command channel.
@@ -474,6 +509,9 @@ impl BackendState {
             Ok(WorkerSuccess::Aot(success)) => {
                 self.handle_aot_success(result.key, success);
             }
+            Ok(WorkerSuccess::JitObject(success)) => {
+                self.handle_jit_object_success(result.key, success, result.compile_duration);
+            }
             Err(err) => {
                 self.entries.remove(&result.key);
                 self.inner.stats.compilations_failed.fetch_add(1, Ordering::Relaxed);
@@ -488,6 +526,41 @@ impl BackendState {
         }
 
         notify();
+    }
+
+    fn handle_jit_object_success(
+        &mut self,
+        key: RuntimeCacheKey,
+        success: JitObjectSuccess,
+        compile_duration: std::time::Duration,
+    ) {
+        match link_jit_object(&success) {
+            Ok((func, backing)) => {
+                let program = Arc::new(CompiledProgram::new_jit(key, func, backing));
+                self.insert_resident(key, program);
+                self.entries.remove(&key);
+                self.inner.stats.compilations_succeeded.fetch_add(1, Ordering::Relaxed);
+
+                debug!(
+                    code_hash = %key.code_hash,
+                    spec_id = ?key.spec_id,
+                    compile_time = ?compile_duration,
+                    object_len = success.object_bytes.len(),
+                    "JIT object linked and published to resident map",
+                );
+            }
+            Err(err) => {
+                self.entries.remove(&key);
+                self.inner.stats.compilations_failed.fetch_add(1, Ordering::Relaxed);
+
+                warn!(
+                    code_hash = %key.code_hash,
+                    error = %err,
+                    compile_time = ?compile_duration,
+                    "failed to link JIT object",
+                );
+            }
+        }
     }
 
     fn handle_aot_success(&mut self, key: RuntimeCacheKey, success: AotSuccess) {

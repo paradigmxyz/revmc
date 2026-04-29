@@ -132,6 +132,13 @@ macro_rules! builtins {
                 }
             }
 
+            pub fn addr_by_name(name: &str) -> Option<usize> {
+                match name {
+                    $(stringify!($name) => Some(crate::$name as *const () as usize),)*
+                    _ => None,
+                }
+            }
+
             pub const fn call_conv(self) -> CallConv {
                 match self {
                     Self::Mresize => CallConv::PreserveMost,
