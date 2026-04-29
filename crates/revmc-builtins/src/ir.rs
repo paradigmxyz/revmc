@@ -132,9 +132,9 @@ macro_rules! builtins {
                 }
             }
 
-            pub fn addr_by_name(name: &str) -> Option<usize> {
+            pub fn parse(name: &str) -> Option<Self> {
                 match name {
-                    $(stringify!($name) => Some(crate::$name as *const () as usize),)*
+                    $(stringify!($name) => Some(Self::$ident),)*
                     _ => None,
                 }
             }

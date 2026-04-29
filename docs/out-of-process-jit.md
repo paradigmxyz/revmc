@@ -1,6 +1,6 @@
 # Out-of-process JIT exploration
 
-`RuntimeConfig::jit_process_mode` now has an `OutOfProcess` variant, disabled by default. It currently returns an error if selected; this document records the implementation work needed to make it transparent.
+`RuntimeConfig::jit_mode` now has an `OutOfProcess` variant, disabled by default. This document records the current prototype and the remaining work needed to make it production-ready.
 
 ## Recommended architecture
 
@@ -23,7 +23,7 @@ Using LLVM ORC's remote executor APIs (`ExecutorProcessControl`, `SimpleRemoteEP
 
 Current prototype:
 
-- `RuntimeConfig::jit_process_mode = JitProcessMode::OutOfProcess` makes each JIT worker keep a persistent helper process spawned via `RuntimeConfig::jit_helper_path`, or `std::env::current_exe()` when unset.
+- `RuntimeConfig::jit_mode = JitMode::OutOfProcess` makes each JIT worker keep a persistent helper process spawned via `RuntimeConfig::jit_helper_path`, or `std::env::current_exe()` when unset.
 - Helper binaries must call `revmc::runtime::maybe_run_jit_helper()` at process startup. `revmc-cli` does this already.
 - Each worker sends a stream of JIT object requests to its helper over stdin and receives framed responses from stdout.
 - The parent links returned object bytes into its local ORC instance, resolves the symbol, and constructs `JitCodeBacking` with a parent-owned `ResourceTracker`.

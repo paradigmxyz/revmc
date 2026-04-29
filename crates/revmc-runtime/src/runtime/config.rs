@@ -78,11 +78,11 @@ pub struct RuntimeConfig {
 
     /// Where JIT compilation work runs.
     ///
-    /// Defaults to [`JitProcessMode::InProcess`].
-    pub jit_process_mode: JitProcessMode,
+    /// Defaults to [`JitMode::InProcess`].
+    pub jit_mode: JitMode,
 
-    /// Helper executable used when [`jit_process_mode`](Self::jit_process_mode)
-    /// is [`JitProcessMode::OutOfProcess`].
+    /// Helper executable used when [`jit_mode`](Self::jit_mode)
+    /// is [`JitMode::OutOfProcess`].
     ///
     /// When `None`, the runtime spawns `std::env::current_exe()` and expects it
     /// to call [`super::maybe_run_jit_helper`] during startup.
@@ -137,7 +137,7 @@ pub enum CompilationKind {
 
 /// Where JIT compilation work runs.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum JitProcessMode {
+pub enum JitMode {
     /// Compile on background threads in this process.
     #[default]
     InProcess,
@@ -161,7 +161,7 @@ impl Default for RuntimeConfig {
             no_dse: false,
             gas_params: None,
             aot: false,
-            jit_process_mode: JitProcessMode::default(),
+            jit_mode: JitMode::default(),
             jit_helper_path: None,
             blocking: false,
             on_compilation: None,
@@ -215,7 +215,7 @@ pub struct RuntimeTuning {
     /// Timeout for a single out-of-process JIT compilation job.
     ///
     /// When exceeded, the helper process is killed and a fresh helper is spawned for
-    /// the next job. Only applies to [`JitProcessMode::OutOfProcess`].
+    /// the next job. Only applies to [`JitMode::OutOfProcess`].
     ///
     /// Defaults to `5s`.
     pub jit_helper_timeout: Duration,

@@ -72,8 +72,9 @@ fn link_jit_object(
         .builtin_symbols
         .iter()
         .map(|name| {
-            let addr = revmc_builtins::Builtin::addr_by_name(name)
-                .ok_or_else(|| eyre::eyre!("unknown builtin symbol: {name}"))?;
+            let addr = revmc_builtins::Builtin::parse(name)
+                .ok_or_else(|| eyre::eyre!("unknown builtin symbol: {name}"))?
+                .addr();
             Ok((CString::new(name.as_str())?, addr))
         })
         .collect::<eyre::Result<Vec<_>>>()?;

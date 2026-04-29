@@ -12,7 +12,7 @@
 use crate::{
     CompileTimings, EvmCompilerFn, OptimizationLevel, eyre,
     runtime::{
-        config::{CompilationKind, JitProcessMode, RuntimeConfig},
+        config::{CompilationKind, JitMode, RuntimeConfig},
         storage::RuntimeCacheKey,
     },
 };
@@ -289,7 +289,7 @@ fn clear_thread_local_compilers() {}
 fn compile_job(job: CompileJob, config: &RuntimeConfig) -> WorkerResult {
     trace!(?job, "received job");
     match job.kind {
-        CompilationKind::Jit if config.jit_process_mode == JitProcessMode::OutOfProcess => {
+        CompilationKind::Jit if config.jit_mode == JitMode::OutOfProcess => {
             compile_job_out_of_process(job, config)
         }
         CompilationKind::Jit => {
@@ -659,7 +659,7 @@ fn compile_with_state(
     compiler.set_opt_level(job.opt_level);
 
     let outcome = match job.kind {
-        CompilationKind::Jit if config.jit_process_mode == JitProcessMode::OutOfProcess => {
+        CompilationKind::Jit if config.jit_mode == JitMode::OutOfProcess => {
             compile_jit_object_artifact(&job, compiler)
         }
         CompilationKind::Jit => compile_jit_artifact(&job, compiler),
