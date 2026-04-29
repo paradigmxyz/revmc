@@ -1868,10 +1868,6 @@ impl Builder for EvmLlvmBuilder<'_> {
         address: Option<usize>,
         linkage: revmc_backend::Linkage,
     ) -> Self::Function {
-        if name == "__revmc_builtin_mresize" {
-            return self.add_preserve_most_stub(name, params, ret, address, linkage);
-        }
-
         let func_ty = self.fn_type(ret, params);
         let function = self.module().add_function(name, func_ty, Some(convert_linkage(linkage)));
         cpp::set_dso_local(function);
@@ -1883,28 +1879,14 @@ impl Builder for EvmLlvmBuilder<'_> {
         function
     }
 
-    fn add_function_attribute(
-        &mut self,
-        function: Option<Self::Function>,
-        attribute: revmc_backend::Attribute,
-        loc: revmc_backend::FunctionAttributeLocation,
-    ) {
-        let func = function.unwrap_or(self.function);
-        let loc = convert_attribute_loc(loc);
-        let attr = convert_attribute(self, attribute);
-        func.add_attribute(loc, attr);
-    }
-}
-
-impl EvmLlvmBuilder<'_> {
     fn add_preserve_most_stub(
         &mut self,
         name: &str,
-        params: &[BasicTypeEnum<'static>],
-        ret: Option<BasicTypeEnum<'static>>,
+        params: &[Self::Type],
+        ret: Option<Self::Type>,
         address: Option<usize>,
         linkage: revmc_backend::Linkage,
-    ) -> FunctionValue<'static> {
+    ) -> Self::Function {
         let func_ty = self.fn_type(ret, params);
         let real = self.module().add_function(name, func_ty, Some(convert_linkage(linkage)));
         cpp::set_dso_local(real);
@@ -1948,6 +1930,18 @@ impl EvmLlvmBuilder<'_> {
         }
 
         stub
+    }
+
+    fn add_function_attribute(
+        &mut self,
+        function: Option<Self::Function>,
+        attribute: revmc_backend::Attribute,
+        loc: revmc_backend::FunctionAttributeLocation,
+    ) {
+        let func = function.unwrap_or(self.function);
+        let loc = convert_attribute_loc(loc);
+        let attr = convert_attribute(self, attribute);
+        func.add_attribute(loc, attr);
     }
 }
 
@@ -2185,13 +2179,10 @@ fn convert_attribute_loc(loc: revmc_backend::FunctionAttributeLocation) -> Attri
     }
 }
 
-fn function_call_conv(function: FunctionValue<'_>) -> Option<inkwell::llvm_sys::LLVMCallConv> {
-    match function.get_name().to_bytes() {
-        b"__revmc_builtin_mresize.preserve_most" => {
-            Some(inkwell::llvm_sys::LLVMCallConv::LLVMPreserveMostCallConv)
-        }
-        _ => None,
-    }
+fn function_call_conv(function: FunctionValue<'_>) -> Option<u32> {
+    let call_conv =
+        unsafe { inkwell::llvm_sys::core::LLVMGetFunctionCallConv(function.as_value_ref()) };
+    (call_conv != inkwell::llvm_sys::LLVMCallConv::LLVMCCallConv as u32).then_some(call_conv)
 }
 
 fn convert_linkage(linkage: revmc_backend::Linkage) -> inkwell::module::Linkage {

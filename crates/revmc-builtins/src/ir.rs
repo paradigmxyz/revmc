@@ -47,7 +47,11 @@ impl<B: Backend> Builtins<B> {
         let params = builtin.params(bcx);
         let address = builtin.addr();
         let linkage = revmc_backend::Linkage::Import;
-        let f = bcx.add_function(name, &params, ret, Some(address), linkage);
+        let f = if builtin.needs_preserve_most_stub() {
+            bcx.add_preserve_most_stub(name, &params, ret, Some(address), linkage)
+        } else {
+            bcx.add_function(name, &params, ret, Some(address), linkage)
+        };
         let param_attrs = builtin.param_attrs();
         let mut attrs = Vec::with_capacity(16);
         attrs.extend(builtin.attrs());
@@ -119,6 +123,10 @@ macro_rules! builtins {
                 match self {
                     $(Self::$ident => crate::$name as *const () as usize,)*
                 }
+            }
+
+            pub const fn needs_preserve_most_stub(self) -> bool {
+                matches!(self, Self::Mresize)
             }
 
             pub fn ret<B: TypeMethods>(self, $bcx: &mut B) -> Option<B::Type> {

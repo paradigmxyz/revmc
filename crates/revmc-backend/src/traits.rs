@@ -479,6 +479,18 @@ pub trait Builder: BackendTypes + TypeMethods {
         linkage: Linkage,
     ) -> Self::Function;
 
+    /// Adds a local preserve-most calling-convention stub for an external function.
+    fn add_preserve_most_stub(
+        &mut self,
+        name: &str,
+        params: &[Self::Type],
+        ret: Option<Self::Type>,
+        address: Option<usize>,
+        linkage: Linkage,
+    ) -> Self::Function {
+        self.add_function(name, params, ret, address, linkage)
+    }
+
     /// Adds an attribute to a function, one of its parameters, or its return value.
     ///
     /// If `function` is `None`, the attribute is added to the current function.
