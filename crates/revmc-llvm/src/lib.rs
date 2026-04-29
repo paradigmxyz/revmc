@@ -754,8 +754,7 @@ impl EvmLlvmBackend {
         object: &[u8],
         symbols: &[(CString, usize)],
     ) -> Result<(usize, orc::ResourceTracker)> {
-        self.ensure_orc()?;
-        let orc = self.orc.as_mut().unwrap();
+        let orc = self.ensure_orc()?;
         orc.global.define_builtins(symbols);
         let tracker = orc.jd().create_resource_tracker();
         orc.global.jit.add_object_with_rt(object, &tracker).map_err(error_msg)?;
