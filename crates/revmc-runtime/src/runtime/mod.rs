@@ -30,7 +30,7 @@ pub use api::{
 };
 
 mod config;
-pub use config::{CompilationEvent, CompilationKind, RuntimeConfig, RuntimeTuning};
+pub use config::{CompilationEvent, CompilationKind, JitProcessMode, RuntimeConfig, RuntimeTuning};
 
 mod backend;
 
@@ -137,7 +137,6 @@ impl JitBackend {
             config.enabled = true;
             config.tuning.jit_hot_threshold = 0;
         }
-
         let enabled = config.enabled;
         let (tx, rx) = chan::bounded::<Command>(config.tuning.channel_capacity);
         let events = ArrayQueue::new(config.tuning.channel_capacity);
@@ -350,10 +349,17 @@ impl JitBackend {
         };
 
         let LazySpawnState { rx, config } = lazy;
+        if config.jit_process_mode == JitProcessMode::OutOfProcess {
+            *guard = Some(LazySpawnState { rx, config });
+            eyre::bail!(
+                "out-of-process JIT is not implemented yet; see docs/out-of-process-jit.md"
+            );
+        }
 
         debug!(
             blocking = self.inner.blocking,
             workers = config.tuning.jit_worker_count,
+            jit_process_mode = ?config.jit_process_mode,
             hot_threshold = config.tuning.jit_hot_threshold,
             channel_capacity = config.tuning.channel_capacity,
             "spawning backend thread",

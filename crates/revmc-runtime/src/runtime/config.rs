@@ -76,6 +76,11 @@ pub struct RuntimeConfig {
     /// Defaults to `false`.
     pub aot: bool,
 
+    /// Where JIT compilation work runs.
+    ///
+    /// Defaults to [`JitProcessMode::InProcess`].
+    pub jit_process_mode: JitProcessMode,
+
     /// Blocking mode: every lookup synchronously JIT-compiles on miss and never
     /// falls back to the interpreter.
     ///
@@ -123,6 +128,19 @@ pub enum CompilationKind {
     Aot,
 }
 
+/// Where JIT compilation work runs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum JitProcessMode {
+    /// Compile on background threads in this process.
+    #[default]
+    InProcess,
+    /// Compile in a helper process and link the result into this process.
+    ///
+    /// This is reserved for the out-of-process JIT implementation and is
+    /// disabled by default.
+    OutOfProcess,
+}
+
 impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
@@ -136,6 +154,7 @@ impl Default for RuntimeConfig {
             no_dse: false,
             gas_params: None,
             aot: false,
+            jit_process_mode: JitProcessMode::default(),
             blocking: false,
             on_compilation: None,
         }
