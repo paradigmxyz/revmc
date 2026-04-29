@@ -16,6 +16,8 @@ const EXIT_RESULT_OFFSET: usize = core::mem::offset_of!(EvmContext<'_>, exit_res
 /// Offset of `EvmContext::exit_sp`.
 const EXIT_SP_OFFSET: usize = core::mem::offset_of!(EvmContext<'_>, exit_sp);
 
+mod preserve_most;
+
 #[cfg(target_arch = "x86_64")]
 mod x86_64;
 #[cfg(target_arch = "x86_64")]

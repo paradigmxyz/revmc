@@ -25,8 +25,8 @@ use inkwell::{
         StringRadix, VoidType,
     },
     values::{
-        BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, InstructionValue,
-        PointerValue,
+        AsValueRef, BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue,
+        InstructionValue, PointerValue,
     },
 };
 use object::{Object, ObjectSymbol};
@@ -1777,6 +1777,14 @@ impl Builder for EvmLlvmBuilder<'_> {
     ) -> Option<Self::Value> {
         let args = args.iter().copied().map(Into::into).collect::<Vec<_>>();
         let callsite = self.bcx.build_call(function, &args, "").unwrap();
+        if let Some(call_conv) = function_call_conv(function) {
+            unsafe {
+                inkwell::llvm_sys::core::LLVMSetInstructionCallConv(
+                    callsite.as_value_ref(),
+                    call_conv as _,
+                );
+            }
+        }
         if tail_call != TailCallKind::None {
             callsite.set_tail_call_kind(convert_tail_call_kind(tail_call));
         }
@@ -1862,6 +1870,14 @@ impl Builder for EvmLlvmBuilder<'_> {
     ) -> Self::Function {
         let func_ty = self.fn_type(ret, params);
         let function = self.module().add_function(name, func_ty, Some(convert_linkage(linkage)));
+        if let Some(call_conv) = function_call_conv(function) {
+            unsafe {
+                inkwell::llvm_sys::core::LLVMSetFunctionCallConv(
+                    function.as_value_ref(),
+                    call_conv as _,
+                );
+            }
+        }
         cpp::set_dso_local(function);
         if let Some(address) = address
             && let Some(orc) = &mut self.orc
@@ -2115,6 +2131,15 @@ fn convert_attribute_loc(loc: revmc_backend::FunctionAttributeLocation) -> Attri
         revmc_backend::FunctionAttributeLocation::Return => AttributeLoc::Return,
         revmc_backend::FunctionAttributeLocation::Param(i) => AttributeLoc::Param(i),
         revmc_backend::FunctionAttributeLocation::Function => AttributeLoc::Function,
+    }
+}
+
+fn function_call_conv(function: FunctionValue<'_>) -> Option<inkwell::llvm_sys::LLVMCallConv> {
+    match function.get_name() {
+        c"__revmc_builtin_mresize" => {
+            Some(inkwell::llvm_sys::LLVMCallConv::LLVMPreserveMostCallConv)
+        }
+        _ => None,
     }
 }
 
