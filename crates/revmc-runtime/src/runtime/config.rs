@@ -218,7 +218,7 @@ pub struct RuntimeTuning {
     /// the next job. Only applies to [`JitMode::OutOfProcess`].
     ///
     /// Defaults to `5s`.
-    pub jit_helper_timeout: Duration,
+    pub jit_timeout: Duration,
 
     /// Capacity of the per-worker job queue.
     ///
@@ -288,7 +288,7 @@ impl Default for RuntimeTuning {
             jit_max_bytecode_len: 0,
             jit_max_pending_jobs: 2048,
             jit_worker_count: worker_count,
-            jit_helper_timeout: Duration::from_secs(5),
+            jit_timeout: Duration::from_secs(5),
             jit_worker_queue_capacity: 64,
             jit_opt_level: crate::OptimizationLevel::default(),
             aot_opt_level: crate::OptimizationLevel::default(),

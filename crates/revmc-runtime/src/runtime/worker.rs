@@ -31,7 +31,7 @@ use std::{
 };
 use std::{
     sync::{
-        Arc,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
@@ -279,7 +279,6 @@ impl Drop for WorkerPool {
 fn clear_thread_local_compilers() {
     JIT_COMPILER.with_borrow_mut(Option::take);
     AOT_COMPILER.with_borrow_mut(Option::take);
-    JIT_HELPER.with_borrow_mut(Option::take);
 }
 
 #[cfg(not(feature = "llvm"))]
@@ -327,20 +326,25 @@ fn run_helper_job(job: &CompileJob, config: &RuntimeConfig) -> Result<WorkerSucc
         return Err("out-of-process JIT does not support debug dumps yet".into());
     }
 
-    JIT_HELPER.with_borrow_mut(|slot| {
-        if slot.as_ref().is_none_or(|helper| !helper.matches_config(config)) {
-            *slot = Some(HelperProcess::spawn(config)?);
-        }
+    let mut slot = helper_process().lock().unwrap();
+    if slot.as_ref().is_none_or(|helper| !helper.matches_config(config)) {
+        *slot = Some(HelperProcess::spawn(config)?);
+    }
 
-        let helper = slot.as_mut().unwrap();
-        match helper.compile(job, config) {
-            Ok(result) => Ok(result),
-            Err(err) => {
-                *slot = None;
-                Err(err)
-            }
+    let helper = slot.as_mut().unwrap();
+    match helper.compile(job, config) {
+        Ok(result) => Ok(result),
+        Err(err) => {
+            *slot = None;
+            Err(err)
         }
-    })
+    }
+}
+
+#[cfg(feature = "llvm")]
+fn helper_process() -> &'static Mutex<Option<HelperProcess>> {
+    static HELPER: OnceLock<Mutex<Option<HelperProcess>>> = OnceLock::new();
+    HELPER.get_or_init(|| Mutex::new(None))
 }
 
 #[cfg(feature = "llvm")]
@@ -399,11 +403,11 @@ impl HelperProcess {
             .map_err(|e| format!("failed to write helper job: {e}"))?;
         self.stdin.flush().map_err(|e| format!("failed to flush helper job: {e}"))?;
 
-        match self.result_rx.recv_timeout(config.tuning.jit_helper_timeout) {
+        match self.result_rx.recv_timeout(config.tuning.jit_timeout) {
             Ok(result) => result,
             Err(chan::RecvTimeoutError::Timeout) => {
                 let _ = self.child.kill();
-                Err(format!("JIT helper timed out after {:?}", config.tuning.jit_helper_timeout))
+                Err(format!("JIT helper timed out after {:?}", config.tuning.jit_timeout))
             }
             Err(chan::RecvTimeoutError::Disconnected) => {
                 let status = self.child.try_wait().ok().flatten();
@@ -719,7 +723,6 @@ impl CompilerState {
 thread_local! {
     static JIT_COMPILER: RefCell<Option<CompilerState>> = const { RefCell::new(None) };
     static AOT_COMPILER: RefCell<Option<CompilerState>> = const { RefCell::new(None) };
-    static JIT_HELPER: RefCell<Option<HelperProcess>> = const { RefCell::new(None) };
 }
 
 #[cfg(feature = "llvm")]
