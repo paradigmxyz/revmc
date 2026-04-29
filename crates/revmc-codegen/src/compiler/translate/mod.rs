@@ -1661,6 +1661,9 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         // Continue: load mem_base from ecx.
         self.bcx.switch_to_block(contd_block);
         self.bcx.seal_block(contd_block);
+        let mem_len = self.bcx.load(isize_type, mem_len_field, "ecx.mem_len");
+        let memory_resized = self.bcx.icmp(IntCC::UnsignedGreaterThanOrEqual, mem_len, min_size);
+        self.bcx.assume(memory_resized);
         let ptr_type = self.bcx.type_ptr();
         let mem_base_field = self.get_field(
             self.ecx,

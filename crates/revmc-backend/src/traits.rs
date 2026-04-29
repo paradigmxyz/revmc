@@ -292,6 +292,9 @@ pub trait Builder: BackendTypes + TypeMethods {
     fn switch_to_block(&mut self, block: Self::BasicBlock);
     fn seal_block(&mut self, block: Self::BasicBlock);
     fn seal_all_blocks(&mut self);
+    fn assume(&mut self, cond: Self::Value) {
+        let _ = cond;
+    }
     fn set_current_block_cold(&mut self);
     fn current_block(&mut self) -> Option<Self::BasicBlock>;
     fn block_addr(&mut self, block: Self::BasicBlock) -> Option<Self::Value>;
