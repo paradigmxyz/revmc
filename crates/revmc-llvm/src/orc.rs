@@ -17,7 +17,10 @@ use crate::llvm_string;
 use inkwell::{
     context::Context,
     llvm_sys::{
-        core::{LLVMContextCreate, LLVMModuleCreateWithNameInContext},
+        core::{
+            LLVMContextCreate, LLVMCreateMemoryBufferWithMemoryRangeCopy,
+            LLVMModuleCreateWithNameInContext,
+        },
         error::*,
         orc2::{lljit::*, *},
         prelude::*,
@@ -1396,6 +1399,23 @@ impl LLJIT {
         cvt(unsafe {
             LLVMOrcLLJITAddLLVMIRModuleWithRT(self.as_inner(), rt.as_inner(), tsm.as_inner())
         })
+    }
+
+    /// Add a relocatable object file to the given ResourceTracker's JITDylib.
+    pub fn add_object_with_rt(
+        &self,
+        object: &[u8],
+        rt: &ResourceTracker,
+    ) -> Result<(), LLVMString> {
+        let name = c"revmc-object";
+        let buf = unsafe {
+            LLVMCreateMemoryBufferWithMemoryRangeCopy(
+                object.as_ptr().cast(),
+                object.len(),
+                name.as_ptr(),
+            )
+        };
+        cvt(unsafe { LLVMOrcLLJITAddObjectFileWithRT(self.as_inner(), rt.as_inner(), buf) })
     }
 
     /// Gets the execution session.
