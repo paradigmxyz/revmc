@@ -1,4 +1,5 @@
 use crate::bytecode::{Block, Bytecode, Inst, InstFlags};
+use bitvec::vec::BitVec;
 use core::fmt;
 use oxc_index::{Idx, IndexVec, index_vec};
 use std::collections::VecDeque;
@@ -42,24 +43,25 @@ impl MemorySection {
 
 #[derive(Clone)]
 struct IndexBitSet<I: Idx> {
-    bits: IndexVec<I, bool>,
+    bits: BitVec,
+    _marker: std::marker::PhantomData<fn() -> I>,
 }
 
 impl<I: Idx> IndexBitSet<I> {
     fn new(len: usize) -> Self {
-        Self { bits: index_vec![false; len] }
+        Self { bits: bitvec::bitvec![0; len], _marker: std::marker::PhantomData }
     }
 
     fn insert(&mut self, index: I) {
-        self.bits[index] = true;
+        self.bits.set(index.index(), true);
     }
 
     fn contains(&self, index: I) -> bool {
-        self.bits[index]
+        self.bits[index.index()]
     }
 
     fn iter(&self) -> impl Iterator<Item = I> + '_ {
-        self.bits.iter_enumerated().filter_map(|(index, &set)| set.then_some(index))
+        self.bits.iter_ones().map(I::from_usize)
     }
 }
 
@@ -78,6 +80,8 @@ struct BlockMemoryState {
 pub(crate) struct MemorySectionAnalysis {
     /// Minimum memory size required by all constant-size accesses in each block.
     block_min_required_sizes: IndexVec<Block, u64>,
+    /// Exact memory size required by all accesses in each block, if all are known.
+    block_exact_required_sizes: IndexVec<Block, Option<u64>>,
     /// Memory facts known at each block entry.
     block_entry_states: IndexVec<Block, BlockMemoryState>,
     dynamic_jump_blocks: IndexBitSet<Block>,
@@ -109,6 +113,7 @@ impl MemorySectionAnalysis {
 
         Self {
             block_min_required_sizes: index_vec![0; bytecode.cfg.blocks.len()],
+            block_exact_required_sizes: index_vec![Some(0); bytecode.cfg.blocks.len()],
             block_entry_states: index_vec![BlockMemoryState::default(); bytecode.cfg.blocks.len()],
             dynamic_jump_blocks,
             dynamic_jump_targets,
@@ -118,21 +123,28 @@ impl MemorySectionAnalysis {
 
     /// Runs memory section analysis.
     pub(crate) fn run(mut self, bytecode: &Bytecode<'_>) -> IndexVec<Inst, MemorySection> {
-        self.compute_block_min_required_sizes(bytecode);
+        self.compute_block_memory_summaries(bytecode);
         self.compute_block_entry_states(bytecode);
         self.save_sections(bytecode);
         self.sections
     }
 
-    fn compute_block_min_required_sizes(&mut self, bytecode: &Bytecode<'_>) {
+    fn compute_block_memory_summaries(&mut self, bytecode: &Bytecode<'_>) {
         for bid in bytecode.cfg.blocks.indices() {
             let block = &bytecode.cfg.blocks[bid];
+            let mut min_required_size = 0;
+            let mut exact_required_size = Some(0);
             for inst in block.insts() {
                 for (offset, len) in bytecode.const_memory_accesses(inst).into_iter().flatten() {
-                    self.block_min_required_sizes[bid] = self.block_min_required_sizes[bid]
-                        .max(min_memory_size_for_access(offset, len));
+                    min_required_size =
+                        min_required_size.max(min_memory_size_for_access(offset, len));
+                    exact_required_size = exact_required_size
+                        .zip(exact_memory_size_for_access(offset, len))
+                        .map(|(block_size, access_size)| block_size.max(access_size));
                 }
             }
+            self.block_min_required_sizes[bid] = min_required_size;
+            self.block_exact_required_sizes[bid] = exact_required_size;
         }
     }
 
@@ -140,6 +152,8 @@ impl MemorySectionAnalysis {
         let entry = Block::from_usize(0);
         self.block_entry_states[entry] =
             BlockMemoryState { known_size: Some(0), exact_known_size: Some(0) };
+
+        let dynamic_jump_targets: Vec<_> = self.dynamic_jump_targets.iter().collect();
 
         let mut queue = VecDeque::new();
         queue.push_back(entry);
@@ -153,8 +167,7 @@ impl MemorySectionAnalysis {
                 self.update_entry_state(bytecode, succ, &mut queue);
             }
             if self.dynamic_jump_blocks.contains(bid) {
-                let targets = self.dynamic_jump_targets.clone();
-                for succ in targets.iter() {
+                for &succ in &dynamic_jump_targets {
                     self.update_entry_state(bytecode, succ, &mut queue);
                 }
             }
@@ -183,35 +196,27 @@ impl MemorySectionAnalysis {
         };
 
         for &pred in &block.preds {
-            state = join_state(state, self.block_exit_state(bytecode, pred));
+            state = join_state(state, self.block_exit_state(pred));
         }
 
         if bytecode.inst(block.insts.start).is_reachable_jumpdest(true) {
             for pred in self.dynamic_jump_blocks.iter() {
-                state = join_state(state, self.block_exit_state(bytecode, pred));
+                state = join_state(state, self.block_exit_state(pred));
             }
         }
 
         state
     }
 
-    fn block_exit_state(&self, bytecode: &Bytecode<'_>, bid: Block) -> BlockMemoryState {
+    fn block_exit_state(&self, bid: Block) -> BlockMemoryState {
         let state = self.block_entry_states[bid];
         let known_size =
             state.known_size.map(|known_size| known_size.max(self.block_min_required_sizes[bid]));
-        let exact_known_size = self.block_exact_known_exit_size(bytecode, bid);
+        let exact_known_size = state
+            .exact_known_size
+            .zip(self.block_exact_required_sizes[bid])
+            .map(|(exact_known_size, required_size)| exact_known_size.max(required_size));
         BlockMemoryState { known_size, exact_known_size }
-    }
-
-    fn block_exact_known_exit_size(&self, bytecode: &Bytecode<'_>, bid: Block) -> Option<u64> {
-        let mut exact_known_size = self.block_entry_states[bid].exact_known_size?;
-        for inst in bytecode.cfg.blocks[bid].insts() {
-            for (offset, len) in bytecode.const_memory_accesses(inst).into_iter().flatten() {
-                let exact_required_size = exact_memory_size_for_access(offset, len)?;
-                exact_known_size = exact_known_size.max(exact_required_size);
-            }
-        }
-        Some(exact_known_size)
     }
 
     fn save_sections(&mut self, bytecode: &Bytecode<'_>) {
