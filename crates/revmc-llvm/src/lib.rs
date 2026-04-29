@@ -1915,6 +1915,8 @@ impl Builder for EvmLlvmBuilder<'_> {
         cpp::set_dso_local(stub);
 
         let before = self.bcx.get_insert_block();
+        self.bcx.unset_current_debug_location();
+
         let entry = self.cx.append_basic_block(stub, self.name("preserve_most"));
         self.bcx.position_at_end(entry);
         let args = (0..stub.count_params())
