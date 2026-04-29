@@ -1,0 +1,12 @@
+CALLVALUE
+PUSH0
+MSTORE
+PUSH1 0x20
+PUSH0
+RETURN
+
+; CHECK: br i1 {{.*}}, label %failure, label %{{.*}}, {{.*}}!prof
+; CHECK: {{.*}}.mresize:
+; CHECK-NEXT: call preserve_mostcc void @__revmc_builtin_mresize.stub
+; CHECK: failure:
+; CHECK-NEXT: ret i8 32
