@@ -10,5 +10,5 @@ MSTORE
 STOP
 
 ; CHECK-COUNT-2: call preserve_mostcc void @__revmc_builtin_mresize.stub
-; CHECK-NOT: phi ptr
+; CHECK: phi ptr
 ; CHECK-NOT: call preserve_mostcc void @__revmc_builtin_mresize.stub
