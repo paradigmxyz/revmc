@@ -25,8 +25,8 @@ use inkwell::{
         StringRadix, VoidType,
     },
     values::{
-        AsValueRef, BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue,
-        InstructionValue, PointerValue,
+        AsValueRef, BasicMetadataValueEnum, BasicValue, BasicValueEnum, CallSiteValue,
+        FunctionValue, InstructionValue, PointerValue,
     },
 };
 use object::{Object, ObjectSymbol};
@@ -1248,6 +1248,13 @@ impl EvmLlvmBuilder<'_> {
         let kind_id = self.cx.get_kind_id("prof");
         inst.set_metadata(metadata, kind_id).unwrap();
     }
+
+    fn assume_inner(&mut self, cond: BasicValueEnum<'static>) -> CallSiteValue<'static> {
+        let function = self.get_or_add_function("llvm.assume", |this| {
+            this.ty_void.fn_type(&[this.ty_i1.into()], false)
+        });
+        self.bcx.build_call(function, &[cond.into()], "").unwrap()
+    }
 }
 
 impl BackendTypes for EvmLlvmBuilder<'_> {
@@ -1303,11 +1310,8 @@ impl Builder for EvmLlvmBuilder<'_> {
     }
 
     fn set_current_block_cold(&mut self) {
-        let function = self.get_or_add_function("llvm.assume", |this| {
-            this.ty_void.fn_type(&[this.ty_i1.into()], false)
-        });
         let true_ = self.bool_const(true);
-        let callsite = self.bcx.build_call(function, &[true_.into()], "cold").unwrap();
+        let callsite = self.assume_inner(true_);
         let cold = self.cx.create_enum_attribute(Attribute::get_named_enum_kind_id("cold"), 0);
         callsite.add_attribute(AttributeLoc::Function, cold);
     }
@@ -1321,6 +1325,9 @@ impl Builder for EvmLlvmBuilder<'_> {
     }
 
     fn add_comment_to_current_inst(&mut self, comment: &str) {
+        if !self.backend_config.is_dumping {
+            return;
+        }
         let Some(block) = self.current_block() else { return };
         let Some(ins) = block.get_last_instruction() else { return };
         let metadata = self.cx.metadata_string(comment);
@@ -1473,6 +1480,10 @@ impl Builder for EvmLlvmBuilder<'_> {
             values => self.bcx.build_aggregate_return(values),
         }
         .unwrap();
+    }
+
+    fn assume(&mut self, cond: Self::Value) {
+        self.assume_inner(cond);
     }
 
     fn icmp(&mut self, cond: IntCC, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
@@ -1918,6 +1929,11 @@ impl Builder for EvmLlvmBuilder<'_> {
         );
         set_function_call_conv(stub, call_conv);
         cpp::set_dso_local(stub);
+        self.add_function_attribute(
+            Some(stub),
+            revmc_backend::Attribute::NoInline,
+            revmc_backend::FunctionAttributeLocation::Function,
+        );
 
         let before = self.bcx.get_insert_block();
         let debug_location = self.debug_scope.and_then(|_| self.bcx.get_current_debug_location());
@@ -1958,7 +1974,7 @@ impl Builder for EvmLlvmBuilder<'_> {
 
 /// Builds the LLVM pass pipeline string. See [`EvmLlvmBackend::optimize_module`].
 fn build_pass_pipeline(with_licm: bool) -> String {
-    let mut passes = String::from("function(");
+    let mut passes = String::from("module(globalopt,cgscc(inline),globalopt,function(");
     let function_passes: &[&str] = &[
         "simplifycfg",
         "sroa",
@@ -1988,7 +2004,7 @@ fn build_pass_pipeline(with_licm: bool) -> String {
         }
         passes.push_str(pass);
     }
-    passes.push_str("),globaldce");
+    passes.push_str("),globaldce)");
     passes
 }
 
@@ -2206,7 +2222,7 @@ fn set_function_call_conv(function: FunctionValue<'_>, call_conv: CallConv) {
 fn convert_call_conv(call_conv: CallConv) -> Option<inkwell::llvm_sys::LLVMCallConv> {
     match call_conv {
         CallConv::Default => None,
-        CallConv::PreserveMost => Some(inkwell::llvm_sys::LLVMCallConv::LLVMPreserveMostCallConv),
+        CallConv::Cold => Some(inkwell::llvm_sys::LLVMCallConv::LLVMPreserveMostCallConv),
     }
 }
 

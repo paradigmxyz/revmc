@@ -12,7 +12,10 @@ use std::{borrow::Cow, cell::RefCell};
 pub(crate) use revm_context_interface::cfg::GasParams;
 
 mod passes;
-pub(crate) use passes::{Block, Cfg, GasSection, SectionsAnalysis, Snapshots, StackSection};
+pub(crate) use passes::{
+    Block, Cfg, GasSection, MemorySection, MemorySectionAnalysis, SectionsAnalysis, Snapshots,
+    StackSection,
+};
 
 mod asm;
 pub use asm::parse_asm;
@@ -183,6 +186,8 @@ pub struct Bytecode<'a> {
 
     /// Per-instruction operand snapshots computed by block analysis.
     snapshots: Snapshots,
+    /// Per-instruction memory sections computed by section analysis.
+    memory_sections: IndexVec<Inst, MemorySection>,
     /// Multi-target jump table: maps a JUMP/JUMPI instruction to its set of known targets.
     /// Only populated for jumps resolved to multiple targets by block analysis.
     multi_jump_targets: FxHashMap<Inst, SmallVec<[Inst; 4]>>,
@@ -327,6 +332,7 @@ impl<'a> Bytecode<'a> {
             has_dynamic_jumps: false,
             may_suspend: false,
             snapshots: Snapshots::default(),
+            memory_sections: IndexVec::new(),
             u256_interner: RefCell::new(u256_interner),
             multi_jump_targets: FxHashMap::default(),
             pc_to_inst,
@@ -441,6 +447,7 @@ impl<'a> Bytecode<'a> {
         self.calc_may_suspend();
 
         self.construct_sections();
+        self.construct_memory_sections();
 
         debug!(
             compiler_gas_used = self.compiler_gas_used,
@@ -508,6 +515,12 @@ impl<'a> Bytecode<'a> {
             }
         }
         analysis.finish(self);
+    }
+
+    /// Constructs the memory sections in the bytecode.
+    #[instrument(name = "memory_sections", level = "debug", skip_all)]
+    fn construct_memory_sections(&mut self) {
+        self.memory_sections = MemorySectionAnalysis::new(self).run(self);
     }
 
     /// Returns the immediate value of the given instruction, if any.
@@ -611,6 +624,59 @@ impl<'a> Bytecode<'a> {
     pub(crate) fn const_output(&self, inst: Inst) -> Option<U256> {
         let imm = self.snapshots.outputs[inst]?.as_const()?;
         Some(imm.get(&self.u256_interner.borrow()))
+    }
+
+    /// Returns the first constant EVM memory access `(offset, len)` for the given instruction.
+    #[allow(dead_code)]
+    pub(crate) fn const_memory_access(&self, inst: Inst) -> Option<(Option<u64>, Option<u64>)> {
+        self.const_memory_accesses(inst).into_iter().flatten().next()
+    }
+
+    /// Returns the constant EVM memory accesses `(offset, len)` for the given instruction.
+    pub(crate) fn const_memory_accesses(
+        &self,
+        inst: Inst,
+    ) -> [Option<(Option<u64>, Option<u64>)>; 2] {
+        let data = self.inst(inst);
+        if data.flags.intersects(InstFlags::DISABLED | InstFlags::UNKNOWN) {
+            return [None, None];
+        }
+
+        let operand =
+            |depth| self.const_operand(inst, depth).and_then(|value| u64::try_from(value).ok());
+        match data.opcode {
+            op::KECCAK256 | op::RETURN | op::REVERT | op::LOG0 => {
+                [Some((operand(0), operand(1))), None]
+            }
+            op::MLOAD | op::MSTORE => [Some((operand(0), Some(32))), None],
+            op::MSTORE8 => [Some((operand(0), Some(1))), None],
+            op::CALLDATACOPY | op::CODECOPY | op::RETURNDATACOPY => {
+                [Some((operand(0), operand(2))), None]
+            }
+            op::EXTCODECOPY => [Some((operand(1), operand(3))), None],
+            op::MCOPY => [
+                Some((operand(0).zip(operand(1)).map(|(dst, src)| dst.max(src)), operand(2))),
+                None,
+            ],
+            op::LOG1 => [Some((operand(1), operand(2))), None],
+            op::LOG2 => [Some((operand(2), operand(3))), None],
+            op::LOG3 => [Some((operand(3), operand(4))), None],
+            op::LOG4 => [Some((operand(4), operand(5))), None],
+            op::CREATE | op::CREATE2 => [Some((operand(1), operand(2))), None],
+            op::CALL | op::CALLCODE => {
+                [Some((operand(3), operand(4))), Some((operand(5), operand(6)))]
+            }
+            op::DELEGATECALL | op::STATICCALL => {
+                [Some((operand(2), operand(3))), Some((operand(4), operand(5)))]
+            }
+            _ => [None, None],
+        }
+    }
+
+    /// Returns the memory section for the given instruction.
+    #[allow(dead_code)]
+    pub(crate) fn memory_section(&self, inst: Inst) -> MemorySection {
+        self.memory_sections.get(inst).copied().unwrap_or_default()
     }
 
     /// Logs per-opcode constant-input statistics at trace level.

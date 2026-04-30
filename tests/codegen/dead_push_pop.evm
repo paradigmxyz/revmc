@@ -1,8 +1,8 @@
-PUSH1 0xff
-POP
-PUSH1 0x20
-PUSH0
-RETURN
+    PUSH1 0xff
+    POP
+    PUSH1 0x20
+    PUSH0
+    RETURN
 
 ; CHECK-NOT: store i256 255
 ; CHECK: @__revmc_builtin_do_return

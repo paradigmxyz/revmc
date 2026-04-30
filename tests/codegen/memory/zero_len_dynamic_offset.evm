@@ -1,0 +1,5 @@
+    PUSH0
+    CALLVALUE
+    RETURN
+
+; CHECK-NOT: call {{.*}}@__revmc_builtin_mresize{{.*}}; >>

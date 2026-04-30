@@ -184,11 +184,10 @@ pub enum FunctionAttributeLocation {
 /// Calling convention.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CallConv {
-    /// Backend default calling convention.
     #[default]
     Default,
-    /// Preserve most caller registers across the call.
-    PreserveMost,
+    /// Preserve most caller registers across the call to reduce callsite register pressure.
+    Cold,
 }
 
 /// Tail call kind.
@@ -353,6 +352,9 @@ pub trait Builder: BackendTypes + TypeMethods {
 
     fn nop(&mut self);
     fn ret(&mut self, values: &[Self::Value]);
+    fn assume(&mut self, cond: Self::Value) {
+        let _ = cond;
+    }
 
     fn icmp(&mut self, cond: IntCC, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
     fn icmp_imm(&mut self, cond: IntCC, lhs: Self::Value, rhs: i64) -> Self::Value;

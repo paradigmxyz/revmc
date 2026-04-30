@@ -1,0 +1,9 @@
+    PUSH1 0x60
+    PUSH1 0x40
+    MSTORE
+    STOP
+
+; CHECK-NOT: ecx.mem_len
+; CHECK-COUNT-1: call {{.*}}@__revmc_builtin_mresize{{.*}}; >>
+; CHECK-NOT: ecx.mem_len
+; CHECK-NOT: call {{.*}}@__revmc_builtin_mresize{{.*}}; >>

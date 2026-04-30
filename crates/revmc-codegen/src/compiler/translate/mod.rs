@@ -102,6 +102,7 @@ pub(super) struct FunctionCx<'a, B: Backend> {
     /// At section start this is 0 (len.addr == section_start_len). After each store it becomes
     /// `section_len_offset + diff`. Stores are skipped when the new offset matches this value.
     stored_len_offset: i32,
+    cached_mem_base: Option<B::Value>,
 
     /// The bytecode being translated.
     bytecode: &'a Bytecode<'a>,
@@ -280,6 +281,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             section_start_sp,
             section_len_offset: 0,
             stored_len_offset: 0,
+            cached_mem_base: None,
             bcx,
 
             bytecode,
@@ -562,6 +564,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             self.section_start_sp = self.sp_at(self.section_start_len);
             self.section_len_offset = 0;
             self.stored_len_offset = 0;
+            self.cached_mem_base = None;
 
             let section = data.stack_section;
             self.vstack.reset(section.inputs as usize, section.max_growth.max(0) as usize);
@@ -1675,23 +1678,39 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     /// Ensures the memory is large enough for `offset + len` bytes, calling the `mresize`
     /// builtin on the cold path if needed. Returns the pointer to `mem_base + offset`.
     fn build_ensure_memory(&mut self, offset: B::Value, len: u64) -> B::Value {
+        // 63 bits lets us avoid overflow in the addition below.
+        let offset = self.u256_to_u64_saturating(offset, 63);
+        // Analysis proved this access is already covered on every path.
+        if self.current_inst.is_some_and(|inst| self.can_skip_ensure_memory(inst)) {
+            return self.build_memory_addr(offset);
+        }
+
+        let isize_type = self.isize_type;
+        let len_const = self.bcx.iconst(isize_type, len as i64);
+        let min_size = self.bcx.iadd(offset, len_const);
+
+        let direct_resize_size = self
+            .current_inst
+            .map(|inst| self.bytecode.memory_section(inst).direct_resize_size)
+            .unwrap_or_default();
+        // Analysis proved this access always grows memory to exactly `min_size`.
+        if direct_resize_size != 0 {
+            self.call_fallible_builtin(Builtin::Mresize, &[self.ecx, min_size]);
+            self.cached_mem_base = None;
+            return self.build_memory_addr(offset);
+        }
+
         let current_block = self.current_block();
         let resize_block = self.create_block_after(current_block, "mresize");
         let contd_block = self.create_block_after(resize_block, "mresize.contd");
 
-        // 63 bits lets us avoid overflow in the addition below.
-        let offset = self.u256_to_u64_saturating(offset, 63);
-
-        let i8_type = self.i8_type;
-        let isize_type = self.isize_type;
-
+        // Otherwise emit the normal checked-resize diamond.
         // Fast path: offset + len <= mem_len (no overflow).
-        let len_const = self.bcx.iconst(isize_type, len as i64);
-        let min_size = self.bcx.iadd(offset, len_const);
         let mem_len_field =
             self.get_field(self.ecx, mem::offset_of!(EvmContext<'_>, mem_len), "ecx.mem_len.addr");
         let mem_len = self.bcx.load(isize_type, mem_len_field, "ecx.mem_len");
         let exceeds = self.bcx.icmp(IntCC::UnsignedGreaterThan, min_size, mem_len);
+        self.cached_mem_base = None;
 
         self.bcx.brif(exceeds, resize_block, contd_block);
 
@@ -1701,17 +1720,39 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         self.call_fallible_builtin(Builtin::Mresize, &[self.ecx, min_size]);
         self.bcx.br(contd_block);
 
-        // Continue: load mem_base from ecx.
         self.bcx.switch_to_block(contd_block);
-        self.bcx.seal_block(contd_block);
+        self.build_memory_addr(offset)
+    }
+
+    fn can_skip_ensure_memory(&self, inst: Inst) -> bool {
+        let section = self.bytecode.memory_section(inst);
+        if section.known_size < section.required_size {
+            return false;
+        }
+        let mut has_memory_access = false;
+        for (offset, len) in self.bytecode.const_memory_accesses(inst).into_iter().flatten() {
+            has_memory_access = true;
+            if offset.is_none() || len.is_none() {
+                return false;
+            }
+        }
+        has_memory_access
+    }
+
+    fn build_memory_addr(&mut self, offset: B::Value) -> B::Value {
+        let mem_base = self.cached_mem_base.unwrap_or_else(|| self.load_memory_base());
+        self.cached_mem_base = Some(mem_base);
+        self.bcx.gep(self.i8_type, mem_base, &[offset], "mem.addr")
+    }
+
+    fn load_memory_base(&mut self) -> B::Value {
         let ptr_type = self.bcx.type_ptr();
         let mem_base_field = self.get_field(
             self.ecx,
             mem::offset_of!(EvmContext<'_>, mem_base),
             "ecx.mem_base.addr",
         );
-        let mem_base = self.bcx.load(ptr_type, mem_base_field, "ecx.mem_base");
-        self.bcx.gep(i8_type, mem_base, &[offset], "mem.addr")
+        self.bcx.load(ptr_type, mem_base_field, "ecx.mem_base")
     }
 
     /*
@@ -1901,7 +1942,13 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         //     format_printf!("{} - calling {}\n", self.op_block_name(""), builtin.name()),
         //     &[],
         // );
-        self.bcx.call(function, args)
+        let invalidate_mem_base =
+            !self.current_inst.is_some_and(|inst| self.can_skip_ensure_memory(inst));
+        let value = self.bcx.call(function, args);
+        if invalidate_mem_base {
+            self.cached_mem_base = None;
+        }
+        value
     }
 
     /// Gets the function for the given builtin.
@@ -1911,7 +1958,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
     /// Adds a comment to the current instruction.
     fn add_comment(&mut self, comment: &str) {
-        if comment.is_empty() {
+        if comment.is_empty() || !self.config.comments {
             return;
         }
         self.bcx.add_comment_to_current_inst(comment);

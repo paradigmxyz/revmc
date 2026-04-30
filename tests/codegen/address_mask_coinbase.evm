@@ -1,7 +1,7 @@
-COINBASE
-PUSH20 0xffffffffffffffffffffffffffffffffffffffff
-AND
-RET_WORD
+    COINBASE
+    PUSH20 0xffffffffffffffffffffffffffffffffffffffff
+    AND
+    RET_WORD
 
 ; CHECK: call void @__revmc_builtin_coinbase(
 ; CHECK-NOT: and
