@@ -1911,6 +1911,11 @@ impl Builder for EvmLlvmBuilder<'_> {
         );
         set_function_call_conv(stub, call_conv);
         cpp::set_dso_local(stub);
+        self.add_function_attribute(
+            Some(stub),
+            revmc_backend::Attribute::NoInline,
+            revmc_backend::FunctionAttributeLocation::Function,
+        );
 
         let before = self.bcx.get_insert_block();
         let debug_location = self.debug_scope.and_then(|_| self.bcx.get_current_debug_location());

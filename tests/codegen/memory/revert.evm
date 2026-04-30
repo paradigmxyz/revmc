@@ -5,5 +5,5 @@
     PUSH0
     REVERT
 
-; CHECK-COUNT-1: call {{.*}}@__revmc_builtin_mresize
-; CHECK-NOT: call {{.*}}@__revmc_builtin_mresize
+; CHECK-COUNT-1: call {{.*}}@__revmc_builtin_mresize{{.*}}; >>
+; CHECK-NOT: call {{.*}}@__revmc_builtin_mresize{{.*}}; >>
