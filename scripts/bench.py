@@ -726,13 +726,12 @@ class CompileTime(Analysis):
 
 
 class JumpResolution(Analysis):
-    KEYS = ["local", "non_adj", "hint", "edge", "fixpt", "unresolved", "total"]
-    HEADERS = ["benchmark", "local", "nonadj", "hint", "edge", "fixpt", "unres", "total"]
+    KEYS = ["local", "non_adj", "pcr", "fixpt", "unresolved", "total"]
+    HEADERS = ["benchmark", "local", "nonadj", "pcr", "fixpt", "unres", "total"]
     LOWER_IS_BETTER = {
         "local": False,
         "non_adj": False,
-        "hint": False,
-        "edge": False,
+        "pcr": False,
         "fixpt": False,
         "unresolved": True,
         "total": False,
@@ -757,8 +756,7 @@ class JumpResolution(Analysis):
     def _analyze(cls, output: str) -> dict[str, int]:
         local_res = cls._last_match(r"local_jumps.*newly_resolved=(\d+)", output)
         non_adj = cls._count_matches(r"resolved non-adjacent jump", output)
-        hint_res = cls._count_matches(r"resolved via ranked hint", output)
-        edge_res = cls._count_matches(r"resolved via edge state", output)
+        pcr_res = cls._count_matches(r"resolved via PCR hint", output)
         fixpt_res = cls._last_match(r"ba:.*newly_resolved=(\d+)", output)
 
         ba_unres_matches = re.findall(
@@ -779,8 +777,7 @@ class JumpResolution(Analysis):
         return {
             "local": local_res,
             "non_adj": non_adj,
-            "hint": hint_res,
-            "edge": edge_res,
+            "pcr": pcr_res,
             "fixpt": fixpt_res,
             "unresolved": unresolved,
             "total": total,
