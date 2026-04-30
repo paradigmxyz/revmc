@@ -682,6 +682,21 @@ impl Bytecode<'_> {
         // When the fixpoint didn't converge, partially-discovered ConstSets may be
         // incomplete, so we must conservatively invalidate them too.
         if has_top_jump || !converged {
+            let resolved_before_invalidation = jump_targets
+                .iter()
+                .filter(|(_, target)| matches!(target, JumpTarget::Resolved(_)))
+                .count();
+            let invalid_before_invalidation = jump_targets
+                .iter()
+                .filter(|(_, target)| matches!(target, JumpTarget::Invalid))
+                .count();
+            debug!(
+                has_top_jump,
+                converged,
+                resolved_before_invalidation,
+                invalid_before_invalidation,
+                "invalidating suspect jump resolutions"
+            );
             self.invalidate_suspect_jumps(
                 &mut jump_targets,
                 &block_states,
@@ -1050,6 +1065,13 @@ impl Bytecode<'_> {
             if let Some(bid) = self.cfg.inst_to_block[*inst]
                 && suspect[bid.index()]
             {
+                trace!(
+                    %inst,
+                    pc = self.pc(*inst),
+                    %bid,
+                    target = ?target,
+                    "invalidated suspect jump resolution"
+                );
                 *target = JumpTarget::Top;
             }
         }
