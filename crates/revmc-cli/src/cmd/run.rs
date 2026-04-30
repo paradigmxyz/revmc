@@ -271,24 +271,18 @@ impl RunArgs {
             _lib = None;
         };
 
-        if self.n_iters == 0 {
-            return Ok(());
-        }
-
-        prepared.sanity_check();
-
-        if self.interpret {
-            prepared.run_interpreter();
-        } else {
-            prepared.run_jit();
-        }
-
-        if self.n_iters > 1 {
-            if self.interpret || !self.jit_only {
-                bench(self.n_iters, &format!("{name}/interpreter"), || prepared.run_interpreter());
-            }
-            if !self.interpret {
-                bench(self.n_iters, &format!("{name}/jit"), || prepared.run_jit());
+        match self.n_iters {
+            0 => {}
+            1 if !self.interpret || self.jit_only => prepared.sanity_check(),
+            _ => {
+                if self.interpret || !self.jit_only {
+                    bench(self.n_iters, &format!("{name}/interpreter"), || {
+                        prepared.run_interpreter()
+                    });
+                }
+                if !self.interpret {
+                    bench(self.n_iters, &format!("{name}/jit"), || prepared.run_jit());
+                }
             }
         }
 
