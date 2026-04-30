@@ -1556,37 +1556,6 @@ impl Builder for EvmLlvmBuilder<'_> {
         self.bcx.build_select(cond.into_int_value(), then_value, else_value, "").unwrap()
     }
 
-    fn lazy_select(
-        &mut self,
-        cond: Self::Value,
-        ty: Self::Type,
-        then_value: impl FnOnce(&mut Self) -> Self::Value,
-        else_value: impl FnOnce(&mut Self) -> Self::Value,
-    ) -> Self::Value {
-        let then_block = if let Some(current) = self.current_block() {
-            self.create_block_after(current, "then")
-        } else {
-            self.create_block("then")
-        };
-        let else_block = self.create_block_after(then_block, "else");
-        let done_block = self.create_block_after(else_block, "contd");
-
-        self.brif(cond, then_block, else_block);
-
-        self.switch_to_block(then_block);
-        let then_value = then_value(self);
-        self.br(done_block);
-
-        self.switch_to_block(else_block);
-        let else_value = else_value(self);
-        self.br(done_block);
-
-        self.switch_to_block(done_block);
-        let phi = self.bcx.build_phi(ty, "").unwrap();
-        phi.add_incoming(&[(&then_value, then_block), (&else_value, else_block)]);
-        phi.as_basic_value()
-    }
-
     fn iadd(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
         self.bcx.build_int_add(lhs.into_int_value(), rhs.into_int_value(), "").unwrap().into()
     }

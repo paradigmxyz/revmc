@@ -383,13 +383,6 @@ pub trait Builder: BackendTypes + TypeMethods {
         then_value: Self::Value,
         else_value: Self::Value,
     ) -> Self::Value;
-    fn lazy_select(
-        &mut self,
-        cond: Self::Value,
-        ty: Self::Type,
-        then_value: impl FnOnce(&mut Self) -> Self::Value,
-        else_value: impl FnOnce(&mut Self) -> Self::Value,
-    ) -> Self::Value;
 
     fn iadd(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
     fn isub(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
