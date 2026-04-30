@@ -321,6 +321,17 @@ fn push_unique(targets: &mut SmallVec<[Inst; 4]>, target: Inst) {
     }
 }
 
+fn push_unique_state(states: &mut Vec<Vec<AbsValue>>, state: &[AbsValue]) {
+    let start = state.len().saturating_sub(MAX_ABS_STACK_DEPTH);
+    let state = &state[start..];
+    if !states.iter().any(|existing| existing == state) {
+        states.push(state.to_vec());
+    }
+}
+
+type DiscoveredEdges = IndexVec<Block, SmallVec<[Block; 4]>>;
+type EdgeStates = IndexVec<Block, Vec<Vec<AbsValue>>>;
+
 /// CFG for abstract interpretation.
 #[derive(Default)]
 pub(crate) struct Cfg {
@@ -631,7 +642,8 @@ impl Bytecode<'_> {
         }
 
         let mut const_sets = ConstSetInterner::new();
-        let (discovered_edges, converged) = self.run_fixpoint(&mut block_states, &mut const_sets);
+        let (discovered_edges, edge_states, converged) =
+            self.run_fixpoint(&mut block_states, &mut const_sets);
 
         // On non-convergence, all fixpoint-derived snapshots are potentially stale.
         // Restore the safe block-local snapshots computed by `block_analysis_local`.
@@ -653,12 +665,13 @@ impl Bytecode<'_> {
             jump_targets.push((jump_inst, target));
         }
 
-        let pcr_jumps = if converged {
-            self.resolve_stack_balance_returns_from_hints(
-                &mut jump_targets,
-                &block_states,
-                &const_sets,
-            )
+        let edge_state_jumps = if converged {
+            self.resolve_jumps_from_edge_states(&mut jump_targets, &edge_states, &const_sets)
+        } else {
+            Vec::new()
+        };
+        let ranked_hint_jumps = if converged {
+            self.resolve_ranked_continuation_jumps(&mut jump_targets, &block_states, &const_sets)
         } else {
             Vec::new()
         };
@@ -678,15 +691,23 @@ impl Bytecode<'_> {
         }
 
         for &(jump_inst, ref target) in &jump_targets {
-            if pcr_jumps.contains(&jump_inst)
-                && let JumpTarget::Resolved(targets) = target
-            {
-                trace!(
-                    %jump_inst,
-                    pc = self.pc(jump_inst),
-                    n_targets = targets.len(),
-                    "resolved via PCR hint"
-                );
+            if let JumpTarget::Resolved(targets) = target {
+                if edge_state_jumps.contains(&jump_inst) {
+                    trace!(
+                        %jump_inst,
+                        pc = self.pc(jump_inst),
+                        n_targets = targets.len(),
+                        "resolved via edge state"
+                    );
+                }
+                if ranked_hint_jumps.contains(&jump_inst) {
+                    trace!(
+                        %jump_inst,
+                        pc = self.pc(jump_inst),
+                        n_targets = targets.len(),
+                        "resolved via ranked hint"
+                    );
+                }
             }
         }
 
@@ -737,15 +758,44 @@ impl Bytecode<'_> {
         }
     }
 
-    /// Resolves stack-balance return blocks using ranked continuation labels from call sites.
+    /// Resolves jumps by replaying blocks from path-sensitive incoming edge states.
     ///
-    /// Solidity often emits nested internal calls as `[..., outer_ret, ..., inner_ret, callee]`
-    /// followed by `JUMP`. The fixpoint can resolve the callee's return to `inner_ret`, but the
-    /// continuation block at `inner_ret` may recover `outer_ret` from a stack shape that was
-    /// merged away to `Top`. This mirrors Gigahorse's possible-call-return ranking in a narrow
-    /// form: labels left on the stack by a static call are ordered from top to bottom, and a
-    /// stack-balance return block for rank N can return to rank N + 1.
-    fn resolve_stack_balance_returns_from_hints(
+    /// The block-level fixpoint joins all predecessors into one entry state, which can erase
+    /// return labels that are still precise on each individual edge. Replaying an unresolved
+    /// jump block from every recorded incoming edge state lets us prove the jump operand without
+    /// assuming anything about the block's opcode shape.
+    fn resolve_jumps_from_edge_states(
+        &mut self,
+        jump_targets: &mut [(Inst, JumpTarget)],
+        edge_states: &EdgeStates,
+        const_sets: &ConstSetInterner,
+    ) -> Vec<Inst> {
+        let mut resolved = Vec::new();
+        for (jump_inst, target) in jump_targets {
+            if !matches!(target, JumpTarget::Top) {
+                continue;
+            }
+            let Some(block) = self.cfg.inst_to_block[*jump_inst] else { continue };
+            if edge_states[block].is_empty() {
+                continue;
+            }
+
+            if let Some(edge_target) =
+                self.resolve_jump_from_all_edge_states(*jump_inst, &edge_states[block], const_sets)
+            {
+                *target = edge_target;
+                resolved.push(*jump_inst);
+            }
+        }
+        resolved
+    }
+
+    /// Resolves continuation jumps from ranked JUMPDEST labels left by static call sites.
+    ///
+    /// If a static call leaves labels ranked as `[..., outer_ret, inner_ret]`, a later
+    /// unresolved jump in `inner_ret` can return to `outer_ret` even when the continuation
+    /// block contains work before the jump.
+    fn resolve_ranked_continuation_jumps(
         &mut self,
         jump_targets: &mut [(Inst, JumpTarget)],
         block_states: &IndexVec<Block, BlockState>,
@@ -805,10 +855,7 @@ impl Bytecode<'_> {
                 continue;
             }
             let Some(block) = self.cfg.inst_to_block[*jump_inst] else { continue };
-            if !matches!(block_states[block], BlockState::Known(_))
-                || !self.is_stack_balance_return_block(block)
-                || hints[block].is_empty()
-            {
+            if !matches!(block_states[block], BlockState::Known(_)) || hints[block].is_empty() {
                 continue;
             }
 
@@ -816,6 +863,77 @@ impl Bytecode<'_> {
             resolved.push(*jump_inst);
         }
         resolved
+    }
+
+    fn resolve_jump_from_all_edge_states(
+        &mut self,
+        jump_inst: Inst,
+        states: &[Vec<AbsValue>],
+        const_sets: &ConstSetInterner,
+    ) -> Option<JumpTarget> {
+        let mut targets = SmallVec::new();
+        let mut invalid = false;
+        for state in states {
+            match self.resolve_jump_from_edge_state(jump_inst, state, const_sets) {
+                JumpTarget::Resolved(edge_targets) => {
+                    for target in edge_targets {
+                        push_unique(&mut targets, target);
+                    }
+                }
+                JumpTarget::Invalid => invalid = true,
+                JumpTarget::Bottom | JumpTarget::Top => return None,
+            }
+        }
+
+        match (targets.is_empty(), invalid) {
+            (false, false) => Some(JumpTarget::Resolved(targets)),
+            (true, true) => Some(JumpTarget::Invalid),
+            _ => None,
+        }
+    }
+
+    fn resolve_jump_from_edge_state(
+        &mut self,
+        jump_inst: Inst,
+        state: &[AbsValue],
+        const_sets: &ConstSetInterner,
+    ) -> JumpTarget {
+        let Some(block) = self.cfg.inst_to_block[jump_inst] else {
+            return JumpTarget::Bottom;
+        };
+        let insts = self.cfg.blocks[block].insts().collect::<SmallVec<[Inst; 16]>>();
+        let old_inputs = insts
+            .iter()
+            .map(|&inst| self.snapshots.inputs[inst].clone())
+            .collect::<SmallVec<[OperandSnapshot; 16]>>();
+        let old_outputs = insts
+            .iter()
+            .map(|&inst| self.snapshots.outputs[inst])
+            .collect::<SmallVec<[Option<AbsValue>; 16]>>();
+        let compiler_gas_used = self.compiler_gas_used;
+
+        let mut stack = state.to_vec();
+        let interpreted = self.interpret_block(insts.iter().copied(), &mut stack);
+        let target = if interpreted {
+            self.snapshots.inputs[jump_inst].last().copied().map_or(JumpTarget::Bottom, |operand| {
+                self.resolve_jump_operand(operand, const_sets)
+            })
+        } else {
+            JumpTarget::Bottom
+        };
+
+        for ((&inst, inputs), output) in insts.iter().zip(old_inputs).zip(old_outputs) {
+            self.snapshots.inputs[inst] = inputs;
+            self.snapshots.outputs[inst] = output;
+        }
+        self.compiler_gas_used = compiler_gas_used;
+
+        target
+    }
+
+    fn block_for_jump_target(&self, target: Inst) -> Option<Block> {
+        let target = self.redirects.get(&target).copied().unwrap_or(target);
+        self.cfg.inst_to_block.get(target).copied().flatten()
     }
 
     fn jumpdest_targets_for_value(
@@ -842,30 +960,10 @@ impl Bytecode<'_> {
         (!targets.is_empty()).then_some(targets)
     }
 
-    fn block_for_jump_target(&self, target: Inst) -> Option<Block> {
-        let target = self.redirects.get(&target).copied().unwrap_or(target);
-        self.cfg.inst_to_block.get(target).copied().flatten()
-    }
-
-    fn is_stack_balance_return_block(&self, bid: Block) -> bool {
-        let block = &self.cfg.blocks[bid];
-        if self.insts[block.terminator()].opcode != op::JUMP {
-            return false;
+    fn record_edge_state(&self, succ: Block, stack: &[AbsValue], edge_states: &mut EdgeStates) {
+        if self.insts[self.cfg.blocks[succ].insts.start].is_jumpdest() {
+            push_unique_state(&mut edge_states[succ], stack);
         }
-
-        block.insts().all(|inst| {
-            matches!(
-                self.insts[inst].opcode,
-                op::JUMPDEST
-                    | op::POP
-                    | op::JUMP
-                    | op::DUP1..=op::DUP16
-                    | op::SWAP1..=op::SWAP16
-                    | op::DUPN
-                    | op::SWAPN
-                    | op::EXCHANGE
-            )
-        })
     }
 
     /// Adds discovered dynamic-jump target edges for a block.
@@ -889,7 +987,7 @@ impl Bytecode<'_> {
                 continue;
             }
             let ti = self.pc_to_inst(target_pc);
-            if let Some(tb) = self.cfg.inst_to_block[ti]
+            if let Some(tb) = self.block_for_jump_target(ti)
                 && !discovered[bid].contains(&tb)
             {
                 discovered[bid].push(tb);
@@ -970,22 +1068,22 @@ impl Bytecode<'_> {
 
     /// Run a worklist-based fixpoint to compute abstract block states.
     ///
-    /// Returns `(discovered_edges, converged)`.
+    /// Returns `(discovered_edges, edge_states, converged)`.
     fn run_fixpoint(
         &mut self,
         block_states: &mut IndexVec<Block, BlockState>,
         const_sets: &mut ConstSetInterner,
-    ) -> (IndexVec<Block, SmallVec<[Block; 4]>>, bool) {
+    ) -> (DiscoveredEdges, EdgeStates, bool) {
         let num_blocks = self.cfg.blocks.len();
         let mut worklist = Worklist::new(num_blocks);
         worklist.push(Block::from_usize(0));
 
         // Discovered dynamic-jump target edges per block.
-        let mut discovered: IndexVec<Block, SmallVec<[Block; 4]>> =
-            IndexVec::from_vec(vec![SmallVec::new(); num_blocks]);
+        let mut discovered: DiscoveredEdges = IndexVec::from_vec(vec![SmallVec::new(); num_blocks]);
         // Reverse map: discovered predecessors per block.
         let mut disc_preds: IndexVec<Block, SmallVec<[Block; 4]>> =
             IndexVec::from_vec(vec![SmallVec::new(); num_blocks]);
+        let mut edge_states: EdgeStates = IndexVec::from_vec(vec![Vec::new(); num_blocks]);
 
         let max_iterations = num_blocks * 8;
         let mut iterations = 0;
@@ -1032,6 +1130,7 @@ impl Bytecode<'_> {
 
             // Propagate to static CFG successors and discovered dynamic-jump targets.
             for &succ in block.succs.iter().chain(&discovered[bid]) {
+                self.record_edge_state(succ, &stack_buf, &mut edge_states);
                 if block_states[succ].join(&stack_buf, const_sets) {
                     worklist.push(succ);
                 }
@@ -1043,7 +1142,7 @@ impl Bytecode<'_> {
             msg = if converged { "converged" } else { "did not converge" },
         );
 
-        (discovered, converged)
+        (discovered, edge_states, converged)
     }
 
     /// Interpret a sequence of instructions on the abstract stack.
