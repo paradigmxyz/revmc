@@ -1,0 +1,11 @@
+    CALLVALUE
+    PUSH0
+    MSTORE
+    PUSH0
+    MLOAD
+    PUSH1 0x20
+    MLOAD
+    STOP
+
+; CHECK-COUNT-2: call {{.*}}@__revmc_builtin_mresize{{.*}}; >>
+; CHECK-NOT: call {{.*}}@__revmc_builtin_mresize{{.*}}; >>

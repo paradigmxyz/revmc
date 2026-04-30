@@ -1,0 +1,21 @@
+    PUSH 69
+    PUSH0
+    MSTORE
+    PUSH0
+    MLOAD
+    PUSH 2
+    MUL
+    PUSH0
+    MSTORE
+    PUSH 32
+    PUSH0
+    RETURN
+
+; CHECK-NOT: ecx.mem_len
+; CHECK-COUNT-1: call {{.*}}@__revmc_builtin_mresize{{.*}}; >>
+; CHECK-NOT: ecx.mem_len
+; CHECK-NOT: call {{.*}}@__revmc_builtin_mresize{{.*}}; >>
+; CHECK-NOT: load i256
+; CHECK-NOT: mul
+; CHECK: store i256 {{-?[0-9]+}}
+; CHECK: call {{.*}}@__revmc_builtin_do_return{{.*}}i64 0, i64 32
