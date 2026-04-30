@@ -1367,7 +1367,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let full_avail = self.bcx.icmp_imm(IntCC::UnsignedGreaterThanOrEqual, remaining, 32);
         let fast = self.bcx.bitand(valid, full_avail);
 
-        let result = self.lazy_select(
+        let result = self.if_else(
             fast,
             self.word_type,
             |this| this.bcx.load_aligned(this.word_type, src, 1, "calldataload.full"),
@@ -1700,11 +1700,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             return self.build_memory_addr(offset);
         }
 
-        let current_block = self.current_block();
-        let resize_block = self.create_block_after(current_block, "mresize");
-        let contd_block = self.create_block_after(resize_block, "mresize.contd");
-
-        // Otherwise emit the normal checked-resize diamond.
+        // Otherwise emit the normal checked-resize branch.
         // Fast path: offset + len <= mem_len (no overflow).
         let mem_len_field =
             self.get_field(self.ecx, mem::offset_of!(EvmContext<'_>, mem_len), "ecx.mem_len.addr");
@@ -1712,15 +1708,10 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         let exceeds = self.bcx.icmp(IntCC::UnsignedGreaterThan, min_size, mem_len);
         self.cached_mem_base = None;
 
-        self.bcx.brif(exceeds, resize_block, contd_block);
-
-        // Cold path: call mresize builtin.
-        self.bcx.switch_to_block(resize_block);
-        self.bcx.set_current_block_cold();
-        self.call_fallible_builtin(Builtin::Mresize, &[self.ecx, min_size]);
-        self.bcx.br(contd_block);
-
-        self.bcx.switch_to_block(contd_block);
+        self.if_then(exceeds, |this| {
+            this.bcx.set_current_block_cold();
+            this.call_fallible_builtin(Builtin::Mresize, &[this.ecx, min_size]);
+        });
         self.build_memory_addr(offset)
     }
 
@@ -1969,7 +1960,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         self.bytecode.inst(self.current_inst.unwrap())
     }
 
-    fn lazy_select(
+    fn if_else(
         &mut self,
         cond: B::Value,
         ty: B::Type,
@@ -1995,6 +1986,20 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
         self.bcx.switch_to_block(done_block);
         self.bcx.phi(ty, &[(then_value, then_block), (else_value, else_block)])
+    }
+
+    fn if_then(&mut self, cond: B::Value, then: impl FnOnce(&mut Self)) {
+        let current_block = self.current_block();
+        let then_block = self.create_block_after(current_block, "then");
+        let done_block = self.create_block_after(then_block, "contd");
+
+        self.bcx.brif(cond, then_block, done_block);
+
+        self.bcx.switch_to_block(then_block);
+        then(self);
+        self.bcx.br(done_block);
+
+        self.bcx.switch_to_block(done_block);
     }
 
     /// Returns the current block.
@@ -2061,13 +2066,18 @@ impl<B: Backend> FunctionCx<'_, B> {
 
     fn build_calldataload_slow(&mut self) {
         self.bcx.add_function_attribute(None, Attribute::Cold, FunctionAttributeLocation::Function);
+        self.bcx.add_function_attribute(
+            None,
+            Attribute::NoInline,
+            FunctionAttributeLocation::Function,
+        );
 
         let src = self.bcx.fn_param(0);
         let remaining = self.bcx.fn_param(1);
         let zero = self.bcx.iconst_256(U256::ZERO);
 
         let has_data = self.bcx.icmp_imm(IntCC::SignedGreaterThan, remaining, 0);
-        let r = self.lazy_select(
+        let r = self.if_else(
             has_data,
             self.word_type,
             |this| {
