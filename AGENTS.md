@@ -45,6 +45,17 @@ cargo r -- run custom --code 6001600201    # run custom bytecode (hex)
 cargo r -- run custom --code 'PUSH1 1 PUSH1 2 ADD' # run custom bytecode (asm string)
 ```
 
+`-o <dir>` writes dumps under `<dir>/<benchmark>/`. Common files:
+
+- `bytecode.bin` — raw input bytecode.
+- `bytecode.txt` — parsed bytecode IR with blocks, gas, stack info, and comments.
+- `bytecode.dbg.txt` — verbose debug dump of the parsed bytecode structure.
+- `bytecode.dot` / `bytecode.svg` — rendered CFG.
+- `unopt.ll` — LLVM IR before optimization.
+- `opt.ll` — optimized LLVM IR.
+- `opt.s` — final optimized assembly.
+- `remarks.txt` — compile timings, JIT size, and generated-file sizes.
+
 Use `RUST_LOG` to control log output:
 
 ```bash
