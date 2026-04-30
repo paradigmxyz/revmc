@@ -34,15 +34,15 @@ strips debug info and uses LTO which makes builds much slower for no benefit
 during development.
 
 ```bash
-cargo r -- run --list                      # list available benchmarks
-cargo r -- run usdc_proxy                  # compile and run a benchmark
-cargo r -- run usdc_proxy -o tmp/dump      # compile and run a benchmark; dump files like opt.ll, remarks.txt to tmp/dump
-cargo r -- run usdc_proxy --parse-only     # parse and analyze only (no codegen)
-cargo r -- run usdc_proxy --display        # print parsed bytecode IR
-cargo r -- run usdc_proxy --dot            # render CFG as DOT/SVG
-cargo r -- run usdc_proxy --aot            # compile to shared library
-cargo r -- run custom --code 6001600201    # run custom bytecode (hex)
-cargo r -- run custom --code 'PUSH1 1 PUSH1 2 ADD' # run custom bytecode (asm string)
+cargo r -- run --list                  # list available benchmarks
+cargo r -- run usdc_proxy              # compile and run a benchmark
+cargo r -- run usdc_proxy -o tmp/dump  # compile and run a benchmark; dump files like opt.ll, remarks.txt to tmp/dump
+cargo r -- run usdc_proxy --parse-only # parse and analyze only (no codegen)
+cargo r -- run usdc_proxy --display    # print parsed bytecode IR
+cargo r -- run usdc_proxy --dot        # render CFG as DOT/SVG
+cargo r -- run usdc_proxy --aot        # compile to shared library
+cargo r -- run 0x6001600201            # run custom bytecode (hex)
+cargo r -- run 'PUSH1 1 PUSH1 2 ADD'   # run custom bytecode (asm string)
 ```
 
 `-o <dir>` writes dumps under `<dir>/<benchmark>/`. Common files:
