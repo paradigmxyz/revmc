@@ -59,27 +59,6 @@ pub(crate) struct Snapshots {
 }
 
 impl Snapshots {
-    fn join_inputs(&mut self, inst: Inst, incoming: &[AbsValue], sets: &mut ConstSetInterner) {
-        let snap = &mut self.inputs[inst];
-        if snap.is_empty() {
-            snap.extend_from_slice(incoming);
-            return;
-        }
-
-        debug_assert_eq!(snap.len(), incoming.len(), "mismatched snapshot arity at {inst}");
-        for (existing, incoming) in snap.iter_mut().zip(incoming.iter().copied()) {
-            *existing = sets.join(*existing, incoming);
-        }
-    }
-
-    fn join_output(&mut self, inst: Inst, incoming: Option<AbsValue>, sets: &mut ConstSetInterner) {
-        match (&mut self.outputs[inst], incoming) {
-            (slot @ None, Some(value)) => *slot = Some(value),
-            (Some(existing), Some(value)) => *existing = sets.join(*existing, value),
-            _ => {}
-        }
-    }
-
     /// Restores snapshots for the given instructions from a previously saved copy.
     pub(crate) fn restore_from(&mut self, insts: impl Iterator<Item = Inst>, saved: &Self) {
         for inst in insts {
@@ -95,11 +74,6 @@ pub(crate) enum AbsValue {
     Const(U256Imm),
     /// Multiple known constant values (interned, sorted, deduplicated).
     ConstSet(ConstSetIdx),
-    /// The value in block-entry stack slot `k` (0 = bottom of abstract stack at entry).
-    ///
-    /// Context refinement uses this to preserve return-address provenance through
-    /// block-local stack manipulation before resolving it against the context input.
-    EntrySlot(u16),
     /// Top value (unknown concrete value).
     #[default]
     Top,
@@ -111,19 +85,6 @@ impl AbsValue {
         match self {
             Self::Const(v) => Some(v),
             _ => None,
-        }
-    }
-
-    /// Returns `true` if this value carries concrete information.
-    fn is_known(self) -> bool {
-        !matches!(self, Self::Top)
-    }
-
-    /// Resolves `EntrySlot(k)` against the block's input state.
-    fn resolve(self, input: &[Self]) -> Self {
-        match self {
-            Self::EntrySlot(k) => input.get(usize::from(k)).copied().unwrap_or(Self::Top),
-            other => other,
         }
     }
 }
@@ -149,7 +110,6 @@ impl ConstSetInterner {
             AbsValue::Top => None,
             AbsValue::Const(v) => Some(std::slice::from_ref(v)),
             AbsValue::ConstSet(idx) => Some(self.get(*idx)),
-            AbsValue::EntrySlot(_) => None,
         }
     }
 
@@ -166,8 +126,6 @@ impl ConstSetInterner {
     fn join(&mut self, a: AbsValue, b: AbsValue) -> AbsValue {
         match (a, b) {
             (AbsValue::Top, _) | (_, AbsValue::Top) => AbsValue::Top,
-            (AbsValue::EntrySlot(x), AbsValue::EntrySlot(y)) if x == y => AbsValue::EntrySlot(x),
-            (AbsValue::EntrySlot(_), _) | (_, AbsValue::EntrySlot(_)) => AbsValue::Top,
             (AbsValue::Const(x), AbsValue::Const(y)) if x == y => AbsValue::Const(x),
             _ => {
                 let a = self.abs_const_set(&a).unwrap();
@@ -200,25 +158,6 @@ impl ConstSetInterner {
     }
 }
 
-/// Local per-block summary for call/return pattern detection.
-#[derive(Clone, Debug, Default)]
-struct BlockLocalSummary {
-    /// If the block pushes a valid JUMPDEST constant that survives on the stack at exit.
-    pushes_label: Option<U256Imm>,
-    /// If the block looks like a private function call.
-    private_call: Option<PrivateCallSummary>,
-    /// If the block ends in a return jump whose target comes from the entry stack.
-    is_private_return: bool,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct PrivateCallSummary {
-    callee_block: Block,
-    continuation: U256Imm,
-    /// The PUSH instruction that produced the continuation label.
-    continuation_push: Inst,
-}
-
 /// Maximum abstract stack depth tracked by the analysis. Top-aligned joins across paths with
 /// differing stack heights pad the shorter stack with `Top` at the bottom; on CFG cycles this
 /// padding can grow without bound. Clamping discards only those bottom `Top` entries, so no
@@ -227,23 +166,6 @@ struct PrivateCallSummary {
 /// Instructions that access deeper than this (e.g. Amsterdam DUPN/SWAPN up to depth 236)
 /// treat the out-of-range slot as `Top` rather than aborting block interpretation.
 const MAX_ABS_STACK_DEPTH: usize = 64;
-/// Maximum number of worklist visits per block for the flat fixpoint.
-const MAX_FIXPOINT_ITER_MULTIPLIER: usize = 8;
-/// Maximum number of context-sensitive worklist visits per block.
-const MAX_CONTEXT_FIXPOINT_ITER_MULTIPLIER: usize = 4096;
-/// Minimum worklist budget for context-sensitive refinement.
-const MIN_CONTEXT_FIXPOINT_ITERATIONS: usize = 256;
-/// Skip context refinement on larger CFGs where the second pass is usually wasted work.
-const MAX_CONTEXT_REFINEMENT_BLOCKS: usize = 20_000;
-/// Maximum number of call-string frames tracked during context-sensitive refinement.
-const MAX_CALL_CONTEXT_DEPTH: u8 = 2;
-
-#[derive(Clone)]
-struct InterpResult {
-    jump_targets: Vec<(Inst, JumpTarget)>,
-    count: usize,
-    converged: bool,
-}
 
 /// Abstract state at the entry of a block.
 #[derive(Clone, Debug)]
@@ -314,94 +236,6 @@ oxc_index::define_nonmax_u32_index_type! {
 }
 crate::bytecode::impl_index_display!(Block, "bb{}");
 
-oxc_index::define_nonmax_u32_index_type! {
-    /// A call-string context tracked during CFG discovery.
-    struct Context;
-}
-crate::bytecode::impl_index_display!(Context, "ctx{}");
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct ContextData {
-    return_pc: Option<U256Imm>,
-    parent: Option<Context>,
-    depth: u8,
-}
-
-struct ContextInterner {
-    contexts: IndexVec<Context, ContextData>,
-}
-
-impl ContextInterner {
-    fn new() -> Self {
-        let mut contexts = IndexVec::new();
-        contexts.push(ContextData { return_pc: None, parent: None, depth: 0 });
-        Self { contexts }
-    }
-
-    fn root(&self) -> Context {
-        Context::from_usize(0)
-    }
-
-    fn head(&self, ctx: Context) -> Option<U256Imm> {
-        self.contexts[ctx].return_pc
-    }
-
-    fn pop(&self, ctx: Context) -> Context {
-        self.contexts[ctx].parent.unwrap_or(ctx)
-    }
-
-    fn push(&mut self, parent: Context, return_pc: U256Imm) -> Context {
-        if self.contexts[parent].depth >= MAX_CALL_CONTEXT_DEPTH {
-            return parent;
-        }
-
-        if let Some((ctx, _)) = self
-            .contexts
-            .iter_enumerated()
-            .find(|(_, data)| data.return_pc == Some(return_pc) && data.parent == Some(parent))
-        {
-            return ctx;
-        }
-
-        let depth = self.contexts[parent].depth.saturating_add(1);
-        self.contexts.push(ContextData { return_pc: Some(return_pc), parent: Some(parent), depth })
-    }
-}
-
-#[derive(Clone, Debug)]
-struct BlockContexts(IndexVec<Block, Vec<(Context, BlockState)>>);
-
-impl BlockContexts {
-    fn new(num_blocks: usize) -> Self {
-        Self(IndexVec::from_vec(vec![Vec::new(); num_blocks]))
-    }
-
-    fn get(&self, block: Block, ctx: Context) -> Option<&BlockState> {
-        self.0[block].iter().find_map(|(id, state)| (*id == ctx).then_some(state))
-    }
-
-    fn has_known(&self, block: Block) -> bool {
-        self.0[block].iter().any(|(_, state)| matches!(state, BlockState::Known(_)))
-    }
-
-    fn join(
-        &mut self,
-        block: Block,
-        ctx: Context,
-        incoming: &[AbsValue],
-        sets: &mut ConstSetInterner,
-    ) -> bool {
-        if let Some((_, state)) = self.0[block].iter_mut().find(|(id, _)| *id == ctx) {
-            return state.join(incoming, sets);
-        }
-
-        let mut state = BlockState::Bottom;
-        let changed = state.join(incoming, sets);
-        self.0[block].push((ctx, state));
-        changed
-    }
-}
-
 /// FIFO worklist with deduplication.
 struct Worklist {
     queue: VecDeque<Block>,
@@ -425,39 +259,6 @@ impl Worklist {
         let id = self.queue.pop_front()?;
         self.in_queue.set(id.index(), false);
         Some(id)
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct WorkItem {
-    block: Block,
-    ctx: Context,
-}
-
-struct ContextWorklist {
-    queue: VecDeque<WorkItem>,
-    in_queue: IndexVec<Block, Vec<Context>>,
-}
-
-impl ContextWorklist {
-    fn new(size: usize) -> Self {
-        Self { queue: VecDeque::new(), in_queue: IndexVec::from_vec(vec![Vec::new(); size]) }
-    }
-
-    fn push(&mut self, block: Block, ctx: Context) {
-        if self.in_queue[block].contains(&ctx) {
-            return;
-        }
-        self.in_queue[block].push(ctx);
-        self.queue.push_back(WorkItem { block, ctx });
-    }
-
-    fn pop(&mut self) -> Option<WorkItem> {
-        let item = self.queue.pop_front()?;
-        if let Some(pos) = self.in_queue[item.block].iter().position(|queued| *queued == item.ctx) {
-            self.in_queue[item.block].swap_remove(pos);
-        }
-        Some(item)
     }
 }
 
@@ -817,188 +618,6 @@ impl Bytecode<'_> {
         assert_ne!(cfg.blocks.len(), 0, "should always build at least one block");
     }
 
-    /// Computes local per-block summaries for private call/return pattern detection.
-    fn compute_local_summaries(&mut self) -> IndexVec<Block, BlockLocalSummary> {
-        let num_blocks = self.cfg.blocks.len();
-        let mut summaries = IndexVec::from_vec(vec![BlockLocalSummary::default(); num_blocks]);
-
-        let max_entry = 32usize;
-        let mut stack = Vec::with_capacity(max_entry + 32);
-        let mut producers = Vec::with_capacity(max_entry + 32);
-
-        for bid in self.cfg.blocks.indices() {
-            let block = &self.cfg.blocks[bid];
-
-            stack.clear();
-            producers.clear();
-            for k in 0..max_entry {
-                stack.push(AbsValue::EntrySlot(k as u16));
-                producers.push(None);
-            }
-
-            let term_inst = block.terminator();
-            let mut ok = true;
-            for i in block.insts() {
-                if i == term_inst {
-                    break;
-                }
-                let inst = &self.insts[i];
-                if inst.is_dead_code() {
-                    continue;
-                }
-
-                let (inp, out) = inst.stack_io();
-                let inp = inp as usize;
-                let out = out as usize;
-
-                match inst.opcode {
-                    op::PUSH0..=op::PUSH32 => {
-                        stack.push(AbsValue::Const(inst.imm()));
-                        producers.push(Some(i));
-                    }
-                    op::POP => {
-                        if stack.pop().is_none() {
-                            ok = false;
-                            break;
-                        }
-                        producers.pop();
-                    }
-                    op::DUP1..=op::DUP16 => {
-                        let depth = (inst.opcode - op::DUP1 + 1) as usize;
-                        if stack.len() < depth {
-                            ok = false;
-                            break;
-                        }
-                        let idx = stack.len() - depth;
-                        stack.push(stack[idx]);
-                        producers.push(producers[idx]);
-                    }
-                    op::SWAP1..=op::SWAP16 => {
-                        let depth = (inst.opcode - op::SWAP1 + 1) as usize;
-                        let len = stack.len();
-                        if len < depth + 1 {
-                            ok = false;
-                            break;
-                        }
-                        stack.swap(len - 1, len - 1 - depth);
-                        producers.swap(len - 1, len - 1 - depth);
-                    }
-                    _ => {
-                        if stack.len() < inp {
-                            ok = false;
-                            break;
-                        }
-
-                        let result = if out > 0 {
-                            super::const_fold::try_const_fold(
-                                inst,
-                                &stack[stack.len() - inp..],
-                                &mut self.u256_interner.borrow_mut(),
-                                self.code.len(),
-                            )
-                        } else {
-                            None
-                        };
-                        stack.truncate(stack.len() - inp);
-                        producers.truncate(producers.len() - inp);
-                        if let Some(folded) = result {
-                            stack.push(folded);
-                            producers.push(None);
-                        } else {
-                            stack.resize(stack.len() + out, AbsValue::Top);
-                            producers.resize(producers.len() + out, None);
-                        }
-                    }
-                }
-            }
-
-            if !ok {
-                continue;
-            }
-
-            let term = &self.insts[term_inst];
-            if !term.is_jump() {
-                continue;
-            }
-
-            let target_operand = stack.last().copied();
-            let is_return = matches!(target_operand, Some(AbsValue::EntrySlot(_)));
-            let static_target_pc =
-                term.is_static_jump().then(|| self.pc(term.static_jump_target()));
-
-            let callee_block =
-                if term.is_static_jump() && !term.flags.contains(InstFlags::MULTI_JUMP) {
-                    let target = term.static_jump_target();
-                    let target = self.redirects.get(&target).copied().unwrap_or(target);
-                    self.cfg.inst_to_block.get(target).copied().flatten()
-                } else {
-                    target_operand.and_then(|v| match v {
-                        AbsValue::Const(imm) => {
-                            let val = imm.get(&self.u256_interner.borrow());
-                            let pc = usize::try_from(val).ok()?;
-                            if !self.is_valid_jump(pc) {
-                                return None;
-                            }
-                            let target = self.pc_to_inst(pc);
-                            let target = self.redirects.get(&target).copied().unwrap_or(target);
-                            self.cfg.inst_to_block.get(target).copied().flatten()
-                        }
-                        _ => None,
-                    })
-                };
-
-            let (search_stack, search_producers) = if term.is_static_jump() {
-                (stack.as_slice(), producers.as_slice())
-            } else if term.opcode == op::JUMP {
-                let n = stack.len().saturating_sub(1);
-                (&stack[..n], &producers[..n])
-            } else {
-                let n = stack.len().saturating_sub(2);
-                (&stack[..n], &producers[..n])
-            };
-
-            let mut pushed_label = None;
-            for (value, producer) in search_stack.iter().rev().zip(search_producers.iter().rev()) {
-                let AbsValue::Const(imm) = value else { continue };
-                let val = imm.get(&self.u256_interner.borrow());
-                let Ok(pc) = usize::try_from(val) else { continue };
-                if self.is_valid_jump(pc)
-                    && static_target_pc != Some(pc as u32)
-                    && !matches!(target_operand, Some(AbsValue::Const(target)) if target == *imm)
-                {
-                    pushed_label = Some((*imm, *producer));
-                    break;
-                }
-            }
-
-            summaries[bid].pushes_label = pushed_label.map(|(imm, _)| imm);
-
-            if is_return && term.opcode == op::JUMP {
-                summaries[bid].is_private_return = true;
-            }
-
-            if let (Some(callee), Some((continuation, Some(continuation_push)))) =
-                (callee_block, pushed_label)
-                && term.opcode == op::JUMP
-            {
-                summaries[bid].private_call = Some(PrivateCallSummary {
-                    callee_block: callee,
-                    continuation,
-                    continuation_push,
-                });
-            }
-        }
-
-        if enabled!(tracing::Level::DEBUG) {
-            let calls = summaries.iter().filter(|s| s.private_call.is_some()).count();
-            let returns = summaries.iter().filter(|s| s.is_private_return).count();
-            let labels = summaries.iter().filter(|s| s.pushes_label.is_some()).count();
-            debug!(calls, returns, labels, "local block summaries");
-        }
-
-        summaries
-    }
-
     /// Run worklist-based abstract interpretation over the CFG.
     ///
     /// Returns a list of (jump_inst, resolved_target) pairs and the count of resolvable jumps.
@@ -1112,53 +731,7 @@ impl Bytecode<'_> {
             .filter(|(_, t)| matches!(t, JumpTarget::Resolved(_) | JumpTarget::Invalid))
             .count();
 
-        let flat = InterpResult { jump_targets, count, converged };
-        if std::env::var_os("REVMC_CONTEXT_JUMP_REFINEMENT").is_none() {
-            return (flat.jump_targets, flat.count);
-        }
-        let summaries = self.compute_local_summaries();
-        if !self.should_refine_with_contexts(&flat, &summaries) {
-            return (flat.jump_targets, flat.count);
-        }
-
-        let flat_snapshots = self.snapshots.clone();
-        let n = self.insts.len();
-        self.snapshots = Snapshots {
-            inputs: IndexVec::from_vec(vec![SmallVec::new(); n]),
-            outputs: IndexVec::from_vec(vec![None; n]),
-        };
-
-        let refined = self.run_context_sensitive_interp(&jump_insts, &summaries, local_snapshots);
-        if refined.converged && refined.count > flat.count {
-            debug!(
-                baseline = flat.count,
-                refined = refined.count,
-                "using context-sensitive refinement"
-            );
-            return (refined.jump_targets, refined.count);
-        }
-
-        if !refined.converged {
-            debug!(
-                baseline = flat.count,
-                refined = refined.count,
-                "discarding non-converged context-sensitive refinement"
-            );
-        }
-
-        self.snapshots = flat_snapshots;
-        (flat.jump_targets, flat.count)
-    }
-
-    fn should_refine_with_contexts(
-        &self,
-        flat: &InterpResult,
-        summaries: &IndexVec<Block, BlockLocalSummary>,
-    ) -> bool {
-        std::env::var_os("REVMC_CONTEXT_JUMP_REFINEMENT").is_some()
-            && self.cfg.blocks.len() <= MAX_CONTEXT_REFINEMENT_BLOCKS
-            && flat.jump_targets.iter().any(|(_, target)| matches!(target, JumpTarget::Top))
-            && summaries.iter().any(|s| s.private_call.is_some())
+        (jump_targets, count)
     }
 
     /// Resolves a jump target from the snapshot operand recorded during the fixpoint.
@@ -1196,7 +769,6 @@ impl Bytecode<'_> {
                     JumpTarget::Invalid
                 }
             }
-            AbsValue::EntrySlot(_) => JumpTarget::Top,
             AbsValue::Top => JumpTarget::Top,
         }
     }
@@ -1387,7 +959,7 @@ impl Bytecode<'_> {
         let constants = match value {
             AbsValue::Const(imm) => Either::Left(std::iter::once(imm)),
             AbsValue::ConstSet(set_idx) => Either::Right(const_sets.get(set_idx).iter().copied()),
-            AbsValue::EntrySlot(_) | AbsValue::Top => return None,
+            AbsValue::Top => return None,
         };
 
         let interner = self.u256_interner.borrow();
@@ -1421,7 +993,7 @@ impl Bytecode<'_> {
         let consts = match operand {
             AbsValue::Const(imm) => Either::Left(std::iter::once(imm)),
             AbsValue::ConstSet(set_idx) => Either::Right(const_sets.get(set_idx).iter().copied()),
-            AbsValue::EntrySlot(_) | AbsValue::Top => return,
+            AbsValue::Top => return,
         };
         let interner = self.u256_interner.borrow();
         for imm in consts {
@@ -1516,58 +1088,6 @@ impl Bytecode<'_> {
         }
     }
 
-    fn invalidate_suspect_context_jumps(
-        &mut self,
-        jump_targets: &mut [(Inst, JumpTarget)],
-        block_states: &BlockContexts,
-        discovered_edges: &IndexVec<Block, SmallVec<[Block; 4]>>,
-    ) {
-        let num_blocks = self.cfg.blocks.len();
-
-        let mut suspect: BitVec = BitVec::repeat(false, num_blocks);
-        for bid in self.cfg.blocks.indices() {
-            if block_states.has_known(bid)
-                && self.insts[self.cfg.blocks[bid].insts.start].is_jumpdest()
-            {
-                suspect.set(bid.index(), true);
-            }
-        }
-
-        let mut propagate = Worklist::new(num_blocks);
-        for bid in self.cfg.blocks.indices() {
-            if suspect[bid.index()] {
-                propagate.push(bid);
-            }
-        }
-        while let Some(bid) = propagate.pop() {
-            for &succ in self.cfg.blocks[bid].succs.iter().chain(discovered_edges[bid].iter()) {
-                let si = succ.index();
-                if !suspect[si] {
-                    suspect.set(si, true);
-                    propagate.push(succ);
-                }
-            }
-        }
-
-        for (inst, target) in jump_targets.iter_mut() {
-            if !matches!(target, JumpTarget::Resolved(_) | JumpTarget::Invalid) {
-                continue;
-            }
-            if let Some(bid) = self.cfg.inst_to_block[*inst]
-                && suspect[bid.index()]
-            {
-                trace!(
-                    %inst,
-                    pc = self.pc(*inst),
-                    %bid,
-                    target = ?target,
-                    "invalidated suspect context jump resolution"
-                );
-                *target = JumpTarget::Top;
-            }
-        }
-    }
-
     /// Run a worklist-based fixpoint to compute abstract block states.
     ///
     /// Returns `(discovered_edges, edge_states, converged)`.
@@ -1587,7 +1107,7 @@ impl Bytecode<'_> {
             IndexVec::from_vec(vec![SmallVec::new(); num_blocks]);
         let mut edge_states: EdgeStates = IndexVec::from_vec(vec![Vec::new(); num_blocks]);
 
-        let max_iterations = num_blocks.saturating_mul(MAX_FIXPOINT_ITER_MULTIPLIER);
+        let max_iterations = num_blocks * 8;
         let mut iterations = 0;
         let mut converged = true;
 
@@ -1645,453 +1165,6 @@ impl Bytecode<'_> {
         );
 
         (discovered, edge_states, converged)
-    }
-
-    fn run_context_sensitive_interp(
-        &mut self,
-        jump_insts: &[Inst],
-        summaries: &IndexVec<Block, BlockLocalSummary>,
-        local_snapshots: &Snapshots,
-    ) -> InterpResult {
-        let num_blocks = self.cfg.blocks.len();
-
-        let mut const_sets = ConstSetInterner::new();
-        let mut contexts = ContextInterner::new();
-        let root_ctx = contexts.root();
-
-        let mut block_states = BlockContexts::new(num_blocks);
-        block_states.join(Block::from_usize(0), root_ctx, &[], &mut const_sets);
-
-        let (discovered_edges, converged) =
-            self.run_context_fixpoint(&mut block_states, &mut const_sets, &mut contexts, summaries);
-
-        if !converged {
-            self.snapshots.restore_from(self.insts.indices(), local_snapshots);
-        }
-
-        let mut jump_targets = Vec::new();
-        for &jump_inst in jump_insts {
-            let snap = &self.snapshots.inputs[jump_inst];
-            let target = if snap.is_empty() {
-                trace!(%jump_inst, pc = self.pc(jump_inst), "jump in unreached block");
-                JumpTarget::Bottom
-            } else {
-                self.resolve_jump_operand(*snap.last().unwrap(), &const_sets)
-            };
-            jump_targets.push((jump_inst, target));
-        }
-
-        let has_top_jump = jump_targets.iter().any(|(_, target)| matches!(target, JumpTarget::Top));
-        if has_top_jump || !converged {
-            let resolved_before_invalidation = jump_targets
-                .iter()
-                .filter(|(_, target)| matches!(target, JumpTarget::Resolved(_)))
-                .count();
-            let invalid_before_invalidation = jump_targets
-                .iter()
-                .filter(|(_, target)| matches!(target, JumpTarget::Invalid))
-                .count();
-            debug!(
-                has_top_jump,
-                converged,
-                resolved_before_invalidation,
-                invalid_before_invalidation,
-                "invalidating suspect context jump resolutions"
-            );
-            self.invalidate_suspect_context_jumps(
-                &mut jump_targets,
-                &block_states,
-                &discovered_edges,
-            );
-        }
-
-        for &(jump_inst, ref target) in &jump_targets {
-            if let JumpTarget::Resolved(targets) = target {
-                trace!(
-                    %jump_inst,
-                    pc = self.pc(jump_inst),
-                    n_targets = targets.len(),
-                    "resolved via context"
-                );
-            }
-        }
-
-        let count = jump_targets
-            .iter()
-            .filter(|(_, target)| matches!(target, JumpTarget::Resolved(_) | JumpTarget::Invalid))
-            .count();
-
-        InterpResult { jump_targets, count, converged }
-    }
-
-    /// Runs a context-sensitive fixpoint that tracks call-string return continuations.
-    fn run_context_fixpoint(
-        &mut self,
-        block_states: &mut BlockContexts,
-        const_sets: &mut ConstSetInterner,
-        contexts: &mut ContextInterner,
-        summaries: &IndexVec<Block, BlockLocalSummary>,
-    ) -> (DiscoveredEdges, bool) {
-        let num_blocks = self.cfg.blocks.len();
-        let mut worklist = ContextWorklist::new(num_blocks);
-        worklist.push(Block::from_usize(0), contexts.root());
-
-        let mut discovered: DiscoveredEdges = IndexVec::from_vec(vec![SmallVec::new(); num_blocks]);
-        let mut disc_preds: IndexVec<Block, SmallVec<[Block; 4]>> =
-            IndexVec::from_vec(vec![SmallVec::new(); num_blocks]);
-
-        let max_iterations = num_blocks
-            .saturating_mul(MAX_CONTEXT_FIXPOINT_ITER_MULTIPLIER)
-            .max(MIN_CONTEXT_FIXPOINT_ITERATIONS);
-        let mut iterations = 0;
-        let mut converged = true;
-        let mut stack_buf = Vec::with_capacity(MAX_ABS_STACK_DEPTH);
-
-        while let Some(item) = worklist.pop() {
-            iterations += 1;
-            if iterations > max_iterations {
-                converged = false;
-                break;
-            }
-
-            let bid = item.block;
-            let ctx = item.ctx;
-
-            stack_buf.clear();
-            let input = match block_states.get(bid, ctx) {
-                Some(BlockState::Known(s)) => {
-                    stack_buf.extend_from_slice(s);
-                    s.as_slice()
-                }
-                Some(BlockState::Bottom) | None => continue,
-            };
-
-            for (k, value) in stack_buf.iter_mut().enumerate() {
-                if !value.is_known() {
-                    *value = AbsValue::EntrySlot(k as u16);
-                }
-            }
-
-            let term_inst = self.cfg.blocks[bid].terminator();
-            let insts = self.cfg.blocks[bid].insts().collect::<SmallVec<[Inst; 16]>>();
-            let succs = self.cfg.blocks[bid].succs.clone();
-            let term = &self.insts[term_inst];
-            let term_opcode = term.opcode;
-            let term_is_jump = term.is_jump();
-            let term_is_static_jump = term.is_static_jump();
-            let term_can_fall_through = term.can_fall_through();
-
-            let (ok, term_snap) = self.interpret_block_context(
-                insts.iter().copied(),
-                term_inst,
-                input,
-                &mut stack_buf,
-                const_sets,
-            );
-            if !ok {
-                continue;
-            }
-
-            if term_is_jump
-                && !term_is_static_jump
-                && let Some(operand) = term_snap.as_ref().and_then(|snap| snap.last()).copied()
-            {
-                self.discover_jump_edges(
-                    operand,
-                    bid,
-                    const_sets,
-                    &mut discovered,
-                    &mut disc_preds,
-                );
-            }
-
-            for value in &mut stack_buf {
-                *value = value.resolve(input);
-            }
-
-            let (skip_fallthrough, skip_jump) = if term_opcode == op::JUMPI
-                && let Some(AbsValue::Const(imm)) =
-                    term_snap.as_ref().and_then(|snap| snap.first()).copied()
-            {
-                if imm.get(&self.u256_interner.borrow()).is_zero() {
-                    (false, true)
-                } else {
-                    (true, false)
-                }
-            } else {
-                (false, false)
-            };
-
-            for (si, &succ) in succs.iter().chain(&discovered[bid]).enumerate() {
-                let is_fallthrough = si == 0 && term_opcode == op::JUMPI && term_can_fall_through;
-                let is_jump_edge = !is_fallthrough;
-                if (is_fallthrough && skip_fallthrough) || (is_jump_edge && skip_jump) {
-                    continue;
-                }
-
-                let succ_ctx =
-                    self.successor_context(summaries, contexts, ctx, bid, succ, &stack_buf);
-                if block_states.join(succ, succ_ctx, &stack_buf, const_sets) {
-                    worklist.push(succ, succ_ctx);
-                }
-            }
-
-            if summaries[bid].is_private_return
-                && term_opcode == op::JUMP
-                && !term_is_static_jump
-                && let Some(return_pc) = contexts.head(ctx)
-            {
-                let return_pc = return_pc.get(&self.u256_interner.borrow());
-                if let Ok(pc) = usize::try_from(return_pc)
-                    && self.is_valid_jump(pc)
-                {
-                    let target = self.pc_to_inst(pc);
-                    let target = self.redirects.get(&target).copied().unwrap_or(target);
-                    if let Some(target_block) =
-                        self.cfg.inst_to_block.get(target).copied().flatten()
-                    {
-                        let return_ctx = contexts.pop(ctx);
-                        if !discovered[bid].contains(&target_block) {
-                            discovered[bid].push(target_block);
-                            disc_preds[target_block].push(bid);
-                        }
-                        if block_states.join(target_block, return_ctx, &stack_buf, const_sets) {
-                            worklist.push(target_block, return_ctx);
-                        }
-                    }
-                }
-            }
-        }
-
-        debug!(
-            "{msg} after {iterations} iterations (max={max_iterations})",
-            msg = if converged { "context converged" } else { "context did not converge" },
-        );
-
-        (discovered, converged)
-    }
-
-    fn interpret_block_context(
-        &mut self,
-        insts: impl IntoIterator<Item = Inst>,
-        term_inst: Inst,
-        entry_input: &[AbsValue],
-        stack: &mut Vec<AbsValue>,
-        const_sets: &mut ConstSetInterner,
-    ) -> (bool, Option<OperandSnapshot>) {
-        let mut term_snapshot = None;
-
-        for i in insts {
-            let inst = &self.insts[i];
-            if inst.is_dead_code() {
-                continue;
-            }
-
-            let (inp, out) = inst.stack_io();
-            let inp = inp as usize;
-            let out = out as usize;
-
-            let start = stack.len().saturating_sub(inp);
-            let snap = stack[start..]
-                .iter()
-                .copied()
-                .map(|value| value.resolve(entry_input))
-                .collect::<OperandSnapshot>();
-            if snap.len() != inp {
-                return (false, None);
-            }
-            self.snapshots.join_inputs(i, &snap, const_sets);
-            if i == term_inst {
-                term_snapshot = Some(snap.clone());
-            }
-
-            match inst.opcode {
-                op::PUSH0..=op::PUSH32 => {
-                    stack.push(AbsValue::Const(inst.imm()));
-                }
-                op::POP => {
-                    if stack.pop().is_none() {
-                        return (false, None);
-                    }
-                }
-                op::DUP1..=op::DUP16 => {
-                    let depth = (inst.opcode - op::DUP1 + 1) as usize;
-                    if stack.len() < depth {
-                        return (false, None);
-                    }
-                    stack.push(stack[stack.len() - depth]);
-                }
-                op::SWAP1..=op::SWAP16 => {
-                    let depth = (inst.opcode - op::SWAP1 + 1) as usize;
-                    let len = stack.len();
-                    if len < depth + 1 {
-                        return (false, None);
-                    }
-                    stack.swap(len - 1, len - 1 - depth);
-                }
-                op::DUPN => {
-                    let depth = crate::decode_single(inst.imm_byte());
-                    match depth {
-                        Some(n) => {
-                            let n = n as usize;
-                            if stack.len() < n {
-                                stack.push(AbsValue::Top);
-                            } else {
-                                stack.push(stack[stack.len() - n]);
-                            }
-                        }
-                        None => return (false, None),
-                    }
-                }
-                op::SWAPN => {
-                    let depth = crate::decode_single(inst.imm_byte());
-                    match depth {
-                        Some(n) => {
-                            let n = n as usize;
-                            let len = stack.len();
-                            if len < n + 1 {
-                                if let Some(tos) = stack.last_mut() {
-                                    *tos = AbsValue::Top;
-                                }
-                            } else {
-                                stack.swap(len - 1, len - 1 - n);
-                            }
-                        }
-                        None => return (false, None),
-                    }
-                }
-                op::EXCHANGE => {
-                    let pair = crate::decode_pair(inst.imm_byte());
-                    match pair {
-                        Some((n, m)) => {
-                            let (n, m) = (n as usize, m as usize);
-                            let len = stack.len();
-                            if len < m + 1 {
-                                if len > n {
-                                    stack[len - 1 - n] = AbsValue::Top;
-                                }
-                            } else {
-                                stack.swap(len - 1 - n, len - 1 - m);
-                            }
-                        }
-                        None => return (false, None),
-                    }
-                }
-                _ => {
-                    if stack.len() < inp {
-                        return (false, None);
-                    }
-
-                    let result = if out > 0 && self.compiler_gas_used < self.compiler_gas_limit {
-                        let inputs_slice = &stack[stack.len() - inp..];
-                        let mut interner = self.u256_interner.borrow_mut();
-                        let gas =
-                            super::const_fold::const_fold_gas(inst.opcode, inputs_slice, &interner);
-                        if let Some(cost) = gas
-                            && self.compiler_gas_used.saturating_add(cost)
-                                <= self.compiler_gas_limit
-                        {
-                            let folded = super::const_fold::try_const_fold(
-                                inst,
-                                inputs_slice,
-                                &mut interner,
-                                self.code.len(),
-                            );
-                            if folded.is_some() {
-                                self.compiler_gas_used += cost;
-                            }
-                            folded
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    };
-
-                    stack.truncate(stack.len() - inp);
-                    if let Some(folded) = result {
-                        debug_assert_eq!(out, 1);
-                        stack.push(folded);
-                    } else {
-                        stack.resize(stack.len() + out, AbsValue::Top);
-                    }
-                }
-            }
-
-            if out > 0 && !matches!(inst.opcode, op::SWAP1..=op::SWAP16 | op::SWAPN | op::EXCHANGE)
-            {
-                self.snapshots.join_output(
-                    i,
-                    stack.last().copied().map(|value| value.resolve(entry_input)),
-                    const_sets,
-                );
-            }
-
-            #[cfg(test)]
-            if inst.opcode == crate::TEST_SUSPEND {
-                stack.fill(AbsValue::Top);
-            }
-        }
-
-        (true, term_snapshot)
-    }
-
-    fn successor_context(
-        &self,
-        summaries: &IndexVec<Block, BlockLocalSummary>,
-        contexts: &mut ContextInterner,
-        current: Context,
-        bid: Block,
-        succ: Block,
-        _outgoing: &[AbsValue],
-    ) -> Context {
-        if summaries[bid].is_private_return {
-            let succ_pc = self.pc(self.cfg.blocks[succ].insts.start) as usize;
-            if let Some(return_pc) = contexts.head(current) {
-                let return_pc = return_pc.get(&self.u256_interner.borrow());
-                if usize::try_from(return_pc) == Ok(succ_pc) {
-                    return contexts.pop(current);
-                }
-            }
-        }
-
-        if let Some(call) = &summaries[bid].private_call
-            && call.callee_block == succ
-        {
-            trace!(
-                %bid,
-                %succ,
-                continuation_push = %call.continuation_push,
-                "pushed continuation context"
-            );
-            return contexts.push(current, call.continuation);
-        }
-
-        let term = &self.insts[self.cfg.blocks[bid].terminator()];
-        if term.opcode == op::JUMP
-            && term.is_static_jump()
-            && let Some(return_pc) = self.call_return_candidate(
-                _outgoing,
-                self.pc(self.cfg.blocks[succ].insts.start) as usize,
-            )
-        {
-            trace!(%bid, %succ, "pushed inferred continuation context");
-            return contexts.push(current, return_pc);
-        }
-
-        current
-    }
-
-    fn call_return_candidate(&self, outgoing: &[AbsValue], target_pc: usize) -> Option<U256Imm> {
-        let interner = self.u256_interner.borrow();
-        for value in outgoing.iter().rev() {
-            let AbsValue::Const(imm) = *value else { continue };
-            let Ok(pc) = usize::try_from(imm.get(&interner)) else { continue };
-            if pc != target_pc && self.is_valid_jump(pc) {
-                return Some(imm);
-            }
-        }
-        None
     }
 
     /// Interpret a sequence of instructions on the abstract stack.
