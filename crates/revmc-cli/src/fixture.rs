@@ -104,6 +104,7 @@ pub struct PreparedBench {
     cfg: CfgEnv,
     tx: TxEnv,
     functions: B256Map<RawEvmCompilerFn>,
+    assert_success: bool,
 }
 
 /// Default caller address used for ad hoc bytecode fixtures.
@@ -179,7 +180,15 @@ impl PreparedBench {
         }
         compiler.clear_ir().expect("clear_ir failed");
 
-        Self { name: bench.name, accounts, block, cfg, tx, functions }
+        Self {
+            name: bench.name,
+            accounts,
+            block,
+            cfg,
+            tx,
+            functions,
+            assert_success: bench.assert_success,
+        }
     }
 
     /// Load a benchmark from a pre-compiled shared library instead of JIT-compiling.
@@ -207,7 +216,18 @@ impl PreparedBench {
             functions.insert(acct.code_hash, (*f).into_inner());
         }
 
-        (Self { name: bench.name, accounts, block, cfg, tx, functions }, lib)
+        (
+            Self {
+                name: bench.name,
+                accounts,
+                block,
+                cfg,
+                tx,
+                functions,
+                assert_success: bench.assert_success,
+            },
+            lib,
+        )
     }
 
     /// Parse a fixture JSON into accounts, block, cfg, tx.
@@ -354,12 +374,14 @@ impl PreparedBench {
     pub fn sanity_check(&self) {
         let interp = self.run_interpreter();
         let jit = self.run_jit();
-        assert!(
-            interp.result.is_success(),
-            "benchmark transaction failed:\n  interpreter: {:?}\n  JIT: {:?}",
-            interp.result,
-            jit.result,
-        );
+        if self.assert_success {
+            assert!(
+                interp.result.is_success(),
+                "benchmark transaction failed:\n  interpreter: {:?}\n  JIT: {:?}",
+                interp.result,
+                jit.result,
+            );
+        }
         assert_eq!(
             interp.result.is_success(),
             jit.result.is_success(),

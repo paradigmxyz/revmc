@@ -9,6 +9,8 @@ pub struct Bench {
     pub fixture_json: Option<Cow<'static, str>>,
     /// Spec ID for transaction fixture benchmarks.
     pub spec_id: Option<SpecId>,
+    /// Whether sanity checks should require successful execution.
+    pub assert_success: bool,
 }
 
 impl Bench {
@@ -61,6 +63,7 @@ pub fn fixture_from_bytecode(name: &'static str, bytecode: Vec<u8>, spec_id: Spe
 }}"#
         ))),
         spec_id: Some(spec_id),
+        assert_success: false,
     }
 }
 
@@ -74,6 +77,7 @@ macro_rules! bench {
             name: $name,
             spec_id: Some($spec),
             fixture_json: Some(Cow::Borrowed(include_str!($path))),
+            assert_success: true,
         }
     };
 }
