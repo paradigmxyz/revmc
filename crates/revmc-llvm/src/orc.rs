@@ -763,7 +763,7 @@ impl<'mr> MaterializationResponsibilityRef<'mr> {
     /// materialization responsibility. Useful for breaking up work between
     /// threads, or different kinds of materialization processes.
     ///
-    /// The caller retains responsibility of the the passed
+    /// The caller retains responsibility of the passed
     /// MaterializationResponsibility.
     pub fn delegate(&self, syms: &[SymbolStringPoolEntry]) -> Result<Self, LLVMString> {
         let mut res = MaybeUninit::uninit();
