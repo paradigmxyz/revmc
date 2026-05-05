@@ -80,13 +80,6 @@ struct RawTransaction {
     value: Option<String>,
 }
 
-struct ParsedFixture {
-    accounts: Vec<ParsedAccount>,
-    block: BlockEnv,
-    cfg: CfgEnv,
-    tx: TxEnv,
-}
-
 // ── Parsed fixture state ─────────────────────────────────────────────────────
 
 /// Pre-parsed fixture state; cheap to clone for building a fresh DB per run.
@@ -118,119 +111,6 @@ const BENCH_CALLER: Address = Address::new([
     0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
     0x11, 0x11, 0x11, 0x11,
 ]);
-
-impl Bench {
-    /// Extract the entry-point contract bytecode from a fixture benchmark.
-    pub fn entry_bytecode(&self) -> Vec<u8> {
-        FixtureFile::parse(self).entry_bytecode()
-    }
-}
-
-impl FixtureFile {
-    fn parse(bench: &Bench) -> Self {
-        let fixture_json = bench.fixture_json.as_deref().expect("fixture_json required");
-        serde_json::from_str(fixture_json).expect("failed to parse fixture JSON")
-    }
-
-    fn into_case(self) -> FixtureCase {
-        self.cases.into_values().next().expect("no cases in fixture")
-    }
-
-    fn entry_bytecode(self) -> Vec<u8> {
-        let case = self.into_case();
-        let to = case
-            .transaction
-            .first()
-            .and_then(|tx| tx.to.as_deref())
-            .expect("fixture missing transaction.to");
-        let raw = case.pre.get(to).expect("fixture missing entry-point account");
-        raw.code.as_str().hex_bytes()
-    }
-}
-
-impl FixtureCase {
-    fn parse(self, spec_id: SpecId) -> ParsedFixture {
-        let first_tx = self.transaction.into_iter().next().expect("no transactions");
-        let mut accounts = Vec::new();
-        for (addr_hex, raw) in &self.pre {
-            accounts.push(raw.parse(addr_hex));
-        }
-
-        let block = self.env.block();
-        let mut cfg = CfgEnv::new_with_spec(spec_id);
-        cfg.tx_gas_limit_cap = Some(block.gas_limit);
-        cfg.disable_nonce_check = true;
-        let tx = first_tx.tx(&cfg);
-
-        ParsedFixture { accounts, block, cfg, tx }
-    }
-}
-
-impl RawAccount {
-    fn parse(&self, addr_hex: &str) -> ParsedAccount {
-        let bytecode = Bytecode::new_raw(Bytes::from(self.code.as_str().hex_bytes()));
-        let code_hash = bytecode.hash_slow();
-        let storage =
-            self.storage.iter().map(|(k, v)| (k.as_str().u256(), v.as_str().u256())).collect();
-        ParsedAccount {
-            address: addr_hex.address(),
-            balance: self.balance.as_str().u256(),
-            nonce: self.nonce.as_str().u64(),
-            bytecode,
-            code_hash,
-            storage,
-        }
-    }
-}
-
-impl FixtureEnv {
-    fn block(&self) -> BlockEnv {
-        let mut block = BlockEnv {
-            number: self.current_number.as_deref().unwrap_or("0x1").u256(),
-            timestamp: self.current_timestamp.as_deref().unwrap_or("0x1").u256(),
-            gas_limit: self.current_gas_limit.as_deref().unwrap_or("0x1000000").u64(),
-            basefee: self.current_base_fee.as_deref().unwrap_or("0x1").u64(),
-            beneficiary: self
-                .current_coinbase
-                .as_deref()
-                .unwrap_or("0x0000000000000000000000000000000000000000")
-                .address(),
-            ..Default::default()
-        };
-        if let Some(random) = &self.current_random {
-            block.prevrandao = Some(B256::from_slice(&random.as_str().fixed_bytes(32)));
-        }
-        block.set_blob_excess_gas_and_price(
-            0,
-            revm_primitives::eip4844::BLOB_BASE_FEE_UPDATE_FRACTION_CANCUN,
-        );
-        block
-    }
-}
-
-impl RawTransaction {
-    fn tx(self, cfg: &CfgEnv) -> TxEnv {
-        TxEnv {
-            tx_type: 0,
-            caller: self.sender.as_deref().map(str::address).unwrap_or(BENCH_CALLER),
-            gas_limit: self.gas_limit.as_str().u64(),
-            gas_price: self.gas_price.as_deref().unwrap_or("0x0").u128(),
-            kind: match self.to.as_deref() {
-                Some(v) if !v.trim().is_empty() && v.trim() != "0x" => TxKind::Call(v.address()),
-                _ => TxKind::Create,
-            },
-            value: self.value.as_deref().unwrap_or("0x0").u256(),
-            data: Bytes::from(self.data.as_str().hex_bytes()),
-            nonce: self.nonce.as_deref().unwrap_or("0x0").u64(),
-            chain_id: Some(cfg.chain_id),
-            access_list: Default::default(),
-            gas_priority_fee: None,
-            blob_hashes: Vec::new(),
-            max_fee_per_blob_gas: 0,
-            authorization_list: Vec::new(),
-        }
-    }
-}
 
 impl PreparedBench {
     /// Load and JIT-compile a benchmark using a fresh compiler.
@@ -276,7 +156,7 @@ impl PreparedBench {
         mut pending: Vec<(B256, <EvmLlvmBackend as Backend>::FuncId)>,
     ) -> Self {
         let _ = default_spec_id;
-        let ParsedFixture { accounts, block, cfg, tx } = Self::parse_fixture(bench);
+        let (accounts, block, cfg, tx) = Self::parse_fixture(bench);
 
         // JIT compile all contract bytecodes that were not provided by the caller.
         let spec_id = cfg.spec;
@@ -313,7 +193,7 @@ impl PreparedBench {
         symbol_name: &str,
     ) -> (Self, libloading::Library) {
         let _ = default_spec_id;
-        let ParsedFixture { accounts, block, cfg, tx } = Self::parse_fixture(bench);
+        let (accounts, block, cfg, tx) = Self::parse_fixture(bench);
 
         let lib = unsafe { libloading::Library::new(lib_path) }.expect("failed to load library");
         let mut functions = B256Map::default();
@@ -331,9 +211,78 @@ impl PreparedBench {
     }
 
     /// Parse a fixture JSON into accounts, block, cfg, tx.
-    fn parse_fixture(bench: &Bench) -> ParsedFixture {
+    fn parse_fixture(bench: &Bench) -> (Vec<ParsedAccount>, BlockEnv, CfgEnv, TxEnv) {
+        let fixture_json = bench.fixture_json.as_deref().expect("fixture_json required");
         let spec_id = bench.spec_id.expect("spec_id required for fixture bench");
-        FixtureFile::parse(bench).into_case().parse(spec_id)
+        let file: FixtureFile =
+            serde_json::from_str(fixture_json).expect("failed to parse fixture JSON");
+        let case = file.cases.into_values().next().expect("no cases in fixture");
+        let first_tx = case.transaction.into_iter().next().expect("no transactions");
+
+        // Parse accounts.
+        let mut accounts = Vec::new();
+        for (addr_hex, raw) in &case.pre {
+            let address = parse_address(addr_hex);
+            let balance = parse_u256(&raw.balance);
+            let nonce = parse_u64(&raw.nonce);
+            let bytecode_bytes = parse_hex_bytes(&raw.code);
+            let bytecode = Bytecode::new_raw(Bytes::from(bytecode_bytes));
+            let code_hash = bytecode.hash_slow();
+            let storage: StorageKeyMap<StorageValue> =
+                raw.storage.iter().map(|(k, v)| (parse_u256(k), parse_u256(v))).collect();
+            accounts.push(ParsedAccount { address, balance, nonce, bytecode, code_hash, storage });
+        }
+
+        // Build block env.
+        let env = &case.env;
+        let mut block = BlockEnv {
+            number: parse_u256(env.current_number.as_deref().unwrap_or("0x1")),
+            timestamp: parse_u256(env.current_timestamp.as_deref().unwrap_or("0x1")),
+            gas_limit: parse_u64(env.current_gas_limit.as_deref().unwrap_or("0x1000000")),
+            basefee: parse_u64(env.current_base_fee.as_deref().unwrap_or("0x1")),
+            beneficiary: parse_address(
+                env.current_coinbase
+                    .as_deref()
+                    .unwrap_or("0x0000000000000000000000000000000000000000"),
+            ),
+            ..Default::default()
+        };
+        if let Some(random) = &env.current_random {
+            block.prevrandao = Some(B256::from_slice(&parse_fixed_bytes(random, 32)));
+        }
+        block.set_blob_excess_gas_and_price(
+            0,
+            revm_primitives::eip4844::BLOB_BASE_FEE_UPDATE_FRACTION_CANCUN,
+        );
+
+        // Build tx.
+        let caller = first_tx.sender.as_deref().map(parse_address).unwrap_or(BENCH_CALLER);
+        let mut cfg = CfgEnv::new_with_spec(spec_id);
+        cfg.tx_gas_limit_cap = Some(block.gas_limit);
+        cfg.disable_nonce_check = true;
+        let tx = TxEnv {
+            tx_type: 0,
+            caller,
+            gas_limit: parse_u64(&first_tx.gas_limit),
+            gas_price: parse_u128(first_tx.gas_price.as_deref().unwrap_or("0x0")),
+            kind: match first_tx.to.as_deref() {
+                Some(v) if !v.trim().is_empty() && v.trim() != "0x" => {
+                    TxKind::Call(parse_address(v))
+                }
+                _ => TxKind::Create,
+            },
+            value: parse_u256(first_tx.value.as_deref().unwrap_or("0x0")),
+            data: Bytes::from(parse_hex_bytes(&first_tx.data)),
+            nonce: parse_u64(first_tx.nonce.as_deref().unwrap_or("0x0")),
+            chain_id: Some(cfg.chain_id),
+            access_list: Default::default(),
+            gas_priority_fee: None,
+            blob_hashes: Vec::new(),
+            max_fee_per_blob_gas: 0,
+            authorization_list: Vec::new(),
+        };
+
+        (accounts, block, cfg, tx)
     }
 
     /// Benchmark name.
@@ -421,63 +370,62 @@ impl PreparedBench {
     }
 }
 
-// ── Hex parsing helpers ──────────────────────────────────────────────────────
-
-trait HexValue {
-    fn address(&self) -> Address;
-    fn u256(&self) -> U256;
-    fn u128(&self) -> u128;
-    fn u64(&self) -> u64;
-    fn hex_bytes(&self) -> Vec<u8>;
-    fn fixed_bytes(&self, expected_len: usize) -> Vec<u8>;
-    fn without_0x(&self) -> &str;
+/// Extract the entry-point contract bytecode from a fixture benchmark.
+pub fn fixture_entry_bytecode(bench: &Bench) -> Vec<u8> {
+    let fixture_json = bench.fixture_json.as_deref().expect("fixture_json required");
+    let file: FixtureFile =
+        serde_json::from_str(fixture_json).expect("failed to parse fixture JSON");
+    let case = file.cases.into_values().next().expect("no cases in fixture");
+    let to = case
+        .transaction
+        .first()
+        .and_then(|tx| tx.to.as_deref())
+        .expect("fixture missing transaction.to");
+    let raw = case.pre.get(to).expect("fixture missing entry-point account");
+    parse_hex_bytes(&raw.code)
 }
 
-impl HexValue for str {
-    fn address(&self) -> Address {
-        Address::from_slice(&self.fixed_bytes(20))
-    }
+// ── Hex parsing helpers ──────────────────────────────────────────────────────
 
-    fn u256(&self) -> U256 {
-        let trimmed = self.without_0x();
-        if trimmed.is_empty() { U256::ZERO } else { U256::from_str_radix(trimmed, 16).unwrap() }
-    }
+fn parse_address(value: &str) -> Address {
+    Address::from_slice(&parse_fixed_bytes(value, 20))
+}
 
-    fn u128(&self) -> u128 {
-        let trimmed = self.without_0x();
-        if trimmed.is_empty() { 0 } else { u128::from_str_radix(trimmed, 16).unwrap() }
-    }
+fn parse_u256(value: &str) -> U256 {
+    let trimmed = strip_0x(value.trim());
+    if trimmed.is_empty() { U256::ZERO } else { U256::from_str_radix(trimmed, 16).unwrap() }
+}
 
-    fn u64(&self) -> u64 {
-        let trimmed = self.without_0x();
-        if trimmed.is_empty() { 0 } else { u64::from_str_radix(trimmed, 16).unwrap() }
-    }
+fn parse_u128(value: &str) -> u128 {
+    let trimmed = strip_0x(value.trim());
+    if trimmed.is_empty() { 0 } else { u128::from_str_radix(trimmed, 16).unwrap() }
+}
 
-    fn hex_bytes(&self) -> Vec<u8> {
-        let trimmed = self.without_0x();
-        if trimmed.is_empty() {
-            return Vec::new();
-        }
-        let even = if trimmed.len().is_multiple_of(2) {
-            trimmed.to_owned()
-        } else {
-            format!("0{trimmed}")
-        };
-        revmc::primitives::hex::decode(even).unwrap()
-    }
+fn parse_u64(value: &str) -> u64 {
+    let trimmed = strip_0x(value.trim());
+    if trimmed.is_empty() { 0 } else { u64::from_str_radix(trimmed, 16).unwrap() }
+}
 
-    fn fixed_bytes(&self, expected_len: usize) -> Vec<u8> {
-        let mut bytes = self.hex_bytes();
-        if bytes.len() < expected_len {
-            let mut padded = vec![0u8; expected_len - bytes.len()];
-            padded.extend_from_slice(&bytes);
-            bytes = padded;
-        }
-        bytes
+fn parse_hex_bytes(value: &str) -> Vec<u8> {
+    let trimmed = strip_0x(value.trim());
+    if trimmed.is_empty() {
+        return Vec::new();
     }
+    let even =
+        if trimmed.len().is_multiple_of(2) { trimmed.to_owned() } else { format!("0{trimmed}") };
+    revmc::primitives::hex::decode(even).unwrap()
+}
 
-    fn without_0x(&self) -> &str {
-        let value = self.trim();
-        value.strip_prefix("0x").or_else(|| value.strip_prefix("0X")).unwrap_or(value)
+fn parse_fixed_bytes(value: &str, expected_len: usize) -> Vec<u8> {
+    let mut bytes = parse_hex_bytes(value);
+    if bytes.len() < expected_len {
+        let mut padded = vec![0u8; expected_len - bytes.len()];
+        padded.extend_from_slice(&bytes);
+        bytes = padded;
     }
+    bytes
+}
+
+fn strip_0x(value: &str) -> &str {
+    value.strip_prefix("0x").or_else(|| value.strip_prefix("0X")).unwrap_or(value)
 }

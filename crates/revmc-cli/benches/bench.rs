@@ -3,7 +3,7 @@
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use revm_handler::ExecuteEvm;
 use revmc::{EvmCompiler, EvmLlvmBackend, OptimizationLevel, primitives::hardfork::SpecId};
-use revmc_cli::PreparedBench;
+use revmc_cli::{PreparedBench, fixture_entry_bytecode};
 use std::time::Duration;
 
 const SPEC_ID: SpecId = SpecId::OSAKA;
@@ -41,7 +41,7 @@ fn run_bench(
     compiler: &mut EvmCompiler<EvmLlvmBackend>,
 ) {
     let name = def.name;
-    let bytecode = def.entry_bytecode();
+    let bytecode = fixture_entry_bytecode(def);
     let spec_id = def.spec_id.unwrap_or(SPEC_ID);
 
     let prepared = PreparedBench::load_with(def, spec_id, compiler);
