@@ -95,9 +95,7 @@ struct ParsedAccount {
 
 /// A prepared benchmark, ready to run via interpreter or JIT.
 ///
-/// Handles both fixture-based (multi-contract transaction) and simple bytecode
-/// benchmarks — the latter are converted to a single-contract fixture
-/// internally so the execution path is the same.
+/// Handles fixture-based benchmarks.
 #[allow(missing_debug_implementations)]
 pub struct PreparedBench {
     name: &'static str,
@@ -108,16 +106,10 @@ pub struct PreparedBench {
     functions: B256Map<RawEvmCompilerFn>,
 }
 
-/// Caller address used for synthetic bytecode benchmarks.
+/// Default caller address used for ad hoc bytecode fixtures.
 const BENCH_CALLER: Address = Address::new([
     0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
     0x11, 0x11, 0x11, 0x11,
-]);
-
-/// Contract address used for synthetic bytecode benchmarks.
-const BENCH_CONTRACT: Address = Address::new([
-    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
-    0xcc, 0xcc, 0xcc, 0xcc,
 ]);
 
 impl PreparedBench {
@@ -163,11 +155,8 @@ impl PreparedBench {
         mut functions: B256Map<RawEvmCompilerFn>,
         mut pending: Vec<(B256, <EvmLlvmBackend as Backend>::FuncId)>,
     ) -> Self {
-        let (accounts, block, cfg, tx) = if bench.is_fixture() {
-            Self::parse_fixture(bench)
-        } else {
-            Self::from_bytecode(bench, default_spec_id)
-        };
+        let _ = default_spec_id;
+        let (accounts, block, cfg, tx) = Self::parse_fixture(bench);
 
         // JIT compile all contract bytecodes that were not provided by the caller.
         let spec_id = cfg.spec;
@@ -203,11 +192,8 @@ impl PreparedBench {
         lib_path: &Path,
         symbol_name: &str,
     ) -> (Self, libloading::Library) {
-        let (accounts, block, cfg, tx) = if bench.is_fixture() {
-            Self::parse_fixture(bench)
-        } else {
-            Self::from_bytecode(bench, default_spec_id)
-        };
+        let _ = default_spec_id;
+        let (accounts, block, cfg, tx) = Self::parse_fixture(bench);
 
         let lib = unsafe { libloading::Library::new(lib_path) }.expect("failed to load library");
         let mut functions = B256Map::default();
@@ -224,73 +210,9 @@ impl PreparedBench {
         (Self { name: bench.name, accounts, block, cfg, tx, functions }, lib)
     }
 
-    /// Convert a bytecode [`Bench`] into fixture state.
-    fn from_bytecode(
-        bench: &Bench,
-        spec_id: SpecId,
-    ) -> (Vec<ParsedAccount>, BlockEnv, CfgEnv, TxEnv) {
-        let bytecode = Bytecode::new_raw(Bytes::copy_from_slice(&bench.bytecode));
-        let code_hash = bytecode.hash_slow();
-
-        let storage: StorageKeyMap<StorageValue> =
-            bench.storage.iter().map(|&(k, v)| (k, v)).collect();
-
-        let contract = ParsedAccount {
-            address: BENCH_CONTRACT,
-            balance: U256::ZERO,
-            nonce: 1,
-            bytecode,
-            code_hash,
-            storage,
-        };
-        let caller = ParsedAccount {
-            address: BENCH_CALLER,
-            balance: U256::MAX / U256::from(2),
-            nonce: 0,
-            bytecode: Bytecode::default(),
-            code_hash: B256::ZERO,
-            storage: Default::default(),
-        };
-
-        let gas_limit = u64::MAX / 2;
-        let mut block = BlockEnv {
-            number: bench.block_number.unwrap_or(U256::from(1)),
-            timestamp: bench.timestamp.unwrap_or(U256::from(1)),
-            gas_limit,
-            basefee: 0,
-            ..Default::default()
-        };
-        block.set_blob_excess_gas_and_price(
-            0,
-            revm_primitives::eip4844::BLOB_BASE_FEE_UPDATE_FRACTION_CANCUN,
-        );
-
-        let mut cfg = CfgEnv::new_with_spec(spec_id);
-        cfg.tx_gas_limit_cap = Some(gas_limit);
-        cfg.disable_nonce_check = true;
-        let tx = TxEnv {
-            tx_type: 0,
-            caller: BENCH_CALLER,
-            gas_limit,
-            gas_price: 0,
-            kind: TxKind::Call(BENCH_CONTRACT),
-            value: U256::ZERO,
-            data: Bytes::from(bench.calldata.clone()),
-            nonce: 0,
-            chain_id: Some(cfg.chain_id),
-            access_list: Default::default(),
-            gas_priority_fee: None,
-            blob_hashes: Vec::new(),
-            max_fee_per_blob_gas: 0,
-            authorization_list: Vec::new(),
-        };
-
-        (vec![caller, contract], block, cfg, tx)
-    }
-
     /// Parse a fixture JSON into accounts, block, cfg, tx.
     fn parse_fixture(bench: &Bench) -> (Vec<ParsedAccount>, BlockEnv, CfgEnv, TxEnv) {
-        let fixture_json = bench.fixture_json.expect("fixture_json required for fixture bench");
+        let fixture_json = bench.fixture_json.as_deref().expect("fixture_json required");
         let spec_id = bench.spec_id.expect("spec_id required for fixture bench");
         let file: FixtureFile =
             serde_json::from_str(fixture_json).expect("failed to parse fixture JSON");
@@ -336,6 +258,7 @@ impl PreparedBench {
         // Build tx.
         let caller = first_tx.sender.as_deref().map(parse_address).unwrap_or(BENCH_CALLER);
         let mut cfg = CfgEnv::new_with_spec(spec_id);
+        cfg.tx_gas_limit_cap = Some(block.gas_limit);
         cfg.disable_nonce_check = true;
         let tx = TxEnv {
             tx_type: 0,
@@ -431,6 +354,12 @@ impl PreparedBench {
     pub fn sanity_check(&self) {
         let interp = self.run_interpreter();
         let jit = self.run_jit();
+        assert!(
+            interp.result.is_success(),
+            "benchmark transaction failed:\n  interpreter: {:?}\n  JIT: {:?}",
+            interp.result,
+            jit.result,
+        );
         assert_eq!(
             interp.result.is_success(),
             jit.result.is_success(),
@@ -439,6 +368,21 @@ impl PreparedBench {
             jit.result,
         );
     }
+}
+
+/// Extract the entry-point contract bytecode from a fixture benchmark.
+pub fn fixture_entry_bytecode(bench: &Bench) -> Vec<u8> {
+    let fixture_json = bench.fixture_json.as_deref().expect("fixture_json required");
+    let file: FixtureFile =
+        serde_json::from_str(fixture_json).expect("failed to parse fixture JSON");
+    let case = file.cases.into_values().next().expect("no cases in fixture");
+    let to = case
+        .transaction
+        .first()
+        .and_then(|tx| tx.to.as_deref())
+        .expect("fixture missing transaction.to");
+    let raw = case.pre.get(to).expect("fixture missing entry-point account");
+    parse_hex_bytes(&raw.code)
 }
 
 // ── Hex parsing helpers ──────────────────────────────────────────────────────
