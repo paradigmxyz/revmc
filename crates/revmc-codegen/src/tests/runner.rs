@@ -501,6 +501,7 @@ fn run_compiled_test_case(test_case: &TestCase<'_>, f: EvmCompilerFn) {
         }
         if let Some(modify_ecx) = modify_ecx {
             modify_ecx(ecx);
+            ecx.refresh_memory_cache();
         }
 
         // Interpreter - run via instruction table
