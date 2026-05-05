@@ -4,10 +4,7 @@ use revm_primitives::{B256Map, keccak256};
 use revmc::{
     EvmCompiler, OptimizationLevel, eyre::ensure, primitives::hardfork::SpecId, shared_library_path,
 };
-use revmc_cli::{
-    PreparedBench, fixture_entry_bytecode, fixture_from_bytecode, get_benches, read_code_path,
-    read_code_string,
-};
+use revmc_cli::{Bench, PreparedBench, get_benches, read_code_path, read_code_string};
 use std::{
     hint::black_box,
     path::{Path, PathBuf},
@@ -136,7 +133,7 @@ impl RunArgs {
                     .to_string();
                 (stem, path.to_path_buf())
             };
-            fixture_from_bytecode(name.leak(), read_code_path(&bytecode_path)?, spec_id)
+            Bench::from_bytecode(name.leak(), read_code_path(&bytecode_path)?, spec_id)
         } else {
             let bytecode = read_code_string(bench_name.trim().as_bytes(), None).map_err(|e| {
                 eyre!(
@@ -144,7 +141,7 @@ impl RunArgs {
                      or valid EVM hex/asm: {e}"
                 )
             })?;
-            fixture_from_bytecode("custom", bytecode, spec_id)
+            Bench::from_bytecode("custom", bytecode, spec_id)
         };
 
         let name = bench_entry.name;
@@ -154,7 +151,7 @@ impl RunArgs {
 
         // Compile the entry-point contract: parse, display, dot, dump, aot.
         {
-            let bytecode = fixture_entry_bytecode(&bench_entry);
+            let bytecode = bench_entry.entry_bytecode();
             let compile_spec_id = bench_entry.spec_id.unwrap_or(spec_id);
 
             let mut compiler = EvmCompiler::new_llvm(self.aot)?;

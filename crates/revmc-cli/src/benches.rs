@@ -16,14 +16,13 @@ impl Bench {
     pub fn is_fixture(&self) -> bool {
         self.fixture_json.is_some()
     }
-}
 
-pub fn fixture_from_bytecode(name: &'static str, bytecode: Vec<u8>, spec_id: SpecId) -> Bench {
-    let bytecode = revmc::primitives::hex::encode(bytecode);
-    Bench {
-        name,
-        fixture_json: Some(Cow::Owned(format!(
-            r#"{{
+    pub fn from_bytecode(name: &'static str, bytecode: Vec<u8>, spec_id: SpecId) -> Self {
+        let bytecode = revmc::primitives::hex::encode(bytecode);
+        Self {
+            name,
+            fixture_json: Some(Cow::Owned(format!(
+                r#"{{
   "{name}": {{
     "env": {{
       "currentBaseFee": "0x0",
@@ -59,8 +58,9 @@ pub fn fixture_from_bytecode(name: &'static str, bytecode: Vec<u8>, spec_id: Spe
     ]
   }}
 }}"#
-        ))),
-        spec_id: Some(spec_id),
+            ))),
+            spec_id: Some(spec_id),
+        }
     }
 }
 
