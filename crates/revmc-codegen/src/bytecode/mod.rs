@@ -472,6 +472,7 @@ impl<'a> Bytecode<'a> {
     /// We can simply mark all instructions that are between diverging instructions and
     /// `JUMPDEST`s.
     #[instrument(name = "dce", level = "debug", skip_all)]
+    #[inline(never)]
     fn mark_dead_code(&mut self) {
         let mut iter = self.insts.iter_mut_enumerated();
         while let Some((i, data)) = iter.next() {
@@ -514,6 +515,7 @@ impl<'a> Bytecode<'a> {
 
     /// Constructs the sections in the bytecode.
     #[instrument(name = "sections", level = "debug", skip_all)]
+    #[inline(never)]
     fn construct_sections(&mut self) {
         let mut analysis = SectionsAnalysis::default();
         for inst in self.insts.indices() {
@@ -526,6 +528,7 @@ impl<'a> Bytecode<'a> {
 
     /// Constructs the memory sections in the bytecode.
     #[instrument(name = "memory_sections", level = "debug", skip_all)]
+    #[inline(never)]
     fn construct_memory_sections(&mut self) {
         self.memory_sections = MemorySectionAnalysis::new(self).run(self);
     }
