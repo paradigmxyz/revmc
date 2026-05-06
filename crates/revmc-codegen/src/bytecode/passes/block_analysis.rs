@@ -2337,6 +2337,48 @@ mod tests_edge_cases {
         assert_eq!(jumpi.static_jump_target(), jump_inst + 1);
     }
 
+    /// A block-local true JUMPI condition is also sound in a suspect block, but
+    /// an unknown target must stay dynamic and must not retain a fallthrough.
+    #[test]
+    fn suspect_jumpi_top_target_keeps_local_true_condition() {
+        let bytecode = analyze_asm(
+            "
+            PUSH0
+            CALLDATALOAD
+            PUSH %opaque
+            JUMPI
+            PUSH %fn_entry
+            JUMP
+        opaque:
+            JUMPDEST
+            PUSH0
+            MLOAD
+            JUMP
+        fn_entry:
+            JUMPDEST
+            PUSH1 0x01
+            PUSH0
+            MLOAD
+            JUMPI
+            STOP
+        taken:
+            JUMPDEST
+            STOP
+        ",
+        );
+
+        let (jump_inst, jumpi) =
+            bytecode.iter_insts().rev().find(|(_, data)| data.opcode == op::JUMPI).unwrap();
+        assert!(jumpi.has_const_jumpi_condition());
+        assert!(!jumpi.flags.contains(InstFlags::STATIC_JUMP));
+        assert!(!jumpi.can_fall_through());
+        assert!(bytecode.has_dynamic_jumps);
+        assert!(
+            bytecode.cfg.inst_to_block[jump_inst + 1].is_none(),
+            "always-taken dynamic JUMPI fallthrough should be dead"
+        );
+    }
+
     /// A third caller reaches the function entry with a known callee (static
     /// PUSH+JUMP) but an opaque return address (from MLOAD). The function's
     /// return jump must not be resolved because the return address is Top.
