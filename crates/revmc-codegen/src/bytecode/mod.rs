@@ -472,14 +472,22 @@ impl<'a> Bytecode<'a> {
     /// We can simply mark all instructions that are between diverging instructions and
     /// `JUMPDEST`s.
     #[instrument(name = "dce", level = "debug", skip_all)]
+    #[inline(never)]
     fn mark_dead_code(&mut self) {
         let mut iter = self.insts.iter_mut_enumerated();
         while let Some((i, data)) = iter.next() {
             if !data.can_fall_through() {
+                let static_target = data
+                    .is_static_jump()
+                    .then(|| data.static_jump_target())
+                    .filter(|&target| target > i);
                 let mut end = i;
                 let mut any_new = false;
                 for (j, data) in &mut iter {
                     end = j;
+                    if static_target == Some(j) {
+                        break;
+                    }
                     if data.is_reachable_jumpdest(self.has_dynamic_jumps) {
                         break;
                     }
@@ -507,6 +515,7 @@ impl<'a> Bytecode<'a> {
 
     /// Constructs the sections in the bytecode.
     #[instrument(name = "sections", level = "debug", skip_all)]
+    #[inline(never)]
     fn construct_sections(&mut self) {
         let mut analysis = SectionsAnalysis::default();
         for inst in self.insts.indices() {
@@ -519,6 +528,7 @@ impl<'a> Bytecode<'a> {
 
     /// Constructs the memory sections in the bytecode.
     #[instrument(name = "memory_sections", level = "debug", skip_all)]
+    #[inline(never)]
     fn construct_memory_sections(&mut self) {
         self.memory_sections = MemorySectionAnalysis::new(self).run(self);
     }
@@ -962,6 +972,12 @@ impl InstData {
         self.is_jump() && self.flags.contains(InstFlags::STATIC_JUMP)
     }
 
+    /// Returns `true` if this instruction is a `JUMPI` whose condition is known statically.
+    #[inline]
+    pub(crate) fn has_const_jumpi_condition(&self) -> bool {
+        self.opcode == op::JUMPI && self.flags.contains(InstFlags::CONST_JUMP_CONDITION)
+    }
+
     /// Returns `true` if this instruction is a `JUMPDEST`.
     #[inline]
     pub(crate) const fn is_jumpdest(&self) -> bool {
@@ -1023,6 +1039,12 @@ impl InstData {
         self.data |= Self::JUMPDEST_REACHABLE;
     }
 
+    #[inline]
+    pub(crate) fn clear_jumpdest_reachable(&mut self) {
+        debug_assert_eq!(self.opcode, op::JUMPDEST);
+        self.data &= !Self::JUMPDEST_REACHABLE;
+    }
+
     /// Returns the static target of a `JUMP`/`JUMPI` with [`InstFlags::STATIC_JUMP`].
     #[inline]
     pub(crate) fn static_jump_target(&self) -> Inst {
@@ -1060,7 +1082,7 @@ impl InstData {
     /// Returns `true` if execution can fall through to the next sequential instruction.
     #[inline]
     pub(crate) fn can_fall_through(&self) -> bool {
-        !self.is_diverging() && self.opcode != op::JUMP
+        !self.is_diverging() && self.opcode != op::JUMP && !self.has_const_jumpi_condition()
     }
 
     /// Returns `true` if we know that this instruction will branch or stop execution.
@@ -1104,7 +1126,7 @@ impl InstData {
 bitflags::bitflags! {
     /// [`InstrData`] flags.
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-    pub(crate) struct InstFlags: u8 {
+    pub(crate) struct InstFlags: u16 {
         /// The `JUMP`/`JUMPI` target is known at compile time.
         const STATIC_JUMP = 1 << 0;
         /// The jump target is known to be invalid.
@@ -1113,20 +1135,22 @@ bitflags::bitflags! {
         /// The jump has multiple known targets (see `Bytecode::multi_jump_targets`).
         /// The target value is still on the stack and must be popped and switched on at runtime.
         const MULTI_JUMP = 1 << 2;
+        /// The `JUMPI` condition is known at compile time.
+        const CONST_JUMP_CONDITION = 1 << 3;
 
         /// The instruction is disabled in this EVM version.
         /// Always returns [`InstructionResult::NotActivated`] at runtime.
-        const DISABLED = 1 << 3;
+        const DISABLED = 1 << 4;
         /// The instruction is unknown.
         /// Always returns [`InstructionResult::NotFound`] at runtime.
-        const UNKNOWN = 1 << 4;
+        const UNKNOWN = 1 << 5;
 
         /// Instruction is a no-op: skip generating logic, but keep the gas calculation.
-        const NOOP = 1 << 5;
+        const NOOP = 1 << 6;
         /// This instruction starts a new stack section.
-        const STACK_SECTION_HEAD = 1 << 6;
+        const STACK_SECTION_HEAD = 1 << 7;
         /// Don't generate any code.
-        const DEAD_CODE = 1 << 7;
+        const DEAD_CODE = 1 << 8;
     }
 }
 
