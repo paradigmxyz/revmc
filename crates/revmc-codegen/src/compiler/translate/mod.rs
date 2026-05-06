@@ -963,20 +963,18 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                         let target_value = self.pop();
                         let targets = self.bytecode.multi_jump_targets(inst).unwrap();
 
-                        if opcode == op::JUMPI {
-                            if has_const_jumpi_condition {
-                                self.pop_ignore(1);
-                                self.materialize_live_stack();
-                            } else {
-                                let cond_word = self.pop();
-                                self.materialize_live_stack();
-                                let cond = self.bcx.icmp_imm(IntCC::NotEqual, cond_word, 0);
-                                let next = self.inst_entries[inst + 1];
-                                let switch_block = self.bcx.create_block("multi_jump");
-                                self.bcx.brif(cond, switch_block, next);
-                                self.bcx.switch_to_block(switch_block);
-                            }
+                        if opcode == op::JUMPI && !has_const_jumpi_condition {
+                            let cond_word = self.pop();
+                            self.materialize_live_stack();
+                            let cond = self.bcx.icmp_imm(IntCC::NotEqual, cond_word, 0);
+                            let next = self.inst_entries[inst + 1];
+                            let switch_block = self.bcx.create_block("multi_jump");
+                            self.bcx.brif(cond, switch_block, next);
+                            self.bcx.switch_to_block(switch_block);
                         } else {
+                            if opcode == op::JUMPI {
+                                self.pop_ignore(1);
+                            }
                             self.materialize_live_stack();
                         }
 
