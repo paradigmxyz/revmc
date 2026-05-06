@@ -100,7 +100,9 @@ impl Bytecode<'_> {
                 let mut text = String::from("  ");
                 let opcode = self.opcode(inst);
                 write!(text, "{opcode}").unwrap();
-                if data.flags.contains(InstFlags::INVALID_JUMP) {
+                if data.flags.contains(InstFlags::NOT_TAKEN_JUMP) {
+                    text.push_str(" %fallthrough");
+                } else if data.flags.contains(InstFlags::INVALID_JUMP) {
                     text.push_str(" %invalid");
                 } else if data.flags.contains(InstFlags::MULTI_JUMP) {
                     if let Some(targets) = self.multi_jump_targets(inst) {
@@ -157,6 +159,9 @@ impl Bytecode<'_> {
                 }
                 if flags.contains(InstFlags::MULTI_JUMP) {
                     comment.push_str(" multi_jump");
+                }
+                if flags.contains(InstFlags::NOT_TAKEN_JUMP) {
+                    comment.push_str(" not_taken_jump");
                 }
                 if data.may_suspend() {
                     comment.push_str(" suspends");
@@ -610,7 +615,8 @@ bb2:           ; stack_in=0 max_growth=7 predecessors=bb1
                 let cleaned = before_comment
                     .replace(" %bb", " ; %bb")
                     .replace(" %dynamic", " ; %dynamic")
-                    .replace(" %invalid", " ; %invalid");
+                    .replace(" %invalid", " ; %invalid")
+                    .replace(" %fallthrough", " ; %fallthrough");
                 if comment.is_empty() {
                     format!("{cleaned}\n")
                 } else {
