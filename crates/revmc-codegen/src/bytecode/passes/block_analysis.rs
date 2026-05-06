@@ -334,16 +334,16 @@ impl BlockData {
     }
 }
 
-/// Resolved jump target after fixpoint.
+/// Resolved jump including compile-time condition information.
 #[derive(Clone, Debug)]
-struct JumpTarget {
-    target: JumpTargetKind,
+struct JumpResolution {
+    target: JumpTarget,
     condition: JumpCondition,
 }
 
 /// Resolved jump target kind after fixpoint.
 #[derive(Clone, Debug)]
-enum JumpTargetKind {
+enum JumpTarget {
     /// Not yet observed.
     Bottom,
     /// One or more known constant target instruction indices.
@@ -364,29 +364,29 @@ enum JumpCondition {
     AlwaysFalse,
 }
 
-impl JumpTarget {
-    fn new(target: JumpTargetKind) -> Self {
+impl JumpResolution {
+    fn new(target: JumpTarget) -> Self {
         Self { target, condition: JumpCondition::Unknown }
     }
 
     fn bottom() -> Self {
-        Self::new(JumpTargetKind::Bottom)
+        Self::new(JumpTarget::Bottom)
     }
 
     fn invalid() -> Self {
-        Self::new(JumpTargetKind::Invalid)
+        Self::new(JumpTarget::Invalid)
     }
 
     fn top() -> Self {
-        Self::new(JumpTargetKind::Top)
+        Self::new(JumpTarget::Top)
     }
 
     fn resolved(targets: SmallVec<[Inst; 4]>) -> Self {
-        Self::new(JumpTargetKind::Resolved(targets))
+        Self::new(JumpTarget::Resolved(targets))
     }
 
     fn resolved_with_invalid(targets: SmallVec<[Inst; 4]>) -> Self {
-        Self::new(JumpTargetKind::ResolvedWithInvalid(targets))
+        Self::new(JumpTarget::ResolvedWithInvalid(targets))
     }
 
     /// Creates a resolved target with a single constant.
@@ -397,7 +397,7 @@ impl JumpTarget {
     /// Returns the single resolved target, if exactly one.
     fn as_single(&self) -> Option<Inst> {
         match &self.target {
-            JumpTargetKind::Resolved(targets) if targets.len() == 1 => Some(targets[0]),
+            JumpTarget::Resolved(targets) if targets.len() == 1 => Some(targets[0]),
             _ => None,
         }
     }
@@ -408,19 +408,17 @@ impl JumpTarget {
     }
 
     fn is_top(&self) -> bool {
-        matches!(self.target, JumpTargetKind::Top)
+        matches!(self.target, JumpTarget::Top)
     }
 
     fn is_bottom(&self) -> bool {
-        matches!(self.target, JumpTargetKind::Bottom)
+        matches!(self.target, JumpTarget::Bottom)
     }
 
     fn is_resolved(&self) -> bool {
         matches!(
             self.target,
-            JumpTargetKind::Resolved(_)
-                | JumpTargetKind::ResolvedWithInvalid(_)
-                | JumpTargetKind::Invalid
+            JumpTarget::Resolved(_) | JumpTarget::ResolvedWithInvalid(_) | JumpTarget::Invalid
         )
     }
 }
@@ -574,7 +572,7 @@ impl Bytecode<'_> {
     /// Commits resolved jump targets by setting flags and data on the corresponding instructions.
     ///
     /// Returns the number of newly resolved jumps.
-    fn commit_resolved_jumps(&mut self, resolved: &[(Inst, JumpTarget)]) -> u32 {
+    fn commit_resolved_jumps(&mut self, resolved: &[(Inst, JumpResolution)]) -> u32 {
         let has_top_jump = resolved.iter().any(|(_, target)| target.is_top());
 
         let mut newly_resolved = 0u32;
@@ -585,11 +583,11 @@ impl Bytecode<'_> {
             }
 
             if target.condition != JumpCondition::Unknown {
-                self.insts[jump_inst].flags |= InstFlags::CONST_JUMP_CONDITION;
+                self.insts[jump_inst].flags |= InstFlags::CONST_JUMPI_CONDITION;
             }
 
             match &target.target {
-                JumpTargetKind::Resolved(targets) => {
+                JumpTarget::Resolved(targets) => {
                     self.insts[jump_inst]
                         .flags
                         .remove(InstFlags::INVALID_JUMP | InstFlags::MULTI_JUMP);
@@ -618,7 +616,7 @@ impl Bytecode<'_> {
                         newly_resolved += 1;
                     }
                 }
-                JumpTargetKind::ResolvedWithInvalid(targets) => {
+                JumpTarget::ResolvedWithInvalid(targets) => {
                     for &target_inst in targets {
                         debug_assert_eq!(
                             self.insts[target_inst].opcode,
@@ -632,7 +630,7 @@ impl Bytecode<'_> {
                     newly_resolved += 1;
                     trace!(%jump_inst, n_targets = targets.len(), "resolved multi-target jump with invalid default");
                 }
-                JumpTargetKind::Invalid => {
+                JumpTarget::Invalid => {
                     self.multi_jump_targets.remove(&jump_inst);
                     self.insts[jump_inst].flags |= InstFlags::STATIC_JUMP | InstFlags::INVALID_JUMP;
                     self.insts[jump_inst].flags.remove(InstFlags::MULTI_JUMP);
@@ -641,7 +639,7 @@ impl Bytecode<'_> {
                     }
                     trace!(%jump_inst, "resolved invalid jump");
                 }
-                JumpTargetKind::Bottom if !has_top_jump => {
+                JumpTarget::Bottom if !has_top_jump => {
                     // Truly unreachable: no unresolved jumps remain, so this
                     // code cannot be reached at runtime. Mark as invalid.
                     self.multi_jump_targets.remove(&jump_inst);
@@ -652,13 +650,13 @@ impl Bytecode<'_> {
                     }
                     trace!(%jump_inst, "unreachable jump");
                 }
-                JumpTargetKind::Bottom => {
+                JumpTarget::Bottom => {
                     // Unreachable according to the analysis, but there are
                     // unresolved (Top) jumps that might reach this code at
                     // runtime. Leave as-is.
                     trace!(%jump_inst, "unreachable jump (not marking, has_top_jump)");
                 }
-                JumpTargetKind::Top => {
+                JumpTarget::Top => {
                     trace!(%jump_inst, "unresolved jump (Top)");
                 }
             }
@@ -826,7 +824,7 @@ impl Bytecode<'_> {
         &mut self,
         local_snapshots: &Snapshots,
         split_contexts: bool,
-    ) -> (Vec<(Inst, JumpTarget)>, usize) {
+    ) -> (Vec<(Inst, JumpResolution)>, usize) {
         let num_blocks = self.cfg.blocks.len();
 
         // Initialize block states. Entry block starts with an empty stack.
@@ -857,7 +855,7 @@ impl Bytecode<'_> {
         }
 
         // After convergence, resolve each dynamic jump from its snapshot operand.
-        let mut jump_targets: Vec<(Inst, JumpTarget)> = Vec::new();
+        let mut jump_targets: Vec<(Inst, JumpResolution)> = Vec::new();
         let mut has_top_jump = false;
         for &jump_inst in &jump_insts {
             let target = self.resolve_jump_snapshot(jump_inst, &const_sets);
@@ -892,7 +890,11 @@ impl Bytecode<'_> {
         (jump_targets, count)
     }
 
-    fn resolve_jump_snapshot(&self, jump_inst: Inst, const_sets: &ConstSetInterner) -> JumpTarget {
+    fn resolve_jump_snapshot(
+        &self,
+        jump_inst: Inst,
+        const_sets: &ConstSetInterner,
+    ) -> JumpResolution {
         let snap = &self.snapshots.inputs[jump_inst];
         let condition = if self.insts[jump_inst].opcode == op::JUMPI {
             snap.first()
@@ -903,7 +905,8 @@ impl Bytecode<'_> {
         };
 
         if condition == JumpCondition::AlwaysFalse {
-            return JumpTarget::single(jump_inst + 1).with_condition(JumpCondition::AlwaysFalse);
+            return JumpResolution::single(jump_inst + 1)
+                .with_condition(JumpCondition::AlwaysFalse);
         }
 
         match snap.last() {
@@ -912,21 +915,25 @@ impl Bytecode<'_> {
             }
             None => {
                 trace!(%jump_inst, pc = self.pc(jump_inst), "jump in unreached block");
-                JumpTarget::bottom()
+                JumpResolution::bottom()
             }
         }
     }
 
     /// Resolves a jump target from the snapshot operand recorded during the fixpoint.
-    fn resolve_jump_operand(&self, operand: AbsValue, const_sets: &ConstSetInterner) -> JumpTarget {
+    fn resolve_jump_operand(
+        &self,
+        operand: AbsValue,
+        const_sets: &ConstSetInterner,
+    ) -> JumpResolution {
         match operand {
             AbsValue::Const(imm) => {
                 let val = imm.get(&self.u256_interner.borrow());
                 match usize::try_from(val) {
                     Ok(target_pc) if self.is_valid_jump(target_pc) => {
-                        JumpTarget::single(self.pc_to_inst(target_pc))
+                        JumpResolution::single(self.pc_to_inst(target_pc))
                     }
-                    _ => JumpTarget::invalid(),
+                    _ => JumpResolution::invalid(),
                 }
             }
             AbsValue::ConstSet(set_idx) => {
@@ -944,14 +951,14 @@ impl Bytecode<'_> {
                     }
                 }
                 if targets.is_empty() {
-                    JumpTarget::invalid()
+                    JumpResolution::invalid()
                 } else if has_invalid {
-                    JumpTarget::resolved_with_invalid(targets)
+                    JumpResolution::resolved_with_invalid(targets)
                 } else {
-                    JumpTarget::resolved(targets)
+                    JumpResolution::resolved(targets)
                 }
             }
-            AbsValue::Top => JumpTarget::top(),
+            AbsValue::Top => JumpResolution::top(),
         }
     }
 
@@ -1099,7 +1106,7 @@ impl Bytecode<'_> {
     /// resolved jumps and operand snapshots in suspect blocks.
     fn invalidate_suspect_jumps(
         &mut self,
-        jump_targets: &mut [(Inst, JumpTarget)],
+        jump_targets: &mut [(Inst, JumpResolution)],
         block_states: &IndexVec<Block, BlockState>,
         discovered_edges: &IndexVec<Block, SmallVec<[Block; 4]>>,
         local_snapshots: &Snapshots,
@@ -1136,7 +1143,7 @@ impl Bytecode<'_> {
 
         if invalidate_targets {
             for (inst, target) in jump_targets.iter_mut() {
-                if matches!(target.target, JumpTargetKind::Resolved(_))
+                if matches!(target.target, JumpTarget::Resolved(_))
                     && target.condition == JumpCondition::AlwaysFalse
                     && self.local_jumpi_condition_is_zero(*inst, local_snapshots)
                 {
@@ -1148,7 +1155,7 @@ impl Bytecode<'_> {
                 if let Some(bid) = self.cfg.inst_to_block[*inst]
                     && suspect[bid.index()]
                 {
-                    *target = JumpTarget::top();
+                    *target = JumpResolution::top();
                 }
             }
         }
