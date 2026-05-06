@@ -866,16 +866,21 @@ impl Bytecode<'_> {
         }
     }
 
-    fn is_const_zero(&self, value: AbsValue) -> bool {
-        value.as_const().is_some_and(|imm| imm.get(&self.u256_interner.borrow()).is_zero())
-    }
-
-    fn local_jumpi_condition_is_zero(&self, jump_inst: Inst, local_snapshots: &Snapshots) -> bool {
-        self.insts[jump_inst].opcode == op::JUMPI
-            && local_snapshots.inputs[jump_inst]
-                .first()
-                .copied()
-                .is_some_and(|value| self.is_const_zero(value))
+    fn local_jumpi_condition(&self, jump_inst: Inst, local_snapshots: &Snapshots) -> JumpCondition {
+        if self.insts[jump_inst].opcode != op::JUMPI {
+            return JumpCondition::Unknown;
+        }
+        let Some(condition) = local_snapshots.inputs[jump_inst].first().copied() else {
+            return JumpCondition::Unknown;
+        };
+        let Some(imm) = condition.as_const() else {
+            return JumpCondition::Unknown;
+        };
+        if imm.get(&self.u256_interner.borrow()).is_zero() {
+            JumpCondition::AlwaysFalse
+        } else {
+            JumpCondition::AlwaysTrue
+        }
     }
 
     /// Adds discovered dynamic-jump target edges for a block.
@@ -956,19 +961,18 @@ impl Bytecode<'_> {
         }
 
         for (inst, target) in jump_targets.iter_mut() {
-            if matches!(target.target, JumpTarget::Resolved(_))
-                && target.condition == JumpCondition::AlwaysFalse
-                && self.local_jumpi_condition_is_zero(*inst, local_snapshots)
-            {
-                continue;
-            }
-            if !target.is_resolved() {
-                continue;
-            }
             if let Some(bid) = self.cfg.inst_to_block[*inst]
                 && suspect[bid.index()]
             {
-                *target = JumpResolution::top();
+                let condition = self.local_jumpi_condition(*inst, local_snapshots);
+                if condition == JumpCondition::AlwaysFalse {
+                    *target = JumpResolution::single(*inst + 1).with_condition(condition);
+                    continue;
+                }
+                target.condition = condition;
+                if target.is_resolved() {
+                    *target = JumpResolution::top().with_condition(condition);
+                }
             }
         }
 
@@ -2246,6 +2250,91 @@ mod tests_edge_cases {
             !rj.flags.contains(InstFlags::STATIC_JUMP),
             "unsound: JUMPI return should not be resolved"
         );
+    }
+
+    /// A suspect JUMPI block must not keep a fixpoint-derived constant
+    /// condition when block-local analysis cannot prove it.
+    #[test]
+    fn suspect_jumpi_top_target_invalidates_const_condition() {
+        let bytecode = analyze_asm(
+            "
+            ; Branch to an opaque caller or fall through to a known caller.
+            PUSH0                       ; pc=0
+            CALLDATALOAD                ; pc=1
+            PUSH %opaque_caller         ; pc=2
+            JUMPI                       ; pc=4
+            ; Known caller reaches fn_entry with condition=1 and a Top target.
+            PUSH1 0x01                  ; pc=5: condition
+            PUSH0                       ; pc=7
+            MLOAD                       ; pc=8: target = Top
+            PUSH %fn_entry              ; pc=9
+            JUMP                        ; pc=11
+            ; Opaque caller could reach fn_entry with condition=0.
+        opaque_caller:
+            JUMPDEST                    ; pc=12
+            PUSH0                       ; pc=13: condition
+            PUSH %taken                 ; pc=14: target
+            PUSH0                       ; pc=16
+            MLOAD                       ; pc=17: jump destination = Top
+            JUMP                        ; pc=18
+        fn_entry:
+            JUMPDEST                    ; pc=19
+            JUMPI                       ; pc=20
+            STOP                        ; pc=21
+        taken:
+            JUMPDEST                    ; pc=22
+            STOP                        ; pc=23
+        ",
+        );
+
+        let (_, jumpi) = bytecode
+            .iter_insts()
+            .find(|(i, d)| bytecode.pc(*i) == 20 && d.opcode == op::JUMPI)
+            .unwrap();
+        assert!(
+            !jumpi.has_const_jumpi_condition(),
+            "suspect JUMPI should not keep a non-local const condition"
+        );
+        assert!(
+            !jumpi.flags.contains(InstFlags::STATIC_JUMP),
+            "suspect JUMPI target should remain dynamic"
+        );
+    }
+
+    /// A block-local false JUMPI condition is sound even in a suspect block.
+    #[test]
+    fn suspect_jumpi_top_target_keeps_local_false_condition() {
+        let bytecode = analyze_asm(
+            "
+            PUSH0
+            CALLDATALOAD
+            PUSH %opaque
+            JUMPI
+            PUSH %fn_entry
+            JUMP
+        opaque:
+            JUMPDEST
+            PUSH0
+            MLOAD
+            JUMP
+        fn_entry:
+            JUMPDEST
+            PUSH0
+            PUSH0
+            MLOAD
+            JUMPI
+            STOP
+        taken:
+            JUMPDEST
+            STOP
+        ",
+        );
+
+        let (jump_inst, jumpi) =
+            bytecode.iter_insts().rev().find(|(_, data)| data.opcode == op::JUMPI).unwrap();
+        assert!(jumpi.has_const_jumpi_condition());
+        assert!(jumpi.flags.contains(InstFlags::STATIC_JUMP));
+        assert_eq!(jumpi.static_jump_target(), jump_inst + 1);
     }
 
     /// A third caller reaches the function entry with a known callee (static
