@@ -2853,7 +2853,7 @@ mod tests_edge_cases {
             "
             PUSH1 0x69          ; inst 0: cross-block value
             CALLDATASIZE        ; inst 1: unknown condition
-            PUSH %target        ; inst 2
+            PUSH %opaque        ; inst 2
             JUMPI               ; inst 3
             ; Non-suspect fallthrough block (no JUMPDEST).
             PUSH1 0x0A          ; inst 4
@@ -2866,6 +2866,7 @@ mod tests_edge_cases {
             MSTORE              ; inst 11
             STOP                ; inst 12
             ; Opaque dynamic jump — triggers suspect invalidation.
+        opaque:
             JUMPDEST            ; inst 13
             PUSH0               ; inst 14
             CALLDATALOAD        ; inst 15: Top
