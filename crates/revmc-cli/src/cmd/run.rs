@@ -4,7 +4,10 @@ use revm_primitives::{B256Map, keccak256};
 use revmc::{
     EvmCompiler, OptimizationLevel, eyre::ensure, primitives::hardfork::SpecId, shared_library_path,
 };
-use revmc_cli::{Bench, PreparedBench, get_benches, read_code_path, read_code_string};
+use revmc_cli::{
+    PreparedBench, fixture_entry_bytecode, fixture_from_bytecode, get_benches, read_code_path,
+    read_code_string,
+};
 use std::{
     hint::black_box,
     path::{Path, PathBuf},
@@ -105,6 +108,7 @@ impl RunArgs {
         let Some(bench_name) = self.bench_name.clone() else {
             return Err(eyre!("missing <BENCH_NAME>; use `--list` to see available benchmarks"));
         };
+        let spec_id: SpecId = self.spec_id.into();
 
         // Resolve bench entry. Auto-detected from the input:
         //   1. Match against the built-in benchmark catalog by name.
@@ -132,11 +136,7 @@ impl RunArgs {
                     .to_string();
                 (stem, path.to_path_buf())
             };
-            Bench {
-                name: name.leak(),
-                bytecode: read_code_path(&bytecode_path)?,
-                ..Default::default()
-            }
+            fixture_from_bytecode(name.leak(), read_code_path(&bytecode_path)?, spec_id)
         } else {
             let bytecode = read_code_string(bench_name.trim().as_bytes(), None).map_err(|e| {
                 eyre!(
@@ -144,27 +144,18 @@ impl RunArgs {
                      or valid EVM hex/asm: {e}"
                 )
             })?;
-            Bench { name: "custom", bytecode, ..Default::default() }
+            fixture_from_bytecode("custom", bytecode, spec_id)
         };
 
         let name = bench_entry.name;
-        let is_fixture = bench_entry.is_fixture();
         let default_aot_dir = || std::env::temp_dir().join("revmc-cli").join(&bench_name);
         let mut aot_dir = None;
         let mut pending_jit = None;
 
         // Compile the entry-point contract: parse, display, dot, dump, aot.
-        // For fixture benchmarks, extract the tx-target bytecode.
         {
-            let bytecode;
-            let compile_spec_id: SpecId;
-            if is_fixture {
-                bytecode = fixture_entry_bytecode(bench_entry.fixture_json.unwrap());
-                compile_spec_id = bench_entry.spec_id.unwrap();
-            } else {
-                bytecode = bench_entry.bytecode.clone();
-                compile_spec_id = self.spec_id.into();
-            };
+            let bytecode = fixture_entry_bytecode(&bench_entry);
+            let compile_spec_id = bench_entry.spec_id.unwrap_or(spec_id);
 
             let mut compiler = EvmCompiler::new_llvm(self.aot)?;
             compiler.set_opt_level(self.opt_level);
@@ -238,8 +229,7 @@ impl RunArgs {
             }
         }
 
-        // Unified runtime path for both bytecode, fixture, and loaded benchmarks.
-        let spec_id: SpecId = self.spec_id.into();
+        // Unified runtime path for fixture benchmarks.
         let load_path = self.load.as_ref().map(|load| match load {
             Some(p) => p.clone(),
             None => {
@@ -288,16 +278,6 @@ impl RunArgs {
 
         Ok(())
     }
-}
-
-/// Extract the entry-point contract's bytecode from a fixture JSON.
-fn fixture_entry_bytecode(json: &str) -> Vec<u8> {
-    let v: serde_json::Value = serde_json::from_str(json).expect("invalid fixture JSON");
-    let case = v.as_object().unwrap().values().next().unwrap();
-    let to = case["transaction"][0]["to"].as_str().expect("fixture missing transaction.to");
-    let code = case["pre"][to]["code"].as_str().expect("fixture missing entry-point code");
-    let hex = code.strip_prefix("0x").unwrap_or(code);
-    revmc::primitives::hex::decode(hex).expect("invalid hex in fixture code")
 }
 
 fn open_dot(dot_path: &Path, fmt: DotFormat, open: bool) -> Result<()> {

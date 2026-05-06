@@ -1528,13 +1528,18 @@ pub(crate) mod tests {
 
     #[test]
     fn hash_10k() {
-        let code = revm_primitives::hex::decode(
-            include_str!("../../../../../data/hash_10k.rt.hex").trim(),
-        )
-        .unwrap();
+        let code = fixture_entry_code(include_str!("../../../../../data/hash_10k.json"));
         let mut bytecode = Bytecode::test(code);
         bytecode.analyze().unwrap();
         assert!(!bytecode.has_dynamic_jumps, "expected all jumps to be resolved");
+    }
+
+    fn fixture_entry_code(json: &str) -> Vec<u8> {
+        let v: serde_json::Value = serde_json::from_str(json).unwrap();
+        let case = v.as_object().unwrap().values().next().unwrap();
+        let to = case["transaction"][0]["to"].as_str().unwrap();
+        let code = case["pre"][to]["code"].as_str().unwrap().trim_start_matches("0x");
+        revm_primitives::hex::decode(code).unwrap()
     }
 }
 

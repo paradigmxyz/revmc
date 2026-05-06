@@ -456,14 +456,20 @@ mod tests {
 
     #[test]
     fn dedup_weth() {
-        let code =
-            revm_primitives::hex::decode(include_str!("../../../../../data/weth.rt.hex").trim())
-                .unwrap();
+        let code = fixture_entry_code(include_str!("../../../../../data/weth.json"));
         let mut bytecode = crate::Bytecode::test(code);
         bytecode.config = AnalysisConfig::DEDUP;
         bytecode.analyze().unwrap();
 
         assert_eq!(bytecode.redirects.len(), 13);
+    }
+
+    fn fixture_entry_code(json: &str) -> Vec<u8> {
+        let v: serde_json::Value = serde_json::from_str(json).unwrap();
+        let case = v.as_object().unwrap().values().next().unwrap();
+        let to = case["transaction"][0]["to"].as_str().unwrap();
+        let code = case["pre"][to]["code"].as_str().unwrap().trim_start_matches("0x");
+        revm_primitives::hex::decode(code).unwrap()
     }
 
     #[test]
