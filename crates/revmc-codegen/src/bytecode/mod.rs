@@ -962,6 +962,12 @@ impl InstData {
         self.is_jump() && self.flags.contains(InstFlags::STATIC_JUMP)
     }
 
+    /// Returns `true` if this instruction is a `JUMPI` whose condition is known statically.
+    #[inline]
+    pub(crate) fn has_const_jump_condition(&self) -> bool {
+        self.opcode == op::JUMPI && self.flags.contains(InstFlags::CONST_JUMP_CONDITION)
+    }
+
     /// Returns `true` if this instruction is a `JUMPDEST`.
     #[inline]
     pub(crate) const fn is_jumpdest(&self) -> bool {
@@ -1060,7 +1066,7 @@ impl InstData {
     /// Returns `true` if execution can fall through to the next sequential instruction.
     #[inline]
     pub(crate) fn can_fall_through(&self) -> bool {
-        !self.is_diverging() && self.opcode != op::JUMP
+        !self.is_diverging() && self.opcode != op::JUMP && !self.has_const_jump_condition()
     }
 
     /// Returns `true` if we know that this instruction will branch or stop execution.
@@ -1104,7 +1110,7 @@ impl InstData {
 bitflags::bitflags! {
     /// [`InstrData`] flags.
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-    pub(crate) struct InstFlags: u8 {
+    pub(crate) struct InstFlags: u16 {
         /// The `JUMP`/`JUMPI` target is known at compile time.
         const STATIC_JUMP = 1 << 0;
         /// The jump target is known to be invalid.
@@ -1127,6 +1133,8 @@ bitflags::bitflags! {
         const STACK_SECTION_HEAD = 1 << 6;
         /// Don't generate any code.
         const DEAD_CODE = 1 << 7;
+        /// The `JUMPI` condition is known at compile time.
+        const CONST_JUMP_CONDITION = 1 << 8;
     }
 }
 

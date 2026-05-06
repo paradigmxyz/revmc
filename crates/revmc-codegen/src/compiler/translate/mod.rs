@@ -965,11 +965,13 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                         if opcode == op::JUMPI {
                             let cond_word = self.pop();
                             self.materialize_live_stack();
-                            let cond = self.bcx.icmp_imm(IntCC::NotEqual, cond_word, 0);
-                            let next = self.inst_entries[inst + 1];
-                            let switch_block = self.bcx.create_block("multi_jump");
-                            self.bcx.brif(cond, switch_block, next);
-                            self.bcx.switch_to_block(switch_block);
+                            if !data.has_const_jump_condition() {
+                                let cond = self.bcx.icmp_imm(IntCC::NotEqual, cond_word, 0);
+                                let next = self.inst_entries[inst + 1];
+                                let switch_block = self.bcx.create_block("multi_jump");
+                                self.bcx.brif(cond, switch_block, next);
+                                self.bcx.switch_to_block(switch_block);
+                            }
                         } else {
                             self.materialize_live_stack();
                         }
@@ -990,9 +992,9 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                         // Pop and discard the target; it's always on the stack.
                         self.pop_ignore(1);
                         let target_inst = data.static_jump_target();
-                        debug_assert_eq!(
-                            *self.bytecode.inst(target_inst),
-                            op::JUMPDEST,
+                        debug_assert!(
+                            *self.bytecode.inst(target_inst) == op::JUMPDEST
+                                || (opcode == op::JUMPI && target_inst == inst + 1),
                             "jumping to non-JUMPDEST; target_inst={target_inst}",
                         );
                         self.inst_entries[target_inst]
@@ -1010,9 +1012,13 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                         let cond_word = self.pop();
                         // Flush virtual values before leaving the section.
                         self.materialize_live_stack();
-                        let cond = self.bcx.icmp_imm(IntCC::NotEqual, cond_word, 0);
-                        let next = self.inst_entries[inst + 1];
-                        self.bcx.brif(cond, target, next);
+                        if data.has_const_jump_condition() {
+                            self.bcx.br(target);
+                        } else {
+                            let cond = self.bcx.icmp_imm(IntCC::NotEqual, cond_word, 0);
+                            let next = self.inst_entries[inst + 1];
+                            self.bcx.brif(cond, target, next);
+                        }
                     } else {
                         // Flush virtual values before leaving the section.
                         self.materialize_live_stack();
