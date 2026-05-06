@@ -948,6 +948,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             }
             op::JUMP | op::JUMPI => {
                 let is_invalid = data.flags.contains(InstFlags::INVALID_JUMP);
+                let has_const_jumpi_condition = data.has_const_jumpi_condition();
                 if is_invalid && opcode == op::JUMP {
                     // Pop and discard the target; it's always on the stack.
                     self.pop_ignore(1);
@@ -963,13 +964,18 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                         let targets = self.bytecode.multi_jump_targets(inst).unwrap();
 
                         if opcode == op::JUMPI {
-                            let cond_word = self.pop();
-                            self.materialize_live_stack();
-                            let cond = self.bcx.icmp_imm(IntCC::NotEqual, cond_word, 0);
-                            let next = self.inst_entries[inst + 1];
-                            let switch_block = self.bcx.create_block("multi_jump");
-                            self.bcx.brif(cond, switch_block, next);
-                            self.bcx.switch_to_block(switch_block);
+                            if has_const_jumpi_condition {
+                                self.pop_ignore(1);
+                                self.materialize_live_stack();
+                            } else {
+                                let cond_word = self.pop();
+                                self.materialize_live_stack();
+                                let cond = self.bcx.icmp_imm(IntCC::NotEqual, cond_word, 0);
+                                let next = self.inst_entries[inst + 1];
+                                let switch_block = self.bcx.create_block("multi_jump");
+                                self.bcx.brif(cond, switch_block, next);
+                                self.bcx.switch_to_block(switch_block);
+                            }
                         } else {
                             self.materialize_live_stack();
                         }
@@ -990,9 +996,9 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                         // Pop and discard the target; it's always on the stack.
                         self.pop_ignore(1);
                         let target_inst = data.static_jump_target();
-                        debug_assert_eq!(
-                            *self.bytecode.inst(target_inst),
-                            op::JUMPDEST,
+                        debug_assert!(
+                            *self.bytecode.inst(target_inst) == op::JUMPDEST
+                                || (opcode == op::JUMPI && target_inst == inst + 1),
                             "jumping to non-JUMPDEST; target_inst={target_inst}",
                         );
                         self.inst_entries[target_inst]
@@ -1006,7 +1012,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                         self.dynamic_jump_table
                     };
 
-                    if opcode == op::JUMPI {
+                    if opcode == op::JUMPI && !has_const_jumpi_condition {
                         let cond_word = self.pop();
                         // Flush virtual values before leaving the section.
                         self.materialize_live_stack();
@@ -1014,6 +1020,9 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                         let next = self.inst_entries[inst + 1];
                         self.bcx.brif(cond, target, next);
                     } else {
+                        if opcode == op::JUMPI {
+                            self.pop_ignore(1);
+                        }
                         // Flush virtual values before leaving the section.
                         self.materialize_live_stack();
                         self.bcx.br(target);
