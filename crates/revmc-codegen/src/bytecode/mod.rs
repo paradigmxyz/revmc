@@ -971,7 +971,7 @@ impl InstData {
 
     /// Returns `true` if this instruction is a `JUMPI` whose condition is known statically.
     #[inline]
-    pub(crate) fn has_const_jump_condition(&self) -> bool {
+    pub(crate) fn has_const_jumpi_condition(&self) -> bool {
         self.opcode == op::JUMPI && self.flags.contains(InstFlags::CONST_JUMP_CONDITION)
     }
 
@@ -1036,6 +1036,12 @@ impl InstData {
         self.data |= Self::JUMPDEST_REACHABLE;
     }
 
+    #[inline]
+    pub(crate) fn clear_jumpdest_reachable(&mut self) {
+        debug_assert_eq!(self.opcode, op::JUMPDEST);
+        self.data &= !Self::JUMPDEST_REACHABLE;
+    }
+
     /// Returns the static target of a `JUMP`/`JUMPI` with [`InstFlags::STATIC_JUMP`].
     #[inline]
     pub(crate) fn static_jump_target(&self) -> Inst {
@@ -1073,7 +1079,7 @@ impl InstData {
     /// Returns `true` if execution can fall through to the next sequential instruction.
     #[inline]
     pub(crate) fn can_fall_through(&self) -> bool {
-        !self.is_diverging() && self.opcode != op::JUMP && !self.has_const_jump_condition()
+        !self.is_diverging() && self.opcode != op::JUMP && !self.has_const_jumpi_condition()
     }
 
     /// Returns `true` if we know that this instruction will branch or stop execution.
@@ -1126,22 +1132,22 @@ bitflags::bitflags! {
         /// The jump has multiple known targets (see `Bytecode::multi_jump_targets`).
         /// The target value is still on the stack and must be popped and switched on at runtime.
         const MULTI_JUMP = 1 << 2;
+        /// The `JUMPI` condition is known at compile time.
+        const CONST_JUMP_CONDITION = 1 << 3;
 
         /// The instruction is disabled in this EVM version.
         /// Always returns [`InstructionResult::NotActivated`] at runtime.
-        const DISABLED = 1 << 3;
+        const DISABLED = 1 << 4;
         /// The instruction is unknown.
         /// Always returns [`InstructionResult::NotFound`] at runtime.
-        const UNKNOWN = 1 << 4;
+        const UNKNOWN = 1 << 5;
 
         /// Instruction is a no-op: skip generating logic, but keep the gas calculation.
-        const NOOP = 1 << 5;
+        const NOOP = 1 << 6;
         /// This instruction starts a new stack section.
-        const STACK_SECTION_HEAD = 1 << 6;
+        const STACK_SECTION_HEAD = 1 << 7;
         /// Don't generate any code.
-        const DEAD_CODE = 1 << 7;
-        /// The `JUMPI` condition is known at compile time.
-        const CONST_JUMP_CONDITION = 1 << 8;
+        const DEAD_CODE = 1 << 8;
     }
 }
 
