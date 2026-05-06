@@ -385,6 +385,10 @@ impl JumpTarget {
         Self::new(JumpTargetKind::Resolved(targets))
     }
 
+    fn resolved_with_invalid(targets: SmallVec<[Inst; 4]>) -> Self {
+        Self::new(JumpTargetKind::ResolvedWithInvalid(targets))
+    }
+
     /// Creates a resolved target with a single constant.
     fn single(inst: Inst) -> Self {
         Self::resolved(SmallVec::from_elem(inst, 1))
@@ -407,8 +411,17 @@ impl JumpTarget {
         matches!(self.target, JumpTargetKind::Top)
     }
 
+    fn is_bottom(&self) -> bool {
+        matches!(self.target, JumpTargetKind::Bottom)
+    }
+
     fn is_resolved(&self) -> bool {
-        matches!(self.target, JumpTargetKind::Resolved(_) | JumpTargetKind::Invalid)
+        matches!(
+            self.target,
+            JumpTargetKind::Resolved(_)
+                | JumpTargetKind::ResolvedWithInvalid(_)
+                | JumpTargetKind::Invalid
+        )
     }
 }
 
