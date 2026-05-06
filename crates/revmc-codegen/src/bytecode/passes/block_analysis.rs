@@ -191,7 +191,12 @@ impl BlockState {
     /// bottom-padded with `Top`. This handles the common Solidity dispatch pattern where
     /// the "no selector match" fallthrough leaves an extra item on the stack that the
     /// fallback ignores.
-    fn join(&mut self, incoming: &[AbsValue], sets: &mut ConstSetInterner) -> bool {
+    fn join(
+        &mut self,
+        incoming: &[AbsValue],
+        sets: &mut ConstSetInterner,
+        split_key: Option<usize>,
+    ) -> bool {
         fn clamp_state(incoming: &[AbsValue]) -> Vec<AbsValue> {
             let start = incoming.len().saturating_sub(MAX_ABS_STACK_DEPTH);
             incoming[start..].to_vec()
@@ -244,9 +249,20 @@ impl BlockState {
                 true
             }
             Self::Known(states) => {
-                if let Some(existing) =
-                    states.iter_mut().find(|state| state.len() == incoming.len())
-                {
+                let incoming_key = split_key
+                    .and_then(|offset| incoming.get(incoming.len().checked_sub(1 + offset)?))
+                    .copied();
+                let same_context = |state: &[AbsValue]| {
+                    if state.len() != incoming.len() {
+                        return false;
+                    }
+                    let Some(offset) = split_key else { return true };
+                    let Some(incoming_key) = incoming_key else { return true };
+                    let Some(index) = state.len().checked_sub(1 + offset) else { return true };
+                    state.get(index).is_none_or(|&existing_key| existing_key == incoming_key)
+                };
+
+                if let Some(existing) = states.iter_mut().find(|state| same_context(state)) {
                     return join_state(existing, incoming, sets);
                 }
 
@@ -526,7 +542,13 @@ impl Bytecode<'_> {
     #[instrument(name = "ba", level = "debug", skip_all)]
     pub(crate) fn block_analysis(&mut self, local_snapshots: &Snapshots) {
         self.init_snapshots();
-        let (resolved, count) = self.run_abstract_interp(local_snapshots);
+        let compiler_gas_used = self.compiler_gas_used;
+        let (mut resolved, mut count) = self.run_abstract_interp(local_snapshots, true);
+        if resolved.iter().any(|(_, target)| target.is_top()) {
+            self.init_snapshots();
+            self.compiler_gas_used = compiler_gas_used;
+            (resolved, count) = self.run_abstract_interp(local_snapshots, false);
+        }
 
         let has_const_condition =
             resolved.iter().any(|(_, target)| target.condition != JumpCondition::Unknown);
@@ -805,6 +827,7 @@ impl Bytecode<'_> {
     fn run_abstract_interp(
         &mut self,
         local_snapshots: &Snapshots,
+        split_contexts: bool,
     ) -> (Vec<(Inst, JumpTarget)>, usize) {
         let num_blocks = self.cfg.blocks.len();
 
@@ -826,7 +849,8 @@ impl Bytecode<'_> {
         }
 
         let mut const_sets = ConstSetInterner::new();
-        let (discovered_edges, converged) = self.run_fixpoint(&mut block_states, &mut const_sets);
+        let (discovered_edges, converged) =
+            self.run_fixpoint(&mut block_states, &mut const_sets, split_contexts);
 
         // On non-convergence, all fixpoint-derived snapshots are potentially stale.
         // Restore the safe block-local snapshots computed by `block_analysis_local`.
@@ -994,6 +1018,64 @@ impl Bytecode<'_> {
         }
     }
 
+    fn jump_operand_split_keys(&self) -> IndexVec<Block, Option<usize>> {
+        self.cfg
+            .blocks
+            .iter_enumerated()
+            .map(|(_, block)| {
+                let term_inst = block.terminator();
+                let term = &self.insts[term_inst];
+                if !term.is_jump() || term.flags.contains(InstFlags::STATIC_JUMP) {
+                    return None;
+                }
+
+                let mut stack: Vec<Option<usize>> =
+                    (0..MAX_ABS_STACK_DEPTH).rev().map(Some).collect();
+
+                for inst in block.insts() {
+                    if self.insts[inst].is_dead_code() {
+                        continue;
+                    }
+
+                    let opcode = self.insts[inst].opcode;
+                    let (inp, out) = self.insts[inst].stack_io();
+                    let inp = inp as usize;
+                    let out = out as usize;
+
+                    if inst == term_inst {
+                        return stack.last().copied().flatten();
+                    }
+
+                    match opcode {
+                        op::PUSH0..=op::PUSH32 => stack.push(None),
+                        op::POP => {
+                            stack.pop()?;
+                        }
+                        op::DUP1..=op::DUP16 => {
+                            let depth = (opcode - op::DUP1 + 1) as usize;
+                            stack.push(*stack.get(stack.len().checked_sub(depth)?)?);
+                        }
+                        op::SWAP1..=op::SWAP16 => {
+                            let depth = (opcode - op::SWAP1 + 1) as usize;
+                            let len = stack.len();
+                            stack.swap(len.checked_sub(1)?, len.checked_sub(1 + depth)?);
+                        }
+                        op::DUPN | op::SWAPN | op::EXCHANGE => return None,
+                        _ => {
+                            if stack.len() < inp {
+                                return None;
+                            }
+                            stack.truncate(stack.len() - inp);
+                            stack.resize(stack.len() + out, None);
+                        }
+                    }
+                }
+
+                None
+            })
+            .collect()
+    }
+
     /// Invalidates jump resolutions and operand snapshots that may be unsound due to
     /// unresolved `Top` jumps.
     ///
@@ -1074,6 +1156,7 @@ impl Bytecode<'_> {
         &mut self,
         block_states: &mut IndexVec<Block, BlockState>,
         const_sets: &mut ConstSetInterner,
+        split_contexts: bool,
     ) -> (IndexVec<Block, SmallVec<[Block; 4]>>, bool) {
         let num_blocks = self.cfg.blocks.len();
         let mut worklist = Worklist::new(num_blocks);
@@ -1085,6 +1168,7 @@ impl Bytecode<'_> {
         // Reverse map: discovered predecessors per block.
         let mut disc_preds: IndexVec<Block, SmallVec<[Block; 4]>> =
             IndexVec::from_vec(vec![SmallVec::new(); num_blocks]);
+        let split_keys = split_contexts.then(|| self.jump_operand_split_keys());
 
         let max_iterations = num_blocks * 8;
         let mut iterations = 0;
@@ -1141,7 +1225,8 @@ impl Bytecode<'_> {
 
                 // Propagate to static CFG successors and discovered dynamic-jump targets.
                 for &succ in block.succs.iter().chain(&context_targets) {
-                    if block_states[succ].join(&stack_buf, const_sets) {
+                    let split_key = split_keys.as_ref().and_then(|keys| keys[succ]);
+                    if block_states[succ].join(&stack_buf, const_sets, split_key) {
                         worklist.push(succ);
                     }
                 }
@@ -1807,6 +1892,22 @@ pub(crate) mod tests {
     #[test]
     fn hash_10k() {
         let code = fixture_entry_code(include_str!("../../../../../data/hash_10k.json"));
+        let mut bytecode = Bytecode::test(code);
+        bytecode.analyze().unwrap();
+        assert!(!bytecode.has_dynamic_jumps, "expected all jumps to be resolved");
+    }
+
+    #[test]
+    fn weth() {
+        let code = fixture_entry_code(include_str!("../../../../../data/weth.json"));
+        let mut bytecode = Bytecode::test(code);
+        bytecode.analyze().unwrap();
+        assert!(!bytecode.has_dynamic_jumps, "expected all jumps to be resolved");
+    }
+
+    #[test]
+    fn erc20_transfer() {
+        let code = fixture_entry_code(include_str!("../../../../../data/erc20_transfer.json"));
         let mut bytecode = Bytecode::test(code);
         bytecode.analyze().unwrap();
         assert!(!bytecode.has_dynamic_jumps, "expected all jumps to be resolved");
