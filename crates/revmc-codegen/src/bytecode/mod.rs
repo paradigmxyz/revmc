@@ -559,7 +559,6 @@ impl<'a> Bytecode<'a> {
 
     /// Returns the value of a PUSH instruction, right-padding truncated EOF immediates with zeros
     /// per EVM spec.
-    #[cfg(test)]
     pub(crate) fn get_push_value(&self, data: &InstData) -> U256 {
         debug_assert!(matches!(data.opcode, op::PUSH0..=op::PUSH32));
         data.imm().get(&self.u256_interner.borrow())
@@ -975,7 +974,7 @@ impl InstData {
     /// Returns `true` if this instruction is a `JUMPI` whose condition is known statically.
     #[inline]
     pub(crate) fn has_const_jumpi_condition(&self) -> bool {
-        self.opcode == op::JUMPI && self.flags.contains(InstFlags::CONST_JUMP_CONDITION)
+        self.opcode == op::JUMPI && self.flags.contains(InstFlags::CONST_JUMPI_CONDITION)
     }
 
     /// Returns `true` if this instruction is a `JUMPDEST`.
@@ -1136,7 +1135,7 @@ bitflags::bitflags! {
         /// The target value is still on the stack and must be popped and switched on at runtime.
         const MULTI_JUMP = 1 << 2;
         /// The `JUMPI` condition is known at compile time.
-        const CONST_JUMP_CONDITION = 1 << 3;
+        const CONST_JUMPI_CONDITION = 1 << 3;
 
         /// The instruction is disabled in this EVM version.
         /// Always returns [`InstructionResult::NotActivated`] at runtime.

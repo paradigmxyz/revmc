@@ -1068,7 +1068,9 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             }
 
             op::PUSH0..=op::PUSH32 => {
-                unreachable!("handled in const_output");
+                let value = self.bytecode.get_push_value(data);
+                let value = self.bcx.iconst_256(value);
+                self.push(value);
             }
 
             op::DUP1..=op::DUP16 => self.dup((opcode - op::DUP1 + 1) as usize),
