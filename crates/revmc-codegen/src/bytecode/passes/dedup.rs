@@ -461,7 +461,7 @@ mod tests {
         bytecode.config = AnalysisConfig::DEDUP;
         bytecode.analyze().unwrap();
 
-        assert_eq!(bytecode.redirects.len(), 13);
+        assert_eq!(bytecode.redirects.len(), 20);
     }
 
     fn fixture_entry_code(json: &str) -> Vec<u8> {

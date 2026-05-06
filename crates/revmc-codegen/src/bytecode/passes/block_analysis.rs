@@ -1308,10 +1308,11 @@ impl Bytecode<'_> {
 
             // Record post-instruction output snapshot.
             // Skip SWAP/SWAPN/EXCHANGE: they modify two positions and have no single "output".
-            if out > 0 && !matches!(opcode, op::SWAP1..=op::SWAP16 | op::SWAPN | op::EXCHANGE) {
-                if let Some(&value) = stack.last() {
-                    self.record_output_snapshot(i, value, const_sets);
-                }
+            if out > 0
+                && !matches!(opcode, op::SWAP1..=op::SWAP16 | op::SWAPN | op::EXCHANGE)
+                && let Some(&value) = stack.last()
+            {
+                self.record_output_snapshot(i, value, const_sets);
             }
 
             #[cfg(test)]
