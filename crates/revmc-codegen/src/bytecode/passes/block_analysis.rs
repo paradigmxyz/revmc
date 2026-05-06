@@ -346,6 +346,10 @@ impl JumpTarget {
             _ => None,
         }
     }
+
+    fn is_resolved(&self) -> bool {
+        matches!(self, Self::Resolved(_) | Self::ResolvedWithInvalid(_) | Self::Invalid)
+    }
 }
 
 /// CFG for abstract interpretation.
@@ -761,17 +765,7 @@ impl Bytecode<'_> {
             }
         }
 
-        let count = jump_targets
-            .iter()
-            .filter(|(_, t)| {
-                matches!(
-                    t,
-                    JumpTarget::Resolved(_)
-                        | JumpTarget::ResolvedWithInvalid(_)
-                        | JumpTarget::Invalid
-                )
-            })
-            .count();
+        let count = jump_targets.iter().filter(|(_, target)| target.is_resolved()).count();
 
         (jump_targets, count)
     }
@@ -902,12 +896,7 @@ impl Bytecode<'_> {
 
         if invalidate_targets {
             for (inst, target) in jump_targets.iter_mut() {
-                if !matches!(
-                    target,
-                    JumpTarget::Resolved(_)
-                        | JumpTarget::ResolvedWithInvalid(_)
-                        | JumpTarget::Invalid
-                ) {
+                if !target.is_resolved() {
                     continue;
                 }
                 if let Some(bid) = self.cfg.inst_to_block[*inst]
