@@ -505,3 +505,61 @@ pub trait Builder: BackendTypes + TypeMethods {
         loc: FunctionAttributeLocation,
     );
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{BackendConfig, OptimizationLevel};
+    use std::{path::PathBuf, str::FromStr};
+
+    #[test]
+    fn backend_config_defaults_match_runtime_settings() {
+        let config = BackendConfig::default();
+
+        assert_eq!(config.opt_level, OptimizationLevel::Default);
+        assert!(!config.is_dumping);
+        assert_eq!(config.debug_assertions, cfg!(debug_assertions));
+        assert!(config.debug_support);
+        assert!(!config.profiling_support);
+        assert!(config.simple_perf);
+        assert_eq!(config.debug_file, None);
+    }
+
+    #[test]
+    fn backend_config_is_cloneable_and_comparable() {
+        let config = BackendConfig {
+            opt_level: OptimizationLevel::Aggressive,
+            is_dumping: true,
+            debug_assertions: true,
+            debug_support: false,
+            profiling_support: true,
+            simple_perf: false,
+            debug_file: Some(PathBuf::from("debug.sol")),
+        };
+
+        assert_eq!(config.clone(), config);
+    }
+
+    #[test]
+    fn optimization_level_parses_numeric_and_named_values() {
+        for (input, expected) in [
+            ("0", OptimizationLevel::None),
+            ("none", OptimizationLevel::None),
+            ("1", OptimizationLevel::Less),
+            ("less", OptimizationLevel::Less),
+            ("2", OptimizationLevel::Default),
+            ("default", OptimizationLevel::Default),
+            ("3", OptimizationLevel::Aggressive),
+            ("aggressive", OptimizationLevel::Aggressive),
+        ] {
+            assert_eq!(OptimizationLevel::from_str(input), Ok(expected));
+        }
+    }
+
+    #[test]
+    fn optimization_level_reports_unknown_values() {
+        assert_eq!(
+            OptimizationLevel::from_str("fast").unwrap_err(),
+            "unknown optimization level: fast"
+        );
+    }
+}
