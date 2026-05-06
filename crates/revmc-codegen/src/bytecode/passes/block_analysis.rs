@@ -718,12 +718,20 @@ impl Bytecode<'_> {
         let mut jump_targets: Vec<(Inst, JumpTarget)> = Vec::new();
         let mut has_top_jump = false;
         for &jump_inst in &jump_insts {
-            let target = match self.snapshots.inputs[jump_inst].last() {
-                Some(&operand) => self.resolve_jump_operand(operand, &const_sets),
-                None => {
-                    // No snapshot means the block was never interpreted (unreachable).
-                    trace!(%jump_inst, pc = self.pc(jump_inst), "jump in unreached block");
-                    JumpTarget::Bottom
+            let snap = &self.snapshots.inputs[jump_inst];
+            let target = if self.insts[jump_inst].opcode == op::JUMPI
+                && let Some(&condition) = snap.first()
+                && self.is_const_zero(condition)
+            {
+                JumpTarget::Invalid
+            } else {
+                match snap.last() {
+                    Some(&operand) => self.resolve_jump_operand(operand, &const_sets),
+                    None => {
+                        // No snapshot means the block was never interpreted (unreachable).
+                        trace!(%jump_inst, pc = self.pc(jump_inst), "jump in unreached block");
+                        JumpTarget::Bottom
+                    }
                 }
             };
             if matches!(target, JumpTarget::Top) {
@@ -804,6 +812,10 @@ impl Bytecode<'_> {
             }
             AbsValue::Top => JumpTarget::Top,
         }
+    }
+
+    fn is_const_zero(&self, value: AbsValue) -> bool {
+        value.as_const().is_some_and(|imm| imm.get(&self.u256_interner.borrow()).is_zero())
     }
 
     /// Adds discovered dynamic-jump target edges for a block.
@@ -1867,6 +1879,26 @@ mod tests_edge_cases {
             .find(|(_, d)| d.is_jump() && d.flags.contains(InstFlags::MULTI_JUMP))
             .expect("expected mixed valid/invalid jump to use multi-jump");
         assert!(jump.flags.contains(InstFlags::STATIC_JUMP));
+        assert!(!bytecode.has_dynamic_jumps);
+    }
+
+    #[test]
+    fn jumpi_with_zero_condition_ignores_unknown_target() {
+        let bytecode = analyze_asm(
+            "
+            PUSH0
+            CALLDATASIZE
+            JUMPI
+            STOP
+        target:
+            JUMPDEST
+            STOP
+        ",
+        );
+
+        let (_, jump) = bytecode.iter_insts().find(|(_, d)| d.opcode == op::JUMPI).unwrap();
+        assert!(jump.flags.contains(InstFlags::STATIC_JUMP));
+        assert!(jump.flags.contains(InstFlags::INVALID_JUMP));
         assert!(!bytecode.has_dynamic_jumps);
     }
 
