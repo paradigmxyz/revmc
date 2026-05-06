@@ -167,6 +167,7 @@ impl ConstSetInterner {
 /// treat the out-of-range slot as `Top` rather than aborting block interpretation.
 const MAX_ABS_STACK_DEPTH: usize = 64;
 const MAX_BLOCK_CONTEXTS: usize = 8;
+const MAX_SPLIT_FIXPOINT_ITERATIONS: usize = 512;
 
 /// Abstract state at the entry of a block.
 #[derive(Clone, Debug)]
@@ -1192,8 +1193,16 @@ impl Bytecode<'_> {
         let mut disc_preds: IndexVec<Block, SmallVec<[Block; 4]>> =
             IndexVec::from_vec(vec![SmallVec::new(); num_blocks]);
         let split_keys = split_contexts.then(|| self.jump_operand_split_keys());
+        let n_split_keys = split_keys
+            .as_ref()
+            .map(|keys| keys.iter().filter(|key| key.is_some()).count())
+            .unwrap_or_default();
 
-        let max_iterations = num_blocks * 8;
+        let max_iterations = if split_contexts {
+            (num_blocks * 8).min(MAX_SPLIT_FIXPOINT_ITERATIONS)
+        } else {
+            num_blocks * 8
+        };
         let mut iterations = 0;
         let mut converged = true;
 
@@ -1257,7 +1266,7 @@ impl Bytecode<'_> {
         }
 
         debug!(
-            "{msg} after {iterations} iterations (max={max_iterations})",
+            "{msg} after {iterations} iterations (max={max_iterations}, split_contexts={split_contexts}, split_keys={n_split_keys})",
             msg = if converged { "converged" } else { "did not converge" },
         );
 
