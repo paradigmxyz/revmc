@@ -965,11 +965,13 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                         if opcode == op::JUMPI {
                             let cond_word = self.pop();
                             self.materialize_live_stack();
-                            let cond = self.bcx.icmp_imm(IntCC::NotEqual, cond_word, 0);
-                            let next = self.inst_entries[inst + 1];
-                            let switch_block = self.bcx.create_block("multi_jump");
-                            self.bcx.brif(cond, switch_block, next);
-                            self.bcx.switch_to_block(switch_block);
+                            if !data.has_const_jump_condition() {
+                                let cond = self.bcx.icmp_imm(IntCC::NotEqual, cond_word, 0);
+                                let next = self.inst_entries[inst + 1];
+                                let switch_block = self.bcx.create_block("multi_jump");
+                                self.bcx.brif(cond, switch_block, next);
+                                self.bcx.switch_to_block(switch_block);
+                            }
                         } else {
                             self.materialize_live_stack();
                         }
@@ -1010,9 +1012,13 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                         let cond_word = self.pop();
                         // Flush virtual values before leaving the section.
                         self.materialize_live_stack();
-                        let cond = self.bcx.icmp_imm(IntCC::NotEqual, cond_word, 0);
-                        let next = self.inst_entries[inst + 1];
-                        self.bcx.brif(cond, target, next);
+                        if data.has_const_jump_condition() {
+                            self.bcx.br(target);
+                        } else {
+                            let cond = self.bcx.icmp_imm(IntCC::NotEqual, cond_word, 0);
+                            let next = self.inst_entries[inst + 1];
+                            self.bcx.brif(cond, target, next);
+                        }
                     } else {
                         // Flush virtual values before leaving the section.
                         self.materialize_live_stack();

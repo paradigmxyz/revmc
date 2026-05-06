@@ -432,7 +432,7 @@ mod tests {
             PUSH0
             PUSH 64
             MSTORE
-            PUSH 1
+            CALLDATASIZE
             PUSH %large
             JUMPI
             PUSH %join

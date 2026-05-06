@@ -324,42 +324,46 @@ enum JumpTarget {
     /// Not yet observed.
     Bottom,
     /// One or more known constant target instruction indices.
-    Resolved(SmallVec<[Inst; 4]>),
+    Resolved(SmallVec<[Inst; 4]>, JumpCondition),
     /// One or more known valid targets, plus at least one known invalid target.
     ResolvedWithInvalid(SmallVec<[Inst; 4]>),
     /// Known constant but invalid target.
     Invalid,
-    /// Conditional jump with a condition known to be zero. The only reachable successor is the
-    /// fallthrough instruction.
-    NotTaken(Inst),
     /// Unknown target.
     Top,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum JumpCondition {
+    #[default]
+    Unknown,
+    AlwaysTrue,
+    AlwaysFalse,
 }
 
 impl JumpTarget {
     /// Creates a resolved target with a single constant.
     fn single(inst: Inst) -> Self {
-        Self::Resolved(SmallVec::from_elem(inst, 1))
+        Self::Resolved(SmallVec::from_elem(inst, 1), JumpCondition::Unknown)
     }
 
     /// Returns the single resolved target, if exactly one.
     fn as_single(&self) -> Option<Inst> {
         match self {
-            Self::Resolved(targets) if targets.len() == 1 => Some(targets[0]),
-            Self::NotTaken(target) => Some(*target),
+            Self::Resolved(targets, _) if targets.len() == 1 => Some(targets[0]),
             _ => None,
         }
     }
 
     fn is_resolved(&self) -> bool {
-        matches!(
-            self,
-            Self::Resolved(_) | Self::ResolvedWithInvalid(_) | Self::Invalid | Self::NotTaken(_)
-        )
+        matches!(self, Self::Resolved(_, _) | Self::ResolvedWithInvalid(_) | Self::Invalid)
     }
 
-    fn depends_on_reached_entry_state(&self) -> bool {
-        matches!(self, Self::Resolved(_) | Self::ResolvedWithInvalid(_) | Self::Invalid)
+    fn with_condition(self, condition: JumpCondition) -> Self {
+        match self {
+            Self::Resolved(targets, _) => Self::Resolved(targets, condition),
+            target => target,
+        }
     }
 }
 
@@ -519,14 +523,19 @@ impl Bytecode<'_> {
             }
 
             match *target {
-                JumpTarget::Resolved(ref targets) => {
-                    for &target_inst in targets {
-                        debug_assert_eq!(
-                            self.insts[target_inst].opcode,
-                            op::JUMPDEST,
-                            "block_analysis resolved to non-JUMPDEST"
-                        );
-                        self.insts[target_inst].set_jumpdest_reachable();
+                JumpTarget::Resolved(ref targets, condition) => {
+                    if condition != JumpCondition::Unknown {
+                        self.insts[jump_inst].flags |= InstFlags::CONST_JUMP_CONDITION;
+                    }
+                    if condition != JumpCondition::AlwaysFalse {
+                        for &target_inst in targets {
+                            debug_assert_eq!(
+                                self.insts[target_inst].opcode,
+                                op::JUMPDEST,
+                                "block_analysis resolved to non-JUMPDEST"
+                            );
+                            self.insts[target_inst].set_jumpdest_reachable();
+                        }
                     }
                     if targets.len() == 1 {
                         self.insts[jump_inst].flags |= InstFlags::STATIC_JUMP;
@@ -558,13 +567,6 @@ impl Bytecode<'_> {
                     self.insts[jump_inst].flags |= InstFlags::STATIC_JUMP | InstFlags::INVALID_JUMP;
                     newly_resolved += 1;
                     trace!(%jump_inst, "resolved invalid jump");
-                }
-                JumpTarget::NotTaken(target_inst) => {
-                    debug_assert_eq!(self.insts[jump_inst].opcode, op::JUMPI);
-                    self.insts[jump_inst].flags |= InstFlags::STATIC_JUMP;
-                    self.insts[jump_inst].set_static_jump_target(target_inst);
-                    newly_resolved += 1;
-                    trace!(%jump_inst, "resolved not-taken conditional jump");
                 }
                 JumpTarget::Bottom if !has_top_jump => {
                     // Truly unreachable: no unresolved jumps remain, so this
@@ -778,15 +780,25 @@ impl Bytecode<'_> {
 
     fn resolve_jump_snapshot(&self, jump_inst: Inst, const_sets: &ConstSetInterner) -> JumpTarget {
         let snap = &self.snapshots.inputs[jump_inst];
-        if self.insts[jump_inst].opcode == op::JUMPI
-            && let Some(&condition) = snap.first()
-            && self.is_const_zero(condition)
-        {
-            return JumpTarget::NotTaken(jump_inst + 1);
+        let condition = if self.insts[jump_inst].opcode == op::JUMPI {
+            snap.first()
+                .map(|&value| self.resolve_jump_condition(value, const_sets))
+                .unwrap_or_default()
+        } else {
+            JumpCondition::Unknown
+        };
+
+        if condition == JumpCondition::AlwaysFalse {
+            return JumpTarget::Resolved(
+                SmallVec::from_elem(jump_inst + 1, 1),
+                JumpCondition::AlwaysFalse,
+            );
         }
 
         match snap.last() {
-            Some(&operand) => self.resolve_jump_operand(operand, const_sets),
+            Some(&operand) => {
+                self.resolve_jump_operand(operand, const_sets).with_condition(condition)
+            }
             None => {
                 trace!(%jump_inst, pc = self.pc(jump_inst), "jump in unreached block");
                 JumpTarget::Bottom
@@ -825,7 +837,7 @@ impl Bytecode<'_> {
                 } else if has_invalid {
                     JumpTarget::ResolvedWithInvalid(targets)
                 } else {
-                    JumpTarget::Resolved(targets)
+                    JumpTarget::Resolved(targets, JumpCondition::Unknown)
                 }
             }
             AbsValue::Top => JumpTarget::Top,
@@ -842,6 +854,33 @@ impl Bytecode<'_> {
                 .first()
                 .copied()
                 .is_some_and(|value| self.is_const_zero(value))
+    }
+
+    fn resolve_jump_condition(
+        &self,
+        condition: AbsValue,
+        const_sets: &ConstSetInterner,
+    ) -> JumpCondition {
+        let consts = match condition {
+            AbsValue::Const(imm) => Either::Left(std::iter::once(imm)),
+            AbsValue::ConstSet(set_idx) => Either::Right(const_sets.get(set_idx).iter().copied()),
+            AbsValue::Top => return JumpCondition::Unknown,
+        };
+        let interner = self.u256_interner.borrow();
+        let mut saw_zero = false;
+        let mut saw_nonzero = false;
+        for imm in consts {
+            if imm.get(&interner).is_zero() {
+                saw_zero = true;
+            } else {
+                saw_nonzero = true;
+            }
+        }
+        match (saw_zero, saw_nonzero) {
+            (true, false) => JumpCondition::AlwaysFalse,
+            (false, true) => JumpCondition::AlwaysTrue,
+            _ => JumpCondition::Unknown,
+        }
     }
 
     /// Adds discovered dynamic-jump target edges for a block.
@@ -928,12 +967,12 @@ impl Bytecode<'_> {
 
         if invalidate_targets {
             for (inst, target) in jump_targets.iter_mut() {
-                if matches!(target, JumpTarget::NotTaken(_))
+                if matches!(target, JumpTarget::Resolved(_, JumpCondition::AlwaysFalse))
                     && self.local_jumpi_condition_is_zero(*inst, local_snapshots)
                 {
                     continue;
                 }
-                if !target.depends_on_reached_entry_state() {
+                if !target.is_resolved() {
                     continue;
                 }
                 if let Some(bid) = self.cfg.inst_to_block[*inst]
@@ -1804,7 +1843,8 @@ mod tests_edge_cases {
         ",
         );
         // The JUMPI should be resolved as static.
-        let (jump_inst, jump) = bytecode.iter_insts().find(|(_, d)| d.opcode == op::JUMPI).unwrap();
+        let (jump_inst, jump) =
+            bytecode.iter_insts().find(|(_, data)| data.opcode == op::JUMPI).unwrap();
         assert!(jump.flags.contains(InstFlags::STATIC_JUMP));
         assert_eq!(bytecode.inst(jump.static_jump_target()).opcode, op::JUMPDEST);
         assert_ne!(jump.static_jump_target(), jump_inst + 1);
@@ -1926,7 +1966,7 @@ mod tests_edge_cases {
         ",
         );
 
-        let (_, jump) = bytecode.iter_insts().find(|(_, d)| d.opcode == op::JUMPI).unwrap();
+        let (_, jump) = bytecode.iter_insts().find(|(_, data)| data.opcode == op::JUMPI).unwrap();
         assert!(jump.flags.contains(InstFlags::STATIC_JUMP));
         assert!(!jump.flags.contains(InstFlags::INVALID_JUMP));
         assert_eq!(jump.static_jump_target(), Inst::from_usize(3));
@@ -1947,7 +1987,7 @@ mod tests_edge_cases {
         ",
         );
 
-        let (_, jump) = bytecode.iter_insts().find(|(_, d)| d.opcode == op::JUMPI).unwrap();
+        let (_, jump) = bytecode.iter_insts().find(|(_, data)| data.opcode == op::JUMPI).unwrap();
         assert!(jump.flags.contains(InstFlags::STATIC_JUMP));
         assert!(!jump.flags.contains(InstFlags::INVALID_JUMP));
         assert_eq!(jump.static_jump_target(), Inst::from_usize(3));
@@ -1968,7 +2008,7 @@ mod tests_edge_cases {
         ",
         );
 
-        let (_, jump) = bytecode.iter_insts().find(|(_, d)| d.opcode == op::JUMPI).unwrap();
+        let (_, jump) = bytecode.iter_insts().find(|(_, data)| data.opcode == op::JUMPI).unwrap();
         assert!(!jump.flags.contains(InstFlags::STATIC_JUMP));
         assert!(bytecode.has_dynamic_jumps);
     }
