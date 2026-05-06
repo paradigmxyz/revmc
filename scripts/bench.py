@@ -106,11 +106,12 @@ def dump_subdir(bench: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _indicator(delta: float) -> str:
-    """🟢 for improvement (negative delta), 🔴 for regression, empty for neutral."""
-    if delta < 0:
+def _indicator(delta: float, lower_is_better: bool = True) -> str:
+    """🟢 for improvement, 🔴 for regression, empty for neutral."""
+    score = delta if lower_is_better else -delta
+    if score < 0:
         return " 🟢"
-    if delta > 0:
+    if score > 0:
         return " 🔴"
     return ""
 
@@ -120,13 +121,56 @@ def fmt_diff(base: int, current: int) -> str:
     return "=" if d == 0 else f"{d:+d}"
 
 
-def fmt_pct(base: float | int, current: float | int) -> str:
+def fmt_pct(
+    base: float | int, current: float | int, lower_is_better: bool = True
+) -> str:
     if base == 0:
         return "-"
     pct = (current - base) / base * 100
     if round(pct, 1) == 0:
         return "="
-    return f"{pct:+.1f}%{_indicator(pct)}"
+    return f"{pct:+.1f}%{_indicator(pct, lower_is_better)}"
+
+
+def fmt_change(
+    base: float | int, current: float | int, lower_is_better: bool = True
+) -> str:
+    if base == 0:
+        delta = current - base
+        if delta == 0:
+            return "="
+        return f"{delta:+g}{_indicator(delta, lower_is_better)}"
+    return fmt_pct(base, current, lower_is_better)
+
+
+def fmt_ratio(numerator: int, denominator: int) -> str:
+    if denominator == 0:
+        return "-"
+    return f"{numerator}/{denominator} ({numerator / denominator * 100:.0f}%)"
+
+
+def fmt_ratio_change(
+    base_numerator: int,
+    base_denominator: int,
+    current_numerator: int,
+    current_denominator: int,
+    lower_is_better: bool = False,
+) -> str:
+    base = base_numerator / base_denominator if base_denominator else 0.0
+    current = current_numerator / current_denominator if current_denominator else 0.0
+    return fmt_change(base, current, lower_is_better)
+
+
+def ratio_is_noise(
+    base_numerator: int,
+    base_denominator: int,
+    current_numerator: int,
+    current_denominator: int,
+    noise: float,
+) -> bool:
+    base = base_numerator / base_denominator if base_denominator else 0.0
+    current = current_numerator / current_denominator if current_denominator else 0.0
+    return is_noise(base, current, noise)
 
 
 def fmt_detail(current: str | int, base: str | int, diff: str) -> str:
@@ -150,6 +194,7 @@ def is_noise(base: float | int, current: float | int, noise: float) -> bool:
 # (the `<details>` table still shows them).
 NOISE_CODEGEN = 1.0  # codegen line counts, jit size, spills, reloads
 NOISE_TIME = 5.0  # compile times (high run-to-run variance)
+NOISE_ANALYSIS = 0.0  # analysis counters are deterministic
 
 
 def fmt_dur(s: float) -> str:
@@ -681,6 +726,17 @@ class CompileTime(Analysis):
 
 
 class JumpResolution(Analysis):
+    KEYS = ["local", "non_adj", "pcr", "fixpt", "unresolved", "total"]
+    HEADERS = ["benchmark", "local", "nonadj", "pcr", "fixpt", "unres", "total"]
+    LOWER_IS_BETTER = {
+        "local": False,
+        "non_adj": False,
+        "pcr": False,
+        "fixpt": False,
+        "unresolved": True,
+        "total": False,
+    }
+
     def needs_codegen(self) -> bool:
         return False
 
@@ -727,24 +783,102 @@ class JumpResolution(Analysis):
             "total": total,
         }
 
+    @classmethod
+    def _collect(cls, benches, outputs):
+        rows = [(bench_name(bench), cls._analyze(outputs.get(bench, ""))) for bench in benches]
+        totals = {k: 0 for k in cls.KEYS}
+        for _, stats in rows:
+            for key in cls.KEYS:
+                totals[key] += stats[key]
+        return rows, totals
+
     def report(self, benches, dump_dir, outputs):
         print("### Jump resolution\n")
-        headers = ["benchmark", "local", "nonadj", "pcr", "fixpt", "unres", "total"]
+        rows, totals = self._collect(benches, outputs)
+        table = [[name, *[s[k] for k in self.KEYS]] for name, s in rows]
+        table.append(["**TOTAL**", *[f"**{totals[k]}**" for k in self.KEYS]])
+        print_table(self.HEADERS, table)
+
+    def report_diff(
+        self, benches, dump_dir, outputs, base_dump, base_outputs, base_label
+    ):
+        cur_rows, cur_totals = self._collect(benches, outputs)
+        base_rows, base_totals = self._collect(benches, base_outputs)
+        base_map = dict(base_rows)
+
+        print("### Jump resolution\n")
         table = []
-        for bench in benches:
-            s = self._analyze(outputs.get(bench, ""))
+        for name, cur in cur_rows:
+            base = base_map.get(name)
+            if not base:
+                table.append([name, *[cur[k] for k in self.KEYS]])
+                continue
+            if all(base[k] == cur[k] for k in self.KEYS):
+                continue
             table.append(
                 [
-                    bench_name(bench),
-                    s["local"],
-                    s["non_adj"],
-                    s["pcr"],
-                    s["fixpt"],
-                    s["unresolved"],
-                    s["total"],
+                    name,
+                    *[
+                        fmt_change(
+                            base[k],
+                            cur[k],
+                            lower_is_better=self.LOWER_IS_BETTER[k],
+                        )
+                        for k in self.KEYS
+                    ],
                 ]
             )
-        print_table(headers, table)
+        table.append(
+            [
+                "**TOTAL**",
+                *[
+                    f"**{fmt_change(base_totals[k], cur_totals[k], lower_is_better=self.LOWER_IS_BETTER[k])}**"
+                    for k in self.KEYS
+                ],
+            ]
+        )
+        print_table(self.HEADERS, table)
+
+        print("<details><summary>Full jump resolution</summary>\n")
+        detail_table = []
+        for name, cur in cur_rows:
+            base = base_map.get(name, {k: 0 for k in self.KEYS})
+            detail_table.append(
+                [
+                    name,
+                    *[
+                        fmt_detail(
+                            cur[k],
+                            base[k],
+                            fmt_change(
+                                base[k],
+                                cur[k],
+                                lower_is_better=self.LOWER_IS_BETTER[k],
+                            ),
+                        )
+                        for k in self.KEYS
+                    ],
+                ]
+            )
+        detail_table.append(
+            [
+                "**TOTAL**",
+                *[
+                    fmt_detail_bold(
+                        cur_totals[k],
+                        base_totals[k],
+                        fmt_change(
+                            base_totals[k],
+                            cur_totals[k],
+                            lower_is_better=self.LOWER_IS_BETTER[k],
+                        ),
+                    )
+                    for k in self.KEYS
+                ],
+            ]
+        )
+        print_table(self.HEADERS, detail_table)
+        print("</details>\n")
 
 
 # ---------------------------------------------------------------------------
@@ -803,36 +937,58 @@ class BlockStats(Analysis):
             "block_median": int(m.group(10)),
         }
 
+    @staticmethod
+    def _collect(benches, outputs):
+        rows = []
+        for bench in benches:
+            stats = BlockStats._parse(outputs.get(bench, ""))
+            if stats:
+                rows.append((bench_name(bench), stats))
+        return rows
+
     def report(self, benches, dump_dir, outputs):
         print("### IR stats\n")
         headers = ["benchmark"] + IR_STAT_KEYS
-        table = []
-        for bench in benches:
-            s = self._parse(outputs.get(bench, ""))
-            if not s:
-                continue
-            table.append([bench_name(bench)] + [s[k] for k in IR_STAT_KEYS])
+        rows = self._collect(benches, outputs)
+        table = [[name] + [s[k] for k in IR_STAT_KEYS] for name, s in rows]
         print_table(headers, table)
 
     def report_diff(
         self, benches, dump_dir, outputs, base_dump, base_outputs, base_label
     ):
+        cur_rows = self._collect(benches, outputs)
+        base_rows = self._collect(benches, base_outputs)
+        base_map = dict(base_rows)
+
         print("### IR stats\n")
         headers = ["benchmark"] + IR_STAT_KEYS
         table = []
-        for bench in benches:
-            cur = self._parse(outputs.get(bench, ""))
-            base = self._parse(base_outputs.get(bench, ""))
-            if not cur:
-                continue
+        for name, cur in cur_rows:
+            base = base_map.get(name)
             if not base:
-                table.append([bench_name(bench)] + [cur[k] for k in IR_STAT_KEYS])
-            else:
-                table.append(
-                    [bench_name(bench)]
-                    + [fmt_pct(base[k], cur[k]) for k in IR_STAT_KEYS]
-                )
+                table.append([name] + [cur[k] for k in IR_STAT_KEYS])
+                continue
+            pairs = [(base[k], cur[k]) for k in IR_STAT_KEYS]
+            if all(is_noise(b, c, NOISE_ANALYSIS) for b, c in pairs):
+                continue
+            table.append([name] + [fmt_change(b, c) for b, c in pairs])
         print_table(headers, table)
+
+        print("<details><summary>Full IR stats</summary>\n")
+        detail_table = []
+        for name, cur in cur_rows:
+            base = base_map.get(name, {k: 0 for k in IR_STAT_KEYS})
+            detail_table.append(
+                [
+                    name,
+                    *[
+                        fmt_detail(cur[k], base[k], fmt_change(base[k], cur[k]))
+                        for k in IR_STAT_KEYS
+                    ],
+                ]
+            )
+        print_table(headers, detail_table)
+        print("</details>\n")
 
 
 # ---------------------------------------------------------------------------
@@ -926,39 +1082,251 @@ class InputStats(Analysis):
                 agg["per_input"][i][2] += u
 
     @classmethod
-    def _print(cls, stats, title):
-        print(f"\n=== {title} ===")
+    def _collect(cls, benches, outputs):
+        rows = []
+        aggregate = {}
+        for bench in benches:
+            stats = cls._parse(outputs.get(bench, ""))
+            if stats:
+                rows.append((bench_name(bench), stats))
+                cls._merge(aggregate, stats)
+        return rows, aggregate
+
+    @staticmethod
+    def _per_input_totals(stats):
+        total = sum(i[0] for i in stats["per_input"])
+        const = sum(i[1] for i in stats["per_input"])
+        usize = sum(i[2] for i in stats["per_input"])
+        return total, const, usize
+
+    @classmethod
+    def _stat_table(cls, stats):
+        rows = []
         for name in sorted(stats, key=lambda n: stats[n].get("opbyte", 0)):
             s = stats[name]
-            t = s["total"]
-            if t == 0:
+            total = s["total"]
+            if total == 0:
                 continue
-            ac = s["all_const"]
-            co = s.get("const_output", 0)
-            line = (
-                f"  {name:<16} {t} occ, {s['inputs']} inputs, "
-                f"all_const={ac}/{t} ({cls._pct(ac, t)})"
+            input_total, input_const, input_usize = cls._per_input_totals(s)
+            rows.append(
+                [
+                    name,
+                    total,
+                    s["inputs"],
+                    fmt_ratio(s["all_const"], total),
+                    fmt_ratio(s.get("const_output", 0), total),
+                    fmt_ratio(input_const, input_total),
+                    fmt_ratio(input_usize, input_total),
+                ]
             )
-            if co:
-                line += f", const_output={co}/{t} ({cls._pct(co, t)})"
-            print(line)
-            for i, [total, const, usize] in enumerate(s["per_input"]):
-                if total > 0:
-                    print(
-                        f"    [{i}]: const={const}/{total} ({cls._pct(const, total)}), "
-                        f"fits_usize={usize}/{total} ({cls._pct(usize, total)})"
-                    )
+        return rows
+
+    @classmethod
+    def _stat_detail(cls, stats):
+        parts = []
+        for i, (total, const, usize) in enumerate(stats["per_input"]):
+            if total > 0:
+                parts.append(
+                    f"[{i}] const={fmt_ratio(const, total)}, usize={fmt_ratio(usize, total)}"
+                )
+        return "; ".join(parts) if parts else "-"
 
     def report(self, benches, dump_dir, outputs):
         print("### Constant-input stats\n")
-        aggregate = {}
-        for bench in benches:
-            stats = self._parse(outputs.get(bench, ""))
-            if stats:
-                self._merge(aggregate, stats)
-                self._print(stats, bench_name(bench))
-        self._print(aggregate, f"AGGREGATE ({len(benches)} benchmarks)")
-        print()
+        rows, aggregate = self._collect(benches, outputs)
+        headers = [
+            "opcode",
+            "occ",
+            "inputs",
+            "all const",
+            "const output",
+            "input const",
+            "fits usize",
+        ]
+        print_table(headers, self._stat_table(aggregate))
+
+        print("<details><summary>Per-benchmark constant-input stats</summary>\n")
+        for name, stats in rows:
+            print(f"#### {name}\n")
+            print_table(headers, self._stat_table(stats))
+        print("</details>\n")
+
+    def report_diff(
+        self, benches, dump_dir, outputs, base_dump, base_outputs, base_label
+    ):
+        _, cur = self._collect(benches, outputs)
+        _, base = self._collect(benches, base_outputs)
+        names = sorted(
+            set(cur) | set(base),
+            key=lambda n: cur.get(n, base.get(n, {})).get("opbyte", 0),
+        )
+
+        print("### Constant-input stats\n")
+        headers = [
+            "opcode",
+            "occ",
+            "all const",
+            "const output",
+            "input const",
+            "fits usize",
+        ]
+        table = []
+        for name in names:
+            c = cur.get(name)
+            b = base.get(name)
+            if not c:
+                continue
+            if not b:
+                table.append([name, c["total"], "-", "-", "-", "-"])
+                continue
+
+            c_input_total, c_input_const, c_input_usize = self._per_input_totals(c)
+            b_input_total, b_input_const, b_input_usize = self._per_input_totals(b)
+            changes = [
+                not is_noise(b["total"], c["total"], NOISE_ANALYSIS),
+                not ratio_is_noise(
+                    b["all_const"], b["total"], c["all_const"], c["total"], NOISE_ANALYSIS
+                ),
+                not ratio_is_noise(
+                    b.get("const_output", 0),
+                    b["total"],
+                    c.get("const_output", 0),
+                    c["total"],
+                    NOISE_ANALYSIS,
+                ),
+                not ratio_is_noise(
+                    b_input_const,
+                    b_input_total,
+                    c_input_const,
+                    c_input_total,
+                    NOISE_ANALYSIS,
+                ),
+                not ratio_is_noise(
+                    b_input_usize,
+                    b_input_total,
+                    c_input_usize,
+                    c_input_total,
+                    NOISE_ANALYSIS,
+                ),
+            ]
+            if not any(changes):
+                continue
+            table.append(
+                [
+                    name,
+                    fmt_change(b["total"], c["total"]),
+                    fmt_ratio_change(b["all_const"], b["total"], c["all_const"], c["total"]),
+                    fmt_ratio_change(
+                        b.get("const_output", 0),
+                        b["total"],
+                        c.get("const_output", 0),
+                        c["total"],
+                    ),
+                    fmt_ratio_change(
+                        b_input_const,
+                        b_input_total,
+                        c_input_const,
+                        c_input_total,
+                    ),
+                    fmt_ratio_change(
+                        b_input_usize,
+                        b_input_total,
+                        c_input_usize,
+                        c_input_total,
+                    ),
+                ]
+            )
+        print_table(headers, table)
+
+        print("<details><summary>Full constant-input stats</summary>\n")
+        detail_headers = [
+            "opcode",
+            "occ",
+            "inputs",
+            "all const",
+            "const output",
+            "input const",
+            "fits usize",
+            "per input",
+        ]
+        detail_table = []
+        for name in names:
+            c = cur.get(name)
+            b = base.get(name)
+            if not c:
+                continue
+            if not b:
+                detail_table.append(
+                    [
+                        name,
+                        c["total"],
+                        c["inputs"],
+                        fmt_ratio(c["all_const"], c["total"]),
+                        fmt_ratio(c.get("const_output", 0), c["total"]),
+                        "-",
+                        "-",
+                        self._stat_detail(c),
+                    ]
+                )
+                continue
+
+            c_input_total, c_input_const, c_input_usize = self._per_input_totals(c)
+            b_input_total, b_input_const, b_input_usize = self._per_input_totals(b)
+            detail_table.append(
+                [
+                    name,
+                    fmt_detail(
+                        c["total"],
+                        b["total"],
+                        fmt_change(b["total"], c["total"]),
+                    ),
+                    fmt_detail(c["inputs"], b["inputs"], fmt_diff(b["inputs"], c["inputs"])),
+                    fmt_detail(
+                        fmt_ratio(c["all_const"], c["total"]),
+                        fmt_ratio(b["all_const"], b["total"]),
+                        fmt_ratio_change(
+                            b["all_const"], b["total"], c["all_const"], c["total"]
+                        ),
+                    ),
+                    fmt_detail(
+                        fmt_ratio(c.get("const_output", 0), c["total"]),
+                        fmt_ratio(b.get("const_output", 0), b["total"]),
+                        fmt_ratio_change(
+                            b.get("const_output", 0),
+                            b["total"],
+                            c.get("const_output", 0),
+                            c["total"],
+                        ),
+                    ),
+                    fmt_detail(
+                        fmt_ratio(c_input_const, c_input_total),
+                        fmt_ratio(b_input_const, b_input_total),
+                        fmt_ratio_change(
+                            b_input_const,
+                            b_input_total,
+                            c_input_const,
+                            c_input_total,
+                        ),
+                    ),
+                    fmt_detail(
+                        fmt_ratio(c_input_usize, c_input_total),
+                        fmt_ratio(b_input_usize, b_input_total),
+                        fmt_ratio_change(
+                            b_input_usize,
+                            b_input_total,
+                            c_input_usize,
+                            c_input_total,
+                        ),
+                    ),
+                    fmt_detail(
+                        self._stat_detail(c),
+                        self._stat_detail(b),
+                        "=" if self._stat_detail(c) == self._stat_detail(b) else "changed",
+                    ),
+                ]
+            )
+        print_table(detail_headers, detail_table)
+        print("</details>\n")
 
 
 # ---------------------------------------------------------------------------
