@@ -384,6 +384,7 @@ impl Bytecode<'_> {
     ///
     /// Also initializes `self.snapshots`.
     #[instrument(name = "local_jumps", level = "debug", skip_all)]
+    #[inline(never)]
     pub(crate) fn block_analysis_local(&mut self) {
         self.init_snapshots();
 
@@ -415,7 +416,7 @@ impl Bytecode<'_> {
                 continue;
             }
 
-            let target = self.resolve_jump_snapshot(term_inst, &empty_sets);
+            let target = self.resolve_jump(term_inst, &empty_sets);
             let Some(target_inst) = target.as_single() else { continue };
 
             // Log non-adjacent resolutions (not simple PUSH+JUMP).
@@ -444,6 +445,7 @@ impl Bytecode<'_> {
     ///
     /// Also computes and stores per-instruction stack snapshots for constant propagation.
     #[instrument(name = "ba", level = "debug", skip_all)]
+    #[inline(never)]
     pub(crate) fn block_analysis(&mut self, local_snapshots: &Snapshots) {
         self.init_snapshots();
         let (resolved, count) = self.run_abstract_interp(local_snapshots);
@@ -459,6 +461,7 @@ impl Bytecode<'_> {
     }
 
     /// Recomputes the `has_dynamic_jumps` flag based on the current instruction set.
+    #[inline(never)]
     pub(crate) fn recompute_has_dynamic_jumps(&mut self) {
         let mut unresolved = self.insts.iter().filter(|inst| {
             inst.is_jump() && !inst.flags.contains(InstFlags::STATIC_JUMP) && !inst.is_dead_code()
@@ -584,6 +587,7 @@ impl Bytecode<'_> {
 
     /// Rebuild the basic-block CFG from the current instruction state.
     #[instrument(level = "debug", skip_all)]
+    #[inline(never)]
     pub(crate) fn rebuild_cfg(&mut self) {
         let finish_block = |cfg: &mut Cfg, start: usize, end: usize| {
             debug_assert!(start < end, "empty block range: {start}..{end}");
@@ -742,7 +746,7 @@ impl Bytecode<'_> {
         let mut jump_targets: Vec<(Inst, JumpResolution)> = Vec::new();
         let mut has_top_jump = false;
         for &jump_inst in &jump_insts {
-            let target = self.resolve_jump_snapshot(jump_inst, &const_sets);
+            let target = self.resolve_jump(jump_inst, &const_sets);
             if target.is_top() {
                 has_top_jump = true;
             }
@@ -766,7 +770,7 @@ impl Bytecode<'_> {
         (jump_targets, count)
     }
 
-    fn resolve_jump_snapshot(
+    fn resolve_jump(
         &self,
         jump_inst: Inst,
         const_sets: &ConstSetInterner,
