@@ -476,10 +476,17 @@ impl<'a> Bytecode<'a> {
         let mut iter = self.insts.iter_mut_enumerated();
         while let Some((i, data)) = iter.next() {
             if !data.can_fall_through() {
+                let static_target = data
+                    .is_static_jump()
+                    .then(|| data.static_jump_target())
+                    .filter(|&target| target > i);
                 let mut end = i;
                 let mut any_new = false;
                 for (j, data) in &mut iter {
                     end = j;
+                    if static_target == Some(j) {
+                        break;
+                    }
                     if data.is_reachable_jumpdest(self.has_dynamic_jumps) {
                         break;
                     }
