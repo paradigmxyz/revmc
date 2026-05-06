@@ -166,7 +166,7 @@ impl ConstSetInterner {
 /// Instructions that access deeper than this (e.g. Amsterdam DUPN/SWAPN up to depth 236)
 /// treat the out-of-range slot as `Top` rather than aborting block interpretation.
 const MAX_ABS_STACK_DEPTH: usize = 64;
-const MAX_BLOCK_CONTEXTS: usize = 2;
+const MAX_BLOCK_CONTEXTS: usize = 8;
 
 /// Abstract state at the entry of a block.
 #[derive(Clone, Debug)]
@@ -332,6 +332,8 @@ enum JumpTargetKind {
     Bottom,
     /// One or more known constant target instruction indices.
     Resolved(SmallVec<[Inst; 4]>),
+    /// One or more known valid targets, plus at least one known invalid target.
+    ResolvedWithInvalid(SmallVec<[Inst; 4]>),
     /// Known constant but invalid target.
     Invalid,
     /// Unknown target.
@@ -581,6 +583,20 @@ impl Bytecode<'_> {
                         newly_resolved += 1;
                     }
                 }
+                JumpTargetKind::ResolvedWithInvalid(targets) => {
+                    for &target_inst in targets {
+                        debug_assert_eq!(
+                            self.insts[target_inst].opcode,
+                            op::JUMPDEST,
+                            "block_analysis resolved to non-JUMPDEST"
+                        );
+                        self.insts[target_inst].set_jumpdest_reachable();
+                    }
+                    self.insts[jump_inst].flags |= InstFlags::STATIC_JUMP | InstFlags::MULTI_JUMP;
+                    self.multi_jump_targets.insert(jump_inst, targets.clone());
+                    newly_resolved += 1;
+                    trace!(%jump_inst, n_targets = targets.len(), "resolved multi-target jump with invalid default");
+                }
                 JumpTargetKind::Invalid => {
                     self.multi_jump_targets.remove(&jump_inst);
                     self.insts[jump_inst].flags |= InstFlags::STATIC_JUMP | InstFlags::INVALID_JUMP;
@@ -817,11 +833,11 @@ impl Bytecode<'_> {
         // Invalidate resolutions that may be unsound due to incomplete analysis.
         // When the fixpoint didn't converge, partially-discovered ConstSets may be
         // incomplete, so we must conservatively invalidate them too.
-        let has_bottom_jump =
-            jump_targets.iter().any(|(_, target)| matches!(target, JumpTarget::Bottom));
+        let has_bottom_jump = jump_targets.iter().any(|(_, target)| target.is_bottom());
         if has_top_jump || has_bottom_jump || !converged {
             self.invalidate_suspect_jumps(
                 &mut jump_targets,
+                &block_states,
                 &discovered_edges,
                 local_snapshots,
                 has_top_jump || !converged,
@@ -880,23 +896,22 @@ impl Bytecode<'_> {
                 let consts = const_sets.get(set_idx);
                 let interner = self.u256_interner.borrow();
                 let mut targets = SmallVec::new();
+                let mut has_invalid = false;
                 for &imm in consts {
                     let val = imm.get(&interner);
                     match usize::try_from(val) {
                         Ok(pc) if self.is_valid_jump(pc) => {
                             targets.push(self.pc_to_inst(pc));
                         }
-                        _ => {
-                            // Mixed valid + invalid: can't resolve since at runtime
-                            // the value might be any member of the set.
-                            return JumpTarget::top();
-                        }
+                        _ => has_invalid = true,
                     }
                 }
-                if !targets.is_empty() {
-                    JumpTarget::resolved(targets)
-                } else {
+                if targets.is_empty() {
                     JumpTarget::invalid()
+                } else if has_invalid {
+                    JumpTarget::resolved_with_invalid(targets)
+                } else {
+                    JumpTarget::resolved(targets)
                 }
             }
             AbsValue::Top => JumpTarget::top(),
@@ -990,6 +1005,7 @@ impl Bytecode<'_> {
     fn invalidate_suspect_jumps(
         &mut self,
         jump_targets: &mut [(Inst, JumpTarget)],
+        block_states: &IndexVec<Block, BlockState>,
         discovered_edges: &IndexVec<Block, SmallVec<[Block; 4]>>,
         local_snapshots: &Snapshots,
         invalidate_targets: bool,
@@ -999,7 +1015,9 @@ impl Bytecode<'_> {
         // Seed: every reachable JUMPDEST block is suspect when Top jumps exist.
         let mut suspect: BitVec = BitVec::repeat(false, num_blocks);
         for bid in self.cfg.blocks.indices() {
-            if self.insts[self.cfg.blocks[bid].insts.start].is_jumpdest() {
+            if !matches!(block_states[bid], BlockState::Bottom)
+                && self.insts[self.cfg.blocks[bid].insts.start].is_jumpdest()
+            {
                 suspect.set(bid.index(), true);
             }
         }
@@ -1972,6 +1990,41 @@ mod tests_edge_cases {
             .iter_insts()
             .find(|(_, d)| d.is_jump() && d.flags.contains(InstFlags::INVALID_JUMP));
         assert!(jump_inst.is_some(), "expected an invalid jump");
+    }
+
+    /// A finite target set with both valid and invalid PCs can still be compiled
+    /// as a multi-jump: valid cases branch to their target and the switch default
+    /// handles the invalid cases.
+    #[test]
+    fn const_set_with_invalid_target_resolves_to_multi_jump() {
+        let bytecode = analyze_asm(
+            "
+            CALLDATASIZE
+            PUSH %invalid_path
+            JUMPI
+            PUSH %valid
+            PUSH %join
+            JUMP
+        invalid_path:
+            JUMPDEST
+            PUSH1 0xff
+            PUSH %join
+            JUMP
+        join:
+            JUMPDEST
+            JUMP
+        valid:
+            JUMPDEST
+            STOP
+        ",
+        );
+
+        let (_, jump) = bytecode
+            .iter_insts()
+            .find(|(_, d)| d.is_jump() && d.flags.contains(InstFlags::MULTI_JUMP))
+            .expect("expected mixed valid/invalid jump to use multi-jump");
+        assert!(jump.flags.contains(InstFlags::STATIC_JUMP));
+        assert!(!bytecode.has_dynamic_jumps);
     }
 
     #[test]
