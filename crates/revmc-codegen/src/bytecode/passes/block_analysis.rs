@@ -329,8 +329,9 @@ enum JumpTarget {
     ResolvedWithInvalid(SmallVec<[Inst; 4]>),
     /// Known constant but invalid target.
     Invalid,
-    /// Conditional jump with a condition known to be zero.
-    NotTaken,
+    /// Conditional jump with a condition known to be zero. The only reachable successor is the
+    /// fallthrough instruction.
+    NotTaken(Inst),
     /// Unknown target.
     Top,
 }
@@ -345,6 +346,7 @@ impl JumpTarget {
     fn as_single(&self) -> Option<Inst> {
         match self {
             Self::Resolved(targets) if targets.len() == 1 => Some(targets[0]),
+            Self::NotTaken(target) => Some(*target),
             _ => None,
         }
     }
@@ -352,7 +354,7 @@ impl JumpTarget {
     fn is_resolved(&self) -> bool {
         matches!(
             self,
-            Self::Resolved(_) | Self::ResolvedWithInvalid(_) | Self::Invalid | Self::NotTaken
+            Self::Resolved(_) | Self::ResolvedWithInvalid(_) | Self::Invalid | Self::NotTaken(_)
         )
     }
 
@@ -449,7 +451,7 @@ impl Bytecode<'_> {
 
             let target = self.resolve_jump_snapshot(term_inst, &local_sets);
             let target_inst = target.as_single();
-            if !matches!(target, JumpTarget::NotTaken) && target_inst.is_none() {
+            if target_inst.is_none() {
                 continue;
             }
 
@@ -557,10 +559,10 @@ impl Bytecode<'_> {
                     newly_resolved += 1;
                     trace!(%jump_inst, "resolved invalid jump");
                 }
-                JumpTarget::NotTaken => {
+                JumpTarget::NotTaken(target_inst) => {
                     debug_assert_eq!(self.insts[jump_inst].opcode, op::JUMPI);
-                    self.insts[jump_inst].flags |=
-                        InstFlags::STATIC_JUMP | InstFlags::NOT_TAKEN_JUMP;
+                    self.insts[jump_inst].flags |= InstFlags::STATIC_JUMP;
+                    self.insts[jump_inst].set_static_jump_target(target_inst);
                     newly_resolved += 1;
                     trace!(%jump_inst, "resolved not-taken conditional jump");
                 }
@@ -694,8 +696,8 @@ impl Bytecode<'_> {
                 }
             } else if term.is_static_jump()
                 && !term.flags.contains(InstFlags::INVALID_JUMP)
-                && !term.flags.contains(InstFlags::NOT_TAKEN_JUMP)
                 && let Some(target_block) = resolve(term.static_jump_target())
+                && !cfg.blocks[bid].succs.contains(&target_block)
             {
                 cfg.blocks[target_block].preds.push(bid);
                 cfg.blocks[bid].succs.push(target_block);
@@ -780,7 +782,7 @@ impl Bytecode<'_> {
             && let Some(&condition) = snap.first()
             && self.is_const_zero(condition)
         {
-            return JumpTarget::NotTaken;
+            return JumpTarget::NotTaken(jump_inst + 1);
         }
 
         match snap.last() {
@@ -926,7 +928,7 @@ impl Bytecode<'_> {
 
         if invalidate_targets {
             for (inst, target) in jump_targets.iter_mut() {
-                if matches!(target, JumpTarget::NotTaken)
+                if matches!(target, JumpTarget::NotTaken(_))
                     && self.local_jumpi_condition_is_zero(*inst, local_snapshots)
                 {
                     continue;
@@ -1802,6 +1804,10 @@ mod tests_edge_cases {
         ",
         );
         // The JUMPI should be resolved as static.
+        let (jump_inst, jump) = bytecode.iter_insts().find(|(_, d)| d.opcode == op::JUMPI).unwrap();
+        assert!(jump.flags.contains(InstFlags::STATIC_JUMP));
+        assert_eq!(bytecode.inst(jump.static_jump_target()).opcode, op::JUMPDEST);
+        assert_ne!(jump.static_jump_target(), jump_inst + 1);
         assert!(!bytecode.has_dynamic_jumps);
     }
 
@@ -1922,8 +1928,8 @@ mod tests_edge_cases {
 
         let (_, jump) = bytecode.iter_insts().find(|(_, d)| d.opcode == op::JUMPI).unwrap();
         assert!(jump.flags.contains(InstFlags::STATIC_JUMP));
-        assert!(jump.flags.contains(InstFlags::NOT_TAKEN_JUMP));
         assert!(!jump.flags.contains(InstFlags::INVALID_JUMP));
+        assert_eq!(jump.static_jump_target(), Inst::from_usize(3));
         assert!(!bytecode.has_dynamic_jumps);
     }
 
@@ -1943,8 +1949,8 @@ mod tests_edge_cases {
 
         let (_, jump) = bytecode.iter_insts().find(|(_, d)| d.opcode == op::JUMPI).unwrap();
         assert!(jump.flags.contains(InstFlags::STATIC_JUMP));
-        assert!(jump.flags.contains(InstFlags::NOT_TAKEN_JUMP));
         assert!(!jump.flags.contains(InstFlags::INVALID_JUMP));
+        assert_eq!(jump.static_jump_target(), Inst::from_usize(3));
         assert!(!bytecode.has_dynamic_jumps);
     }
 

@@ -947,15 +947,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 self.call_fallible_builtin(Builtin::Sstore, &[self.ecx, sp]);
             }
             op::JUMP | op::JUMPI => {
-                if data.flags.contains(InstFlags::NOT_TAKEN_JUMP) {
-                    debug_assert_eq!(opcode, op::JUMPI);
-                    self.pop_ignore(2);
-                    self.materialize_live_stack();
-                    let next = self.inst_entries[inst + 1];
-                    self.bcx.br(next);
-                    goto_return!(no_branch);
-                }
-
                 let is_invalid = data.flags.contains(InstFlags::INVALID_JUMP);
                 if is_invalid && opcode == op::JUMP {
                     // Pop and discard the target; it's always on the stack.
@@ -999,9 +990,9 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                         // Pop and discard the target; it's always on the stack.
                         self.pop_ignore(1);
                         let target_inst = data.static_jump_target();
-                        debug_assert_eq!(
-                            *self.bytecode.inst(target_inst),
-                            op::JUMPDEST,
+                        debug_assert!(
+                            *self.bytecode.inst(target_inst) == op::JUMPDEST
+                                || (opcode == op::JUMPI && target_inst == inst + 1),
                             "jumping to non-JUMPDEST; target_inst={target_inst}",
                         );
                         self.inst_entries[target_inst]

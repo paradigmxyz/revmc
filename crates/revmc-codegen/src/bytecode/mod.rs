@@ -899,8 +899,7 @@ pub(crate) struct InstData {
     /// - `PC`: program counter of this instruction.
     /// - `JUMPDEST`: program counter in low 31 bits, reachable flag in high bit
     ///   ([`InstData::JUMPDEST_REACHABLE`]).
-    /// - `JUMP | JUMPI` with [`InstFlags::STATIC_JUMP`]: target instruction index, except for
-    ///   `JUMPI` with [`InstFlags::NOT_TAKEN_JUMP`].
+    /// - `JUMP | JUMPI` with [`InstFlags::STATIC_JUMP`]: target instruction index.
     /// - otherwise: unused.
     pub(crate) data: u32,
     /// The gas section this instruction belongs to.
@@ -1027,7 +1026,6 @@ impl InstData {
     #[inline]
     pub(crate) fn static_jump_target(&self) -> Inst {
         debug_assert!(self.is_static_jump());
-        debug_assert!(!self.flags.contains(InstFlags::NOT_TAKEN_JUMP));
         Inst::from_usize(self.data as usize)
     }
 
@@ -1105,7 +1103,7 @@ impl InstData {
 bitflags::bitflags! {
     /// [`InstrData`] flags.
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-    pub(crate) struct InstFlags: u16 {
+    pub(crate) struct InstFlags: u8 {
         /// The `JUMP`/`JUMPI` target is known at compile time.
         const STATIC_JUMP = 1 << 0;
         /// The jump target is known to be invalid.
@@ -1114,22 +1112,20 @@ bitflags::bitflags! {
         /// The jump has multiple known targets (see `Bytecode::multi_jump_targets`).
         /// The target value is still on the stack and must be popped and switched on at runtime.
         const MULTI_JUMP = 1 << 2;
-        /// The `JUMPI` condition is known to be false, so control always falls through.
-        const NOT_TAKEN_JUMP = 1 << 3;
 
         /// The instruction is disabled in this EVM version.
         /// Always returns [`InstructionResult::NotActivated`] at runtime.
-        const DISABLED = 1 << 4;
+        const DISABLED = 1 << 3;
         /// The instruction is unknown.
         /// Always returns [`InstructionResult::NotFound`] at runtime.
-        const UNKNOWN = 1 << 5;
+        const UNKNOWN = 1 << 4;
 
         /// Instruction is a no-op: skip generating logic, but keep the gas calculation.
-        const NOOP = 1 << 6;
+        const NOOP = 1 << 5;
         /// This instruction starts a new stack section.
-        const STACK_SECTION_HEAD = 1 << 7;
+        const STACK_SECTION_HEAD = 1 << 6;
         /// Don't generate any code.
-        const DEAD_CODE = 1 << 8;
+        const DEAD_CODE = 1 << 7;
     }
 }
 

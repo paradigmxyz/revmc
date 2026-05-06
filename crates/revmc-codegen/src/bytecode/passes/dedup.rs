@@ -188,7 +188,6 @@ impl<'a> Bytecode<'a> {
                     let is_static = term.is_static_jump()
                         && !term.flags.contains(InstFlags::INVALID_JUMP)
                         && !term.flags.contains(InstFlags::MULTI_JUMP)
-                        && !term.flags.contains(InstFlags::NOT_TAKEN_JUMP)
                         && term.static_jump_target() == dup_first_inst;
                     if is_static {
                         self.insts[term_inst].set_static_jump_target(canonical_first_inst);
