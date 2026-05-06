@@ -770,11 +770,7 @@ impl Bytecode<'_> {
         (jump_targets, count)
     }
 
-    fn resolve_jump(
-        &self,
-        jump_inst: Inst,
-        const_sets: &ConstSetInterner,
-    ) -> JumpResolution {
+    fn resolve_jump(&self, jump_inst: Inst, const_sets: &ConstSetInterner) -> JumpResolution {
         let snap = &self.snapshots.inputs[jump_inst];
         let condition = if self.insts[jump_inst].opcode == op::JUMPI {
             snap.first()
