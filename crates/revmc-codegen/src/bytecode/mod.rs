@@ -549,7 +549,6 @@ impl<'a> Bytecode<'a> {
 
     /// Returns the value of a PUSH instruction, right-padding truncated EOF immediates with zeros
     /// per EVM spec.
-    #[cfg(test)]
     pub(crate) fn get_push_value(&self, data: &InstData) -> U256 {
         debug_assert!(matches!(data.opcode, op::PUSH0..=op::PUSH32));
         data.imm().get(&self.u256_interner.borrow())
