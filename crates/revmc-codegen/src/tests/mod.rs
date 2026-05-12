@@ -2028,6 +2028,36 @@ tests! {
             ),
         }),
 
+        dedup_false_jumpi_non_jumpdest_fallthrough(@raw {
+            bytecode: &asm("
+                CALLDATASIZE
+                PUSH %path2
+                JUMPI
+
+                PUSH0
+                PUSH %done
+                JUMPI
+                PUSH0
+                PUSH0
+                REVERT
+
+            path2:
+                JUMPDEST
+                PUSH0
+                PUSH %done
+                JUMPI
+                PUSH0
+                PUSH0
+                REVERT
+
+            done:
+                JUMPDEST
+                STOP
+            "),
+            expected_return: InstructionResult::Revert,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+        }),
+
         // Disabled opcodes must not poison stack sections.
         //
         // When a disabled opcode (e.g. TSTORE before Cancun) follows executable instructions
