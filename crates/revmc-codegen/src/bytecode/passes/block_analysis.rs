@@ -460,18 +460,6 @@ impl Bytecode<'_> {
         self.recompute_has_dynamic_jumps();
     }
 
-    /// Recomputes the `has_dynamic_jumps` flag based on the current instruction set.
-    #[inline(never)]
-    pub(crate) fn recompute_has_dynamic_jumps(&mut self) {
-        let mut unresolved = self.insts.iter().filter(|inst| {
-            inst.is_jump() && !inst.flags.contains(InstFlags::STATIC_JUMP) && !inst.is_dead_code()
-        });
-        self.has_dynamic_jumps = unresolved.next().is_some();
-        if self.has_dynamic_jumps {
-            debug!(n = 1 + unresolved.count(), "unresolved dynamic jumps remain");
-        }
-    }
-
     /// Commits resolved jump targets by setting flags and data on the corresponding instructions.
     ///
     /// Returns the number of newly resolved jumps.
@@ -554,41 +542,39 @@ impl Bytecode<'_> {
         newly_resolved
     }
 
-    fn recompute_reachable_jumpdests(&mut self) {
-        for data in &mut self.insts.raw {
-            if data.opcode == op::JUMPDEST {
-                data.clear_jumpdest_reachable();
-            }
-        }
+    /// Refresh reachability and CFG-derived state after control-flow changes.
+    #[instrument(level = "debug", name = "re_cfg", skip_all)]
+    #[inline(never)]
+    pub(crate) fn refresh_cfg(&mut self) {
+        self.recompute_has_dynamic_jumps();
+        self.recompute_reachable_jumpdests(); // Depends on has_dynamic_jumps
+        self.mark_dead_code(); // Depends on reachable jumpdests
+        self.compress_redirects();
+        self.rebuild_cfg();
+    }
 
-        let mut targets = Vec::new();
-        for (inst, data) in self.insts.iter_enumerated() {
-            if !data.is_static_jump()
-                || data.flags.contains(InstFlags::INVALID_JUMP)
-                || data.is_dead_code()
-            {
-                continue;
+    #[instrument(level = "debug", name = "redirects", skip_all)]
+    fn compress_redirects(&mut self) {
+        // Compress redirect chains so that earlier redirects (e.g. t2 -> t1) are
+        // updated when their target gets deduped in a later round (t1 -> t0).
+        // Without this, rebuild_cfg resolves edges only one hop, leaving stale
+        // intermediate targets in DedupKey.succs (preventing valid merges) and
+        // in translate.rs inst_entries (causing InvalidJump on valid bytecode).
+        for inst in self.redirects.keys().copied().collect::<Vec<_>>() {
+            let mut target = self.redirects[&inst];
+            let original = target;
+            while let Some(&next) = self.redirects.get(&target) {
+                target = next;
             }
-            if data.flags.contains(InstFlags::MULTI_JUMP) {
-                if let Some(multi_targets) = self.multi_jump_targets.get(&inst) {
-                    targets.extend(multi_targets.iter().copied());
-                }
-            } else {
-                targets.push(data.static_jump_target());
-            }
-        }
-
-        for target in targets {
-            if self.insts[target].opcode == op::JUMPDEST {
-                self.insts[target].set_jumpdest_reachable();
+            if target != original {
+                self.redirects.insert(inst, target);
             }
         }
     }
 
     /// Rebuild the basic-block CFG from the current instruction state.
-    #[instrument(level = "debug", skip_all)]
-    #[inline(never)]
-    pub(crate) fn rebuild_cfg(&mut self) {
+    #[instrument(level = "debug", name = "cfg", skip_all)]
+    fn rebuild_cfg(&mut self) {
         let finish_block = |cfg: &mut Cfg, start: usize, end: usize| {
             debug_assert!(start < end, "empty block range: {start}..{end}");
             let bid = cfg.blocks.push(BlockData {
