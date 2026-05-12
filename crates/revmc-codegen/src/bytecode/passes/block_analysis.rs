@@ -113,6 +113,27 @@ impl ConstSetInterner {
         }
     }
 
+    fn const_set_contains(&self, set_idx: ConstSetIdx, value: U256Imm) -> bool {
+        self.get(set_idx).binary_search(&value).is_ok()
+    }
+
+    fn const_set_contains_all(&self, set_idx: ConstSetIdx, values: &[U256Imm]) -> bool {
+        let set = self.get(set_idx);
+        let mut i = 0;
+        let mut j = 0;
+        while i < set.len() && j < values.len() {
+            match set[i].cmp(&values[j]) {
+                Ordering::Less => i += 1,
+                Ordering::Equal => {
+                    i += 1;
+                    j += 1;
+                }
+                Ordering::Greater => return false,
+            }
+        }
+        j == values.len()
+    }
+
     /// Interns a sorted, deduplicated set and returns the corresponding `AbsValue`.
     fn intern_set(&mut self, set: &[U256Imm]) -> AbsValue {
         match set.len() {
@@ -122,11 +143,44 @@ impl ConstSetInterner {
         }
     }
 
+    #[inline(never)]
+    fn join_into(&mut self, slot: &mut AbsValue, incoming: AbsValue) -> bool {
+        if matches!(*slot, AbsValue::Top) || *slot == incoming {
+            return false;
+        }
+
+        let joined = self.join(*slot, incoming);
+        if joined == *slot {
+            return false;
+        }
+
+        *slot = joined;
+        true
+    }
+
     /// Lattice join: two values merge to their least upper bound.
     fn join(&mut self, a: AbsValue, b: AbsValue) -> AbsValue {
+        if a == b {
+            return a;
+        }
+
         match (a, b) {
             (AbsValue::Top, _) | (_, AbsValue::Top) => AbsValue::Top,
-            (AbsValue::Const(x), AbsValue::Const(y)) if x == y => AbsValue::Const(x),
+
+            // If one value is a subset of the other, the result is the larger set.
+            (AbsValue::ConstSet(idx), AbsValue::Const(v)) if self.const_set_contains(idx, v) => a,
+            (AbsValue::Const(v), AbsValue::ConstSet(idx)) if self.const_set_contains(idx, v) => b,
+            (AbsValue::ConstSet(a_idx), AbsValue::ConstSet(b_idx))
+                if self.const_set_contains_all(a_idx, self.get(b_idx)) =>
+            {
+                a
+            }
+            (AbsValue::ConstSet(a_idx), AbsValue::ConstSet(b_idx))
+                if self.const_set_contains_all(b_idx, self.get(a_idx)) =>
+            {
+                b
+            }
+
             _ => {
                 let a = self.abs_const_set(&a).unwrap();
                 let b = self.abs_const_set(&b).unwrap();
@@ -234,9 +288,7 @@ impl BlockState {
             let pad = join_len - incoming_top.len();
             for i in 0..join_len {
                 let inc = if i < pad { AbsValue::Top } else { incoming_top[i - pad] };
-                let joined = sets.join(existing[i], inc);
-                if joined != existing[i] {
-                    existing[i] = joined;
+                if sets.join_into(&mut existing[i], inc) {
                     changed = true;
                 }
             }
@@ -447,7 +499,7 @@ impl Bytecode<'_> {
 
         debug_assert_eq!(snap.len(), operands.len());
         for (slot, &operand) in snap.iter_mut().zip(operands) {
-            *slot = const_sets.join(*slot, operand);
+            const_sets.join_into(slot, operand);
         }
     }
 
@@ -458,7 +510,9 @@ impl Bytecode<'_> {
         const_sets: &mut ConstSetInterner,
     ) {
         match &mut self.snapshots.outputs[inst] {
-            Some(existing) => *existing = const_sets.join(*existing, value),
+            Some(existing) => {
+                const_sets.join_into(existing, value);
+            }
             slot @ None => *slot = Some(value),
         }
     }
@@ -544,11 +598,11 @@ impl Bytecode<'_> {
     pub(crate) fn block_analysis(&mut self, local_snapshots: &Snapshots) {
         self.init_snapshots();
         let compiler_gas_used = self.compiler_gas_used;
-        let (mut resolved, mut count) = self.run_abstract_interp(local_snapshots, true);
-        if resolved.iter().any(|(_, target)| target.is_top()) {
+        let (mut resolved, mut count, converged) = self.run_abstract_interp(local_snapshots, true);
+        if converged && resolved.iter().any(|(_, target)| target.is_top()) {
             self.init_snapshots();
             self.compiler_gas_used = compiler_gas_used;
-            (resolved, count) = self.run_abstract_interp(local_snapshots, false);
+            (resolved, count, _) = self.run_abstract_interp(local_snapshots, false);
         }
 
         let has_const_condition =
@@ -817,7 +871,7 @@ impl Bytecode<'_> {
         &mut self,
         local_snapshots: &Snapshots,
         split_contexts: bool,
-    ) -> (Vec<(Inst, JumpResolution)>, usize) {
+    ) -> (Vec<(Inst, JumpResolution)>, usize, bool) {
         let num_blocks = self.cfg.blocks.len();
 
         // Initialize block states. Entry block starts with an empty stack.
@@ -880,7 +934,7 @@ impl Bytecode<'_> {
 
         let count = jump_targets.iter().filter(|(_, target)| target.is_resolved()).count();
 
-        (jump_targets, count)
+        (jump_targets, count, converged)
     }
 
     fn resolve_jump(&self, jump_inst: Inst, const_sets: &ConstSetInterner) -> JumpResolution {
