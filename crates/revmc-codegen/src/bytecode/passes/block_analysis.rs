@@ -262,6 +262,10 @@ impl BlockState {
             incoming: &[AbsValue],
             sets: &mut ConstSetInterner,
         ) -> bool {
+            if existing == incoming {
+                return false;
+            }
+
             let new_len = existing.len().max(incoming.len());
             let mut changed = false;
 
@@ -498,6 +502,9 @@ impl Bytecode<'_> {
         }
 
         debug_assert_eq!(snap.len(), operands.len());
+        if snap.as_slice() == operands {
+            return;
+        }
         for (slot, &operand) in snap.iter_mut().zip(operands) {
             const_sets.join_into(slot, operand);
         }
