@@ -2006,12 +2006,6 @@ pub(crate) mod tests {
         let code = case["pre"][to]["code"].as_str().unwrap().trim_start_matches("0x");
         revm_primitives::hex::decode(code).unwrap()
     }
-}
-
-#[cfg(test)]
-mod tests_edge_cases {
-    use super::{tests::*, *};
-
     /// Three callers to the same internal function. The return JUMP should
     /// resolve to Multi with three targets.
     #[test]
