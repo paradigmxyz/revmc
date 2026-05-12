@@ -996,7 +996,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                         let target_inst = data.static_jump_target();
                         debug_assert!(
                             *self.bytecode.inst(target_inst) == op::JUMPDEST
-                                || (opcode == op::JUMPI && target_inst == inst + 1),
+                                || (opcode == op::JUMPI && has_const_jumpi_condition),
                             "jumping to non-JUMPDEST; target_inst={target_inst}",
                         );
                         self.inst_entries[target_inst]

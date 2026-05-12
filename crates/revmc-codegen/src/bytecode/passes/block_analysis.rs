@@ -561,18 +561,6 @@ impl Bytecode<'_> {
         self.recompute_has_dynamic_jumps();
     }
 
-    /// Recomputes the `has_dynamic_jumps` flag based on the current instruction set.
-    #[inline(never)]
-    pub(crate) fn recompute_has_dynamic_jumps(&mut self) {
-        let mut unresolved = self.insts.iter().filter(|inst| {
-            inst.is_jump() && !inst.flags.contains(InstFlags::STATIC_JUMP) && !inst.is_dead_code()
-        });
-        self.has_dynamic_jumps = unresolved.next().is_some();
-        if self.has_dynamic_jumps {
-            debug!(n = 1 + unresolved.count(), "unresolved dynamic jumps remain");
-        }
-    }
-
     /// Commits resolved jump targets by setting flags and data on the corresponding instructions.
     ///
     /// Returns the number of newly resolved jumps.
@@ -587,7 +575,7 @@ impl Bytecode<'_> {
             }
 
             if target.condition != JumpCondition::Unknown {
-                self.insts[jump_inst].flags |= InstFlags::CONST_JUMPI_CONDITION;
+                self.insts[jump_inst].flags |= InstFlags::CONST_JUMP_CONDITION;
             }
 
             match &target.target {
@@ -631,7 +619,9 @@ impl Bytecode<'_> {
                     }
                     self.insts[jump_inst].flags |= InstFlags::STATIC_JUMP | InstFlags::MULTI_JUMP;
                     self.multi_jump_targets.insert(jump_inst, targets.clone());
-                    newly_resolved += 1;
+                    if !was_static {
+                        newly_resolved += 1;
+                    }
                     trace!(%jump_inst, n_targets = targets.len(), "resolved multi-target jump with invalid default");
                 }
                 JumpTarget::Invalid => {
@@ -669,41 +659,39 @@ impl Bytecode<'_> {
         newly_resolved
     }
 
-    fn recompute_reachable_jumpdests(&mut self) {
-        for data in &mut self.insts.raw {
-            if data.opcode == op::JUMPDEST {
-                data.clear_jumpdest_reachable();
-            }
-        }
+    /// Refresh reachability and CFG-derived state after control-flow changes.
+    #[instrument(level = "debug", name = "re_cfg", skip_all)]
+    #[inline(never)]
+    pub(crate) fn refresh_cfg(&mut self) {
+        self.recompute_has_dynamic_jumps();
+        self.recompute_reachable_jumpdests(); // Depends on has_dynamic_jumps
+        self.mark_dead_code(); // Depends on reachable jumpdests
+        self.compress_redirects();
+        self.rebuild_cfg();
+    }
 
-        let mut targets = Vec::new();
-        for (inst, data) in self.insts.iter_enumerated() {
-            if !data.is_static_jump()
-                || data.flags.contains(InstFlags::INVALID_JUMP)
-                || data.is_dead_code()
-            {
-                continue;
+    #[instrument(level = "debug", name = "redirects", skip_all)]
+    fn compress_redirects(&mut self) {
+        // Compress redirect chains so that earlier redirects (e.g. t2 -> t1) are
+        // updated when their target gets deduped in a later round (t1 -> t0).
+        // Without this, rebuild_cfg resolves edges only one hop, leaving stale
+        // intermediate targets in DedupKey.succs (preventing valid merges) and
+        // in translate.rs inst_entries (causing InvalidJump on valid bytecode).
+        for inst in self.redirects.keys().copied().collect::<Vec<_>>() {
+            let mut target = self.redirects[&inst];
+            let original = target;
+            while let Some(&next) = self.redirects.get(&target) {
+                target = next;
             }
-            if data.flags.contains(InstFlags::MULTI_JUMP) {
-                if let Some(multi_targets) = self.multi_jump_targets.get(&inst) {
-                    targets.extend(multi_targets.iter().copied());
-                }
-            } else {
-                targets.push(data.static_jump_target());
-            }
-        }
-
-        for target in targets {
-            if self.insts[target].opcode == op::JUMPDEST {
-                self.insts[target].set_jumpdest_reachable();
+            if target != original {
+                self.redirects.insert(inst, target);
             }
         }
     }
 
     /// Rebuild the basic-block CFG from the current instruction state.
-    #[instrument(level = "debug", skip_all)]
-    #[inline(never)]
-    pub(crate) fn rebuild_cfg(&mut self) {
+    #[instrument(level = "debug", name = "cfg", skip_all)]
+    fn rebuild_cfg(&mut self) {
         let finish_block = |cfg: &mut Cfg, start: usize, end: usize| {
             debug_assert!(start < end, "empty block range: {start}..{end}");
             let bid = cfg.blocks.push(BlockData {
@@ -1152,12 +1140,12 @@ impl Bytecode<'_> {
                 if let Some(bid) = self.cfg.inst_to_block[*inst]
                     && suspect[bid.index()]
                 {
-                    target.condition = self.local_jumpi_condition(*inst, local_snapshots);
-                    if matches!(target.target, JumpTarget::Resolved(_))
-                        && target.condition == JumpCondition::AlwaysFalse
-                    {
+                    let condition = self.local_jumpi_condition(*inst, local_snapshots);
+                    if condition == JumpCondition::AlwaysFalse {
+                        *target = JumpResolution::single(*inst + 1).with_condition(condition);
                         continue;
                     }
+                    target.condition = condition;
                     if target.is_resolved() {
                         let condition = target.condition;
                         *target = JumpResolution::top().with_condition(condition);
@@ -2571,6 +2559,84 @@ mod tests_edge_cases {
         assert!(
             !jumpi.flags.contains(InstFlags::STATIC_JUMP),
             "suspect JUMPI target should remain dynamic"
+        );
+    }
+
+    /// A block-local false JUMPI condition is sound even in a suspect block.
+    #[test]
+    fn suspect_jumpi_top_target_keeps_local_false_condition() {
+        let bytecode = analyze_asm(
+            "
+            PUSH0
+            CALLDATALOAD
+            PUSH %opaque
+            JUMPI
+            PUSH %fn_entry
+            JUMP
+        opaque:
+            JUMPDEST
+            PUSH0
+            MLOAD
+            JUMP
+        fn_entry:
+            JUMPDEST
+            PUSH0
+            PUSH0
+            MLOAD
+            JUMPI
+            STOP
+        taken:
+            JUMPDEST
+            STOP
+        ",
+        );
+
+        let (jump_inst, jumpi) =
+            bytecode.iter_insts().rev().find(|(_, data)| data.opcode == op::JUMPI).unwrap();
+        assert!(jumpi.has_const_jumpi_condition());
+        assert!(jumpi.flags.contains(InstFlags::STATIC_JUMP));
+        assert_eq!(jumpi.static_jump_target(), jump_inst + 1);
+    }
+
+    /// A block-local true JUMPI condition is also sound in a suspect block, but
+    /// an unknown target must stay dynamic and must not retain a fallthrough.
+    #[test]
+    fn suspect_jumpi_top_target_keeps_local_true_condition() {
+        let bytecode = analyze_asm(
+            "
+            PUSH0
+            CALLDATALOAD
+            PUSH %opaque
+            JUMPI
+            PUSH %fn_entry
+            JUMP
+        opaque:
+            JUMPDEST
+            PUSH0
+            MLOAD
+            JUMP
+        fn_entry:
+            JUMPDEST
+            PUSH1 0x01
+            PUSH0
+            MLOAD
+            JUMPI
+            STOP
+        taken:
+            JUMPDEST
+            STOP
+        ",
+        );
+
+        let (jump_inst, jumpi) =
+            bytecode.iter_insts().rev().find(|(_, data)| data.opcode == op::JUMPI).unwrap();
+        assert!(jumpi.has_const_jumpi_condition());
+        assert!(!jumpi.flags.contains(InstFlags::STATIC_JUMP));
+        assert!(!jumpi.can_fall_through());
+        assert!(bytecode.has_dynamic_jumps);
+        assert!(
+            bytecode.cfg.inst_to_block[jump_inst + 1].is_none(),
+            "always-taken dynamic JUMPI fallthrough should be dead"
         );
     }
 

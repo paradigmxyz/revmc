@@ -61,22 +61,7 @@ impl<'a> Bytecode<'a> {
             if deduped == 0 {
                 break;
             }
-            // Compress redirect chains so that earlier redirects (e.g. t2 -> t1) are
-            // updated when their target gets deduped in a later round (t1 -> t0).
-            // Without this, rebuild_cfg resolves edges only one hop, leaving stale
-            // intermediate targets in DedupKey.succs (preventing valid merges) and
-            // in translate.rs inst_entries (causing InvalidJump on valid bytecode).
-            for inst in self.redirects.keys().copied().collect::<Vec<_>>() {
-                let mut target = self.redirects[&inst];
-                let original = target;
-                while let Some(&next) = self.redirects.get(&target) {
-                    target = next;
-                }
-                if target != original {
-                    self.redirects.insert(inst, target);
-                }
-            }
-            self.rebuild_cfg();
+            self.refresh_cfg();
         }
         debug!(deduped = total_deduped, "finished");
     }
@@ -111,8 +96,8 @@ impl<'a> Bytecode<'a> {
                 continue;
             }
 
-            // Skip unresolved dynamic JUMPs — any target is possible at runtime.
-            if term.opcode == op::JUMP && !term.flags.contains(InstFlags::STATIC_JUMP) {
+            // Skip unresolved dynamic jumps — any target is possible at runtime.
+            if term.is_jump() && !term.flags.contains(InstFlags::STATIC_JUMP) {
                 continue;
             }
 
@@ -233,6 +218,7 @@ mod tests {
     use crate::bytecode::{
         AnalysisConfig, InstFlags, passes::block_analysis::tests::analyze_asm_with,
     };
+    use revm_bytecode::opcode as op;
 
     #[test]
     fn dedup_identical_revert_blocks() {
@@ -522,6 +508,117 @@ mod tests {
         assert!(
             bytecode.redirects.is_empty(),
             "should not dedup blocks ending in unresolved dynamic JUMP",
+        );
+    }
+
+    #[test]
+    fn dedup_skips_const_true_dynamic_jumpi_tail() {
+        // Two non-JUMPDEST byte-identical tails ending in const-true `JUMPI` with
+        // unresolved dynamic targets must NOT be deduped. The constant condition
+        // makes the terminator non-fallthrough, but the target is still arbitrary.
+        let bytecode = analyze_asm_with(
+            "
+            CALLDATASIZE
+            PUSH %path_b
+            JUMPI
+
+            ; tail A
+            PUSH1 0x01
+            PUSH0
+            CALLDATALOAD
+            JUMPI
+            STOP
+
+        path_b:
+            JUMPDEST
+            PUSH0
+            PUSH %after_b
+            JUMPI
+
+            ; tail B
+            PUSH1 0x01
+            PUSH0
+            CALLDATALOAD
+            JUMPI
+            STOP
+
+        after_b:
+            JUMPDEST
+            INVALID
+        ",
+            AnalysisConfig::DEDUP,
+        );
+
+        let dynamic_jumpis = bytecode
+            .iter_insts()
+            .filter(|(_, data)| {
+                data.opcode == op::JUMPI
+                    && data.has_const_jumpi_condition()
+                    && !data.flags.contains(InstFlags::STATIC_JUMP)
+            })
+            .count();
+        assert_eq!(dynamic_jumpis, 2, "expected two const-true dynamic JUMPI tails");
+        assert!(
+            bytecode.redirects.is_empty(),
+            "should not dedup blocks ending in unresolved dynamic JUMPI",
+        );
+    }
+
+    #[test]
+    fn dedup_allows_const_true_static_jumpi_tail() {
+        // The dynamic-target guard should not block const-true JUMPI tails whose
+        // target is known and whose CFG successors match.
+        let bytecode = analyze_asm_with(
+            "
+            CALLDATASIZE
+            PUSH %path_b
+            JUMPI
+
+            ; tail A
+            PUSH1 0x01
+            PUSH %target
+            JUMPI
+            STOP
+
+        path_b:
+            JUMPDEST
+            PUSH0
+            PUSH %after_b
+            JUMPI
+
+            ; tail B
+            PUSH1 0x01
+            PUSH %target
+            JUMPI
+            STOP
+
+        after_b:
+            JUMPDEST
+            INVALID
+
+        target:
+            JUMPDEST
+            STOP
+        ",
+            AnalysisConfig::DEDUP,
+        );
+
+        let static_jumpis = bytecode
+            .iter_insts()
+            .filter(|(_, data)| {
+                data.opcode == op::JUMPI
+                    && data.has_const_jumpi_condition()
+                    && data.flags.contains(InstFlags::STATIC_JUMP)
+            })
+            .count();
+        assert!(
+            static_jumpis >= 2,
+            "expected at least two const-condition static JUMPI instructions",
+        );
+        assert_eq!(
+            bytecode.redirects.len(),
+            1,
+            "same-target const-true static JUMPI tails should be deduped",
         );
     }
 

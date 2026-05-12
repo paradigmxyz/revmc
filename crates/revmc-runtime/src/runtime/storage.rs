@@ -164,3 +164,102 @@ impl ArtifactStore for RuntimeArtifactStore {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ArtifactKey, ArtifactManifest, ArtifactStore, BackendSelection, RuntimeArtifactStore,
+        RuntimeCacheKey,
+    };
+    use alloy_primitives::B256;
+    use revm_primitives::hardfork::SpecId;
+    use revmc_backend::OptimizationLevel;
+
+    fn artifact_key(code_hash: B256) -> ArtifactKey {
+        ArtifactKey {
+            runtime: RuntimeCacheKey { code_hash, spec_id: SpecId::OSAKA },
+            backend: BackendSelection::Llvm,
+            opt_level: OptimizationLevel::Default,
+        }
+    }
+
+    fn manifest(key: ArtifactKey, artifact_len: usize) -> ArtifactManifest {
+        ArtifactManifest {
+            artifact_key: key,
+            symbol_name: "main".to_string(),
+            bytecode_len: 3,
+            artifact_len,
+            created_at_unix_secs: 42,
+            content_hash: [7; 32],
+        }
+    }
+
+    #[test]
+    fn runtime_artifact_store_starts_empty() {
+        let store = RuntimeArtifactStore::new().unwrap();
+
+        assert!(store.is_empty());
+        assert_eq!(store.len(), 0);
+        assert!(store.load_all().unwrap().is_empty());
+    }
+
+    #[test]
+    fn runtime_artifact_store_round_trips_artifacts() {
+        let store = RuntimeArtifactStore::new().unwrap();
+        let key = artifact_key(B256::with_last_byte(1));
+        let manifest = manifest(key.clone(), 4);
+
+        store.store(&key, &manifest, b"dylib").unwrap();
+
+        assert_eq!(store.len(), 1);
+        let loaded = store.load(&key).unwrap().unwrap();
+        assert_eq!(loaded.manifest.symbol_name, "main");
+        assert_eq!(loaded.manifest.artifact_len, 4);
+        assert_eq!(std::fs::read(&loaded.dylib_path).unwrap(), b"dylib");
+
+        let all = store.load_all().unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].0, key);
+        assert_eq!(all[0].1.manifest.content_hash, [7; 32]);
+    }
+
+    #[test]
+    fn runtime_artifact_store_replaces_artifacts() {
+        let store = RuntimeArtifactStore::new().unwrap();
+        let key = artifact_key(B256::with_last_byte(2));
+
+        store.store(&key, &manifest(key.clone(), 3), b"one").unwrap();
+        store.store(&key, &manifest(key.clone(), 5), b"three").unwrap();
+
+        assert_eq!(store.len(), 1);
+        let loaded = store.load(&key).unwrap().unwrap();
+        assert_eq!(loaded.manifest.artifact_len, 5);
+        assert_eq!(std::fs::read(&loaded.dylib_path).unwrap(), b"three");
+    }
+
+    #[test]
+    fn runtime_artifact_store_delete_and_clear_remove_files() {
+        let store = RuntimeArtifactStore::new().unwrap();
+        let first = artifact_key(B256::with_last_byte(3));
+        let second = artifact_key(B256::with_last_byte(4));
+
+        store.store(&first, &manifest(first.clone(), 1), b"a").unwrap();
+        store.store(&second, &manifest(second.clone(), 1), b"b").unwrap();
+        let first_path = store.load(&first).unwrap().unwrap().dylib_path;
+        let second_path = store.load(&second).unwrap().unwrap().dylib_path;
+
+        store.delete(&first).unwrap();
+        assert!(store.load(&first).unwrap().is_none());
+        assert!(!first_path.exists());
+        assert!(second_path.exists());
+
+        store.clear().unwrap();
+        assert!(store.is_empty());
+        assert!(!second_path.exists());
+    }
+
+    #[test]
+    fn backend_selection_defaults_to_auto() {
+        assert_eq!(BackendSelection::default(), BackendSelection::Auto);
+    }
+}

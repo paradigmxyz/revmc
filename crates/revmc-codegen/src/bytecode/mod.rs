@@ -419,24 +419,19 @@ impl<'a> Bytecode<'a> {
     /// Runs a list of analysis passes on the instructions.
     #[instrument(level = "debug", skip_all)]
     pub(crate) fn analyze(&mut self) -> Result<()> {
-        self.recompute_has_dynamic_jumps();
-        self.mark_dead_code();
-        self.rebuild_cfg();
+        self.refresh_cfg();
 
         self.block_analysis_local();
-        self.mark_dead_code();
-        self.rebuild_cfg();
+        self.refresh_cfg();
 
         let local_snapshots = self.snapshots.clone();
 
         self.block_analysis(&local_snapshots);
-        self.mark_dead_code();
-        self.rebuild_cfg();
+        self.refresh_cfg();
 
         if self.config.contains(AnalysisConfig::DEDUP) {
             self.dedup_blocks(&local_snapshots);
-            self.mark_dead_code();
-            self.rebuild_cfg();
+            self.refresh_cfg();
         }
         drop(local_snapshots);
 
@@ -463,6 +458,55 @@ impl<'a> Bytecode<'a> {
         Ok(())
     }
 
+    /// Recomputes the `has_dynamic_jumps` flag based on the current instruction set.
+    #[instrument(name = "dyn_jumps", level = "debug", skip_all)]
+    #[inline(never)]
+    pub(crate) fn recompute_has_dynamic_jumps(&mut self) {
+        let mut unresolved = self.insts.iter().filter(|inst| {
+            inst.is_jump() && !inst.flags.contains(InstFlags::STATIC_JUMP) && !inst.is_dead_code()
+        });
+        self.has_dynamic_jumps = unresolved.next().is_some();
+        if self.has_dynamic_jumps {
+            debug!(n = 1 + unresolved.count(), "unresolved dynamic jumps remain");
+        }
+    }
+
+    #[instrument(name = "jumpdests", level = "debug", skip_all)]
+    #[inline(never)]
+    pub(crate) fn recompute_reachable_jumpdests(&mut self) {
+        for data in &mut self.insts.raw {
+            if data.opcode == op::JUMPDEST {
+                data.clear_jumpdest_reachable();
+            }
+        }
+
+        let mut targets = Vec::new();
+        for (inst, data) in self.insts.iter_enumerated() {
+            if !data.is_static_jump()
+                || data.flags.contains(InstFlags::INVALID_JUMP)
+                || data.is_dead_code()
+            {
+                continue;
+            }
+            if data.flags.contains(InstFlags::MULTI_JUMP) {
+                if let Some(multi_targets) = self.multi_jump_targets.get(&inst) {
+                    targets.extend(multi_targets.iter().copied());
+                }
+            } else {
+                targets.push(data.static_jump_target());
+            }
+        }
+
+        for mut target in targets {
+            while let Some(&next) = self.redirects.get(&target) {
+                target = next;
+            }
+            if self.insts[target].opcode == op::JUMPDEST {
+                self.insts[target].set_jumpdest_reachable();
+            }
+        }
+    }
+
     /// Mark unreachable instructions as `DEAD_CODE` to not generate any code for them.
     ///
     /// This pass is technically unnecessary as the backend will very likely optimize any
@@ -474,13 +518,27 @@ impl<'a> Bytecode<'a> {
     #[instrument(name = "dce", level = "debug", skip_all)]
     #[inline(never)]
     fn mark_dead_code(&mut self) {
+        loop {
+            if !self.mark_dead_code_once() {
+                break;
+            }
+            self.recompute_has_dynamic_jumps();
+            self.recompute_reachable_jumpdests();
+        }
+    }
+
+    fn mark_dead_code_once(&mut self) -> bool {
         let mut iter = self.insts.iter_mut_enumerated();
+        let mut marked_jump_dead = false;
         while let Some((i, data)) = iter.next() {
             if !data.can_fall_through() {
                 let static_target = data
                     .is_static_jump()
                     .then(|| data.static_jump_target())
                     .filter(|&target| target > i);
+                if static_target == Some(i + 1) {
+                    continue;
+                }
                 let mut end = i;
                 let mut any_new = false;
                 for (j, data) in &mut iter {
@@ -493,6 +551,7 @@ impl<'a> Bytecode<'a> {
                     }
                     if !data.flags.contains(InstFlags::DEAD_CODE) {
                         any_new = true;
+                        marked_jump_dead |= data.is_jump();
                     }
                     data.flags |= InstFlags::DEAD_CODE;
                 }
@@ -502,6 +561,7 @@ impl<'a> Bytecode<'a> {
                 }
             }
         }
+        marked_jump_dead
     }
 
     /// Calculates whether the bytecode suspend suspend execution.
@@ -974,7 +1034,7 @@ impl InstData {
     /// Returns `true` if this instruction is a `JUMPI` whose condition is known statically.
     #[inline]
     pub(crate) fn has_const_jumpi_condition(&self) -> bool {
-        self.opcode == op::JUMPI && self.flags.contains(InstFlags::CONST_JUMPI_CONDITION)
+        self.opcode == op::JUMPI && self.flags.contains(InstFlags::CONST_JUMP_CONDITION)
     }
 
     /// Returns `true` if this instruction is a `JUMPDEST`.
@@ -1135,7 +1195,7 @@ bitflags::bitflags! {
         /// The target value is still on the stack and must be popped and switched on at runtime.
         const MULTI_JUMP = 1 << 2;
         /// The `JUMPI` condition is known at compile time.
-        const CONST_JUMPI_CONDITION = 1 << 3;
+        const CONST_JUMP_CONDITION = 1 << 3;
 
         /// The instruction is disabled in this EVM version.
         /// Always returns [`InstructionResult::NotActivated`] at runtime.
@@ -1205,5 +1265,66 @@ mod tests {
         let bc = Bytecode::test(&code);
         let data = bc.inst(Inst::from_usize(0));
         assert_eq!(bc.get_push_value(data), U256::from(0x42FF));
+    }
+
+    #[test]
+    fn false_jumpi_fallthrough_terminator_marks_following_dead_code() {
+        let mut bc = Bytecode::test(&[
+            op::PUSH0,
+            op::CALLDATASIZE,
+            op::JUMPI,
+            op::STOP,
+            op::CALLDATALOAD,
+            op::JUMP,
+        ]);
+        let jumpi = Inst::from_usize(2);
+        let fallthrough = jumpi + 1;
+        let dynamic_jump = Inst::from_usize(5);
+
+        bc.inst_mut(jumpi).flags |= InstFlags::STATIC_JUMP | InstFlags::CONST_JUMP_CONDITION;
+        bc.inst_mut(jumpi).set_static_jump_target(fallthrough);
+        bc.has_dynamic_jumps = true;
+        bc.mark_dead_code();
+
+        assert!(!bc.inst(fallthrough).is_dead_code());
+        assert!(bc.inst(Inst::from_usize(4)).is_dead_code());
+        assert!(bc.inst(dynamic_jump).is_dead_code());
+        assert!(!bc.has_dynamic_jumps);
+    }
+
+    #[test]
+    fn dead_fallthrough_jump_does_not_keep_jumpdest_reachable() {
+        let mut bc = Bytecode::test(&[
+            op::PUSH1,
+            5,
+            op::PUSH1,
+            1,
+            op::JUMPI,
+            op::PUSH1,
+            8,
+            op::JUMP,
+            op::JUMPDEST,
+            op::STOP,
+            op::JUMPDEST,
+            op::STOP,
+        ]);
+        let jumpi = Inst::from_usize(2);
+        let dead_jump = Inst::from_usize(4);
+        let live_target = Inst::from_usize(5);
+        let stale_target = Inst::from_usize(7);
+
+        bc.inst_mut(jumpi).flags |= InstFlags::STATIC_JUMP | InstFlags::CONST_JUMP_CONDITION;
+        bc.inst_mut(jumpi).set_static_jump_target(live_target);
+        bc.inst_mut(dead_jump).flags |= InstFlags::STATIC_JUMP;
+        bc.inst_mut(dead_jump).set_static_jump_target(stale_target);
+        bc.inst_mut(live_target).set_jumpdest_reachable();
+        bc.inst_mut(stale_target).set_jumpdest_reachable();
+
+        bc.mark_dead_code();
+
+        assert!(bc.inst(dead_jump).is_dead_code());
+        assert!(bc.inst(live_target).is_jumpdest_reachable());
+        assert!(!bc.inst(stale_target).is_jumpdest_reachable());
+        assert!(bc.inst(stale_target).is_dead_code());
     }
 }
