@@ -475,12 +475,16 @@ impl<'a> Bytecode<'a> {
     #[inline(never)]
     fn mark_dead_code(&mut self) {
         let mut iter = self.insts.iter_mut_enumerated();
+        let mut marked_jump_dead = false;
         while let Some((i, data)) = iter.next() {
             if !data.can_fall_through() {
                 let static_target = data
                     .is_static_jump()
                     .then(|| data.static_jump_target())
                     .filter(|&target| target > i);
+                if static_target == Some(i + 1) {
+                    continue;
+                }
                 let mut end = i;
                 let mut any_new = false;
                 for (j, data) in &mut iter {
@@ -493,6 +497,7 @@ impl<'a> Bytecode<'a> {
                     }
                     if !data.flags.contains(InstFlags::DEAD_CODE) {
                         any_new = true;
+                        marked_jump_dead |= data.is_jump();
                     }
                     data.flags |= InstFlags::DEAD_CODE;
                 }
@@ -501,6 +506,9 @@ impl<'a> Bytecode<'a> {
                     debug!("found dead code: {start}..{end}");
                 }
             }
+        }
+        if marked_jump_dead {
+            self.recompute_has_dynamic_jumps();
         }
     }
 
@@ -1206,5 +1214,30 @@ mod tests {
         let bc = Bytecode::test(&code);
         let data = bc.inst(Inst::from_usize(0));
         assert_eq!(bc.get_push_value(data), U256::from(0x42FF));
+    }
+
+    #[test]
+    fn false_jumpi_fallthrough_terminator_marks_following_dead_code() {
+        let mut bc = Bytecode::test(&[
+            op::PUSH0,
+            op::CALLDATASIZE,
+            op::JUMPI,
+            op::STOP,
+            op::CALLDATALOAD,
+            op::JUMP,
+        ]);
+        let jumpi = Inst::from_usize(2);
+        let fallthrough = jumpi + 1;
+        let dynamic_jump = Inst::from_usize(5);
+
+        bc.inst_mut(jumpi).flags |= InstFlags::STATIC_JUMP | InstFlags::CONST_JUMP_CONDITION;
+        bc.inst_mut(jumpi).set_static_jump_target(fallthrough);
+        bc.has_dynamic_jumps = true;
+        bc.mark_dead_code();
+
+        assert!(!bc.inst(fallthrough).is_dead_code());
+        assert!(bc.inst(Inst::from_usize(4)).is_dead_code());
+        assert!(bc.inst(dynamic_jump).is_dead_code());
+        assert!(!bc.has_dynamic_jumps);
     }
 }
