@@ -521,7 +521,10 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             ($($comment:expr)?) => {
                 // Flush virtual stack before leaving the section.
                 if self.inst_entries.get(inst + 1).is_some() {
-                    let next = self.bytecode.inst(inst + 1);
+                    let next_inst = inst + 1;
+                    let next_inst =
+                        self.bytecode.redirects.get(&next_inst).copied().unwrap_or(next_inst);
+                    let next = self.bytecode.inst(next_inst);
                     if !next.is_dead_code() && next.is_stack_section_head() {
                         self.materialize_live_stack();
                     } else {
