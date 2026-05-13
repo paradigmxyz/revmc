@@ -474,6 +474,28 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         Ok(())
     }
 
+    /// Returns the instruction that is physically next in bytecode order.
+    fn lexical_next_inst(&self, inst: Inst) -> Option<Inst> {
+        let next = inst + 1;
+        self.inst_entries.get(next)?;
+        Some(next)
+    }
+
+    /// Resolves an instruction through dead-block redirects created by dedup.
+    fn effective_inst(&self, inst: Inst) -> Inst {
+        self.bytecode.redirects.get(&inst).copied().unwrap_or(inst)
+    }
+
+    /// Returns the runtime fallthrough target after applying dedup redirects.
+    fn effective_next_inst(&self, inst: Inst) -> Option<Inst> {
+        self.lexical_next_inst(inst).map(|next| self.effective_inst(next))
+    }
+
+    /// Returns the IR block for the runtime fallthrough target.
+    fn effective_next_entry(&self, inst: Inst) -> Option<B::BasicBlock> {
+        self.effective_next_inst(inst).map(|next| self.inst_entries[next])
+    }
+
     #[instrument(level = "debug", skip_all, fields(inst = %self.bytecode.inst(inst).to_op()))]
     fn translate_inst(&mut self, inst: Inst) -> Result<()> {
         self.current_inst = Some(inst);
@@ -493,7 +515,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 !this.bytecode.is_instr_diverging(inst),
                 "attempted to branch to next instruction in a diverging instruction: {data:?}",
             );
-            if let Some(&next) = this.inst_entries.get(inst + 1) {
+            if let Some(next) = this.effective_next_entry(inst) {
                 this.bcx.br(next);
             }
         };
@@ -520,10 +542,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             }};
             ($($comment:expr)?) => {
                 // Flush virtual stack before leaving the section.
-                if self.inst_entries.get(inst + 1).is_some() {
-                    let next_inst = inst + 1;
-                    let next_inst =
-                        self.bytecode.redirects.get(&next_inst).copied().unwrap_or(next_inst);
+                if let Some(next_inst) = self.effective_next_inst(inst) {
                     let next = self.bytecode.inst(next_inst);
                     if !next.is_dead_code() && next.is_stack_section_head() {
                         self.materialize_live_stack();
@@ -970,7 +989,9 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                             let cond_word = self.pop();
                             self.materialize_live_stack();
                             let cond = self.bcx.icmp_imm(IntCC::NotEqual, cond_word, 0);
-                            let next = self.inst_entries[inst + 1];
+                            let next = self
+                                .effective_next_entry(inst)
+                                .expect("JUMPI must have a fallthrough target");
                             let switch_block = self.bcx.create_block("multi_jump");
                             self.bcx.brif(cond, switch_block, next);
                             self.bcx.switch_to_block(switch_block);
@@ -1018,7 +1039,9 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                         // Flush virtual values before leaving the section.
                         self.materialize_live_stack();
                         let cond = self.bcx.icmp_imm(IntCC::NotEqual, cond_word, 0);
-                        let next = self.inst_entries[inst + 1];
+                        let next = self
+                            .effective_next_entry(inst)
+                            .expect("JUMPI must have a fallthrough target");
                         self.bcx.brif(cond, target, next);
                     } else {
                         if opcode == op::JUMPI {
@@ -1371,7 +1394,10 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
         // Register the next instruction as the resume block.
         let idx = self.resume_blocks.len();
-        self.add_resume_at(self.inst_entries[self.current_inst.unwrap() + 1]);
+        let resume_at = self
+            .effective_next_entry(self.current_inst.unwrap())
+            .expect("suspending instruction must have a resume target");
+        self.add_resume_at(resume_at);
 
         // Register the current block as the suspend block.
         let value = self.bcx.iconst(self.isize_type, idx as i64 + 1);
