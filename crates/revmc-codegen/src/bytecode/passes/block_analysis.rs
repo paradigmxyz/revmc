@@ -890,7 +890,8 @@ impl Bytecode<'_> {
         // may become constant only after CFG fixpoint.
         let mut jump_insts: Vec<Inst> = Vec::new();
         for (i, inst) in self.insts.iter_enumerated() {
-            if inst.is_jump()
+            if !inst.is_dead_code()
+                && inst.is_jump()
                 && (!inst.flags.contains(InstFlags::STATIC_JUMP)
                     || (inst.opcode == op::JUMPI && !inst.has_const_jumpi_condition()))
             {
@@ -1745,6 +1746,36 @@ pub(crate) mod tests {
         assert_eq!(bytecode.const_operand(Inst::from_usize(12), 0), Some(U256::from(0x02)));
         assert_eq!(bytecode.const_operand(Inst::from_usize(12), 1), None);
         assert_eq!(bytecode.const_output(Inst::from_usize(12)), None);
+    }
+
+    #[test]
+    fn dead_dynamic_jump_does_not_invalidate_snapshots() {
+        let bytecode = analyze_asm(
+            "
+            PUSH %entry         ; inst 0
+            JUMP                ; inst 1
+            PUSH0               ; inst 2: dead
+            JUMP                ; inst 3: dead dynamic jump
+        entry:
+            JUMPDEST            ; inst 4
+            PUSH1 0x40          ; inst 5
+            PUSH %ret           ; inst 6
+            PUSH %func          ; inst 7
+            JUMP                ; inst 8
+        ret:
+            JUMPDEST            ; inst 9
+            ADD                 ; inst 10: 0x40 + 0x02 = 0x42
+            STOP                ; inst 11
+        func:
+            JUMPDEST            ; inst 12
+            PUSH1 0x02          ; inst 13
+            SWAP1               ; inst 14
+            JUMP                ; inst 15
+        ",
+        );
+
+        assert!(bytecode.inst(Inst::from_usize(3)).is_dead_code());
+        assert_eq!(bytecode.const_output(Inst::from_usize(10)), Some(U256::from(0x42)));
     }
 
     #[test]
