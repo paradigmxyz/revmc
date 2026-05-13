@@ -606,7 +606,7 @@ impl Bytecode<'_> {
         self.init_snapshots();
         let compiler_gas_used = self.compiler_gas_used;
         let (mut resolved, mut count, converged) = self.run_abstract_interp(local_snapshots, true);
-        if converged && resolved.iter().any(|(_, target)| target.is_top()) {
+        if !converged || resolved.iter().any(|(_, target)| target.is_top()) {
             self.init_snapshots();
             self.compiler_gas_used = compiler_gas_used;
             (resolved, count, _) = self.run_abstract_interp(local_snapshots, false);
@@ -3208,5 +3208,52 @@ pub(crate) mod tests {
             bytecode.has_dynamic_jumps,
             "return jump should remain dynamic when fixpoint doesn't converge"
         );
+    }
+
+    /// If split-context analysis hits its fixed cap, retry the uncapped unsplit
+    /// analysis before falling back to block-local snapshots.
+    #[test]
+    fn split_non_convergence_retries_unsplit_analysis() {
+        let k = 12;
+        let b = 40;
+        let mut lines = Vec::new();
+        lines.push("PUSH %call0".to_string());
+        lines.push("JUMP".to_string());
+        for i in 0..k {
+            lines.push(format!("call{i}:"));
+            lines.push("JUMPDEST".to_string());
+            lines.push(format!("PUSH %ret{i}"));
+            lines.push("PUSH %relay0".to_string());
+            lines.push("JUMP".to_string());
+
+            lines.push(format!("ret{i}:"));
+            lines.push("JUMPDEST".to_string());
+            lines.push("POP".to_string());
+            if i + 1 < k {
+                lines.push(format!("PUSH %call{}", i + 1));
+                lines.push("JUMP".to_string());
+            } else {
+                lines.push("STOP".to_string());
+            }
+        }
+        for i in 0..b {
+            lines.push(format!("relay{i}:"));
+            lines.push("JUMPDEST".to_string());
+            if i + 1 < b {
+                lines.push(format!("PUSH %relay{}", i + 1));
+            } else {
+                lines.push("PUSH %fn_entry".to_string());
+            }
+            lines.push("JUMP".to_string());
+        }
+        lines.push("fn_entry:".to_string());
+        lines.push("JUMPDEST".to_string());
+        lines.push("PUSH1 0x42".to_string());
+        lines.push("SWAP1".to_string());
+        lines.push("JUMP".to_string());
+
+        let bytecode = analyze_asm(&lines.join("\n"));
+
+        assert!(!bytecode.has_dynamic_jumps, "unsplit retry should resolve the shared return jump");
     }
 }
