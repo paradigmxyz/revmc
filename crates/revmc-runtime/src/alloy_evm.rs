@@ -7,93 +7,160 @@ use crate::{revm_evm, runtime::JitBackend};
 use alloy_evm::{
     Database,
     env::EvmEnv,
-    eth::{EthEvmBuilder, EthEvmContext},
+    eth::{EthEvmContext, EthEvmFactory},
     evm::{Evm, EvmFactory},
     precompiles::PrecompilesMap,
 };
 use alloy_primitives::{Address, Bytes};
-use revm_context::{BlockEnv, Evm as RevmEvm, TxEnv};
-use revm_context_interface::result::{EVMError, HaltReason, ResultAndState};
-use revm_handler::{
-    EthFrame, ExecuteEvm, PrecompileProvider, SystemCallEvm, instructions::EthInstructions,
+use core::error::Error;
+use revm_context::{BlockEnv, CfgEnv, Evm as RevmEvm, TxEnv};
+use revm_context_interface::{
+    ContextTr,
+    result::{EVMError, ExecutionResult, HaltReason, ResultAndState},
 };
-use revm_inspector::{InspectEvm, InspectSystemCallEvm, Inspector, NoOpInspector};
-use revm_interpreter::{InterpreterResult, interpreter::EthInterpreter};
+use revm_handler::{EthFrame, EvmTr, ExecuteEvm, SystemCallEvm, instructions::EthInstructions};
+use revm_inspector::{InspectEvm, InspectSystemCallEvm, Inspector, InspectorEvmTr, NoOpInspector};
+use revm_interpreter::interpreter::EthInterpreter;
 use revm_primitives::hardfork::SpecId;
+use revm_state::EvmState;
 
-type InnerEvm<DB, I, P> =
-    RevmEvm<EthEvmContext<DB>, I, EthInstructions<EthInterpreter, EthEvmContext<DB>>, P, EthFrame>;
+/// Inner EVM type that can be wrapped by [`JitEvm`].
+pub trait JitEvmInner:
+    EvmTr<
+        Frame = EthFrame,
+        Context: ContextTr<Db = Self::DB, Tx = TxEnv, Block = BlockEnv, Cfg = CfgEnv>,
+    > + InspectorEvmTr
+    + Sized
+{
+    /// Database type held by the inner EVM.
+    type DB: Database;
 
-/// Ethereum EVM with JIT-compiled function dispatch.
+    /// Consumes the EVM and returns its database and environment.
+    fn finish(self) -> (Self::DB, EvmEnv);
+}
+
+impl<DB, I, INSTRUCTIONS, P, F> JitEvmInner for RevmEvm<EthEvmContext<DB>, I, INSTRUCTIONS, P, F>
+where
+    DB: Database,
+    EthEvmContext<DB>: ContextTr<
+            Db = DB,
+            Tx = TxEnv,
+            Block = BlockEnv,
+            Cfg = CfgEnv,
+            Journal: revm_inspector::JournalExt,
+        >,
+    Self: EvmTr<Frame = EthFrame, Context = EthEvmContext<DB>, Precompiles = P> + InspectorEvmTr,
+{
+    type DB = DB;
+
+    fn finish(self) -> (DB, EvmEnv) {
+        let revm_context::Context { block: block_env, cfg: cfg_env, journaled_state, .. } =
+            self.ctx;
+        (journaled_state.database, EvmEnv { block_env, cfg_env })
+    }
+}
+
+type DbError<EVM> = <<EVM as JitEvmInner>::DB as revm_context_interface::Database>::Error;
+type EthInnerEvm<DB, I> = RevmEvm<
+    EthEvmContext<DB>,
+    I,
+    EthInstructions<EthInterpreter, EthEvmContext<DB>>,
+    PrecompilesMap,
+    EthFrame,
+>;
+
+/// EVM with JIT-compiled function dispatch.
 ///
-/// Wraps the standard revm EVM inside a [`revm_evm::JitEvm`] which overrides `frame_run`
+/// Wraps a revm EVM inside a [`revm_evm::JitEvm`] which overrides `frame_run`
 /// to look up compiled functions via [`JitBackend`] before falling back to the interpreter.
 #[derive(derive_more::Debug)]
-pub struct JitEvm<DB: Database, I, PRECOMPILE = PrecompilesMap> {
+pub struct JitEvm<EVM> {
     #[debug(skip)]
-    inner: revm_evm::JitEvm<InnerEvm<DB, I, PRECOMPILE>>,
+    inner: revm_evm::JitEvm<EVM>,
     inspect: bool,
 }
 
-impl<DB, I, P> JitEvm<DB, I, P>
+impl<EVM> JitEvm<EVM>
 where
-    DB: Database,
-    P: PrecompileProvider<EthEvmContext<DB>, Output = InterpreterResult>,
+    EVM: EvmTr,
+    EVM::Context: ContextTr,
 {
     /// Creates a new JIT EVM from an inner revm EVM, inspect flag, and backend.
-    pub fn new(inner: InnerEvm<DB, I, P>, inspect: bool, backend: JitBackend) -> Self {
+    pub fn new(inner: EVM, inspect: bool, backend: JitBackend) -> Self {
         Self { inner: revm_evm::JitEvm::new(inner, backend), inspect }
     }
 }
 
-impl<DB: Database, I, P> JitEvm<DB, I, P> {
+impl<EVM> JitEvm<EVM> {
+    /// Returns a reference to the inner EVM.
+    pub const fn inner(&self) -> &EVM {
+        self.inner.inner()
+    }
+
+    /// Returns a mutable reference to the inner EVM.
+    pub fn inner_mut(&mut self) -> &mut EVM {
+        self.inner.inner_mut()
+    }
+
+    /// Consumes the JIT EVM and returns the inner EVM.
+    pub fn into_inner(self) -> EVM {
+        self.inner.into_inner()
+    }
+
     /// Returns a reference to the JIT backend.
     pub const fn backend(&self) -> &JitBackend {
         self.inner.backend()
     }
 }
 
-impl<DB: Database, I, P> core::ops::Deref for JitEvm<DB, I, P> {
-    type Target = EthEvmContext<DB>;
+impl<EVM> core::ops::Deref for JitEvm<EVM> {
+    type Target = EVM;
 
     #[inline]
     fn deref(&self) -> &Self::Target {
-        &self.inner.ctx
+        self.inner.inner()
     }
 }
 
-impl<DB: Database, I, P> core::ops::DerefMut for JitEvm<DB, I, P> {
+impl<EVM> core::ops::DerefMut for JitEvm<EVM> {
     #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.inner.ctx
+        self.inner.inner_mut()
     }
 }
 
-impl<DB, I, P> Evm for JitEvm<DB, I, P>
+impl<EVM> Evm for JitEvm<EVM>
 where
-    DB: Database,
-    I: Inspector<EthEvmContext<DB>>,
-    P: PrecompileProvider<EthEvmContext<DB>, Output = InterpreterResult>,
+    EVM: JitEvmInner,
+    revm_evm::JitEvm<EVM>: ExecuteEvm<
+            ExecutionResult = ExecutionResult<HaltReason>,
+            State = EvmState,
+            Error = EVMError<DbError<EVM>>,
+            Tx = TxEnv,
+            Block = BlockEnv,
+        > + InspectEvm<Inspector = <EVM as InspectorEvmTr>::Inspector>
+        + SystemCallEvm
+        + InspectSystemCallEvm,
 {
-    type DB = DB;
+    type DB = EVM::DB;
     type Tx = TxEnv;
-    type Error = EVMError<DB::Error>;
+    type Error = EVMError<DbError<EVM>>;
     type HaltReason = HaltReason;
     type Spec = SpecId;
     type BlockEnv = BlockEnv;
-    type Precompiles = P;
-    type Inspector = I;
+    type Precompiles = <EVM as EvmTr>::Precompiles;
+    type Inspector = <EVM as InspectorEvmTr>::Inspector;
 
-    fn block(&self) -> &BlockEnv {
-        &self.inner.ctx.block
+    fn block(&self) -> &Self::BlockEnv {
+        self.inner.ctx_ref().block()
     }
 
     fn cfg_env(&self) -> &revm_context::CfgEnv<Self::Spec> {
-        &self.inner.cfg
+        self.inner.ctx_ref().cfg()
     }
 
     fn chain_id(&self) -> u64 {
-        self.inner.ctx.cfg.chain_id
+        self.inner.ctx_ref().cfg().chain_id
     }
 
     fn transact_raw(
@@ -116,10 +183,8 @@ where
         }
     }
 
-    fn finish(self) -> (Self::DB, EvmEnv<Self::Spec>) {
-        let revm_context::Context { block: block_env, cfg: cfg_env, journaled_state, .. } =
-            self.inner.into_inner().ctx;
-        (journaled_state.database, EvmEnv { block_env, cfg_env })
+    fn finish(self) -> (Self::DB, EvmEnv<Self::Spec, Self::BlockEnv>) {
+        self.into_inner().finish()
     }
 
     fn set_inspector_enabled(&mut self, enabled: bool) {
@@ -127,26 +192,32 @@ where
     }
 
     fn components(&self) -> (&Self::DB, &Self::Inspector, &Self::Precompiles) {
-        let inner = self.inner.inner();
-        (&inner.ctx.journaled_state.database, &inner.inspector, &inner.precompiles)
+        let (ctx, _, precompiles, _, inspector) = self.inner.inner().all_inspector();
+        (ctx.db(), inspector, precompiles)
     }
 
     fn components_mut(&mut self) -> (&mut Self::DB, &mut Self::Inspector, &mut Self::Precompiles) {
-        let inner = self.inner.inner_mut();
-        (&mut inner.ctx.journaled_state.database, &mut inner.inspector, &mut inner.precompiles)
+        let (ctx, _, precompiles, _, inspector) = self.inner.inner_mut().all_mut_inspector();
+        (ctx.db_mut(), inspector, precompiles)
     }
 }
 
 /// Factory producing [`JitEvm`] instances.
 #[derive(Clone, Debug)]
-pub struct JitEvmFactory {
+pub struct JitEvmFactory<F = EthEvmFactory> {
+    inner: F,
     backend: JitBackend,
 }
 
-impl JitEvmFactory {
-    /// Creates a new factory from a JIT backend.
-    pub const fn new(backend: JitBackend) -> Self {
-        Self { backend }
+impl<F> JitEvmFactory<F> {
+    /// Creates a new factory from an inner EVM factory and JIT backend.
+    pub fn new(inner: F, backend: JitBackend) -> Self {
+        Self { inner, backend }
+    }
+
+    /// Returns a reference to the inner EVM factory.
+    pub const fn inner(&self) -> &F {
+        &self.inner
     }
 
     /// Returns a reference to the JIT backend.
@@ -155,18 +226,68 @@ impl JitEvmFactory {
     }
 }
 
-impl EvmFactory for JitEvmFactory {
-    type Evm<DB: Database, I: Inspector<EthEvmContext<DB>>> = JitEvm<DB, I, PrecompilesMap>;
+/// Factory whose produced EVM can be wrapped by [`JitEvm`].
+pub trait JitEvmFactoryInner {
+    /// The inner EVM type to wrap.
+    type InnerEvm<DB: Database, I: Inspector<EthEvmContext<DB>>>: JitEvmInner<
+            DB = DB,
+            Context = EthEvmContext<DB>,
+            Precompiles = PrecompilesMap,
+            Inspector = I,
+        >;
+
+    /// Creates the inner EVM.
+    fn create_inner_evm<DB: Database>(
+        &self,
+        db: DB,
+        input: EvmEnv,
+    ) -> Self::InnerEvm<DB, NoOpInspector>;
+
+    /// Creates the inner EVM with an inspector.
+    fn create_inner_evm_with_inspector<DB: Database, I: Inspector<EthEvmContext<DB>>>(
+        &self,
+        db: DB,
+        input: EvmEnv,
+        inspector: I,
+    ) -> Self::InnerEvm<DB, I>;
+}
+
+impl JitEvmFactoryInner for EthEvmFactory {
+    type InnerEvm<DB: Database, I: Inspector<EthEvmContext<DB>>> = EthInnerEvm<DB, I>;
+
+    fn create_inner_evm<DB: Database>(
+        &self,
+        db: DB,
+        input: EvmEnv,
+    ) -> Self::InnerEvm<DB, NoOpInspector> {
+        self.create_evm(db, input).into_inner()
+    }
+
+    fn create_inner_evm_with_inspector<DB: Database, I: Inspector<EthEvmContext<DB>>>(
+        &self,
+        db: DB,
+        input: EvmEnv,
+        inspector: I,
+    ) -> Self::InnerEvm<DB, I> {
+        self.create_evm_with_inspector(db, input, inspector).into_inner()
+    }
+}
+
+impl<F> EvmFactory for JitEvmFactory<F>
+where
+    F: JitEvmFactoryInner,
+{
+    type Evm<DB: Database, I: Inspector<Self::Context<DB>>> = JitEvm<F::InnerEvm<DB, I>>;
     type Context<DB: Database> = EthEvmContext<DB>;
     type Tx = TxEnv;
-    type Error<DBError: core::error::Error + Send + Sync + 'static> = EVMError<DBError>;
+    type Error<DBError: Error + Send + Sync + 'static> = EVMError<DBError>;
     type HaltReason = HaltReason;
     type Spec = SpecId;
     type BlockEnv = BlockEnv;
     type Precompiles = PrecompilesMap;
 
     fn create_evm<DB: Database>(&self, db: DB, input: EvmEnv) -> Self::Evm<DB, NoOpInspector> {
-        let inner = EthEvmBuilder::new(db, input).build().into_inner();
+        let inner = self.inner.create_inner_evm(db, input);
         JitEvm::new(inner, false, self.backend.clone())
     }
 
@@ -176,8 +297,7 @@ impl EvmFactory for JitEvmFactory {
         input: EvmEnv,
         inspector: I,
     ) -> Self::Evm<DB, I> {
-        let inner =
-            EthEvmBuilder::new(db, input).activate_inspector(inspector).build().into_inner();
+        let inner = self.inner.create_inner_evm_with_inspector(db, input, inspector);
         JitEvm::new(inner, true, self.backend.clone())
     }
 }
@@ -250,7 +370,7 @@ mod tests {
         // PUSH1 0x42 PUSH0 MSTORE PUSH1 0x20 PUSH0 RETURN
         let runtime_code: &[u8] = &[0x60, 0x42, 0x5f, 0x52, 0x60, 0x20, 0x5f, 0xf3];
 
-        let factory = JitEvmFactory::new(backend.clone());
+        let factory = JitEvmFactory::new(EthEvmFactory::default(), backend.clone());
         let mut evm = factory.create_evm(CacheDB::<EmptyDB>::default(), EvmEnv::default());
         let contract_addr = deploy_contract(&mut evm, runtime_code);
 
@@ -288,7 +408,7 @@ mod tests {
 
         // Run via JitEvmFactory.
         let jit_result = {
-            let factory = JitEvmFactory::new(backend);
+            let factory = JitEvmFactory::new(EthEvmFactory::default(), backend);
             let mut evm = factory.create_evm(CacheDB::<EmptyDB>::default(), EvmEnv::default());
             let addr = deploy_contract(&mut evm, runtime_code);
             evm.transact_raw(TxEnv {
@@ -321,7 +441,7 @@ mod tests {
     #[test]
     fn jit_evm_factory_roundtrip() {
         let backend = blocking_backend();
-        let factory = JitEvmFactory::new(backend);
+        let factory = JitEvmFactory::new(EthEvmFactory::default(), backend);
 
         let mut evm = factory.create_evm(CacheDB::<EmptyDB>::default(), EvmEnv::default());
         assert_eq!(evm.chain_id(), 1);
