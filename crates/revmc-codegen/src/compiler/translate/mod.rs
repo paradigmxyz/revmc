@@ -233,11 +233,10 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         // This is initialized later in `post_entry_block`.
         let stack_len = bcx.new_stack_slot(isize_type, "len.addr");
 
-        // Create all instruction entry blocks.
-        // Dead-code instructions map to `unreachable_block`, except when block deduplication
-        // has a redirect — those are resolved in a second pass once all blocks exist.
+        // Create all instruction entry blocks. Dead-code instructions map to
+        // `unreachable_block`; dedup redirects are resolved at control-flow callsites.
         let unreachable_block = bcx.create_block("unreachable");
-        let mut inst_entries: IndexVec<Inst, _> = bytecode
+        let inst_entries: IndexVec<Inst, _> = bytecode
             .iter_all_insts()
             .map(|(i, data)| {
                 if data.is_dead_code() {
@@ -249,13 +248,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             })
             .collect();
         assert!(!inst_entries.is_empty(), "translating empty bytecode");
-
-        // Apply dedup redirects: map dead duplicate entries to their canonical block.
-        if bytecode.has_redirects() {
-            for (&from, &to) in &bytecode.redirects {
-                inst_entries[from] = inst_entries[to];
-            }
-        }
 
         let dynamic_jump_table = bcx.create_block("dynamic_jump_table");
         let suspend_block = bcx.create_block("suspend");
@@ -336,7 +328,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             fx.bcx.switch_to_block(fx.dynamic_jump_table);
             let jumpdests = bytecode.iter_insts().filter(|(_, data)| data.opcode == op::JUMPDEST);
             let targets = jumpdests
-                .map(|(inst, data)| (data.jumpdest_pc() as u64, fx.inst_entries[inst]))
+                .map(|(inst, data)| (data.jumpdest_pc() as u64, fx.effective_entry(inst)))
                 .collect::<Vec<_>>();
             let i64_type = fx.bcx.type_int(64);
             let index = fx.bcx.phi(i64_type, &fx.incoming_dynamic_jumps);
@@ -474,6 +466,33 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         Ok(())
     }
 
+    /// Returns the instruction that is physically next in bytecode order.
+    fn lexical_next_inst(&self, inst: Inst) -> Option<Inst> {
+        let next = inst + 1;
+        self.inst_entries.get(next)?;
+        Some(next)
+    }
+
+    /// Resolves an instruction through dead-block redirects created by dedup.
+    fn effective_inst(&self, inst: Inst) -> Inst {
+        self.bytecode.redirects.get(&inst).copied().unwrap_or(inst)
+    }
+
+    /// Returns the IR block for an instruction after applying dedup redirects.
+    fn effective_entry(&self, inst: Inst) -> B::BasicBlock {
+        self.inst_entries[self.effective_inst(inst)]
+    }
+
+    /// Returns the runtime fallthrough target after applying dedup redirects.
+    fn effective_next_inst(&self, inst: Inst) -> Option<Inst> {
+        self.lexical_next_inst(inst).map(|next| self.effective_inst(next))
+    }
+
+    /// Returns the IR block for the runtime fallthrough target.
+    fn effective_next_entry(&self, inst: Inst) -> Option<B::BasicBlock> {
+        self.effective_next_inst(inst).map(|next| self.effective_entry(next))
+    }
+
     #[instrument(level = "debug", skip_all, fields(inst = %self.bytecode.inst(inst).to_op()))]
     fn translate_inst(&mut self, inst: Inst) -> Result<()> {
         self.current_inst = Some(inst);
@@ -493,7 +512,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 !this.bytecode.is_instr_diverging(inst),
                 "attempted to branch to next instruction in a diverging instruction: {data:?}",
             );
-            if let Some(&next) = this.inst_entries.get(inst + 1) {
+            if let Some(next) = this.effective_next_entry(inst) {
                 this.bcx.br(next);
             }
         };
@@ -520,8 +539,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             }};
             ($($comment:expr)?) => {
                 // Flush virtual stack before leaving the section.
-                if self.inst_entries.get(inst + 1).is_some() {
-                    let next = self.bytecode.inst(inst + 1);
+                if let Some(next_inst) = self.effective_next_inst(inst) {
+                    let next = self.bytecode.inst(next_inst);
                     if !next.is_dead_code() && next.is_stack_section_head() {
                         self.materialize_live_stack();
                     } else {
@@ -967,7 +986,9 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                             let cond_word = self.pop();
                             self.materialize_live_stack();
                             let cond = self.bcx.icmp_imm(IntCC::NotEqual, cond_word, 0);
-                            let next = self.inst_entries[inst + 1];
+                            let next = self
+                                .effective_next_entry(inst)
+                                .expect("JUMPI must have a fallthrough target");
                             let switch_block = self.bcx.create_block("multi_jump");
                             self.bcx.brif(cond, switch_block, next);
                             self.bcx.switch_to_block(switch_block);
@@ -982,7 +1003,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                             .iter()
                             .map(|&t| {
                                 let pc = self.bytecode.inst(t).jumpdest_pc() as u64;
-                                (pc, self.inst_entries[t])
+                                (pc, self.effective_entry(t))
                             })
                             .collect();
                         let invalid_jump = self.add_invalid_jump();
@@ -999,7 +1020,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                                 || (opcode == op::JUMPI && has_const_jumpi_condition),
                             "jumping to non-JUMPDEST; target_inst={target_inst}",
                         );
-                        self.inst_entries[target_inst]
+                        self.effective_entry(target_inst)
                     } else {
                         // Dynamic jump.
                         debug_assert!(self.bytecode.has_dynamic_jumps());
@@ -1015,7 +1036,9 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                         // Flush virtual values before leaving the section.
                         self.materialize_live_stack();
                         let cond = self.bcx.icmp_imm(IntCC::NotEqual, cond_word, 0);
-                        let next = self.inst_entries[inst + 1];
+                        let next = self
+                            .effective_next_entry(inst)
+                            .expect("JUMPI must have a fallthrough target");
                         self.bcx.brif(cond, target, next);
                     } else {
                         if opcode == op::JUMPI {
@@ -1368,7 +1391,10 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
         // Register the next instruction as the resume block.
         let idx = self.resume_blocks.len();
-        self.add_resume_at(self.inst_entries[self.current_inst.unwrap() + 1]);
+        let resume_at = self
+            .effective_next_entry(self.current_inst.unwrap())
+            .expect("suspending instruction must have a resume target");
+        self.add_resume_at(resume_at);
 
         // Register the current block as the suspend block.
         let value = self.bcx.iconst(self.isize_type, idx as i64 + 1);
