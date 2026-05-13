@@ -652,11 +652,6 @@ impl<'a> Bytecode<'a> {
         self.config.contains(AnalysisConfig::INSPECT_STACK) || self.may_suspend()
     }
 
-    /// Returns `true` if any dead-block redirects exist.
-    pub(crate) fn has_redirects(&self) -> bool {
-        !self.redirects.is_empty()
-    }
-
     /// Returns `true` if the instruction is diverging.
     pub(crate) fn is_instr_diverging(&self, inst: Inst) -> bool {
         self.insts[inst].is_diverging()

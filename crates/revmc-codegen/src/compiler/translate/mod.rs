@@ -233,11 +233,10 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         // This is initialized later in `post_entry_block`.
         let stack_len = bcx.new_stack_slot(isize_type, "len.addr");
 
-        // Create all instruction entry blocks.
-        // Dead-code instructions map to `unreachable_block`, except when block deduplication
-        // has a redirect — those are resolved in a second pass once all blocks exist.
+        // Create all instruction entry blocks. Dead-code instructions map to
+        // `unreachable_block`; dedup redirects are resolved at control-flow callsites.
         let unreachable_block = bcx.create_block("unreachable");
-        let mut inst_entries: IndexVec<Inst, _> = bytecode
+        let inst_entries: IndexVec<Inst, _> = bytecode
             .iter_all_insts()
             .map(|(i, data)| {
                 if data.is_dead_code() {
@@ -249,13 +248,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             })
             .collect();
         assert!(!inst_entries.is_empty(), "translating empty bytecode");
-
-        // Apply dedup redirects: map dead duplicate entries to their canonical block.
-        if bytecode.has_redirects() {
-            for (&from, &to) in &bytecode.redirects {
-                inst_entries[from] = inst_entries[to];
-            }
-        }
 
         let dynamic_jump_table = bcx.create_block("dynamic_jump_table");
         let suspend_block = bcx.create_block("suspend");
@@ -336,7 +328,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             fx.bcx.switch_to_block(fx.dynamic_jump_table);
             let jumpdests = bytecode.iter_insts().filter(|(_, data)| data.opcode == op::JUMPDEST);
             let targets = jumpdests
-                .map(|(inst, data)| (data.jumpdest_pc() as u64, fx.inst_entries[inst]))
+                .map(|(inst, data)| (data.jumpdest_pc() as u64, fx.effective_entry(inst)))
                 .collect::<Vec<_>>();
             let i64_type = fx.bcx.type_int(64);
             let index = fx.bcx.phi(i64_type, &fx.incoming_dynamic_jumps);
@@ -486,6 +478,11 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         self.bytecode.redirects.get(&inst).copied().unwrap_or(inst)
     }
 
+    /// Returns the IR block for an instruction after applying dedup redirects.
+    fn effective_entry(&self, inst: Inst) -> B::BasicBlock {
+        self.inst_entries[self.effective_inst(inst)]
+    }
+
     /// Returns the runtime fallthrough target after applying dedup redirects.
     fn effective_next_inst(&self, inst: Inst) -> Option<Inst> {
         self.lexical_next_inst(inst).map(|next| self.effective_inst(next))
@@ -493,7 +490,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
     /// Returns the IR block for the runtime fallthrough target.
     fn effective_next_entry(&self, inst: Inst) -> Option<B::BasicBlock> {
-        self.effective_next_inst(inst).map(|next| self.inst_entries[next])
+        self.effective_next_inst(inst).map(|next| self.effective_entry(next))
     }
 
     #[instrument(level = "debug", skip_all, fields(inst = %self.bytecode.inst(inst).to_op()))]
@@ -1006,7 +1003,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                             .iter()
                             .map(|&t| {
                                 let pc = self.bytecode.inst(t).jumpdest_pc() as u64;
-                                (pc, self.inst_entries[t])
+                                (pc, self.effective_entry(t))
                             })
                             .collect();
                         let invalid_jump = self.add_invalid_jump();
@@ -1023,7 +1020,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                                 || (opcode == op::JUMPI && has_const_jumpi_condition),
                             "jumping to non-JUMPDEST; target_inst={target_inst}",
                         );
-                        self.inst_entries[target_inst]
+                        self.effective_entry(target_inst)
                     } else {
                         // Dynamic jump.
                         debug_assert!(self.bytecode.has_dynamic_jumps());

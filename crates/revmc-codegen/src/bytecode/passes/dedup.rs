@@ -180,8 +180,8 @@ impl<'a> Bytecode<'a> {
                     // Multi-jump target PCs are not rewritten here: each carries a
                     // distinct PC that callers push as a return address. The targets
                     // were already merged into the canonical block above, and
-                    // `inst_entries` redirects (translate.rs) map the dead
-                    // instruction's IR entry to the canonical one.
+                    // Translator callsites resolve redirects to map dead
+                    // instruction targets to the canonical IR entry.
                 }
             }
         }
