@@ -2058,6 +2058,33 @@ tests! {
             expected_gas: GAS_WHAT_INTERPRETER_SAYS,
         }),
 
+        dedup_fallthrough_jump_tail_charges_jump_gas(@raw {
+            bytecode: &asm("
+                PUSH %done
+                CALLER
+                PUSH %path2
+                JUMPI
+                JUMP
+
+            path2:
+                JUMPDEST
+                PUSH0
+                PUSH %other
+                JUMPI
+                JUMP
+
+            other:
+                JUMPDEST
+                STOP
+
+            done:
+                JUMPDEST
+                STOP
+            "),
+            expected_return: InstructionResult::Stop,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+        }),
+
         dedup_fallthrough_redirect_materializes_stack(@raw {
             bytecode: &asm("
                 CALLVALUE
