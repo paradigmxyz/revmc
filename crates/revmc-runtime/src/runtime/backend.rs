@@ -101,6 +101,8 @@ struct EntryState {
     phase: EntryPhase,
     /// The bytecode for this key (captured from a miss event).
     bytecode: Bytes,
+    /// When this entry was last observed.
+    last_observed_at: Instant,
     /// Sync notifiers waiting for this entry to finish compiling.
     pending_notifiers: Vec<SyncNotifier>,
 }
@@ -246,12 +248,15 @@ impl BackendState {
             return;
         }
 
+        let now = Instant::now();
         let entry = self.entries.entry(key).or_insert_with(|| EntryState {
             hotness: 0,
             phase: EntryPhase::Cold,
             bytecode: bytecode.clone(),
+            last_observed_at: now,
             pending_notifiers: Vec::new(),
         });
+        entry.last_observed_at = now;
 
         if entry.phase == EntryPhase::Working {
             entry.pending_notifiers.push(sync_notifier);
@@ -632,7 +637,18 @@ impl BackendState {
             }
         }
 
-        // Phase 2: enforce memory budget by evicting LRU JIT entries.
+        // Phase 2: evict stale cold entries that never became hot enough to compile.
+        if let Some(idle) = idle_duration {
+            let resident = &self.inner.resident;
+            self.entries.retain(|key, entry| {
+                let stale = entry.phase == EntryPhase::Cold
+                    && now.duration_since(entry.last_observed_at) > idle
+                    && !resident.contains_key(key);
+                !stale
+            });
+        }
+
+        // Phase 3: enforce memory budget by evicting LRU JIT entries.
         if budget > 0 && jit_total_bytes() > budget {
             // Collect JIT entries sorted by last_hit_at ascending (oldest first).
             // AOT entries are excluded because they don't contribute to `jit_total_bytes()`.
