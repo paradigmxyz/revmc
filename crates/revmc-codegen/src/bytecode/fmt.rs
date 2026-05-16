@@ -538,7 +538,7 @@ mod tests {
             op::PUSH1, 0x01,
             op::PUSH1, 0x00,
             op::SSTORE,
-            op::PUSH1, 0x01,
+            op::CALLDATASIZE,
             op::PUSH1, 0x03,
             op::JUMPI,
             op::PUSH1, 0x00,
@@ -565,7 +565,7 @@ mod tests {
             actual,
             snapbox::str![[r#"
 ; spec_id=Osaka has_dynamic_jumps=false may_suspend=true
-; insts=19 live=19 dead=0 noops=11 suspends=1 blocks=3 block_min=2 block_max=10 block_avg=6.3 block_median=7
+; insts=19 live=19 dead=0 noops=10 suspends=1 blocks=3 block_min=2 block_max=10 block_avg=6.3 block_median=7
 
 bb0:           ; stack_in=0 max_growth=1 predecessors=
   PUSH1 0x03   ; ic= 0 pc= 0 gas=11 noop
@@ -576,21 +576,21 @@ bb1:           ; stack_in=0 max_growth=2 predecessors=bb0,bb1
   PUSH1 0x01   ; ic= 3 pc= 4 noop
   PUSH1 0x00   ; ic= 4 pc= 6 noop
   SSTORE       ; ic= 5 pc= 8
-  PUSH1 0x01   ; ic= 6 pc= 9 gas=16 noop
-  PUSH1 0x03   ; ic= 7 pc=11 noop
-  JUMPI %bb1   ; ic= 8 pc=13
+  CALLDATASIZE ; ic= 6 pc= 9 gas=15
+  PUSH1 0x03   ; ic= 7 pc=10 noop
+  JUMPI %bb1   ; ic= 8 pc=12
 
 bb2:           ; stack_in=0 max_growth=7 predecessors=bb1
-  PUSH1 0x00   ; ic= 9 pc=14 gas=121
-  PUSH1 0x00   ; ic=10 pc=16 noop
-  PUSH1 0x00   ; ic=11 pc=18 noop
-  PUSH1 0x00   ; ic=12 pc=20 noop
-  PUSH1 0x00   ; ic=13 pc=22 noop
-  PUSH1 0x42   ; ic=14 pc=24 noop
-  PUSH2 0xffff ; ic=15 pc=26 noop
-  CALL         ; ic=16 pc=29 suspends
-  POP          ; ic=17 pc=30 gas=2 stack_in=1 max_growth=0
-  STOP         ; ic=18 pc=31
+  PUSH1 0x00   ; ic= 9 pc=13 gas=121
+  PUSH1 0x00   ; ic=10 pc=15 noop
+  PUSH1 0x00   ; ic=11 pc=17 noop
+  PUSH1 0x00   ; ic=12 pc=19 noop
+  PUSH1 0x00   ; ic=13 pc=21 noop
+  PUSH1 0x42   ; ic=14 pc=23 noop
+  PUSH2 0xffff ; ic=15 pc=25 noop
+  CALL         ; ic=16 pc=28 suspends
+  POP          ; ic=17 pc=29 gas=2 stack_in=1 max_growth=0
+  STOP         ; ic=18 pc=30
 
 "#]]
         );
@@ -637,7 +637,7 @@ bb2:           ; stack_in=0 max_growth=7 predecessors=bb1
         assert!(dot.contains("SSTORE"), "missing SSTORE");
         // SSTORE splits gas sections: two [g=] annotations in bb1.
         assert!(dot.contains("[g=7]"), "missing first gas section");
-        assert!(dot.contains("[g=16]"), "missing second gas section");
+        assert!(dot.contains("[g=15]"), "missing second gas section");
         // CALL present in bb2.
         assert!(dot.contains("CALL"), "missing CALL");
         assert!(dot.contains("[g=121]"), "missing CALL gas section");

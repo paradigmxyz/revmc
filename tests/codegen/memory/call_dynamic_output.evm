@@ -1,0 +1,20 @@
+    CALLVALUE
+    PUSH0
+    MSTORE
+    CALLVALUE
+    PUSH1 0x20
+    PUSH1 0x20
+    PUSH0
+    PUSH0
+    PUSH0
+    PUSH0
+    CALL
+    CALLVALUE
+    PUSH0
+    MSTORE
+    STOP
+
+; CHECK-COUNT-1: call {{.*}}@__revmc_builtin_mresize{{.*}}; >>
+; CHECK: @__revmc_builtin_call
+; CHECK: = load ptr, ptr %ecx.mem_base.addr
+; CHECK-NOT: call {{.*}}@__revmc_builtin_mresize{{.*}}; >>

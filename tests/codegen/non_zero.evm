@@ -1,7 +1,7 @@
-CALLVALUE
-ISZERO
-ISZERO
-RET_WORD
+    CALLVALUE
+    ISZERO
+    ISZERO
+    RET_WORD
 
 ; CHECK: [[VALUE:%.*]] = load i256
 ; CHECK: icmp eq i256 [[VALUE]], 0

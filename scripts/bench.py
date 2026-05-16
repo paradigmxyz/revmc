@@ -214,6 +214,19 @@ def i256_load_store_counts(path: str) -> tuple[int, int]:
     return loads, stores
 
 
+def mresize_call_count(path: str) -> int:
+    """Count mresize builtin calls in an LLVM IR file."""
+    calls = 0
+    try:
+        with open(path) as f:
+            for line in f:
+                if "call" in line and "@__revmc_builtin_mresize" in line:
+                    calls += 1
+    except FileNotFoundError:
+        pass
+    return calls
+
+
 DURATION_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(ns|µs|us|ms|s)")
 DURATION_UNITS = {"ns": 1e-9, "µs": 1e-6, "us": 1e-6, "ms": 1e-3, "s": 1.0}
 
@@ -343,7 +356,7 @@ class CodegenLines(Analysis):
     def _collect(self, benches, dump_dir):
         """Collect line counts per file type + JIT size + i256 loads/stores + spills/reloads.
 
-        Each row is (name, [line_counts...], jit_size, i256_loads, i256_stores, spills, reloads).
+        Each row is (name, [line_counts...], jit_size, i256_loads, i256_stores, mresize, spills, reloads).
         """
         FILES = ["unopt.ll", "opt.ll", "opt.s"]
         rows = []
@@ -351,6 +364,7 @@ class CodegenLines(Analysis):
         total_size = 0
         total_i256_loads = 0
         total_i256_stores = 0
+        total_mresize = 0
         total_spills = 0
         total_reloads = 0
         for bench in benches:
@@ -359,9 +373,9 @@ class CodegenLines(Analysis):
             if all(c == 0 for c in counts):
                 continue
             jit_size = parse_jit_size(dump_dir, bench)
-            i256_loads, i256_stores = i256_load_store_counts(
-                os.path.join(dump_dir, sub, "opt.ll")
-            )
+            opt_ll = os.path.join(dump_dir, sub, "opt.ll")
+            i256_loads, i256_stores = i256_load_store_counts(opt_ll)
+            mresize = mresize_call_count(opt_ll)
             spills, reloads = spill_reload_counts(os.path.join(dump_dir, sub, "opt.s"))
             rows.append(
                 (
@@ -370,6 +384,7 @@ class CodegenLines(Analysis):
                     jit_size,
                     i256_loads,
                     i256_stores,
+                    mresize,
                     spills,
                     reloads,
                 )
@@ -379,6 +394,7 @@ class CodegenLines(Analysis):
             total_size += jit_size
             total_i256_loads += i256_loads
             total_i256_stores += i256_stores
+            total_mresize += mresize
             total_spills += spills
             total_reloads += reloads
         return (
@@ -387,6 +403,7 @@ class CodegenLines(Analysis):
             total_size,
             total_i256_loads,
             total_i256_stores,
+            total_mresize,
             total_spills,
             total_reloads,
         )
@@ -398,13 +415,14 @@ class CodegenLines(Analysis):
             total_size,
             total_i256_ld,
             total_i256_st,
+            total_mresize,
             total_spills,
             total_reloads,
         ) = self._collect(benches, dump_dir)
         print("### Codegen statistics\n")
         table = [
-            [name, *counts, fmt_size(jit_size), i256_ld, i256_st, spills, reloads]
-            for name, counts, jit_size, i256_ld, i256_st, spills, reloads in rows
+            [name, *counts, fmt_size(jit_size), i256_ld, i256_st, mresize, spills, reloads]
+            for name, counts, jit_size, i256_ld, i256_st, mresize, spills, reloads in rows
         ]
         table.append(
             [
@@ -413,6 +431,7 @@ class CodegenLines(Analysis):
                 f"**{fmt_size(total_size)}**",
                 f"**{total_i256_ld}**",
                 f"**{total_i256_st}**",
+                f"**{total_mresize}**",
                 f"**{total_spills}**",
                 f"**{total_reloads}**",
             ]
@@ -426,6 +445,7 @@ class CodegenLines(Analysis):
                 "jit size",
                 "i256 loads",
                 "i256 stores",
+                "mresize",
                 "spills",
                 "reloads",
             ],
@@ -435,7 +455,7 @@ class CodegenLines(Analysis):
     def report_diff(
         self, benches, dump_dir, outputs, base_dump, base_outputs, base_label
     ):
-        cur_rows, cur_totals, cur_total_size, cur_tld, cur_tst, cur_tsp, cur_trl = (
+        cur_rows, cur_totals, cur_total_size, cur_tld, cur_tst, cur_tmresize, cur_tsp, cur_trl = (
             self._collect(benches, dump_dir)
         )
         (
@@ -444,12 +464,13 @@ class CodegenLines(Analysis):
             base_total_size,
             base_tld,
             base_tst,
+            base_tmresize,
             base_tsp,
             base_trl,
         ) = self._collect(benches, base_dump)
         base_map = {
-            name: (counts, jit_size, i256_ld, i256_st, spills, reloads)
-            for name, counts, jit_size, i256_ld, i256_st, spills, reloads in base_rows
+            name: (counts, jit_size, i256_ld, i256_st, mresize, spills, reloads)
+            for name, counts, jit_size, i256_ld, i256_st, mresize, spills, reloads in base_rows
         }
 
         # Summary table.
@@ -462,20 +483,22 @@ class CodegenLines(Analysis):
             "jit size",
             "i256 loads",
             "i256 stores",
+            "mresize",
             "spills",
             "reloads",
         ]
         table = []
         n = NOISE_CODEGEN
-        for name, counts, jit_size, i256_ld, i256_st, spills, reloads in cur_rows:
-            base_counts, base_jit, base_ld, base_st, base_sp, base_rl = base_map.get(
-                name, ([0] * 3, 0, 0, 0, 0, 0)
+        for name, counts, jit_size, i256_ld, i256_st, mresize, spills, reloads in cur_rows:
+            base_counts, base_jit, base_ld, base_st, base_mresize, base_sp, base_rl = base_map.get(
+                name, ([0] * 3, 0, 0, 0, 0, 0, 0)
             )
             pairs = [
                 *list(zip(base_counts, counts)),
                 (base_jit, jit_size),
                 (base_ld, i256_ld),
                 (base_st, i256_st),
+                (base_mresize, mresize),
                 (base_sp, spills),
                 (base_rl, reloads),
             ]
@@ -489,6 +512,7 @@ class CodegenLines(Analysis):
                 f"**{fmt_pct(base_total_size, cur_total_size)}**",
                 f"**{fmt_pct(base_tld, cur_tld)}**",
                 f"**{fmt_pct(base_tst, cur_tst)}**",
+                f"**{fmt_pct(base_tmresize, cur_tmresize)}**",
                 f"**{fmt_pct(base_tsp, cur_tsp)}**",
                 f"**{fmt_pct(base_trl, cur_trl)}**",
             ]
@@ -505,13 +529,14 @@ class CodegenLines(Analysis):
             "jit size",
             "i256 loads",
             "i256 stores",
+            "mresize",
             "spills",
             "reloads",
         ]
         detail_table = []
-        for name, counts, jit_size, i256_ld, i256_st, spills, reloads in cur_rows:
-            base_counts, base_jit, base_ld, base_st, base_sp, base_rl = base_map.get(
-                name, ([0] * 3, 0, 0, 0, 0, 0)
+        for name, counts, jit_size, i256_ld, i256_st, mresize, spills, reloads in cur_rows:
+            base_counts, base_jit, base_ld, base_st, base_mresize, base_sp, base_rl = base_map.get(
+                name, ([0] * 3, 0, 0, 0, 0, 0, 0)
             )
             row = [name]
             for b, c in zip(base_counts, counts):
@@ -521,6 +546,7 @@ class CodegenLines(Analysis):
             )
             row.append(fmt_detail(i256_ld, base_ld, fmt_pct(base_ld, i256_ld)))
             row.append(fmt_detail(i256_st, base_st, fmt_pct(base_st, i256_st)))
+            row.append(fmt_detail(mresize, base_mresize, fmt_pct(base_mresize, mresize)))
             row.append(fmt_detail(spills, base_sp, fmt_pct(base_sp, spills)))
             row.append(fmt_detail(reloads, base_rl, fmt_pct(base_rl, reloads)))
             detail_table.append(row)
@@ -536,6 +562,7 @@ class CodegenLines(Analysis):
         )
         total_row.append(fmt_detail_bold(cur_tld, base_tld, fmt_pct(base_tld, cur_tld)))
         total_row.append(fmt_detail_bold(cur_tst, base_tst, fmt_pct(base_tst, cur_tst)))
+        total_row.append(fmt_detail_bold(cur_tmresize, base_tmresize, fmt_pct(base_tmresize, cur_tmresize)))
         total_row.append(fmt_detail_bold(cur_tsp, base_tsp, fmt_pct(base_tsp, cur_tsp)))
         total_row.append(fmt_detail_bold(cur_trl, base_trl, fmt_pct(base_trl, cur_trl)))
         detail_table.append(total_row)

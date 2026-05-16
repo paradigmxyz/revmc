@@ -3,7 +3,7 @@
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use revm_handler::ExecuteEvm;
 use revmc::{EvmCompiler, EvmLlvmBackend, OptimizationLevel, primitives::hardfork::SpecId};
-use revmc_cli::PreparedBench;
+use revmc_cli::{PreparedBench, fixture_entry_bytecode};
 use std::time::Duration;
 
 const SPEC_ID: SpecId = SpecId::OSAKA;
@@ -41,9 +41,10 @@ fn run_bench(
     compiler: &mut EvmCompiler<EvmLlvmBackend>,
 ) {
     let name = def.name;
-    let is_fixture = def.is_fixture();
+    let bytecode = fixture_entry_bytecode(def);
+    let spec_id = def.spec_id.unwrap_or(SPEC_ID);
 
-    let prepared = PreparedBench::load_with(def, SPEC_ID, compiler);
+    let prepared = PreparedBench::load_with(def, spec_id, compiler);
     if cfg!(any(debug_assertions, not(codspeed))) {
         prepared.sanity_check();
     }
@@ -53,36 +54,32 @@ fn run_bench(
     g.warm_up_time(Duration::from_secs(1));
     g.measurement_time(Duration::from_secs(5));
 
-    // ── Bytecode-only benchmarks ────────────────────────────────────────
+    // ── Compile-time benchmarks ─────────────────────────────────────────
 
-    if !is_fixture {
-        // Compile-time.
-        g.bench_function(format!("{name}/compile/translate"), |b| {
+    g.bench_function(format!("{name}/compile/translate"), |b| {
+        b.iter_batched_ref(
+            || new_compiler(OptimizationLevel::Default),
+            |compiler| {
+                compiler.translate(name, &bytecode, spec_id).unwrap();
+            },
+            BatchSize::PerIteration,
+        )
+    });
+
+    if !SKIP_JIT.contains(&name) {
+        g.bench_function(format!("{name}/compile/jit"), |b| {
             b.iter_batched_ref(
-                || new_compiler(OptimizationLevel::Default),
-                |compiler| {
-                    compiler.translate(name, &def.bytecode, SPEC_ID).unwrap();
+                || {
+                    let mut compiler = new_compiler(OptimizationLevel::default());
+                    let id = compiler.translate(name, &bytecode, spec_id).expect("translate");
+                    (compiler, id)
+                },
+                |(compiler, id)| unsafe {
+                    compiler.jit_function(*id).unwrap();
                 },
                 BatchSize::PerIteration,
             )
         });
-
-        if !SKIP_JIT.contains(&name) {
-            g.bench_function(format!("{name}/compile/jit"), |b| {
-                b.iter_batched_ref(
-                    || {
-                        let mut compiler = new_compiler(OptimizationLevel::default());
-                        let id =
-                            compiler.translate(name, &def.bytecode, SPEC_ID).expect("translate");
-                        (compiler, id)
-                    },
-                    |(compiler, id)| unsafe {
-                        compiler.jit_function(*id).unwrap();
-                    },
-                    BatchSize::PerIteration,
-                )
-            });
-        }
     }
 
     // ── Unified runtime benchmarks ──────────────────────────────────────

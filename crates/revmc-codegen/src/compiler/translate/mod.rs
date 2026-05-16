@@ -102,6 +102,7 @@ pub(super) struct FunctionCx<'a, B: Backend> {
     /// At section start this is 0 (len.addr == section_start_len). After each store it becomes
     /// `section_len_offset + diff`. Stores are skipped when the new offset matches this value.
     stored_len_offset: i32,
+    cached_mem_base: Option<B::Value>,
 
     /// The bytecode being translated.
     bytecode: &'a Bytecode<'a>,
@@ -232,11 +233,10 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         // This is initialized later in `post_entry_block`.
         let stack_len = bcx.new_stack_slot(isize_type, "len.addr");
 
-        // Create all instruction entry blocks.
-        // Dead-code instructions map to `unreachable_block`, except when block deduplication
-        // has a redirect — those are resolved in a second pass once all blocks exist.
+        // Create all instruction entry blocks. Dead-code instructions map to
+        // `unreachable_block`; dedup redirects are resolved at control-flow callsites.
         let unreachable_block = bcx.create_block("unreachable");
-        let mut inst_entries: IndexVec<Inst, _> = bytecode
+        let inst_entries: IndexVec<Inst, _> = bytecode
             .iter_all_insts()
             .map(|(i, data)| {
                 if data.is_dead_code() {
@@ -248,13 +248,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             })
             .collect();
         assert!(!inst_entries.is_empty(), "translating empty bytecode");
-
-        // Apply dedup redirects: map dead duplicate entries to their canonical block.
-        if bytecode.has_redirects() {
-            for (&from, &to) in &bytecode.redirects {
-                inst_entries[from] = inst_entries[to];
-            }
-        }
 
         let dynamic_jump_table = bcx.create_block("dynamic_jump_table");
         let suspend_block = bcx.create_block("suspend");
@@ -280,6 +273,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             section_start_sp,
             section_len_offset: 0,
             stored_len_offset: 0,
+            cached_mem_base: None,
             bcx,
 
             bytecode,
@@ -334,7 +328,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             fx.bcx.switch_to_block(fx.dynamic_jump_table);
             let jumpdests = bytecode.iter_insts().filter(|(_, data)| data.opcode == op::JUMPDEST);
             let targets = jumpdests
-                .map(|(inst, data)| (data.jumpdest_pc() as u64, fx.inst_entries[inst]))
+                .map(|(inst, data)| (data.jumpdest_pc() as u64, fx.effective_entry(inst)))
                 .collect::<Vec<_>>();
             let i64_type = fx.bcx.type_int(64);
             let index = fx.bcx.phi(i64_type, &fx.incoming_dynamic_jumps);
@@ -472,6 +466,33 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         Ok(())
     }
 
+    /// Returns the instruction that is physically next in bytecode order.
+    fn lexical_next_inst(&self, inst: Inst) -> Option<Inst> {
+        let next = inst + 1;
+        self.inst_entries.get(next)?;
+        Some(next)
+    }
+
+    /// Resolves an instruction through dead-block redirects created by dedup.
+    fn effective_inst(&self, inst: Inst) -> Inst {
+        self.bytecode.redirects.get(&inst).copied().unwrap_or(inst)
+    }
+
+    /// Returns the IR block for an instruction after applying dedup redirects.
+    fn effective_entry(&self, inst: Inst) -> B::BasicBlock {
+        self.inst_entries[self.effective_inst(inst)]
+    }
+
+    /// Returns the runtime fallthrough target after applying dedup redirects.
+    fn effective_next_inst(&self, inst: Inst) -> Option<Inst> {
+        self.lexical_next_inst(inst).map(|next| self.effective_inst(next))
+    }
+
+    /// Returns the IR block for the runtime fallthrough target.
+    fn effective_next_entry(&self, inst: Inst) -> Option<B::BasicBlock> {
+        self.effective_next_inst(inst).map(|next| self.effective_entry(next))
+    }
+
     #[instrument(level = "debug", skip_all, fields(inst = %self.bytecode.inst(inst).to_op()))]
     fn translate_inst(&mut self, inst: Inst) -> Result<()> {
         self.current_inst = Some(inst);
@@ -491,7 +512,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 !this.bytecode.is_instr_diverging(inst),
                 "attempted to branch to next instruction in a diverging instruction: {data:?}",
             );
-            if let Some(&next) = this.inst_entries.get(inst + 1) {
+            if let Some(next) = this.effective_next_entry(inst) {
                 this.bcx.br(next);
             }
         };
@@ -518,8 +539,8 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             }};
             ($($comment:expr)?) => {
                 // Flush virtual stack before leaving the section.
-                if self.inst_entries.get(inst + 1).is_some() {
-                    let next = self.bytecode.inst(inst + 1);
+                if let Some(next_inst) = self.effective_next_inst(inst) {
+                    let next = self.bytecode.inst(next_inst);
                     if !next.is_dead_code() && next.is_stack_section_head() {
                         self.materialize_live_stack();
                     } else {
@@ -562,6 +583,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             self.section_start_sp = self.sp_at(self.section_start_len);
             self.section_len_offset = 0;
             self.stored_len_offset = 0;
+            self.cached_mem_base = None;
 
             let section = data.stack_section;
             self.vstack.reset(section.inputs as usize, section.max_growth.max(0) as usize);
@@ -945,6 +967,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             }
             op::JUMP | op::JUMPI => {
                 let is_invalid = data.flags.contains(InstFlags::INVALID_JUMP);
+                let has_const_jumpi_condition = data.has_const_jumpi_condition();
                 if is_invalid && opcode == op::JUMP {
                     // Pop and discard the target; it's always on the stack.
                     self.pop_ignore(1);
@@ -959,15 +982,20 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                         let target_value = self.pop();
                         let targets = self.bytecode.multi_jump_targets(inst).unwrap();
 
-                        if opcode == op::JUMPI {
+                        if opcode == op::JUMPI && !has_const_jumpi_condition {
                             let cond_word = self.pop();
                             self.materialize_live_stack();
                             let cond = self.bcx.icmp_imm(IntCC::NotEqual, cond_word, 0);
-                            let next = self.inst_entries[inst + 1];
+                            let next = self
+                                .effective_next_entry(inst)
+                                .expect("JUMPI must have a fallthrough target");
                             let switch_block = self.bcx.create_block("multi_jump");
                             self.bcx.brif(cond, switch_block, next);
                             self.bcx.switch_to_block(switch_block);
                         } else {
+                            if opcode == op::JUMPI {
+                                self.pop_ignore(1);
+                            }
                             self.materialize_live_stack();
                         }
 
@@ -975,24 +1003,23 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                             .iter()
                             .map(|&t| {
                                 let pc = self.bytecode.inst(t).jumpdest_pc() as u64;
-                                (pc, self.inst_entries[t])
+                                (pc, self.effective_entry(t))
                             })
                             .collect();
                         let invalid_jump = self.add_invalid_jump();
                         self.bcx.switch(target_value, invalid_jump, &switch_targets, true);
 
-                        self.inst_entries[inst] = self.bcx.current_block().unwrap();
                         goto_return!(no_branch);
                     } else if data.flags.contains(InstFlags::STATIC_JUMP) {
                         // Pop and discard the target; it's always on the stack.
                         self.pop_ignore(1);
                         let target_inst = data.static_jump_target();
-                        debug_assert_eq!(
-                            *self.bytecode.inst(target_inst),
-                            op::JUMPDEST,
+                        debug_assert!(
+                            *self.bytecode.inst(target_inst) == op::JUMPDEST
+                                || (opcode == op::JUMPI && has_const_jumpi_condition),
                             "jumping to non-JUMPDEST; target_inst={target_inst}",
                         );
-                        self.inst_entries[target_inst]
+                        self.effective_entry(target_inst)
                     } else {
                         // Dynamic jump.
                         debug_assert!(self.bytecode.has_dynamic_jumps());
@@ -1003,19 +1030,23 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                         self.dynamic_jump_table
                     };
 
-                    if opcode == op::JUMPI {
+                    if opcode == op::JUMPI && !has_const_jumpi_condition {
                         let cond_word = self.pop();
                         // Flush virtual values before leaving the section.
                         self.materialize_live_stack();
                         let cond = self.bcx.icmp_imm(IntCC::NotEqual, cond_word, 0);
-                        let next = self.inst_entries[inst + 1];
+                        let next = self
+                            .effective_next_entry(inst)
+                            .expect("JUMPI must have a fallthrough target");
                         self.bcx.brif(cond, target, next);
                     } else {
+                        if opcode == op::JUMPI {
+                            self.pop_ignore(1);
+                        }
                         // Flush virtual values before leaving the section.
                         self.materialize_live_stack();
                         self.bcx.br(target);
                     }
-                    self.inst_entries[inst] = self.bcx.current_block().unwrap();
                 }
 
                 goto_return!(no_branch);
@@ -1358,7 +1389,10 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
         // Register the next instruction as the resume block.
         let idx = self.resume_blocks.len();
-        self.add_resume_at(self.inst_entries[self.current_inst.unwrap() + 1]);
+        let resume_at = self
+            .effective_next_entry(self.current_inst.unwrap())
+            .expect("suspending instruction must have a resume target");
+        self.add_resume_at(resume_at);
 
         // Register the current block as the suspend block.
         let value = self.bcx.iconst(self.isize_type, idx as i64 + 1);
@@ -1632,43 +1666,72 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     /// Ensures the memory is large enough for `offset + len` bytes, calling the `mresize`
     /// builtin on the cold path if needed. Returns the pointer to `mem_base + offset`.
     fn build_ensure_memory(&mut self, offset: B::Value, len: u64) -> B::Value {
-        let current_block = self.current_block();
-        let resize_block = self.create_block_after(current_block, "mresize");
-        let contd_block = self.create_block_after(resize_block, "mresize.contd");
-
         // 63 bits lets us avoid overflow in the addition below.
         let offset = self.u256_to_u64_saturating(offset, 63);
+        // Analysis proved this access is already covered on every path.
+        if self.current_inst.is_some_and(|inst| self.can_skip_ensure_memory(inst)) {
+            return self.build_memory_addr(offset);
+        }
 
-        let i8_type = self.i8_type;
         let isize_type = self.isize_type;
-
-        // Fast path: offset + len <= mem_len (no overflow).
         let len_const = self.bcx.iconst(isize_type, len as i64);
         let min_size = self.bcx.iadd(offset, len_const);
+
+        let direct_resize_size = self
+            .current_inst
+            .map(|inst| self.bytecode.memory_section(inst).direct_resize_size)
+            .unwrap_or_default();
+        // Analysis proved this access always grows memory to exactly `min_size`.
+        if direct_resize_size != 0 {
+            self.call_fallible_builtin(Builtin::Mresize, &[self.ecx, min_size]);
+            self.cached_mem_base = None;
+            return self.build_memory_addr(offset);
+        }
+
+        // Otherwise emit the normal checked-resize branch.
+        // Fast path: offset + len <= mem_len (no overflow).
         let mem_len_field =
             self.get_field(self.ecx, mem::offset_of!(EvmContext<'_>, mem_len), "ecx.mem_len.addr");
         let mem_len = self.bcx.load(isize_type, mem_len_field, "ecx.mem_len");
         let exceeds = self.bcx.icmp(IntCC::UnsignedGreaterThan, min_size, mem_len);
+        self.cached_mem_base = None;
 
-        self.bcx.brif(exceeds, resize_block, contd_block);
+        self.if_then(exceeds, |this| {
+            this.bcx.set_current_block_cold();
+            this.call_fallible_builtin(Builtin::Mresize, &[this.ecx, min_size]);
+        });
+        self.build_memory_addr(offset)
+    }
 
-        // Cold path: call mresize builtin.
-        self.bcx.switch_to_block(resize_block);
-        self.bcx.set_current_block_cold();
-        self.call_fallible_builtin(Builtin::Mresize, &[self.ecx, min_size]);
-        self.bcx.br(contd_block);
+    fn can_skip_ensure_memory(&self, inst: Inst) -> bool {
+        let section = self.bytecode.memory_section(inst);
+        if section.known_size < section.required_size {
+            return false;
+        }
+        let mut has_memory_access = false;
+        for (offset, len) in self.bytecode.const_memory_accesses(inst).into_iter().flatten() {
+            has_memory_access = true;
+            if offset.is_none() || len.is_none() {
+                return false;
+            }
+        }
+        has_memory_access
+    }
 
-        // Continue: load mem_base from ecx.
-        self.bcx.switch_to_block(contd_block);
-        self.bcx.seal_block(contd_block);
+    fn build_memory_addr(&mut self, offset: B::Value) -> B::Value {
+        let mem_base = self.cached_mem_base.unwrap_or_else(|| self.load_memory_base());
+        self.cached_mem_base = Some(mem_base);
+        self.bcx.gep(self.i8_type, mem_base, &[offset], "mem.addr")
+    }
+
+    fn load_memory_base(&mut self) -> B::Value {
         let ptr_type = self.bcx.type_ptr();
         let mem_base_field = self.get_field(
             self.ecx,
             mem::offset_of!(EvmContext<'_>, mem_base),
             "ecx.mem_base.addr",
         );
-        let mem_base = self.bcx.load(ptr_type, mem_base_field, "ecx.mem_base");
-        self.bcx.gep(i8_type, mem_base, &[offset], "mem.addr")
+        self.bcx.load(ptr_type, mem_base_field, "ecx.mem_base")
     }
 
     /*
@@ -1858,7 +1921,13 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         //     format_printf!("{} - calling {}\n", self.op_block_name(""), builtin.name()),
         //     &[],
         // );
-        self.bcx.call(function, args)
+        let invalidate_mem_base =
+            !self.current_inst.is_some_and(|inst| self.can_skip_ensure_memory(inst));
+        let value = self.bcx.call(function, args);
+        if invalidate_mem_base {
+            self.cached_mem_base = None;
+        }
+        value
     }
 
     /// Gets the function for the given builtin.
@@ -1868,7 +1937,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
 
     /// Adds a comment to the current instruction.
     fn add_comment(&mut self, comment: &str) {
-        if comment.is_empty() {
+        if comment.is_empty() || !self.config.comments {
             return;
         }
         self.bcx.add_comment_to_current_inst(comment);
@@ -1877,6 +1946,20 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     /// Returns the current instruction.
     fn current_inst(&self) -> &InstData {
         self.bytecode.inst(self.current_inst.unwrap())
+    }
+
+    fn if_then(&mut self, cond: B::Value, then: impl FnOnce(&mut Self)) {
+        let current_block = self.current_block();
+        let then_block = self.create_block_after(current_block, "then");
+        let done_block = self.create_block_after(then_block, "contd");
+
+        self.bcx.brif(cond, then_block, done_block);
+
+        self.bcx.switch_to_block(then_block);
+        then(self);
+        self.bcx.br(done_block);
+
+        self.bcx.switch_to_block(done_block);
     }
 
     /// Returns the current block.

@@ -2028,6 +2028,131 @@ tests! {
             ),
         }),
 
+        dedup_false_jumpi_non_jumpdest_fallthrough(@raw {
+            bytecode: &asm("
+                CALLDATASIZE
+                PUSH %path2
+                JUMPI
+
+                PUSH0
+                PUSH %done
+                JUMPI
+                PUSH0
+                PUSH0
+                REVERT
+
+            path2:
+                JUMPDEST
+                PUSH0
+                PUSH %done
+                JUMPI
+                PUSH0
+                PUSH0
+                REVERT
+
+            done:
+                JUMPDEST
+                STOP
+            "),
+            expected_return: InstructionResult::Revert,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+        }),
+
+        dedup_fallthrough_jump_tail_charges_jump_gas(@raw {
+            bytecode: &asm("
+                PUSH %done
+                CALLER
+                PUSH %path2
+                JUMPI
+                JUMP
+
+            path2:
+                JUMPDEST
+                PUSH0
+                PUSH %other
+                JUMPI
+                JUMP
+
+            other:
+                JUMPDEST
+                STOP
+
+            done:
+                JUMPDEST
+                STOP
+            "),
+            expected_return: InstructionResult::Stop,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+        }),
+
+        dedup_fallthrough_redirect_materializes_stack(@raw {
+            bytecode: &asm("
+                CALLVALUE
+                PUSH 123456789
+                SUB
+                PUSH %join_a
+                JUMPI
+                CALLVALUE
+                PUSH 123456789
+                SUB
+                PUSH %join_b
+                JUMPI
+
+                CALLDATASIZE
+                PUSH %case_b_entry
+                JUMPI
+
+                PUSH0
+                PUSH0
+                PUSH %case_a
+                JUMP
+
+            case_a:
+                JUMPDEST
+                PUSH 0xaa
+                SWAP2
+                POP
+            join_a:
+                JUMPDEST
+                PUSH %done
+                JUMP
+
+            case_b_entry:
+                JUMPDEST
+                PUSH0
+                PUSH0
+                PUSH %case_b
+                JUMP
+
+            case_b:
+                JUMPDEST
+                PUSH 0xbb
+                SWAP2
+                POP
+            join_b:
+                JUMPDEST
+                PUSH %done
+                JUMP
+
+            done:
+                JUMPDEST
+                POP
+                ISZERO
+                PUSH %bad
+                JUMPI
+                STOP
+
+            bad:
+                JUMPDEST
+                PUSH0
+                PUSH0
+                REVERT
+            "),
+            inspect_stack: Some(false),
+            expected_return: InstructionResult::Stop,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+        }),
+
         // Disabled opcodes must not poison stack sections.
         //
         // When a disabled opcode (e.g. TSTORE before Cancun) follows executable instructions

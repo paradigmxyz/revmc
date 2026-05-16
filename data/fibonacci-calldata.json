@@ -1,0 +1,36 @@
+{
+  "fibonacci-calldata": {
+    "env": {
+      "currentBaseFee": "0x0",
+      "currentCoinbase": "0x0000000000000000000000000000000000000000",
+      "currentGasLimit": "0x7fffffffffffffff",
+      "currentNumber": "0x1",
+      "currentTimestamp": "0x1"
+    },
+    "pre": {
+      "0x1111111111111111111111111111111111111111": {
+        "balance": "0x7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "code": "0x",
+        "nonce": "0x0",
+        "storage": {}
+      },
+      "0xcccccccccccccccccccccccccccccccccccccccc": {
+        "balance": "0x0",
+        "code": "0x5f355f60015b8215601a578181019150909160019003916005565b9150505f5260205ff3",
+        "nonce": "0x1",
+        "storage": {}
+      }
+    },
+    "transaction": [
+      {
+        "data": "0x00000000000000000000000000000000000000000000000000000000000003e8",
+        "gasLimit": "0x7fffffffffffffff",
+        "gasPrice": "0x0",
+        "nonce": "0x0",
+        "sender": "0x1111111111111111111111111111111111111111",
+        "to": "0xcccccccccccccccccccccccccccccccccccccccc",
+        "value": "0x0"
+      }
+    ]
+  }
+}
