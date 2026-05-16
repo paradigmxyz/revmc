@@ -1138,10 +1138,7 @@ fn cold_entries_are_evicted() {
     assert_eq!(tb.stats().resident_entries, 0);
 
     std::thread::sleep(std::time::Duration::from_millis(100));
-    for _ in 0..2 {
-        let _ = tb.lookup(TestBackend::req_cancun(&compile_me));
-    }
-    tb.wait_resident_count(1);
+    tb.wait_compiled(&compile_me, SpecId::CANCUN);
 }
 
 // ===========================================================================
