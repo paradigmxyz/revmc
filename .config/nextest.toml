@@ -1,11 +1,15 @@
+[experimental]
+benchmarks = true
+
 [profile.default]
 slow-timeout = { period = "60s", terminate-after = 1 }
 status-level = "leak"
 
-[test-groups.statetest]
-max-threads = 1
+# Run known-slow statetest groups first so they do not hold up the end of a run.
+[[profile.default.overrides]]
+filter = 'test(/stTimeConsuming|vmPerformance|50000|test_valid|test_many|until_out_of_gas/)'
+priority = 2
 
 [[profile.default.overrides]]
-filter = "test(statetest::)"
-test-group = "statetest"
-slow-timeout = { period = "600s", terminate-after = 1 }
+filter = 'test(blockchain_tests::)'
+priority = 1
