@@ -16,22 +16,104 @@ concurrency:
 
 jobs:
   test:
-    name: test ${{ matrix.os }}-${{ matrix.arch }}-${{ matrix.toolchain }} ${{ matrix.profile }}
+    name: ${{ matrix.name }}
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 30
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        os: ["ubuntu", "macos"]
-        toolchain: ["stable", "nightly"]
-        profile: ["dev", "release"]
         include:
-          - os: ubuntu
+          - name: test ubuntu-x64 stable dev
+            kind: test
+            os: ubuntu
             runner: depot-ubuntu-latest
             arch: x64
-          - os: macos
+            toolchain: stable
+            profile: dev
+          - name: test ubuntu-x64 stable release
+            kind: test
+            os: ubuntu
+            runner: depot-ubuntu-latest
+            arch: x64
+            toolchain: stable
+            profile: release
+          - name: test ubuntu-x64 nightly dev
+            kind: test
+            os: ubuntu
+            runner: depot-ubuntu-latest
+            arch: x64
+            toolchain: nightly
+            profile: dev
+          - name: test ubuntu-x64 nightly release
+            kind: test
+            os: ubuntu
+            runner: depot-ubuntu-latest
+            arch: x64
+            toolchain: nightly
+            profile: release
+          - name: test macos-arm64 stable dev
+            kind: test
+            os: macos
             runner: macos-latest
             arch: arm64
+            toolchain: stable
+            profile: dev
+          - name: test macos-arm64 stable release
+            kind: test
+            os: macos
+            runner: macos-latest
+            arch: arm64
+            toolchain: stable
+            profile: release
+          - name: test macos-arm64 nightly dev
+            kind: test
+            os: macos
+            runner: macos-latest
+            arch: arm64
+            toolchain: nightly
+            profile: dev
+          - name: test macos-arm64 nightly release
+            kind: test
+            os: macos
+            runner: macos-latest
+            arch: arm64
+            toolchain: nightly
+            profile: release
+          - name: statetest ubuntu-x64 interpreter
+            kind: statetest
+            os: ubuntu
+            runner: depot-ubuntu-latest-8
+            arch: x64
+            toolchain: stable
+            mode: interpreter
+          - name: statetest ubuntu-x64 jit
+            kind: statetest
+            os: ubuntu
+            runner: depot-ubuntu-latest-8
+            arch: x64
+            toolchain: stable
+            mode: jit
+          - name: statetest ubuntu-x64 aot
+            kind: statetest
+            os: ubuntu
+            runner: depot-ubuntu-latest-8
+            arch: x64
+            toolchain: stable
+            mode: aot
+          - name: statetest macos-arm64 interpreter
+            kind: statetest
+            os: macos
+            runner: depot-macos-latest
+            arch: arm64
+            toolchain: stable
+            mode: interpreter
+          - name: statetest macos-arm64 jit
+            kind: statetest
+            os: macos
+            runner: depot-macos-latest
+            arch: arm64
+            toolchain: stable
+            mode: jit
     steps:
       - uses: actions/checkout@v4
       - name: Install LLVM (apt)
@@ -55,50 +137,19 @@ jobs:
         with:
           cache-on-failure: true
       - uses: taiki-e/install-action@nextest
-      - name: test
-        run: cargo nextest run --workspace --cargo-profile ${{ matrix.profile }} --features ${{ env.ALL_BACKENDS }}
-
-  state-tests:
-    name: state-tests (${{ matrix.os }}, ${{ matrix.mode }})
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      matrix:
-        os: ["ubuntu", "macos"]
-        mode: [interpreter, jit, aot]
-        exclude:
-          - os: macos
-            mode: aot
-        include:
-          - os: ubuntu
-            runner: depot-ubuntu-latest-8
-          - os: macos
-            runner: depot-macos-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Checkout ethereum/tests
-        run: git submodule update --init --checkout --depth 1 tests/ethereum-tests
+      - uses: astral-sh/setup-uv@v7
+        if: ${{ matrix.kind == 'statetest' }}
       - name: Download test fixtures
-        run: ./scripts/setup-test-fixtures.sh
-      - name: Install LLVM (apt)
-        if: ${{ matrix.os == 'ubuntu' }}
-        run: sudo .github/scripts/install_llvm_ubuntu.sh
-      - name: Install LLVM (brew)
-        if: ${{ matrix.os == 'macos' }}
+        if: ${{ matrix.kind == 'statetest' }}
+        run: ./scripts/setup_test_fixtures.py
+      - name: test
+        if: ${{ matrix.kind == 'test' }}
         run: |
-          v=22
-          brew install "llvm@${v}"
-          prefix="$(brew --prefix llvm@${v})"
-          echo "LLVM_SYS_${v}1_PREFIX=${prefix}" >> $GITHUB_ENV
-          echo "${prefix}/bin" >> $GITHUB_PATH
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: mozilla-actions/sccache-action@v0.0.9
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
-      - uses: taiki-e/install-action@nextest
+          cargo nextest run --workspace \
+            --cargo-profile ${{ matrix.profile }} \
+            --features ${{ env.ALL_BACKENDS }}
       - name: Run state tests
+        if: ${{ matrix.kind == 'statetest' }}
         run: |
           cargo nextest run -p revmc-statetest \
             --no-capture --no-fail-fast \
@@ -192,7 +243,6 @@ jobs:
     if: always()
     needs:
       - test
-      - state-tests
       - feature-checks
       - clippy
       - docs
