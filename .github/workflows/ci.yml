@@ -49,12 +49,7 @@ jobs:
         run: sudo .github/scripts/install_llvm_ubuntu.sh
       - name: Install LLVM (brew)
         if: ${{ matrix.os == 'macos' }}
-        run: |
-          v=22
-          brew install "llvm@${v}"
-          prefix="$(brew --prefix llvm@${v})"
-          echo "LLVM_SYS_${v}1_PREFIX=${prefix}" >> $GITHUB_ENV
-          echo "${prefix}/bin" >> $GITHUB_PATH
+        run: .github/scripts/install_llvm_brew.sh
       - name: llvm-config
         run: llvm-config --version --bindir --libdir
       - uses: dtolnay/rust-toolchain@master
