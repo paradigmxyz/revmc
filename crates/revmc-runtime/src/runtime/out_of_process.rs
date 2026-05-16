@@ -280,7 +280,7 @@ enum HelperResponse {
     Err { error: String },
 }
 
-fn write_job(mut w: impl Write, job: &CompileJob, config: &RuntimeConfig) -> std::io::Result<()> {
+fn write_job(w: &mut dyn Write, job: &CompileJob, config: &RuntimeConfig) -> std::io::Result<()> {
     let req = HelperRequest {
         code_hash: job.key.code_hash.0,
         spec_id: job.key.spec_id as u8,
@@ -291,10 +291,10 @@ fn write_job(mut w: impl Write, job: &CompileJob, config: &RuntimeConfig) -> std
         symbol_name: job.symbol_name.clone(),
         bytecode: job.bytecode.to_vec(),
     };
-    write_message(&mut w, &req)
+    write_message(w, &req)
 }
 
-fn read_helper_result(r: &mut impl Read) -> Result<WorkerSuccess, String> {
+fn read_helper_result(r: &mut dyn Read) -> Result<WorkerSuccess, String> {
     match read_message(r).map_err(|e| format!("failed to decode helper result: {e}"))? {
         Some(HelperResponse::Ok { symbol_name, object_bytes, builtin_symbols }) => {
             Ok(WorkerSuccess::JitObject(JitObjectSuccess {
@@ -334,7 +334,7 @@ fn run_jit_helper_stdio() -> eyre::Result<()> {
     Ok(())
 }
 
-fn read_helper_job(stdin: &mut impl Read) -> eyre::Result<Option<(CompileJob, RuntimeConfig)>> {
+fn read_helper_job(stdin: &mut dyn Read) -> eyre::Result<Option<(CompileJob, RuntimeConfig)>> {
     let Some(req) = read_message::<HelperRequest>(stdin)? else { return Ok(None) };
     let spec_id = SpecId::try_from_u8(req.spec_id).ok_or_else(|| eyre::eyre!("invalid spec id"))?;
     let opt_level = opt_level_from_u8(req.opt_level)?;
@@ -358,7 +358,7 @@ fn read_helper_job(stdin: &mut impl Read) -> eyre::Result<Option<(CompileJob, Ru
 }
 
 fn write_helper_result(
-    mut stdout: impl Write,
+    stdout: &mut dyn Write,
     result: Result<WorkerSuccess, String>,
 ) -> eyre::Result<()> {
     let response = match result {
@@ -370,23 +370,24 @@ fn write_helper_result(
         Ok(_) => unreachable!(),
         Err(error) => HelperResponse::Err { error },
     };
-    write_message(&mut stdout, &response)?;
+    write_message(stdout, &response)?;
     Ok(())
 }
 
-fn write_message<T>(mut w: impl Write, message: &T) -> std::io::Result<()>
+fn write_message<T>(w: &mut dyn Write, message: &T) -> std::io::Result<()>
 where
     T: wincode::SchemaWrite<wincode::config::DefaultConfig, Src = T>,
 {
-    let bytes = wincode::serialize(message)
+    let len = wincode::serialized_size(message)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    let len = u32::try_from(bytes.len())
+    let len = u32::try_from(len)
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "message too large"))?;
     w.write_all(&len.to_le_bytes())?;
-    w.write_all(&bytes)
+    wincode::serialize_into(IoWriter(w), message)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
 }
 
-fn read_message<T>(r: &mut impl Read) -> std::io::Result<Option<T>>
+fn read_message<T>(r: &mut dyn Read) -> std::io::Result<Option<T>>
 where
     for<'de> T: wincode::SchemaRead<'de, wincode::config::DefaultConfig, Dst = T>,
 {
@@ -401,6 +402,66 @@ where
     wincode::deserialize(&bytes)
         .map(Some)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+}
+
+struct IoWriter<'a>(&'a mut dyn Write);
+
+impl wincode::io::Writer for IoWriter<'_> {
+    type Trusted<'a>
+        = TrustedIoWriter<'a>
+    where
+        Self: 'a;
+
+    fn write(&mut self, src: &[u8]) -> wincode::io::WriteResult<()> {
+        self.0.write_all(src)?;
+        Ok(())
+    }
+
+    unsafe fn as_trusted_for(
+        &mut self,
+        n_bytes: usize,
+    ) -> wincode::io::WriteResult<Self::Trusted<'_>> {
+        Ok(TrustedIoWriter { inner: self.0, remaining: n_bytes })
+    }
+}
+
+struct TrustedIoWriter<'a> {
+    inner: &'a mut dyn Write,
+    remaining: usize,
+}
+
+impl wincode::io::Writer for TrustedIoWriter<'_> {
+    type Trusted<'a>
+        = TrustedIoWriter<'a>
+    where
+        Self: 'a;
+
+    fn finish(&mut self) -> wincode::io::WriteResult<()> {
+        if self.remaining != 0 {
+            return Err(wincode::io::WriteError::WriteSizeLimit(self.remaining));
+        }
+        Ok(())
+    }
+
+    fn write(&mut self, src: &[u8]) -> wincode::io::WriteResult<()> {
+        if src.len() > self.remaining {
+            return Err(wincode::io::WriteError::WriteSizeLimit(src.len()));
+        }
+        self.inner.write_all(src)?;
+        self.remaining -= src.len();
+        Ok(())
+    }
+
+    unsafe fn as_trusted_for(
+        &mut self,
+        n_bytes: usize,
+    ) -> wincode::io::WriteResult<Self::Trusted<'_>> {
+        if n_bytes > self.remaining {
+            return Err(wincode::io::WriteError::WriteSizeLimit(n_bytes));
+        }
+        self.remaining -= n_bytes;
+        Ok(TrustedIoWriter { inner: self.inner, remaining: n_bytes })
+    }
 }
 
 fn opt_level_to_u8(level: OptimizationLevel) -> u8 {
