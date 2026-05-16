@@ -44,6 +44,9 @@ jobs:
       matrix: ${{ fromJson(needs.matrices.outputs.test-matrix) }}
     steps:
       - uses: actions/checkout@v4
+      - name: Checkout ethereum/tests
+        if: ${{ matrix.kind == 'statetest' }}
+        run: git submodule update --init --checkout --depth 1 tests/ethereum-tests
       - name: Install LLVM
         run: .github/scripts/install_llvm.sh ${{ matrix.os }}
       - name: llvm-config
