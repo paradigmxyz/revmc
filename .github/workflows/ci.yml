@@ -44,12 +44,8 @@ jobs:
       matrix: ${{ fromJson(needs.matrices.outputs.test-matrix) }}
     steps:
       - uses: actions/checkout@v4
-      - name: Install LLVM (apt)
-        if: ${{ matrix.os == 'ubuntu' }}
-        run: sudo .github/scripts/install_llvm_ubuntu.sh
-      - name: Install LLVM (brew)
-        if: ${{ matrix.os == 'macos' }}
-        run: .github/scripts/install_llvm_brew.sh
+      - name: Install LLVM
+        run: .github/scripts/install_llvm.sh ${{ matrix.os }}
       - name: llvm-config
         run: llvm-config --version --bindir --libdir
       - uses: dtolnay/rust-toolchain@master
