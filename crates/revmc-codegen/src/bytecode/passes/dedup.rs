@@ -86,12 +86,6 @@ impl<'a> Bytecode<'a> {
             // JUMPDEST could be reached from an unresolved dynamic JUMP with an
             // arbitrary stack context.
             let first = &self.insts[block.insts.start];
-            // Do not dedup jumpdest join blocks reached by fallthrough predecessors. The
-            // predecessor's stack writes may be context-specific and required downstream.
-            if first.is_jumpdest() && self.has_fallthrough_predecessor(block) {
-                continue;
-            }
-
             if self.has_dynamic_jumps && first.is_reachable_jumpdest(true) {
                 continue;
             }
@@ -193,13 +187,6 @@ impl<'a> Bytecode<'a> {
         }
 
         deduped
-    }
-
-    fn has_fallthrough_predecessor(&self, block: &BlockData) -> bool {
-        block.preds.iter().any(|&pred| {
-            let pred_term = self.cfg.blocks[pred].terminator();
-            self.insts[pred_term].can_fall_through() && pred_term + 1 == block.insts.start
-        })
     }
 }
 
@@ -402,9 +389,9 @@ mod tests {
     }
 
     #[test]
-    fn dedup_skips_fallthrough_joins() {
-        // Each path materializes a different stack value before falling through to identical
-        // join blocks. Merging the joins would lose the predecessor-specific stack write.
+    fn dedup_keeps_pure_fallthrough_materialization() {
+        // These labels are only reached by fallthrough, so the materialization stays in the
+        // same block as the join suffix. Dedup must not split out only the identical suffix.
         let bytecode = analyze_asm_with(
             "
             PUSH0
@@ -441,6 +428,52 @@ mod tests {
         );
 
         assert!(bytecode.redirects.is_empty(), "fallthrough join blocks must not be deduped");
+    }
+
+    #[test]
+    fn dedup_redirects_fallthrough_joins_that_are_static_targets() {
+        let bytecode = analyze_asm_with(
+            "
+            CALLVALUE
+            PUSH 123456789
+            SUB
+            PUSH %join_a
+            JUMPI
+            CALLVALUE
+            PUSH 123456789
+            SUB
+            PUSH %join_b
+            JUMPI
+
+            CALLDATASIZE
+            PUSH %case_b
+            JUMPI
+
+            PUSH 1
+        join_a:
+            JUMPDEST
+            PUSH %done
+            JUMP
+
+        case_b:
+            JUMPDEST
+            PUSH 2
+        join_b:
+            JUMPDEST
+            PUSH %done
+            JUMP
+
+        done:
+            JUMPDEST
+            STOP
+        ",
+            AnalysisConfig::DEDUP,
+        );
+
+        assert_eq!(bytecode.redirects.len(), 1);
+        let (&redirected, &canonical) = bytecode.redirects.iter().next().unwrap();
+        assert!(bytecode.insts[redirected].is_jumpdest());
+        assert!(bytecode.insts[canonical].is_jumpdest());
     }
 
     #[test]
@@ -502,7 +535,7 @@ mod tests {
         bytecode.config = AnalysisConfig::DEDUP;
         bytecode.analyze().unwrap();
 
-        assert_eq!(bytecode.redirects.len(), 19);
+        assert_eq!(bytecode.redirects.len(), 20);
     }
 
     fn fixture_entry_code(json: &str) -> Vec<u8> {

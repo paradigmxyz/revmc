@@ -2153,6 +2153,87 @@ tests! {
             expected_gas: GAS_WHAT_INTERPRETER_SAYS,
         }),
 
+        dedup_fallthrough_redirect_keeps_case_a_constant(@raw {
+            bytecode: &asm("
+                CALLVALUE
+                PUSH 123456789
+                SUB
+                PUSH %join_a
+                JUMPI
+                CALLVALUE
+                PUSH 123456789
+                SUB
+                PUSH %join_b
+                JUMPI
+
+                CALLDATASIZE
+                ISZERO
+                PUSH %case_b
+                JUMPI
+
+                PUSH 1
+            join_a:
+                JUMPDEST
+                PUSH %done
+                JUMP
+
+            case_b:
+                JUMPDEST
+                PUSH 2
+            join_b:
+                JUMPDEST
+                PUSH %done
+                JUMP
+
+            done:
+                JUMPDEST
+                STOP
+            "),
+            expected_return: InstructionResult::Stop,
+            expected_stack: &[1_U256],
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+        }),
+
+        dedup_fallthrough_redirect_keeps_case_b_constant(@raw {
+            bytecode: &asm("
+                CALLVALUE
+                PUSH 123456789
+                SUB
+                PUSH %join_a
+                JUMPI
+                CALLVALUE
+                PUSH 123456789
+                SUB
+                PUSH %join_b
+                JUMPI
+
+                CALLDATASIZE
+                PUSH %case_b
+                JUMPI
+
+                PUSH 1
+            join_a:
+                JUMPDEST
+                PUSH %done
+                JUMP
+
+            case_b:
+                JUMPDEST
+                PUSH 2
+            join_b:
+                JUMPDEST
+                PUSH %done
+                JUMP
+
+            done:
+                JUMPDEST
+                STOP
+            "),
+            expected_return: InstructionResult::Stop,
+            expected_stack: &[2_U256],
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+        }),
+
         // Disabled opcodes must not poison stack sections.
         //
         // When a disabled opcode (e.g. TSTORE before Cancun) follows executable instructions
