@@ -24,6 +24,8 @@ Using LLVM ORC's remote executor APIs (`ExecutorProcessControl`, `SimpleRemoteEP
 Current prototype:
 
 - `RuntimeConfig::jit_mode = JitMode::OutOfProcess` makes the runtime keep a global persistent helper process spawned via `RuntimeConfig::jit_helper_path`, or `std::env::current_exe()` when unset.
+- `REVMC_JIT_MODE=out-of-process` switches default runtime configs to out-of-process JIT. `REVMC_JIT_HELPER_PATH` overrides the helper executable path. Test harnesses should point this at a binary that calls `revmc::runtime::maybe_run_jit_helper()` at startup, such as `target/debug/revmc`.
+- `REVMC_JIT_HELPER_MEMORY_LIMIT_BYTES` and `REVMC_JIT_HELPER_CPU_SECONDS` apply Unix `RLIMIT_AS` and `RLIMIT_CPU` limits to helper processes before `exec`.
 - Helper binaries must call `revmc::runtime::maybe_run_jit_helper()` at process startup. `revmc-cli` does this already.
 - Workers send newline-delimited JSON JIT object requests to the helper over stdin and receive newline-delimited JSON responses from stdout.
 - The parent links returned object bytes into its local ORC instance, resolves the symbol, and constructs `JitCodeBacking` with a parent-owned `ResourceTracker`.
@@ -32,7 +34,8 @@ Current prototype:
 Still needed:
 
 - Move the worker pool into a single helper process; the parent should only enqueue IPC requests.
-- Add protocol versioning to the JSON IPC payloads and carry the remaining data: gas params, dump settings, generation, timings, object bytes, and errors.
+- Replace newline-delimited JSON with a length-prefixed binary protocol once the payload shape settles. The hot payload is bytecode in and object bytes out, so binary framing avoids JSON's array/base64 overhead and gives the parent a single `read_exact` per response.
+- Add protocol versioning to the IPC payloads and carry the remaining data: gas params, dump settings, generation, timings, object bytes, and errors.
 - Keep AOT jobs either in the helper too or explicitly route them through the existing in-process AOT path; the first option gives consistent isolation.
 - Define shutdown semantics: close IPC, let the helper drain or cancel queued jobs, then kill on timeout.
 - Treat helper crash as worker-pool failure: fail pending synchronous jobs, drop pending async jobs, and optionally respawn.

@@ -3327,6 +3327,7 @@ dependencies = [
  "dashmap",
  "derive_more",
  "eyre",
+ "libc",
  "libloading",
  "paste",
  "quanta",

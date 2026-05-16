@@ -146,12 +146,6 @@ macro_rules! builtins {
                 }
             }
 
-            pub const fn call_conv(self) -> CallConv {
-                match self {
-                    Self::Mresize => CallConv::PreserveMost,
-                    _ => CallConv::Default,
-                }
-            }
             pub fn ret<B: TypeMethods>(self, $bcx: &mut B) -> Option<B::Type> {
                 $($types_init)*
                 match self {

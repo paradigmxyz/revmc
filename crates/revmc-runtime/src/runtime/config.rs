@@ -4,7 +4,12 @@ use crate::{CompileTimings, runtime::storage::ArtifactStore};
 use alloy_primitives::B256;
 use revm_context_interface::cfg::GasParams;
 use revm_primitives::hardfork::SpecId;
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{env, path::PathBuf, str::FromStr, sync::Arc, time::Duration};
+
+const JIT_MODE_ENV: &str = "REVMC_JIT_MODE";
+const JIT_HELPER_PATH_ENV: &str = "REVMC_JIT_HELPER_PATH";
+const JIT_HELPER_MEMORY_LIMIT_ENV: &str = "REVMC_JIT_HELPER_MEMORY_LIMIT_BYTES";
+const JIT_HELPER_CPU_SECONDS_ENV: &str = "REVMC_JIT_HELPER_CPU_SECONDS";
 
 /// Runtime configuration.
 #[derive(Clone, derive_more::Debug)]
@@ -78,14 +83,15 @@ pub struct RuntimeConfig {
 
     /// Where JIT compilation work runs.
     ///
-    /// Defaults to [`JitMode::InProcess`].
+    /// Defaults to [`JitMode::InProcess`], or `REVMC_JIT_MODE` when set.
     pub jit_mode: JitMode,
 
     /// Helper executable used when [`jit_mode`](Self::jit_mode)
     /// is [`JitMode::OutOfProcess`].
     ///
     /// When `None`, the runtime spawns `std::env::current_exe()` and expects it
-    /// to call [`super::maybe_run_jit_helper`] during startup.
+    /// to call [`super::maybe_run_jit_helper`] during startup. Defaults to
+    /// `REVMC_JIT_HELPER_PATH` when set.
     pub jit_helper_path: Option<PathBuf>,
 
     /// Blocking mode: every lookup synchronously JIT-compiles on miss and never
@@ -148,6 +154,21 @@ pub enum JitMode {
     OutOfProcess,
 }
 
+impl FromStr for JitMode {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let mode = s.trim().to_ascii_lowercase();
+        Ok(match mode.as_str() {
+            "" | "in-process" | "in_process" | "inprocess" | "in" | "0" => Self::InProcess,
+            "out-of-process" | "out_of_process" | "outofprocess" | "out" | "oop" | "1" => {
+                Self::OutOfProcess
+            }
+            _ => return Err(format!("unknown JIT mode: {s}")),
+        })
+    }
+}
+
 impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
@@ -161,8 +182,8 @@ impl Default for RuntimeConfig {
             no_dse: false,
             gas_params: None,
             aot: false,
-            jit_mode: JitMode::default(),
-            jit_helper_path: None,
+            jit_mode: env::var(JIT_MODE_ENV).ok().and_then(|s| s.parse().ok()).unwrap_or_default(),
+            jit_helper_path: env_path(JIT_HELPER_PATH_ENV),
             blocking: false,
             on_compilation: None,
         }
@@ -219,6 +240,23 @@ pub struct RuntimeTuning {
     ///
     /// Defaults to `5s`.
     pub jit_timeout: Duration,
+
+    /// Maximum address space for the out-of-process JIT helper, in bytes.
+    ///
+    /// `0` disables the limit. On Unix this is applied with `RLIMIT_AS` before
+    /// the helper process starts executing.
+    ///
+    /// Defaults to `0`, or `REVMC_JIT_HELPER_MEMORY_LIMIT_BYTES` when set.
+    pub jit_helper_memory_limit_bytes: u64,
+
+    /// Maximum CPU time for the out-of-process JIT helper.
+    ///
+    /// `None` disables the limit. On Unix this is applied with `RLIMIT_CPU`
+    /// before the helper process starts executing.
+    ///
+    /// Defaults to `None`, or `REVMC_JIT_HELPER_CPU_SECONDS` when set to a
+    /// non-zero integer.
+    pub jit_helper_cpu_time: Option<Duration>,
 
     /// Capacity of the per-worker job queue.
     ///
@@ -289,6 +327,10 @@ impl Default for RuntimeTuning {
             jit_max_pending_jobs: 2048,
             jit_worker_count: worker_count,
             jit_timeout: Duration::from_secs(5),
+            jit_helper_memory_limit_bytes: parse_env_u64(JIT_HELPER_MEMORY_LIMIT_ENV).unwrap_or(0),
+            jit_helper_cpu_time: parse_env_u64(JIT_HELPER_CPU_SECONDS_ENV)
+                .filter(|secs| *secs > 0)
+                .map(Duration::from_secs),
             jit_worker_queue_capacity: 64,
             jit_opt_level: crate::OptimizationLevel::default(),
             aot_opt_level: crate::OptimizationLevel::default(),
@@ -298,4 +340,15 @@ impl Default for RuntimeTuning {
             compiler_recycle_threshold: 1000,
         }
     }
+}
+
+fn parse_env_u64(name: &str) -> Option<u64> {
+    env::var(name).ok().and_then(|s| s.parse().ok())
+}
+
+fn env_path(name: &str) -> Option<PathBuf> {
+    env::var_os(name).map(|path| {
+        let path = PathBuf::from(path);
+        path.canonicalize().unwrap_or(path)
+    })
 }

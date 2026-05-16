@@ -319,6 +319,45 @@ fn compile_job_out_of_process(job: CompileJob, config: &RuntimeConfig) -> Worker
 
 const HELPER_ENV: &str = "REVMC_JIT_HELPER";
 
+#[cfg(all(feature = "llvm", unix))]
+fn apply_helper_limits(command: &mut Command, config: &RuntimeConfig) {
+    use std::os::unix::process::CommandExt;
+
+    let memory_limit = config.tuning.jit_helper_memory_limit_bytes;
+    let cpu_time = config.tuning.jit_helper_cpu_time;
+    if memory_limit == 0 && cpu_time.is_none() {
+        return;
+    }
+
+    // SAFETY: `pre_exec` runs in the child after fork and before exec. The closure only calls
+    // async-signal-safe libc `setrlimit` and constructs an `io::Error` if it fails.
+    unsafe {
+        command.pre_exec(move || {
+            if memory_limit > 0 {
+                set_rlimit(libc::RLIMIT_AS as _, memory_limit)?;
+            }
+            if let Some(cpu_time) = cpu_time {
+                let seconds = cpu_time.as_secs().max(1);
+                set_rlimit(libc::RLIMIT_CPU as _, seconds)?;
+            }
+            Ok(())
+        });
+    }
+}
+
+#[cfg(all(feature = "llvm", unix))]
+fn set_rlimit(resource: libc::c_int, value: u64) -> std::io::Result<()> {
+    let value = libc::rlim_t::try_from(value).unwrap_or(libc::rlim_t::MAX);
+    let limit = libc::rlimit { rlim_cur: value, rlim_max: value };
+    if unsafe { libc::setrlimit(resource as _, &limit) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(all(feature = "llvm", not(unix)))]
+fn apply_helper_limits(_command: &mut Command, _config: &RuntimeConfig) {}
+
 #[cfg(feature = "llvm")]
 fn run_helper_job(job: &CompileJob, config: &RuntimeConfig) -> Result<WorkerSuccess, String> {
     if config.gas_params.is_some() {
@@ -380,13 +419,15 @@ impl HelperProcessInner {
                 std::env::current_exe().map_err(|e| format!("failed to locate current exe: {e}"))?
             }
         };
-        let mut child = Command::new(&path)
+        let mut command = Command::new(&path);
+        command
             .env(HELPER_ENV, "1")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .map_err(|e| format!("failed to spawn JIT helper: {e}"))?;
+            .stderr(Stdio::inherit());
+        apply_helper_limits(&mut command, config);
+
+        let mut child = command.spawn().map_err(|e| format!("failed to spawn JIT helper: {e}"))?;
         let stdin = child.stdin.take().ok_or("helper stdin unavailable")?;
         let stdout = child.stdout.take().ok_or("helper stdout unavailable")?;
         let (result_tx, result_rx) = chan::bounded(1);
@@ -449,35 +490,35 @@ impl Drop for HelperProcessInner {
 #[cfg(feature = "llvm")]
 #[derive(Serialize, Deserialize)]
 struct HelperRequest {
-    code_hash: B256,
+    code_hash: [u8; 32],
     spec_id: u8,
     opt_level: u8,
     debug_assertions: bool,
     no_dedup: bool,
     no_dse: bool,
     symbol_name: String,
-    bytecode: Bytes,
+    bytecode: Vec<u8>,
 }
 
 #[cfg(feature = "llvm")]
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 enum HelperResponse {
-    Ok { symbol_name: String, object_bytes: Bytes, builtin_symbols: Vec<String> },
+    Ok { symbol_name: String, object_bytes: Vec<u8>, builtin_symbols: Vec<String> },
     Err { error: String },
 }
 
 #[cfg(feature = "llvm")]
 fn write_job(mut w: impl Write, job: &CompileJob, config: &RuntimeConfig) -> std::io::Result<()> {
     let req = HelperRequest {
-        code_hash: job.key.code_hash,
+        code_hash: job.key.code_hash.0,
         spec_id: job.key.spec_id as u8,
         opt_level: opt_level_to_u8(job.opt_level),
         debug_assertions: config.debug_assertions,
         no_dedup: config.no_dedup,
         no_dse: config.no_dse,
         symbol_name: job.symbol_name.clone(),
-        bytecode: job.bytecode.clone(),
+        bytecode: job.bytecode.to_vec(),
     };
     serde_json::to_writer(&mut w, &req)?;
     w.write_all(b"\n")
@@ -496,7 +537,7 @@ fn read_helper_result(r: &mut impl BufRead) -> Result<WorkerSuccess, String> {
         HelperResponse::Ok { symbol_name, object_bytes, builtin_symbols } => {
             Ok(WorkerSuccess::JitObject(JitObjectSuccess {
                 symbol_name,
-                object_bytes,
+                object_bytes: Bytes::from(object_bytes),
                 builtin_symbols,
             }))
         }
@@ -549,8 +590,8 @@ fn read_helper_job(stdin: &mut impl BufRead) -> eyre::Result<Option<(CompileJob,
     };
     let job = CompileJob {
         kind: CompilationKind::Jit,
-        key: RuntimeCacheKey { code_hash: req.code_hash, spec_id },
-        bytecode: req.bytecode,
+        key: RuntimeCacheKey { code_hash: B256::from(req.code_hash), spec_id },
+        bytecode: Bytes::from(req.bytecode),
         symbol_name: req.symbol_name,
         opt_level,
         sync_notifier: SyncNotifier::none(),
@@ -567,7 +608,7 @@ fn write_helper_result(
     let response = match result {
         Ok(WorkerSuccess::JitObject(success)) => HelperResponse::Ok {
             symbol_name: success.symbol_name,
-            object_bytes: success.object_bytes,
+            object_bytes: success.object_bytes.to_vec(),
             builtin_symbols: success.builtin_symbols,
         },
         Ok(_) => unreachable!(),
