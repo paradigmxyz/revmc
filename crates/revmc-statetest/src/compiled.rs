@@ -242,7 +242,9 @@ pub fn run(
     keep_going: bool,
     mode: CompileMode,
 ) -> Result<(), TestError> {
-    let _ = tracing_subscriber::fmt::try_init();
+    if std::env::var_os("RUST_LOG").is_some() {
+        let _ = tracing_subscriber::fmt::try_init();
+    }
 
     let n_files = test_files.len();
     let state = TestRunnerState::new(test_files);

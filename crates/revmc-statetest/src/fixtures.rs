@@ -1,4 +1,4 @@
-use crate::harness::TestRoot;
+use crate::{compiled::CompileMode, harness::TestRoot};
 use std::{
     env,
     path::{Path, PathBuf},
@@ -42,50 +42,59 @@ pub fn explicit_state_test_root_from_env() -> Option<PathBuf> {
 }
 
 /// Return the state-test roots to run by default.
-pub fn state_test_roots() -> Vec<StateTestRoot> {
+pub fn state_test_roots(mode: CompileMode) -> Vec<StateTestRoot> {
     if let Some(path) = explicit_state_test_root_from_env() {
         return vec![StateTestRoot { name: "custom", label: "custom state tests", path }];
     }
 
-    default_state_test_roots().into_iter().filter(|root| root.path.is_dir()).collect()
+    default_state_test_roots(mode).into_iter().filter(|root| root.path.is_dir()).collect()
 }
 
 /// Return the default repo-relative state-test roots, whether or not they exist.
-pub fn default_state_test_roots() -> Vec<StateTestRoot> {
+pub fn default_state_test_roots(mode: CompileMode) -> Vec<StateTestRoot> {
     let fixtures = fixtures_root();
     let ethereum_tests = workspace_root().join(DEFAULT_ETHEREUM_TESTS_PATH);
-    let main_path = if env_flag(STATETEST_STABLE_ENV) || env_flag(EEST_STABLE_ENV) {
-        fixtures.join("main/stable/state_tests")
-    } else {
-        fixtures.join("main/develop/state_tests")
-    };
-
-    let mut roots = vec![
-        StateTestRoot { name: "eest", label: "execution-spec-tests", path: main_path },
-        StateTestRoot {
-            name: "legacy::cancun",
-            label: "legacy Cancun",
-            path: fixtures.join("legacytests/Cancun/GeneralStateTests"),
-        },
-        StateTestRoot {
-            name: "legacy::constantinople",
-            label: "legacy Constantinople",
-            path: fixtures.join("legacytests/Constantinople/GeneralStateTests"),
-        },
-    ];
+    let mut roots = Vec::new();
 
     if let Some(path) = general_state_tests_path(&ethereum_tests) {
-        roots.push(StateTestRoot {
-            name: "legacy::ethereum_tests",
-            label: "ethereum/tests GeneralStateTests",
-            path,
-        });
+        roots.push(legacy_ethereum_tests_root(path, mode));
+    }
+
+    if is_ci() && mode != CompileMode::Aot {
+        roots.extend([
+            StateTestRoot {
+                name: "eest",
+                label: "execution-spec-tests develop",
+                path: fixtures.join("main/develop/state_tests"),
+            },
+            StateTestRoot {
+                name: "legacy::cancun",
+                label: "legacy Cancun",
+                path: fixtures.join("legacytests/Cancun/GeneralStateTests"),
+            },
+            StateTestRoot {
+                name: "legacy::constantinople",
+                label: "legacy Constantinople",
+                path: fixtures.join("legacytests/Constantinople/GeneralStateTests"),
+            },
+        ]);
     }
 
     for root in &mut roots {
         apply_subdir(&mut root.path, STATE_TEST_SUBDIR_ENV);
     }
     roots
+}
+
+fn legacy_ethereum_tests_root(mut path: PathBuf, mode: CompileMode) -> StateTestRoot {
+    if mode == CompileMode::Aot && !is_ci() && env::var_os(STATE_TEST_SUBDIR_ENV).is_none() {
+        path.push("stRevertTest");
+    }
+    StateTestRoot {
+        name: "legacy::ethereum_tests",
+        label: "ethereum/tests GeneralStateTests",
+        path,
+    }
 }
 
 /// Resolve the workspace root by walking up from this crate.
@@ -108,6 +117,11 @@ pub fn fixtures_root() -> PathBuf {
 /// Return whether an environment flag is set to a truthy value.
 pub fn env_flag(name: &str) -> bool {
     env::var_os(name).is_some_and(|value| !value.is_empty() && value.to_str() != Some("0"))
+}
+
+/// Return whether the current process is running in CI.
+pub fn is_ci() -> bool {
+    env::var_os("CI").is_some()
 }
 
 /// Appends `SUBDIR`-style filters to a root path.

@@ -43,8 +43,7 @@ pub fn run() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    let roots = state_test_roots();
-    let trials = collect_trials(&args, roots).unwrap_or_else(|err| {
+    let trials = collect_trials(&args).unwrap_or_else(|err| {
         eprintln!("{err}");
         Vec::new()
     });
@@ -53,21 +52,28 @@ pub fn run() -> ExitCode {
     libtest_mimic::run(&args, trials).exit_code()
 }
 
-fn collect_trials(args: &Arguments, roots: Vec<TestRoot>) -> Result<Vec<Trial>, String> {
-    if roots.is_empty() {
-        return Ok(Vec::new());
-    }
-
+fn collect_trials(args: &Arguments) -> Result<Vec<Trial>, String> {
     if args.exact
         && let Some(filter) = &args.filter
     {
-        return Ok(exact_trial(&roots, filter).into_iter().collect());
+        return Ok(exact_trial(filter).into_iter().collect());
     }
 
     let mut trials = Vec::new();
     for mode in MODES {
+        let roots = state_test_roots(mode.compile_mode);
         for root in &roots {
             let files = find_json_tests(std::slice::from_ref(&root.path), descend_all)?;
+            if mode.compile_mode == CompileMode::Aot {
+                let name = aot_test_name(*mode, root);
+                let ignored = should_ignore(&name);
+                trials.push(
+                    Trial::test(name, move || run_files(files, CompileMode::Aot))
+                        .with_ignored_flag(ignored),
+                );
+                continue;
+            }
+
             for path in files {
                 let name = test_name(*mode, root, &path);
                 let ignored = should_ignore(&name);
@@ -82,10 +88,30 @@ fn collect_trials(args: &Arguments, roots: Vec<TestRoot>) -> Result<Vec<Trial>, 
     Ok(trials)
 }
 
-fn exact_trial(roots: &[TestRoot], name: &str) -> Option<Trial> {
+fn exact_trial(name: &str) -> Option<Trial> {
+    for mode in MODES {
+        if mode.compile_mode == CompileMode::Aot {
+            for root in state_test_roots(mode.compile_mode) {
+                let aot_name = aot_test_name(*mode, &root);
+                if name == aot_name {
+                    let files =
+                        find_json_tests(std::slice::from_ref(&root.path), descend_all).ok()?;
+                    let ignored = should_ignore(&aot_name);
+                    return Some(
+                        Trial::test(aot_name, move || run_files(files, CompileMode::Aot))
+                            .with_ignored_flag(ignored),
+                    );
+                }
+            }
+        }
+    }
+
     let (mode, root, relative) = MODES
         .iter()
-        .flat_map(|mode| roots.iter().map(move |root| (*mode, root)))
+        .filter(|mode| mode.compile_mode != CompileMode::Aot)
+        .flat_map(|mode| {
+            state_test_roots(mode.compile_mode).into_iter().map(move |root| (*mode, root))
+        })
         .filter_map(|(mode, root)| {
             let prefix = format!("statetest::{}::{}", mode.name, root.name);
             name.strip_prefix(&prefix).map(|relative| (mode, root, relative))
@@ -107,9 +133,20 @@ fn run_file(path: PathBuf, mode: CompileMode) -> Result<(), Failed> {
     compiled::run(vec![path], true, false, mode).map(|_| ()).map_err(|err| err.to_string().into())
 }
 
+fn run_files(paths: Vec<PathBuf>, mode: CompileMode) -> Result<(), Failed> {
+    compiled::run(paths, true, false, mode).map(|_| ()).map_err(|err| err.to_string().into())
+}
+
 fn test_name(mode: Mode, root: &TestRoot, path: &Path) -> String {
     let relative = path.strip_prefix(&root.path).unwrap_or(path);
     format!("statetest::{}::{}::{}", mode.name, root.name, path_name(relative))
+}
+
+fn aot_test_name(mode: Mode, root: &TestRoot) -> String {
+    if root.path.file_name().is_some_and(|name| name == "stRevertTest") {
+        return format!("statetest::{}::{}::stRevertTest", mode.name, root.name);
+    }
+    format!("statetest::{}::{}", mode.name, root.name)
 }
 
 fn path_name(path: &Path) -> String {
