@@ -15,8 +15,7 @@ use alloy_primitives::{B256, Bytes};
 use crossbeam_channel as chan;
 use revm_primitives::hardfork::SpecId;
 use std::{
-    io::{BufRead, BufReader, Read, Write},
-    mem::MaybeUninit,
+    io::{BufReader, BufWriter, Read, Write},
     ops::ControlFlow,
     path::PathBuf,
     process::{Child, ChildStdin, Command, Stdio},
@@ -25,7 +24,7 @@ use std::{
     time::{Duration, Instant},
 };
 use wait_timeout::ChildExt;
-use wincode::{DeserializeOwned, SchemaRead, SchemaWrite};
+use wincode::{SchemaRead, SchemaWrite};
 
 const HELPER_ENV: &str = "REVMC_JIT_HELPER";
 
@@ -76,7 +75,7 @@ fn helper_process() -> &'static HelperProcess {
 }
 
 struct HelperIo {
-    stdin: ChildStdin,
+    stdin: BufWriter<ChildStdin>,
     result_rx: chan::Receiver<Result<WorkerSuccess, String>>,
 }
 
@@ -142,11 +141,11 @@ impl HelperProcessInner {
         apply_helper_limits(&mut command, config);
 
         let mut child = command.spawn().map_err(|e| format!("failed to spawn JIT helper: {e}"))?;
-        let stdin = child.stdin.take().ok_or("helper stdin unavailable")?;
+        let stdin = BufWriter::new(child.stdin.take().ok_or("helper stdin unavailable")?);
         let stdout = child.stdout.take().ok_or("helper stdout unavailable")?;
         let (result_tx, result_rx) = chan::bounded(1);
         let reader = std::thread::spawn(move || {
-            let mut stdout = IpcReader::new(stdout);
+            let mut stdout = BufReader::new(stdout);
             loop {
                 let result = read_helper_result(&mut stdout);
                 let done = result.is_err();
@@ -281,7 +280,11 @@ enum HelperResponse {
     Err { error: String },
 }
 
-fn write_job(w: &mut dyn Write, job: &CompileJob, config: &RuntimeConfig) -> std::io::Result<()> {
+fn write_job<W: Write + ?Sized>(
+    w: &mut BufWriter<W>,
+    job: &CompileJob,
+    config: &RuntimeConfig,
+) -> std::io::Result<()> {
     let req = HelperRequest {
         code_hash: job.key.code_hash.0,
         spec_id: job.key.spec_id as u8,
@@ -295,7 +298,7 @@ fn write_job(w: &mut dyn Write, job: &CompileJob, config: &RuntimeConfig) -> std
     write_message(w, &req)
 }
 
-fn read_helper_result<R: Read>(r: &mut IpcReader<R>) -> Result<WorkerSuccess, String> {
+fn read_helper_result<R: Read + ?Sized>(r: &mut BufReader<R>) -> Result<WorkerSuccess, String> {
     match read_message(r).map_err(|e| format!("failed to decode helper result: {e}"))? {
         Some(HelperResponse::Ok { symbol_name, object_bytes, builtin_symbols }) => {
             Ok(WorkerSuccess::JitObject(JitObjectSuccess {
@@ -310,8 +313,8 @@ fn read_helper_result<R: Read>(r: &mut IpcReader<R>) -> Result<WorkerSuccess, St
 }
 
 fn run_jit_helper_stdio() -> eyre::Result<()> {
-    let mut stdin = IpcReader::new(std::io::stdin().lock());
-    let mut stdout = std::io::stdout().lock();
+    let mut stdin = BufReader::new(std::io::stdin().lock());
+    let mut stdout = BufWriter::new(std::io::stdout().lock());
     let mut compiler: Option<EvmCompiler<EvmLlvmBackend>> = None;
 
     while let Some((job, config)) = read_helper_job(&mut stdin)? {
@@ -335,8 +338,8 @@ fn run_jit_helper_stdio() -> eyre::Result<()> {
     Ok(())
 }
 
-fn read_helper_job<R: Read>(
-    stdin: &mut IpcReader<R>,
+fn read_helper_job<R: Read + ?Sized>(
+    stdin: &mut BufReader<R>,
 ) -> eyre::Result<Option<(CompileJob, RuntimeConfig)>> {
     let req: Option<HelperRequest> = read_message(stdin)?;
     let Some(req) = req else { return Ok(None) };
@@ -361,8 +364,8 @@ fn read_helper_job<R: Read>(
     Ok(Some((job, config)))
 }
 
-fn write_helper_result(
-    stdout: &mut dyn Write,
+fn write_helper_result<W: Write + ?Sized>(
+    stdout: &mut BufWriter<W>,
     result: Result<WorkerSuccess, String>,
 ) -> eyre::Result<()> {
     let response = match result {
@@ -378,7 +381,7 @@ fn write_helper_result(
     Ok(())
 }
 
-fn write_message<T>(w: &mut dyn Write, message: &T) -> std::io::Result<()>
+fn write_message<T, W: Write + ?Sized>(w: &mut BufWriter<W>, message: &T) -> std::io::Result<()>
 where
     T: wincode::SchemaWrite<wincode::config::DefaultConfig, Src = T>,
 {
@@ -387,161 +390,31 @@ where
     let len = u32::try_from(len)
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "message too large"))?;
     w.write_all(&len.to_le_bytes())?;
-    wincode::serialize_into(IoWriter(w), message)
+    wincode::serialize_into(w, message)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
 }
 
-fn read_message<T, R: Read>(r: &mut IpcReader<R>) -> std::io::Result<Option<T>>
+fn read_message<T, R: Read + ?Sized>(r: &mut BufReader<R>) -> std::io::Result<Option<T>>
 where
     T: wincode::SchemaReadOwned<wincode::config::DefaultConfig, Dst = T>,
 {
     let mut len = [0; 4];
-    let n = r.inner.read(&mut len[..1])?;
+    let n = r.read(&mut len[..1])?;
     if n == 0 {
         return Ok(None);
     }
-    r.inner.read_exact(&mut len[1..])?;
-    let mut reader =
-        LimitedReader { inner: &mut r.inner, remaining: u32::from_le_bytes(len) as usize };
-    let value = T::deserialize_from(&mut reader)
+    r.read_exact(&mut len[1..])?;
+    let mut reader = BufReader::new(r.take(u64::from(u32::from_le_bytes(len))));
+    let value = wincode::deserialize_from(&mut reader)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    if reader.remaining != 0 {
+    let remaining = reader.buffer().len() as u64 + reader.get_ref().limit();
+    if remaining != 0 {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "trailing bytes in helper message",
         ));
     }
     Ok(Some(value))
-}
-
-struct IpcReader<R: Read> {
-    inner: BufReader<R>,
-}
-
-impl<R: Read> IpcReader<R> {
-    fn new(inner: R) -> Self {
-        Self { inner: BufReader::new(inner) }
-    }
-}
-
-struct LimitedReader<'a, R: Read> {
-    inner: &'a mut BufReader<R>,
-    remaining: usize,
-}
-
-impl<'de, R: Read> wincode::io::Reader<'de> for LimitedReader<'_, R> {
-    type Trusted<'a>
-        = LimitedReader<'a, R>
-    where
-        Self: 'a;
-
-    fn fill_buf(&mut self, n_bytes: usize) -> wincode::io::ReadResult<&[u8]> {
-        if n_bytes > self.remaining {
-            return Err(wincode::io::read_size_limit(n_bytes));
-        }
-        let buf = self.inner.fill_buf()?;
-        Ok(&buf[..buf.len().min(self.remaining)])
-    }
-
-    fn copy_into_slice(&mut self, dst: &mut [MaybeUninit<u8>]) -> wincode::io::ReadResult<()> {
-        if dst.len() > self.remaining {
-            return Err(wincode::io::read_size_limit(dst.len()));
-        }
-        let dst =
-            unsafe { std::slice::from_raw_parts_mut(dst.as_mut_ptr().cast::<u8>(), dst.len()) };
-        self.inner.read_exact(dst)?;
-        self.remaining -= dst.len();
-        Ok(())
-    }
-
-    unsafe fn consume_unchecked(&mut self, amt: usize) {
-        self.inner.consume(amt);
-        self.remaining -= amt;
-    }
-
-    fn consume(&mut self, amt: usize) -> wincode::io::ReadResult<()> {
-        if amt > self.remaining {
-            return Err(wincode::io::read_size_limit(amt));
-        }
-        let buffered = self.inner.buffer().len();
-        if amt > buffered {
-            return Err(wincode::io::read_size_limit(amt));
-        }
-        self.inner.consume(amt);
-        self.remaining -= amt;
-        Ok(())
-    }
-
-    unsafe fn as_trusted_for(
-        &mut self,
-        n_bytes: usize,
-    ) -> wincode::io::ReadResult<Self::Trusted<'_>> {
-        if n_bytes > self.remaining {
-            return Err(wincode::io::read_size_limit(n_bytes));
-        }
-        self.remaining -= n_bytes;
-        Ok(LimitedReader { inner: self.inner, remaining: n_bytes })
-    }
-}
-
-struct IoWriter<'a>(&'a mut dyn Write);
-
-impl wincode::io::Writer for IoWriter<'_> {
-    type Trusted<'a>
-        = TrustedIoWriter<'a>
-    where
-        Self: 'a;
-
-    fn write(&mut self, src: &[u8]) -> wincode::io::WriteResult<()> {
-        self.0.write_all(src)?;
-        Ok(())
-    }
-
-    unsafe fn as_trusted_for(
-        &mut self,
-        n_bytes: usize,
-    ) -> wincode::io::WriteResult<Self::Trusted<'_>> {
-        Ok(TrustedIoWriter { inner: self.0, remaining: n_bytes })
-    }
-}
-
-struct TrustedIoWriter<'a> {
-    inner: &'a mut dyn Write,
-    remaining: usize,
-}
-
-impl wincode::io::Writer for TrustedIoWriter<'_> {
-    type Trusted<'a>
-        = TrustedIoWriter<'a>
-    where
-        Self: 'a;
-
-    fn finish(&mut self) -> wincode::io::WriteResult<()> {
-        if self.remaining != 0 {
-            return Err(wincode::io::WriteError::WriteSizeLimit(self.remaining));
-        }
-        Ok(())
-    }
-
-    fn write(&mut self, src: &[u8]) -> wincode::io::WriteResult<()> {
-        if src.len() > self.remaining {
-            return Err(wincode::io::WriteError::WriteSizeLimit(src.len()));
-        }
-        self.inner.write_all(src)?;
-        self.remaining -= src.len();
-        Ok(())
-    }
-
-    unsafe fn as_trusted_for(
-        &mut self,
-        n_bytes: usize,
-    ) -> wincode::io::WriteResult<Self::Trusted<'_>> {
-        if n_bytes > self.remaining {
-            return Err(wincode::io::WriteError::WriteSizeLimit(n_bytes));
-        }
-        self.remaining -= n_bytes;
-        Ok(TrustedIoWriter { inner: self.inner, remaining: n_bytes })
-    }
 }
 
 fn opt_level_to_u8(level: OptimizationLevel) -> u8 {

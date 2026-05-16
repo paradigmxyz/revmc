@@ -74,7 +74,7 @@ tracing-tracy = "0.11"
 paste = "1.0"
 quanta = "0.12"
 wait-timeout = "0.2"
-wincode = { version = "0.4.5", features = ["derive"] }
+wincode = { version = "0.5.4", features = ["derive"] }
 
 [profile.dev]
 opt-level = 3
