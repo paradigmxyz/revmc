@@ -14,7 +14,6 @@ use crate::{
 use alloy_primitives::{B256, Bytes};
 use crossbeam_channel as chan;
 use revm_primitives::hardfork::SpecId;
-use serde::{Deserialize, Serialize};
 use std::{
     io::{BufReader, Read, Write},
     ops::ControlFlow,
@@ -25,6 +24,7 @@ use std::{
     time::{Duration, Instant},
 };
 use wait_timeout::ChildExt;
+use wincode::{SchemaRead, SchemaWrite};
 
 const HELPER_ENV: &str = "REVMC_JIT_HELPER";
 
@@ -262,7 +262,7 @@ fn set_rlimit(resource: libc::c_int, value: u64) -> std::io::Result<()> {
 #[cfg(not(unix))]
 fn apply_helper_limits(_command: &mut Command, _config: &RuntimeConfig) {}
 
-#[derive(Serialize, Deserialize)]
+#[derive(SchemaWrite, SchemaRead)]
 struct HelperRequest {
     code_hash: [u8; 32],
     spec_id: u8,
@@ -274,7 +274,7 @@ struct HelperRequest {
     bytecode: Vec<u8>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(SchemaWrite, SchemaRead)]
 enum HelperResponse {
     Ok { symbol_name: String, object_bytes: Vec<u8>, builtin_symbols: Vec<String> },
     Err { error: String },
@@ -374,8 +374,11 @@ fn write_helper_result(
     Ok(())
 }
 
-fn write_message<T: Serialize>(mut w: impl Write, message: &T) -> std::io::Result<()> {
-    let bytes = <serde_wincode::SerdeCompat<T> as wincode::Serialize>::serialize(message)
+fn write_message<T>(mut w: impl Write, message: &T) -> std::io::Result<()>
+where
+    T: wincode::SchemaWrite<wincode::config::DefaultConfig, Src = T>,
+{
+    let bytes = wincode::serialize(message)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     let len = u32::try_from(bytes.len())
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "message too large"))?;
@@ -383,7 +386,10 @@ fn write_message<T: Serialize>(mut w: impl Write, message: &T) -> std::io::Resul
     w.write_all(&bytes)
 }
 
-fn read_message<T: for<'de> Deserialize<'de>>(r: &mut impl Read) -> std::io::Result<Option<T>> {
+fn read_message<T>(r: &mut impl Read) -> std::io::Result<Option<T>>
+where
+    for<'de> T: wincode::SchemaRead<'de, wincode::config::DefaultConfig, Dst = T>,
+{
     let mut len = [0; 4];
     let n = r.read(&mut len[..1])?;
     if n == 0 {
@@ -392,7 +398,7 @@ fn read_message<T: for<'de> Deserialize<'de>>(r: &mut impl Read) -> std::io::Res
     r.read_exact(&mut len[1..])?;
     let mut bytes = vec![0; u32::from_le_bytes(len) as usize];
     r.read_exact(&mut bytes)?;
-    <serde_wincode::SerdeCompat<T> as wincode::Deserialize>::deserialize(&bytes)
+    wincode::deserialize(&bytes)
         .map(Some)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
 }
