@@ -1111,6 +1111,37 @@ fn prepare_aot_skips_jit_resident() {
 }
 
 // ===========================================================================
+// Tests: cold-entry eviction.
+// ===========================================================================
+
+#[test]
+#[cfg(feature = "llvm")]
+fn cold_entries_are_evicted() {
+    let tb = TestBackend::with_tuning_1w(RuntimeTuning {
+        jit_hot_threshold: 2,
+        jit_max_pending_jobs: 1,
+        idle_evict_duration: Some(std::time::Duration::from_millis(20)),
+        eviction_sweep_interval: std::time::Duration::from_millis(10),
+        event_drain_interval: std::time::Duration::from_millis(10),
+        ..Default::default()
+    });
+
+    for i in 0..10 {
+        let _ = tb.lookup(TestBackend::req_cancun(&indexed_bytecode(i)));
+    }
+
+    let compile_me = indexed_bytecode(42);
+    for _ in 0..2 {
+        let _ = tb.lookup(TestBackend::req_cancun(&compile_me));
+    }
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    assert_eq!(tb.stats().resident_entries, 0);
+
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    tb.wait_compiled(&compile_me, SpecId::CANCUN);
+}
+
+// ===========================================================================
 // Tests: compiler recycling.
 // ===========================================================================
 

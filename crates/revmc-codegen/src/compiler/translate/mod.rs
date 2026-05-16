@@ -1009,7 +1009,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                         let invalid_jump = self.add_invalid_jump();
                         self.bcx.switch(target_value, invalid_jump, &switch_targets, true);
 
-                        self.inst_entries[inst] = self.bcx.current_block().unwrap();
                         goto_return!(no_branch);
                     } else if data.flags.contains(InstFlags::STATIC_JUMP) {
                         // Pop and discard the target; it's always on the stack.
@@ -1048,7 +1047,6 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                         self.materialize_live_stack();
                         self.bcx.br(target);
                     }
-                    self.inst_entries[inst] = self.bcx.current_block().unwrap();
                 }
 
                 goto_return!(no_branch);
