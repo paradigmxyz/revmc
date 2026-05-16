@@ -23,7 +23,7 @@ use rayon::{ThreadPool, ThreadPoolBuilder};
 use std::{
     cell::RefCell,
     fs::File,
-    io::{BufRead, BufReader, Read, Write},
+    io::{BufReader, Cursor, Read, Write},
     path::PathBuf,
     process::{Child, ChildStdin, Command, Stdio},
     thread::JoinHandle,
@@ -44,8 +44,6 @@ use crate::{
 };
 #[cfg(feature = "llvm")]
 use revm_primitives::hardfork::SpecId;
-#[cfg(feature = "llvm")]
-use serde::{Deserialize, Serialize};
 
 /// Notifier for synchronous compilation requests.
 ///
@@ -487,8 +485,11 @@ impl Drop for HelperProcessInner {
     }
 }
 
+const HELPER_PROTOCOL_VERSION: u8 = 1;
+const HELPER_RESPONSE_OK: u8 = 0;
+const HELPER_RESPONSE_ERR: u8 = 1;
+
 #[cfg(feature = "llvm")]
-#[derive(Serialize, Deserialize)]
 struct HelperRequest {
     code_hash: [u8; 32],
     spec_id: u8,
@@ -501,8 +502,6 @@ struct HelperRequest {
 }
 
 #[cfg(feature = "llvm")]
-#[derive(Serialize, Deserialize)]
-#[serde(tag = "status", rename_all = "snake_case")]
 enum HelperResponse {
     Ok { symbol_name: String, object_bytes: Vec<u8>, builtin_symbols: Vec<String> },
     Err { error: String },
@@ -510,30 +509,23 @@ enum HelperResponse {
 
 #[cfg(feature = "llvm")]
 fn write_job(mut w: impl Write, job: &CompileJob, config: &RuntimeConfig) -> std::io::Result<()> {
-    let req = HelperRequest {
-        code_hash: job.key.code_hash.0,
-        spec_id: job.key.spec_id as u8,
-        opt_level: opt_level_to_u8(job.opt_level),
-        debug_assertions: config.debug_assertions,
-        no_dedup: config.no_dedup,
-        no_dse: config.no_dse,
-        symbol_name: job.symbol_name.clone(),
-        bytecode: job.bytecode.to_vec(),
-    };
-    serde_json::to_writer(&mut w, &req)?;
-    w.write_all(b"\n")
+    let mut frame = Vec::with_capacity(job.bytecode.len() + job.symbol_name.len() + 64);
+    write_u8(&mut frame, HELPER_PROTOCOL_VERSION)?;
+    write_fixed_bytes(&mut frame, &job.key.code_hash.0)?;
+    write_u8(&mut frame, job.key.spec_id as u8)?;
+    write_u8(&mut frame, opt_level_to_u8(job.opt_level))?;
+    let flags = u8::from(config.debug_assertions)
+        | (u8::from(config.no_dedup) << 1)
+        | (u8::from(config.no_dse) << 2);
+    write_u8(&mut frame, flags)?;
+    write_string(&mut frame, &job.symbol_name)?;
+    write_bytes(&mut frame, &job.bytecode)?;
+    write_frame(&mut w, &frame)
 }
 
 #[cfg(feature = "llvm")]
-fn read_helper_result(r: &mut impl BufRead) -> Result<WorkerSuccess, String> {
-    let mut line = String::new();
-    let n = r.read_line(&mut line).map_err(|e| format!("failed to read helper result: {e}"))?;
-    if n == 0 {
-        return Err("JIT helper closed stdout".into());
-    }
-    match serde_json::from_str::<HelperResponse>(&line)
-        .map_err(|e| format!("failed to decode helper result: {e}"))?
-    {
+fn read_helper_result(r: &mut impl Read) -> Result<WorkerSuccess, String> {
+    match read_response(r)? {
         HelperResponse::Ok { symbol_name, object_bytes, builtin_symbols } => {
             Ok(WorkerSuccess::JitObject(JitObjectSuccess {
                 symbol_name,
@@ -553,7 +545,7 @@ pub(super) fn run_jit_helper_stdio() -> eyre::Result<()> {
 
     while let Some((job, config)) = read_helper_job(&mut stdin)? {
         if compiler.is_none() {
-            compiler = Some(create_compiler(&config, false).map_err(|e| eyre::eyre!(e))?);
+            compiler = Some(create_compiler(&config, true).map_err(|e| eyre::eyre!(e))?);
         }
         let compiler = compiler.as_mut().unwrap();
         compiler.set_opt_level(job.opt_level);
@@ -573,12 +565,8 @@ pub(super) fn run_jit_helper_stdio() -> eyre::Result<()> {
 }
 
 #[cfg(feature = "llvm")]
-fn read_helper_job(stdin: &mut impl BufRead) -> eyre::Result<Option<(CompileJob, RuntimeConfig)>> {
-    let mut line = String::new();
-    if stdin.read_line(&mut line)? == 0 {
-        return Ok(None);
-    }
-    let req: HelperRequest = serde_json::from_str(&line)?;
+fn read_helper_job(stdin: &mut impl Read) -> eyre::Result<Option<(CompileJob, RuntimeConfig)>> {
+    let Some(req) = read_request(stdin)? else { return Ok(None) };
     let spec_id = SpecId::try_from_u8(req.spec_id).ok_or_else(|| eyre::eyre!("invalid spec id"))?;
     let opt_level = opt_level_from_u8(req.opt_level)?;
 
@@ -605,7 +593,7 @@ fn write_helper_result(
     mut stdout: impl Write,
     result: Result<WorkerSuccess, String>,
 ) -> eyre::Result<()> {
-    let response = match result {
+    match result {
         Ok(WorkerSuccess::JitObject(success)) => HelperResponse::Ok {
             symbol_name: success.symbol_name,
             object_bytes: success.object_bytes.to_vec(),
@@ -613,10 +601,194 @@ fn write_helper_result(
         },
         Ok(_) => unreachable!(),
         Err(error) => HelperResponse::Err { error },
-    };
-    serde_json::to_writer(&mut stdout, &response)?;
-    stdout.write_all(b"\n")?;
+    }
+    .write(&mut stdout)?;
     Ok(())
+}
+
+#[cfg(feature = "llvm")]
+impl HelperResponse {
+    fn write(self, mut w: impl Write) -> std::io::Result<()> {
+        let mut frame = Vec::new();
+        write_u8(&mut frame, HELPER_PROTOCOL_VERSION)?;
+        match self {
+            Self::Ok { symbol_name, object_bytes, builtin_symbols } => {
+                write_u8(&mut frame, HELPER_RESPONSE_OK)?;
+                write_string(&mut frame, &symbol_name)?;
+                write_bytes(&mut frame, &object_bytes)?;
+                write_u32(&mut frame, usize_to_u32(builtin_symbols.len())?)?;
+                for symbol in builtin_symbols {
+                    write_string(&mut frame, &symbol)?;
+                }
+            }
+            Self::Err { error } => {
+                write_u8(&mut frame, HELPER_RESPONSE_ERR)?;
+                write_string(&mut frame, &error)?;
+            }
+        }
+        write_frame(&mut w, &frame)
+    }
+}
+
+#[cfg(feature = "llvm")]
+fn read_request(r: &mut impl Read) -> eyre::Result<Option<HelperRequest>> {
+    let Some(frame) = read_frame(r)? else { return Ok(None) };
+    let mut r = Cursor::new(frame);
+    check_protocol_version(read_u8(&mut r)?)?;
+    let mut code_hash = [0; 32];
+    r.read_exact(&mut code_hash)?;
+    let spec_id = read_u8(&mut r)?;
+    let opt_level = read_u8(&mut r)?;
+    let flags = read_u8(&mut r)?;
+    let symbol_name = read_string(&mut r)?;
+    let bytecode = read_bytes(&mut r)?;
+    ensure_frame_consumed(&r)?;
+    Ok(Some(HelperRequest {
+        code_hash,
+        spec_id,
+        opt_level,
+        debug_assertions: flags & 1 != 0,
+        no_dedup: flags & (1 << 1) != 0,
+        no_dse: flags & (1 << 2) != 0,
+        symbol_name,
+        bytecode,
+    }))
+}
+
+#[cfg(feature = "llvm")]
+fn read_response(r: &mut impl Read) -> Result<HelperResponse, String> {
+    let Some(frame) = read_frame(r).map_err(|e| format!("failed to read helper result: {e}"))?
+    else {
+        return Err("JIT helper closed stdout".into());
+    };
+    let mut r = Cursor::new(frame);
+    check_protocol_version(
+        read_u8(&mut r).map_err(|e| format!("failed to decode helper result: {e}"))?,
+    )
+    .map_err(|e| format!("failed to decode helper result: {e}"))?;
+    let tag = read_u8(&mut r).map_err(|e| format!("failed to decode helper result: {e}"))?;
+    let response = match tag {
+        HELPER_RESPONSE_OK => {
+            let symbol_name =
+                read_string(&mut r).map_err(|e| format!("failed to decode helper result: {e}"))?;
+            let object_bytes =
+                read_bytes(&mut r).map_err(|e| format!("failed to decode helper result: {e}"))?;
+            let n_symbols =
+                read_u32(&mut r).map_err(|e| format!("failed to decode helper result: {e}"))?;
+            let mut builtin_symbols = Vec::with_capacity(n_symbols as usize);
+            for _ in 0..n_symbols {
+                builtin_symbols.push(
+                    read_string(&mut r)
+                        .map_err(|e| format!("failed to decode helper result: {e}"))?,
+                );
+            }
+            HelperResponse::Ok { symbol_name, object_bytes, builtin_symbols }
+        }
+        HELPER_RESPONSE_ERR => {
+            let error =
+                read_string(&mut r).map_err(|e| format!("failed to decode helper result: {e}"))?;
+            HelperResponse::Err { error }
+        }
+        _ => return Err(format!("failed to decode helper result: unknown response tag {tag}")),
+    };
+    ensure_frame_consumed(&r).map_err(|e| format!("failed to decode helper result: {e}"))?;
+    Ok(response)
+}
+
+#[cfg(feature = "llvm")]
+fn check_protocol_version(version: u8) -> eyre::Result<()> {
+    if version != HELPER_PROTOCOL_VERSION {
+        eyre::bail!("unsupported helper protocol version {version}");
+    }
+    Ok(())
+}
+
+#[cfg(feature = "llvm")]
+fn write_frame(mut w: impl Write, frame: &[u8]) -> std::io::Result<()> {
+    write_u32(&mut w, usize_to_u32(frame.len())?)?;
+    w.write_all(frame)
+}
+
+#[cfg(feature = "llvm")]
+fn read_frame(r: &mut impl Read) -> std::io::Result<Option<Vec<u8>>> {
+    let mut len = [0; 4];
+    let n = r.read(&mut len[..1])?;
+    if n == 0 {
+        return Ok(None);
+    }
+    r.read_exact(&mut len[1..])?;
+    let len = u32::from_le_bytes(len);
+    let mut frame = vec![0; len as usize];
+    r.read_exact(&mut frame)?;
+    Ok(Some(frame))
+}
+
+#[cfg(feature = "llvm")]
+fn ensure_frame_consumed(r: &Cursor<Vec<u8>>) -> eyre::Result<()> {
+    if r.position() != r.get_ref().len() as u64 {
+        eyre::bail!("trailing bytes in helper frame");
+    }
+    Ok(())
+}
+
+#[cfg(feature = "llvm")]
+fn write_u8(mut w: impl Write, value: u8) -> std::io::Result<()> {
+    w.write_all(&[value])
+}
+
+#[cfg(feature = "llvm")]
+fn write_u32(mut w: impl Write, value: u32) -> std::io::Result<()> {
+    w.write_all(&value.to_le_bytes())
+}
+
+#[cfg(feature = "llvm")]
+fn write_fixed_bytes(mut w: impl Write, bytes: &[u8]) -> std::io::Result<()> {
+    w.write_all(bytes)
+}
+
+#[cfg(feature = "llvm")]
+fn write_bytes(mut w: impl Write, bytes: &[u8]) -> std::io::Result<()> {
+    write_u32(&mut w, usize_to_u32(bytes.len())?)?;
+    w.write_all(bytes)
+}
+
+#[cfg(feature = "llvm")]
+fn write_string(w: impl Write, value: &str) -> std::io::Result<()> {
+    write_bytes(w, value.as_bytes())
+}
+
+#[cfg(feature = "llvm")]
+fn read_u8(mut r: impl Read) -> std::io::Result<u8> {
+    let mut buf = [0];
+    r.read_exact(&mut buf)?;
+    Ok(buf[0])
+}
+
+#[cfg(feature = "llvm")]
+fn read_u32(mut r: impl Read) -> std::io::Result<u32> {
+    let mut buf = [0; 4];
+    r.read_exact(&mut buf)?;
+    Ok(u32::from_le_bytes(buf))
+}
+
+#[cfg(feature = "llvm")]
+fn read_bytes(mut r: impl Read) -> std::io::Result<Vec<u8>> {
+    let len = read_u32(&mut r)? as usize;
+    let mut bytes = vec![0; len];
+    r.read_exact(&mut bytes)?;
+    Ok(bytes)
+}
+
+#[cfg(feature = "llvm")]
+fn read_string(r: impl Read) -> std::io::Result<String> {
+    String::from_utf8(read_bytes(r)?)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+}
+
+#[cfg(feature = "llvm")]
+fn usize_to_u32(value: usize) -> std::io::Result<u32> {
+    u32::try_from(value)
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "frame too large"))
 }
 
 #[cfg(feature = "llvm")]
@@ -808,12 +980,16 @@ fn compile_jit_object_artifact(
     compiler
         .write_object(&mut object_bytes)
         .map_err(|e| format!("JIT object write failed: {e}"))?;
-    let builtin_symbols = compiler
+    let mut builtin_symbols: Vec<String> = compiler
         .backend()
         .pending_symbol_names()
         .into_iter()
         .map(|name| name.to_string_lossy().into_owned())
         .collect();
+    if builtin_symbols.is_empty() {
+        builtin_symbols =
+            revmc_builtins::Builtin::ALL.iter().map(|builtin| builtin.name().to_string()).collect();
+    }
 
     debug!(
         bytecode_len = job.bytecode.len(),
