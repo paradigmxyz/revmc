@@ -14,9 +14,15 @@
 pub mod btest;
 pub mod compiled;
 pub mod diagnostic;
+pub mod discover;
+pub mod fixtures;
+pub mod harness;
 pub mod merkle_trie;
 pub mod runner;
 pub mod utils;
+
+#[doc(hidden)]
+pub use revmc_builtins as builtins;
 
 use std::path::{Path, PathBuf};
 use walkdir::{DirEntry, WalkDir};

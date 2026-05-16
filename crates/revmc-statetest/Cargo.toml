@@ -15,6 +15,7 @@ exclude.workspace = true
 
 [dependencies]
 revmc = { workspace = true, features = ["llvm"] }
+revmc-builtins.workspace = true
 
 revm-context = { workspace = true, features = ["std"] }
 revm-context-interface = { workspace = true, features = ["std"] }
@@ -36,6 +37,7 @@ eyre.workspace = true
 indicatif = "0.18"
 k256 = { version = "0.13", features = ["ecdsa"] }
 libloading = "0.9"
+libtest-mimic.workspace = true
 serde_json = { version = "1.0", features = ["preserve_order"] }
 tempfile = "3"
 thiserror = "2"
@@ -44,5 +46,13 @@ tracing-subscriber.workspace = true
 tracing.workspace = true
 walkdir = "2.5"
 
+[build-dependencies]
+revmc-build.workspace = true
+
 [lib]
 path = "src/lib.rs"
+
+[[test]]
+name = "statetest"
+path = "tests/statetest.rs"
+harness = false

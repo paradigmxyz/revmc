@@ -1586,6 +1586,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "escape8259"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5692dd7b5a1978a5aeb0ce83b7655c58ca8efdcb79d21036ea249da95afec2c6"
+
+[[package]]
 name = "eyre"
 version = "0.6.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2139,6 +2145,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e02f3bb43d335493c96bf3fd3a321600bf6bd07ed34bc64118e9293bdffea46c"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "libtest-mimic"
+version = "0.8.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "14e6ba06f0ade6e504aff834d7c34298e5155c6baca353cc6a4aaff2f9fd7f33"
+dependencies = [
+ "anstream",
+ "anstyle",
+ "clap",
+ "escape8259",
 ]
 
 [[package]]
@@ -3147,7 +3165,6 @@ dependencies = [
  "revmc-context",
  "revmc-llvm",
  "revmc-runtime",
- "revmc-statetest",
 ]
 
 [[package]]
@@ -3364,6 +3381,7 @@ dependencies = [
  "indicatif",
  "k256",
  "libloading",
+ "libtest-mimic",
  "revm-bytecode",
  "revm-context",
  "revm-context-interface",
@@ -3376,6 +3394,8 @@ dependencies = [
  "revm-state",
  "revm-statetest-types",
  "revmc",
+ "revmc-build",
+ "revmc-builtins",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
