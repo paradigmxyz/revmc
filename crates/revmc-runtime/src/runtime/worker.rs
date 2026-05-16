@@ -10,28 +10,20 @@
 //! as the job channel closes.
 
 use crate::{
-    CompileTimings, EvmCompilerFn, OptimizationLevel, eyre,
+    CompileTimings, EvmCompilerFn, OptimizationLevel,
     runtime::{
         config::{CompilationKind, JitMode, RuntimeConfig},
         storage::RuntimeCacheKey,
     },
 };
-use alloy_primitives::{B256, Bytes};
+use alloy_primitives::Bytes;
 use crossbeam_channel as chan;
 use rayon::{ThreadPool, ThreadPoolBuilder};
 #[cfg(feature = "llvm")]
-use std::{
-    cell::RefCell,
-    fs::File,
-    io::{BufReader, Cursor, Read, Write},
-    path::PathBuf,
-    process::{Child, ChildStdin, Command, Stdio},
-    thread::JoinHandle,
-    time::Instant,
-};
+use std::{cell::RefCell, fs::File, io::Read, time::Instant};
 use std::{
     sync::{
-        Arc, Mutex, OnceLock,
+        Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
@@ -42,8 +34,6 @@ use crate::{
     EvmCompiler, EvmLlvmBackend, Linker,
     llvm::{JitDylibGuard, orc::ResourceTracker},
 };
-#[cfg(feature = "llvm")]
-use revm_primitives::hardfork::SpecId;
 
 /// Notifier for synchronous compilation requests.
 ///
@@ -271,8 +261,9 @@ impl WorkerPool {
 
     /// Cancels any in-flight compilation that can be interrupted externally.
     pub(crate) fn cancel_in_flight(&self) {
+        #[cfg(feature = "llvm")]
         if self.config.jit_mode == JitMode::OutOfProcess {
-            reset_jit_helper();
+            super::out_of_process::cancel_in_flight();
         }
     }
 }
@@ -297,7 +288,7 @@ fn compile_job(job: CompileJob, config: &RuntimeConfig) -> WorkerResult {
     trace!(?job, "received job");
     match job.kind {
         CompilationKind::Jit if config.jit_mode == JitMode::OutOfProcess => {
-            compile_job_out_of_process(job, config)
+            super::out_of_process::compile_job(job, config)
         }
         CompilationKind::Jit => {
             JIT_COMPILER.with_borrow_mut(|state| compile_with_state(job, config, state))
@@ -306,554 +297,6 @@ fn compile_job(job: CompileJob, config: &RuntimeConfig) -> WorkerResult {
             AOT_COMPILER.with_borrow_mut(|state| compile_with_state(job, config, state))
         }
     }
-}
-
-#[cfg(feature = "llvm")]
-fn compile_job_out_of_process(job: CompileJob, config: &RuntimeConfig) -> WorkerResult {
-    let t0 = Instant::now();
-    let outcome = run_helper_job(&job, config);
-    WorkerResult {
-        key: job.key,
-        outcome,
-        kind: job.kind,
-        sync_notifier: job.sync_notifier,
-        generation: job.generation,
-        compile_duration: t0.elapsed(),
-        timings: CompileTimings::default(),
-    }
-}
-
-const HELPER_ENV: &str = "REVMC_JIT_HELPER";
-
-#[cfg(all(feature = "llvm", unix))]
-fn apply_helper_limits(command: &mut Command, config: &RuntimeConfig) {
-    use std::os::unix::process::CommandExt;
-
-    let memory_limit = config.tuning.jit_helper_memory_limit_bytes;
-    let cpu_time = config.tuning.jit_helper_cpu_time;
-    if memory_limit == 0 && cpu_time.is_none() {
-        return;
-    }
-
-    // SAFETY: `pre_exec` runs in the child after fork and before exec. The closure only calls
-    // async-signal-safe libc `setrlimit` and constructs an `io::Error` if it fails.
-    unsafe {
-        command.pre_exec(move || {
-            if memory_limit > 0 {
-                set_rlimit(libc::RLIMIT_AS as _, memory_limit)?;
-            }
-            if let Some(cpu_time) = cpu_time {
-                let seconds = cpu_time.as_secs().max(1);
-                set_rlimit(libc::RLIMIT_CPU as _, seconds)?;
-            }
-            Ok(())
-        });
-    }
-}
-
-#[cfg(all(feature = "llvm", unix))]
-fn set_rlimit(resource: libc::c_int, value: u64) -> std::io::Result<()> {
-    let value = libc::rlim_t::try_from(value).unwrap_or(libc::rlim_t::MAX);
-    let limit = libc::rlimit { rlim_cur: value, rlim_max: value };
-    if unsafe { libc::setrlimit(resource as _, &limit) } != 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(())
-}
-
-#[cfg(all(feature = "llvm", not(unix)))]
-fn apply_helper_limits(_command: &mut Command, _config: &RuntimeConfig) {}
-
-#[cfg(feature = "llvm")]
-fn run_helper_job(job: &CompileJob, config: &RuntimeConfig) -> Result<WorkerSuccess, String> {
-    if config.gas_params.is_some() {
-        return Err("out-of-process JIT does not support custom gas params yet".into());
-    }
-    if config.dump_dir.is_some() {
-        return Err("out-of-process JIT does not support debug dumps yet".into());
-    }
-
-    helper_process().compile(job, config)
-}
-
-#[cfg(feature = "llvm")]
-static HELPER_PROCESS: OnceLock<HelperProcess> = OnceLock::new();
-
-#[cfg(feature = "llvm")]
-fn helper_process() -> &'static HelperProcess {
-    HELPER_PROCESS.get_or_init(HelperProcess::default)
-}
-
-#[cfg(feature = "llvm")]
-fn reset_jit_helper() {
-    if let Some(helper) = HELPER_PROCESS.get() {
-        helper.reset();
-    }
-}
-
-#[cfg(not(feature = "llvm"))]
-fn reset_jit_helper() {}
-
-#[cfg(feature = "llvm")]
-struct HelperIo {
-    stdin: ChildStdin,
-    result_rx: chan::Receiver<Result<WorkerSuccess, String>>,
-}
-
-#[cfg(feature = "llvm")]
-#[derive(Default)]
-struct HelperProcess {
-    inner: Mutex<Option<Arc<HelperProcessInner>>>,
-}
-
-#[cfg(feature = "llvm")]
-impl HelperProcess {
-    fn compile(&self, job: &CompileJob, config: &RuntimeConfig) -> Result<WorkerSuccess, String> {
-        let helper = {
-            let mut slot = self.inner.lock().unwrap();
-            if slot.as_ref().is_none_or(|helper| !helper.matches_config(config)) {
-                *slot = Some(Arc::new(HelperProcessInner::spawn(config)?));
-            }
-            slot.as_ref().unwrap().clone()
-        };
-
-        match helper.compile(job, config) {
-            Ok(result) => Ok(result),
-            Err(err) => {
-                let mut slot = self.inner.lock().unwrap();
-                if slot.as_ref().is_some_and(|current| Arc::ptr_eq(current, &helper)) {
-                    *slot = None;
-                }
-                Err(err)
-            }
-        }
-    }
-
-    fn reset(&self) {
-        if let Some(helper) = self.inner.lock().unwrap().take() {
-            helper.kill();
-        }
-    }
-}
-
-#[cfg(feature = "llvm")]
-struct HelperProcessInner {
-    path: PathBuf,
-    child: Mutex<Child>,
-    io: Mutex<HelperIo>,
-    reader: Mutex<Option<JoinHandle<()>>>,
-}
-
-#[cfg(feature = "llvm")]
-impl HelperProcessInner {
-    fn spawn(config: &RuntimeConfig) -> Result<Self, String> {
-        let path = match &config.jit_helper_path {
-            Some(path) => path.clone(),
-            None => {
-                std::env::current_exe().map_err(|e| format!("failed to locate current exe: {e}"))?
-            }
-        };
-        let mut command = Command::new(&path);
-        command
-            .env(HELPER_ENV, "1")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit());
-        apply_helper_limits(&mut command, config);
-
-        let mut child = command.spawn().map_err(|e| format!("failed to spawn JIT helper: {e}"))?;
-        let stdin = child.stdin.take().ok_or("helper stdin unavailable")?;
-        let stdout = child.stdout.take().ok_or("helper stdout unavailable")?;
-        let (result_tx, result_rx) = chan::bounded(1);
-        let reader = std::thread::spawn(move || {
-            let mut stdout = BufReader::new(stdout);
-            loop {
-                let result = read_helper_result(&mut stdout);
-                let done = result.is_err();
-                if result_tx.send(result).is_err() || done {
-                    break;
-                }
-            }
-        });
-        Ok(Self {
-            path,
-            child: Mutex::new(child),
-            io: Mutex::new(HelperIo { stdin, result_rx }),
-            reader: Mutex::new(Some(reader)),
-        })
-    }
-
-    fn matches_config(&self, config: &RuntimeConfig) -> bool {
-        match &config.jit_helper_path {
-            Some(path) => self.path == *path,
-            None => std::env::current_exe().map(|path| self.path == path).unwrap_or(false),
-        }
-    }
-
-    fn compile(&self, job: &CompileJob, config: &RuntimeConfig) -> Result<WorkerSuccess, String> {
-        let mut io = self.io.lock().unwrap();
-        write_job(&mut io.stdin, job, config)
-            .map_err(|e| format!("failed to write helper job: {e}"))?;
-        io.stdin.flush().map_err(|e| format!("failed to flush helper job: {e}"))?;
-
-        match io.result_rx.recv_timeout(config.tuning.jit_timeout) {
-            Ok(result) => result,
-            Err(chan::RecvTimeoutError::Timeout) => {
-                self.kill();
-                Err(format!("JIT helper timed out after {:?}", config.tuning.jit_timeout))
-            }
-            Err(chan::RecvTimeoutError::Disconnected) => {
-                let status = self.child.lock().unwrap().try_wait().ok().flatten();
-                Err(match status {
-                    Some(status) => format!("JIT helper exited with {status}"),
-                    None => "JIT helper disconnected".into(),
-                })
-            }
-        }
-    }
-
-    fn kill(&self) {
-        let mut child = self.child.lock().unwrap();
-        let _ = child.kill();
-        let _ = child.wait();
-    }
-}
-
-#[cfg(feature = "llvm")]
-impl Drop for HelperProcessInner {
-    fn drop(&mut self) {
-        self.kill();
-        if let Some(reader) = self.reader.lock().unwrap().take() {
-            let _ = reader.join();
-        }
-    }
-}
-
-const HELPER_PROTOCOL_VERSION: u8 = 1;
-const HELPER_RESPONSE_OK: u8 = 0;
-const HELPER_RESPONSE_ERR: u8 = 1;
-
-#[cfg(feature = "llvm")]
-struct HelperRequest {
-    code_hash: [u8; 32],
-    spec_id: u8,
-    opt_level: u8,
-    debug_assertions: bool,
-    no_dedup: bool,
-    no_dse: bool,
-    symbol_name: String,
-    bytecode: Vec<u8>,
-}
-
-#[cfg(feature = "llvm")]
-enum HelperResponse {
-    Ok { symbol_name: String, object_bytes: Vec<u8>, builtin_symbols: Vec<String> },
-    Err { error: String },
-}
-
-#[cfg(feature = "llvm")]
-fn write_job(mut w: impl Write, job: &CompileJob, config: &RuntimeConfig) -> std::io::Result<()> {
-    let mut frame = Vec::with_capacity(job.bytecode.len() + job.symbol_name.len() + 64);
-    write_u8(&mut frame, HELPER_PROTOCOL_VERSION)?;
-    write_fixed_bytes(&mut frame, &job.key.code_hash.0)?;
-    write_u8(&mut frame, job.key.spec_id as u8)?;
-    write_u8(&mut frame, opt_level_to_u8(job.opt_level))?;
-    let flags = u8::from(config.debug_assertions)
-        | (u8::from(config.no_dedup) << 1)
-        | (u8::from(config.no_dse) << 2);
-    write_u8(&mut frame, flags)?;
-    write_string(&mut frame, &job.symbol_name)?;
-    write_bytes(&mut frame, &job.bytecode)?;
-    write_frame(&mut w, &frame)
-}
-
-#[cfg(feature = "llvm")]
-fn read_helper_result(r: &mut impl Read) -> Result<WorkerSuccess, String> {
-    match read_response(r)? {
-        HelperResponse::Ok { symbol_name, object_bytes, builtin_symbols } => {
-            Ok(WorkerSuccess::JitObject(JitObjectSuccess {
-                symbol_name,
-                object_bytes: Bytes::from(object_bytes),
-                builtin_symbols,
-            }))
-        }
-        HelperResponse::Err { error } => Err(error),
-    }
-}
-
-#[cfg(feature = "llvm")]
-pub(super) fn run_jit_helper_stdio() -> eyre::Result<()> {
-    let mut stdin = std::io::stdin().lock();
-    let mut stdout = std::io::stdout().lock();
-    let mut compiler: Option<EvmCompiler<EvmLlvmBackend>> = None;
-
-    while let Some((job, config)) = read_helper_job(&mut stdin)? {
-        if compiler.is_none() {
-            compiler = Some(create_compiler(&config, true).map_err(|e| eyre::eyre!(e))?);
-        }
-        let compiler = compiler.as_mut().unwrap();
-        compiler.set_opt_level(job.opt_level);
-        compiler.debug_assertions(config.debug_assertions);
-        compiler.set_dedup(!config.no_dedup);
-        compiler.set_dse(!config.no_dse);
-
-        let result = compile_jit_object_artifact(&job, compiler);
-        if let Err(err) = compiler.clear_ir() {
-            warn!(%err, "clear_ir failed");
-        }
-        write_helper_result(&mut stdout, result)?;
-        stdout.flush()?;
-    }
-
-    Ok(())
-}
-
-#[cfg(feature = "llvm")]
-fn read_helper_job(stdin: &mut impl Read) -> eyre::Result<Option<(CompileJob, RuntimeConfig)>> {
-    let Some(req) = read_request(stdin)? else { return Ok(None) };
-    let spec_id = SpecId::try_from_u8(req.spec_id).ok_or_else(|| eyre::eyre!("invalid spec id"))?;
-    let opt_level = opt_level_from_u8(req.opt_level)?;
-
-    let config = RuntimeConfig {
-        debug_assertions: req.debug_assertions,
-        no_dedup: req.no_dedup,
-        no_dse: req.no_dse,
-        ..Default::default()
-    };
-    let job = CompileJob {
-        kind: CompilationKind::Jit,
-        key: RuntimeCacheKey { code_hash: B256::from(req.code_hash), spec_id },
-        bytecode: Bytes::from(req.bytecode),
-        symbol_name: req.symbol_name,
-        opt_level,
-        sync_notifier: SyncNotifier::none(),
-        generation: 0,
-    };
-    Ok(Some((job, config)))
-}
-
-#[cfg(feature = "llvm")]
-fn write_helper_result(
-    mut stdout: impl Write,
-    result: Result<WorkerSuccess, String>,
-) -> eyre::Result<()> {
-    match result {
-        Ok(WorkerSuccess::JitObject(success)) => HelperResponse::Ok {
-            symbol_name: success.symbol_name,
-            object_bytes: success.object_bytes.to_vec(),
-            builtin_symbols: success.builtin_symbols,
-        },
-        Ok(_) => unreachable!(),
-        Err(error) => HelperResponse::Err { error },
-    }
-    .write(&mut stdout)?;
-    Ok(())
-}
-
-#[cfg(feature = "llvm")]
-impl HelperResponse {
-    fn write(self, mut w: impl Write) -> std::io::Result<()> {
-        let mut frame = Vec::new();
-        write_u8(&mut frame, HELPER_PROTOCOL_VERSION)?;
-        match self {
-            Self::Ok { symbol_name, object_bytes, builtin_symbols } => {
-                write_u8(&mut frame, HELPER_RESPONSE_OK)?;
-                write_string(&mut frame, &symbol_name)?;
-                write_bytes(&mut frame, &object_bytes)?;
-                write_u32(&mut frame, usize_to_u32(builtin_symbols.len())?)?;
-                for symbol in builtin_symbols {
-                    write_string(&mut frame, &symbol)?;
-                }
-            }
-            Self::Err { error } => {
-                write_u8(&mut frame, HELPER_RESPONSE_ERR)?;
-                write_string(&mut frame, &error)?;
-            }
-        }
-        write_frame(&mut w, &frame)
-    }
-}
-
-#[cfg(feature = "llvm")]
-fn read_request(r: &mut impl Read) -> eyre::Result<Option<HelperRequest>> {
-    let Some(frame) = read_frame(r)? else { return Ok(None) };
-    let mut r = Cursor::new(frame);
-    check_protocol_version(read_u8(&mut r)?)?;
-    let mut code_hash = [0; 32];
-    r.read_exact(&mut code_hash)?;
-    let spec_id = read_u8(&mut r)?;
-    let opt_level = read_u8(&mut r)?;
-    let flags = read_u8(&mut r)?;
-    let symbol_name = read_string(&mut r)?;
-    let bytecode = read_bytes(&mut r)?;
-    ensure_frame_consumed(&r)?;
-    Ok(Some(HelperRequest {
-        code_hash,
-        spec_id,
-        opt_level,
-        debug_assertions: flags & 1 != 0,
-        no_dedup: flags & (1 << 1) != 0,
-        no_dse: flags & (1 << 2) != 0,
-        symbol_name,
-        bytecode,
-    }))
-}
-
-#[cfg(feature = "llvm")]
-fn read_response(r: &mut impl Read) -> Result<HelperResponse, String> {
-    let Some(frame) = read_frame(r).map_err(|e| format!("failed to read helper result: {e}"))?
-    else {
-        return Err("JIT helper closed stdout".into());
-    };
-    let mut r = Cursor::new(frame);
-    check_protocol_version(
-        read_u8(&mut r).map_err(|e| format!("failed to decode helper result: {e}"))?,
-    )
-    .map_err(|e| format!("failed to decode helper result: {e}"))?;
-    let tag = read_u8(&mut r).map_err(|e| format!("failed to decode helper result: {e}"))?;
-    let response = match tag {
-        HELPER_RESPONSE_OK => {
-            let symbol_name =
-                read_string(&mut r).map_err(|e| format!("failed to decode helper result: {e}"))?;
-            let object_bytes =
-                read_bytes(&mut r).map_err(|e| format!("failed to decode helper result: {e}"))?;
-            let n_symbols =
-                read_u32(&mut r).map_err(|e| format!("failed to decode helper result: {e}"))?;
-            let mut builtin_symbols = Vec::with_capacity(n_symbols as usize);
-            for _ in 0..n_symbols {
-                builtin_symbols.push(
-                    read_string(&mut r)
-                        .map_err(|e| format!("failed to decode helper result: {e}"))?,
-                );
-            }
-            HelperResponse::Ok { symbol_name, object_bytes, builtin_symbols }
-        }
-        HELPER_RESPONSE_ERR => {
-            let error =
-                read_string(&mut r).map_err(|e| format!("failed to decode helper result: {e}"))?;
-            HelperResponse::Err { error }
-        }
-        _ => return Err(format!("failed to decode helper result: unknown response tag {tag}")),
-    };
-    ensure_frame_consumed(&r).map_err(|e| format!("failed to decode helper result: {e}"))?;
-    Ok(response)
-}
-
-#[cfg(feature = "llvm")]
-fn check_protocol_version(version: u8) -> eyre::Result<()> {
-    if version != HELPER_PROTOCOL_VERSION {
-        eyre::bail!("unsupported helper protocol version {version}");
-    }
-    Ok(())
-}
-
-#[cfg(feature = "llvm")]
-fn write_frame(mut w: impl Write, frame: &[u8]) -> std::io::Result<()> {
-    write_u32(&mut w, usize_to_u32(frame.len())?)?;
-    w.write_all(frame)
-}
-
-#[cfg(feature = "llvm")]
-fn read_frame(r: &mut impl Read) -> std::io::Result<Option<Vec<u8>>> {
-    let mut len = [0; 4];
-    let n = r.read(&mut len[..1])?;
-    if n == 0 {
-        return Ok(None);
-    }
-    r.read_exact(&mut len[1..])?;
-    let len = u32::from_le_bytes(len);
-    let mut frame = vec![0; len as usize];
-    r.read_exact(&mut frame)?;
-    Ok(Some(frame))
-}
-
-#[cfg(feature = "llvm")]
-fn ensure_frame_consumed(r: &Cursor<Vec<u8>>) -> eyre::Result<()> {
-    if r.position() != r.get_ref().len() as u64 {
-        eyre::bail!("trailing bytes in helper frame");
-    }
-    Ok(())
-}
-
-#[cfg(feature = "llvm")]
-fn write_u8(mut w: impl Write, value: u8) -> std::io::Result<()> {
-    w.write_all(&[value])
-}
-
-#[cfg(feature = "llvm")]
-fn write_u32(mut w: impl Write, value: u32) -> std::io::Result<()> {
-    w.write_all(&value.to_le_bytes())
-}
-
-#[cfg(feature = "llvm")]
-fn write_fixed_bytes(mut w: impl Write, bytes: &[u8]) -> std::io::Result<()> {
-    w.write_all(bytes)
-}
-
-#[cfg(feature = "llvm")]
-fn write_bytes(mut w: impl Write, bytes: &[u8]) -> std::io::Result<()> {
-    write_u32(&mut w, usize_to_u32(bytes.len())?)?;
-    w.write_all(bytes)
-}
-
-#[cfg(feature = "llvm")]
-fn write_string(w: impl Write, value: &str) -> std::io::Result<()> {
-    write_bytes(w, value.as_bytes())
-}
-
-#[cfg(feature = "llvm")]
-fn read_u8(mut r: impl Read) -> std::io::Result<u8> {
-    let mut buf = [0];
-    r.read_exact(&mut buf)?;
-    Ok(buf[0])
-}
-
-#[cfg(feature = "llvm")]
-fn read_u32(mut r: impl Read) -> std::io::Result<u32> {
-    let mut buf = [0; 4];
-    r.read_exact(&mut buf)?;
-    Ok(u32::from_le_bytes(buf))
-}
-
-#[cfg(feature = "llvm")]
-fn read_bytes(mut r: impl Read) -> std::io::Result<Vec<u8>> {
-    let len = read_u32(&mut r)? as usize;
-    let mut bytes = vec![0; len];
-    r.read_exact(&mut bytes)?;
-    Ok(bytes)
-}
-
-#[cfg(feature = "llvm")]
-fn read_string(r: impl Read) -> std::io::Result<String> {
-    String::from_utf8(read_bytes(r)?)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
-}
-
-#[cfg(feature = "llvm")]
-fn usize_to_u32(value: usize) -> std::io::Result<u32> {
-    u32::try_from(value)
-        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "frame too large"))
-}
-
-#[cfg(feature = "llvm")]
-fn opt_level_to_u8(level: OptimizationLevel) -> u8 {
-    match level {
-        OptimizationLevel::None => 0,
-        OptimizationLevel::Less => 1,
-        OptimizationLevel::Default => 2,
-        OptimizationLevel::Aggressive => 3,
-    }
-}
-
-#[cfg(feature = "llvm")]
-fn opt_level_from_u8(level: u8) -> eyre::Result<OptimizationLevel> {
-    Ok(match level {
-        0 => OptimizationLevel::None,
-        1 => OptimizationLevel::Less,
-        2 => OptimizationLevel::Default,
-        3 => OptimizationLevel::Aggressive,
-        _ => eyre::bail!("invalid optimization level"),
-    })
 }
 
 #[cfg(feature = "llvm")]
@@ -966,7 +409,7 @@ thread_local! {
 }
 
 #[cfg(feature = "llvm")]
-fn create_compiler(
+pub(super) fn create_compiler(
     config: &RuntimeConfig,
     aot: bool,
 ) -> Result<EvmCompiler<EvmLlvmBackend>, String> {
@@ -1012,7 +455,7 @@ fn compile_jit_artifact(
 
 /// Compiles a single bytecode to a shared library and returns the raw bytes.
 #[cfg(feature = "llvm")]
-fn compile_jit_object_artifact(
+pub(super) fn compile_jit_object_artifact(
     job: &CompileJob,
     compiler: &mut EvmCompiler<EvmLlvmBackend>,
 ) -> Result<WorkerSuccess, String> {

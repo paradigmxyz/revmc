@@ -52,6 +52,9 @@ tempfile = "3.10"
 quanta.workspace = true
 rayon.workspace = true
 tracing.workspace = true
+serde.workspace = true
+serde-wincode.workspace = true
+wincode.workspace = true
 
 [dev-dependencies]
 revmc-statetest = { path = "../revmc-statetest" }

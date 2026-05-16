@@ -16,6 +16,7 @@ use crossbeam_queue::ArrayQueue;
 use revm_primitives::{B256, hardfork::SpecId, hints_util::cold_path};
 use stats::RuntimeStats;
 use std::{
+    ops::ControlFlow,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -43,25 +44,27 @@ pub use storage::{
     RuntimeCacheKey, StoredArtifact,
 };
 
+#[cfg(feature = "llvm")]
+mod out_of_process;
+
 mod worker;
 
 /// Runs the out-of-process JIT helper if this process was launched as one.
 ///
-/// Returns `Ok(true)` after the helper request has been handled and the caller
-/// should exit immediately. Normal application startup should continue on
-/// `Ok(false)`.
-pub fn maybe_run_jit_helper() -> eyre::Result<bool> {
-    if std::env::var_os("REVMC_JIT_HELPER").is_none() {
-        return Ok(false);
-    }
+/// Returns [`ControlFlow::Break`] after the helper request has been handled and
+/// the caller should exit immediately. Normal application startup should
+/// continue on [`ControlFlow::Continue`].
+pub fn maybe_run_jit_helper() -> eyre::Result<ControlFlow<()>> {
     #[cfg(feature = "llvm")]
     {
-        worker::run_jit_helper_stdio()?;
-        Ok(true)
+        out_of_process::maybe_run_jit_helper()
     }
     #[cfg(not(feature = "llvm"))]
     {
-        eyre::bail!("LLVM backend not available")
+        if std::env::var_os("REVMC_JIT_HELPER").is_some() {
+            eyre::bail!("LLVM backend not available")
+        }
+        Ok(ControlFlow::Continue(()))
     }
 }
 
@@ -144,7 +147,7 @@ impl JitBackend {
     /// Call [`set_enabled`](Self::set_enabled) to lazily spawn the backend thread with
     /// a default [`RuntimeConfig`].
     pub fn disabled() -> Self {
-        Self::new(RuntimeConfig::default()).expect("default config cannot fail")
+        Self::new_inner(RuntimeConfig::default()).expect("default config cannot fail")
     }
 
     /// Creates a backend from the given config.
@@ -153,6 +156,11 @@ impl JitBackend {
     /// immediately and AOT artifacts are preloaded. Otherwise, both are deferred until the
     /// first [`set_enabled(true)`](Self::set_enabled) call.
     pub fn new(mut config: RuntimeConfig) -> eyre::Result<Self> {
+        config = config.with_env_overrides()?;
+        Self::new_inner(config)
+    }
+
+    fn new_inner(mut config: RuntimeConfig) -> eyre::Result<Self> {
         if config.blocking {
             config.enabled = true;
             config.tuning.jit_hot_threshold = 0;
