@@ -15,105 +15,33 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  matrices:
+    name: build matrices
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      test-matrix: ${{ steps.gen.outputs.test-matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Generate matrices
+        id: gen
+        shell: bash
+        run: |
+          output=$(python3 .github/scripts/matrices.py)
+          printf '::debug::test-matrix=%s\n' "$output"
+          printf 'test-matrix=%s\n' "$output" >> "$GITHUB_OUTPUT"
+
   test:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.runner }}
+    needs: matrices
     timeout-minutes: 60
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - name: test ubuntu-x64 stable dev
-            kind: test
-            os: ubuntu
-            runner: depot-ubuntu-latest
-            arch: x64
-            toolchain: stable
-            profile: dev
-          - name: test ubuntu-x64 stable release
-            kind: test
-            os: ubuntu
-            runner: depot-ubuntu-latest
-            arch: x64
-            toolchain: stable
-            profile: release
-          - name: test ubuntu-x64 nightly dev
-            kind: test
-            os: ubuntu
-            runner: depot-ubuntu-latest
-            arch: x64
-            toolchain: nightly
-            profile: dev
-          - name: test ubuntu-x64 nightly release
-            kind: test
-            os: ubuntu
-            runner: depot-ubuntu-latest
-            arch: x64
-            toolchain: nightly
-            profile: release
-          - name: test macos-arm64 stable dev
-            kind: test
-            os: macos
-            runner: macos-latest
-            arch: arm64
-            toolchain: stable
-            profile: dev
-          - name: test macos-arm64 stable release
-            kind: test
-            os: macos
-            runner: macos-latest
-            arch: arm64
-            toolchain: stable
-            profile: release
-          - name: test macos-arm64 nightly dev
-            kind: test
-            os: macos
-            runner: macos-latest
-            arch: arm64
-            toolchain: nightly
-            profile: dev
-          - name: test macos-arm64 nightly release
-            kind: test
-            os: macos
-            runner: macos-latest
-            arch: arm64
-            toolchain: nightly
-            profile: release
-          - name: statetest ubuntu-x64 interpreter
-            kind: statetest
-            os: ubuntu
-            runner: depot-ubuntu-latest-8
-            arch: x64
-            toolchain: stable
-            mode: interpreter
-          - name: statetest ubuntu-x64 jit
-            kind: statetest
-            os: ubuntu
-            runner: depot-ubuntu-latest-8
-            arch: x64
-            toolchain: stable
-            mode: jit
-          - name: statetest ubuntu-x64 aot
-            kind: statetest
-            os: ubuntu
-            runner: depot-ubuntu-latest-8
-            arch: x64
-            toolchain: stable
-            mode: aot
-          - name: statetest macos-arm64 interpreter
-            kind: statetest
-            os: macos
-            runner: depot-macos-latest
-            arch: arm64
-            toolchain: stable
-            mode: interpreter
-          - name: statetest macos-arm64 jit
-            kind: statetest
-            os: macos
-            runner: depot-macos-latest
-            arch: arm64
-            toolchain: stable
-            mode: jit
+      matrix: ${{ fromJson(needs.matrices.outputs.test-matrix) }}
     steps:
       - uses: actions/checkout@v4
       - name: Install LLVM (apt)
@@ -242,6 +170,7 @@ jobs:
     runs-on: ubuntu-latest
     if: always()
     needs:
+      - matrices
       - test
       - feature-checks
       - clippy
