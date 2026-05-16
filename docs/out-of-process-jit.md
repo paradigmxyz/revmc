@@ -30,13 +30,14 @@ Current prototype:
 - Workers send length-prefixed binary JIT object requests to the helper over stdin and receive length-prefixed binary responses from stdout.
 - The parent links returned object bytes into its local ORC instance, resolves the symbol, and constructs `JitCodeBacking` with a parent-owned `ResourceTracker`.
 - `RuntimeTuning::jit_timeout` bounds each helper compilation; timed-out helpers are killed and replaced on the next job.
+- Clearing resident code or shutting down the runtime kills the helper process so in-flight out-of-process compiles can be interrupted instead of waiting for LLVM to finish.
 
 Still needed:
 
 - Move the worker pool into a single helper process; the parent should only enqueue IPC requests.
 - Carry the remaining data in the IPC payloads: gas params, dump settings, generation, timings, and richer errors.
 - Keep AOT jobs either in the helper too or explicitly route them through the existing in-process AOT path; the first option gives consistent isolation.
-- Define shutdown semantics: close IPC, let the helper drain or cancel queued jobs, then kill on timeout.
+- Define graceful shutdown semantics for queued helper jobs; the current implementation kills the helper for cancellation/shutdown.
 - Treat helper crash as worker-pool failure: fail pending synchronous jobs, drop pending async jobs, and optionally respawn.
 
 ## Open questions

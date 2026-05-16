@@ -262,10 +262,18 @@ impl WorkerPool {
     /// Shuts down all workers after draining queued jobs.
     pub(crate) fn shutdown(&mut self) {
         self.shutdown.store(true, Ordering::Release);
+        self.cancel_in_flight();
         if let Some(pool) = &self.pool {
             pool.broadcast(|_| clear_thread_local_compilers());
         }
         self.pool.take();
+    }
+
+    /// Cancels any in-flight compilation that can be interrupted externally.
+    pub(crate) fn cancel_in_flight(&self) {
+        if self.config.jit_mode == JitMode::OutOfProcess {
+            reset_jit_helper();
+        }
     }
 }
 
@@ -369,32 +377,61 @@ fn run_helper_job(job: &CompileJob, config: &RuntimeConfig) -> Result<WorkerSucc
 }
 
 #[cfg(feature = "llvm")]
+static HELPER_PROCESS: OnceLock<HelperProcess> = OnceLock::new();
+
+#[cfg(feature = "llvm")]
 fn helper_process() -> &'static HelperProcess {
-    static HELPER: OnceLock<HelperProcess> = OnceLock::new();
-    HELPER.get_or_init(HelperProcess::default)
+    HELPER_PROCESS.get_or_init(HelperProcess::default)
+}
+
+#[cfg(feature = "llvm")]
+fn reset_jit_helper() {
+    if let Some(helper) = HELPER_PROCESS.get() {
+        helper.reset();
+    }
+}
+
+#[cfg(not(feature = "llvm"))]
+fn reset_jit_helper() {}
+
+#[cfg(feature = "llvm")]
+struct HelperIo {
+    stdin: ChildStdin,
+    result_rx: chan::Receiver<Result<WorkerSuccess, String>>,
 }
 
 #[cfg(feature = "llvm")]
 #[derive(Default)]
 struct HelperProcess {
-    inner: Mutex<Option<HelperProcessInner>>,
+    inner: Mutex<Option<Arc<HelperProcessInner>>>,
 }
 
 #[cfg(feature = "llvm")]
 impl HelperProcess {
     fn compile(&self, job: &CompileJob, config: &RuntimeConfig) -> Result<WorkerSuccess, String> {
-        let mut slot = self.inner.lock().unwrap();
-        if slot.as_ref().is_none_or(|helper| !helper.matches_config(config)) {
-            *slot = Some(HelperProcessInner::spawn(config)?);
-        }
+        let helper = {
+            let mut slot = self.inner.lock().unwrap();
+            if slot.as_ref().is_none_or(|helper| !helper.matches_config(config)) {
+                *slot = Some(Arc::new(HelperProcessInner::spawn(config)?));
+            }
+            slot.as_ref().unwrap().clone()
+        };
 
-        let helper = slot.as_mut().unwrap();
         match helper.compile(job, config) {
             Ok(result) => Ok(result),
             Err(err) => {
-                *slot = None;
+                let mut slot = self.inner.lock().unwrap();
+                if slot.as_ref().is_some_and(|current| Arc::ptr_eq(current, &helper)) {
+                    *slot = None;
+                }
                 Err(err)
             }
+        }
+    }
+
+    fn reset(&self) {
+        if let Some(helper) = self.inner.lock().unwrap().take() {
+            helper.kill();
         }
     }
 }
@@ -402,10 +439,9 @@ impl HelperProcess {
 #[cfg(feature = "llvm")]
 struct HelperProcessInner {
     path: PathBuf,
-    child: Child,
-    stdin: ChildStdin,
-    result_rx: chan::Receiver<Result<WorkerSuccess, String>>,
-    reader: Option<JoinHandle<()>>,
+    child: Mutex<Child>,
+    io: Mutex<HelperIo>,
+    reader: Mutex<Option<JoinHandle<()>>>,
 }
 
 #[cfg(feature = "llvm")]
@@ -433,12 +469,18 @@ impl HelperProcessInner {
             let mut stdout = BufReader::new(stdout);
             loop {
                 let result = read_helper_result(&mut stdout);
-                if result_tx.send(result).is_err() {
+                let done = result.is_err();
+                if result_tx.send(result).is_err() || done {
                     break;
                 }
             }
         });
-        Ok(Self { path, child, stdin, result_rx, reader: Some(reader) })
+        Ok(Self {
+            path,
+            child: Mutex::new(child),
+            io: Mutex::new(HelperIo { stdin, result_rx }),
+            reader: Mutex::new(Some(reader)),
+        })
     }
 
     fn matches_config(&self, config: &RuntimeConfig) -> bool {
@@ -448,23 +490,20 @@ impl HelperProcessInner {
         }
     }
 
-    fn compile(
-        &mut self,
-        job: &CompileJob,
-        config: &RuntimeConfig,
-    ) -> Result<WorkerSuccess, String> {
-        write_job(&mut self.stdin, job, config)
+    fn compile(&self, job: &CompileJob, config: &RuntimeConfig) -> Result<WorkerSuccess, String> {
+        let mut io = self.io.lock().unwrap();
+        write_job(&mut io.stdin, job, config)
             .map_err(|e| format!("failed to write helper job: {e}"))?;
-        self.stdin.flush().map_err(|e| format!("failed to flush helper job: {e}"))?;
+        io.stdin.flush().map_err(|e| format!("failed to flush helper job: {e}"))?;
 
-        match self.result_rx.recv_timeout(config.tuning.jit_timeout) {
+        match io.result_rx.recv_timeout(config.tuning.jit_timeout) {
             Ok(result) => result,
             Err(chan::RecvTimeoutError::Timeout) => {
-                let _ = self.child.kill();
+                self.kill();
                 Err(format!("JIT helper timed out after {:?}", config.tuning.jit_timeout))
             }
             Err(chan::RecvTimeoutError::Disconnected) => {
-                let status = self.child.try_wait().ok().flatten();
+                let status = self.child.lock().unwrap().try_wait().ok().flatten();
                 Err(match status {
                     Some(status) => format!("JIT helper exited with {status}"),
                     None => "JIT helper disconnected".into(),
@@ -472,14 +511,19 @@ impl HelperProcessInner {
             }
         }
     }
+
+    fn kill(&self) {
+        let mut child = self.child.lock().unwrap();
+        let _ = child.kill();
+        let _ = child.wait();
+    }
 }
 
 #[cfg(feature = "llvm")]
 impl Drop for HelperProcessInner {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-        if let Some(reader) = self.reader.take() {
+        self.kill();
+        if let Some(reader) = self.reader.lock().unwrap().take() {
             let _ = reader.join();
         }
     }

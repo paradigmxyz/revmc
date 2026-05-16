@@ -412,6 +412,7 @@ impl BackendState {
     }
 
     fn handle_clear_resident(&mut self) {
+        self.workers.cancel_in_flight();
         self.inner.resident.clear();
         self.resident_meta.clear();
         // Notify any pending sync callers before clearing entries.
