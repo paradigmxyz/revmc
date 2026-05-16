@@ -32,6 +32,14 @@ Current prototype:
 - `RuntimeTuning::jit_timeout` bounds each helper compilation; timed-out helpers are killed and replaced on the next job.
 - Clearing resident code or shutting down the runtime kills the helper process so in-flight out-of-process compiles can be interrupted instead of waiting for LLVM to finish.
 
+## Fork-only helper startup
+
+Using `fork()` without `exec` is not safe with the current lazy helper model. The helper is spawned from a runtime worker after the backend has started threads, and a child forked from a multithreaded process can only safely run async-signal-safe operations until `exec`. The helper would immediately need to run normal Rust code, allocate, use locks, deserialize IPC messages, and initialize/run LLVM, so it does not fit that rule.
+
+Avoiding LLVM translation in the parent is not sufficient. The parent still uses LLVM ORC to link returned object files, and the Rust runtime, allocator, tracing, channels, and other libraries can have process-global locks or thread-local state before the helper is spawned.
+
+A fork-only helper may be viable only as an early fork server: fork during single-threaded startup before any LLVM initialization or backend worker creation, then let the child own all helper-side Rust/LLVM state. That would require an explicit startup path instead of the current lazy spawn.
+
 Still needed:
 
 - Move the worker pool into a single helper process; the parent should only enqueue IPC requests.

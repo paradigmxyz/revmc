@@ -20,10 +20,11 @@ use std::{
     ops::ControlFlow,
     path::PathBuf,
     process::{Child, ChildStdin, Command, Stdio},
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Arc, Mutex},
     thread::JoinHandle,
-    time::Instant,
+    time::{Duration, Instant},
 };
+use wait_timeout::ChildExt;
 
 const HELPER_ENV: &str = "REVMC_JIT_HELPER";
 
@@ -53,9 +54,7 @@ pub(super) fn compile_job(job: CompileJob, config: &RuntimeConfig) -> WorkerResu
 
 /// Cancels in-flight out-of-process helper work.
 pub(super) fn cancel_in_flight() {
-    if let Some(helper) = HELPER_PROCESS.get() {
-        helper.reset();
-    }
+    HELPER_PROCESS.reset();
 }
 
 fn run_helper_job(job: &CompileJob, config: &RuntimeConfig) -> Result<WorkerSuccess, String> {
@@ -69,10 +68,10 @@ fn run_helper_job(job: &CompileJob, config: &RuntimeConfig) -> Result<WorkerSucc
     helper_process().compile(job, config)
 }
 
-static HELPER_PROCESS: OnceLock<HelperProcess> = OnceLock::new();
+static HELPER_PROCESS: HelperProcess = HelperProcess::new();
 
 fn helper_process() -> &'static HelperProcess {
-    HELPER_PROCESS.get_or_init(HelperProcess::default)
+    &HELPER_PROCESS
 }
 
 struct HelperIo {
@@ -80,12 +79,15 @@ struct HelperIo {
     result_rx: chan::Receiver<Result<WorkerSuccess, String>>,
 }
 
-#[derive(Default)]
 struct HelperProcess {
     inner: Mutex<Option<Arc<HelperProcessInner>>>,
 }
 
 impl HelperProcess {
+    const fn new() -> Self {
+        Self { inner: Mutex::new(None) }
+    }
+
     fn compile(&self, job: &CompileJob, config: &RuntimeConfig) -> Result<WorkerSuccess, String> {
         let helper = {
             let mut slot = self.inner.lock().unwrap();
@@ -119,6 +121,7 @@ struct HelperProcessInner {
     child: Mutex<Child>,
     io: Mutex<HelperIo>,
     reader: Mutex<Option<JoinHandle<()>>>,
+    shutdown_timeout: Duration,
 }
 
 impl HelperProcessInner {
@@ -146,7 +149,7 @@ impl HelperProcessInner {
             loop {
                 let result = read_helper_result(&mut stdout);
                 let done = result.is_err();
-                if result_tx.send(result).is_err() || done {
+                if result_tx.try_send(result).is_err() || done {
                     break;
                 }
             }
@@ -156,6 +159,7 @@ impl HelperProcessInner {
             child: Mutex::new(child),
             io: Mutex::new(HelperIo { stdin, result_rx }),
             reader: Mutex::new(Some(reader)),
+            shutdown_timeout: config.tuning.shutdown_timeout,
         })
     }
 
@@ -188,17 +192,32 @@ impl HelperProcessInner {
         }
     }
 
-    fn kill(&self) {
+    fn kill(&self) -> bool {
         let mut child = self.child.lock().unwrap();
-        let _ = child.kill();
-        let _ = child.wait();
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            return true;
+        }
+        if let Err(err) = child.kill() {
+            warn!(%err, "failed to kill JIT helper");
+        }
+        match child.wait_timeout(self.shutdown_timeout) {
+            Ok(Some(_)) => true,
+            Ok(None) => {
+                warn!(timeout = ?self.shutdown_timeout, "timed out waiting for JIT helper exit");
+                false
+            }
+            Err(err) => {
+                warn!(%err, "failed to wait for JIT helper exit");
+                false
+            }
+        }
     }
 }
 
 impl Drop for HelperProcessInner {
     fn drop(&mut self) {
-        self.kill();
-        if let Some(reader) = self.reader.lock().unwrap().take() {
+        let exited = self.kill();
+        if exited && let Some(reader) = self.reader.lock().unwrap().take() {
             let _ = reader.join();
         }
     }

@@ -75,6 +75,7 @@ paste = "1.0"
 quanta = "0.12"
 serde = { version = "1", features = ["derive"] }
 serde-wincode = "0.1"
+wait-timeout = "0.2"
 wincode = "0.4.5"
 
 [profile.dev]

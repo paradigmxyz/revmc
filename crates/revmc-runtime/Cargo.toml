@@ -54,6 +54,7 @@ rayon.workspace = true
 tracing.workspace = true
 serde.workspace = true
 serde-wincode.workspace = true
+wait-timeout.workspace = true
 wincode.workspace = true
 
 [dev-dependencies]
