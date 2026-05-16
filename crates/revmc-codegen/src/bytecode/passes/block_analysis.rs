@@ -113,6 +113,27 @@ impl ConstSetInterner {
         }
     }
 
+    fn const_set_contains(&self, set_idx: ConstSetIdx, value: U256Imm) -> bool {
+        self.get(set_idx).binary_search(&value).is_ok()
+    }
+
+    fn const_set_contains_all(&self, set_idx: ConstSetIdx, values: &[U256Imm]) -> bool {
+        let set = self.get(set_idx);
+        let mut i = 0;
+        let mut j = 0;
+        while i < set.len() && j < values.len() {
+            match set[i].cmp(&values[j]) {
+                Ordering::Less => i += 1,
+                Ordering::Equal => {
+                    i += 1;
+                    j += 1;
+                }
+                Ordering::Greater => return false,
+            }
+        }
+        j == values.len()
+    }
+
     /// Interns a sorted, deduplicated set and returns the corresponding `AbsValue`.
     fn intern_set(&mut self, set: &[U256Imm]) -> AbsValue {
         match set.len() {
@@ -122,11 +143,44 @@ impl ConstSetInterner {
         }
     }
 
+    #[inline(never)]
+    fn join_into(&mut self, slot: &mut AbsValue, incoming: AbsValue) -> bool {
+        if matches!(*slot, AbsValue::Top) || *slot == incoming {
+            return false;
+        }
+
+        let joined = self.join(*slot, incoming);
+        if joined == *slot {
+            return false;
+        }
+
+        *slot = joined;
+        true
+    }
+
     /// Lattice join: two values merge to their least upper bound.
     fn join(&mut self, a: AbsValue, b: AbsValue) -> AbsValue {
+        if a == b {
+            return a;
+        }
+
         match (a, b) {
             (AbsValue::Top, _) | (_, AbsValue::Top) => AbsValue::Top,
-            (AbsValue::Const(x), AbsValue::Const(y)) if x == y => AbsValue::Const(x),
+
+            // If one value is a subset of the other, the result is the larger set.
+            (AbsValue::ConstSet(idx), AbsValue::Const(v)) if self.const_set_contains(idx, v) => a,
+            (AbsValue::Const(v), AbsValue::ConstSet(idx)) if self.const_set_contains(idx, v) => b,
+            (AbsValue::ConstSet(a_idx), AbsValue::ConstSet(b_idx))
+                if self.const_set_contains_all(a_idx, self.get(b_idx)) =>
+            {
+                a
+            }
+            (AbsValue::ConstSet(a_idx), AbsValue::ConstSet(b_idx))
+                if self.const_set_contains_all(b_idx, self.get(a_idx)) =>
+            {
+                b
+            }
+
             _ => {
                 let a = self.abs_const_set(&a).unwrap();
                 let b = self.abs_const_set(&b).unwrap();
@@ -166,65 +220,115 @@ impl ConstSetInterner {
 /// Instructions that access deeper than this (e.g. Amsterdam DUPN/SWAPN up to depth 236)
 /// treat the out-of-range slot as `Top` rather than aborting block interpretation.
 const MAX_ABS_STACK_DEPTH: usize = 64;
+const MAX_BLOCK_CONTEXTS: usize = 8;
+const MAX_SPLIT_FIXPOINT_ITERATIONS: usize = 512;
 
 /// Abstract state at the entry of a block.
 #[derive(Clone, Debug)]
 enum BlockState {
     /// Block has not been reached yet.
     Bottom,
-    /// Block has been reached with a known stack state (top-aligned).
-    Known(Vec<AbsValue>),
+    /// Block has been reached with one or more known stack states.
+    Known(SmallVec<[Vec<AbsValue>; 2]>),
 }
 
 impl BlockState {
+    fn states(&self) -> &[Vec<AbsValue>] {
+        match self {
+            Self::Bottom => &[],
+            Self::Known(states) => states,
+        }
+    }
+
     /// Join another incoming state into this one. Returns `true` if the state changed.
     ///
     /// When stack heights differ, the stacks are top-aligned and the shorter one is
     /// bottom-padded with `Top`. This handles the common Solidity dispatch pattern where
     /// the "no selector match" fallthrough leaves an extra item on the stack that the
     /// fallback ignores.
-    fn join(&mut self, incoming: &[AbsValue], sets: &mut ConstSetInterner) -> bool {
+    fn join(
+        &mut self,
+        incoming: &[AbsValue],
+        sets: &mut ConstSetInterner,
+        split_key: Option<usize>,
+    ) -> bool {
+        fn clamp_state(incoming: &[AbsValue]) -> Vec<AbsValue> {
+            let start = incoming.len().saturating_sub(MAX_ABS_STACK_DEPTH);
+            incoming[start..].to_vec()
+        }
+
+        fn join_state(
+            existing: &mut Vec<AbsValue>,
+            incoming: &[AbsValue],
+            sets: &mut ConstSetInterner,
+        ) -> bool {
+            if existing == incoming {
+                return false;
+            }
+
+            let new_len = existing.len().max(incoming.len());
+            let mut changed = false;
+
+            // Clamp to MAX_ABS_STACK_DEPTH by only joining the top portion;
+            // elements below that are unreachable by any EVM instruction and
+            // discarding them preserves soundness.
+            let join_len = new_len.min(MAX_ABS_STACK_DEPTH);
+
+            // Resize existing to join_len: pad at bottom with Top or truncate.
+            if existing.len() < join_len {
+                let pad = join_len - existing.len();
+                existing.splice(0..0, std::iter::repeat_n(AbsValue::Top, pad));
+                changed = true;
+            } else if existing.len() > join_len {
+                existing.drain(..existing.len() - join_len);
+                changed = true;
+            }
+
+            // Join element-wise, top-aligned. Both stacks have their top at the end.
+            // `incoming` may be longer than join_len — we only look at its top portion.
+            let incoming_start = incoming.len().saturating_sub(join_len);
+            let incoming_top = &incoming[incoming_start..];
+            // incoming_top.len() <= join_len. If shorter, bottom positions get Top.
+            let pad = join_len - incoming_top.len();
+            for i in 0..join_len {
+                let inc = if i < pad { AbsValue::Top } else { incoming_top[i - pad] };
+                if sets.join_into(&mut existing[i], inc) {
+                    changed = true;
+                }
+            }
+
+            changed
+        }
+
         match self {
             Self::Bottom => {
-                let start = incoming.len().saturating_sub(MAX_ABS_STACK_DEPTH);
-                *self = Self::Known(incoming[start..].to_vec());
+                *self = Self::Known(SmallVec::from_elem(clamp_state(incoming), 1));
                 true
             }
-            Self::Known(existing) => {
-                let new_len = existing.len().max(incoming.len());
-                let mut changed = false;
-
-                // Clamp to MAX_ABS_STACK_DEPTH by only joining the top portion;
-                // elements below that are unreachable by any EVM instruction and
-                // discarding them preserves soundness.
-                let join_len = new_len.min(MAX_ABS_STACK_DEPTH);
-
-                // Resize existing to join_len: pad at bottom with Top or truncate.
-                if existing.len() < join_len {
-                    let pad = join_len - existing.len();
-                    existing.splice(0..0, std::iter::repeat_n(AbsValue::Top, pad));
-                    changed = true;
-                } else if existing.len() > join_len {
-                    existing.drain(..existing.len() - join_len);
-                    changed = true;
-                }
-
-                // Join element-wise, top-aligned. Both stacks have their top at the end.
-                // `incoming` may be longer than join_len — we only look at its top portion.
-                let incoming_start = incoming.len().saturating_sub(join_len);
-                let incoming_top = &incoming[incoming_start..];
-                // incoming_top.len() <= join_len. If shorter, bottom positions get Top.
-                let pad = join_len - incoming_top.len();
-                for i in 0..join_len {
-                    let inc = if i < pad { AbsValue::Top } else { incoming_top[i - pad] };
-                    let joined = sets.join(existing[i], inc);
-                    if joined != existing[i] {
-                        existing[i] = joined;
-                        changed = true;
+            Self::Known(states) => {
+                let incoming_key = split_key
+                    .and_then(|offset| incoming.get(incoming.len().checked_sub(1 + offset)?))
+                    .copied();
+                let same_context = |state: &[AbsValue]| {
+                    if state.len() != incoming.len() {
+                        return false;
                     }
+                    let Some(offset) = split_key else { return true };
+                    let Some(incoming_key) = incoming_key else { return true };
+                    let Some(index) = state.len().checked_sub(1 + offset) else { return true };
+                    state.get(index).is_none_or(|&existing_key| existing_key == incoming_key)
+                };
+
+                if let Some(existing) = states.iter_mut().find(|state| same_context(state)) {
+                    return join_state(existing, incoming, sets);
                 }
 
-                changed
+                if states.len() < MAX_BLOCK_CONTEXTS {
+                    states.push(clamp_state(incoming));
+                    return true;
+                }
+
+                join_state(&mut states[0], incoming, sets)
             }
         }
     }
@@ -301,6 +405,8 @@ enum JumpTarget {
     Bottom,
     /// One or more known constant target instruction indices.
     Resolved(SmallVec<[Inst; 4]>),
+    /// One or more known valid targets, plus at least one known invalid target.
+    ResolvedWithInvalid(SmallVec<[Inst; 4]>),
     /// Known constant but invalid target.
     Invalid,
     /// Unknown target.
@@ -336,6 +442,10 @@ impl JumpResolution {
         Self::new(JumpTarget::Resolved(targets))
     }
 
+    fn resolved_with_invalid(targets: SmallVec<[Inst; 4]>) -> Self {
+        Self::new(JumpTarget::ResolvedWithInvalid(targets))
+    }
+
     /// Creates a resolved target with a single constant.
     fn single(inst: Inst) -> Self {
         Self::resolved(SmallVec::from_elem(inst, 1))
@@ -358,8 +468,15 @@ impl JumpResolution {
         matches!(self.target, JumpTarget::Top)
     }
 
+    fn is_bottom(&self) -> bool {
+        matches!(self.target, JumpTarget::Bottom)
+    }
+
     fn is_resolved(&self) -> bool {
-        matches!(self.target, JumpTarget::Resolved(_) | JumpTarget::Invalid)
+        matches!(
+            self.target,
+            JumpTarget::Resolved(_) | JumpTarget::ResolvedWithInvalid(_) | JumpTarget::Invalid
+        )
     }
 }
 
@@ -372,11 +489,50 @@ pub(crate) struct Cfg {
 }
 
 impl Bytecode<'_> {
+    fn record_input_snapshot(
+        &mut self,
+        inst: Inst,
+        operands: &[AbsValue],
+        const_sets: &mut ConstSetInterner,
+    ) {
+        let snap = &mut self.snapshots.inputs[inst];
+        if snap.is_empty() {
+            snap.extend_from_slice(operands);
+            return;
+        }
+
+        debug_assert_eq!(snap.len(), operands.len());
+        if snap.as_slice() == operands {
+            return;
+        }
+        for (slot, &operand) in snap.iter_mut().zip(operands) {
+            const_sets.join_into(slot, operand);
+        }
+    }
+
+    fn record_output_snapshot(
+        &mut self,
+        inst: Inst,
+        value: AbsValue,
+        const_sets: &mut ConstSetInterner,
+    ) {
+        match &mut self.snapshots.outputs[inst] {
+            Some(existing) => {
+                const_sets.join_into(existing, value);
+            }
+            slot @ None => *slot = Some(value),
+        }
+    }
+
     /// Ensures `self.snapshots` is sized for the current instruction count.
     fn init_snapshots(&mut self) {
         let n = self.insts.len();
         self.snapshots.inputs.resize(n, SmallVec::new());
         self.snapshots.outputs.resize(n, None);
+        for input in &mut self.snapshots.inputs {
+            input.clear();
+        }
+        self.snapshots.outputs.raw.fill(None);
     }
 
     /// Block-local jump resolution: interpret each block independently to discover
@@ -388,7 +544,7 @@ impl Bytecode<'_> {
     pub(crate) fn block_analysis_local(&mut self) {
         self.init_snapshots();
 
-        let empty_sets = ConstSetInterner::new();
+        let mut local_sets = ConstSetInterner::new();
         let mut resolved = Vec::new();
         let mut stack = Vec::new();
         let trace_logs = enabled!(tracing::Level::TRACE);
@@ -403,7 +559,7 @@ impl Bytecode<'_> {
             // Interpret the block with `Top` as inputs.
             stack.clear();
             stack.resize(section.inputs as usize, AbsValue::Top);
-            if !self.interpret_block(block.insts(), &mut stack) {
+            if !self.interpret_block(block.insts(), &mut stack, &mut local_sets, None, &mut None) {
                 continue;
             }
 
@@ -416,7 +572,7 @@ impl Bytecode<'_> {
                 continue;
             }
 
-            let target = self.resolve_jump(term_inst, &empty_sets);
+            let target = self.resolve_jump(term_inst, &local_sets);
             let Some(target_inst) = target.as_single() else { continue };
 
             // Log non-adjacent resolutions (not simple PUSH+JUMP).
@@ -448,7 +604,13 @@ impl Bytecode<'_> {
     #[inline(never)]
     pub(crate) fn block_analysis(&mut self, local_snapshots: &Snapshots) {
         self.init_snapshots();
-        let (resolved, count) = self.run_abstract_interp(local_snapshots);
+        let compiler_gas_used = self.compiler_gas_used;
+        let (mut resolved, mut count, converged) = self.run_abstract_interp(local_snapshots, true);
+        if !converged || resolved.iter().any(|(_, target)| target.is_top()) {
+            self.init_snapshots();
+            self.compiler_gas_used = compiler_gas_used;
+            (resolved, count, _) = self.run_abstract_interp(local_snapshots, false);
+        }
 
         let has_const_condition =
             resolved.iter().any(|(_, target)| target.condition != JumpCondition::Unknown);
@@ -506,6 +668,22 @@ impl Bytecode<'_> {
                     if !was_static {
                         newly_resolved += 1;
                     }
+                }
+                JumpTarget::ResolvedWithInvalid(targets) => {
+                    for &target_inst in targets {
+                        debug_assert_eq!(
+                            self.insts[target_inst].opcode,
+                            op::JUMPDEST,
+                            "block_analysis resolved to non-JUMPDEST"
+                        );
+                        self.insts[target_inst].set_jumpdest_reachable();
+                    }
+                    self.insts[jump_inst].flags |= InstFlags::STATIC_JUMP | InstFlags::MULTI_JUMP;
+                    self.multi_jump_targets.insert(jump_inst, targets.clone());
+                    if !was_static {
+                        newly_resolved += 1;
+                    }
+                    trace!(%jump_inst, n_targets = targets.len(), "resolved multi-target jump with invalid default");
                 }
                 JumpTarget::Invalid => {
                     self.multi_jump_targets.remove(&jump_inst);
@@ -699,19 +877,21 @@ impl Bytecode<'_> {
     fn run_abstract_interp(
         &mut self,
         local_snapshots: &Snapshots,
-    ) -> (Vec<(Inst, JumpResolution)>, usize) {
+        split_contexts: bool,
+    ) -> (Vec<(Inst, JumpResolution)>, usize, bool) {
         let num_blocks = self.cfg.blocks.len();
 
         // Initialize block states. Entry block starts with an empty stack.
         let mut block_states: IndexVec<Block, BlockState> =
             index_vec![BlockState::Bottom; num_blocks];
-        block_states[Block::from_usize(0)] = BlockState::Known(Vec::new());
+        block_states[Block::from_usize(0)] = BlockState::Known(SmallVec::from_elem(Vec::new(), 1));
 
         // Collect unresolved jumps, plus static JUMPI instructions whose condition
         // may become constant only after CFG fixpoint.
         let mut jump_insts: Vec<Inst> = Vec::new();
         for (i, inst) in self.insts.iter_enumerated() {
-            if inst.is_jump()
+            if !inst.is_dead_code()
+                && inst.is_jump()
                 && (!inst.flags.contains(InstFlags::STATIC_JUMP)
                     || (inst.opcode == op::JUMPI && !inst.has_const_jumpi_condition()))
             {
@@ -720,7 +900,8 @@ impl Bytecode<'_> {
         }
 
         let mut const_sets = ConstSetInterner::new();
-        let (discovered_edges, converged) = self.run_fixpoint(&mut block_states, &mut const_sets);
+        let (discovered_edges, converged) =
+            self.run_fixpoint(&mut block_states, &mut const_sets, split_contexts);
 
         // On non-convergence, all fixpoint-derived snapshots are potentially stale.
         // Restore the safe block-local snapshots computed by `block_analysis_local`.
@@ -742,18 +923,26 @@ impl Bytecode<'_> {
         // Invalidate resolutions that may be unsound due to incomplete analysis.
         // When the fixpoint didn't converge, partially-discovered ConstSets may be
         // incomplete, so we must conservatively invalidate them too.
-        if has_top_jump || !converged {
+        let has_bottom_jump = jump_targets.iter().any(|(_, target)| target.is_bottom());
+        if has_top_jump || has_bottom_jump || !converged {
             self.invalidate_suspect_jumps(
                 &mut jump_targets,
                 &block_states,
                 &discovered_edges,
                 local_snapshots,
+                has_top_jump || !converged,
             );
+        }
+
+        for bid in self.cfg.blocks.indices() {
+            if matches!(block_states[bid], BlockState::Bottom) {
+                self.snapshots.restore_from(self.cfg.blocks[bid].insts(), local_snapshots);
+            }
         }
 
         let count = jump_targets.iter().filter(|(_, target)| target.is_resolved()).count();
 
-        (jump_targets, count)
+        (jump_targets, count, converged)
     }
 
     fn resolve_jump(&self, jump_inst: Inst, const_sets: &ConstSetInterner) -> JumpResolution {
@@ -802,23 +991,22 @@ impl Bytecode<'_> {
                 let consts = const_sets.get(set_idx);
                 let interner = self.u256_interner.borrow();
                 let mut targets = SmallVec::new();
+                let mut has_invalid = false;
                 for &imm in consts {
                     let val = imm.get(&interner);
                     match usize::try_from(val) {
                         Ok(pc) if self.is_valid_jump(pc) => {
                             targets.push(self.pc_to_inst(pc));
                         }
-                        _ => {
-                            // Mixed valid + invalid: can't resolve since at runtime
-                            // the value might be any member of the set.
-                            return JumpResolution::top();
-                        }
+                        _ => has_invalid = true,
                     }
                 }
-                if !targets.is_empty() {
-                    JumpResolution::resolved(targets)
-                } else {
+                if targets.is_empty() {
                     JumpResolution::invalid()
+                } else if has_invalid {
+                    JumpResolution::resolved_with_invalid(targets)
+                } else {
+                    JumpResolution::resolved(targets)
                 }
             }
             AbsValue::Top => JumpResolution::top(),
@@ -877,6 +1065,7 @@ impl Bytecode<'_> {
         const_sets: &ConstSetInterner,
         discovered: &mut IndexVec<Block, SmallVec<[Block; 4]>>,
         disc_preds: &mut IndexVec<Block, SmallVec<[Block; 4]>>,
+        context_targets: &mut SmallVec<[Block; 4]>,
     ) {
         let consts = match operand {
             AbsValue::Const(imm) => Either::Left(std::iter::once(imm)),
@@ -890,13 +1079,74 @@ impl Bytecode<'_> {
                 continue;
             }
             let ti = self.pc_to_inst(target_pc);
-            if let Some(tb) = self.cfg.inst_to_block[ti]
-                && !discovered[bid].contains(&tb)
-            {
-                discovered[bid].push(tb);
-                disc_preds[tb].push(bid);
+            if let Some(tb) = self.cfg.inst_to_block[ti] {
+                if !context_targets.contains(&tb) {
+                    context_targets.push(tb);
+                }
+                if !discovered[bid].contains(&tb) {
+                    discovered[bid].push(tb);
+                    disc_preds[tb].push(bid);
+                }
             }
         }
+    }
+
+    fn jump_operand_split_keys(&self) -> IndexVec<Block, Option<usize>> {
+        self.cfg
+            .blocks
+            .iter_enumerated()
+            .map(|(_, block)| {
+                let term_inst = block.terminator();
+                let term = &self.insts[term_inst];
+                if !term.is_jump() || term.flags.contains(InstFlags::STATIC_JUMP) {
+                    return None;
+                }
+
+                let mut stack: Vec<Option<usize>> =
+                    (0..MAX_ABS_STACK_DEPTH).rev().map(Some).collect();
+
+                for inst in block.insts() {
+                    if self.insts[inst].is_dead_code() {
+                        continue;
+                    }
+
+                    let opcode = self.insts[inst].opcode;
+                    let (inp, out) = self.insts[inst].stack_io();
+                    let inp = inp as usize;
+                    let out = out as usize;
+
+                    if inst == term_inst {
+                        return stack.last().copied().flatten();
+                    }
+
+                    match opcode {
+                        op::PUSH0..=op::PUSH32 => stack.push(None),
+                        op::POP => {
+                            stack.pop()?;
+                        }
+                        op::DUP1..=op::DUP16 => {
+                            let depth = (opcode - op::DUP1 + 1) as usize;
+                            stack.push(*stack.get(stack.len().checked_sub(depth)?)?);
+                        }
+                        op::SWAP1..=op::SWAP16 => {
+                            let depth = (opcode - op::SWAP1 + 1) as usize;
+                            let len = stack.len();
+                            stack.swap(len.checked_sub(1)?, len.checked_sub(1 + depth)?);
+                        }
+                        op::DUPN | op::SWAPN | op::EXCHANGE => return None,
+                        _ => {
+                            if stack.len() < inp {
+                                return None;
+                            }
+                            stack.truncate(stack.len() - inp);
+                            stack.resize(stack.len() + out, None);
+                        }
+                    }
+                }
+
+                None
+            })
+            .collect()
     }
 
     /// Invalidates jump resolutions and operand snapshots that may be unsound due to
@@ -916,6 +1166,7 @@ impl Bytecode<'_> {
         block_states: &IndexVec<Block, BlockState>,
         discovered_edges: &IndexVec<Block, SmallVec<[Block; 4]>>,
         local_snapshots: &Snapshots,
+        invalidate_targets: bool,
     ) {
         let num_blocks = self.cfg.blocks.len();
 
@@ -946,18 +1197,21 @@ impl Bytecode<'_> {
             }
         }
 
-        for (inst, target) in jump_targets.iter_mut() {
-            if let Some(bid) = self.cfg.inst_to_block[*inst]
-                && suspect[bid.index()]
-            {
-                let condition = self.local_jumpi_condition(*inst, local_snapshots);
-                if condition == JumpCondition::AlwaysFalse {
-                    *target = JumpResolution::single(*inst + 1).with_condition(condition);
-                    continue;
-                }
-                target.condition = condition;
-                if target.is_resolved() {
-                    *target = JumpResolution::top().with_condition(condition);
+        if invalidate_targets {
+            for (inst, target) in jump_targets.iter_mut() {
+                if let Some(bid) = self.cfg.inst_to_block[*inst]
+                    && suspect[bid.index()]
+                {
+                    let condition = self.local_jumpi_condition(*inst, local_snapshots);
+                    if condition == JumpCondition::AlwaysFalse {
+                        *target = JumpResolution::single(*inst + 1).with_condition(condition);
+                        continue;
+                    }
+                    target.condition = condition;
+                    if target.is_resolved() {
+                        let condition = target.condition;
+                        *target = JumpResolution::top().with_condition(condition);
+                    }
                 }
             }
         }
@@ -981,6 +1235,7 @@ impl Bytecode<'_> {
         &mut self,
         block_states: &mut IndexVec<Block, BlockState>,
         const_sets: &mut ConstSetInterner,
+        split_contexts: bool,
     ) -> (IndexVec<Block, SmallVec<[Block; 4]>>, bool) {
         let num_blocks = self.cfg.blocks.len();
         let mut worklist = Worklist::new(num_blocks);
@@ -992,8 +1247,17 @@ impl Bytecode<'_> {
         // Reverse map: discovered predecessors per block.
         let mut disc_preds: IndexVec<Block, SmallVec<[Block; 4]>> =
             IndexVec::from_vec(vec![SmallVec::new(); num_blocks]);
+        let split_keys = split_contexts.then(|| self.jump_operand_split_keys());
+        let n_split_keys = split_keys
+            .as_ref()
+            .map(|keys| keys.iter().filter(|key| key.is_some()).count())
+            .unwrap_or_default();
 
-        let max_iterations = num_blocks * 8;
+        let max_iterations = if split_contexts {
+            (num_blocks * 8).min(MAX_SPLIT_FIXPOINT_ITERATIONS)
+        } else {
+            num_blocks * 8
+        };
         let mut iterations = 0;
         let mut converged = true;
 
@@ -1009,43 +1273,55 @@ impl Bytecode<'_> {
 
             // Copy input state into reusable buffer.
             stack_buf.clear();
-            match &block_states[bid] {
-                BlockState::Known(s) => stack_buf.extend_from_slice(s),
-                BlockState::Bottom => continue,
-            };
+            let states = block_states[bid].states().to_vec();
+            for state in states {
+                // Copy input state into reusable buffer.
+                stack_buf.clear();
+                stack_buf.extend_from_slice(&state);
 
-            let block = &self.cfg.blocks[bid];
-            if !self.interpret_block(block.insts(), &mut stack_buf) {
-                continue;
-            }
-            let block = &self.cfg.blocks[bid];
-
-            // Discover dynamic-jump target edges from the snapshot recorded above.
-            let term_inst = block.terminator();
-            let term = &self.insts[term_inst];
-            if term.is_jump()
-                && !term.flags.contains(InstFlags::STATIC_JUMP)
-                && let Some(&operand) = self.snapshots.inputs[term_inst].last()
-            {
-                self.discover_jump_edges(
-                    operand,
-                    bid,
+                let block = &self.cfg.blocks[bid];
+                let term_inst = block.terminator();
+                let mut jump_operand = None;
+                if !self.interpret_block(
+                    block.insts(),
+                    &mut stack_buf,
                     const_sets,
-                    &mut discovered,
-                    &mut disc_preds,
-                );
-            }
+                    Some(term_inst),
+                    &mut jump_operand,
+                ) {
+                    continue;
+                }
+                let block = &self.cfg.blocks[bid];
 
-            // Propagate to static CFG successors and discovered dynamic-jump targets.
-            for &succ in block.succs.iter().chain(&discovered[bid]) {
-                if block_states[succ].join(&stack_buf, const_sets) {
-                    worklist.push(succ);
+                // Discover dynamic-jump target edges from the snapshot recorded above.
+                let term = &self.insts[term_inst];
+                let mut context_targets = SmallVec::<[Block; 4]>::new();
+                if term.is_jump()
+                    && !term.flags.contains(InstFlags::STATIC_JUMP)
+                    && let Some(operand) = jump_operand
+                {
+                    self.discover_jump_edges(
+                        operand,
+                        bid,
+                        const_sets,
+                        &mut discovered,
+                        &mut disc_preds,
+                        &mut context_targets,
+                    );
+                }
+
+                // Propagate to static CFG successors and discovered dynamic-jump targets.
+                for &succ in block.succs.iter().chain(&context_targets) {
+                    let split_key = split_keys.as_ref().and_then(|keys| keys[succ]);
+                    if block_states[succ].join(&stack_buf, const_sets, split_key) {
+                        worklist.push(succ);
+                    }
                 }
             }
         }
 
         debug!(
-            "{msg} after {iterations} iterations (max={max_iterations})",
+            "{msg} after {iterations} iterations (max={max_iterations}, split_contexts={split_contexts}, split_keys={n_split_keys})",
             msg = if converged { "converged" } else { "did not converge" },
         );
 
@@ -1061,28 +1337,39 @@ impl Bytecode<'_> {
         &mut self,
         insts: impl IntoIterator<Item = Inst>,
         stack: &mut Vec<AbsValue>,
+        const_sets: &mut ConstSetInterner,
+        capture_inst: Option<Inst>,
+        captured_jump_operand: &mut Option<AbsValue>,
     ) -> bool {
         for i in insts {
-            let inst = &self.insts[i];
-            if inst.is_dead_code() {
+            if self.insts[i].is_dead_code() {
                 continue;
             }
 
-            let (inp, out) = inst.stack_io();
+            let opcode = self.insts[i].opcode;
+            let (inp, out) = self.insts[i].stack_io();
             let inp = inp as usize;
             let out = out as usize;
 
             // Record pre-instruction input operand snapshot (in stack order, TOS last).
             if inp > 0 {
+                if capture_inst == Some(i) {
+                    *captured_jump_operand = stack.last().copied();
+                }
                 let start = stack.len().saturating_sub(inp);
-                let snap = &mut self.snapshots.inputs[i];
-                snap.clear();
-                snap.extend_from_slice(&stack[start..]);
+                if stack.len() < inp {
+                    let mut operands = SmallVec::<[AbsValue; 4]>::new();
+                    operands.resize(inp - stack.len(), AbsValue::Top);
+                    operands.extend_from_slice(stack);
+                    self.record_input_snapshot(i, &operands, const_sets);
+                } else {
+                    self.record_input_snapshot(i, &stack[start..], const_sets);
+                }
             }
 
-            match inst.opcode {
+            match opcode {
                 op::PUSH0..=op::PUSH32 => {
-                    stack.push(AbsValue::Const(inst.imm()));
+                    stack.push(AbsValue::Const(self.insts[i].imm()));
                 }
                 op::POP => {
                     if stack.pop().is_none() {
@@ -1090,14 +1377,14 @@ impl Bytecode<'_> {
                     }
                 }
                 op::DUP1..=op::DUP16 => {
-                    let depth = (inst.opcode - op::DUP1 + 1) as usize;
+                    let depth = (opcode - op::DUP1 + 1) as usize;
                     if stack.len() < depth {
                         return false;
                     }
                     stack.push(stack[stack.len() - depth]);
                 }
                 op::SWAP1..=op::SWAP16 => {
-                    let depth = (inst.opcode - op::SWAP1 + 1) as usize;
+                    let depth = (opcode - op::SWAP1 + 1) as usize;
                     let len = stack.len();
                     if len < depth + 1 {
                         return false;
@@ -1105,7 +1392,7 @@ impl Bytecode<'_> {
                     stack.swap(len - 1, len - 1 - depth);
                 }
                 op::DUPN => {
-                    let depth = crate::decode_single(inst.imm_byte());
+                    let depth = crate::decode_single(self.insts[i].imm_byte());
                     match depth {
                         Some(n) => {
                             let n = n as usize;
@@ -1122,7 +1409,7 @@ impl Bytecode<'_> {
                     }
                 }
                 op::SWAPN => {
-                    let depth = crate::decode_single(inst.imm_byte());
+                    let depth = crate::decode_single(self.insts[i].imm_byte());
                     match depth {
                         Some(n) => {
                             let n = n as usize;
@@ -1141,7 +1428,7 @@ impl Bytecode<'_> {
                     }
                 }
                 op::EXCHANGE => {
-                    let pair = crate::decode_pair(inst.imm_byte());
+                    let pair = crate::decode_pair(self.insts[i].imm_byte());
                     match pair {
                         Some((n, m)) => {
                             let (n, m) = (n as usize, m as usize);
@@ -1171,13 +1458,13 @@ impl Bytecode<'_> {
 
                         // Check gas cost before doing the actual fold.
                         let gas =
-                            super::const_fold::const_fold_gas(inst.opcode, inputs_slice, &interner);
+                            super::const_fold::const_fold_gas(opcode, inputs_slice, &interner);
                         if let Some(cost) = gas
                             && self.compiler_gas_used.saturating_add(cost)
                                 <= self.compiler_gas_limit
                         {
                             let folded = super::const_fold::try_const_fold(
-                                inst,
+                                &self.insts[i],
                                 inputs_slice,
                                 &mut interner,
                                 self.code.len(),
@@ -1208,13 +1495,15 @@ impl Bytecode<'_> {
 
             // Record post-instruction output snapshot.
             // Skip SWAP/SWAPN/EXCHANGE: they modify two positions and have no single "output".
-            if out > 0 && !matches!(inst.opcode, op::SWAP1..=op::SWAP16 | op::SWAPN | op::EXCHANGE)
+            if out > 0
+                && !matches!(opcode, op::SWAP1..=op::SWAP16 | op::SWAPN | op::EXCHANGE)
+                && let Some(&value) = stack.last()
             {
-                self.snapshots.outputs[i] = stack.last().copied();
+                self.record_output_snapshot(i, value, const_sets);
             }
 
             #[cfg(test)]
-            if inst.opcode == crate::TEST_SUSPEND {
+            if opcode == crate::TEST_SUSPEND {
                 stack.fill(AbsValue::Top);
             }
         }
@@ -1282,7 +1571,7 @@ pub(crate) mod tests {
         let bytecode = analyze_hex(
             "60606040526000357c0100000000000000000000000000000000000000000000000000000000900463ffffffff168063b28175c4146046578063c0406226146052575b6000565b3460005760506076565b005b34600057605c6081565b604051808215151515815260200191505060405180910390f35b600c6000819055505b565b600060896076565b600d600181905550600e600281905550600190505b905600a165627a7a723058202a8a75d7d795b5bcb9042fb18b283daa90b999a11ddec892f5487322",
         );
-        assert!(bytecode.has_dynamic_jumps());
+        assert!(!bytecode.has_dynamic_jumps());
     }
 
     #[test]
@@ -1290,7 +1579,7 @@ pub(crate) mod tests {
         let bytecode = analyze_hex(
             "608060405234801561001057600080fd5b506004361061002b5760003560e01c806373027f6d14610030575b600080fd5b61004a600480360381019061004591906101a9565b61004c565b005b6000808273ffffffffffffffffffffffffffffffffffffffff166040516024016040516020818303038152906040527fb28175c4000000000000000000000000000000000000000000000000000000007bffffffffffffffffffffffffffffffffffffffffffffffffffffffff19166020820180517bffffffffffffffffffffffffffffffffffffffffffffffffffffff83818316178352505050506040516100f69190610247565b6000604051808303816000865af19150503d8060008114610133576040519150601f19603f3d011682016040523d82523d6000602084013e610138565b606091505b509150915081600155505050565b600080fd5b600073ffffffffffffffffffffffffffffffffffffffff82169050919050565b60006101768261014b565b9050919050565b6101868161016b565b811461019157600080fd5b50565b6000813590506101a38161017d565b92915050565b6000602082840312156101bf576101be610146565b5b60006101cd84828501610194565b91505092915050565b600081519050919050565b600081905092915050565b60005b8381101561020a5780820151818401526020810190506101ef565b60008484015250505050565b6000610221826101d6565b61022b81856101e1565b935061023b8185602086016101ec565b80840191505092915050565b60006102538284610216565b91508190509291505056fea2646970667358221220b4673c55c7b0268d7d118059e6509196d2185bb7fe040a7d3900f902c8542ea464736f6c63430008180033",
         );
-        assert!(bytecode.has_dynamic_jumps());
+        assert!(!bytecode.has_dynamic_jumps());
     }
 
     #[test]
@@ -1301,7 +1590,7 @@ pub(crate) mod tests {
             "3033146033575b303303600e57005b601b5f35806001555f608d565b5f80808080305af1600255602e60016089565b600355005b603a5f6089565b8015608757604a600182035f608d565b5f80808080305af1156083576001606191035f608d565b5f80808080305af115608357607f60016078816089565b016001608d565b6006565b5f80fd5b005b5c90565b5d56",
             "60065f601d565b5f5560106001601d565b6001555f80808080335af1005b5c9056",
         ];
-        let has_dynamic = [false, false, true, false];
+        let has_dynamic = [false, false, false, false];
         for (hex, &expected) in contracts.iter().zip(&has_dynamic) {
             let bytecode = analyze_hex(hex);
             assert_eq!(bytecode.has_dynamic_jumps(), expected, "contract: {hex}");
@@ -1457,6 +1746,36 @@ pub(crate) mod tests {
         assert_eq!(bytecode.const_operand(Inst::from_usize(12), 0), Some(U256::from(0x02)));
         assert_eq!(bytecode.const_operand(Inst::from_usize(12), 1), None);
         assert_eq!(bytecode.const_output(Inst::from_usize(12)), None);
+    }
+
+    #[test]
+    fn dead_dynamic_jump_does_not_invalidate_snapshots() {
+        let bytecode = analyze_asm(
+            "
+            PUSH %entry         ; inst 0
+            JUMP                ; inst 1
+            PUSH0               ; inst 2: dead
+            JUMP                ; inst 3: dead dynamic jump
+        entry:
+            JUMPDEST            ; inst 4
+            PUSH1 0x40          ; inst 5
+            PUSH %ret           ; inst 6
+            PUSH %func          ; inst 7
+            JUMP                ; inst 8
+        ret:
+            JUMPDEST            ; inst 9
+            ADD                 ; inst 10: 0x40 + 0x02 = 0x42
+            STOP                ; inst 11
+        func:
+            JUMPDEST            ; inst 12
+            PUSH1 0x02          ; inst 13
+            SWAP1               ; inst 14
+            JUMP                ; inst 15
+        ",
+        );
+
+        assert!(bytecode.inst(Inst::from_usize(3)).is_dead_code());
+        assert_eq!(bytecode.const_output(Inst::from_usize(10)), Some(U256::from(0x42)));
     }
 
     #[test]
@@ -1631,12 +1950,9 @@ pub(crate) mod tests {
         ",
         );
 
-        // The wrapper return JUMP (pc=30) remains dynamic because the outer
-        // return address is lost to Top during the top-aligned join.
-        // Because an unresolved Top jump exists, the conservative invalidation
-        // also invalidates the inner return JUMP — any reachable JUMPDEST
-        // (including inner's entry) is suspect.
-        assert!(bytecode.has_dynamic_jumps, "expected dynamic jumps to remain");
+        // Different stack-depth contexts preserve the wrapper's outer return
+        // address while still resolving the shared inner return.
+        assert!(!bytecode.has_dynamic_jumps, "expected all jumps to be resolved");
     }
 
     /// Regression test: deep DUPN on Amsterdam must not cause the abstract interpreter to
@@ -1698,6 +2014,22 @@ pub(crate) mod tests {
         assert!(!bytecode.has_dynamic_jumps, "expected all jumps to be resolved");
     }
 
+    #[test]
+    fn weth() {
+        let code = fixture_entry_code(include_str!("../../../../../data/weth.json"));
+        let mut bytecode = Bytecode::test(code);
+        bytecode.analyze().unwrap();
+        assert!(!bytecode.has_dynamic_jumps, "expected all jumps to be resolved");
+    }
+
+    #[test]
+    fn erc20_transfer() {
+        let code = fixture_entry_code(include_str!("../../../../../data/erc20_transfer.json"));
+        let mut bytecode = Bytecode::test(code);
+        bytecode.analyze().unwrap();
+        assert!(!bytecode.has_dynamic_jumps, "expected all jumps to be resolved");
+    }
+
     fn fixture_entry_code(json: &str) -> Vec<u8> {
         let v: serde_json::Value = serde_json::from_str(json).unwrap();
         let case = v.as_object().unwrap().values().next().unwrap();
@@ -1705,12 +2037,6 @@ pub(crate) mod tests {
         let code = case["pre"][to]["code"].as_str().unwrap().trim_start_matches("0x");
         revm_primitives::hex::decode(code).unwrap()
     }
-}
-
-#[cfg(test)]
-mod tests_edge_cases {
-    use super::{tests::*, *};
-
     /// Three callers to the same internal function. The return JUMP should
     /// resolve to Multi with three targets.
     #[test]
@@ -1873,6 +2199,41 @@ mod tests_edge_cases {
             .iter_insts()
             .find(|(_, d)| d.is_jump() && d.flags.contains(InstFlags::INVALID_JUMP));
         assert!(jump_inst.is_some(), "expected an invalid jump");
+    }
+
+    /// A finite target set with both valid and invalid PCs can still be compiled
+    /// as a multi-jump: valid cases branch to their target and the switch default
+    /// handles the invalid cases.
+    #[test]
+    fn const_set_with_invalid_target_resolves_to_multi_jump() {
+        let bytecode = analyze_asm(
+            "
+            CALLDATASIZE
+            PUSH %invalid_path
+            JUMPI
+            PUSH %valid
+            PUSH %join
+            JUMP
+        invalid_path:
+            JUMPDEST
+            PUSH1 0xff
+            PUSH %join
+            JUMP
+        join:
+            JUMPDEST
+            JUMP
+        valid:
+            JUMPDEST
+            STOP
+        ",
+        );
+
+        let (_, jump) = bytecode
+            .iter_insts()
+            .find(|(_, d)| d.is_jump() && d.flags.contains(InstFlags::MULTI_JUMP))
+            .expect("expected mixed valid/invalid jump to use multi-jump");
+        assert!(jump.flags.contains(InstFlags::STATIC_JUMP));
+        assert!(!bytecode.has_dynamic_jumps);
     }
 
     #[test]
@@ -2714,7 +3075,7 @@ mod tests_edge_cases {
             "
             PUSH1 0x69          ; inst 0: cross-block value
             CALLDATASIZE        ; inst 1: unknown condition
-            PUSH %target        ; inst 2
+            PUSH %opaque        ; inst 2
             JUMPI               ; inst 3
             ; Non-suspect fallthrough block (no JUMPDEST).
             PUSH1 0x0A          ; inst 4
@@ -2727,6 +3088,7 @@ mod tests_edge_cases {
             MSTORE              ; inst 11
             STOP                ; inst 12
             ; Opaque dynamic jump — triggers suspect invalidation.
+        opaque:
             JUMPDEST            ; inst 13
             PUSH0               ; inst 14
             CALLDATALOAD        ; inst 15: Top
@@ -2877,5 +3239,52 @@ mod tests_edge_cases {
             bytecode.has_dynamic_jumps,
             "return jump should remain dynamic when fixpoint doesn't converge"
         );
+    }
+
+    /// If split-context analysis hits its fixed cap, retry the uncapped unsplit
+    /// analysis before falling back to block-local snapshots.
+    #[test]
+    fn split_non_convergence_retries_unsplit_analysis() {
+        let k = 12;
+        let b = 40;
+        let mut lines = Vec::new();
+        lines.push("PUSH %call0".to_string());
+        lines.push("JUMP".to_string());
+        for i in 0..k {
+            lines.push(format!("call{i}:"));
+            lines.push("JUMPDEST".to_string());
+            lines.push(format!("PUSH %ret{i}"));
+            lines.push("PUSH %relay0".to_string());
+            lines.push("JUMP".to_string());
+
+            lines.push(format!("ret{i}:"));
+            lines.push("JUMPDEST".to_string());
+            lines.push("POP".to_string());
+            if i + 1 < k {
+                lines.push(format!("PUSH %call{}", i + 1));
+                lines.push("JUMP".to_string());
+            } else {
+                lines.push("STOP".to_string());
+            }
+        }
+        for i in 0..b {
+            lines.push(format!("relay{i}:"));
+            lines.push("JUMPDEST".to_string());
+            if i + 1 < b {
+                lines.push(format!("PUSH %relay{}", i + 1));
+            } else {
+                lines.push("PUSH %fn_entry".to_string());
+            }
+            lines.push("JUMP".to_string());
+        }
+        lines.push("fn_entry:".to_string());
+        lines.push("JUMPDEST".to_string());
+        lines.push("PUSH1 0x42".to_string());
+        lines.push("SWAP1".to_string());
+        lines.push("JUMP".to_string());
+
+        let bytecode = analyze_asm(&lines.join("\n"));
+
+        assert!(!bytecode.has_dynamic_jumps, "unsplit retry should resolve the shared return jump");
     }
 }

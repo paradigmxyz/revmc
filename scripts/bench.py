@@ -704,9 +704,10 @@ class JumpResolution(Analysis):
         fixpt_res = cls._last_match(r"ba:.*newly_resolved=(\d+)", output)
 
         ba_unres_matches = re.findall(
-            r"analyze:ba: .*unresolved dynamic jumps remain n=(\d+)", output
+            r"analyze:ba(?::[^\s:]*)*: .*unresolved dynamic jumps remain n=(\d+)",
+            output,
         )
-        ba_ran = "analyze:ba:" in output
+        ba_ran = re.search(r"analyze:ba(?::[^\s:]*)*:", output) is not None
 
         if ba_unres_matches:
             unresolved = int(ba_unres_matches[-1])
@@ -714,7 +715,8 @@ class JumpResolution(Analysis):
             unresolved = 0
         else:
             unresolved = cls._last_match(
-                r"local_jumps:.*unresolved dynamic jumps remain n=(\d+)", output
+                r"local_jumps(?::[^\s:]*)*: .*unresolved dynamic jumps remain n=(\d+)",
+                output,
             )
 
         total = local_res + fixpt_res + unresolved
