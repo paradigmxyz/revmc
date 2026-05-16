@@ -21,6 +21,8 @@ pub mod merkle_trie;
 pub mod runner;
 pub mod utils;
 
+// Keep `revmc-builtins` linked into the statetest harness so AOT artifacts can
+// resolve their `__revmc_builtin_*` symbols.
 #[doc(hidden)]
 pub use revmc_builtins as builtins;
 
