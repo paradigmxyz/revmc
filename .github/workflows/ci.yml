@@ -71,7 +71,7 @@ jobs:
         if: ${{ matrix.kind == 'statetest' }}
         run: |
           cargo nextest run -p revmc-statetest \
-            --ignore-default-filter --no-capture --no-fail-fast \
+            --no-capture --no-fail-fast \
             -E 'test(statetest::${{ matrix.mode }})'
 
   feature-checks:
