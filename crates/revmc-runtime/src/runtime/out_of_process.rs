@@ -38,9 +38,13 @@ pub(super) fn maybe_run_jit_helper() -> eyre::Result<ControlFlow<()>> {
 }
 
 /// Compiles a job in the out-of-process helper.
-pub(super) fn compile_job(job: CompileJob, config: &RuntimeConfig) -> WorkerResult {
+pub(super) fn compile_job(
+    job: CompileJob,
+    config: &RuntimeConfig,
+    helper: &HelperProcess,
+) -> WorkerResult {
     let t0 = Instant::now();
-    let outcome = run_helper_job(&job, config);
+    let outcome = run_helper_job(&job, config, helper);
     WorkerResult {
         key: job.key,
         outcome,
@@ -52,12 +56,11 @@ pub(super) fn compile_job(job: CompileJob, config: &RuntimeConfig) -> WorkerResu
     }
 }
 
-/// Cancels in-flight out-of-process helper work.
-pub(super) fn cancel_in_flight() {
-    HELPER_PROCESS.reset();
-}
-
-fn run_helper_job(job: &CompileJob, config: &RuntimeConfig) -> Result<WorkerSuccess, String> {
+fn run_helper_job(
+    job: &CompileJob,
+    config: &RuntimeConfig,
+    helper: &HelperProcess,
+) -> Result<WorkerSuccess, String> {
     if config.gas_params.is_some() {
         return Err("out-of-process JIT does not support custom gas params yet".into());
     }
@@ -65,13 +68,7 @@ fn run_helper_job(job: &CompileJob, config: &RuntimeConfig) -> Result<WorkerSucc
         return Err("out-of-process JIT does not support debug dumps yet".into());
     }
 
-    helper_process().compile(job, config)
-}
-
-static HELPER_PROCESS: HelperProcess = HelperProcess::new();
-
-fn helper_process() -> &'static HelperProcess {
-    &HELPER_PROCESS
+    helper.compile(job, config)
 }
 
 struct HelperIo {
@@ -79,12 +76,12 @@ struct HelperIo {
     result_rx: chan::Receiver<Result<WorkerSuccess, String>>,
 }
 
-struct HelperProcess {
+pub(super) struct HelperProcess {
     inner: Mutex<Option<Arc<HelperProcessInner>>>,
 }
 
 impl HelperProcess {
-    const fn new() -> Self {
+    pub(super) const fn new() -> Self {
         Self { inner: Mutex::new(None) }
     }
 
@@ -109,7 +106,7 @@ impl HelperProcess {
         }
     }
 
-    fn reset(&self) {
+    pub(super) fn cancel_in_flight(&self) {
         if let Some(helper) = self.inner.lock().unwrap().take() {
             helper.kill();
         }
