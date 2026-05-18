@@ -126,7 +126,7 @@ macro_rules! builtins {
         #[allow(unused_variables)]
         impl Builtin {
             pub const COUNT: usize = builtins!(@count $($ident),*);
-            pub const ALL: [Self; Self::COUNT] = [$(Self::$ident),*];
+            pub const ALL: &[Self; Self::COUNT] = &[$(Self::$ident),*];
 
             pub const fn name(self) -> &'static str {
                 match self {
