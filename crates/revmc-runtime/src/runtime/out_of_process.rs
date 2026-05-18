@@ -86,6 +86,7 @@ impl HelperProcess {
         let helper = {
             let mut slot = self.inner.lock().unwrap();
             if slot.as_ref().is_none_or(|helper| !helper.matches_config(config)) {
+                debug!("spawning JIT helper");
                 *slot = Some(Arc::new(HelperProcessInner::spawn(config)?));
             }
             slot.as_ref().unwrap().clone()
@@ -96,6 +97,7 @@ impl HelperProcess {
             Err(err) => {
                 let mut slot = self.inner.lock().unwrap();
                 if slot.as_ref().is_some_and(|current| Arc::ptr_eq(current, &helper)) {
+                    warn!(error = %err, "discarding JIT helper after failed job");
                     *slot = None;
                 }
                 Err(err)
@@ -180,15 +182,21 @@ impl HelperProcessInner {
         match io.result_rx.recv_timeout(config.tuning.jit_timeout) {
             Ok(result) => result,
             Err(chan::RecvTimeoutError::Timeout) => {
+                warn!(timeout = ?config.tuning.jit_timeout, "JIT helper timed out");
                 self.kill();
-                Err(format!("JIT helper timed out after {:?}", config.tuning.jit_timeout))
+                Err(format!(
+                    "JIT helper timed out after {:?}; helper will be restarted",
+                    config.tuning.jit_timeout
+                ))
             }
             Err(chan::RecvTimeoutError::Disconnected) => {
                 let status = self.child.lock().unwrap().try_wait().ok().flatten();
-                Err(match status {
+                let message = match status {
                     Some(status) => format!("JIT helper exited with {status}"),
                     None => "JIT helper disconnected".into(),
-                })
+                };
+                warn!(message, "JIT helper disconnected");
+                Err(format!("{message}; helper will be restarted"))
             }
         }
     }
