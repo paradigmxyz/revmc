@@ -16,7 +16,7 @@ use crossbeam_channel as chan;
 use revm_context_interface::cfg::{GasParams, gas_params::GasId};
 use revm_primitives::hardfork::SpecId;
 use std::{
-    io::{BufRead, BufReader, BufWriter, Read, Write},
+    io::{BufReader, BufWriter, Read, Write},
     ops::ControlFlow,
     os::unix::process::CommandExt,
     path::PathBuf,
@@ -366,15 +366,14 @@ fn write_job<W: Write + ?Sized>(w: &mut BufWriter<W>, job: &CompileJob) -> std::
 
 fn read_helper_result<R: Read + ?Sized>(r: &mut BufReader<R>) -> Result<WorkerSuccess, String> {
     match read_message(r).map_err(|e| format!("failed to decode helper result: {e}"))? {
-        Some(HelperResponse::Ok { symbol_name, object_bytes, builtin_symbols }) => {
+        HelperResponse::Ok { symbol_name, object_bytes, builtin_symbols } => {
             Ok(WorkerSuccess::JitObject(JitObjectSuccess {
                 symbol_name,
                 object_bytes: Bytes::from(object_bytes),
                 builtin_symbols,
             }))
         }
-        Some(HelperResponse::Err { error }) => Err(error),
-        None => Err("JIT helper closed stdout".into()),
+        HelperResponse::Err { error } => Err(error),
     }
 }
 
@@ -384,7 +383,12 @@ fn run_jit_helper_stdio() -> eyre::Result<()> {
     let mut compiler: Option<EvmCompiler<EvmLlvmBackend>> = None;
     let config = read_helper_init(&mut stdin)?;
 
-    while let Some(job) = read_helper_job(&mut stdin)? {
+    loop {
+        let job = match read_helper_job(&mut stdin) {
+            Ok(job) => job,
+            Err(err) if is_unexpected_eof(&err) => break,
+            Err(err) => return Err(err),
+        };
         if compiler.is_none() {
             compiler = Some(create_compiler(&config, true).map_err(|e| eyre::eyre!(e))?);
         }
@@ -405,17 +409,15 @@ fn run_jit_helper_stdio() -> eyre::Result<()> {
 
 fn read_helper_init<R: Read + ?Sized>(stdin: &mut BufReader<R>) -> eyre::Result<RuntimeConfig> {
     match read_message(stdin)? {
-        Some(HelperRequest::Init(init)) => runtime_config_from_init(init),
-        Some(HelperRequest::Compile(_)) => eyre::bail!("JIT helper received job before init"),
-        None => eyre::bail!("JIT helper closed stdin before init"),
+        HelperRequest::Init(init) => runtime_config_from_init(init),
+        HelperRequest::Compile(_) => eyre::bail!("JIT helper received job before init"),
     }
 }
 
-fn read_helper_job<R: Read + ?Sized>(stdin: &mut BufReader<R>) -> eyre::Result<Option<CompileJob>> {
+fn read_helper_job<R: Read + ?Sized>(stdin: &mut BufReader<R>) -> eyre::Result<CompileJob> {
     let req = match read_message(stdin)? {
-        Some(HelperRequest::Compile(req)) => req,
-        Some(HelperRequest::Init(_)) => eyre::bail!("JIT helper received duplicate init"),
-        None => return Ok(None),
+        HelperRequest::Compile(req) => req,
+        HelperRequest::Init(_) => eyre::bail!("JIT helper received duplicate init"),
     };
     let spec_id = SpecId::try_from_u8(req.spec_id).ok_or_else(|| eyre::eyre!("invalid spec id"))?;
     let opt_level = opt_level_from_u8(req.opt_level)?;
@@ -429,7 +431,7 @@ fn read_helper_job<R: Read + ?Sized>(stdin: &mut BufReader<R>) -> eyre::Result<O
         sync_notifier: SyncNotifier::none(),
         generation: 0,
     };
-    Ok(Some(job))
+    Ok(job)
 }
 
 fn write_helper_result<W: Write + ?Sized>(
@@ -457,16 +459,25 @@ where
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
 }
 
-fn read_message<T, R: Read + ?Sized>(r: &mut BufReader<R>) -> std::io::Result<Option<T>>
+fn read_message<T, R: Read + ?Sized>(r: &mut BufReader<R>) -> std::io::Result<T>
 where
     T: wincode::SchemaReadOwned<wincode::config::DefaultConfig, Dst = T>,
 {
-    if r.fill_buf()?.is_empty() {
-        return Ok(None);
+    wincode::deserialize_from(r).map_err(|e| std::io::Error::new(read_error_kind(&e), e))
+}
+
+fn read_error_kind(err: &wincode::ReadError) -> std::io::ErrorKind {
+    match err {
+        wincode::ReadError::Io(wincode::io::ReadError::ReadSizeLimit(_)) => {
+            std::io::ErrorKind::UnexpectedEof
+        }
+        _ => std::io::ErrorKind::InvalidData,
     }
-    wincode::deserialize_from(r)
-        .map(Some)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+}
+
+fn is_unexpected_eof(err: &eyre::Report) -> bool {
+    err.downcast_ref::<std::io::Error>()
+        .is_some_and(|err| err.kind() == std::io::ErrorKind::UnexpectedEof)
 }
 
 fn opt_level_to_u8(level: OptimizationLevel) -> u8 {
