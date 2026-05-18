@@ -21,7 +21,7 @@ enum Command {
 }
 
 fn main() -> Result<()> {
-    if matches!(revmc::runtime::maybe_run_jit_helper()?, std::ops::ControlFlow::Break(())) {
+    if revmc::runtime::maybe_run_jit_helper()?.is_break() {
         return Ok(());
     }
     if std::env::var_os("RUST_BACKTRACE").is_none() {

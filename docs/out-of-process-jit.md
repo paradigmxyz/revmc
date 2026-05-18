@@ -43,7 +43,7 @@ A fork-only helper may be viable only as an early fork server: fork during singl
 Still needed:
 
 - Move the worker pool into a single helper process; the parent should only enqueue IPC requests.
-- Carry the remaining data in the IPC payloads: gas params, dump settings, generation, timings, and richer errors.
+- Carry the remaining data in the IPC payloads: generation, timings, and richer errors.
 - Keep AOT jobs either in the helper too or explicitly route them through the existing in-process AOT path; the first option gives consistent isolation.
 - Define graceful shutdown semantics for queued helper jobs; the current implementation kills the helper for cancellation/shutdown.
 - Treat helper crash as worker-pool failure: fail pending synchronous jobs, drop pending async jobs, and optionally respawn.
