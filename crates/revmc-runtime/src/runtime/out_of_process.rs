@@ -18,6 +18,7 @@ use revm_primitives::hardfork::SpecId;
 use std::{
     io::{BufReader, BufWriter, Read, Write},
     ops::ControlFlow,
+    os::unix::process::CommandExt,
     path::PathBuf,
     process::{Child, ChildStdin, Command, Stdio},
     sync::{Arc, Mutex},
@@ -230,10 +231,7 @@ impl Drop for HelperProcessInner {
     }
 }
 
-#[cfg(unix)]
 fn apply_helper_limits(command: &mut Command, config: &RuntimeConfig) {
-    use std::os::unix::process::CommandExt;
-
     let memory_limit = config.tuning.jit_helper_memory_limit_bytes;
     let cpu_count = config.tuning.jit_helper_cpu_count;
 
@@ -253,7 +251,6 @@ fn apply_helper_limits(command: &mut Command, config: &RuntimeConfig) {
     }
 }
 
-#[cfg(unix)]
 fn set_process_group() -> std::io::Result<()> {
     if unsafe { libc::setpgid(0, 0) } != 0 {
         return Err(std::io::Error::last_os_error());
@@ -261,7 +258,6 @@ fn set_process_group() -> std::io::Result<()> {
     Ok(())
 }
 
-#[cfg(unix)]
 fn kill_helper(child: &mut Child) {
     let pid = child.id() as libc::pid_t;
     if unsafe { libc::kill(-pid, libc::SIGKILL) } == 0 {
@@ -277,7 +273,6 @@ fn kill_helper(child: &mut Child) {
     }
 }
 
-#[cfg(unix)]
 fn set_rlimit(resource: libc::c_int, value: u64) -> std::io::Result<()> {
     let value = libc::rlim_t::try_from(value).unwrap_or(libc::rlim_t::MAX);
     let limit = libc::rlimit { rlim_cur: value, rlim_max: value };
@@ -322,16 +317,6 @@ fn limit_cpu_affinity(cpu_count: usize) -> std::io::Result<()> {
 #[cfg(not(any(target_os = "linux", target_os = "android")))]
 fn limit_cpu_affinity(_cpu_count: usize) -> std::io::Result<()> {
     Ok(())
-}
-
-#[cfg(not(unix))]
-fn apply_helper_limits(_command: &mut Command, _config: &RuntimeConfig) {}
-
-#[cfg(not(unix))]
-fn kill_helper(child: &mut Child) {
-    if let Err(err) = child.kill() {
-        warn!(%err, "failed to kill JIT helper");
-    }
 }
 
 #[derive(Clone, PartialEq, Eq, SchemaWrite, SchemaRead)]

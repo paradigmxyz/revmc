@@ -36,6 +36,11 @@ use crate::{
     runtime::config::JitMode,
 };
 
+#[cfg(all(feature = "llvm", unix))]
+type OutOfProcessHelper = Option<Arc<super::out_of_process::HelperProcess>>;
+#[cfg(not(all(feature = "llvm", unix)))]
+type OutOfProcessHelper = ();
+
 /// Notifier for synchronous compilation requests.
 ///
 /// Wraps an optional sender that is notified when the compilation
@@ -180,8 +185,7 @@ pub(crate) struct WorkerPool {
     /// Rayon pool used to execute compilation jobs.
     pool: Option<ThreadPool>,
     /// Out-of-process helper used by this worker pool.
-    #[cfg(feature = "llvm")]
-    out_of_process_helper: Option<Arc<super::out_of_process::HelperProcess>>,
+    out_of_process_helper: OutOfProcessHelper,
     /// Sender for worker results.
     result_tx: chan::Sender<WorkerResult>,
     /// Runtime configuration shared by spawned jobs.
@@ -199,9 +203,7 @@ impl WorkerPool {
     pub(crate) fn new(result_tx: chan::Sender<WorkerResult>, config: RuntimeConfig) -> Self {
         let worker_count = config.tuning.jit_worker_count;
         let queue_capacity = worker_count.saturating_mul(config.tuning.jit_worker_queue_capacity);
-        #[cfg(feature = "llvm")]
-        let out_of_process_helper = (config.jit_mode == JitMode::OutOfProcess)
-            .then(|| Arc::new(super::out_of_process::HelperProcess::new()));
+        let out_of_process_helper = create_out_of_process_helper(&config);
         let pool = (worker_count > 0).then(|| {
             ThreadPoolBuilder::new()
                 .num_threads(worker_count)
@@ -213,7 +215,6 @@ impl WorkerPool {
 
         Self {
             pool,
-            #[cfg(feature = "llvm")]
             out_of_process_helper,
             result_tx,
             config: Arc::new(config),
@@ -250,14 +251,10 @@ impl WorkerPool {
         let queued = self.queued.clone();
         let result_tx = self.result_tx.clone();
         let config = self.config.clone();
-        #[cfg(feature = "llvm")]
         let out_of_process_helper = self.out_of_process_helper.clone();
         pool.spawn_fifo(move || {
             queued.fetch_sub(1, Ordering::AcqRel);
-            #[cfg(feature = "llvm")]
             let result = compile_job(job, &config, out_of_process_helper);
-            #[cfg(not(feature = "llvm"))]
-            let result = compile_job(job, &config);
             let _ = result_tx.send(result);
         });
         Ok(())
@@ -275,10 +272,7 @@ impl WorkerPool {
 
     /// Cancels any in-flight compilation that can be interrupted externally.
     pub(crate) fn cancel_in_flight(&self) {
-        #[cfg(feature = "llvm")]
-        if let Some(helper) = &self.out_of_process_helper {
-            helper.cancel_in_flight();
-        }
+        cancel_out_of_process_helper(&self.out_of_process_helper);
     }
 }
 
@@ -287,6 +281,25 @@ impl Drop for WorkerPool {
         self.shutdown();
     }
 }
+
+#[cfg(all(feature = "llvm", unix))]
+fn create_out_of_process_helper(config: &RuntimeConfig) -> OutOfProcessHelper {
+    (config.jit_mode == JitMode::OutOfProcess)
+        .then(|| Arc::new(super::out_of_process::HelperProcess::new()))
+}
+
+#[cfg(not(all(feature = "llvm", unix)))]
+fn create_out_of_process_helper(_config: &RuntimeConfig) -> OutOfProcessHelper {}
+
+#[cfg(all(feature = "llvm", unix))]
+fn cancel_out_of_process_helper(helper: &OutOfProcessHelper) {
+    if let Some(helper) = helper {
+        helper.cancel_in_flight();
+    }
+}
+
+#[cfg(not(all(feature = "llvm", unix)))]
+fn cancel_out_of_process_helper(_helper: &OutOfProcessHelper) {}
 
 #[cfg(feature = "llvm")]
 fn clear_thread_local_compilers() {
@@ -301,13 +314,12 @@ fn clear_thread_local_compilers() {}
 fn compile_job(
     job: CompileJob,
     config: &RuntimeConfig,
-    out_of_process_helper: Option<Arc<super::out_of_process::HelperProcess>>,
+    out_of_process_helper: OutOfProcessHelper,
 ) -> WorkerResult {
     trace!(?job, "received job");
     match job.kind {
         CompilationKind::Jit if config.jit_mode == JitMode::OutOfProcess => {
-            let helper = out_of_process_helper.expect("missing out-of-process JIT helper");
-            super::out_of_process::compile_job(job, config, &helper)
+            compile_out_of_process_job(job, config, out_of_process_helper)
         }
         CompilationKind::Jit => {
             JIT_COMPILER.with_borrow_mut(|state| compile_with_state(job, config, state))
@@ -315,6 +327,33 @@ fn compile_job(
         CompilationKind::Aot => {
             AOT_COMPILER.with_borrow_mut(|state| compile_with_state(job, config, state))
         }
+    }
+}
+
+#[cfg(all(feature = "llvm", unix))]
+fn compile_out_of_process_job(
+    job: CompileJob,
+    config: &RuntimeConfig,
+    helper: OutOfProcessHelper,
+) -> WorkerResult {
+    let helper = helper.expect("missing out-of-process JIT helper");
+    super::out_of_process::compile_job(job, config, &helper)
+}
+
+#[cfg(all(feature = "llvm", not(unix)))]
+fn compile_out_of_process_job(
+    job: CompileJob,
+    _config: &RuntimeConfig,
+    _helper: OutOfProcessHelper,
+) -> WorkerResult {
+    WorkerResult {
+        key: job.key,
+        outcome: Err("out-of-process JIT is only available on Unix".into()),
+        kind: job.kind,
+        sync_notifier: job.sync_notifier,
+        generation: job.generation,
+        compile_duration: Duration::ZERO,
+        timings: CompileTimings::default(),
     }
 }
 
@@ -552,7 +591,11 @@ fn compile_aot_artifact(
 }
 
 #[cfg(not(feature = "llvm"))]
-fn compile_job(job: CompileJob, _config: &RuntimeConfig) -> WorkerResult {
+fn compile_job(
+    job: CompileJob,
+    _config: &RuntimeConfig,
+    _helper: OutOfProcessHelper,
+) -> WorkerResult {
     WorkerResult {
         key: job.key,
         outcome: Err("LLVM backend not available".into()),

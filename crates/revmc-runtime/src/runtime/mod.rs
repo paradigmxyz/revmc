@@ -44,7 +44,7 @@ pub use storage::{
     RuntimeCacheKey, StoredArtifact,
 };
 
-#[cfg(feature = "llvm")]
+#[cfg(all(feature = "llvm", unix))]
 mod out_of_process;
 
 mod worker;
@@ -55,14 +55,14 @@ mod worker;
 /// the caller should exit immediately. Normal application startup should
 /// continue on [`ControlFlow::Continue`].
 pub fn maybe_run_jit_helper() -> eyre::Result<ControlFlow<()>> {
-    #[cfg(feature = "llvm")]
+    #[cfg(all(feature = "llvm", unix))]
     {
         out_of_process::maybe_run_jit_helper()
     }
-    #[cfg(not(feature = "llvm"))]
+    #[cfg(not(all(feature = "llvm", unix)))]
     {
         if std::env::var_os("REVMC_JIT_HELPER").is_some() {
-            eyre::bail!("LLVM backend not available")
+            eyre::bail!("out-of-process JIT helper is only available on Unix with LLVM")
         }
         Ok(ControlFlow::Continue(()))
     }
@@ -164,6 +164,10 @@ impl JitBackend {
         if config.blocking {
             config.enabled = true;
             config.tuning.jit_hot_threshold = 0;
+        }
+        #[cfg(not(unix))]
+        if config.jit_mode == JitMode::OutOfProcess {
+            eyre::bail!("out-of-process JIT is only available on Unix");
         }
 
         let enabled = config.enabled;
