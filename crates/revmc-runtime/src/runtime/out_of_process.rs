@@ -206,9 +206,7 @@ impl HelperProcessInner {
         if matches!(child.try_wait(), Ok(Some(_))) {
             return true;
         }
-        if let Err(err) = child.kill() {
-            warn!(%err, "failed to kill JIT helper");
-        }
+        kill_helper(&mut child);
         match child.wait_timeout(self.shutdown_timeout) {
             Ok(Some(_)) => true,
             Ok(None) => {
@@ -238,14 +236,12 @@ fn apply_helper_limits(command: &mut Command, config: &RuntimeConfig) {
 
     let memory_limit = config.tuning.jit_helper_memory_limit_bytes;
     let cpu_count = config.tuning.jit_helper_cpu_count;
-    if memory_limit == 0 && cpu_count == 0 {
-        return;
-    }
 
     // SAFETY: `pre_exec` runs in the child after fork and before exec. The closure only calls
-    // libc resource/affinity syscalls and constructs an `io::Error` if they fail.
+    // libc process/resource/affinity syscalls and constructs an `io::Error` if they fail.
     unsafe {
         command.pre_exec(move || {
+            set_process_group()?;
             if memory_limit > 0 {
                 set_rlimit(libc::RLIMIT_AS as _, memory_limit)?;
             }
@@ -254,6 +250,30 @@ fn apply_helper_limits(command: &mut Command, config: &RuntimeConfig) {
             }
             Ok(())
         });
+    }
+}
+
+#[cfg(unix)]
+fn set_process_group() -> std::io::Result<()> {
+    if unsafe { libc::setpgid(0, 0) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn kill_helper(child: &mut Child) {
+    let pid = child.id() as libc::pid_t;
+    if unsafe { libc::kill(-pid, libc::SIGKILL) } == 0 {
+        return;
+    }
+
+    let err = std::io::Error::last_os_error();
+    if err.raw_os_error() != Some(libc::ESRCH) {
+        warn!(%err, "failed to kill JIT helper process group");
+    }
+    if let Err(err) = child.kill() {
+        warn!(%err, "failed to kill JIT helper");
     }
 }
 
@@ -306,6 +326,13 @@ fn limit_cpu_affinity(_cpu_count: usize) -> std::io::Result<()> {
 
 #[cfg(not(unix))]
 fn apply_helper_limits(_command: &mut Command, _config: &RuntimeConfig) {}
+
+#[cfg(not(unix))]
+fn kill_helper(child: &mut Child) {
+    if let Err(err) = child.kill() {
+        warn!(%err, "failed to kill JIT helper");
+    }
+}
 
 #[derive(Clone, PartialEq, Eq, SchemaWrite, SchemaRead)]
 struct HelperInit {
