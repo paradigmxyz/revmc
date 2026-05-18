@@ -321,12 +321,10 @@ fn compile_job(
         CompilationKind::Jit if config.jit_mode == JitMode::OutOfProcess => {
             compile_out_of_process_job(job, config, out_of_process_helper)
         }
-        CompilationKind::Jit => {
-            JIT_COMPILER.with_borrow_mut(|state| compile_with_state(job, config, state))
-        }
-        CompilationKind::Aot => {
-            AOT_COMPILER.with_borrow_mut(|state| compile_with_state(job, config, state))
-        }
+        CompilationKind::Jit => JIT_COMPILER
+            .with_borrow_mut(|state| compile_with_state(job, config, CompilerTarget::Jit, state)),
+        CompilationKind::Aot => AOT_COMPILER
+            .with_borrow_mut(|state| compile_with_state(job, config, CompilerTarget::Aot, state)),
     }
 }
 
@@ -358,9 +356,25 @@ fn compile_out_of_process_job(
 }
 
 #[cfg(feature = "llvm")]
-fn compile_with_state(
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum CompilerTarget {
+    Jit,
+    JitObject,
+    Aot,
+}
+
+#[cfg(feature = "llvm")]
+impl CompilerTarget {
+    const fn is_aot_backend(self) -> bool {
+        matches!(self, Self::JitObject | Self::Aot)
+    }
+}
+
+#[cfg(feature = "llvm")]
+pub(super) fn compile_with_state(
     job: CompileJob,
     config: &RuntimeConfig,
+    target: CompilerTarget,
     state_slot: &mut Option<CompilerState>,
 ) -> WorkerResult {
     let _span = match job.kind {
@@ -374,7 +388,7 @@ fn compile_with_state(
     let t0 = Instant::now();
 
     if state_slot.is_none() {
-        match CompilerState::new(config, job.kind) {
+        match CompilerState::new(config, target) {
             Ok(s) => *state_slot = Some(s),
             Err(e) => {
                 error!(error = %e, "failed to create LLVM backend");
@@ -403,12 +417,10 @@ fn compile_with_state(
     }
     compiler.set_opt_level(job.opt_level);
 
-    let outcome = match job.kind {
-        CompilationKind::Jit if config.jit_mode == JitMode::OutOfProcess => {
-            compile_jit_object_artifact(&job, compiler)
-        }
-        CompilationKind::Jit => compile_jit_artifact(&job, compiler),
-        CompilationKind::Aot => compile_aot_artifact(&job, compiler),
+    let outcome = match target {
+        CompilerTarget::Jit => compile_jit_artifact(&job, compiler),
+        CompilerTarget::JitObject => compile_jit_object_artifact(&job, compiler),
+        CompilerTarget::Aot => compile_aot_artifact(&job, compiler),
     };
     let timings = compiler.take_timings();
 
@@ -421,7 +433,7 @@ fn compile_with_state(
         && state.compilations_since_recycle >= config.tuning.compiler_recycle_threshold
     {
         debug!(compilations_since_recycle = state.compilations_since_recycle, "recycling compiler");
-        match CompilerState::new(config, job.kind) {
+        match CompilerState::new(config, target) {
             Ok(new_state) => {
                 *state_slot = Some(new_state);
                 revmc_llvm::global_gc();
@@ -445,16 +457,16 @@ fn compile_with_state(
 }
 
 #[cfg(feature = "llvm")]
-struct CompilerState {
+pub(super) struct CompilerState {
     compiler: EvmCompiler<EvmLlvmBackend>,
     compilations_since_recycle: usize,
 }
 
 #[cfg(feature = "llvm")]
 impl CompilerState {
-    fn new(config: &RuntimeConfig, kind: CompilationKind) -> Result<Self, String> {
+    fn new(config: &RuntimeConfig, target: CompilerTarget) -> Result<Self, String> {
         Ok(Self {
-            compiler: create_compiler(config, kind == CompilationKind::Aot)?,
+            compiler: create_compiler(config, target.is_aot_backend())?,
             compilations_since_recycle: 0,
         })
     }

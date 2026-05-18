@@ -1,13 +1,13 @@
 //! Out-of-process JIT helper process and IPC.
 
 use crate::{
-    CompileTimings, EvmCompiler, EvmLlvmBackend, OptimizationLevel, eyre,
+    CompileTimings, OptimizationLevel, eyre,
     runtime::{
         config::{CompilationKind, RuntimeConfig},
         storage::RuntimeCacheKey,
         worker::{
-            CompileJob, JitObjectSuccess, SyncNotifier, WorkerResult, WorkerSuccess,
-            compile_jit_object_artifact, create_compiler,
+            CompileJob, CompilerState, CompilerTarget, JitObjectSuccess, SyncNotifier,
+            WorkerResult, WorkerSuccess, compile_with_state,
         },
     },
 };
@@ -49,7 +49,10 @@ pub(super) fn compile_job(
     helper: &HelperProcess,
 ) -> WorkerResult {
     let t0 = Instant::now();
-    let outcome = run_helper_job(&job, config, helper);
+    let (outcome, timings) = match run_helper_job(&job, config, helper) {
+        Ok(result) => (result.outcome, result.timings),
+        Err(error) => (Err(error), CompileTimings::default()),
+    };
     WorkerResult {
         key: job.key,
         outcome,
@@ -57,7 +60,7 @@ pub(super) fn compile_job(
         sync_notifier: job.sync_notifier,
         generation: job.generation,
         compile_duration: t0.elapsed(),
-        timings: CompileTimings::default(),
+        timings,
     }
 }
 
@@ -65,13 +68,18 @@ fn run_helper_job(
     job: &CompileJob,
     config: &RuntimeConfig,
     helper: &HelperProcess,
-) -> Result<WorkerSuccess, String> {
+) -> Result<HelperJobResult, String> {
     helper.compile(job, config)
+}
+
+struct HelperJobResult {
+    outcome: Result<WorkerSuccess, String>,
+    timings: CompileTimings,
 }
 
 struct HelperIo {
     stdin: BufWriter<ChildStdin>,
-    result_rx: chan::Receiver<Result<WorkerSuccess, String>>,
+    result_rx: chan::Receiver<Result<HelperJobResult, String>>,
 }
 
 pub(super) struct HelperProcess {
@@ -83,7 +91,7 @@ impl HelperProcess {
         Self { inner: Mutex::new(None) }
     }
 
-    fn compile(&self, job: &CompileJob, config: &RuntimeConfig) -> Result<WorkerSuccess, String> {
+    fn compile(&self, job: &CompileJob, config: &RuntimeConfig) -> Result<HelperJobResult, String> {
         let helper = {
             let mut slot = self.inner.lock().unwrap();
             if slot.as_ref().is_none_or(|helper| !helper.matches_config(config)) {
@@ -175,7 +183,7 @@ impl HelperProcessInner {
         }
     }
 
-    fn compile(&self, job: &CompileJob, config: &RuntimeConfig) -> Result<WorkerSuccess, String> {
+    fn compile(&self, job: &CompileJob, config: &RuntimeConfig) -> Result<HelperJobResult, String> {
         let mut io = self.io.lock().unwrap();
         write_job(&mut io.stdin, job).map_err(|e| format!("failed to write helper job: {e}"))?;
         io.stdin.flush().map_err(|e| format!("failed to flush helper job: {e}"))?;
@@ -326,6 +334,7 @@ struct HelperInit {
     no_dse: bool,
     dump_dir: Option<String>,
     gas_params: Option<GasParamPairs>,
+    compiler_recycle_threshold: usize,
 }
 
 #[derive(SchemaWrite, SchemaRead)]
@@ -345,8 +354,24 @@ struct HelperCompile {
 
 #[derive(SchemaWrite, SchemaRead)]
 enum HelperResponse {
-    Ok { symbol_name: String, object_bytes: Vec<u8>, builtin_symbols: Vec<String> },
-    Err { error: String },
+    Ok {
+        symbol_name: String,
+        object_bytes: Vec<u8>,
+        builtin_symbols: Vec<String>,
+        timings: HelperTimings,
+    },
+    Err {
+        error: String,
+        timings: HelperTimings,
+    },
+}
+
+#[derive(Clone, Copy, Default, SchemaWrite, SchemaRead)]
+struct HelperTimings {
+    parse: u64,
+    translate: u64,
+    optimize: u64,
+    codegen: u64,
 }
 
 fn write_init<W: Write + ?Sized>(w: &mut BufWriter<W>, init: &HelperInit) -> std::io::Result<()> {
@@ -364,23 +389,54 @@ fn write_job<W: Write + ?Sized>(w: &mut BufWriter<W>, job: &CompileJob) -> std::
     write_message(w, &req)
 }
 
-fn read_helper_result<R: Read + ?Sized>(r: &mut BufReader<R>) -> Result<WorkerSuccess, String> {
+fn read_helper_result<R: Read + ?Sized>(r: &mut BufReader<R>) -> Result<HelperJobResult, String> {
     match read_message(r).map_err(|e| format!("failed to decode helper result: {e}"))? {
-        HelperResponse::Ok { symbol_name, object_bytes, builtin_symbols } => {
-            Ok(WorkerSuccess::JitObject(JitObjectSuccess {
-                symbol_name,
-                object_bytes: Bytes::from(object_bytes),
-                builtin_symbols,
-            }))
+        HelperResponse::Ok { symbol_name, object_bytes, builtin_symbols, timings } => {
+            Ok(HelperJobResult {
+                outcome: Ok(WorkerSuccess::JitObject(JitObjectSuccess {
+                    symbol_name,
+                    object_bytes: Bytes::from(object_bytes),
+                    builtin_symbols,
+                })),
+                timings: timings.into(),
+            })
         }
-        HelperResponse::Err { error } => Err(error),
+        HelperResponse::Err { error, timings } => {
+            Ok(HelperJobResult { outcome: Err(error), timings: timings.into() })
+        }
     }
+}
+
+impl From<CompileTimings> for HelperTimings {
+    fn from(timings: CompileTimings) -> Self {
+        Self {
+            parse: duration_to_nanos(timings.parse),
+            translate: duration_to_nanos(timings.translate),
+            optimize: duration_to_nanos(timings.optimize),
+            codegen: duration_to_nanos(timings.codegen),
+        }
+    }
+}
+
+impl From<HelperTimings> for CompileTimings {
+    fn from(timings: HelperTimings) -> Self {
+        Self {
+            parse: Duration::from_nanos(timings.parse),
+            translate: Duration::from_nanos(timings.translate),
+            optimize: Duration::from_nanos(timings.optimize),
+            codegen: Duration::from_nanos(timings.codegen),
+        }
+    }
+}
+
+fn duration_to_nanos(duration: Duration) -> u64 {
+    u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
 }
 
 fn run_jit_helper_stdio() -> eyre::Result<()> {
     let mut stdin = BufReader::new(std::io::stdin().lock());
     let mut stdout = BufWriter::new(std::io::stdout().lock());
-    let mut compiler: Option<EvmCompiler<EvmLlvmBackend>> = None;
+    let mut compiler = None::<CompilerState>;
     let config = read_helper_init(&mut stdin)?;
 
     loop {
@@ -389,17 +445,7 @@ fn run_jit_helper_stdio() -> eyre::Result<()> {
             Err(err) if is_unexpected_eof(&err) => break,
             Err(err) => return Err(err),
         };
-        if compiler.is_none() {
-            compiler = Some(create_compiler(&config, true).map_err(|e| eyre::eyre!(e))?);
-        }
-        let compiler = compiler.as_mut().unwrap();
-        compiler.set_opt_level(job.opt_level);
-        compiler.set_dump_to(job_dump_dir(&config, &job));
-
-        let result = compile_jit_object_artifact(&job, compiler);
-        if let Err(err) = compiler.clear_ir() {
-            warn!(%err, "clear_ir failed");
-        }
+        let result = compile_with_state(job, &config, CompilerTarget::JitObject, &mut compiler);
         write_helper_result(&mut stdout, result)?;
         stdout.flush()?;
     }
@@ -436,16 +482,18 @@ fn read_helper_job<R: Read + ?Sized>(stdin: &mut BufReader<R>) -> eyre::Result<C
 
 fn write_helper_result<W: Write + ?Sized>(
     stdout: &mut BufWriter<W>,
-    result: Result<WorkerSuccess, String>,
+    result: WorkerResult,
 ) -> eyre::Result<()> {
-    let response = match result {
+    let timings = result.timings.into();
+    let response = match result.outcome {
         Ok(WorkerSuccess::JitObject(success)) => HelperResponse::Ok {
             symbol_name: success.symbol_name,
             object_bytes: success.object_bytes.to_vec(),
             builtin_symbols: success.builtin_symbols,
+            timings,
         },
         Ok(_) => unreachable!(),
-        Err(error) => HelperResponse::Err { error },
+        Err(error) => HelperResponse::Err { error, timings },
     };
     write_message(stdout, &response)?;
     Ok(())
@@ -537,22 +585,19 @@ fn helper_init(config: &RuntimeConfig) -> HelperInit {
         no_dse: config.no_dse,
         dump_dir: config.dump_dir.as_ref().map(|path| path.to_string_lossy().into_owned()),
         gas_params: config.gas_params.as_ref().map(gas_params_to_pairs),
+        compiler_recycle_threshold: config.tuning.compiler_recycle_threshold,
     }
 }
 
 fn runtime_config_from_init(init: HelperInit) -> eyre::Result<RuntimeConfig> {
-    Ok(RuntimeConfig {
+    let mut config = RuntimeConfig {
         dump_dir: init.dump_dir.map(PathBuf::from),
         debug_assertions: init.debug_assertions,
         no_dedup: init.no_dedup,
         no_dse: init.no_dse,
         gas_params: init.gas_params.map(gas_params_from_pairs).transpose()?,
         ..Default::default()
-    })
-}
-
-fn job_dump_dir(config: &RuntimeConfig, job: &CompileJob) -> Option<PathBuf> {
-    config.dump_dir.as_ref().map(|base| {
-        base.join(format!("{:?}", job.key.spec_id)).join(format!("{}", job.key.code_hash))
-    })
+    };
+    config.tuning.compiler_recycle_threshold = init.compiler_recycle_threshold;
+    Ok(config)
 }
