@@ -16,7 +16,7 @@ use crossbeam_channel as chan;
 use revm_context_interface::cfg::{GasParams, gas_params::GasId};
 use revm_primitives::hardfork::SpecId;
 use std::{
-    io::{BufReader, BufWriter, Read, Write},
+    io::{BufRead, BufReader, BufWriter, Read, Write},
     ops::ControlFlow,
     os::unix::process::CommandExt,
     path::PathBuf,
@@ -453,11 +453,6 @@ fn write_message<T, W: Write + ?Sized>(w: &mut BufWriter<W>, message: &T) -> std
 where
     T: wincode::SchemaWrite<wincode::config::DefaultConfig, Src = T>,
 {
-    let len = wincode::serialized_size(message)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    let len = u32::try_from(len)
-        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "message too large"))?;
-    w.write_all(&len.to_le_bytes())?;
     wincode::serialize_into(w, message)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
 }
@@ -466,23 +461,12 @@ fn read_message<T, R: Read + ?Sized>(r: &mut BufReader<R>) -> std::io::Result<Op
 where
     T: wincode::SchemaReadOwned<wincode::config::DefaultConfig, Dst = T>,
 {
-    let mut len = [0; 4];
-    let n = r.read(&mut len[..1])?;
-    if n == 0 {
+    if r.fill_buf()?.is_empty() {
         return Ok(None);
     }
-    r.read_exact(&mut len[1..])?;
-    let mut reader = BufReader::new(r.take(u64::from(u32::from_le_bytes(len))));
-    let value = wincode::deserialize_from(&mut reader)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    let remaining = reader.buffer().len() as u64 + reader.get_ref().limit();
-    if remaining != 0 {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "trailing bytes in helper message",
-        ));
-    }
-    Ok(Some(value))
+    wincode::deserialize_from(r)
+        .map(Some)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
 }
 
 fn opt_level_to_u8(level: OptimizationLevel) -> u8 {
