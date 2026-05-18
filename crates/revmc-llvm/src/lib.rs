@@ -757,7 +757,7 @@ impl EvmLlvmBackend {
         let orc = self.ensure_orc()?;
         orc.global.define_builtins(symbols);
         let tracker = orc.jd().create_resource_tracker();
-        orc.global.jit.add_object_with_rt(object, &tracker).map_err(error_msg)?;
+        orc.global.jit.add_object_with_rt(symbol_name, object, &tracker).map_err(error_msg)?;
         let addr = orc.global.jit.lookup_in(orc.jd(), symbol_name).map_err(error_msg)?;
         orc.loaded_trackers.push(tracker);
         Ok((addr, orc.loaded_trackers.pop().unwrap()))

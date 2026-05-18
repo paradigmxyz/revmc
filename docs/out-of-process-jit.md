@@ -25,7 +25,8 @@ Current prototype:
 
 - `RuntimeConfig::jit_mode = JitMode::OutOfProcess` makes the runtime keep a global persistent helper process spawned via `RuntimeConfig::jit_helper_path`, or `std::env::current_exe()` when unset.
 - `RuntimeConfig::default()` uses plain in-process defaults. `JitBackend::new` applies `RuntimeConfig::with_env_overrides()`, which recognizes `REVMC_JIT_MODE=out-of-process` and `REVMC_JIT_MODE=in-process`; other spellings are rejected. `REVMC_JIT_HELPER_PATH` overrides the helper executable path. Test harnesses should point this at a binary that calls `revmc::runtime::maybe_run_jit_helper()` at startup, such as `target/debug/revmc`.
-- `REVMC_JIT_HELPER_MEMORY_LIMIT_BYTES` and `REVMC_JIT_HELPER_CPU_SECONDS` apply Unix `RLIMIT_AS` and `RLIMIT_CPU` limits to helper processes before `exec`.
+- `REVMC_JIT_HELPER_MEMORY_LIMIT_BYTES` applies a Unix `RLIMIT_AS` limit to helper processes before `exec`.
+- `REVMC_JIT_HELPER_CPU_COUNT` limits helper CPU affinity on Linux before `exec`.
 - Helper binaries must call `revmc::runtime::maybe_run_jit_helper()` at process startup. `revmc-cli` does this already.
 - Workers send length-prefixed wincode-serialized JIT object requests to the helper over stdin and receive length-prefixed wincode-serialized responses from stdout.
 - The parent links returned object bytes into its local ORC instance, resolves the symbol, and constructs `JitCodeBacking` with a parent-owned `ResourceTracker`.

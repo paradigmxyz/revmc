@@ -9,7 +9,7 @@ use std::{path::PathBuf, str::FromStr, sync::Arc, time::Duration};
 const JIT_MODE_ENV: &str = "REVMC_JIT_MODE";
 const JIT_HELPER_PATH_ENV: &str = "REVMC_JIT_HELPER_PATH";
 const JIT_HELPER_MEMORY_LIMIT_ENV: &str = "REVMC_JIT_HELPER_MEMORY_LIMIT_BYTES";
-const JIT_HELPER_CPU_SECONDS_ENV: &str = "REVMC_JIT_HELPER_CPU_SECONDS";
+const JIT_HELPER_CPU_COUNT_ENV: &str = "REVMC_JIT_HELPER_CPU_COUNT";
 
 /// Runtime configuration.
 #[derive(Clone, derive_more::Debug)]
@@ -171,7 +171,7 @@ impl RuntimeConfig {
     /// Applies runtime environment overrides.
     ///
     /// Recognized variables are `REVMC_JIT_MODE`, `REVMC_JIT_HELPER_PATH`,
-    /// `REVMC_JIT_HELPER_MEMORY_LIMIT_BYTES`, and `REVMC_JIT_HELPER_CPU_SECONDS`.
+    /// `REVMC_JIT_HELPER_MEMORY_LIMIT_BYTES`, and `REVMC_JIT_HELPER_CPU_COUNT`.
     pub fn with_env_overrides(mut self) -> eyre::Result<Self> {
         if let Some(mode) = env_var(JIT_MODE_ENV) {
             self.jit_mode = mode.parse().map_err(|e: String| eyre::eyre!("{JIT_MODE_ENV}: {e}"))?;
@@ -182,8 +182,8 @@ impl RuntimeConfig {
         if let Some(limit) = parse_env_u64(JIT_HELPER_MEMORY_LIMIT_ENV)? {
             self.tuning.jit_helper_memory_limit_bytes = limit;
         }
-        if let Some(secs) = parse_env_u64(JIT_HELPER_CPU_SECONDS_ENV)? {
-            self.tuning.jit_helper_cpu_time = (secs > 0).then(|| Duration::from_secs(secs));
+        if let Some(count) = parse_env_usize(JIT_HELPER_CPU_COUNT_ENV)? {
+            self.tuning.jit_helper_cpu_count = count;
         }
         Ok(self)
     }
@@ -269,13 +269,14 @@ pub struct RuntimeTuning {
     /// Defaults to `0`.
     pub jit_helper_memory_limit_bytes: u64,
 
-    /// Maximum CPU time for the out-of-process JIT helper.
+    /// Maximum CPU count for the out-of-process JIT helper.
     ///
-    /// `None` disables the limit. On Unix this is applied with `RLIMIT_CPU`
-    /// before the helper process starts executing.
+    /// `0` disables the limit. On Linux this limits the helper's CPU affinity
+    /// to the first N CPUs from the helper's current affinity mask before the
+    /// helper process starts executing.
     ///
-    /// Defaults to `None`.
-    pub jit_helper_cpu_time: Option<Duration>,
+    /// Defaults to `0`.
+    pub jit_helper_cpu_count: usize,
 
     /// Capacity of the per-worker job queue.
     ///
@@ -347,7 +348,7 @@ impl Default for RuntimeTuning {
             jit_worker_count: worker_count,
             jit_timeout: Duration::from_secs(5),
             jit_helper_memory_limit_bytes: 0,
-            jit_helper_cpu_time: None,
+            jit_helper_cpu_count: 0,
             jit_worker_queue_capacity: 64,
             jit_opt_level: crate::OptimizationLevel::default(),
             aot_opt_level: crate::OptimizationLevel::default(),
@@ -360,6 +361,11 @@ impl Default for RuntimeTuning {
 }
 
 fn parse_env_u64(name: &str) -> eyre::Result<Option<u64>> {
+    let Some(value) = env_var(name) else { return Ok(None) };
+    value.parse().map(Some).map_err(|e| eyre::eyre!("{name}: {e}"))
+}
+
+fn parse_env_usize(name: &str) -> eyre::Result<Option<usize>> {
     let Some(value) = env_var(name) else { return Ok(None) };
     value.parse().map(Some).map_err(|e| eyre::eyre!("{name}: {e}"))
 }

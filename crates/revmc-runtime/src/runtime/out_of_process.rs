@@ -229,21 +229,20 @@ fn apply_helper_limits(command: &mut Command, config: &RuntimeConfig) {
     use std::os::unix::process::CommandExt;
 
     let memory_limit = config.tuning.jit_helper_memory_limit_bytes;
-    let cpu_time = config.tuning.jit_helper_cpu_time;
-    if memory_limit == 0 && cpu_time.is_none() {
+    let cpu_count = config.tuning.jit_helper_cpu_count;
+    if memory_limit == 0 && cpu_count == 0 {
         return;
     }
 
     // SAFETY: `pre_exec` runs in the child after fork and before exec. The closure only calls
-    // async-signal-safe libc `setrlimit` and constructs an `io::Error` if it fails.
+    // libc resource/affinity syscalls and constructs an `io::Error` if they fail.
     unsafe {
         command.pre_exec(move || {
             if memory_limit > 0 {
                 set_rlimit(libc::RLIMIT_AS as _, memory_limit)?;
             }
-            if let Some(cpu_time) = cpu_time {
-                let seconds = cpu_time.as_secs().max(1);
-                set_rlimit(libc::RLIMIT_CPU as _, seconds)?;
+            if cpu_count > 0 {
+                limit_cpu_affinity(cpu_count)?;
             }
             Ok(())
         });
@@ -257,6 +256,43 @@ fn set_rlimit(resource: libc::c_int, value: u64) -> std::io::Result<()> {
     if unsafe { libc::setrlimit(resource as _, &limit) } != 0 {
         return Err(std::io::Error::last_os_error());
     }
+    Ok(())
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn limit_cpu_affinity(cpu_count: usize) -> std::io::Result<()> {
+    let mut current = unsafe { std::mem::zeroed::<libc::cpu_set_t>() };
+    let size = std::mem::size_of::<libc::cpu_set_t>();
+    if unsafe { libc::sched_getaffinity(0, size, &mut current) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+
+    let mut limited = unsafe { std::mem::zeroed::<libc::cpu_set_t>() };
+    let mut remaining = cpu_count;
+    for cpu in 0..(8 * size) {
+        if unsafe { libc::CPU_ISSET(cpu, &current) } {
+            unsafe { libc::CPU_SET(cpu, &mut limited) };
+            remaining -= 1;
+            if remaining == 0 {
+                break;
+            }
+        }
+    }
+    if remaining == cpu_count {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "current CPU affinity mask is empty",
+        ));
+    }
+
+    if unsafe { libc::sched_setaffinity(0, size, &limited) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+fn limit_cpu_affinity(_cpu_count: usize) -> std::io::Result<()> {
     Ok(())
 }
 

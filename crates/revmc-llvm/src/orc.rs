@@ -1404,10 +1404,10 @@ impl LLJIT {
     /// Add a relocatable object file to the given ResourceTracker's JITDylib.
     pub fn add_object_with_rt(
         &self,
+        name: &CStr,
         object: &[u8],
         rt: &ResourceTracker,
     ) -> Result<(), LLVMString> {
-        let name = c"revmc-object";
         let buf = unsafe {
             LLVMCreateMemoryBufferWithMemoryRangeCopy(
                 object.as_ptr().cast(),

@@ -63,33 +63,54 @@ fn jit_total_bytes() -> usize {
 }
 
 #[cfg(feature = "llvm")]
-fn link_jit_object(
-    success: &JitObjectSuccess,
-) -> eyre::Result<(EvmCompilerFn, Arc<JitCodeBacking>)> {
-    let mut backend = crate::EvmLlvmBackend::new(false)?;
-    let symbol_name = CString::new(success.symbol_name.clone())?;
-    let builtin_symbols = success
-        .builtin_symbols
-        .iter()
-        .map(|name| {
-            let addr = revmc_builtins::Builtin::parse(name)
-                .ok_or_else(|| eyre::eyre!("unknown builtin symbol: {name}"))?
-                .addr();
-            Ok((CString::new(name.as_str())?, addr))
-        })
-        .collect::<eyre::Result<Vec<_>>>()?;
-    let (addr, tracker) =
-        backend.link_jit_object(&symbol_name, &success.object_bytes, &builtin_symbols)?;
-    let jd_guard = backend.jit_dylib_guard();
-    let func = EvmCompilerFn::new(unsafe { std::mem::transmute::<usize, RawEvmCompilerFn>(addr) });
-    Ok((func, Arc::new(JitCodeBacking::new(tracker, jd_guard))))
+#[derive(Default)]
+struct JitObjectLinker {
+    backend: Option<crate::EvmLlvmBackend>,
+}
+
+#[cfg(feature = "llvm")]
+impl JitObjectLinker {
+    fn link(
+        &mut self,
+        success: &JitObjectSuccess,
+    ) -> eyre::Result<(EvmCompilerFn, Arc<JitCodeBacking>)> {
+        let backend = match &mut self.backend {
+            Some(backend) => backend,
+            None => self.backend.insert(crate::EvmLlvmBackend::new(false)?),
+        };
+
+        let symbol_name = CString::new(success.symbol_name.clone())?;
+        let builtin_symbols = success
+            .builtin_symbols
+            .iter()
+            .map(|name| {
+                let addr = revmc_builtins::Builtin::parse(name)
+                    .ok_or_else(|| eyre::eyre!("unknown builtin symbol: {name}"))?
+                    .addr();
+                Ok((CString::new(name.as_str())?, addr))
+            })
+            .collect::<eyre::Result<Vec<_>>>()?;
+        let (addr, tracker) =
+            backend.link_jit_object(&symbol_name, &success.object_bytes, &builtin_symbols)?;
+        let jd_guard = backend.jit_dylib_guard();
+        let func =
+            EvmCompilerFn::new(unsafe { std::mem::transmute::<usize, RawEvmCompilerFn>(addr) });
+        Ok((func, Arc::new(JitCodeBacking::new(tracker, jd_guard))))
+    }
 }
 
 #[cfg(not(feature = "llvm"))]
-fn link_jit_object(
-    _success: &JitObjectSuccess,
-) -> eyre::Result<(EvmCompilerFn, Arc<JitCodeBacking>)> {
-    eyre::bail!("LLVM backend not available")
+#[derive(Default)]
+struct JitObjectLinker;
+
+#[cfg(not(feature = "llvm"))]
+impl JitObjectLinker {
+    fn link(
+        &mut self,
+        _success: &JitObjectSuccess,
+    ) -> eyre::Result<(EvmCompilerFn, Arc<JitCodeBacking>)> {
+        eyre::bail!("LLVM backend not available")
+    }
 }
 
 /// Commands sent to the backend thread on the bounded command channel.
@@ -171,6 +192,8 @@ struct BackendState {
     entries: HashMap<RuntimeCacheKey, EntryState>,
     /// Worker pool for JIT compilation.
     workers: WorkerPool,
+    /// Backend-thread-owned linker for out-of-process JIT objects.
+    jit_object_linker: JitObjectLinker,
     /// Receiver for worker results.
     result_rx: chan::Receiver<WorkerResult>,
     /// Artifact store for persisted artifacts.
@@ -541,7 +564,7 @@ impl BackendState {
         success: JitObjectSuccess,
         compile_duration: std::time::Duration,
     ) {
-        match link_jit_object(&success) {
+        match self.jit_object_linker.link(&success) {
             Ok((func, backing)) => {
                 let program = Arc::new(CompiledProgram::new_jit(key, func, backing));
                 self.insert_resident(key, program);
@@ -792,6 +815,7 @@ pub(crate) fn run(
         resident_meta: preload_meta,
         entries: HashMap::default(),
         workers,
+        jit_object_linker: JitObjectLinker::default(),
         result_rx,
         store: config.store,
         tuning: config.tuning,
