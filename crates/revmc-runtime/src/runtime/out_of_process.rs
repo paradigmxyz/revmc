@@ -27,7 +27,7 @@ use std::{
     process::{Child, ChildStdin, Command, Stdio},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread::JoinHandle,
     time::{Duration, Instant},
@@ -91,12 +91,13 @@ struct HelperIo {
 
 pub(super) struct HelperProcess {
     inner: Mutex<Option<Arc<HelperProcessInner>>>,
+    paused: Arc<AtomicBool>,
     stats: Arc<RuntimeStats>,
 }
 
 impl HelperProcess {
     pub(super) fn new(stats: Arc<RuntimeStats>) -> Self {
-        Self { inner: Mutex::new(None), stats }
+        Self { inner: Mutex::new(None), paused: Arc::new(AtomicBool::new(false)), stats }
     }
 
     fn compile(&self, job: &CompileJob, config: &RuntimeConfig) -> Result<HelperJobResult, String> {
@@ -105,8 +106,11 @@ impl HelperProcess {
             if slot.as_ref().is_none_or(|helper| !helper.matches_config(config)) {
                 let restarting = slot.is_some();
                 debug!("spawning JIT helper");
-                match HelperProcessInner::spawn(config, self.stats.clone()) {
+                match HelperProcessInner::spawn(config, self.stats.clone(), self.paused.clone()) {
                     Ok(helper) => {
+                        if self.paused.load(Ordering::Relaxed) {
+                            helper.pause();
+                        }
                         self.stats.jit_helper_spawns.fetch_add(1, Ordering::Relaxed);
                         if restarting {
                             self.stats.jit_helper_restarts.fetch_add(1, Ordering::Relaxed);
@@ -141,6 +145,20 @@ impl HelperProcess {
             helper.kill();
         }
     }
+
+    pub(super) fn pause(&self) {
+        self.paused.store(true, Ordering::Relaxed);
+        if let Some(helper) = self.inner.lock().unwrap().as_ref() {
+            helper.pause();
+        }
+    }
+
+    pub(super) fn resume(&self) {
+        self.paused.store(false, Ordering::Relaxed);
+        if let Some(helper) = self.inner.lock().unwrap().as_ref() {
+            helper.resume();
+        }
+    }
 }
 
 struct HelperProcessInner {
@@ -153,10 +171,15 @@ struct HelperProcessInner {
     next_job_id: AtomicU64,
     shutdown_timeout: Duration,
     stats: Arc<RuntimeStats>,
+    paused: Arc<AtomicBool>,
 }
 
 impl HelperProcessInner {
-    fn spawn(config: &RuntimeConfig, stats: Arc<RuntimeStats>) -> Result<Self, String> {
+    fn spawn(
+        config: &RuntimeConfig,
+        stats: Arc<RuntimeStats>,
+        paused: Arc<AtomicBool>,
+    ) -> Result<Self, String> {
         let path = match &config.jit_helper_path {
             Some(path) => path.clone(),
             None => {
@@ -210,6 +233,7 @@ impl HelperProcessInner {
             next_job_id: AtomicU64::new(0),
             shutdown_timeout: config.tuning.shutdown_timeout,
             stats,
+            paused,
         })
     }
 
@@ -240,27 +264,32 @@ impl HelperProcessInner {
             }
         }
 
-        match rx.recv_timeout(config.tuning.jit_timeout) {
-            Ok(result) => result,
-            Err(chan::RecvTimeoutError::Timeout) => {
-                warn!(timeout = ?config.tuning.jit_timeout, "JIT helper timed out");
-                self.pending.lock().unwrap().remove(&id);
-                self.stats.jit_helper_timeouts.fetch_add(1, Ordering::Relaxed);
-                self.kill();
-                Err(format!(
-                    "JIT helper timed out after {:?}; helper will be restarted",
-                    config.tuning.jit_timeout
-                ))
-            }
-            Err(chan::RecvTimeoutError::Disconnected) => {
-                let status = self.child.lock().unwrap().try_wait().ok().flatten();
-                let message = match status {
-                    Some(status) => format!("JIT helper exited with {status}"),
-                    None => "JIT helper disconnected".into(),
-                };
-                warn!(message, "JIT helper disconnected");
-                self.stats.jit_helper_disconnects.fetch_add(1, Ordering::Relaxed);
-                Err(format!("{message}; helper will be restarted"))
+        loop {
+            match rx.recv_timeout(config.tuning.jit_timeout) {
+                Ok(result) => return result,
+                Err(chan::RecvTimeoutError::Timeout) if self.paused.load(Ordering::Relaxed) => {
+                    continue;
+                }
+                Err(chan::RecvTimeoutError::Timeout) => {
+                    warn!(timeout = ?config.tuning.jit_timeout, "JIT helper timed out");
+                    self.pending.lock().unwrap().remove(&id);
+                    self.stats.jit_helper_timeouts.fetch_add(1, Ordering::Relaxed);
+                    self.kill();
+                    return Err(format!(
+                        "JIT helper timed out after {:?}; helper will be restarted",
+                        config.tuning.jit_timeout
+                    ));
+                }
+                Err(chan::RecvTimeoutError::Disconnected) => {
+                    let status = self.child.lock().unwrap().try_wait().ok().flatten();
+                    let message = match status {
+                        Some(status) => format!("JIT helper exited with {status}"),
+                        None => "JIT helper disconnected".into(),
+                    };
+                    warn!(message, "JIT helper disconnected");
+                    self.stats.jit_helper_disconnects.fetch_add(1, Ordering::Relaxed);
+                    return Err(format!("{message}; helper will be restarted"));
+                }
             }
         }
     }
@@ -282,6 +311,22 @@ impl HelperProcessInner {
                 false
             }
         }
+    }
+
+    fn pause(&self) {
+        self.signal(libc::SIGSTOP, "pause");
+    }
+
+    fn resume(&self) {
+        self.signal(libc::SIGCONT, "resume");
+    }
+
+    fn signal(&self, signal: libc::c_int, action: &str) {
+        let mut child = self.child.lock().unwrap();
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            return;
+        }
+        signal_helper(&child, signal, action);
     }
 }
 
@@ -333,6 +378,18 @@ fn kill_helper(child: &mut Child) {
     }
     if let Err(err) = child.kill() {
         warn!(%err, "failed to kill JIT helper");
+    }
+}
+
+fn signal_helper(child: &Child, signal: libc::c_int, action: &str) {
+    let pid = child.id() as libc::pid_t;
+    if unsafe { libc::kill(-pid, signal) } == 0 {
+        return;
+    }
+
+    let err = std::io::Error::last_os_error();
+    if err.raw_os_error() != Some(libc::ESRCH) {
+        warn!(%err, signal, action, "failed to signal JIT helper process group");
     }
 }
 

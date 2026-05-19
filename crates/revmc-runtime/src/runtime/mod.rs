@@ -369,16 +369,24 @@ impl JitBackend {
     /// Resident compiled functions are still returned by [`lookup`](Self::lookup), but
     /// lookup events are not enqueued or drained while paused.
     pub fn pause(&self) {
-        self.inner.shared.pause_depth.fetch_add(1, Ordering::Relaxed);
+        if self.inner.shared.pause_depth.fetch_add(1, Ordering::Relaxed) == 0 {
+            let _ = self.inner.tx.send(Command::Pause);
+        }
     }
 
     /// Resumes background JIT promotion from lookup observations.
     pub fn resume(&self) {
-        let _ = self.inner.shared.pause_depth.fetch_update(
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-            |depth| Some(depth.saturating_sub(1)),
-        );
+        if self
+            .inner
+            .shared
+            .pause_depth
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |depth| {
+                Some(depth.saturating_sub(1))
+            })
+            .is_ok_and(|depth| depth == 1)
+        {
+            let _ = self.inner.tx.send(Command::Resume);
+        }
     }
 
     /// Returns whether background JIT promotion is paused.

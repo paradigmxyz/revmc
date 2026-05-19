@@ -279,6 +279,16 @@ impl WorkerPool {
     pub(crate) fn cancel_in_flight(&self) {
         cancel_out_of_process_helper(&self.out_of_process_helper);
     }
+
+    /// Pauses out-of-process helper execution.
+    pub(crate) fn pause(&self) {
+        pause_out_of_process_helper(&self.out_of_process_helper);
+    }
+
+    /// Resumes out-of-process helper execution.
+    pub(crate) fn resume(&self) {
+        resume_out_of_process_helper(&self.out_of_process_helper);
+    }
 }
 
 impl Drop for WorkerPool {
@@ -312,6 +322,26 @@ fn cancel_out_of_process_helper(helper: &OutOfProcessHelper) {
 
 #[cfg(not(all(feature = "llvm", unix)))]
 fn cancel_out_of_process_helper(_helper: &OutOfProcessHelper) {}
+
+#[cfg(all(feature = "llvm", unix))]
+fn pause_out_of_process_helper(helper: &OutOfProcessHelper) {
+    if let Some(helper) = helper {
+        helper.pause();
+    }
+}
+
+#[cfg(not(all(feature = "llvm", unix)))]
+fn pause_out_of_process_helper(_helper: &OutOfProcessHelper) {}
+
+#[cfg(all(feature = "llvm", unix))]
+fn resume_out_of_process_helper(helper: &OutOfProcessHelper) {
+    if let Some(helper) = helper {
+        helper.resume();
+    }
+}
+
+#[cfg(not(all(feature = "llvm", unix)))]
+fn resume_out_of_process_helper(_helper: &OutOfProcessHelper) {}
 
 #[cfg(feature = "llvm")]
 fn clear_thread_local_compilers() {

@@ -136,6 +136,10 @@ pub(crate) enum Command {
     ClearPersisted,
     /// Clear both resident and persisted.
     ClearAll,
+    /// Pause out-of-process helper execution.
+    Pause,
+    /// Resume out-of-process helper execution.
+    Resume,
     /// Shut down the backend.
     Shutdown,
 }
@@ -228,6 +232,8 @@ impl BackendState {
             Command::ClearResident => self.handle_clear_resident(),
             Command::ClearPersisted => self.handle_clear_persisted(),
             Command::ClearAll => self.handle_clear_all(),
+            Command::Pause => self.workers.pause(),
+            Command::Resume => self.workers.resume(),
             Command::Shutdown => return ControlFlow::Break(()),
         }
         ControlFlow::Continue(())
