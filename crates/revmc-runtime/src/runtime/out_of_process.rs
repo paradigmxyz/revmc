@@ -875,3 +875,53 @@ fn runtime_config_from_init(init: HelperInit) -> eyre::Result<RuntimeConfig> {
     config.tuning.compiler_recycle_threshold = init.compiler_recycle_threshold;
     Ok(config)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn helper_pause_state_blocks_until_resume() {
+        let pause_state = Arc::new(HelperPauseState::default());
+        pause_state.pause();
+
+        let (tx, rx) = chan::bounded(1);
+        let thread_pause_state = Arc::clone(&pause_state);
+        let thread = std::thread::spawn(move || {
+            thread_pause_state.wait_resumed();
+            tx.send(()).unwrap();
+        });
+
+        assert!(rx.recv_timeout(Duration::from_millis(50)).is_err());
+        pause_state.resume();
+        rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        thread.join().unwrap();
+    }
+
+    #[test]
+    fn helper_pause_protocol_roundtrips() {
+        let mut request = Vec::new();
+        {
+            let mut writer = BufWriter::new(&mut request);
+            write_pause(&mut writer, 42).unwrap();
+            writer.flush().unwrap();
+        }
+        let mut reader = BufReader::new(request.as_slice());
+        match read_helper_request(&mut reader).unwrap() {
+            HelperWork::Pause { id } => assert_eq!(id, 42),
+            HelperWork::Compile { .. } | HelperWork::Resume => panic!("unexpected helper request"),
+        }
+
+        let mut response = Vec::new();
+        {
+            let mut writer = BufWriter::new(&mut response);
+            write_pause_ack(&mut writer, 42).unwrap();
+            writer.flush().unwrap();
+        }
+        let mut reader = BufReader::new(response.as_slice());
+        match read_helper_response(&mut reader).unwrap() {
+            HelperResponseMessage::Paused(id) => assert_eq!(id, 42),
+            HelperResponseMessage::Job(..) => panic!("unexpected helper response"),
+        }
+    }
+}
