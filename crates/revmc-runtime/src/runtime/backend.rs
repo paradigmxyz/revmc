@@ -63,13 +63,16 @@ fn jit_total_bytes() -> usize {
 }
 
 #[cfg(feature = "llvm")]
-#[derive(Default)]
 struct JitObjectLinker {
     backend: Option<crate::EvmLlvmBackend>,
 }
 
 #[cfg(feature = "llvm")]
 impl JitObjectLinker {
+    const fn new() -> Self {
+        Self { backend: None }
+    }
+
     fn link(
         &mut self,
         success: &JitObjectSuccess,
@@ -90,9 +93,11 @@ impl JitObjectLinker {
                 Ok((CString::new(name.as_str())?, addr))
             })
             .collect::<eyre::Result<Vec<_>>>()?;
-        let (addr, tracker) =
-            backend.link_jit_object(&symbol_name, &success.object_bytes, &builtin_symbols)?;
-        let jd_guard = backend.jit_dylib_guard();
+        let (addr, tracker, jd_guard) = backend.link_jit_object_in_fresh_dylib(
+            &symbol_name,
+            &success.object_bytes,
+            &builtin_symbols,
+        )?;
         let func =
             EvmCompilerFn::new(unsafe { std::mem::transmute::<usize, RawEvmCompilerFn>(addr) });
         Ok((func, Arc::new(JitCodeBacking::new(tracker, jd_guard))))
@@ -100,11 +105,14 @@ impl JitObjectLinker {
 }
 
 #[cfg(not(feature = "llvm"))]
-#[derive(Default)]
 struct JitObjectLinker;
 
 #[cfg(not(feature = "llvm"))]
 impl JitObjectLinker {
+    const fn new() -> Self {
+        Self
+    }
+
     fn link(
         &mut self,
         _success: &JitObjectSuccess,
@@ -815,7 +823,7 @@ pub(crate) fn run(
         resident_meta: preload_meta,
         entries: HashMap::default(),
         workers,
-        jit_object_linker: JitObjectLinker::default(),
+        jit_object_linker: JitObjectLinker::new(),
         result_rx,
         store: config.store,
         tuning: config.tuning,
@@ -858,4 +866,51 @@ pub(crate) fn run(
 
     state.workers.shutdown();
     while state.result_rx.try_recv().is_ok() {}
+}
+
+#[cfg(all(test, feature = "llvm"))]
+mod tests {
+    use super::*;
+    use crate::runtime::worker::{
+        CompileJob, WorkerSuccess, compile_jit_object_artifact, create_compiler,
+    };
+    use revm_primitives::hardfork::SpecId;
+
+    /// PUSH1 0x42 PUSH0 MSTORE PUSH1 0x20 PUSH0 RETURN.
+    const BYTECODE_RET42: &[u8] = &[0x60, 0x42, 0x5f, 0x52, 0x60, 0x20, 0x5f, 0xf3];
+
+    fn compile_jit_object(symbol_name: &str) -> JitObjectSuccess {
+        let config = RuntimeConfig::default();
+        let mut compiler = create_compiler(&config, true).unwrap();
+        let job = CompileJob {
+            kind: CompilationKind::Jit,
+            key: RuntimeCacheKey { code_hash: keccak256(BYTECODE_RET42), spec_id: SpecId::CANCUN },
+            bytecode: Bytes::copy_from_slice(BYTECODE_RET42),
+            symbol_name: symbol_name.to_owned(),
+            opt_level: config.tuning.jit_opt_level,
+            sync_notifier: SyncNotifier::none(),
+            generation: 0,
+        };
+
+        match compile_jit_object_artifact(&job, &mut compiler).unwrap() {
+            WorkerSuccess::JitObject(success) => success,
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn jit_object_linker_relinks_live_symbol_name() {
+        let success = compile_jit_object("jit_duplicate_symbol");
+        let success2 = JitObjectSuccess {
+            symbol_name: success.symbol_name.clone(),
+            object_bytes: success.object_bytes.clone(),
+            builtin_symbols: success.builtin_symbols.clone(),
+        };
+
+        let mut linker = JitObjectLinker::new();
+        let (_first_func, _first_backing) = linker.link(&success).unwrap();
+        let (_second_func, _second_backing) = linker
+            .link(&success2)
+            .expect("same symbol should link while previous backing remains alive");
+    }
 }
