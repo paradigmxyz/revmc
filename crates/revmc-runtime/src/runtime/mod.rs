@@ -19,7 +19,7 @@ use std::{
     ops::ControlFlow,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -87,6 +87,8 @@ pub(crate) struct BackendShared {
     /// Lock-free queue of events.
     #[debug(skip)]
     events: EventQueue,
+    /// Number of active background lookup-processing pauses.
+    pause_depth: AtomicUsize,
     /// Shared stats counters.
     #[debug(skip)]
     stats: Arc<RuntimeStats>,
@@ -177,6 +179,7 @@ impl JitBackend {
         let shared = Arc::new(BackendShared {
             resident: ResidentMap::default(),
             events,
+            pause_depth: AtomicUsize::new(0),
             stats: Arc::new(RuntimeStats::default()),
         });
         let this = Self {
@@ -224,6 +227,11 @@ impl JitBackend {
         } else {
             LookupDecision::Interpret(InterpretReason::NotReady)
         };
+
+        if shared.pause_depth.load(Ordering::Relaxed) != 0 {
+            cold_path();
+            return decision;
+        }
 
         if let Err(_v) = shared.events.push(req) {
             cold_path();
@@ -354,6 +362,28 @@ impl JitBackend {
     /// Returns whether the runtime is enabled.
     pub fn enabled(&self) -> bool {
         self.inner.enabled.load(Ordering::Relaxed)
+    }
+
+    /// Pauses background JIT promotion from lookup observations.
+    ///
+    /// Resident compiled functions are still returned by [`lookup`](Self::lookup), but
+    /// lookup events are not enqueued or drained while paused.
+    pub fn pause(&self) {
+        self.inner.shared.pause_depth.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Resumes background JIT promotion from lookup observations.
+    pub fn resume(&self) {
+        let _ = self.inner.shared.pause_depth.fetch_update(
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+            |depth| Some(depth.saturating_sub(1)),
+        );
+    }
+
+    /// Returns whether background JIT promotion is paused.
+    pub fn is_paused(&self) -> bool {
+        self.inner.shared.pause_depth.load(Ordering::Relaxed) != 0
     }
 
     /// Sets whether the runtime is enabled, spawning the backend thread on first enable.
