@@ -149,6 +149,7 @@ impl HelperProcess {
     }
 
     pub(super) fn pause(&self) {
+        self.stats.jit_helper_pause_requests.fetch_add(1, Ordering::Relaxed);
         self.paused.store(true, Ordering::Relaxed);
         if let Some(helper) = self.inner.lock().unwrap().as_ref() {
             helper.pause();
@@ -156,6 +157,7 @@ impl HelperProcess {
     }
 
     pub(super) fn resume(&self) {
+        self.stats.jit_helper_resume_requests.fetch_add(1, Ordering::Relaxed);
         self.paused.store(false, Ordering::Relaxed);
         if let Some(helper) = self.inner.lock().unwrap().as_ref() {
             helper.resume();
@@ -339,16 +341,24 @@ impl HelperProcessInner {
 
         if let Err(err) = send_result {
             self.pending_pauses.lock().unwrap().remove(&id);
+            self.stats.jit_helper_pause_failures.fetch_add(1, Ordering::Relaxed);
             warn!(%err, "failed to request graceful JIT helper pause");
         } else {
             match rx.recv_timeout(HELPER_PAUSE_TIMEOUT) {
-                Ok(Ok(())) => {}
-                Ok(Err(err)) => warn!(%err, "JIT helper graceful pause failed"),
+                Ok(Ok(())) => {
+                    self.stats.jit_helper_pause_acknowledgements.fetch_add(1, Ordering::Relaxed);
+                }
+                Ok(Err(err)) => {
+                    self.stats.jit_helper_pause_failures.fetch_add(1, Ordering::Relaxed);
+                    warn!(%err, "JIT helper graceful pause failed");
+                }
                 Err(chan::RecvTimeoutError::Timeout) => {
                     self.pending_pauses.lock().unwrap().remove(&id);
+                    self.stats.jit_helper_pause_timeouts.fetch_add(1, Ordering::Relaxed);
                     warn!(timeout = ?HELPER_PAUSE_TIMEOUT, "timed out waiting for JIT helper pause");
                 }
                 Err(chan::RecvTimeoutError::Disconnected) => {
+                    self.stats.jit_helper_pause_failures.fetch_add(1, Ordering::Relaxed);
                     warn!("JIT helper disconnected before pause acknowledgement");
                 }
             }
@@ -364,6 +374,7 @@ impl HelperProcessInner {
             write_resume(&mut io.stdin).and_then(|()| io.stdin.flush())
         };
         if let Err(err) = send_result {
+            self.stats.jit_helper_resume_failures.fetch_add(1, Ordering::Relaxed);
             warn!(%err, "failed to request JIT helper resume");
         }
     }
@@ -923,5 +934,23 @@ mod tests {
             HelperResponseMessage::Paused(id) => assert_eq!(id, 42),
             HelperResponseMessage::Job(..) => panic!("unexpected helper response"),
         }
+    }
+
+    #[test]
+    fn helper_pause_resume_requests_update_stats() {
+        let stats = Arc::new(RuntimeStats::default());
+        let helper = HelperProcess::new(Arc::clone(&stats));
+
+        helper.pause();
+        helper.pause();
+        helper.resume();
+
+        let snapshot = stats.snapshot(crate::runtime::stats::RuntimeStatsGauges::default());
+        assert_eq!(snapshot.jit_helper_pause_requests, 2);
+        assert_eq!(snapshot.jit_helper_pause_acknowledgements, 0);
+        assert_eq!(snapshot.jit_helper_pause_failures, 0);
+        assert_eq!(snapshot.jit_helper_pause_timeouts, 0);
+        assert_eq!(snapshot.jit_helper_resume_requests, 1);
+        assert_eq!(snapshot.jit_helper_resume_failures, 0);
     }
 }

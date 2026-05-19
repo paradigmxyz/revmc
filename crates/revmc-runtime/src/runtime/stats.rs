@@ -29,6 +29,18 @@ pub(crate) struct RuntimeStats {
     pub(crate) jit_helper_timeouts: AtomicU64,
     /// Total number of out-of-process JIT helper disconnects.
     pub(crate) jit_helper_disconnects: AtomicU64,
+    /// Total number of out-of-process JIT helper pause requests.
+    pub(crate) jit_helper_pause_requests: AtomicU64,
+    /// Total number of graceful out-of-process JIT helper pause acknowledgements.
+    pub(crate) jit_helper_pause_acknowledgements: AtomicU64,
+    /// Total number of graceful out-of-process JIT helper pause failures.
+    pub(crate) jit_helper_pause_failures: AtomicU64,
+    /// Total number of graceful out-of-process JIT helper pause acknowledgement timeouts.
+    pub(crate) jit_helper_pause_timeouts: AtomicU64,
+    /// Total number of out-of-process JIT helper resume requests.
+    pub(crate) jit_helper_resume_requests: AtomicU64,
+    /// Total number of out-of-process JIT helper resume request failures.
+    pub(crate) jit_helper_resume_failures: AtomicU64,
 }
 
 /// Gauge values sampled at snapshot time.
@@ -84,6 +96,18 @@ pub struct RuntimeStatsSnapshot {
     pub jit_helper_timeouts: u64,
     /// Total number of out-of-process JIT helper disconnects.
     pub jit_helper_disconnects: u64,
+    /// Total number of out-of-process JIT helper pause requests.
+    pub jit_helper_pause_requests: u64,
+    /// Total number of graceful out-of-process JIT helper pause acknowledgements.
+    pub jit_helper_pause_acknowledgements: u64,
+    /// Total number of graceful out-of-process JIT helper pause failures.
+    pub jit_helper_pause_failures: u64,
+    /// Total number of graceful out-of-process JIT helper pause acknowledgement timeouts.
+    pub jit_helper_pause_timeouts: u64,
+    /// Total number of out-of-process JIT helper resume requests.
+    pub jit_helper_resume_requests: u64,
+    /// Total number of out-of-process JIT helper resume request failures.
+    pub jit_helper_resume_failures: u64,
 }
 
 impl RuntimeStatsSnapshot {
@@ -126,6 +150,14 @@ impl RuntimeStats {
             jit_helper_restarts: self.jit_helper_restarts.load(Ordering::Relaxed),
             jit_helper_timeouts: self.jit_helper_timeouts.load(Ordering::Relaxed),
             jit_helper_disconnects: self.jit_helper_disconnects.load(Ordering::Relaxed),
+            jit_helper_pause_requests: self.jit_helper_pause_requests.load(Ordering::Relaxed),
+            jit_helper_pause_acknowledgements: self
+                .jit_helper_pause_acknowledgements
+                .load(Ordering::Relaxed),
+            jit_helper_pause_failures: self.jit_helper_pause_failures.load(Ordering::Relaxed),
+            jit_helper_pause_timeouts: self.jit_helper_pause_timeouts.load(Ordering::Relaxed),
+            jit_helper_resume_requests: self.jit_helper_resume_requests.load(Ordering::Relaxed),
+            jit_helper_resume_failures: self.jit_helper_resume_failures.load(Ordering::Relaxed),
         }
     }
 }
