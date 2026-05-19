@@ -87,7 +87,7 @@ pub(crate) struct BackendShared {
     /// Lock-free queue of events.
     #[debug(skip)]
     events: EventQueue,
-    /// Number of active background lookup-processing pauses.
+    /// Number of active out-of-process helper pauses.
     pause_depth: AtomicUsize,
     /// Shared stats counters.
     #[debug(skip)]
@@ -228,11 +228,6 @@ impl JitBackend {
             LookupDecision::Interpret(InterpretReason::NotReady)
         };
 
-        if shared.pause_depth.load(Ordering::Relaxed) != 0 {
-            cold_path();
-            return decision;
-        }
-
         if let Err(_v) = shared.events.push(req) {
             cold_path();
             shared.stats.events_dropped.fetch_add(1, Ordering::Relaxed);
@@ -364,17 +359,20 @@ impl JitBackend {
         self.inner.enabled.load(Ordering::Relaxed)
     }
 
-    /// Pauses background JIT promotion from lookup observations.
+    /// Pauses out-of-process helper execution.
     ///
-    /// Resident compiled functions are still returned by [`lookup`](Self::lookup), but
-    /// lookup events are not enqueued or drained while paused.
+    /// Resident compiled functions are still returned by [`lookup`](Self::lookup), and lookup
+    /// events are still processed for stats, hotness tracking, and compilation dispatch. In
+    /// out-of-process mode, the helper process group is stopped until the pause depth returns to
+    /// zero, so dispatched helper requests remain buffered and resume once the helper continues.
+    /// In in-process mode, pause only tracks pause depth.
     pub fn pause(&self) {
         if self.inner.shared.pause_depth.fetch_add(1, Ordering::Relaxed) == 0 {
             let _ = self.inner.tx.send(Command::Pause);
         }
     }
 
-    /// Resumes background JIT promotion from lookup observations.
+    /// Resumes out-of-process helper execution once all active pauses have been released.
     pub fn resume(&self) {
         if self
             .inner
@@ -389,7 +387,7 @@ impl JitBackend {
         }
     }
 
-    /// Returns whether background JIT promotion is paused.
+    /// Returns whether out-of-process helper execution is paused.
     pub fn is_paused(&self) -> bool {
         self.inner.shared.pause_depth.load(Ordering::Relaxed) != 0
     }

@@ -240,9 +240,7 @@ impl BackendState {
     }
 
     fn tick(&mut self) {
-        if self.inner.pause_depth.load(Ordering::Relaxed) == 0 {
-            self.drain_events();
-        }
+        self.drain_events();
         self.run_eviction_sweep();
     }
 
