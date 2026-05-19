@@ -89,7 +89,7 @@ pub(crate) struct BackendShared {
     events: EventQueue,
     /// Shared stats counters.
     #[debug(skip)]
-    stats: RuntimeStats,
+    stats: Arc<RuntimeStats>,
 }
 
 /// Inner state for [`JitBackend`]. Owns the backend thread lifecycle.
@@ -177,7 +177,7 @@ impl JitBackend {
         let shared = Arc::new(BackendShared {
             resident: ResidentMap::default(),
             events,
-            stats: RuntimeStats::default(),
+            stats: Arc::new(RuntimeStats::default()),
         });
         let this = Self {
             inner: Arc::new(BackendInner {

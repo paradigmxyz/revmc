@@ -806,7 +806,7 @@ pub(crate) fn run(
 
     let (result_tx, result_rx) = chan::unbounded::<WorkerResult>();
 
-    let workers = WorkerPool::new(result_tx, config.clone());
+    let workers = WorkerPool::new(result_tx, config.clone(), Arc::clone(&inner.stats));
 
     let sweep_interval = config.tuning.eviction_sweep_interval;
     let event_drain_interval = config.tuning.event_drain_interval;

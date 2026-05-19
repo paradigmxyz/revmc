@@ -13,6 +13,7 @@ use crate::{
     CompileTimings, EvmCompilerFn, OptimizationLevel,
     runtime::{
         config::{CompilationKind, RuntimeConfig},
+        stats::RuntimeStats,
         storage::RuntimeCacheKey,
     },
 };
@@ -200,10 +201,14 @@ pub(crate) struct WorkerPool {
 
 impl WorkerPool {
     /// Creates and starts the worker pool.
-    pub(crate) fn new(result_tx: chan::Sender<WorkerResult>, config: RuntimeConfig) -> Self {
+    pub(crate) fn new(
+        result_tx: chan::Sender<WorkerResult>,
+        config: RuntimeConfig,
+        stats: Arc<RuntimeStats>,
+    ) -> Self {
         let worker_count = config.tuning.jit_worker_count;
         let queue_capacity = worker_count.saturating_mul(config.tuning.jit_worker_queue_capacity);
-        let out_of_process_helper = create_out_of_process_helper(&config);
+        let out_of_process_helper = create_out_of_process_helper(&config, stats);
         let pool = (worker_count > 0).then(|| {
             ThreadPoolBuilder::new()
                 .num_threads(worker_count)
@@ -283,13 +288,20 @@ impl Drop for WorkerPool {
 }
 
 #[cfg(all(feature = "llvm", unix))]
-fn create_out_of_process_helper(config: &RuntimeConfig) -> OutOfProcessHelper {
+fn create_out_of_process_helper(
+    config: &RuntimeConfig,
+    stats: Arc<RuntimeStats>,
+) -> OutOfProcessHelper {
     (config.jit_mode == JitMode::OutOfProcess)
-        .then(|| Arc::new(super::out_of_process::HelperProcess::new()))
+        .then(|| Arc::new(super::out_of_process::HelperProcess::new(stats)))
 }
 
 #[cfg(not(all(feature = "llvm", unix)))]
-fn create_out_of_process_helper(_config: &RuntimeConfig) -> OutOfProcessHelper {}
+fn create_out_of_process_helper(
+    _config: &RuntimeConfig,
+    _stats: Arc<RuntimeStats>,
+) -> OutOfProcessHelper {
+}
 
 #[cfg(all(feature = "llvm", unix))]
 fn cancel_out_of_process_helper(helper: &OutOfProcessHelper) {

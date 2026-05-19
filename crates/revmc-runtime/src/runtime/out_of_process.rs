@@ -4,6 +4,7 @@ use crate::{
     CompileTimings, OptimizationLevel, eyre,
     runtime::{
         config::{CompilationKind, RuntimeConfig},
+        stats::RuntimeStats,
         storage::RuntimeCacheKey,
         worker::{
             CompileJob, CompilerState, CompilerTarget, JitObjectSuccess, SyncNotifier,
@@ -21,7 +22,7 @@ use std::{
     os::unix::process::CommandExt,
     path::PathBuf,
     process::{Child, ChildStdin, Command, Stdio},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, atomic::Ordering},
     thread::JoinHandle,
     time::{Duration, Instant},
 };
@@ -84,19 +85,33 @@ struct HelperIo {
 
 pub(super) struct HelperProcess {
     inner: Mutex<Option<Arc<HelperProcessInner>>>,
+    stats: Arc<RuntimeStats>,
 }
 
 impl HelperProcess {
-    pub(super) const fn new() -> Self {
-        Self { inner: Mutex::new(None) }
+    pub(super) fn new(stats: Arc<RuntimeStats>) -> Self {
+        Self { inner: Mutex::new(None), stats }
     }
 
     fn compile(&self, job: &CompileJob, config: &RuntimeConfig) -> Result<HelperJobResult, String> {
         let helper = {
             let mut slot = self.inner.lock().unwrap();
             if slot.as_ref().is_none_or(|helper| !helper.matches_config(config)) {
+                let restarting = slot.is_some();
                 debug!("spawning JIT helper");
-                *slot = Some(Arc::new(HelperProcessInner::spawn(config)?));
+                match HelperProcessInner::spawn(config, self.stats.clone()) {
+                    Ok(helper) => {
+                        self.stats.jit_helper_spawns.fetch_add(1, Ordering::Relaxed);
+                        if restarting {
+                            self.stats.jit_helper_restarts.fetch_add(1, Ordering::Relaxed);
+                        }
+                        *slot = Some(Arc::new(helper));
+                    }
+                    Err(err) => {
+                        self.stats.jit_helper_spawn_failures.fetch_add(1, Ordering::Relaxed);
+                        return Err(err);
+                    }
+                }
             }
             slot.as_ref().unwrap().clone()
         };
@@ -107,6 +122,7 @@ impl HelperProcess {
                 let mut slot = self.inner.lock().unwrap();
                 if slot.as_ref().is_some_and(|current| Arc::ptr_eq(current, &helper)) {
                     warn!(error = %err, "discarding JIT helper after failed job");
+                    self.stats.jit_helper_restarts.fetch_add(1, Ordering::Relaxed);
                     *slot = None;
                 }
                 Err(err)
@@ -128,10 +144,11 @@ struct HelperProcessInner {
     io: Mutex<HelperIo>,
     reader: Mutex<Option<JoinHandle<()>>>,
     shutdown_timeout: Duration,
+    stats: Arc<RuntimeStats>,
 }
 
 impl HelperProcessInner {
-    fn spawn(config: &RuntimeConfig) -> Result<Self, String> {
+    fn spawn(config: &RuntimeConfig, stats: Arc<RuntimeStats>) -> Result<Self, String> {
         let path = match &config.jit_helper_path {
             Some(path) => path.clone(),
             None => {
@@ -170,6 +187,7 @@ impl HelperProcessInner {
             io: Mutex::new(HelperIo { stdin, result_rx }),
             reader: Mutex::new(Some(reader)),
             shutdown_timeout: config.tuning.shutdown_timeout,
+            stats,
         })
     }
 
@@ -192,6 +210,7 @@ impl HelperProcessInner {
             Ok(result) => result,
             Err(chan::RecvTimeoutError::Timeout) => {
                 warn!(timeout = ?config.tuning.jit_timeout, "JIT helper timed out");
+                self.stats.jit_helper_timeouts.fetch_add(1, Ordering::Relaxed);
                 self.kill();
                 Err(format!(
                     "JIT helper timed out after {:?}; helper will be restarted",
@@ -205,6 +224,7 @@ impl HelperProcessInner {
                     None => "JIT helper disconnected".into(),
                 };
                 warn!(message, "JIT helper disconnected");
+                self.stats.jit_helper_disconnects.fetch_add(1, Ordering::Relaxed);
                 Err(format!("{message}; helper will be restarted"))
             }
         }

@@ -19,6 +19,16 @@ pub(crate) struct RuntimeStats {
     pub(crate) compilations_succeeded: AtomicU64,
     /// Total number of failed compilations (JIT + AOT).
     pub(crate) compilations_failed: AtomicU64,
+    /// Total number of out-of-process JIT helper processes spawned successfully.
+    pub(crate) jit_helper_spawns: AtomicU64,
+    /// Total number of failed out-of-process JIT helper spawn attempts.
+    pub(crate) jit_helper_spawn_failures: AtomicU64,
+    /// Total number of out-of-process JIT helpers discarded for restart.
+    pub(crate) jit_helper_restarts: AtomicU64,
+    /// Total number of out-of-process JIT helper job timeouts.
+    pub(crate) jit_helper_timeouts: AtomicU64,
+    /// Total number of out-of-process JIT helper disconnects.
+    pub(crate) jit_helper_disconnects: AtomicU64,
 }
 
 /// Gauge values sampled at snapshot time.
@@ -64,6 +74,16 @@ pub struct RuntimeStatsSnapshot {
     pub compilations_succeeded: u64,
     /// Total number of failed compilations (JIT + AOT).
     pub compilations_failed: u64,
+    /// Total number of out-of-process JIT helper processes spawned successfully.
+    pub jit_helper_spawns: u64,
+    /// Total number of failed out-of-process JIT helper spawn attempts.
+    pub jit_helper_spawn_failures: u64,
+    /// Total number of out-of-process JIT helpers discarded for restart.
+    pub jit_helper_restarts: u64,
+    /// Total number of out-of-process JIT helper job timeouts.
+    pub jit_helper_timeouts: u64,
+    /// Total number of out-of-process JIT helper disconnects.
+    pub jit_helper_disconnects: u64,
 }
 
 impl RuntimeStatsSnapshot {
@@ -101,6 +121,11 @@ impl RuntimeStats {
             compilations_dispatched: dispatched,
             compilations_succeeded: succeeded,
             compilations_failed: failed,
+            jit_helper_spawns: self.jit_helper_spawns.load(Ordering::Relaxed),
+            jit_helper_spawn_failures: self.jit_helper_spawn_failures.load(Ordering::Relaxed),
+            jit_helper_restarts: self.jit_helper_restarts.load(Ordering::Relaxed),
+            jit_helper_timeouts: self.jit_helper_timeouts.load(Ordering::Relaxed),
+            jit_helper_disconnects: self.jit_helper_disconnects.load(Ordering::Relaxed),
         }
     }
 }
