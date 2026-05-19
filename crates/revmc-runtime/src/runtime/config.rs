@@ -1,10 +1,15 @@
 //! Runtime configuration.
 
-use crate::{CompileTimings, runtime::storage::ArtifactStore};
+use crate::{CompileTimings, eyre, runtime::storage::ArtifactStore};
 use alloy_primitives::B256;
 use revm_context_interface::cfg::GasParams;
 use revm_primitives::hardfork::SpecId;
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{path::PathBuf, str::FromStr, sync::Arc, time::Duration};
+
+const JIT_MODE_ENV: &str = "REVMC_JIT_MODE";
+const JIT_HELPER_PATH_ENV: &str = "REVMC_JIT_HELPER_PATH";
+const JIT_HELPER_MEMORY_LIMIT_ENV: &str = "REVMC_JIT_HELPER_MEMORY_LIMIT_BYTES";
+const JIT_HELPER_CPU_COUNT_ENV: &str = "REVMC_JIT_HELPER_CPU_COUNT";
 
 /// Runtime configuration.
 #[derive(Clone, derive_more::Debug)]
@@ -76,6 +81,20 @@ pub struct RuntimeConfig {
     /// Defaults to `false`.
     pub aot: bool,
 
+    /// Where JIT compilation work runs.
+    ///
+    /// Defaults to [`JitMode::InProcess`].
+    pub jit_mode: JitMode,
+
+    /// Helper executable used when [`jit_mode`](Self::jit_mode)
+    /// is [`JitMode::OutOfProcess`].
+    ///
+    /// When `None`, the runtime spawns `std::env::current_exe()` and expects it
+    /// to call [`super::maybe_run_jit_helper`] during startup.
+    ///
+    /// Defaults to `None`.
+    pub jit_helper_path: Option<PathBuf>,
+
     /// Blocking mode: every lookup synchronously JIT-compiles on miss and never
     /// falls back to the interpreter.
     ///
@@ -123,6 +142,53 @@ pub enum CompilationKind {
     Aot,
 }
 
+/// Where JIT compilation work runs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum JitMode {
+    /// Compile on background threads in this process.
+    #[default]
+    InProcess,
+    /// Compile in a helper process and link the result into this process.
+    ///
+    /// This is reserved for the out-of-process JIT implementation and is
+    /// disabled by default.
+    OutOfProcess,
+}
+
+impl FromStr for JitMode {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s {
+            "in-process" => Self::InProcess,
+            "out-of-process" => Self::OutOfProcess,
+            _ => return Err(format!("unknown JIT mode: {s}")),
+        })
+    }
+}
+
+impl RuntimeConfig {
+    /// Applies runtime environment overrides.
+    ///
+    /// Recognized variables are `REVMC_JIT_MODE`, `REVMC_JIT_HELPER_PATH`,
+    /// `REVMC_JIT_HELPER_MEMORY_LIMIT_BYTES`, and `REVMC_JIT_HELPER_CPU_COUNT`.
+    pub fn with_env_overrides(mut self) -> eyre::Result<Self> {
+        if let Some(mode) = env_var(JIT_MODE_ENV) {
+            self.jit_mode = mode.parse().map_err(|e: String| eyre::eyre!("{JIT_MODE_ENV}: {e}"))?;
+        }
+        if let Some(path) = env_path(JIT_HELPER_PATH_ENV) {
+            self.jit_helper_path = Some(path);
+        }
+        if let Some(limit) = parse_env_u64(JIT_HELPER_MEMORY_LIMIT_ENV)? {
+            self.tuning.jit_helper_memory_limit_bytes = limit;
+        }
+        if let Some(count) = parse_env_usize(JIT_HELPER_CPU_COUNT_ENV)? {
+            self.tuning.jit_helper_cpu_count = count;
+        }
+        Ok(self)
+    }
+}
+
 impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
@@ -136,6 +202,8 @@ impl Default for RuntimeConfig {
             no_dse: false,
             gas_params: None,
             aot: false,
+            jit_mode: JitMode::default(),
+            jit_helper_path: None,
             blocking: false,
             on_compilation: None,
         }
@@ -184,6 +252,31 @@ pub struct RuntimeTuning {
     ///
     /// Defaults to `min(max(1, cpus/2), 4)`.
     pub jit_worker_count: usize,
+
+    /// Timeout for a single out-of-process JIT compilation job.
+    ///
+    /// When exceeded, the helper process is killed and a fresh helper is spawned for
+    /// the next job. Only applies to [`JitMode::OutOfProcess`].
+    ///
+    /// Defaults to `5s`.
+    pub jit_timeout: Duration,
+
+    /// Maximum address space for the out-of-process JIT helper, in bytes.
+    ///
+    /// `0` disables the limit. On Unix this is applied with `RLIMIT_AS` before
+    /// the helper process starts executing.
+    ///
+    /// Defaults to `0`.
+    pub jit_helper_memory_limit_bytes: u64,
+
+    /// Maximum CPU count for the out-of-process JIT helper.
+    ///
+    /// `0` disables the limit. On Linux this limits the helper's CPU affinity
+    /// to the first N CPUs from the helper's current affinity mask before the
+    /// helper process starts executing.
+    ///
+    /// Defaults to `0`.
+    pub jit_helper_cpu_count: usize,
 
     /// Capacity of the per-worker job queue.
     ///
@@ -253,6 +346,9 @@ impl Default for RuntimeTuning {
             jit_max_bytecode_len: 0,
             jit_max_pending_jobs: 2048,
             jit_worker_count: worker_count,
+            jit_timeout: Duration::from_secs(5),
+            jit_helper_memory_limit_bytes: 0,
+            jit_helper_cpu_count: 0,
             jit_worker_queue_capacity: 64,
             jit_opt_level: crate::OptimizationLevel::default(),
             aot_opt_level: crate::OptimizationLevel::default(),
@@ -262,4 +358,25 @@ impl Default for RuntimeTuning {
             compiler_recycle_threshold: 1000,
         }
     }
+}
+
+fn parse_env_u64(name: &str) -> eyre::Result<Option<u64>> {
+    let Some(value) = env_var(name) else { return Ok(None) };
+    value.parse().map(Some).map_err(|e| eyre::eyre!("{name}: {e}"))
+}
+
+fn parse_env_usize(name: &str) -> eyre::Result<Option<usize>> {
+    let Some(value) = env_var(name) else { return Ok(None) };
+    value.parse().map(Some).map_err(|e| eyre::eyre!("{name}: {e}"))
+}
+
+fn env_var(name: &str) -> Option<String> {
+    std::env::var(name).ok()
+}
+
+fn env_path(name: &str) -> Option<PathBuf> {
+    std::env::var_os(name).map(|path| {
+        let path = PathBuf::from(path);
+        path.canonicalize().unwrap_or(path)
+    })
 }
