@@ -14,15 +14,21 @@ use crate::{
 };
 use alloy_primitives::{B256, Bytes};
 use crossbeam_channel as chan;
+use rayon::ThreadPoolBuilder;
 use revm_context_interface::cfg::{GasParams, gas_params::GasId};
 use revm_primitives::hardfork::SpecId;
 use std::{
+    cell::RefCell,
+    collections::HashMap,
     io::{BufReader, BufWriter, Read, Write},
     ops::ControlFlow,
     os::unix::process::CommandExt,
     path::PathBuf,
     process::{Child, ChildStdin, Command, Stdio},
-    sync::{Arc, Mutex, atomic::Ordering},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     thread::JoinHandle,
     time::{Duration, Instant},
 };
@@ -33,6 +39,7 @@ const HELPER_ENV: &str = "REVMC_JIT_HELPER";
 const GAS_PARAM_COUNT: usize = 256;
 
 type GasParamPairs = Vec<(u8, u64)>;
+type PendingResponses = Arc<Mutex<HashMap<u64, chan::Sender<Result<HelperJobResult, String>>>>>;
 
 /// Runs the out-of-process JIT helper if this process was launched as one.
 pub(super) fn maybe_run_jit_helper() -> eyre::Result<ControlFlow<()>> {
@@ -80,7 +87,6 @@ struct HelperJobResult {
 
 struct HelperIo {
     stdin: BufWriter<ChildStdin>,
-    result_rx: chan::Receiver<Result<HelperJobResult, String>>,
 }
 
 pub(super) struct HelperProcess {
@@ -142,7 +148,9 @@ struct HelperProcessInner {
     init: HelperInit,
     child: Mutex<Child>,
     io: Mutex<HelperIo>,
+    pending: PendingResponses,
     reader: Mutex<Option<JoinHandle<()>>>,
+    next_job_id: AtomicU64,
     shutdown_timeout: Duration,
     stats: Arc<RuntimeStats>,
 }
@@ -169,14 +177,26 @@ impl HelperProcessInner {
         write_init(&mut stdin, &init).map_err(|e| format!("failed to write helper init: {e}"))?;
         stdin.flush().map_err(|e| format!("failed to flush helper init: {e}"))?;
         let stdout = child.stdout.take().ok_or("helper stdout unavailable")?;
-        let (result_tx, result_rx) = chan::bounded(1);
+        let pending = PendingResponses::default();
+        let reader_pending = pending.clone();
+        let reader_stats = stats.clone();
         let reader = std::thread::spawn(move || {
             let mut stdout = BufReader::new(stdout);
             loop {
                 let result = read_helper_result(&mut stdout);
-                let done = result.is_err();
-                if result_tx.try_send(result).is_err() || done {
-                    break;
+                match result {
+                    Ok((id, result)) => {
+                        if let Some(tx) = reader_pending.lock().unwrap().remove(&id) {
+                            let _ = tx.send(Ok(result));
+                        }
+                    }
+                    Err(error) => {
+                        reader_stats.jit_helper_disconnects.fetch_add(1, Ordering::Relaxed);
+                        for (_, tx) in reader_pending.lock().unwrap().drain() {
+                            let _ = tx.send(Err(error.clone()));
+                        }
+                        break;
+                    }
                 }
             }
         });
@@ -184,8 +204,10 @@ impl HelperProcessInner {
             path,
             init,
             child: Mutex::new(child),
-            io: Mutex::new(HelperIo { stdin, result_rx }),
+            io: Mutex::new(HelperIo { stdin }),
+            pending,
             reader: Mutex::new(Some(reader)),
+            next_job_id: AtomicU64::new(0),
             shutdown_timeout: config.tuning.shutdown_timeout,
             stats,
         })
@@ -202,14 +224,27 @@ impl HelperProcessInner {
     }
 
     fn compile(&self, job: &CompileJob, config: &RuntimeConfig) -> Result<HelperJobResult, String> {
-        let mut io = self.io.lock().unwrap();
-        write_job(&mut io.stdin, job).map_err(|e| format!("failed to write helper job: {e}"))?;
-        io.stdin.flush().map_err(|e| format!("failed to flush helper job: {e}"))?;
+        let id = self.next_job_id.fetch_add(1, Ordering::Relaxed);
+        let (tx, rx) = chan::bounded(1);
+        self.pending.lock().unwrap().insert(id, tx);
 
-        match io.result_rx.recv_timeout(config.tuning.jit_timeout) {
+        {
+            let mut io = self.io.lock().unwrap();
+            if let Err(e) = write_job(&mut io.stdin, id, job) {
+                self.pending.lock().unwrap().remove(&id);
+                return Err(format!("failed to write helper job: {e}"));
+            }
+            if let Err(e) = io.stdin.flush() {
+                self.pending.lock().unwrap().remove(&id);
+                return Err(format!("failed to flush helper job: {e}"));
+            }
+        }
+
+        match rx.recv_timeout(config.tuning.jit_timeout) {
             Ok(result) => result,
             Err(chan::RecvTimeoutError::Timeout) => {
                 warn!(timeout = ?config.tuning.jit_timeout, "JIT helper timed out");
+                self.pending.lock().unwrap().remove(&id);
                 self.stats.jit_helper_timeouts.fetch_add(1, Ordering::Relaxed);
                 self.kill();
                 Err(format!(
@@ -354,6 +389,7 @@ struct HelperInit {
     no_dse: bool,
     dump_dir: Option<String>,
     gas_params: Option<GasParamPairs>,
+    jit_worker_count: usize,
     compiler_recycle_threshold: usize,
 }
 
@@ -365,6 +401,7 @@ enum HelperRequest {
 
 #[derive(SchemaWrite, SchemaRead)]
 struct HelperCompile {
+    id: u64,
     code_hash: [u8; 32],
     spec_id: u8,
     opt_level: u8,
@@ -375,12 +412,14 @@ struct HelperCompile {
 #[derive(SchemaWrite, SchemaRead)]
 enum HelperResponse {
     Ok {
+        id: u64,
         symbol_name: String,
         object_bytes: Vec<u8>,
         builtin_symbols: Vec<String>,
         timings: HelperTimings,
     },
     Err {
+        id: u64,
         error: String,
         timings: HelperTimings,
     },
@@ -398,8 +437,13 @@ fn write_init<W: Write + ?Sized>(w: &mut BufWriter<W>, init: &HelperInit) -> std
     write_message(w, &HelperRequest::Init(init.clone()))
 }
 
-fn write_job<W: Write + ?Sized>(w: &mut BufWriter<W>, job: &CompileJob) -> std::io::Result<()> {
+fn write_job<W: Write + ?Sized>(
+    w: &mut BufWriter<W>,
+    id: u64,
+    job: &CompileJob,
+) -> std::io::Result<()> {
     let req = HelperRequest::Compile(HelperCompile {
+        id,
         code_hash: job.key.code_hash.0,
         spec_id: job.key.spec_id as u8,
         opt_level: opt_level_to_u8(job.opt_level),
@@ -409,20 +453,23 @@ fn write_job<W: Write + ?Sized>(w: &mut BufWriter<W>, job: &CompileJob) -> std::
     write_message(w, &req)
 }
 
-fn read_helper_result<R: Read + ?Sized>(r: &mut BufReader<R>) -> Result<HelperJobResult, String> {
+fn read_helper_result<R: Read + ?Sized>(
+    r: &mut BufReader<R>,
+) -> Result<(u64, HelperJobResult), String> {
     match read_message(r).map_err(|e| format!("failed to decode helper result: {e}"))? {
-        HelperResponse::Ok { symbol_name, object_bytes, builtin_symbols, timings } => {
-            Ok(HelperJobResult {
+        HelperResponse::Ok { id, symbol_name, object_bytes, builtin_symbols, timings } => Ok((
+            id,
+            HelperJobResult {
                 outcome: Ok(WorkerSuccess::JitObject(JitObjectSuccess {
                     symbol_name,
                     object_bytes: Bytes::from(object_bytes),
                     builtin_symbols,
                 })),
                 timings: timings.into(),
-            })
-        }
-        HelperResponse::Err { error, timings } => {
-            Ok(HelperJobResult { outcome: Err(error), timings: timings.into() })
+            },
+        )),
+        HelperResponse::Err { id, error, timings } => {
+            Ok((id, HelperJobResult { outcome: Err(error), timings: timings.into() }))
         }
     }
 }
@@ -453,21 +500,43 @@ fn duration_to_nanos(duration: Duration) -> u64 {
     u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
 }
 
+thread_local! {
+    static HELPER_COMPILER: RefCell<Option<CompilerState>> = const { RefCell::new(None) };
+}
+
 fn run_jit_helper_stdio() -> eyre::Result<()> {
     let mut stdin = BufReader::new(std::io::stdin().lock());
-    let mut stdout = BufWriter::new(std::io::stdout().lock());
-    let mut compiler = None::<CompilerState>;
-    let config = read_helper_init(&mut stdin)?;
+    let config = Arc::new(read_helper_init(&mut stdin)?);
+    let worker_count = config.tuning.jit_worker_count.max(1);
+    let pool = ThreadPoolBuilder::new()
+        .num_threads(worker_count)
+        .thread_name(|i| format!("revmc-helper-{i:02}"))
+        .exit_handler(|_| {
+            HELPER_COMPILER.with_borrow_mut(Option::take);
+        })
+        .build()?;
+    let stdout = Arc::new(Mutex::new(BufWriter::new(std::io::stdout())));
 
     loop {
-        let job = match read_helper_job(&mut stdin) {
+        let (id, job) = match read_helper_job(&mut stdin) {
             Ok(job) => job,
             Err(err) if is_unexpected_eof(&err) => break,
             Err(err) => return Err(err),
         };
-        let result = compile_with_state(job, &config, CompilerTarget::JitObject, &mut compiler);
-        write_helper_result(&mut stdout, result)?;
-        stdout.flush()?;
+        let config = Arc::clone(&config);
+        let stdout = Arc::clone(&stdout);
+        pool.spawn_fifo(move || {
+            let result = HELPER_COMPILER.with_borrow_mut(|compiler| {
+                compile_with_state(job, &config, CompilerTarget::JitObject, compiler)
+            });
+            let mut stdout = stdout.lock().unwrap();
+            if let Err(err) = write_helper_result(&mut stdout, id, result)
+                .and_then(|()| stdout.flush().map_err(Into::into))
+            {
+                error!(%err, "failed to write helper result");
+                std::process::exit(1);
+            }
+        });
     }
 
     Ok(())
@@ -480,7 +549,7 @@ fn read_helper_init<R: Read + ?Sized>(stdin: &mut BufReader<R>) -> eyre::Result<
     }
 }
 
-fn read_helper_job<R: Read + ?Sized>(stdin: &mut BufReader<R>) -> eyre::Result<CompileJob> {
+fn read_helper_job<R: Read + ?Sized>(stdin: &mut BufReader<R>) -> eyre::Result<(u64, CompileJob)> {
     let req = match read_message(stdin)? {
         HelperRequest::Compile(req) => req,
         HelperRequest::Init(_) => eyre::bail!("JIT helper received duplicate init"),
@@ -497,23 +566,25 @@ fn read_helper_job<R: Read + ?Sized>(stdin: &mut BufReader<R>) -> eyre::Result<C
         sync_notifier: SyncNotifier::none(),
         generation: 0,
     };
-    Ok(job)
+    Ok((req.id, job))
 }
 
 fn write_helper_result<W: Write + ?Sized>(
     stdout: &mut BufWriter<W>,
+    id: u64,
     result: WorkerResult,
 ) -> eyre::Result<()> {
     let timings = result.timings.into();
     let response = match result.outcome {
         Ok(WorkerSuccess::JitObject(success)) => HelperResponse::Ok {
+            id,
             symbol_name: success.symbol_name,
             object_bytes: success.object_bytes.to_vec(),
             builtin_symbols: success.builtin_symbols,
             timings,
         },
         Ok(_) => unreachable!(),
-        Err(error) => HelperResponse::Err { error, timings },
+        Err(error) => HelperResponse::Err { id, error, timings },
     };
     write_message(stdout, &response)?;
     Ok(())
@@ -605,6 +676,7 @@ fn helper_init(config: &RuntimeConfig) -> HelperInit {
         no_dse: config.no_dse,
         dump_dir: config.dump_dir.as_ref().map(|path| path.to_string_lossy().into_owned()),
         gas_params: config.gas_params.as_ref().map(gas_params_to_pairs),
+        jit_worker_count: config.tuning.jit_worker_count,
         compiler_recycle_threshold: config.tuning.compiler_recycle_threshold,
     }
 }
@@ -618,6 +690,7 @@ fn runtime_config_from_init(init: HelperInit) -> eyre::Result<RuntimeConfig> {
         gas_params: init.gas_params.map(gas_params_from_pairs).transpose()?,
         ..Default::default()
     };
+    config.tuning.jit_worker_count = init.jit_worker_count;
     config.tuning.compiler_recycle_threshold = init.compiler_recycle_threshold;
     Ok(config)
 }
