@@ -284,6 +284,32 @@ fn set_enabled_toggle() {
 }
 
 #[test]
+fn pause_processes_lookup_events() {
+    let tb = TestBackend::with_tuning(RuntimeTuning { jit_worker_count: 0, ..Default::default() });
+    let req = TestBackend::req_cancun(&[0x00]);
+
+    assert!(!tb.is_paused());
+    tb.pause();
+    tb.pause();
+    assert!(tb.is_paused());
+    assert!(matches!(tb.lookup(req.clone()), LookupDecision::Interpret(InterpretReason::NotReady)));
+
+    let stats = tb.wait_stats(|s| s.lookup_misses == 1);
+    assert_eq!(stats.lookup_misses, 1);
+    assert_eq!(stats.lookup_hits, 0);
+
+    tb.resume();
+    assert!(tb.is_paused());
+    tb.resume();
+    assert!(!tb.is_paused());
+    assert!(matches!(tb.lookup(req), LookupDecision::Interpret(InterpretReason::NotReady)));
+
+    let stats = tb.wait_stats(|s| s.lookup_misses == 2);
+    assert_eq!(stats.lookup_misses, 2);
+    assert_eq!(stats.lookup_hits, 0);
+}
+
+#[test]
 fn lookup_increments_miss_counter() {
     let tb = TestBackend::new(RuntimeConfig { enabled: true, ..Default::default() });
 

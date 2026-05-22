@@ -502,9 +502,8 @@ impl<B: Backend> EvmCompiler<B> {
         Ok(())
     }
 
-    /// (AOT) Finalizes the module and writes the compiled object to the given writer.
+    /// Finalizes the module and writes the compiled object to the given writer.
     pub fn write_object<W: io::Write>(&mut self, w: W) -> Result<()> {
-        ensure!(self.is_aot(), "cannot write AOT object during JIT compilation");
         self.finalize()?;
         {
             let _t = self.remarks.time(|r| &r.codegen);

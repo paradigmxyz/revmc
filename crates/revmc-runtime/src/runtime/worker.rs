@@ -13,6 +13,7 @@ use crate::{
     CompileTimings, EvmCompilerFn, OptimizationLevel,
     runtime::{
         config::{CompilationKind, RuntimeConfig},
+        stats::RuntimeStats,
         storage::RuntimeCacheKey,
     },
 };
@@ -33,7 +34,13 @@ use std::{
 use crate::{
     EvmCompiler, EvmLlvmBackend, Linker,
     llvm::{JitDylibGuard, orc::ResourceTracker},
+    runtime::config::JitMode,
 };
+
+#[cfg(all(feature = "llvm", unix))]
+type OutOfProcessHelper = Option<Arc<super::out_of_process::HelperProcess>>;
+#[cfg(not(all(feature = "llvm", unix)))]
+type OutOfProcessHelper = ();
 
 /// Notifier for synchronous compilation requests.
 ///
@@ -102,6 +109,8 @@ pub(crate) enum WorkerSuccess {
     Jit(JitSuccess),
     /// AOT compilation produced shared-library bytes.
     Aot(AotSuccess),
+    /// JIT compilation produced relocatable object bytes to link in the parent.
+    JitObject(JitObjectSuccess),
 }
 
 /// Successful JIT compilation output.
@@ -114,6 +123,15 @@ pub(crate) struct JitSuccess {
 }
 
 /// Successful AOT compilation output.
+pub(crate) struct JitObjectSuccess {
+    /// The symbol name in the object file.
+    pub(crate) symbol_name: String,
+    /// The raw relocatable object bytes.
+    pub(crate) object_bytes: Bytes,
+    /// Builtin absolute symbols referenced by the object.
+    pub(crate) builtin_symbols: Vec<String>,
+}
+
 pub(crate) struct AotSuccess {
     /// The symbol name in the shared library.
     pub(crate) symbol_name: String,
@@ -167,6 +185,8 @@ impl Drop for JitCodeBacking {
 pub(crate) struct WorkerPool {
     /// Rayon pool used to execute compilation jobs.
     pool: Option<ThreadPool>,
+    /// Out-of-process helper used by this worker pool.
+    out_of_process_helper: OutOfProcessHelper,
     /// Sender for worker results.
     result_tx: chan::Sender<WorkerResult>,
     /// Runtime configuration shared by spawned jobs.
@@ -181,9 +201,14 @@ pub(crate) struct WorkerPool {
 
 impl WorkerPool {
     /// Creates and starts the worker pool.
-    pub(crate) fn new(result_tx: chan::Sender<WorkerResult>, config: RuntimeConfig) -> Self {
+    pub(crate) fn new(
+        result_tx: chan::Sender<WorkerResult>,
+        config: RuntimeConfig,
+        stats: Arc<RuntimeStats>,
+    ) -> Self {
         let worker_count = config.tuning.jit_worker_count;
         let queue_capacity = worker_count.saturating_mul(config.tuning.jit_worker_queue_capacity);
+        let out_of_process_helper = create_out_of_process_helper(&config, stats);
         let pool = (worker_count > 0).then(|| {
             ThreadPoolBuilder::new()
                 .num_threads(worker_count)
@@ -195,6 +220,7 @@ impl WorkerPool {
 
         Self {
             pool,
+            out_of_process_helper,
             result_tx,
             config: Arc::new(config),
             queued: Arc::new(AtomicUsize::new(0)),
@@ -230,9 +256,10 @@ impl WorkerPool {
         let queued = self.queued.clone();
         let result_tx = self.result_tx.clone();
         let config = self.config.clone();
+        let out_of_process_helper = self.out_of_process_helper.clone();
         pool.spawn_fifo(move || {
             queued.fetch_sub(1, Ordering::AcqRel);
-            let result = compile_job(job, &config);
+            let result = compile_job(job, &config, out_of_process_helper);
             let _ = result_tx.send(result);
         });
         Ok(())
@@ -241,10 +268,26 @@ impl WorkerPool {
     /// Shuts down all workers after draining queued jobs.
     pub(crate) fn shutdown(&mut self) {
         self.shutdown.store(true, Ordering::Release);
+        self.cancel_in_flight();
         if let Some(pool) = &self.pool {
             pool.broadcast(|_| clear_thread_local_compilers());
         }
         self.pool.take();
+    }
+
+    /// Cancels any in-flight compilation that can be interrupted externally.
+    pub(crate) fn cancel_in_flight(&self) {
+        cancel_out_of_process_helper(&self.out_of_process_helper);
+    }
+
+    /// Pauses out-of-process helper execution.
+    pub(crate) fn pause(&self) {
+        pause_out_of_process_helper(&self.out_of_process_helper);
+    }
+
+    /// Resumes out-of-process helper execution.
+    pub(crate) fn resume(&self) {
+        resume_out_of_process_helper(&self.out_of_process_helper);
     }
 }
 
@@ -253,6 +296,52 @@ impl Drop for WorkerPool {
         self.shutdown();
     }
 }
+
+#[cfg(all(feature = "llvm", unix))]
+fn create_out_of_process_helper(
+    config: &RuntimeConfig,
+    stats: Arc<RuntimeStats>,
+) -> OutOfProcessHelper {
+    (config.jit_mode == JitMode::OutOfProcess)
+        .then(|| Arc::new(super::out_of_process::HelperProcess::new(stats)))
+}
+
+#[cfg(not(all(feature = "llvm", unix)))]
+fn create_out_of_process_helper(
+    _config: &RuntimeConfig,
+    _stats: Arc<RuntimeStats>,
+) -> OutOfProcessHelper {
+}
+
+#[cfg(all(feature = "llvm", unix))]
+fn cancel_out_of_process_helper(helper: &OutOfProcessHelper) {
+    if let Some(helper) = helper {
+        helper.cancel_in_flight();
+    }
+}
+
+#[cfg(not(all(feature = "llvm", unix)))]
+fn cancel_out_of_process_helper(_helper: &OutOfProcessHelper) {}
+
+#[cfg(all(feature = "llvm", unix))]
+fn pause_out_of_process_helper(helper: &OutOfProcessHelper) {
+    if let Some(helper) = helper {
+        helper.pause();
+    }
+}
+
+#[cfg(not(all(feature = "llvm", unix)))]
+fn pause_out_of_process_helper(_helper: &OutOfProcessHelper) {}
+
+#[cfg(all(feature = "llvm", unix))]
+fn resume_out_of_process_helper(helper: &OutOfProcessHelper) {
+    if let Some(helper) = helper {
+        helper.resume();
+    }
+}
+
+#[cfg(not(all(feature = "llvm", unix)))]
+fn resume_out_of_process_helper(_helper: &OutOfProcessHelper) {}
 
 #[cfg(feature = "llvm")]
 fn clear_thread_local_compilers() {
@@ -264,22 +353,70 @@ fn clear_thread_local_compilers() {
 fn clear_thread_local_compilers() {}
 
 #[cfg(feature = "llvm")]
-fn compile_job(job: CompileJob, config: &RuntimeConfig) -> WorkerResult {
+fn compile_job(
+    job: CompileJob,
+    config: &RuntimeConfig,
+    out_of_process_helper: OutOfProcessHelper,
+) -> WorkerResult {
     trace!(?job, "received job");
     match job.kind {
-        CompilationKind::Jit => {
-            JIT_COMPILER.with_borrow_mut(|state| compile_with_state(job, config, state))
+        CompilationKind::Jit if config.jit_mode == JitMode::OutOfProcess => {
+            compile_out_of_process_job(job, config, out_of_process_helper)
         }
-        CompilationKind::Aot => {
-            AOT_COMPILER.with_borrow_mut(|state| compile_with_state(job, config, state))
-        }
+        CompilationKind::Jit => JIT_COMPILER
+            .with_borrow_mut(|state| compile_with_state(job, config, CompilerTarget::Jit, state)),
+        CompilationKind::Aot => AOT_COMPILER
+            .with_borrow_mut(|state| compile_with_state(job, config, CompilerTarget::Aot, state)),
+    }
+}
+
+#[cfg(all(feature = "llvm", unix))]
+fn compile_out_of_process_job(
+    job: CompileJob,
+    config: &RuntimeConfig,
+    helper: OutOfProcessHelper,
+) -> WorkerResult {
+    let helper = helper.expect("missing out-of-process JIT helper");
+    super::out_of_process::compile_job(job, config, &helper)
+}
+
+#[cfg(all(feature = "llvm", not(unix)))]
+fn compile_out_of_process_job(
+    job: CompileJob,
+    _config: &RuntimeConfig,
+    _helper: OutOfProcessHelper,
+) -> WorkerResult {
+    WorkerResult {
+        key: job.key,
+        outcome: Err("out-of-process JIT is only available on Unix".into()),
+        kind: job.kind,
+        sync_notifier: job.sync_notifier,
+        generation: job.generation,
+        compile_duration: Duration::ZERO,
+        timings: CompileTimings::default(),
     }
 }
 
 #[cfg(feature = "llvm")]
-fn compile_with_state(
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum CompilerTarget {
+    Jit,
+    JitObject,
+    Aot,
+}
+
+#[cfg(feature = "llvm")]
+impl CompilerTarget {
+    const fn is_aot_backend(self) -> bool {
+        matches!(self, Self::JitObject | Self::Aot)
+    }
+}
+
+#[cfg(feature = "llvm")]
+pub(super) fn compile_with_state(
     job: CompileJob,
     config: &RuntimeConfig,
+    target: CompilerTarget,
     state_slot: &mut Option<CompilerState>,
 ) -> WorkerResult {
     let _span = match job.kind {
@@ -293,7 +430,7 @@ fn compile_with_state(
     let t0 = Instant::now();
 
     if state_slot.is_none() {
-        match CompilerState::new(config, job.kind) {
+        match CompilerState::new(config, target) {
             Ok(s) => *state_slot = Some(s),
             Err(e) => {
                 error!(error = %e, "failed to create LLVM backend");
@@ -322,9 +459,10 @@ fn compile_with_state(
     }
     compiler.set_opt_level(job.opt_level);
 
-    let outcome = match job.kind {
-        CompilationKind::Jit => compile_jit_artifact(&job, compiler),
-        CompilationKind::Aot => compile_aot_artifact(&job, compiler),
+    let outcome = match target {
+        CompilerTarget::Jit => compile_jit_artifact(&job, compiler),
+        CompilerTarget::JitObject => compile_jit_object_artifact(&job, compiler),
+        CompilerTarget::Aot => compile_aot_artifact(&job, compiler),
     };
     let timings = compiler.take_timings();
 
@@ -337,7 +475,7 @@ fn compile_with_state(
         && state.compilations_since_recycle >= config.tuning.compiler_recycle_threshold
     {
         debug!(compilations_since_recycle = state.compilations_since_recycle, "recycling compiler");
-        match CompilerState::new(config, job.kind) {
+        match CompilerState::new(config, target) {
             Ok(new_state) => {
                 *state_slot = Some(new_state);
                 revmc_llvm::global_gc();
@@ -361,16 +499,16 @@ fn compile_with_state(
 }
 
 #[cfg(feature = "llvm")]
-struct CompilerState {
+pub(super) struct CompilerState {
     compiler: EvmCompiler<EvmLlvmBackend>,
     compilations_since_recycle: usize,
 }
 
 #[cfg(feature = "llvm")]
 impl CompilerState {
-    fn new(config: &RuntimeConfig, kind: CompilationKind) -> Result<Self, String> {
+    fn new(config: &RuntimeConfig, target: CompilerTarget) -> Result<Self, String> {
         Ok(Self {
-            compiler: create_compiler(config, kind == CompilationKind::Aot)?,
+            compiler: create_compiler(config, target.is_aot_backend())?,
             compilations_since_recycle: 0,
         })
     }
@@ -383,7 +521,7 @@ thread_local! {
 }
 
 #[cfg(feature = "llvm")]
-fn create_compiler(
+pub(super) fn create_compiler(
     config: &RuntimeConfig,
     aot: bool,
 ) -> Result<EvmCompiler<EvmLlvmBackend>, String> {
@@ -429,6 +567,43 @@ fn compile_jit_artifact(
 
 /// Compiles a single bytecode to a shared library and returns the raw bytes.
 #[cfg(feature = "llvm")]
+pub(super) fn compile_jit_object_artifact(
+    job: &CompileJob,
+    compiler: &mut EvmCompiler<EvmLlvmBackend>,
+) -> Result<WorkerSuccess, String> {
+    compiler
+        .translate(&job.symbol_name, &job.bytecode[..], job.key.spec_id)
+        .map_err(|e| format!("JIT object translate failed: {e}"))?;
+
+    let mut object_bytes = Vec::new();
+    compiler
+        .write_object(&mut object_bytes)
+        .map_err(|e| format!("JIT object write failed: {e}"))?;
+    let mut builtin_symbols: Vec<String> = compiler
+        .backend()
+        .pending_symbol_names()
+        .into_iter()
+        .map(|name| name.to_string_lossy().into_owned())
+        .collect();
+    if builtin_symbols.is_empty() {
+        builtin_symbols =
+            revmc_builtins::Builtin::ALL.iter().map(|builtin| builtin.name().to_string()).collect();
+    }
+
+    debug!(
+        bytecode_len = job.bytecode.len(),
+        object_len = object_bytes.len(),
+        "JIT object compilation succeeded",
+    );
+
+    Ok(WorkerSuccess::JitObject(JitObjectSuccess {
+        symbol_name: job.symbol_name.clone(),
+        object_bytes: Bytes::from(object_bytes),
+        builtin_symbols,
+    }))
+}
+
+#[cfg(feature = "llvm")]
 fn compile_aot_artifact(
     job: &CompileJob,
     compiler: &mut EvmCompiler<EvmLlvmBackend>,
@@ -470,7 +645,11 @@ fn compile_aot_artifact(
 }
 
 #[cfg(not(feature = "llvm"))]
-fn compile_job(job: CompileJob, _config: &RuntimeConfig) -> WorkerResult {
+fn compile_job(
+    job: CompileJob,
+    _config: &RuntimeConfig,
+    _helper: OutOfProcessHelper,
+) -> WorkerResult {
     WorkerResult {
         key: job.key,
         outcome: Err("LLVM backend not available".into()),

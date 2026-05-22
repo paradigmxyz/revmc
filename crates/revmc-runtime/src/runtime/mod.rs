@@ -16,9 +16,10 @@ use crossbeam_queue::ArrayQueue;
 use revm_primitives::{B256, hardfork::SpecId, hints_util::cold_path};
 use stats::RuntimeStats;
 use std::{
+    ops::ControlFlow,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -30,7 +31,7 @@ pub use api::{
 };
 
 mod config;
-pub use config::{CompilationEvent, CompilationKind, RuntimeConfig, RuntimeTuning};
+pub use config::{CompilationEvent, CompilationKind, JitMode, RuntimeConfig, RuntimeTuning};
 
 mod backend;
 
@@ -43,7 +44,29 @@ pub use storage::{
     RuntimeCacheKey, StoredArtifact,
 };
 
+#[cfg(all(feature = "llvm", unix))]
+mod out_of_process;
+
 mod worker;
+
+/// Runs the out-of-process JIT helper if this process was launched as one.
+///
+/// Returns [`ControlFlow::Break`] after the helper request has been handled and
+/// the caller should exit immediately. Normal application startup should
+/// continue on [`ControlFlow::Continue`].
+pub fn maybe_run_jit_helper() -> eyre::Result<ControlFlow<()>> {
+    #[cfg(all(feature = "llvm", unix))]
+    {
+        out_of_process::maybe_run_jit_helper()
+    }
+    #[cfg(not(all(feature = "llvm", unix)))]
+    {
+        if std::env::var_os("REVMC_JIT_HELPER").is_some() {
+            eyre::bail!("out-of-process JIT helper is only available on Unix with LLVM")
+        }
+        Ok(ControlFlow::Continue(()))
+    }
+}
 
 #[cfg(test)]
 mod tests;
@@ -64,9 +87,11 @@ pub(crate) struct BackendShared {
     /// Lock-free queue of events.
     #[debug(skip)]
     events: EventQueue,
+    /// Number of active out-of-process helper pauses.
+    pause_depth: AtomicUsize,
     /// Shared stats counters.
     #[debug(skip)]
-    stats: RuntimeStats,
+    stats: Arc<RuntimeStats>,
 }
 
 /// Inner state for [`JitBackend`]. Owns the backend thread lifecycle.
@@ -124,7 +149,7 @@ impl JitBackend {
     /// Call [`set_enabled`](Self::set_enabled) to lazily spawn the backend thread with
     /// a default [`RuntimeConfig`].
     pub fn disabled() -> Self {
-        Self::new(RuntimeConfig::default()).expect("default config cannot fail")
+        Self::new_inner(RuntimeConfig::default()).expect("default config cannot fail")
     }
 
     /// Creates a backend from the given config.
@@ -133,9 +158,18 @@ impl JitBackend {
     /// immediately and AOT artifacts are preloaded. Otherwise, both are deferred until the
     /// first [`set_enabled(true)`](Self::set_enabled) call.
     pub fn new(mut config: RuntimeConfig) -> eyre::Result<Self> {
+        config = config.with_env_overrides()?;
+        Self::new_inner(config)
+    }
+
+    fn new_inner(mut config: RuntimeConfig) -> eyre::Result<Self> {
         if config.blocking {
             config.enabled = true;
             config.tuning.jit_hot_threshold = 0;
+        }
+        #[cfg(not(unix))]
+        if config.jit_mode == JitMode::OutOfProcess {
+            eyre::bail!("out-of-process JIT is only available on Unix");
         }
 
         let enabled = config.enabled;
@@ -145,7 +179,8 @@ impl JitBackend {
         let shared = Arc::new(BackendShared {
             resident: ResidentMap::default(),
             events,
-            stats: RuntimeStats::default(),
+            pause_depth: AtomicUsize::new(0),
+            stats: Arc::new(RuntimeStats::default()),
         });
         let this = Self {
             inner: Arc::new(BackendInner {
@@ -324,6 +359,39 @@ impl JitBackend {
         self.inner.enabled.load(Ordering::Relaxed)
     }
 
+    /// Pauses out-of-process helper execution.
+    ///
+    /// Resident compiled functions are still returned by [`lookup`](Self::lookup), and lookup
+    /// events are still processed for stats, hotness tracking, and compilation dispatch. In
+    /// out-of-process mode, the helper process group is stopped until the pause depth returns to
+    /// zero, so dispatched helper requests remain buffered and resume once the helper continues.
+    /// In in-process mode, pause only tracks pause depth.
+    pub fn pause(&self) {
+        if self.inner.shared.pause_depth.fetch_add(1, Ordering::Relaxed) == 0 {
+            let _ = self.inner.tx.send(Command::Pause);
+        }
+    }
+
+    /// Resumes out-of-process helper execution once all active pauses have been released.
+    pub fn resume(&self) {
+        if self
+            .inner
+            .shared
+            .pause_depth
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |depth| {
+                Some(depth.saturating_sub(1))
+            })
+            .is_ok_and(|depth| depth == 1)
+        {
+            let _ = self.inner.tx.send(Command::Resume);
+        }
+    }
+
+    /// Returns whether out-of-process helper execution is paused.
+    pub fn is_paused(&self) -> bool {
+        self.inner.shared.pause_depth.load(Ordering::Relaxed) != 0
+    }
+
     /// Sets whether the runtime is enabled, spawning the backend thread on first enable.
     ///
     /// When `enabled` is `true` and the backend thread has not been spawned yet, this
@@ -354,6 +422,7 @@ impl JitBackend {
         debug!(
             blocking = self.inner.blocking,
             workers = config.tuning.jit_worker_count,
+            jit_mode = ?config.jit_mode,
             hot_threshold = config.tuning.jit_hot_threshold,
             channel_capacity = config.tuning.channel_capacity,
             "spawning backend thread",

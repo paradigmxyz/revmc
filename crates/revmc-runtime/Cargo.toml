@@ -25,6 +25,7 @@ revmc-backend.workspace = true
 revmc-codegen.workspace = true
 revmc-context = { workspace = true, features = ["evm"] }
 revmc-llvm = { workspace = true, optional = true }
+revmc-builtins = { workspace = true, features = ["ir"] }
 
 alloy-primitives = { workspace = true, features = ["std", "map-fxhash"] }
 alloy-evm = { workspace = true, optional = true }
@@ -45,11 +46,14 @@ crossbeam-queue.workspace = true
 dashmap = "6"
 derive_more = { version = "2", default-features = false, features = ["debug"] }
 eyre.workspace = true
+libc.workspace = true
 libloading = "0.9"
 tempfile = "3.10"
 quanta.workspace = true
 rayon.workspace = true
 tracing.workspace = true
+wait-timeout.workspace = true
+wincode.workspace = true
 
 [dev-dependencies]
 revmc-statetest = { path = "../revmc-statetest" }
