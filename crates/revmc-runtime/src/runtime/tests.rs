@@ -445,6 +445,17 @@ fn blocking_mode() {
 }
 
 #[test]
+fn default_jit_max_bytecode_len_matches_eth_limit() {
+    let tuning = RuntimeTuning::default();
+    let max_len_bytecode = vec![0; 24 * 1024];
+    let too_large_bytecode = vec![0; 24 * 1024 + 1];
+
+    assert_eq!(tuning.jit_max_bytecode_len, 24 * 1024);
+    assert!(tuning.should_compile(&max_len_bytecode));
+    assert!(!tuning.should_compile(&too_large_bytecode));
+}
+
+#[test]
 #[cfg(feature = "llvm")]
 fn jit_hotness_promotion() {
     let tb =

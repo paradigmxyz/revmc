@@ -10,6 +10,7 @@ const JIT_MODE_ENV: &str = "REVMC_JIT_MODE";
 const JIT_HELPER_PATH_ENV: &str = "REVMC_JIT_HELPER_PATH";
 const JIT_HELPER_MEMORY_LIMIT_ENV: &str = "REVMC_JIT_HELPER_MEMORY_LIMIT_BYTES";
 const JIT_HELPER_CPU_COUNT_ENV: &str = "REVMC_JIT_HELPER_CPU_COUNT";
+const DEFAULT_JIT_MAX_BYTECODE_LEN: usize = 24 * 1024;
 
 /// Runtime configuration.
 #[derive(Clone, derive_more::Debug)]
@@ -240,7 +241,7 @@ pub struct RuntimeTuning {
 
     /// Maximum bytecode length eligible for compilation. `0` = no limit.
     ///
-    /// Defaults to `0`.
+    /// Defaults to `24 KiB`.
     pub jit_max_bytecode_len: usize,
 
     /// Maximum number of JIT compilation jobs in flight.
@@ -343,7 +344,7 @@ impl Default for RuntimeTuning {
             event_drain_interval: Duration::from_millis(100),
             shutdown_timeout: Duration::from_secs(5),
             jit_hot_threshold: 8,
-            jit_max_bytecode_len: 0,
+            jit_max_bytecode_len: DEFAULT_JIT_MAX_BYTECODE_LEN,
             jit_max_pending_jobs: 2048,
             jit_worker_count: worker_count,
             jit_timeout: Duration::from_secs(5),
