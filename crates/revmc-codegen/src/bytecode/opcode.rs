@@ -287,7 +287,7 @@ mod tests {
     use super::*;
     use revm_bytecode::opcode as op;
 
-    const DEF_SPEC: SpecId = SpecId::ARROW_GLACIER;
+    const DEF_SPEC: SpecId = SpecId::LONDON;
 
     #[test]
     fn iter_basic() {
