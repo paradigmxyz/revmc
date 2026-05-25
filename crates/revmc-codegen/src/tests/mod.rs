@@ -184,7 +184,7 @@ tests! {
         }),
         clz_arrow_glacier(@raw {
             bytecode: &[op::MSIZE, op::CLZ],
-            spec_id: SpecId::ARROW_GLACIER,
+            spec_id: SpecId::LONDON,
             expected_return: InstructionResult::NotActivated,
             expected_stack: STACK_WHAT_INTERPRETER_SAYS,
             expected_gas: GAS_WHAT_INTERPRETER_SAYS,
@@ -973,7 +973,7 @@ tests! {
         }),
         difficulty(@raw {
             bytecode: &[op::DIFFICULTY, op::DIFFICULTY],
-            spec_id: SpecId::GRAY_GLACIER,
+            spec_id: SpecId::LONDON,
             expected_stack: &[def_env().block.difficulty, def_env().block.difficulty],
             expected_gas: 4,
         }),
@@ -1205,7 +1205,7 @@ tests! {
         }),
         sstore_constantinople(@raw {
             bytecode: &[op::PC, op::PC, op::SSTORE, op::PC, op::COINBASE],
-            spec_id: SpecId::CONSTANTINOPLE,
+            spec_id: SpecId::PETERSBURG,
             expected_stack: STACK_WHAT_INTERPRETER_SAYS,
             expected_gas: GAS_WHAT_INTERPRETER_SAYS,
         }),
@@ -1651,7 +1651,7 @@ tests! {
                 op::PUSH1, 7,   // gas
                 op::CALL,
             ],
-            spec_id: SpecId::MUIR_GLACIER,
+            spec_id: SpecId::ISTANBUL,
             expected_return: RETURN_WHAT_INTERPRETER_SAYS,
             expected_memory: MEMORY_WHAT_INTERPRETER_SAYS,
             expected_gas: GAS_WHAT_INTERPRETER_SAYS,
