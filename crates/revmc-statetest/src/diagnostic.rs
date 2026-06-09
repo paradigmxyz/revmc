@@ -1,16 +1,14 @@
 // Diagnostic utilities for comparing interpreter vs JIT execution.
 
-use crate::{
-    compiled::{CompileCache, CompiledContracts},
-    merkle_trie::compute_test_roots,
-};
-use revm_context::{block::BlockEnv, cfg::CfgEnv, tx::TxEnv, Context};
+use crate::merkle_trie::compute_test_roots;
+use revm_context::{Context, block::BlockEnv, cfg::CfgEnv, tx::TxEnv};
 use revm_context_interface::result::{EVMError, ExecutionResult, HaltReason, InvalidTransaction};
 use revm_database::{self as database, bal::EvmDatabaseError};
 use revm_database_interface::{DatabaseCommit, EmptyDB};
 use revm_handler::{ExecuteCommitEvm, Handler, MainBuilder, MainContext};
-use revm_inspector::{inspectors::TracerEip3155, InspectCommitEvm};
-use revm_primitives::{hardfork::SpecId, Bytes, B256};
+use revm_inspector::{InspectCommitEvm, inspectors::TracerEip3155};
+use revm_primitives::{B256, Bytes};
+use revmc::{revm_evm::JitEvm, runtime::JitBackend};
 use std::{convert::Infallible, io::stderr};
 
 type ExecResult =
@@ -102,40 +100,31 @@ pub fn run_interpreter(
 
 /// Run a single test case with JIT-compiled functions, returning an execution snapshot.
 pub fn run_jit(
-    compiled: &CompiledContracts,
-    cache: &CompileCache,
-    spec_id: SpecId,
+    backend: &JitBackend,
     cfg: &CfgEnv,
     block: &BlockEnv,
     tx: &TxEnv,
     cache_state: &database::CacheState,
 ) -> ExecutionSnapshot {
     let prestate = cache_state.clone();
-    let mut state =
+    let state =
         database::State::builder().with_cached_prestate(prestate).with_bundle_update().build();
 
-    // SAFETY: The handler and evm do not outlive `state`. The `'static` in
-    // `StateTestEvm<'static>` is required by the `Handler` trait but we
-    // guarantee the borrow is valid for the duration of `handler.run`.
-    let exec_result = unsafe {
-        let db_ref = &mut *(&mut state as *mut database::State<EmptyDB>);
-        let evm_context = Context::mainnet()
-            .with_block(block.clone())
-            .with_tx(tx.clone())
-            .with_cfg(cfg.clone())
-            .with_db(db_ref);
-        let mut handler = crate::compiled::CompiledHandler { compiled, cache, spec_id };
-        let mut evm = evm_context.build_mainnet();
-        let result = handler.run(&mut evm);
-        if result.is_ok() {
-            let s = evm.ctx.journaled_state.finalize();
-            DatabaseCommit::commit(&mut evm.ctx.journaled_state.database, s);
-        }
-        result
-    };
-    let db = &state;
+    let evm_context = Context::mainnet()
+        .with_block(block.clone())
+        .with_tx(tx.clone())
+        .with_cfg(cfg.clone())
+        .with_db(state);
+    let inner = evm_context.build_mainnet();
+    let mut evm = JitEvm::new(inner, backend.clone());
+    let mut handler = revm_handler::MainnetHandler::default();
+    let exec_result = handler.run(&mut evm);
+    if exec_result.is_ok() {
+        let s = evm.ctx.journaled_state.finalize();
+        DatabaseCommit::commit(&mut evm.ctx.journaled_state.database, s);
+    }
 
-    snapshot_from_result(&exec_result, db)
+    snapshot_from_result(&exec_result, &evm.ctx.journaled_state.database)
 }
 
 /// Re-run a test case with the interpreter and EIP-3155 tracing to stderr.

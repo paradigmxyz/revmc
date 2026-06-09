@@ -25,18 +25,18 @@ use inkwell::{
         StringRadix, VoidType,
     },
     values::{
-        BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, InstructionValue,
-        PointerValue,
+        AsValueRef, BasicMetadataValueEnum, BasicValue, BasicValueEnum, CallSiteValue,
+        FunctionValue, InstructionValue, PointerValue,
     },
 };
 use object::{Object, ObjectSymbol};
 use revmc_backend::{
-    Backend, BackendConfig, BackendTypes, Builder, IntCC, OptimizationLevel, Result, TailCallKind,
-    TypeMethods, U256, eyre, format_bytes,
+    Backend, BackendConfig, BackendTypes, Builder, CallConv, IntCC, OptimizationLevel, Result,
+    TailCallKind, TypeMethods, U256, eyre, format_bytes,
 };
 use std::{
     cell::Cell,
-    ffi::CString,
+    ffi::{CStr, CString},
     fmt::{self, Write},
     iter,
     mem::ManuallyDrop,
@@ -57,6 +57,7 @@ pub mod orc;
 mod utils;
 pub(crate) use utils::*;
 
+/// Branch weight for non-cold branches.
 const DEFAULT_WEIGHT: u32 = 20000;
 
 /// Current JIT memory usage counters.
@@ -113,6 +114,13 @@ impl JitMemoryCounters {
 /// Returns `None` if the JIT has not been initialized yet.
 pub fn jit_memory_usage() -> Option<JitMemoryUsage> {
     GlobalOrcJit::try_get().map(|g| g.memory_counters.get())
+}
+
+/// Collect garbage on the global JIT.
+pub fn global_gc() {
+    if let Some(orc) = GlobalOrcJit::try_get() {
+        orc.gc();
+    }
 }
 
 type FxHashMap<K, V> = alloy_primitives::map::HashMap<K, V, FxBuildHasher>;
@@ -321,7 +329,7 @@ impl GlobalOrcJit {
                     self.jit.mangle_and_intern(name),
                     orc::EvaluatedSymbol::new(
                         *addr as u64,
-                        orc::SymbolFlags::none().with_exported().callable(),
+                        orc::SymbolFlags::none().exported().callable(),
                     ),
                 )
             })
@@ -333,6 +341,10 @@ impl GlobalOrcJit {
         {
             error!("failed to define builtins: {e}");
         }
+    }
+
+    fn gc(&self) {
+        self.jit.get_execution_session().get_symbol_string_pool().clear_dead_entries();
     }
 }
 
@@ -439,6 +451,20 @@ impl OrcJitState {
     fn jd(&self) -> orc::JITDylibRef {
         self.jd_guard.jd
     }
+}
+
+fn link_jit_object_in_dylib(
+    orc: &OrcJitState,
+    jd: orc::JITDylibRef,
+    symbol_name: &CStr,
+    object: &[u8],
+    symbols: &[(CString, usize)],
+) -> Result<(usize, orc::ResourceTracker)> {
+    orc.global.define_builtins(symbols);
+    let tracker = jd.create_resource_tracker();
+    orc.global.jit.add_object_with_rt(symbol_name, object, &tracker).map_err(error_msg)?;
+    let addr = orc.global.jit.lookup_in(jd, symbol_name).map_err(error_msg)?;
+    Ok((addr, tracker))
 }
 
 /// Wraps a module in a [`orc::ThreadSafeModule`] for transfer to LLJIT.
@@ -724,6 +750,44 @@ impl EvmLlvmBackend {
         self.module = create_module(self.cx, &self.machine, self.aot)?;
 
         Ok(())
+    }
+
+    /// Returns pending absolute symbols collected while translating the current JIT module.
+    pub fn pending_symbol_names(&self) -> Vec<CString> {
+        self.orc
+            .as_ref()
+            .map(|orc| orc.pending_symbols.iter().map(|(name, _)| name.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    /// Links a relocatable object into this backend's JITDylib and returns the function address
+    /// and resource tracker that owns the linked code.
+    pub fn link_jit_object(
+        &mut self,
+        symbol_name: &CStr,
+        object: &[u8],
+        symbols: &[(CString, usize)],
+    ) -> Result<(usize, orc::ResourceTracker)> {
+        let orc = self.ensure_orc()?;
+        let (addr, tracker) =
+            link_jit_object_in_dylib(orc, orc.jd(), symbol_name, object, symbols)?;
+        orc.loaded_trackers.push(tracker);
+        Ok((addr, orc.loaded_trackers.pop().unwrap()))
+    }
+
+    /// Links a relocatable object into a fresh JITDylib and returns the function address,
+    /// resource tracker, and guard for the JITDylib that owns the linked code.
+    pub fn link_jit_object_in_fresh_dylib(
+        &mut self,
+        symbol_name: &CStr,
+        object: &[u8],
+        symbols: &[(CString, usize)],
+    ) -> Result<(usize, orc::ResourceTracker, Arc<JitDylibGuard>)> {
+        let orc = self.ensure_orc()?;
+        let jd = orc.global.create_jit_dylib();
+        let jd_guard = Arc::new(JitDylibGuard { global: orc.global, jd });
+        let (addr, tracker) = link_jit_object_in_dylib(orc, jd, symbol_name, object, symbols)?;
+        Ok((addr, tracker, jd_guard))
     }
 
     /// Pops and returns the [`ResourceTracker`](orc::ResourceTracker) for the last committed
@@ -1236,6 +1300,13 @@ impl EvmLlvmBuilder<'_> {
         let kind_id = self.cx.get_kind_id("prof");
         inst.set_metadata(metadata, kind_id).unwrap();
     }
+
+    fn assume_inner(&mut self, cond: BasicValueEnum<'static>) -> CallSiteValue<'static> {
+        let function = self.get_or_add_function("llvm.assume", |this| {
+            this.ty_void.fn_type(&[this.ty_i1.into()], false)
+        });
+        self.bcx.build_call(function, &[cond.into()], "").unwrap()
+    }
 }
 
 impl BackendTypes for EvmLlvmBuilder<'_> {
@@ -1291,11 +1362,8 @@ impl Builder for EvmLlvmBuilder<'_> {
     }
 
     fn set_current_block_cold(&mut self) {
-        let function = self.get_or_add_function("llvm.assume", |this| {
-            this.ty_void.fn_type(&[this.ty_i1.into()], false)
-        });
         let true_ = self.bool_const(true);
-        let callsite = self.bcx.build_call(function, &[true_.into()], "cold").unwrap();
+        let callsite = self.assume_inner(true_);
         let cold = self.cx.create_enum_attribute(Attribute::get_named_enum_kind_id("cold"), 0);
         callsite.add_attribute(AttributeLoc::Function, cold);
     }
@@ -1309,6 +1377,9 @@ impl Builder for EvmLlvmBuilder<'_> {
     }
 
     fn add_comment_to_current_inst(&mut self, comment: &str) {
+        if !self.backend_config.is_dumping {
+            return;
+        }
         let Some(block) = self.current_block() else { return };
         let Some(ins) = block.get_last_instruction() else { return };
         let metadata = self.cx.metadata_string(comment);
@@ -1355,7 +1426,8 @@ impl Builder for EvmLlvmBuilder<'_> {
         ty.into_int_type().const_int(value, false).into()
     }
 
-    fn iconst_256(&mut self, value: U256) -> Self::Value {
+    fn iconst_256(&mut self, value: impl TryInto<U256>) -> Self::Value {
+        let value = value.try_into().ok().expect("invalid U256 value");
         if let Ok(low) = value.try_into() {
             return self.ty_i256.const_int(low, false).into();
         }
@@ -1444,6 +1516,10 @@ impl Builder for EvmLlvmBuilder<'_> {
         .unwrap();
     }
 
+    fn assume(&mut self, cond: Self::Value) {
+        self.assume_inner(cond);
+    }
+
     fn icmp(&mut self, cond: IntCC, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
         self.bcx
             .build_int_compare(convert_intcc(cond), lhs.into_int_value(), rhs.into_int_value(), "")
@@ -1530,37 +1606,6 @@ impl Builder for EvmLlvmBuilder<'_> {
         else_value: Self::Value,
     ) -> Self::Value {
         self.bcx.build_select(cond.into_int_value(), then_value, else_value, "").unwrap()
-    }
-
-    fn lazy_select(
-        &mut self,
-        cond: Self::Value,
-        ty: Self::Type,
-        then_value: impl FnOnce(&mut Self) -> Self::Value,
-        else_value: impl FnOnce(&mut Self) -> Self::Value,
-    ) -> Self::Value {
-        let then_block = if let Some(current) = self.current_block() {
-            self.create_block_after(current, "then")
-        } else {
-            self.create_block("then")
-        };
-        let else_block = self.create_block_after(then_block, "else");
-        let done_block = self.create_block_after(else_block, "contd");
-
-        self.brif(cond, then_block, else_block);
-
-        self.switch_to_block(then_block);
-        let then_value = then_value(self);
-        self.br(done_block);
-
-        self.switch_to_block(else_block);
-        let else_value = else_value(self);
-        self.br(done_block);
-
-        self.switch_to_block(done_block);
-        let phi = self.bcx.build_phi(ty, "").unwrap();
-        phi.add_incoming(&[(&then_value, then_block), (&else_value, else_block)]);
-        phi.as_basic_value()
     }
 
     fn iadd(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
@@ -1764,6 +1809,14 @@ impl Builder for EvmLlvmBuilder<'_> {
     ) -> Option<Self::Value> {
         let args = args.iter().copied().map(Into::into).collect::<Vec<_>>();
         let callsite = self.bcx.build_call(function, &args, "").unwrap();
+        if let Some(call_conv) = function_call_conv(function) {
+            unsafe {
+                inkwell::llvm_sys::core::LLVMSetInstructionCallConv(
+                    callsite.as_value_ref(),
+                    call_conv as _,
+                );
+            }
+        }
         if tail_call != TailCallKind::None {
             callsite.set_tail_call_kind(convert_tail_call_kind(tail_call));
         }
@@ -1846,9 +1899,11 @@ impl Builder for EvmLlvmBuilder<'_> {
         ret: Option<Self::Type>,
         address: Option<usize>,
         linkage: revmc_backend::Linkage,
+        call_conv: CallConv,
     ) -> Self::Function {
         let func_ty = self.fn_type(ret, params);
         let function = self.module().add_function(name, func_ty, Some(convert_linkage(linkage)));
+        set_function_call_conv(function, call_conv);
         cpp::set_dso_local(function);
         if let Some(address) = address
             && let Some(orc) = &mut self.orc
@@ -1856,6 +1911,55 @@ impl Builder for EvmLlvmBuilder<'_> {
             orc.pending_symbols.push((CString::new(name).unwrap(), address));
         }
         function
+    }
+
+    fn add_function_stub(
+        &mut self,
+        function: Self::Function,
+        call_conv: CallConv,
+    ) -> Self::Function {
+        let name = function.get_name().to_string_lossy();
+        let stub_name = format!("{name}.stub");
+        if let Some(stub) = self.module().get_function(&stub_name) {
+            return stub;
+        }
+
+        let func_ty = function.get_type();
+        let stub = self.module().add_function(
+            &stub_name,
+            func_ty,
+            Some(inkwell::module::Linkage::Internal),
+        );
+        set_function_call_conv(stub, call_conv);
+        cpp::set_dso_local(stub);
+        self.add_function_attribute(
+            Some(stub),
+            revmc_backend::Attribute::NoInline,
+            revmc_backend::FunctionAttributeLocation::Function,
+        );
+
+        let before = self.bcx.get_insert_block();
+        let debug_location = self.debug_scope.and_then(|_| self.bcx.get_current_debug_location());
+        self.bcx.unset_current_debug_location();
+
+        let entry = self.cx.append_basic_block(stub, self.name("stub"));
+        self.bcx.position_at_end(entry);
+        let args =
+            (0..stub.count_params()).map(|i| stub.get_nth_param(i).unwrap()).collect::<Vec<_>>();
+        if let Some(value) = self.call(function, &args) {
+            self.bcx.build_return(Some(&value)).unwrap();
+        } else {
+            self.bcx.build_return(None).unwrap();
+        }
+
+        if let Some(before) = before {
+            self.bcx.position_at_end(before);
+        }
+        if let Some(debug_location) = debug_location {
+            self.bcx.set_current_debug_location(debug_location);
+        }
+
+        stub
     }
 
     fn add_function_attribute(
@@ -1873,7 +1977,7 @@ impl Builder for EvmLlvmBuilder<'_> {
 
 /// Builds the LLVM pass pipeline string. See [`EvmLlvmBackend::optimize_module`].
 fn build_pass_pipeline(with_licm: bool) -> String {
-    let mut passes = String::from("function(");
+    let mut passes = String::from("module(globalopt,cgscc(inline),globalopt,function(");
     let function_passes: &[&str] = &[
         "simplifycfg",
         "sroa",
@@ -1903,7 +2007,7 @@ fn build_pass_pipeline(with_licm: bool) -> String {
         }
         passes.push_str(pass);
     }
-    passes.push_str("),globaldce");
+    passes.push_str("),globaldce)");
     passes
 }
 
@@ -1929,8 +2033,34 @@ fn init_() -> Result<()> {
         install_fatal_error_handler(report_fatal_error);
     }
 
+    // Collect extra LLVM args from `REVMC_LLVM_ARGS` env var (space-separated).
+    let extra: Vec<CString> = std::env::var("REVMC_LLVM_ARGS")
+        .ok()
+        .iter()
+        .flat_map(|s| s.split_whitespace().filter_map(|s| CString::new(s).ok()).collect::<Vec<_>>())
+        .collect();
+    if !extra.is_empty() {
+        debug!(extra = ?&extra, "passing extra LLVM args");
+    }
+
     // The first arg is only used in `-help` output AFAICT.
-    let args = [c"revmc-llvm".as_ptr(), c"-x86-asm-syntax=intel".as_ptr()];
+    let mut args = vec![
+        c"revmc-llvm".as_ptr(),
+        c"-x86-asm-syntax=intel".as_ptr(),
+        // CodeGenPrepare's memory optimization has a pathological interaction with our IR shape:
+        // repeated stores to the same `gas_remaining` pointer in a huge function cause
+        // MemoryDependenceResults::getNonLocalPointerDependency to do superlinear work.
+        // Mark functions with ≥1000 BBs as "huge" to skip the expensive CGP memory opts,
+        // which produce identical codegen at that scale. Small functions still benefit from
+        // CGP's address sinking and branch optimizations.
+        c"--cgpp-huge-func=1000".as_ptr(),
+        // Greedy register allocation's global live range splitting is superlinear on large
+        // functions with many long-lived values. Treat smaller live ranges as huge so LLVM uses
+        // the cheaper splitting path; this preserves code size on snailtracer while cutting llc
+        // time by ~3x.
+        c"--huge-size-for-split=64".as_ptr(),
+    ];
+    args.extend(extra.iter().map(|s| s.as_ptr()));
     unsafe {
         inkwell::llvm_sys::support::LLVMParseCommandLineOptions(
             args.len() as i32,
@@ -2050,6 +2180,7 @@ fn convert_attribute(bcx: &EvmLlvmBuilder<'_>, attr: revmc_backend::Attribute) -
         OurAttr::Writable => ("writable", AttrValue::Enum(0)),
         // memory(argmem: readwrite) = ModRef(3) << ArgMem(0) = 3.
         OurAttr::ArgMemOnly => ("memory", AttrValue::Enum(3)),
+        OurAttr::DeadOnReturn => ("dead_on_return", AttrValue::Enum(0)),
 
         OurAttr::Initializes(size) => {
             return cpp::create_initializes_attr(bcx.cx, 0, size as i64);
@@ -2075,6 +2206,26 @@ fn convert_attribute_loc(loc: revmc_backend::FunctionAttributeLocation) -> Attri
         revmc_backend::FunctionAttributeLocation::Return => AttributeLoc::Return,
         revmc_backend::FunctionAttributeLocation::Param(i) => AttributeLoc::Param(i),
         revmc_backend::FunctionAttributeLocation::Function => AttributeLoc::Function,
+    }
+}
+
+fn function_call_conv(function: FunctionValue<'_>) -> Option<u32> {
+    let call_conv =
+        unsafe { inkwell::llvm_sys::core::LLVMGetFunctionCallConv(function.as_value_ref()) };
+    (call_conv != inkwell::llvm_sys::LLVMCallConv::LLVMCCallConv as u32).then_some(call_conv)
+}
+
+fn set_function_call_conv(function: FunctionValue<'_>, call_conv: CallConv) {
+    let Some(call_conv) = convert_call_conv(call_conv) else { return };
+    unsafe {
+        inkwell::llvm_sys::core::LLVMSetFunctionCallConv(function.as_value_ref(), call_conv as _);
+    }
+}
+
+fn convert_call_conv(call_conv: CallConv) -> Option<inkwell::llvm_sys::LLVMCallConv> {
+    match call_conv {
+        CallConv::Default => None,
+        CallConv::Cold => Some(inkwell::llvm_sys::LLVMCallConv::LLVMPreserveMostCallConv),
     }
 }
 

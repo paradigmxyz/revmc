@@ -1,0 +1,19 @@
+    PUSH1 0x01
+    PUSH0
+    MSTORE
+    PUSH1 0x02
+    PUSH1 0x20
+    MSTORE
+    PUSH1 0x40
+    PUSH0
+    KECCAK256
+    PUSH1 0x03
+    PUSH0
+    MSTORE
+    STOP
+
+; CHECK-COUNT-2: call {{.*}}@__revmc_builtin_mresize{{.*}}; >>
+; CHECK-NOT: call {{.*}}@__revmc_builtin_mresize{{.*}}; >>
+; CHECK: @__revmc_builtin_keccak256
+; CHECK-NOT: load ptr
+; CHECK-NOT: call {{.*}}@__revmc_builtin_mresize{{.*}}; >>

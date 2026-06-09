@@ -6,9 +6,15 @@ use revm_database::{CacheDB, EmptyDB};
 use revm_handler::{ExecuteEvm, MainBuilder, MainnetEvm};
 use revm_primitives::{Address, B256, B256Map, Bytes, StorageKeyMap, StorageValue, TxKind, U256};
 use revm_state::AccountInfo;
-use revmc::{EvmCompiler, EvmLlvmBackend, JitEvm, RawEvmCompilerFn, primitives::hardfork::SpecId};
+use revmc::{
+    Backend, EvmCompiler, EvmLlvmBackend, RawEvmCompilerFn, primitives::hardfork::SpecId,
+    simple_revm_evm::JitEvm,
+};
 use serde::Deserialize;
-use std::collections::{BTreeMap, HashSet};
+use std::{
+    collections::{BTreeMap, HashSet},
+    path::Path,
+};
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -89,30 +95,22 @@ struct ParsedAccount {
 
 /// A prepared benchmark, ready to run via interpreter or JIT.
 ///
-/// Handles both fixture-based (multi-contract transaction) and simple bytecode
-/// benchmarks — the latter are converted to a single-contract fixture
-/// internally so the execution path is the same.
+/// Handles fixture-based benchmarks.
 #[allow(missing_debug_implementations)]
 pub struct PreparedBench {
     name: &'static str,
-    runnable: bool,
     accounts: Vec<ParsedAccount>,
     block: BlockEnv,
     cfg: CfgEnv,
     tx: TxEnv,
     functions: B256Map<RawEvmCompilerFn>,
+    assert_success: bool,
 }
 
-/// Caller address used for synthetic bytecode benchmarks.
+/// Default caller address used for ad hoc bytecode fixtures.
 const BENCH_CALLER: Address = Address::new([
     0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
     0x11, 0x11, 0x11, 0x11,
-]);
-
-/// Contract address used for synthetic bytecode benchmarks.
-const BENCH_CONTRACT: Address = Address::new([
-    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
-    0xcc, 0xcc, 0xcc, 0xcc,
 ]);
 
 impl PreparedBench {
@@ -133,16 +131,39 @@ impl PreparedBench {
         default_spec_id: SpecId,
         compiler: &mut EvmCompiler<EvmLlvmBackend>,
     ) -> Self {
-        let (accounts, block, cfg, tx) = if bench.is_fixture() {
-            Self::parse_fixture(bench)
-        } else {
-            Self::from_bytecode(bench, default_spec_id)
-        };
+        Self::load_with_functions(bench, default_spec_id, compiler, B256Map::default())
+    }
 
-        // JIT compile all contract bytecodes.
+    /// Load a benchmark, reusing already-JIT'd functions and compiling any missing bytecodes.
+    ///
+    /// The caller must keep `compiler` alive as long as the returned `PreparedBench` is used.
+    pub fn load_with_functions(
+        bench: &Bench,
+        default_spec_id: SpecId,
+        compiler: &mut EvmCompiler<EvmLlvmBackend>,
+        functions: B256Map<RawEvmCompilerFn>,
+    ) -> Self {
+        Self::load_with_pending_functions(bench, default_spec_id, compiler, functions, Vec::new())
+    }
+
+    /// Load a benchmark, reusing already-translated and already-JIT'd functions.
+    ///
+    /// The caller must keep `compiler` alive as long as the returned `PreparedBench` is used.
+    pub fn load_with_pending_functions(
+        bench: &Bench,
+        default_spec_id: SpecId,
+        compiler: &mut EvmCompiler<EvmLlvmBackend>,
+        mut functions: B256Map<RawEvmCompilerFn>,
+        mut pending: Vec<(B256, <EvmLlvmBackend as Backend>::FuncId)>,
+    ) -> Self {
+        let _ = default_spec_id;
+        let (accounts, block, cfg, tx) = Self::parse_fixture(bench);
+
+        // JIT compile all contract bytecodes that were not provided by the caller.
         let spec_id = cfg.spec;
         let mut seen = HashSet::new();
-        let mut pending = Vec::new();
+        seen.extend(functions.keys().copied());
+        seen.extend(pending.iter().map(|(hash, _)| *hash));
         for acct in &accounts {
             if acct.bytecode.is_empty() || !seen.insert(acct.code_hash) {
                 continue;
@@ -153,93 +174,65 @@ impl PreparedBench {
                 .expect("translation failed");
             pending.push((acct.code_hash, func_id));
         }
-        let mut functions = B256Map::default();
         for (hash, func_id) in pending {
             let fn_ptr = unsafe { compiler.jit_function(func_id).expect("JIT failed") };
             functions.insert(hash, fn_ptr.into_inner());
         }
         compiler.clear_ir().expect("clear_ir failed");
 
-        let runnable = bench.stack_input.is_empty();
-        Self { name: bench.name, runnable, accounts, block, cfg, tx, functions }
+        Self {
+            name: bench.name,
+            accounts,
+            block,
+            cfg,
+            tx,
+            functions,
+            assert_success: bench.assert_success,
+        }
     }
 
-    /// Whether this benchmark can be run as a transaction.
+    /// Load a benchmark from a pre-compiled shared library instead of JIT-compiling.
     ///
-    /// Benchmarks with `stack_input` push values onto the stack before execution,
-    /// which is not possible via `transact()`. They can still be compiled and
-    /// benchmarked at the bytecode level.
-    pub fn is_runnable(&self) -> bool {
-        self.runnable
-    }
-
-    /// Convert a bytecode [`Bench`] into fixture state.
-    fn from_bytecode(
+    /// The `symbol_name` is looked up in the library for each non-empty contract bytecode.
+    /// The caller must keep `_lib` alive as long as the returned `PreparedBench` is used.
+    pub fn load_from_library(
         bench: &Bench,
-        spec_id: SpecId,
-    ) -> (Vec<ParsedAccount>, BlockEnv, CfgEnv, TxEnv) {
-        let bytecode = Bytecode::new_raw(Bytes::copy_from_slice(&bench.bytecode));
-        let code_hash = bytecode.hash_slow();
+        default_spec_id: SpecId,
+        lib_path: &Path,
+        symbol_name: &str,
+    ) -> (Self, libloading::Library) {
+        let _ = default_spec_id;
+        let (accounts, block, cfg, tx) = Self::parse_fixture(bench);
 
-        let storage: StorageKeyMap<StorageValue> =
-            bench.storage.iter().map(|&(k, v)| (k, v)).collect();
+        let lib = unsafe { libloading::Library::new(lib_path) }.expect("failed to load library");
+        let mut functions = B256Map::default();
+        let mut seen = HashSet::new();
+        for acct in &accounts {
+            if acct.bytecode.is_empty() || !seen.insert(acct.code_hash) {
+                continue;
+            }
+            let f: libloading::Symbol<'_, revmc::EvmCompilerFn> =
+                unsafe { lib.get(symbol_name.as_bytes()) }.expect("symbol not found in library");
+            functions.insert(acct.code_hash, (*f).into_inner());
+        }
 
-        let contract = ParsedAccount {
-            address: BENCH_CONTRACT,
-            balance: U256::ZERO,
-            nonce: 1,
-            bytecode,
-            code_hash,
-            storage,
-        };
-        let caller = ParsedAccount {
-            address: BENCH_CALLER,
-            balance: U256::MAX / U256::from(2),
-            nonce: 0,
-            bytecode: Bytecode::default(),
-            code_hash: B256::ZERO,
-            storage: Default::default(),
-        };
-
-        let gas_limit = u64::MAX / 2;
-        let mut block = BlockEnv {
-            number: bench.block_number.unwrap_or(U256::from(1)),
-            timestamp: bench.timestamp.unwrap_or(U256::from(1)),
-            gas_limit,
-            basefee: 0,
-            ..Default::default()
-        };
-        block.set_blob_excess_gas_and_price(
-            0,
-            revm_primitives::eip4844::BLOB_BASE_FEE_UPDATE_FRACTION_CANCUN,
-        );
-
-        let mut cfg = CfgEnv::new_with_spec(spec_id);
-        cfg.tx_gas_limit_cap = Some(gas_limit);
-        cfg.disable_nonce_check = true;
-        let tx = TxEnv {
-            tx_type: 0,
-            caller: BENCH_CALLER,
-            gas_limit,
-            gas_price: 0,
-            kind: TxKind::Call(BENCH_CONTRACT),
-            value: U256::ZERO,
-            data: Bytes::from(bench.calldata.clone()),
-            nonce: 0,
-            chain_id: Some(cfg.chain_id),
-            access_list: Default::default(),
-            gas_priority_fee: None,
-            blob_hashes: Vec::new(),
-            max_fee_per_blob_gas: 0,
-            authorization_list: Vec::new(),
-        };
-
-        (vec![caller, contract], block, cfg, tx)
+        (
+            Self {
+                name: bench.name,
+                accounts,
+                block,
+                cfg,
+                tx,
+                functions,
+                assert_success: bench.assert_success,
+            },
+            lib,
+        )
     }
 
     /// Parse a fixture JSON into accounts, block, cfg, tx.
     fn parse_fixture(bench: &Bench) -> (Vec<ParsedAccount>, BlockEnv, CfgEnv, TxEnv) {
-        let fixture_json = bench.fixture_json.expect("fixture_json required for fixture bench");
+        let fixture_json = bench.fixture_json.as_deref().expect("fixture_json required");
         let spec_id = bench.spec_id.expect("spec_id required for fixture bench");
         let file: FixtureFile =
             serde_json::from_str(fixture_json).expect("failed to parse fixture JSON");
@@ -284,7 +277,9 @@ impl PreparedBench {
 
         // Build tx.
         let caller = first_tx.sender.as_deref().map(parse_address).unwrap_or(BENCH_CALLER);
-        let cfg = CfgEnv::new_with_spec(spec_id);
+        let mut cfg = CfgEnv::new_with_spec(spec_id);
+        cfg.tx_gas_limit_cap = Some(block.gas_limit);
+        cfg.disable_nonce_check = true;
         let tx = TxEnv {
             tx_type: 0,
             caller,
@@ -376,12 +371,17 @@ impl PreparedBench {
     }
 
     /// Sanity-check that interpreter and JIT produce matching results.
-    ///
-    /// Panics if `!self.is_runnable()`.
     pub fn sanity_check(&self) {
-        assert!(self.runnable, "cannot sanity-check a non-runnable benchmark");
         let interp = self.run_interpreter();
         let jit = self.run_jit();
+        if self.assert_success {
+            assert!(
+                interp.result.is_success(),
+                "benchmark transaction failed:\n  interpreter: {:?}\n  JIT: {:?}",
+                interp.result,
+                jit.result,
+            );
+        }
         assert_eq!(
             interp.result.is_success(),
             jit.result.is_success(),
@@ -390,6 +390,21 @@ impl PreparedBench {
             jit.result,
         );
     }
+}
+
+/// Extract the entry-point contract bytecode from a fixture benchmark.
+pub fn fixture_entry_bytecode(bench: &Bench) -> Vec<u8> {
+    let fixture_json = bench.fixture_json.as_deref().expect("fixture_json required");
+    let file: FixtureFile =
+        serde_json::from_str(fixture_json).expect("failed to parse fixture JSON");
+    let case = file.cases.into_values().next().expect("no cases in fixture");
+    let to = case
+        .transaction
+        .first()
+        .and_then(|tx| tx.to.as_deref())
+        .expect("fixture missing transaction.to");
+    let raw = case.pre.get(to).expect("fixture missing entry-point account");
+    parse_hex_bytes(&raw.code)
 }
 
 // ── Hex parsing helpers ──────────────────────────────────────────────────────

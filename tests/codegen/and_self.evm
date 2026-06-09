@@ -1,8 +1,9 @@
-CALLVALUE
-DUP1
-AND
-RET_WORD
+    CALLVALUE
+    DUP1
+    AND
+    RET_WORD
 
-; CHECK: @__revmc_builtin_call_value
+; CHECK: load i256
 ; CHECK-NOT: and
-; CHECK: @__revmc_builtin_mstore
+; CHECK: bswap
+; CHECK: store i256

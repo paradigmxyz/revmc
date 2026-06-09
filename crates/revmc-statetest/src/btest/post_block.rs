@@ -2,7 +2,7 @@ use revm_context::{Block, ContextTr, JournalTr};
 use revm_database::Database;
 use revm_database_interface::DatabaseCommit;
 use revm_handler::{EvmTr, SystemCallCommitEvm};
-use revm_primitives::{address, hardfork::SpecId, Address, Bytes, ONE_ETHER, ONE_GWEI, U256};
+use revm_primitives::{Address, Bytes, ONE_ETHER, ONE_GWEI, U256, address, hardfork::SpecId};
 use revm_statetest_types::blockchain::Withdrawal;
 
 /// Post block transition that includes:
@@ -69,7 +69,7 @@ pub const fn block_reward(spec: SpecId, ommers: usize) -> u128 {
         return 0;
     }
 
-    let reward = if spec.is_enabled_in(SpecId::CONSTANTINOPLE) {
+    let reward = if spec.is_enabled_in(SpecId::PETERSBURG) {
         ONE_ETHER * 2
     } else if spec.is_enabled_in(SpecId::BYZANTIUM) {
         ONE_ETHER * 3

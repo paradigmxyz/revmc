@@ -1,4 +1,6 @@
-use revmc_backend::{Attribute, Backend, Builder, FunctionAttributeLocation, TypeMethods};
+use revmc_backend::{
+    Attribute, Backend, Builder, CallConv, FunctionAttributeLocation, TypeMethods,
+};
 
 // Must be kept in sync with `remvc-build`.
 const MANGLE_PREFIX: &str = "__revmc_builtin_";
@@ -35,11 +37,16 @@ impl<B: Backend> Builtins<B> {
     fn init(builtin: Builtin, bcx: &mut B::Builder<'_>) -> B::Function {
         let name = builtin.name();
         debug_assert!(name.starts_with(MANGLE_PREFIX), "{name:?}");
-        bcx.get_function(name).inspect(|r| trace!(name, ?r, "pre-existing")).unwrap_or_else(|| {
-            let r = Self::build(name, builtin, bcx);
-            trace!(name, ?r, "built");
-            r
-        })
+        if builtin.call_conv() == CallConv::Default
+            && let Some(r) = bcx.get_function(name)
+        {
+            trace!(name, ?r, "pre-existing");
+            return r;
+        }
+
+        let r = Self::build(name, builtin, bcx);
+        trace!(name, ?r, "built");
+        r
     }
 
     fn build(name: &str, builtin: Builtin, bcx: &mut B::Builder<'_>) -> B::Function {
@@ -47,31 +54,46 @@ impl<B: Backend> Builtins<B> {
         let params = builtin.params(bcx);
         let address = builtin.addr();
         let linkage = revmc_backend::Linkage::Import;
-        let f = bcx.add_function(name, &params, ret, Some(address), linkage);
-        let default_attrs: &[Attribute] = if builtin == Builtin::Panic {
-            &[
-                Attribute::Cold,
-                Attribute::NoReturn,
-                Attribute::NoFree,
-                Attribute::NoRecurse,
-                Attribute::NoSync,
-            ]
-        } else if builtin == Builtin::AssertSpecId {
-            &[Attribute::NoFree, Attribute::NoRecurse, Attribute::NoSync, Attribute::ArgMemOnly]
-        } else {
-            &[
-                Attribute::WillReturn,
-                Attribute::NoFree,
-                Attribute::NoRecurse,
-                Attribute::NoSync,
-                Attribute::NoUnwind,
-                Attribute::ArgMemOnly,
-            ]
-        };
-        for attr in default_attrs.iter().chain(builtin.attrs()).copied() {
+        let f = bcx.add_function(name, &params, ret, Some(address), linkage, CallConv::Default);
+        Self::add_attrs(builtin, f, bcx);
+        match builtin.call_conv() {
+            CallConv::Default => f,
+            call_conv => {
+                let f = bcx.add_function_stub(f, call_conv);
+                Self::add_attrs(builtin, f, bcx);
+                f
+            }
+        }
+    }
+
+    fn add_attrs(builtin: Builtin, f: B::Function, bcx: &mut B::Builder<'_>) {
+        let param_attrs = builtin.param_attrs();
+        let mut attrs = Vec::with_capacity(16);
+        attrs.extend(builtin.attrs());
+        attrs.extend([
+            Attribute::NoFree,
+            Attribute::NoRecurse,
+            Attribute::NoSync,
+            Attribute::NoUnwind,
+        ]);
+        // `argmem` is only valid if the function does not access memory reachable through pointers
+        // *loaded* from its arguments (only memory directly derived from arguments via
+        // GEP/bitcast). Builtins that take a writable `EvmContext` mutate state through
+        // `ecx.host`, `ecx.gas`, etc., which are loaded from `ecx` and thus outside
+        // `argmem`. Apply `ArgMemOnly` only when no parameter is a writable `EvmContext`.
+        let evm_ctx_size = core::mem::size_of::<revmc_context::EvmContext<'static>>() as u64;
+        let writes_ecx = param_attrs.iter().any(|p| {
+            let writable = p.iter().any(|a| matches!(a, Attribute::Writable));
+            let is_ecx =
+                p.iter().any(|a| matches!(a, Attribute::Dereferenceable(s) if *s == evm_ctx_size));
+            writable && is_ecx
+        });
+        if !writes_ecx {
+            attrs.push(Attribute::ArgMemOnly);
+        }
+        for attr in attrs {
             bcx.add_function_attribute(Some(f), attr, FunctionAttributeLocation::Function);
         }
-        let param_attrs = builtin.param_attrs();
         for (i, param_attrs) in param_attrs.iter().enumerate() {
             for attr in param_attrs {
                 bcx.add_function_attribute(
@@ -81,7 +103,6 @@ impl<B: Backend> Builtins<B> {
                 );
             }
         }
-        f
     }
 }
 
@@ -105,6 +126,7 @@ macro_rules! builtins {
         #[allow(unused_variables)]
         impl Builtin {
             pub const COUNT: usize = builtins!(@count $($ident),*);
+            pub const ALL: &[Self; Self::COUNT] = &[$(Self::$ident),*];
 
             pub const fn name(self) -> &'static str {
                 match self {
@@ -115,6 +137,13 @@ macro_rules! builtins {
             pub fn addr(self) -> usize {
                 match self {
                     $(Self::$ident => crate::$name as *const () as usize,)*
+                }
+            }
+
+            pub fn parse(name: &str) -> Option<Self> {
+                match name {
+                    $(stringify!($name) => Some(Self::$ident),)*
+                    _ => None,
                 }
             }
 
@@ -136,7 +165,7 @@ macro_rules! builtins {
                 #[allow(unused_imports)]
                 use Attribute::*;
                 match self {
-                    $(Self::$ident => &[$($attr)*]),*
+                    $(Self::$ident => &[$($attr),*]),*
                 }
             }
 
@@ -163,15 +192,13 @@ macro_rules! builtins {
                 const PANIC: u8 = _0_0;
                 const ASSERTSPECID: u8 = _0_0;
 
+                const EXPGAS: u8 = _1_0;
                 const KECCAK256CC: u8 = _0_1;
 
                 const CALLDATALOADC: u8 = _0_1;
-                const MLOADC: u8 = _0_1;
                 const SLOADC: u8 = _0_1;
 
-                const MSTORECD: u8 = _1_0;
-                const MSTOREDC: u8 = _1_0;
-                const MSTORECC: u8 = _0_0;
+                const MRESIZE: u8 = _0_0;
 
                 const LOG: u8 = _0_0;
                 const DORETURN: u8 = RETURN;
@@ -243,7 +270,7 @@ builtins! {
         }
     }
 
-    Panic          = __revmc_builtin_panic(ptr, usize) None,
+    Panic          = #[Cold] #[NoReturn] __revmc_builtin_panic(ptr, usize) None,
     AssertSpecId   = __revmc_builtin_assert_spec_id(@[ecx] ptr, u8) None,
 
     Div            = __revmc_builtin_div(@[sp] ptr) None,
@@ -252,55 +279,54 @@ builtins! {
     SMod           = __revmc_builtin_smod(@[sp] ptr) None,
     AddMod         = __revmc_builtin_addmod(@[sp] ptr) None,
     MulMod         = __revmc_builtin_mulmod(@[sp] ptr) None,
-    Exp            = __revmc_builtin_exp(@[ecx] ptr, @[sp] ptr) Some(u8),
-    Keccak256      = __revmc_builtin_keccak256(@[ecx] ptr, @[sp] ptr) Some(u8),
-    Keccak256CC    = __revmc_builtin_keccak256_cc(@[ecx] ptr, @[sp] ptr, usize, usize) Some(u8),
-    Address        = __revmc_builtin_address(@[ecx_ro] ptr, @[sp] ptr) None,
-    Balance        = __revmc_builtin_balance(@[ecx] ptr, @[sp] ptr) Some(u8),
+    Exp            = __revmc_builtin_exp(@[ecx] ptr, @[sp] ptr) None,
+    ExpGas         = __revmc_builtin_exp_gas(@[ecx] ptr, @[sp] ptr) None,
+    Keccak256      = __revmc_builtin_keccak256(@[ecx] ptr, @[sp] ptr) None,
+    Keccak256CC    = __revmc_builtin_keccak256_cc(@[ecx] ptr, @[sp] ptr, usize, usize) None,
+    Balance        = __revmc_builtin_balance(@[ecx] ptr, @[sp] ptr) None,
     Origin         = __revmc_builtin_origin(@[ecx_ro] ptr, @[sp] ptr) None,
-    Caller         = __revmc_builtin_caller(@[ecx_ro] ptr, @[sp] ptr) None,
-    CallValue      = __revmc_builtin_call_value(@[ecx_ro] ptr, @[sp] ptr) None,
     CallDataLoad   = __revmc_builtin_calldataload(@[ecx_ro] ptr, @[sp] ptr) None,
     CallDataLoadC  = __revmc_builtin_calldataload_c(@[ecx_ro] ptr, @[sp] ptr, usize) None,
-    CallDataCopy   = __revmc_builtin_calldatacopy(@[ecx] ptr, @[sp] ptr) Some(u8),
-    CodeCopy       = __revmc_builtin_codecopy(@[ecx] ptr, @[sp] ptr) Some(u8),
+    CallDataCopy   = __revmc_builtin_calldatacopy(@[ecx] ptr, @[sp] ptr) None,
+    CodeCopy       = __revmc_builtin_codecopy(@[ecx] ptr, @[sp] ptr) None,
     GasPrice       = __revmc_builtin_gas_price(@[ecx_ro] ptr, @[sp] ptr) None,
-    ExtCodeSize    = __revmc_builtin_extcodesize(@[ecx] ptr, @[sp] ptr) Some(u8),
-    ExtCodeCopy    = __revmc_builtin_extcodecopy(@[ecx] ptr, @[sp] ptr) Some(u8),
-    ReturnDataSize = __revmc_builtin_returndatasize(@[ecx_ro] ptr) Some(usize),
-    ReturnDataCopy = __revmc_builtin_returndatacopy(@[ecx] ptr, @[sp] ptr) Some(u8),
-    ExtCodeHash    = __revmc_builtin_extcodehash(@[ecx] ptr, @[sp] ptr) Some(u8),
-    BlockHash      = __revmc_builtin_blockhash(@[ecx] ptr, @[sp] ptr) Some(u8),
+    ExtCodeSize    = __revmc_builtin_extcodesize(@[ecx] ptr, @[sp] ptr) None,
+    ExtCodeCopy    = __revmc_builtin_extcodecopy(@[ecx] ptr, @[sp] ptr) None,
+    ReturnDataCopy = __revmc_builtin_returndatacopy(@[ecx] ptr, @[sp] ptr) None,
+    ExtCodeHash    = __revmc_builtin_extcodehash(@[ecx] ptr, @[sp] ptr) None,
+    BlockHash      = __revmc_builtin_blockhash(@[ecx] ptr, @[sp] ptr) None,
     Coinbase       = __revmc_builtin_coinbase(@[ecx_ro] ptr, @[sp] ptr) None,
     Timestamp      = __revmc_builtin_timestamp(@[ecx_ro] ptr, @[sp] ptr) None,
     Number         = __revmc_builtin_number(@[ecx_ro] ptr, @[sp] ptr) None,
     Difficulty     = __revmc_builtin_difficulty(@[ecx_ro] ptr, @[sp] ptr) None,
     GasLimit       = __revmc_builtin_gaslimit(@[ecx_ro] ptr, @[sp] ptr) None,
     ChainId        = __revmc_builtin_chainid(@[ecx_ro] ptr, @[sp] ptr) None,
-    SelfBalance    = __revmc_builtin_self_balance(@[ecx] ptr, @[sp] ptr) Some(u8),
+    SelfBalance    = __revmc_builtin_self_balance(@[ecx] ptr, @[sp] ptr) None,
     Basefee        = __revmc_builtin_basefee(@[ecx_ro] ptr, @[sp] ptr) None,
     BlobHash       = __revmc_builtin_blob_hash(@[ecx_ro] ptr, @[sp] ptr) None,
     BlobBaseFee    = __revmc_builtin_blob_base_fee(@[ecx_ro] ptr, @[sp] ptr) None,
     SlotNum        = __revmc_builtin_slot_num(@[ecx_ro] ptr, @[sp] ptr) None,
-    Mload          = __revmc_builtin_mload(@[ecx] ptr, @[sp] ptr) Some(u8),
-    MloadC         = __revmc_builtin_mload_c(@[ecx] ptr, @[sp] ptr, usize) Some(u8),
-    Mstore         = __revmc_builtin_mstore(@[ecx] ptr, @[sp] ptr) Some(u8),
-    MstoreCD       = __revmc_builtin_mstore_cd(@[ecx] ptr, usize, @[sp] ptr) Some(u8),
-    MstoreDC       = __revmc_builtin_mstore_dc(@[ecx] ptr, @[sp] ptr, usize) Some(u8),
-    MstoreCC       = __revmc_builtin_mstore_cc(@[ecx] ptr, usize, usize) Some(u8),
-    Mstore8        = __revmc_builtin_mstore8(@[ecx] ptr, @[sp] ptr) Some(u8),
-    Sload          = __revmc_builtin_sload(@[ecx] ptr, @[sp] ptr) Some(u8),
-    SloadC         = __revmc_builtin_sload_c(@[ecx] ptr, @[sp] ptr, usize) Some(u8),
-    Sstore         = __revmc_builtin_sstore(@[ecx] ptr, @[sp] ptr) Some(u8),
-    Msize          = __revmc_builtin_msize(@[ecx_ro] ptr) Some(usize),
+    Mresize        = __revmc_builtin_mresize(@[ecx] ptr, usize) None,
+    Sload          = __revmc_builtin_sload(@[ecx] ptr, @[sp] ptr) None,
+    SloadC         = __revmc_builtin_sload_c(@[ecx] ptr, @[sp] ptr, usize) None,
+    Sstore         = __revmc_builtin_sstore(@[ecx] ptr, @[sp] ptr) None,
     Tload          = __revmc_builtin_tload(@[ecx] ptr, @[sp] ptr) None,
-    Tstore         = __revmc_builtin_tstore(@[ecx] ptr, @[sp] ptr) Some(u8),
-    Mcopy          = __revmc_builtin_mcopy(@[ecx] ptr, @[sp] ptr) Some(u8),
-    Log            = __revmc_builtin_log(@[ecx] ptr, @[sp_dyn] ptr, u8) Some(u8),
+    Tstore         = __revmc_builtin_tstore(@[ecx] ptr, @[sp] ptr) None,
+    Mcopy          = __revmc_builtin_mcopy(@[ecx] ptr, @[sp] ptr) None,
+    Log            = __revmc_builtin_log(@[ecx] ptr, @[sp_dyn] ptr, u8) None,
 
-    Create         = __revmc_builtin_create(@[ecx] ptr, @[sp_dyn] ptr, u8) Some(u8),
-    Call           = __revmc_builtin_call(@[ecx] ptr, @[sp_dyn] ptr, u8) Some(u8),
-    DoReturn       = __revmc_builtin_do_return(@[ecx] ptr, @[sp] ptr, u8) Some(u8),
-    DoReturnCC     = __revmc_builtin_do_return_cc(@[ecx] ptr, usize, usize, u8) Some(u8),
-    SelfDestruct   = __revmc_builtin_selfdestruct(@[ecx] ptr, @[sp] ptr) Some(u8),
+    Create         = __revmc_builtin_create(@[ecx] ptr, @[sp_dyn] ptr, u8) None,
+    Call           = __revmc_builtin_call(@[ecx] ptr, @[sp_dyn] ptr, u8) None,
+    DoReturn       = #[NoReturn] __revmc_builtin_do_return(@[ecx] ptr, @[sp] ptr, u8) None,
+    DoReturnCC     = #[NoReturn] __revmc_builtin_do_return_cc(@[ecx] ptr, usize, usize, u8) None,
+    SelfDestruct   = #[NoReturn] __revmc_builtin_selfdestruct(@[ecx] ptr, @[sp] ptr) None,
+}
+
+impl Builtin {
+    pub const fn call_conv(self) -> CallConv {
+        match self {
+            Self::Mresize => CallConv::Cold,
+            _ => CallConv::Default,
+        }
+    }
 }

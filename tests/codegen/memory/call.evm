@@ -1,0 +1,37 @@
+    CALLVALUE
+    PUSH1 0x40
+    MSTORE
+    PUSH1 0x20
+    PUSH1 0x20
+    PUSH1 0x20
+    PUSH0
+    PUSH0
+    PUSH0
+    PUSH0
+    CALL
+    PUSH1 0x20
+    PUSH1 0x20
+    PUSH1 0x20
+    PUSH0
+    PUSH0
+    PUSH0
+    PUSH0
+    CALLCODE
+    PUSH1 0x20
+    PUSH1 0x20
+    PUSH1 0x20
+    PUSH0
+    PUSH0
+    PUSH0
+    DELEGATECALL
+    PUSH1 0x20
+    PUSH1 0x20
+    PUSH1 0x20
+    PUSH0
+    PUSH0
+    PUSH0
+    STATICCALL
+    STOP
+
+; CHECK-COUNT-1: call {{.*}}@__revmc_builtin_mresize{{.*}}; >>
+; CHECK-NOT: call {{.*}}@__revmc_builtin_mresize{{.*}}; >>

@@ -6,15 +6,24 @@ use revmc_context::{EvmContext, EvmWord};
 
 pub type BuiltinResult = Result<(), BuiltinError>;
 
+/// Represents an error that occurred during a builtin execution.
 #[derive(Debug)]
 #[repr(transparent)]
 pub struct BuiltinError(NonZero<u8>);
+
+impl From<BuiltinError> for InstructionResult {
+    #[inline]
+    fn from(value: BuiltinError) -> Self {
+        // SAFETY: BuiltinError is always created from a valid InstructionResult.
+        unsafe { core::mem::transmute::<_, _>(value.0.get()) }
+    }
+}
 
 impl From<InstructionResult> for BuiltinError {
     #[inline]
     fn from(value: InstructionResult) -> Self {
         cold_path();
-        Self(unsafe { NonZero::new(value as u8).unwrap_unchecked() })
+        Self(unsafe { NonZero::new_unchecked(value as u8) })
     }
 }
 
@@ -74,8 +83,15 @@ pub(crate) unsafe fn read_words_rev<'a, const N: usize>(sp: *mut EvmWord) -> &'a
 
 #[inline]
 pub(crate) fn ensure_memory(ecx: &mut EvmContext<'_>, offset: usize, len: usize) -> BuiltinResult {
-    revm_interpreter::interpreter::resize_memory(ecx.gas, ecx.memory, &ecx.gas_params, offset, len)
-        .map_err(Into::into)
+    revm_interpreter::interpreter::resize_memory(
+        &mut ecx.gas,
+        ecx.memory,
+        &ecx.gas_params,
+        offset,
+        len,
+    )?;
+    ecx.refresh_memory_cache();
+    Ok(())
 }
 
 pub(crate) unsafe fn copy_operation(

@@ -1,14 +1,15 @@
 // Vendored from revm's `bins/revme/src/cmd/statetest/runner.rs`.
 // Keep in sync with upstream; revmc-specific code lives in `compiled.rs`.
 
-use crate::merkle_trie::{compute_test_roots, TestValidationResult};
-use indicatif::{ProgressBar, ProgressDrawTarget};
-use revm_context::{block::BlockEnv, cfg::CfgEnv, tx::TxEnv, Context};
+use crate::merkle_trie::{TestValidationResult, compute_test_roots};
+use console::Term;
+use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
+use revm_context::{Context, block::BlockEnv, cfg::CfgEnv, tx::TxEnv};
 use revm_context_interface::result::{EVMError, ExecutionResult, HaltReason, InvalidTransaction};
 use revm_database::{self as database, bal::EvmDatabaseError};
 use revm_database_interface::EmptyDB;
 use revm_handler::{ExecuteCommitEvm, MainBuilder, MainContext};
-use revm_primitives::{hardfork::SpecId, Bytes, B256, U256};
+use revm_primitives::{B256, Bytes, U256, hardfork::SpecId};
 use revm_statetest_types::{SpecName, Test, TestSuite, TestUnit};
 use serde_json::json;
 use std::{
@@ -16,8 +17,8 @@ use std::{
     fmt::Debug,
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -384,6 +385,24 @@ pub(crate) struct TestRunnerState {
     pub(crate) console_bar: Arc<ProgressBar>,
     pub(crate) queue: Arc<Mutex<(usize, Vec<PathBuf>)>>,
     pub(crate) elapsed: Arc<Mutex<Duration>>,
+    /// Set when any worker thread requests all others to stop (e.g. on panic).
+    pub(crate) stop: Arc<AtomicBool>,
+}
+
+fn console_bar(n_files: usize) -> ProgressBar {
+    let bar = ProgressBar::with_draw_target(
+        Some(n_files as u64),
+        ProgressDrawTarget::term_like_with_hz(Box::new(Term::buffered_stderr()), 1),
+    );
+    bar.set_style(
+        ProgressStyle::with_template(
+            "[{elapsed_precise}] {wide_bar} {pos}/{len} ({per_sec}, eta {eta})",
+        )
+        .unwrap()
+        .progress_chars("=>-"),
+    );
+    bar.enable_steady_tick(Duration::from_secs(1));
+    bar
 }
 
 impl TestRunnerState {
@@ -391,16 +410,17 @@ impl TestRunnerState {
         let n_files = test_files.len();
         Self {
             n_errors: Arc::new(AtomicUsize::new(0)),
-            console_bar: Arc::new(ProgressBar::with_draw_target(
-                Some(n_files as u64),
-                ProgressDrawTarget::stdout(),
-            )),
+            console_bar: Arc::new(console_bar(n_files)),
             queue: Arc::new(Mutex::new((0usize, test_files))),
             elapsed: Arc::new(Mutex::new(Duration::ZERO)),
+            stop: Arc::new(AtomicBool::new(false)),
         }
     }
 
     pub(crate) fn next_test(&self) -> Option<PathBuf> {
+        if self.stop.load(Ordering::Relaxed) {
+            return None;
+        }
         let (current_idx, queue) = &mut *self.queue.lock().unwrap();
         let idx = *current_idx;
         let test_path = queue.get(idx).cloned()?;

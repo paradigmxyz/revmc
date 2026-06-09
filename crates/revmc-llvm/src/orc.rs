@@ -17,7 +17,10 @@ use crate::llvm_string;
 use inkwell::{
     context::Context,
     llvm_sys::{
-        core::{LLVMContextCreate, LLVMModuleCreateWithNameInContext},
+        core::{
+            LLVMContextCreate, LLVMCreateMemoryBufferWithMemoryRangeCopy,
+            LLVMModuleCreateWithNameInContext,
+        },
         error::*,
         orc2::{lljit::*, *},
         prelude::*,
@@ -283,6 +286,12 @@ pub struct SymbolFlags {
     pub target: u8,
 }
 
+impl Default for SymbolFlags {
+    fn default() -> Self {
+        Self::none()
+    }
+}
+
 impl SymbolFlags {
     /// Create a new, empty SymbolFlags.
     pub fn none() -> Self {
@@ -295,7 +304,7 @@ impl SymbolFlags {
     }
 
     /// Set the `Exported` flag.
-    pub fn with_exported(mut self) -> Self {
+    pub fn exported(mut self) -> Self {
         self.set_exported();
         self
     }
@@ -757,7 +766,7 @@ impl<'mr> MaterializationResponsibilityRef<'mr> {
     /// materialization responsibility. Useful for breaking up work between
     /// threads, or different kinds of materialization processes.
     ///
-    /// The caller retains responsibility of the the passed
+    /// The caller retains responsibility of the passed
     /// MaterializationResponsibility.
     pub fn delegate(&self, syms: &[SymbolStringPoolEntry]) -> Result<Self, LLVMString> {
         let mut res = MaybeUninit::uninit();
@@ -1392,6 +1401,23 @@ impl LLJIT {
         })
     }
 
+    /// Add a relocatable object file to the given ResourceTracker's JITDylib.
+    pub fn add_object_with_rt(
+        &self,
+        name: &CStr,
+        object: &[u8],
+        rt: &ResourceTracker,
+    ) -> Result<(), LLVMString> {
+        let buf = unsafe {
+            LLVMCreateMemoryBufferWithMemoryRangeCopy(
+                object.as_ptr().cast(),
+                object.len(),
+                name.as_ptr(),
+            )
+        };
+        cvt(unsafe { LLVMOrcLLJITAddObjectFileWithRT(self.as_inner(), rt.as_inner(), buf) })
+    }
+
     /// Gets the execution session.
     pub fn get_execution_session(&self) -> ExecutionSessionRef<'_> {
         unsafe { ExecutionSessionRef::from_inner(LLVMOrcLLJITGetExecutionSession(self.as_inner())) }
@@ -1815,15 +1841,15 @@ mod tests {
         let _ext_fn =
             m.add_function("my_external", ext_ty, Some(inkwell::module::Linkage::External));
         let ext_name = CString::new("my_external").unwrap();
-        let sym = crate::orc::SymbolMapPair::new(
+        let sym = SymbolMapPair::new(
             jit.mangle_and_intern(&ext_name),
-            crate::orc::EvaluatedSymbol::new(
+            EvaluatedSymbol::new(
                 my_external as *const () as u64,
-                crate::orc::SymbolFlags::none().with_exported().callable(),
+                SymbolFlags::none().exported().callable(),
             ),
         );
         jit.get_main_jit_dylib()
-            .define(crate::orc::MaterializationUnit::absolute_symbols(vec![sym]))
+            .define(MaterializationUnit::absolute_symbols(vec![sym]))
             .map_err(|(e, _)| e)
             .unwrap();
 
