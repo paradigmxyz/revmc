@@ -629,11 +629,12 @@ fn execute_blockchain_test(
         if let Some(block_header) = block.block_header.as_ref() {
             block_hash = Some(block_header.hash);
             beacon_root = block_header.parent_beacon_block_root;
+            let this_excess = block_header.excess_blob_gas.unwrap_or_default().to::<u64>();
             block_env = block_header.to_block_env(Some(BlobExcessGasAndPrice::new_with_spec(
                 parent_excess_blob_gas,
                 spec_id,
             )));
-            this_excess_blob_gas = block_header.excess_blob_gas.map(|i| i.to::<u64>());
+            this_excess_blob_gas = Some(this_excess);
         } else {
             this_excess_blob_gas = None;
         }
