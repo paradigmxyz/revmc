@@ -290,10 +290,6 @@ impl Host for TestHost {
         false
     }
 
-    fn cpsb(&self) -> u64 {
-        0
-    }
-
     fn difficulty(&self) -> U256 {
         U256::from(0xcdef)
     }

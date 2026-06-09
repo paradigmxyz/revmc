@@ -546,10 +546,9 @@ pub unsafe extern "C" fn __revmc_builtin_sstore(
 
     // State gas for new slot creation (EIP-8037).
     if ecx.host.is_amsterdam_eip8037_enabled() {
-        let cpsb = ecx.host.cpsb();
-        state_gas!(ecx, gp.sstore_state_gas(&state_load.data, cpsb));
+        state_gas!(ecx, gp.sstore_state_gas(&state_load.data));
 
-        let refill = gp.sstore_state_gas_refill(&state_load.data, cpsb);
+        let refill = gp.sstore_state_gas_refill(&state_load.data);
         if refill > 0 {
             ecx.gas.refill_reservoir(refill);
         }
@@ -676,7 +675,7 @@ pub unsafe extern "C" fn __revmc_builtin_create(
 
     // State gas for account creation + contract metadata (EIP-8037).
     if ecx.host.is_amsterdam_eip8037_enabled() {
-        state_gas!(ecx, ecx.gas_params.create_state_gas(ecx.host.cpsb()));
+        state_gas!(ecx, ecx.gas_params.create_state_gas());
     }
 
     let mut gas_limit = ecx.gas.remaining();
@@ -886,7 +885,7 @@ pub unsafe extern "C" fn __revmc_builtin_selfdestruct(
 
     // State gas for new account creation (EIP-8037).
     if ecx.host.is_amsterdam_eip8037_enabled() && should_charge_topup {
-        state_gas!(ecx, ecx.gas_params.new_account_state_gas(ecx.host.cpsb()));
+        state_gas!(ecx, ecx.gas_params.new_account_state_gas());
     }
 
     if !res.previously_destroyed {
