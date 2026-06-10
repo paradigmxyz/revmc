@@ -2284,6 +2284,51 @@ tests! {
                 assert_eq!(host.storage.get(&0_U256), Some(&1_U256));
             }),
         }),
+
+        // The abstract interpreter clamps block-entry stacks to MAX_ABS_STACK_DEPTH (64).
+        // A block entered with a deeper stack that pops below the clamp boundary must not
+        // be treated as unreachable: its JUMP would be committed as INVALID_JUMP even
+        // though the clamped-away slots (including the jump target) are live at runtime.
+        // The resolvable internal-function return makes the analysis commit its results.
+        clamped_stack_underflow_jump(@raw {
+            bytecode: &asm(&format!(
+                "
+                PUSH %ret1
+                PUSH %func
+                JUMP
+            ret1:
+                JUMPDEST
+                POP
+                PUSH %ret2
+                PUSH %func
+                JUMP
+            ret2:
+                JUMPDEST
+                POP
+                PUSH %target
+                {pushes}
+                PUSH %popper
+                JUMP
+            popper:
+                JUMPDEST
+                {pops}
+                JUMP
+            target:
+                JUMPDEST
+                STOP
+            func:
+                JUMPDEST
+                PUSH1 0x42
+                SWAP1
+                JUMP
+                ",
+                pushes = "PUSH0\n".repeat(68),
+                pops = "POP\n".repeat(68),
+            )),
+            expected_return: InstructionResult::Stop,
+            expected_stack: &[],
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+        }),
     }
 }
 

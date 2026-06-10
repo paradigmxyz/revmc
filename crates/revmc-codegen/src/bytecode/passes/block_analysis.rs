@@ -309,8 +309,12 @@ impl BlockState {
                 let incoming_key = split_key
                     .and_then(|offset| incoming.get(incoming.len().checked_sub(1 + offset)?))
                     .copied();
+                // Compare against the clamped length: stored states are clamped to
+                // `MAX_ABS_STACK_DEPTH`, so a longer incoming state would otherwise never
+                // match and push duplicate contexts.
+                let incoming_len = incoming.len().min(MAX_ABS_STACK_DEPTH);
                 let same_context = |state: &[AbsValue]| {
-                    if state.len() != incoming.len() {
+                    if state.len() != incoming_len {
                         return false;
                     }
                     let Some(offset) = split_key else { return true };
@@ -1341,6 +1345,11 @@ impl Bytecode<'_> {
         capture_inst: Option<Inst>,
         captured_jump_operand: &mut Option<AbsValue>,
     ) -> bool {
+        // Entry states at `MAX_ABS_STACK_DEPTH` may have been clamped by `BlockState::join`,
+        // discarding deeper slots that are live at runtime. Abstract underflow then no longer
+        // implies real underflow, so out-of-range slots must be treated as `Top` instead of
+        // aborting the block, which would unsoundly mark its successors as unreachable.
+        let underflow_is_top = stack.len() >= MAX_ABS_STACK_DEPTH;
         for i in insts {
             if self.insts[i].is_dead_code() {
                 continue;
@@ -1372,24 +1381,37 @@ impl Bytecode<'_> {
                     stack.push(AbsValue::Const(self.insts[i].imm()));
                 }
                 op::POP => {
-                    if stack.pop().is_none() {
+                    if stack.pop().is_none() && !underflow_is_top {
                         return false;
                     }
                 }
                 op::DUP1..=op::DUP16 => {
                     let depth = (opcode - op::DUP1 + 1) as usize;
                     if stack.len() < depth {
-                        return false;
+                        if !underflow_is_top {
+                            return false;
+                        }
+                        // The duplicated slot was discarded by clamping.
+                        stack.push(AbsValue::Top);
+                    } else {
+                        stack.push(stack[stack.len() - depth]);
                     }
-                    stack.push(stack[stack.len() - depth]);
                 }
                 op::SWAP1..=op::SWAP16 => {
                     let depth = (opcode - op::SWAP1 + 1) as usize;
                     let len = stack.len();
                     if len < depth + 1 {
-                        return false;
+                        if !underflow_is_top {
+                            return false;
+                        }
+                        // Deep slot was discarded by clamping; TOS becomes unknown and the
+                        // deep slot (not tracked) is unchanged.
+                        if let Some(tos) = stack.last_mut() {
+                            *tos = AbsValue::Top;
+                        }
+                    } else {
+                        stack.swap(len - 1, len - 1 - depth);
                     }
-                    stack.swap(len - 1, len - 1 - depth);
                 }
                 op::DUPN => {
                     let depth = crate::decode_single(self.insts[i].imm_byte());
@@ -1448,47 +1470,54 @@ impl Bytecode<'_> {
                 }
                 _ => {
                     if stack.len() < inp {
-                        return false;
-                    }
-
-                    // Try constant folding for common arithmetic, respecting the gas budget.
-                    let result = if out > 0 && self.compiler_gas_used < self.compiler_gas_limit {
-                        let inputs_slice = &stack[stack.len() - inp..];
-                        let mut interner = self.u256_interner.borrow_mut();
-
-                        // Check gas cost before doing the actual fold.
-                        let gas =
-                            super::const_fold::const_fold_gas(opcode, inputs_slice, &interner);
-                        if let Some(cost) = gas
-                            && self.compiler_gas_used.saturating_add(cost)
-                                <= self.compiler_gas_limit
+                        if !underflow_is_top {
+                            return false;
+                        }
+                        // Inputs reach below the clamped entry stack; consume the tracked
+                        // slots and produce unknown outputs.
+                        stack.clear();
+                        stack.resize(out, AbsValue::Top);
+                    } else {
+                        // Try constant folding for common arithmetic, respecting the gas budget.
+                        let result = if out > 0 && self.compiler_gas_used < self.compiler_gas_limit
                         {
-                            let folded = super::const_fold::try_const_fold(
-                                &self.insts[i],
-                                inputs_slice,
-                                &mut interner,
-                                self.code.len(),
-                            );
-                            if folded.is_some() {
-                                self.compiler_gas_used += cost;
+                            let inputs_slice = &stack[stack.len() - inp..];
+                            let mut interner = self.u256_interner.borrow_mut();
+
+                            // Check gas cost before doing the actual fold.
+                            let gas =
+                                super::const_fold::const_fold_gas(opcode, inputs_slice, &interner);
+                            if let Some(cost) = gas
+                                && self.compiler_gas_used.saturating_add(cost)
+                                    <= self.compiler_gas_limit
+                            {
+                                let folded = super::const_fold::try_const_fold(
+                                    &self.insts[i],
+                                    inputs_slice,
+                                    &mut interner,
+                                    self.code.len(),
+                                );
+                                if folded.is_some() {
+                                    self.compiler_gas_used += cost;
+                                }
+                                folded
+                            } else {
+                                None
                             }
-                            folded
                         } else {
                             None
+                        };
+
+                        // Pop inputs.
+                        stack.truncate(stack.len() - inp);
+
+                        // Push outputs.
+                        if let Some(folded) = result {
+                            debug_assert_eq!(out, 1);
+                            stack.push(folded);
+                        } else {
+                            stack.resize(stack.len() + out, AbsValue::Top);
                         }
-                    } else {
-                        None
-                    };
-
-                    // Pop inputs.
-                    stack.truncate(stack.len() - inp);
-
-                    // Push outputs.
-                    if let Some(folded) = result {
-                        debug_assert_eq!(out, 1);
-                        stack.push(folded);
-                    } else {
-                        stack.resize(stack.len() + out, AbsValue::Top);
                     }
                 }
             }
@@ -3286,5 +3315,59 @@ pub(crate) mod tests {
         let bytecode = analyze_asm(&lines.join("\n"));
 
         assert!(!bytecode.has_dynamic_jumps, "unsplit retry should resolve the shared return jump");
+    }
+
+    /// A block entered with more than `MAX_ABS_STACK_DEPTH` stack items whose body pops
+    /// below the clamp boundary must not have its `JUMP` treated as unreachable.
+    ///
+    /// The incoming state is clamped to the top `MAX_ABS_STACK_DEPTH` entries, so the
+    /// abstract stack underflows even though the real stack does not. The interpreter
+    /// must treat the clamped-away slots as `Top` instead of aborting the block, which
+    /// would leave the jump as `Bottom` and mark reachable code `INVALID_JUMP`.
+    #[test]
+    fn clamped_stack_underflow_jump_not_invalid() {
+        let n = MAX_ABS_STACK_DEPTH + 4;
+        // Resolvable internal-function return so that the analysis commits its results
+        // (`count > 0`), which would also commit the popper's Bottom jump as INVALID_JUMP.
+        let mut lines = vec![
+            "PUSH %ret1".to_string(),
+            "PUSH %func".to_string(),
+            "JUMP".to_string(),
+            "ret1:".to_string(),
+            "JUMPDEST".to_string(),
+            "POP".to_string(),
+            "PUSH %ret2".to_string(),
+            "PUSH %func".to_string(),
+            "JUMP".to_string(),
+            "ret2:".to_string(),
+            "JUMPDEST".to_string(),
+            "POP".to_string(),
+        ];
+        lines.push("PUSH %target".to_string());
+        lines.extend(std::iter::repeat_n("PUSH0".to_string(), n));
+        lines.push("PUSH %popper".to_string());
+        lines.push("JUMP".to_string());
+        lines.push("popper:".to_string());
+        lines.push("JUMPDEST".to_string());
+        lines.extend(std::iter::repeat_n("POP".to_string(), n));
+        lines.push("JUMP".to_string());
+        lines.push("target:".to_string());
+        lines.push("JUMPDEST".to_string());
+        lines.push("STOP".to_string());
+        lines.push("func:".to_string());
+        lines.push("JUMPDEST".to_string());
+        lines.push("PUSH1 0x42".to_string());
+        lines.push("SWAP1".to_string());
+        lines.push("JUMP".to_string());
+
+        let bytecode = analyze_asm(&lines.join("\n"));
+
+        for (inst, data) in bytecode.iter_insts() {
+            assert!(
+                !data.flags.contains(InstFlags::INVALID_JUMP),
+                "JUMP inst={inst} pc={} incorrectly marked INVALID_JUMP",
+                bytecode.pc(inst),
+            );
+        }
     }
 }
