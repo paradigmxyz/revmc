@@ -8,7 +8,8 @@ use context_interface::{
 use revm_bytecode::opcode as op;
 use revm_interpreter::{
     CallInput, Host, InputsImpl, Interpreter, SharedMemory,
-    instructions::instruction_table_gas_changes_spec, interpreter::ExtBytecode,
+    instructions::{gas_table_spec, instruction_table},
+    interpreter::ExtBytecode,
 };
 use revm_primitives::{B256, HashMap, Log, hardfork::SpecId};
 use similar_asserts::assert_eq;
@@ -523,12 +524,10 @@ fn run_compiled_test_case(test_case: &TestCase<'_>, f: EvmCompilerFn) {
             gas_limit,
         );
 
-        let table = instruction_table_gas_changes_spec::<
-            revm_interpreter::interpreter::EthInterpreter,
-            TestHost,
-        >(spec_id);
+        let table = instruction_table::<revm_interpreter::interpreter::EthInterpreter, TestHost>();
+        let gas_table = gas_table_spec(spec_id);
         let mut int_host = TestHost::with_spec(spec_id);
-        let interpreter_action = interpreter.run_plain(&table, &mut int_host);
+        let interpreter_action = interpreter.run_plain(&table, &gas_table, &mut int_host);
 
         let int_result = match &interpreter_action {
             InterpreterAction::Return(result) => result.result,
@@ -547,7 +546,7 @@ fn run_compiled_test_case(test_case: &TestCase<'_>, f: EvmCompilerFn) {
 
         // When modify_ecx is set, the interpreter runs with different inputs than the JIT,
         // so we cannot use interpreter results as expected values or compare against them.
-        let skip_interpreter_checks = modify_ecx.is_some() || expected_return.is_error();
+        let skip_interpreter_checks = modify_ecx.is_some() || expected_return.is_halt();
 
         let mut expected_stack = expected_stack;
         if expected_stack == STACK_WHAT_INTERPRETER_SAYS {
@@ -625,8 +624,8 @@ fn run_compiled_test_case(test_case: &TestCase<'_>, f: EvmCompilerFn) {
             | InstructionResult::OutOfGas | InstructionResult::MemoryOOG | InstructionResult::InvalidOperandOOG
         ) {
             assert_eq!(
-                actual_return.is_error(),
-                expected_return.is_error(),
+                actual_return.is_halt(),
+                expected_return.is_halt(),
                 "return value mismatch: {actual_return:?} != {expected_return:?}"
             );
         } else {
@@ -638,7 +637,7 @@ fn run_compiled_test_case(test_case: &TestCase<'_>, f: EvmCompilerFn) {
 
         // On EVM halt all available gas is consumed, so resulting stack, memory, and gas do not
         // matter. We do less work than the interpreter by bailing out earlier due to sections.
-        if !actual_return.is_error() {
+        if !actual_return.is_halt() {
             if !skip_jit_stack {
                 assert_eq!(actual_stack, *expected_stack, "stack mismatch");
             }

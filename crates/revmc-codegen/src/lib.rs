@@ -36,7 +36,7 @@ type FxHashMap<K, V> = alloy_primitives::map::HashMap<K, V, alloy_primitives::ma
 #[cfg(any())]
 pub fn generate_all_assembly() -> EvmCompiler<revmc_llvm::EvmLlvmBackend> {
     let mut compiler = EvmCompiler::new_llvm(false).unwrap();
-    let _ = compiler.jit(None, &[], revm_primitives::hardfork::SpecId::ARROW_GLACIER).unwrap();
+    let _ = compiler.jit(None, &[], revm_primitives::hardfork::SpecId::LONDON).unwrap();
     unsafe { compiler.clear().unwrap() };
     compiler
 }

@@ -284,6 +284,32 @@ fn set_enabled_toggle() {
 }
 
 #[test]
+fn pause_processes_lookup_events() {
+    let tb = TestBackend::with_tuning(RuntimeTuning { jit_worker_count: 0, ..Default::default() });
+    let req = TestBackend::req_cancun(&[0x00]);
+
+    assert!(!tb.is_paused());
+    tb.pause();
+    tb.pause();
+    assert!(tb.is_paused());
+    assert!(matches!(tb.lookup(req.clone()), LookupDecision::Interpret(InterpretReason::NotReady)));
+
+    let stats = tb.wait_stats(|s| s.lookup_misses == 1);
+    assert_eq!(stats.lookup_misses, 1);
+    assert_eq!(stats.lookup_hits, 0);
+
+    tb.resume();
+    assert!(tb.is_paused());
+    tb.resume();
+    assert!(!tb.is_paused());
+    assert!(matches!(tb.lookup(req), LookupDecision::Interpret(InterpretReason::NotReady)));
+
+    let stats = tb.wait_stats(|s| s.lookup_misses == 2);
+    assert_eq!(stats.lookup_misses, 2);
+    assert_eq!(stats.lookup_hits, 0);
+}
+
+#[test]
 fn lookup_increments_miss_counter() {
     let tb = TestBackend::new(RuntimeConfig { enabled: true, ..Default::default() });
 
@@ -416,6 +442,17 @@ fn blocking_mode() {
     // Empty bytecodes return Ineligible (nothing to compile).
     let decision = tb.lookup(TestBackend::req_cancun(&[]));
     assert!(matches!(decision, LookupDecision::Interpret(InterpretReason::Ineligible)));
+}
+
+#[test]
+fn default_jit_max_bytecode_len_matches_eth_limit() {
+    let tuning = RuntimeTuning::default();
+    let max_len_bytecode = vec![0; 24 * 1024];
+    let too_large_bytecode = vec![0; 24 * 1024 + 1];
+
+    assert_eq!(tuning.jit_max_bytecode_len, 24 * 1024);
+    assert!(tuning.should_compile(&max_len_bytecode));
+    assert!(!tuning.should_compile(&too_large_bytecode));
 }
 
 #[test]

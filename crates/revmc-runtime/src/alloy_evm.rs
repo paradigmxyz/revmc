@@ -13,7 +13,10 @@ use alloy_evm::{
 };
 use alloy_primitives::{Address, Bytes};
 use revm_context::{BlockEnv, Evm as RevmEvm, TxEnv};
-use revm_context_interface::result::{EVMError, HaltReason, ResultAndState};
+use revm_context_interface::{
+    DBErrorMarker,
+    result::{EVMError, HaltReason, ResultAndState},
+};
 use revm_handler::{
     EthFrame, ExecuteEvm, PrecompileProvider, SystemCallEvm, instructions::EthInstructions,
 };
@@ -159,7 +162,7 @@ impl EvmFactory for JitEvmFactory {
     type Evm<DB: Database, I: Inspector<EthEvmContext<DB>>> = JitEvm<DB, I, PrecompilesMap>;
     type Context<DB: Database> = EthEvmContext<DB>;
     type Tx = TxEnv;
-    type Error<DBError: core::error::Error + Send + Sync + 'static> = EVMError<DBError>;
+    type Error<DBError: DBErrorMarker> = EVMError<DBError>;
     type HaltReason = HaltReason;
     type Spec = SpecId;
     type BlockEnv = BlockEnv;

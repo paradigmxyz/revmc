@@ -36,7 +36,7 @@ use revmc_backend::{
 };
 use std::{
     cell::Cell,
-    ffi::CString,
+    ffi::{CStr, CString},
     fmt::{self, Write},
     iter,
     mem::ManuallyDrop,
@@ -453,6 +453,20 @@ impl OrcJitState {
     }
 }
 
+fn link_jit_object_in_dylib(
+    orc: &OrcJitState,
+    jd: orc::JITDylibRef,
+    symbol_name: &CStr,
+    object: &[u8],
+    symbols: &[(CString, usize)],
+) -> Result<(usize, orc::ResourceTracker)> {
+    orc.global.define_builtins(symbols);
+    let tracker = jd.create_resource_tracker();
+    orc.global.jit.add_object_with_rt(symbol_name, object, &tracker).map_err(error_msg)?;
+    let addr = orc.global.jit.lookup_in(jd, symbol_name).map_err(error_msg)?;
+    Ok((addr, tracker))
+}
+
 /// Wraps a module in a [`orc::ThreadSafeModule`] for transfer to LLJIT.
 ///
 /// Uses a raw pointer cast to work around `Module<'ctx>` invariance — the module's
@@ -736,6 +750,44 @@ impl EvmLlvmBackend {
         self.module = create_module(self.cx, &self.machine, self.aot)?;
 
         Ok(())
+    }
+
+    /// Returns pending absolute symbols collected while translating the current JIT module.
+    pub fn pending_symbol_names(&self) -> Vec<CString> {
+        self.orc
+            .as_ref()
+            .map(|orc| orc.pending_symbols.iter().map(|(name, _)| name.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    /// Links a relocatable object into this backend's JITDylib and returns the function address
+    /// and resource tracker that owns the linked code.
+    pub fn link_jit_object(
+        &mut self,
+        symbol_name: &CStr,
+        object: &[u8],
+        symbols: &[(CString, usize)],
+    ) -> Result<(usize, orc::ResourceTracker)> {
+        let orc = self.ensure_orc()?;
+        let (addr, tracker) =
+            link_jit_object_in_dylib(orc, orc.jd(), symbol_name, object, symbols)?;
+        orc.loaded_trackers.push(tracker);
+        Ok((addr, orc.loaded_trackers.pop().unwrap()))
+    }
+
+    /// Links a relocatable object into a fresh JITDylib and returns the function address,
+    /// resource tracker, and guard for the JITDylib that owns the linked code.
+    pub fn link_jit_object_in_fresh_dylib(
+        &mut self,
+        symbol_name: &CStr,
+        object: &[u8],
+        symbols: &[(CString, usize)],
+    ) -> Result<(usize, orc::ResourceTracker, Arc<JitDylibGuard>)> {
+        let orc = self.ensure_orc()?;
+        let jd = orc.global.create_jit_dylib();
+        let jd_guard = Arc::new(JitDylibGuard { global: orc.global, jd });
+        let (addr, tracker) = link_jit_object_in_dylib(orc, jd, symbol_name, object, symbols)?;
+        Ok((addr, tracker, jd_guard))
     }
 
     /// Pops and returns the [`ResourceTracker`](orc::ResourceTracker) for the last committed

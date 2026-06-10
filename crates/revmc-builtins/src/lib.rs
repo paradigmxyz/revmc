@@ -547,6 +547,11 @@ pub unsafe extern "C" fn __revmc_builtin_sstore(
     // State gas for new slot creation (EIP-8037).
     if ecx.host.is_amsterdam_eip8037_enabled() {
         state_gas!(ecx, gp.sstore_state_gas(&state_load.data));
+
+        let refill = gp.sstore_state_gas_refill(&state_load.data);
+        if refill > 0 {
+            ecx.gas.refill_reservoir(refill);
+        }
     }
 
     ecx.gas.record_refund(gp.sstore_refund(is_istanbul, &state_load.data));
@@ -763,6 +768,7 @@ pub unsafe extern "C" fn __revmc_builtin_call(
             transfers_value,
             call_kind == CallKind::Call,
         )?;
+    let charged_new_account_state_gas = state_gas_cost > 0;
 
     gas!(ecx, dynamic_gas);
 
@@ -809,6 +815,7 @@ pub unsafe extern "C" fn __revmc_builtin_call(
             scheme: call_kind.into(),
             is_static: ecx.is_static || call_kind == CallKind::StaticCall,
             reservoir: ecx.gas.reservoir(),
+            charged_new_account_state_gas,
         }),
     )));
 

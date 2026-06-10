@@ -1,7 +1,5 @@
 use revm_bytecode::opcode as op;
-use revm_interpreter::{
-    host::DummyHost, instructions::instruction_table_gas_changes_spec, interpreter::EthInterpreter,
-};
+use revm_interpreter::instructions::gas_table_spec;
 use revm_primitives::hardfork::SpecId;
 
 /// Opcode information.
@@ -53,43 +51,42 @@ impl OpcodeInfo {
 
     /// Sets the unknown flag.
     #[inline]
-    pub fn set_unknown(&mut self) {
+    pub const fn set_unknown(&mut self) {
         self.0 = Self::UNKNOWN;
     }
 
     /// Sets the dynamic flag.
     #[inline]
-    pub fn set_dynamic(&mut self) {
+    pub const fn set_dynamic(&mut self) {
         self.0 |= Self::DYNAMIC;
     }
 
     /// Sets the disabled flag.
     #[inline]
-    pub fn set_disabled(&mut self) {
+    pub const fn set_disabled(&mut self) {
         self.0 |= Self::DISABLED;
     }
 
     /// Sets the gas cost.
     #[inline]
-    pub fn set_gas(&mut self, gas: u16) {
+    pub const fn set_gas(&mut self, gas: u16) {
         self.0 = (self.0 & !Self::MASK) | (gas as u32);
     }
 }
 
 /// Returns the static info map for the given `SpecId`.
-pub fn op_info_map(spec_id: SpecId) -> &'static [OpcodeInfo; 256] {
-    use std::sync::OnceLock;
-    static MAPS: OnceLock<[[OpcodeInfo; 256]; 32]> = OnceLock::new();
-    let maps = MAPS.get_or_init(|| {
-        let mut maps = [[OpcodeInfo(OpcodeInfo::UNKNOWN); 256]; 32];
-        for (i, map) in maps.iter_mut().enumerate() {
-            if let Ok(spec) = SpecId::try_from(i as u8) {
-                *map = make_map(spec);
-            }
+pub const fn op_info_map(spec_id: SpecId) -> &'static [OpcodeInfo; 256] {
+    const SPEC_COUNT: usize = SpecId::AMSTERDAM as usize + 1;
+    static MAPS: [[OpcodeInfo; 256]; SPEC_COUNT] = {
+        let mut maps = [[OpcodeInfo(OpcodeInfo::UNKNOWN); 256]; SPEC_COUNT];
+        let mut i = 0;
+        while i < SPEC_COUNT {
+            maps[i] = make_map(unsafe { core::mem::transmute::<u8, SpecId>(i as u8) });
+            i += 1;
         }
         maps
-    });
-    &maps[spec_id as usize]
+    };
+    &MAPS[spec_id as usize]
 }
 
 /// Opcodes with a dynamic gas component that also have a base (static) cost deducted upfront.
@@ -126,13 +123,13 @@ const FULLY_DYNAMIC: &[u8] = &[op::SSTORE, op::CREATE, op::CREATE2];
 
 /// Opcodes that are gated behind a specific `SpecId`, paired with the spec they were introduced in.
 const SPEC_GATED_OPCODES: &[(u8, SpecId)] = &[
-    (op::SHL, SpecId::CONSTANTINOPLE),
-    (op::SHR, SpecId::CONSTANTINOPLE),
-    (op::SAR, SpecId::CONSTANTINOPLE),
+    (op::SHL, SpecId::PETERSBURG),
+    (op::SHR, SpecId::PETERSBURG),
+    (op::SAR, SpecId::PETERSBURG),
     (op::CLZ, SpecId::OSAKA),
     (op::RETURNDATASIZE, SpecId::BYZANTIUM),
     (op::RETURNDATACOPY, SpecId::BYZANTIUM),
-    (op::EXTCODEHASH, SpecId::CONSTANTINOPLE),
+    (op::EXTCODEHASH, SpecId::PETERSBURG),
     (op::CHAINID, SpecId::ISTANBUL),
     (op::SELFBALANCE, SpecId::ISTANBUL),
     (op::BASEFEE, SpecId::LONDON),
@@ -155,37 +152,50 @@ const SPEC_GATED_OPCODES: &[(u8, SpecId)] = &[
 /// Opcodes present in the upstream instruction table but not supported by revmc (e.g. EOF-only).
 const UNSUPPORTED_OPCODES: &[u8] = &[];
 
-fn make_map(spec_id: SpecId) -> [OpcodeInfo; 256] {
-    let table = instruction_table_gas_changes_spec::<EthInterpreter, DummyHost>(spec_id);
+const fn contains(haystack: &[u8], needle: u8) -> bool {
+    let mut i = 0;
+    while i < haystack.len() {
+        if haystack[i] == needle {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
 
+const fn make_map(spec_id: SpecId) -> [OpcodeInfo; 256] {
+    let table = gas_table_spec(spec_id);
     let mut map = [OpcodeInfo(OpcodeInfo::UNKNOWN); 256];
 
-    for i in 0..256u16 {
+    let mut i = 0u16;
+    while i < 256 {
         let op = i as u8;
 
         // Skip opcodes not defined in revm's opcode table.
         if revm_bytecode::opcode::OpCode::new(op).is_none() {
+            i += 1;
             continue;
         }
 
         // Mark opcodes not supported by revmc (e.g. EOF-only) as disabled rather than
         // unknown, so they return `NotActivated` instead of `OpcodeNotFound` at runtime.
-        if UNSUPPORTED_OPCODES.contains(&op) {
+        if contains(UNSUPPORTED_OPCODES, op) {
             map[op as usize].set_disabled();
+            i += 1;
             continue;
         }
 
-        let is_fully_dynamic = FULLY_DYNAMIC.contains(&op);
-        let is_dynamic_with_base = DYNAMIC_WITH_BASE_GAS.contains(&op);
+        let is_fully_dynamic = contains(FULLY_DYNAMIC, op);
+        let is_dynamic_with_base = contains(DYNAMIC_WITH_BASE_GAS, op);
 
         // Fully dynamic opcodes have their entire gas cost handled in builtins.
         let gas = if is_fully_dynamic {
             0u16
         } else {
-            let static_gas = table[op as usize].static_gas();
+            let static_gas = table[op as usize] as u64;
             assert!(
                 static_gas <= OpcodeInfo::MASK as u64,
-                "static gas for opcode 0x{op:02X} exceeds OpcodeInfo capacity: {static_gas}"
+                "static gas exceeds OpcodeInfo capacity"
             );
             static_gas as u16
         };
@@ -197,13 +207,17 @@ fn make_map(spec_id: SpecId) -> [OpcodeInfo; 256] {
         }
 
         map[op as usize] = info;
+        i += 1;
     }
 
     // Apply spec-gating: mark opcodes as disabled if the current spec is before their introduction.
-    for &(op, required_spec) in SPEC_GATED_OPCODES {
+    let mut j = 0;
+    while j < SPEC_GATED_OPCODES.len() {
+        let (op, required_spec) = SPEC_GATED_OPCODES[j];
         if (spec_id as u8) < (required_spec as u8) {
             map[op as usize].set_disabled();
         }
+        j += 1;
     }
 
     map
@@ -215,19 +229,19 @@ mod tests {
 
     #[test]
     fn test_clz_flags() {
-        let arrow_glacier = op_info_map(SpecId::ARROW_GLACIER);
+        let london = op_info_map(SpecId::LONDON);
         let cancun = op_info_map(SpecId::CANCUN);
         let osaka = op_info_map(SpecId::OSAKA);
 
-        let clz_ag = arrow_glacier[op::CLZ as usize];
+        let clz_london = london[op::CLZ as usize];
         let clz_cancun = cancun[op::CLZ as usize];
         let clz_osaka = osaka[op::CLZ as usize];
 
         eprintln!(
-            "CLZ on ARROW_GLACIER: is_unknown={}, is_disabled={}, raw={:#06x}",
-            clz_ag.is_unknown(),
-            clz_ag.is_disabled(),
-            clz_ag.0
+            "CLZ on LONDON: is_unknown={}, is_disabled={}, raw={:#06x}",
+            clz_london.is_unknown(),
+            clz_london.is_disabled(),
+            clz_london.0
         );
         eprintln!(
             "CLZ on CANCUN: is_unknown={}, is_disabled={}, raw={:#06x}",
@@ -242,8 +256,8 @@ mod tests {
             clz_osaka.0
         );
 
-        assert!(!clz_ag.is_unknown(), "CLZ should not be unknown on pre-OSAKA");
-        assert!(clz_ag.is_disabled(), "CLZ should be disabled on ARROW_GLACIER");
+        assert!(!clz_london.is_unknown(), "CLZ should not be unknown on pre-OSAKA");
+        assert!(clz_london.is_disabled(), "CLZ should be disabled on LONDON");
         assert!(!clz_cancun.is_unknown(), "CLZ should not be unknown on pre-OSAKA");
         assert!(clz_cancun.is_disabled(), "CLZ should be disabled on CANCUN");
         assert!(!clz_osaka.is_unknown(), "CLZ should not be unknown on OSAKA");
