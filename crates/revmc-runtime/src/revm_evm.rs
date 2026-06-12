@@ -506,11 +506,6 @@ mod tests {
         JitBackend::new(RuntimeConfig { blocking: true, ..Default::default() }).unwrap()
     }
 
-    fn blocking_backend_with_exact_errors() -> JitBackend {
-        JitBackend::new(RuntimeConfig { blocking: true, single_error: false, ..Default::default() })
-            .unwrap()
-    }
-
     type TestInnerEvm = revm_handler::MainnetEvm<
         revm_context::Context<
             revm_context::BlockEnv,
@@ -678,14 +673,21 @@ mod tests {
         // PUSH1 1 PUSH1 0xea SSTORE ADD
         //
         // In Amsterdam, the SSTORE charges EIP-8037 state gas. The following ADD
-        // stack-underflows. Collapsing that non-OOG halt into OutOfGas changes
-        // final transaction gas accounting by burning the whole gas limit.
+        // stack-underflows. Compiled failures may collapse to a single halt code,
+        // but final transaction gas accounting still has to match the interpreter.
         let bytecode = &[op::PUSH1, 0x01, op::PUSH1, 0xea, op::SSTORE, op::ADD];
 
         let interpreter = call_contract(JitBackend::disabled(), SpecId::AMSTERDAM, bytecode);
-        let jit = call_contract(blocking_backend_with_exact_errors(), SpecId::AMSTERDAM, bytecode);
+        let jit = call_contract(blocking_backend(), SpecId::AMSTERDAM, bytecode);
 
-        assert_eq!(jit, interpreter);
+        let (
+            ExecutionResult::Halt { gas: jit_gas, .. },
+            ExecutionResult::Halt { gas: interpreter_gas, .. },
+        ) = (&jit, &interpreter)
+        else {
+            panic!("expected halt results: jit={jit:?}, interpreter={interpreter:?}");
+        };
+        assert_eq!(jit_gas, interpreter_gas);
     }
 
     /// Non-blocking mode: JIT compiles in background and results eventually appear.
