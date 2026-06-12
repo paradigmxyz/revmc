@@ -371,7 +371,8 @@ impl JitBackend {
     /// In in-process mode, pause only tracks pause depth.
     ///
     /// Pause delivery is best-effort and never blocks: callers pause around block validation on
-    /// the engine's critical path. See [`try_send_control`](Self::try_send_control).
+    /// the engine's critical path. If the backend thread is not running or the command channel
+    /// is full, the command is skipped or dropped instead of blocking.
     pub fn pause(&self) {
         if self.inner.shared.pause_depth.fetch_add(1, Ordering::Relaxed) == 0 {
             self.try_send_control(Command::Pause);
@@ -408,7 +409,7 @@ impl JitBackend {
     ///   [`commands_dropped`](RuntimeStatsSnapshot::commands_dropped). Pause/resume signals are
     ///   idempotent and re-issued on the next pause cycle, so a dropped command self-heals.
     fn try_send_control(&self, cmd: Command) {
-        if !self.inner.started.load(Ordering::Acquire) {
+        if !self.inner.started.load(Ordering::Relaxed) {
             return;
         }
         if self.inner.tx.try_send(cmd).is_err() {
@@ -485,7 +486,7 @@ impl JitBackend {
             .wrap_err("failed to spawn backend thread")?;
 
         *self.inner.thread.lock().unwrap() = Some(BackendThread { handle: thread, done_rx });
-        self.inner.started.store(true, Ordering::Release);
+        self.inner.started.store(true, Ordering::Relaxed);
         Ok(())
     }
 
