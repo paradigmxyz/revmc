@@ -443,10 +443,11 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 fx.bcx.phi(fx.i8_type, &fx.incoming_failures)
             };
             fx.bcx.set_current_block_cold();
-            let failure_block = fx.bcx.current_block().unwrap();
-            let return_block = fx.return_block.unwrap();
-            fx.incoming_returns.push((failure_value, failure_block));
-            fx.bcx.br(return_block);
+            // Do not sync the stack here: this is a shared synthetic merge block for
+            // failures that may occur before their instruction body has materialized
+            // the current virtual stack. Syncing here can use values that do not
+            // dominate all failure predecessors.
+            fx.build_return_inner(failure_value);
         } else {
             fx.bcx.unreachable();
         }
@@ -1874,6 +1875,10 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         if self.config.inspect_stack {
             self.materialize_live_stack();
         }
+        self.build_return_inner(ret);
+    }
+
+    fn build_return_inner(&mut self, ret: B::Value) {
         if let Some(block) = self.return_block {
             self.incoming_returns.push((ret, self.bcx.current_block().unwrap()));
             self.bcx.br(block);
