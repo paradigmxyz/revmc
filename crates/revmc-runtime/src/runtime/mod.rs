@@ -101,6 +101,8 @@ pub(crate) struct BackendInner {
     shared: Arc<BackendShared>,
     /// Global enable flag.
     enabled: AtomicBool,
+    /// Whether the backend thread has been spawned and is draining the command channel.
+    started: AtomicBool,
     /// Blocking mode: every lookup synchronously compiles and never falls back.
     blocking: bool,
     /// Tuning knobs (Copy). Cached for hot-path eligibility checks.
@@ -186,6 +188,7 @@ impl JitBackend {
             inner: Arc::new(BackendInner {
                 shared,
                 enabled: AtomicBool::new(false),
+                started: AtomicBool::new(false),
                 blocking: config.blocking,
                 tx,
                 thread: std::sync::Mutex::new(None),
@@ -366,13 +369,19 @@ impl JitBackend {
     /// out-of-process mode, the helper process group is stopped until the pause depth returns to
     /// zero, so dispatched helper requests remain buffered and resume once the helper continues.
     /// In in-process mode, pause only tracks pause depth.
+    ///
+    /// Pause delivery is best-effort and never blocks: callers pause around block validation on
+    /// the engine's critical path. If the backend thread is not running or the command channel
+    /// is full, the command is skipped or dropped instead of blocking.
     pub fn pause(&self) {
         if self.inner.shared.pause_depth.fetch_add(1, Ordering::Relaxed) == 0 {
-            let _ = self.inner.tx.send(Command::Pause);
+            self.try_send_control(Command::Pause);
         }
     }
 
     /// Resumes out-of-process helper execution once all active pauses have been released.
+    ///
+    /// Resume delivery is best-effort and never blocks, like [`pause`](Self::pause).
     pub fn resume(&self) {
         if self
             .inner
@@ -383,7 +392,28 @@ impl JitBackend {
             })
             .is_ok_and(|depth| depth == 1)
         {
-            let _ = self.inner.tx.send(Command::Resume);
+            self.try_send_control(Command::Resume);
+        }
+    }
+
+    /// Sends a best-effort control command without ever blocking the caller.
+    ///
+    /// The command channel is bounded, so a plain `send` can block. Pause/resume are issued on
+    /// the caller's block-validation critical path and must never block there:
+    ///
+    /// - If the backend thread has not been started (the runtime was constructed but compilation
+    ///   was never enabled), nothing drains the channel. Queued commands would only accumulate
+    ///   until the channel fills and `send` blocks the caller forever, so the send is skipped
+    ///   entirely — there is no helper to pause anyway.
+    /// - If the channel is full, the command is dropped and recorded in
+    ///   [`commands_dropped`](RuntimeStatsSnapshot::commands_dropped). Pause/resume signals are
+    ///   idempotent and re-issued on the next pause cycle, so a dropped command self-heals.
+    fn try_send_control(&self, cmd: Command) {
+        if !self.inner.started.load(Ordering::Relaxed) {
+            return;
+        }
+        if self.inner.tx.try_send(cmd).is_err() {
+            self.inner.shared.stats.commands_dropped.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -456,6 +486,7 @@ impl JitBackend {
             .wrap_err("failed to spawn backend thread")?;
 
         *self.inner.thread.lock().unwrap() = Some(BackendThread { handle: thread, done_rx });
+        self.inner.started.store(true, Ordering::Relaxed);
         Ok(())
     }
 
