@@ -6,6 +6,7 @@ use crate::{
         config::{CompilationEvent, CompilationKind, RuntimeConfig, RuntimeTuning},
         storage::{
             ArtifactKey, ArtifactManifest, ArtifactStore, BackendSelection, RuntimeCacheKey,
+            gas_params_hash,
         },
         worker::{
             AotSuccess, CompileJob, JitCodeBacking, JitObjectSuccess, SyncNotifier, WorkerPool,
@@ -21,6 +22,7 @@ use crossbeam_channel as chan;
 use crossbeam_queue::ArrayQueue;
 use dashmap::DashMap;
 use quanta::Instant;
+use revm_context_interface::cfg::GasParams;
 use std::{
     ffi::CString,
     mem,
@@ -210,6 +212,8 @@ struct BackendState {
     result_rx: chan::Receiver<WorkerResult>,
     /// Artifact store for persisted artifacts.
     store: Option<Arc<dyn ArtifactStore>>,
+    /// Effective gas parameters used for compile-time gas folding.
+    gas_params: Option<GasParams>,
     /// Tuning knobs.
     tuning: RuntimeTuning,
     /// Whether observed misses compile AOT artifacts instead of JIT code.
@@ -398,6 +402,7 @@ impl BackendState {
 
         let artifact_key = ArtifactKey {
             runtime: *key,
+            gas_params_hash: gas_params_hash(key.spec_id, self.gas_params.as_ref()),
             backend: BackendSelection::Llvm,
             opt_level: self.tuning.aot_opt_level,
         };
@@ -610,6 +615,7 @@ impl BackendState {
     fn handle_aot_success(&mut self, key: RuntimeCacheKey, success: AotSuccess) {
         let artifact_key = ArtifactKey {
             runtime: key,
+            gas_params_hash: gas_params_hash(key.spec_id, self.gas_params.as_ref()),
             backend: BackendSelection::Llvm,
             opt_level: self.tuning.aot_opt_level,
         };
@@ -831,6 +837,7 @@ pub(crate) fn run(
         workers,
         jit_object_linker: JitObjectLinker::new(),
         result_rx,
+        gas_params: config.gas_params,
         store: config.store,
         tuning: config.tuning,
         aot: config.aot,

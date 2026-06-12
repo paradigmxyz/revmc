@@ -13,6 +13,7 @@ use api::LoadedLibrary;
 use backend::{Command, CompileJitRequest, EventQueue, PrepareAotRequest, ResidentMap};
 use crossbeam_channel as chan;
 use crossbeam_queue::ArrayQueue;
+use revm_context_interface::cfg::GasParams;
 use revm_primitives::{B256, hardfork::SpecId, hints_util::cold_path};
 use stats::RuntimeStats;
 use std::{
@@ -39,6 +40,7 @@ mod stats;
 pub use stats::RuntimeStatsSnapshot;
 
 mod storage;
+use storage::gas_params_hash;
 pub use storage::{
     ArtifactKey, ArtifactManifest, ArtifactStore, BackendSelection, RuntimeArtifactStore,
     RuntimeCacheKey, StoredArtifact,
@@ -429,7 +431,7 @@ impl JitBackend {
         );
 
         // Preload AOT artifacts into the already-allocated resident map.
-        match Self::preload_aot(config.store.as_deref()) {
+        match Self::preload_aot(config.store.as_deref(), config.gas_params.as_ref()) {
             Ok(entries) => {
                 for (key, prog) in entries {
                     self.inner.shared.resident.insert(key, prog);
@@ -462,6 +464,7 @@ impl JitBackend {
     /// Preloads AOT artifacts from the store as `Arc<CompiledProgram>`s ready to insert.
     fn preload_aot(
         store: Option<&dyn ArtifactStore>,
+        gas_params: Option<&GasParams>,
     ) -> eyre::Result<Vec<(RuntimeCacheKey, Arc<CompiledProgram>)>> {
         let Some(store) = store else {
             debug!("no artifact store configured, skipping AOT preload");
@@ -481,6 +484,12 @@ impl JitBackend {
         let mut failed = 0u64;
 
         for (artifact_key, stored) in artifacts {
+            let expected_gas_params_hash =
+                gas_params_hash(artifact_key.runtime.spec_id, gas_params);
+            if artifact_key.gas_params_hash != expected_gas_params_hash {
+                continue;
+            }
+
             match Self::load_artifact(&artifact_key, &stored) {
                 Ok(program) => {
                     let key = artifact_key.runtime;

@@ -1,10 +1,13 @@
 //! Artifact storage trait and data model.
 
 use crate::{OptimizationLevel, eyre};
-use alloy_primitives::B256;
+use alloy_primitives::{B256, keccak256};
 use dashmap::DashMap;
+use revm_context_interface::cfg::{GasParams, gas_params::GasId};
 use revm_primitives::hardfork::SpecId;
 use std::{fs, path::PathBuf};
+
+const GAS_PARAM_COUNT: usize = 256;
 
 /// Runtime cache key: the minimal identity for a compiled program at runtime.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -22,10 +25,28 @@ pub struct RuntimeCacheKey {
 pub struct ArtifactKey {
     /// The runtime cache key (code_hash + spec_id).
     pub runtime: RuntimeCacheKey,
+    /// Digest of the effective compile-time gas parameter table.
+    pub gas_params_hash: B256,
     /// The compiler backend used.
     pub backend: BackendSelection,
     /// The optimization level used.
     pub opt_level: OptimizationLevel,
+}
+
+pub(crate) fn gas_params_hash(spec_id: SpecId, gas_params: Option<&GasParams>) -> B256 {
+    let default_gas_params;
+    let gas_params = if let Some(gas_params) = gas_params {
+        gas_params
+    } else {
+        default_gas_params = GasParams::new_spec(spec_id);
+        &default_gas_params
+    };
+
+    let mut bytes = Vec::with_capacity(GAS_PARAM_COUNT * std::mem::size_of::<u64>());
+    for id in 0..GAS_PARAM_COUNT {
+        bytes.extend_from_slice(&gas_params.get(GasId::new(id as u8)).to_le_bytes());
+    }
+    keccak256(bytes)
 }
 
 /// A stored artifact consisting of a manifest and a path to the compiled dylib.
@@ -116,8 +137,12 @@ impl RuntimeArtifactStore {
 
     fn artifact_path(&self, key: &ArtifactKey) -> PathBuf {
         self.dir.path().join(format!(
-            "{:x}_{:?}_{:?}_{:?}.so",
-            key.runtime.code_hash, key.runtime.spec_id, key.backend, key.opt_level,
+            "{:x}_{:?}_{:x}_{:?}_{:?}.so",
+            key.runtime.code_hash,
+            key.runtime.spec_id,
+            key.gas_params_hash,
+            key.backend,
+            key.opt_level,
         ))
     }
 }
@@ -178,6 +203,7 @@ mod tests {
     fn artifact_key(code_hash: B256) -> ArtifactKey {
         ArtifactKey {
             runtime: RuntimeCacheKey { code_hash, spec_id: SpecId::OSAKA },
+            gas_params_hash: super::gas_params_hash(SpecId::OSAKA, None),
             backend: BackendSelection::Llvm,
             opt_level: OptimizationLevel::Default,
         }
