@@ -576,7 +576,7 @@ bb1:           ; stack_in=0 max_growth=2 predecessors=bb0,bb1
   PUSH1 0x01   ; ic= 3 pc= 4 noop
   PUSH1 0x00   ; ic= 4 pc= 6 noop
   SSTORE       ; ic= 5 pc= 8
-  CALLDATASIZE ; ic= 6 pc= 9 gas=15
+  CALLDATASIZE ; ic= 6 pc= 9 gas=15 stack_in=0 max_growth=2
   PUSH1 0x03   ; ic= 7 pc=10 noop
   JUMPI %bb1   ; ic= 8 pc=12
 

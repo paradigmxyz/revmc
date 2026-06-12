@@ -533,6 +533,7 @@ pub(super) fn create_compiler(
         config.tuning.jit_opt_level
     });
     compiler.debug_assertions(config.debug_assertions);
+    compiler.single_error(false);
     compiler.set_dedup(!config.no_dedup);
     compiler.set_dse(!config.no_dse);
     if let Some(gas_params) = &config.gas_params {
