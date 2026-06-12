@@ -2,7 +2,7 @@
 
 use super::*;
 use alloy_primitives::{B256, Bytes};
-use revm_primitives::hardfork::SpecId;
+use revm_primitives::{Address, U256, hardfork::SpecId};
 use std::sync::{Arc, Mutex};
 
 // ---------------------------------------------------------------------------
@@ -14,6 +14,9 @@ const BYTECODE_RET42: &[u8] = &[0x60, 0x42, 0x5f, 0x52, 0x60, 0x20, 0x5f, 0xf3];
 
 /// PUSH1 1 PUSH1 1 ADD PUSH0 MSTORE PUSH1 0x20 PUSH0 RETURN — returns 2.
 const BYTECODE_ADD: &[u8] = &[0x60, 0x01, 0x60, 0x01, 0x01, 0x5f, 0x52, 0x60, 0x20, 0x5f, 0xf3];
+
+/// PUSH1 1 PUSH1 2 EXP STOP — constant EXP whose dynamic gas is folded at compile time.
+const BYTECODE_CONST_EXP: &[u8] = &[0x60, 0x01, 0x60, 0x02, 0x0a, 0x00];
 
 /// Returns a simple bytecode that varies by index (for generating distinct code hashes).
 fn indexed_bytecode(i: u8) -> Vec<u8> {
@@ -133,6 +136,52 @@ impl std::ops::Deref for TestBackend {
 }
 
 // `JitBackend` shuts down automatically when the last `Arc<BackendInner>` drops.
+
+#[cfg(feature = "llvm")]
+fn gas_params_with_exp_byte_gas(
+    spec_id: SpecId,
+    exp_byte_gas: u64,
+) -> revm_context_interface::cfg::GasParams {
+    use revm_context_interface::cfg::gas_params::GasId;
+
+    let mut gas_params = revm_context_interface::cfg::GasParams::new_spec(spec_id);
+    gas_params.override_gas([(GasId::exp_byte_gas(), exp_byte_gas)]);
+    gas_params
+}
+
+#[cfg(feature = "llvm")]
+fn run_compiled_gas(
+    program: &CompiledProgram,
+    bytecode: &[u8],
+    spec_id: SpecId,
+    gas_params: &revm_context_interface::cfg::GasParams,
+) -> u64 {
+    use revm_context_interface::host::DummyHost;
+    use revm_interpreter::{
+        CallInput, InputsImpl, Interpreter, SharedMemory, interpreter::ExtBytecode,
+    };
+
+    let input = InputsImpl {
+        target_address: Address::ZERO,
+        bytecode_address: None,
+        caller_address: Address::ZERO,
+        input: CallInput::Bytes(Bytes::new()),
+        call_value: U256::ZERO,
+    };
+    let bytecode = revm_bytecode::Bytecode::new_raw(Bytes::copy_from_slice(bytecode));
+    let ext_bytecode = ExtBytecode::new(bytecode);
+    let mut interpreter =
+        Interpreter::new(SharedMemory::new(), ext_bytecode, input, false, spec_id, 1_000_000);
+    let mut host = DummyHost::new(spec_id);
+
+    unsafe {
+        program.func.call_with_interpreter_with(&mut interpreter, &mut host, |ecx| {
+            ecx.gas_params = gas_params.clone();
+        });
+    }
+
+    interpreter.gas.total_gas_spent()
+}
 
 // ---------------------------------------------------------------------------
 // Artifact stores for testing.
@@ -927,6 +976,63 @@ fn prepare_aot_persist_and_load() {
     let p = tb.wait_compiled(BYTECODE_RET42, SpecId::CANCUN);
     assert_eq!(p.kind, ProgramKind::Aot);
     assert_eq!(store.len(), 1);
+}
+
+#[test]
+#[cfg(feature = "llvm")]
+fn aot_artifact_recompiled_when_gas_params_change_for_const_exp() {
+    let spec_id = SpecId::CANCUN;
+    let high_exp_gas_params = gas_params_with_exp_byte_gas(spec_id, 500);
+    let default_gas_params = revm_context_interface::cfg::GasParams::new_spec(spec_id);
+    let store = Arc::new(RuntimeArtifactStore::new().unwrap());
+    let code_hash = alloy_primitives::keccak256(BYTECODE_CONST_EXP);
+
+    {
+        let tb = TestBackend::new(RuntimeConfig {
+            enabled: true,
+            store: Some(store.clone()),
+            gas_params: Some(high_exp_gas_params.clone()),
+            tuning: RuntimeTuning { jit_worker_count: 1, ..Default::default() },
+            ..Default::default()
+        });
+
+        tb.prepare_aot(AotRequest {
+            code_hash,
+            code: Bytes::copy_from_slice(BYTECODE_CONST_EXP),
+            spec_id,
+        });
+        let p = tb.wait_compiled(BYTECODE_CONST_EXP, spec_id);
+        assert_eq!(p.kind, ProgramKind::Aot);
+        assert_eq!(
+            run_compiled_gas(&p, BYTECODE_CONST_EXP, spec_id, &high_exp_gas_params),
+            3 + 3 + 10 + 500,
+            "test setup should compile with the custom EXP byte gas",
+        );
+    }
+
+    {
+        let tb = TestBackend::new(RuntimeConfig {
+            enabled: true,
+            store: Some(store),
+            gas_params: Some(default_gas_params.clone()),
+            tuning: RuntimeTuning { jit_worker_count: 1, ..Default::default() },
+            ..Default::default()
+        });
+
+        tb.prepare_aot(AotRequest {
+            code_hash,
+            code: Bytes::copy_from_slice(BYTECODE_CONST_EXP),
+            spec_id,
+        });
+        let p = tb.wait_compiled(BYTECODE_CONST_EXP, spec_id);
+        assert_eq!(p.kind, ProgramKind::Aot);
+
+        assert_eq!(
+            run_compiled_gas(&p, BYTECODE_CONST_EXP, spec_id, &default_gas_params),
+            3 + 3 + 10 + default_gas_params.exp_cost(U256::from(1)),
+            "AOT artifacts compiled under different GasParams must not be reused",
+        );
+    }
 }
 
 #[test]
