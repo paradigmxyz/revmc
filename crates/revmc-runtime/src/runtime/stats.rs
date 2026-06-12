@@ -11,6 +11,8 @@ pub(crate) struct RuntimeStats {
     pub(crate) lookup_misses: AtomicU64,
     /// Total lookup events dropped due to event-queue overflow.
     pub(crate) events_dropped: AtomicU64,
+    /// Total control commands dropped because the command channel was full.
+    pub(crate) commands_dropped: AtomicU64,
     /// Total number of entries evicted (idle + budget).
     pub(crate) evictions: AtomicU64,
     /// Total number of compilations dispatched (JIT promotions + AOT requests).
@@ -60,6 +62,11 @@ pub struct RuntimeStatsSnapshot {
     pub lookup_misses: u64,
     /// Total lookup events dropped due to event-queue overflow.
     pub events_dropped: u64,
+    /// Total control commands dropped because the command channel was full.
+    ///
+    /// Pause/resume commands are best-effort and dropped instead of blocking the caller when
+    /// the command channel is full.
+    pub commands_dropped: u64,
     /// Number of entries in the resident compiled map.
     pub resident_entries: u64,
     /// Number of lookup events currently queued for the backend.
@@ -135,6 +142,7 @@ impl RuntimeStats {
             lookup_hits: self.lookup_hits.load(Ordering::Relaxed),
             lookup_misses: self.lookup_misses.load(Ordering::Relaxed),
             events_dropped: self.events_dropped.load(Ordering::Relaxed),
+            commands_dropped: self.commands_dropped.load(Ordering::Relaxed),
             resident_entries: gauges.resident_entries,
             events_queued: gauges.events_queued,
             command_queue_len: gauges.command_queue_len,
