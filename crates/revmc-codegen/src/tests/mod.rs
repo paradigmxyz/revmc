@@ -385,6 +385,13 @@ tests! {
             expected_stack: STACK_WHAT_INTERPRETER_SAYS,
             expected_gas: GAS_WHAT_INTERPRETER_SAYS,
         }),
+        swap16_dup10_selfdestruct_underflow(@raw {
+            bytecode: &[op::SWAP16, op::DUP10, op::SELFDESTRUCT],
+            spec_id: SpecId::OSAKA,
+            expected_return: InstructionResult::StackUnderflow,
+            expected_stack: STACK_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+        }),
 
         // Invalid immediate: 0x5B (91) is in the invalid range [91, 127] for decode_single.
         dupn_invalid_imm(@raw {
