@@ -443,7 +443,10 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
                 fx.bcx.phi(fx.i8_type, &fx.incoming_failures)
             };
             fx.bcx.set_current_block_cold();
-            fx.build_return(failure_value);
+            let failure_block = fx.bcx.current_block().unwrap();
+            let return_block = fx.return_block.unwrap();
+            fx.incoming_returns.push((failure_value, failure_block));
+            fx.bcx.br(return_block);
         } else {
             fx.bcx.unreachable();
         }
@@ -595,7 +598,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
         };
 
         // Check stack length for the current section.
-        if self.config.stack_bound_checks {
+        if self.config.stack_bound_checks && data.is_stack_section_head() {
             self.check_stack_bounds(data.stack_section);
         }
 
