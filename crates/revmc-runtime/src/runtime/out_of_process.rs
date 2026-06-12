@@ -500,6 +500,7 @@ fn limit_cpu_affinity(_cpu_count: usize) -> std::io::Result<()> {
 #[derive(Clone, PartialEq, Eq, SchemaWrite, SchemaRead)]
 struct HelperInit {
     debug_assertions: bool,
+    single_error: bool,
     no_dedup: bool,
     no_dse: bool,
     dump_dir: Option<String>,
@@ -864,6 +865,7 @@ fn gas_params_from_pairs(pairs: GasParamPairs) -> eyre::Result<GasParams> {
 fn helper_init(config: &RuntimeConfig) -> HelperInit {
     HelperInit {
         debug_assertions: config.debug_assertions,
+        single_error: config.single_error,
         no_dedup: config.no_dedup,
         no_dse: config.no_dse,
         dump_dir: config.dump_dir.as_ref().map(|path| path.to_string_lossy().into_owned()),
@@ -877,6 +879,7 @@ fn runtime_config_from_init(init: HelperInit) -> eyre::Result<RuntimeConfig> {
     let mut config = RuntimeConfig {
         dump_dir: init.dump_dir.map(PathBuf::from),
         debug_assertions: init.debug_assertions,
+        single_error: init.single_error,
         no_dedup: init.no_dedup,
         no_dse: init.no_dse,
         gas_params: init.gas_params.map(gas_params_from_pairs).transpose()?,
