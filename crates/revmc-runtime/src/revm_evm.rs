@@ -515,9 +515,13 @@ mod tests {
         >,
     >;
 
-    fn test_jit_evm(backend: JitBackend) -> JitEvm<TestInnerEvm> {
-        let inner = revm_context::Context::new(CacheDB::default(), SpecId::CANCUN).build_mainnet();
+    fn test_jit_evm_with_spec(backend: JitBackend, spec_id: SpecId) -> JitEvm<TestInnerEvm> {
+        let inner = revm_context::Context::new(CacheDB::default(), spec_id).build_mainnet();
         JitEvm::new(inner, backend)
+    }
+
+    fn test_jit_evm(backend: JitBackend) -> JitEvm<TestInnerEvm> {
+        test_jit_evm_with_spec(backend, SpecId::CANCUN)
     }
 
     fn deploy_contract_with_nonce(
@@ -562,6 +566,18 @@ mod tests {
 
     fn deploy_contract(evm: &mut JitEvm<TestInnerEvm>, bytecode: &[u8]) -> Address {
         deploy_contract_with_nonce(evm, bytecode, 0)
+    }
+
+    fn call_contract(backend: JitBackend, spec_id: SpecId, bytecode: &[u8]) -> ExecutionResult {
+        let mut evm = test_jit_evm_with_spec(backend, spec_id);
+        let contract_addr = deploy_contract(&mut evm, bytecode);
+        let tx = TxEnv {
+            kind: TxKind::Call(contract_addr),
+            nonce: 1,
+            gas_limit: 1_000_000,
+            ..Default::default()
+        };
+        evm.transact(tx).unwrap().result
     }
 
     #[test]
@@ -650,6 +666,28 @@ mod tests {
             "expected Success for empty-code call, got: {:?}",
             result.result,
         );
+    }
+
+    #[test]
+    fn jit_evm_amsterdam_state_gas_failure_matches_interpreter_gas() {
+        // PUSH1 1 PUSH1 0xea SSTORE ADD
+        //
+        // In Amsterdam, the SSTORE charges EIP-8037 state gas. The following ADD
+        // stack-underflows. Compiled failures may collapse to a single halt code,
+        // but final transaction gas accounting still has to match the interpreter.
+        let bytecode = &[op::PUSH1, 0x01, op::PUSH1, 0xea, op::SSTORE, op::ADD];
+
+        let interpreter = call_contract(JitBackend::disabled(), SpecId::AMSTERDAM, bytecode);
+        let jit = call_contract(blocking_backend(), SpecId::AMSTERDAM, bytecode);
+
+        let (
+            ExecutionResult::Halt { gas: jit_gas, .. },
+            ExecutionResult::Halt { gas: interpreter_gas, .. },
+        ) = (&jit, &interpreter)
+        else {
+            panic!("expected halt results: jit={jit:?}, interpreter={interpreter:?}");
+        };
+        assert_eq!(jit_gas, interpreter_gas);
     }
 
     /// Non-blocking mode: JIT compiles in background and results eventually appear.

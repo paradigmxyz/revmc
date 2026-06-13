@@ -33,8 +33,9 @@ impl GasSection {
 
 /// A stack section tracks stack height requirements for a sequence of instructions.
 ///
-/// Stack sections end at branching or suspending instructions, but NOT at instructions
-/// that merely require `gasleft` — those only end gas sections.
+/// Stack sections end at instructions that require `gasleft`, branching instructions, or
+/// suspending instructions. This keeps stack failures after dynamic-gas and host-effect
+/// instructions from being hoisted ahead of those instructions.
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct StackSection {
     /// The stack height required to execute the section.
@@ -234,13 +235,10 @@ impl SectionsAnalysis {
             self.gas.process_extra(bytecode.gas_params.exp_cost(exponent));
         }
 
-        // Instructions that require `gasleft` end only the gas section.
-        // Branching and suspending instructions end both sections.
+        // Dynamic-gas, branching, and suspending instructions end both sections.
         let next = inst + 1;
-        if data.may_suspend() || data.is_branching() {
+        if data.may_suspend() || data.is_branching() || data.requires_gasleft(bytecode.spec_id) {
             self.stack.save_to_reset(bytecode, next);
-            self.gas.save_to_reset(bytecode, next);
-        } else if data.requires_gasleft(bytecode.spec_id) {
             self.gas.save_to_reset(bytecode, next);
         }
     }
