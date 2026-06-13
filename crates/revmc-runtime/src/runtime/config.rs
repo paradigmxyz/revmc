@@ -50,6 +50,19 @@ pub struct RuntimeConfig {
     /// Defaults to `false`.
     pub debug_assertions: bool,
 
+    /// Collapse every JIT failure path to a single
+    /// [`OutOfGas`](revm_interpreter::InstructionResult::OutOfGas) constant.
+    ///
+    /// Failures (stack under/overflow, invalid jump, real OOG, invalid opcode, etc.) are
+    /// semantically interchangeable for callers that only branch on success vs failure, so
+    /// this lets LLVM DCE the per-failure-site materialization and the failure-block phi.
+    /// Successful exits (`STOP`/`RETURN`/`REVERT`) keep their original codes.
+    ///
+    /// Useful for benchmarking the cost of failure-result materialization.
+    ///
+    /// Defaults to `true`.
+    pub single_error: bool,
+
     /// Disable the block deduplication pass.
     ///
     /// When `true`, the dedup pass that merges identical basic blocks is skipped.
@@ -199,6 +212,7 @@ impl Default for RuntimeConfig {
             tuning: RuntimeTuning::default(),
             dump_dir: None,
             debug_assertions: false,
+            single_error: true,
             no_dedup: false,
             no_dse: false,
             gas_params: None,
