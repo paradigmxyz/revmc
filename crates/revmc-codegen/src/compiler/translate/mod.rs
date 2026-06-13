@@ -1157,6 +1157,7 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
             op::INVALID => goto_return!(fail InstructionResult::InvalidFEOpcode),
             op::SELFDESTRUCT => {
                 let sp = self.sp_after_inputs();
+                self.sync_diverging_stack_effect();
                 let _ = self.call_builtin(Builtin::SelfDestruct, &[self.ecx, sp]);
                 self.bcx.unreachable();
                 goto_return!(no_branch);
@@ -1366,8 +1367,21 @@ impl<'a, B: Backend> FunctionCx<'a, B> {
     fn return_common(&mut self, ir: InstructionResult) {
         let sp = self.sp_after_inputs();
         let ir_const = self.bcx.iconst(self.i8_type, ir as i64);
+        self.sync_diverging_stack_effect();
         let _ = self.call_builtin(Builtin::DoReturn, &[self.ecx, sp, ir_const]);
         self.bcx.unreachable();
+    }
+
+    fn sync_diverging_stack_effect(&mut self) {
+        let data = self.current_inst();
+        let (inp, out) = data.stack_io();
+        let diff = effective_stack_diff(inp, out, data);
+        self.sync_virtual_stack_diff(diff);
+        if self.config.inspect_stack {
+            self.materialize_live_stack();
+            self.copy_stack_to_arg();
+            self.save_stack_len();
+        }
     }
 
     /// Builds a `CREATE` or `CREATE2` instruction.

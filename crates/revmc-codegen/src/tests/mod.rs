@@ -1424,6 +1424,13 @@ tests! {
                 assert_eq!(host.selfdestructs, [(DEF_ADDR, Address::with_last_byte(0x69))]);
             }),
         }),
+        selfdestruct_preserves_remaining_stack(@raw {
+            bytecode: &[op::NUMBER, op::NUMBER, op::SELFDESTRUCT],
+            spec_id: SpecId::BERLIN,
+            expected_return: InstructionResult::SelfDestruct,
+            expected_stack: STACK_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+        }),
         // Static-context SELFDESTRUCT: gas < 5000 → OOG before static-call check.
         selfdestruct_static_oog(@raw {
             bytecode: &[op::PUSH1, 0x01, op::SELFDESTRUCT],
