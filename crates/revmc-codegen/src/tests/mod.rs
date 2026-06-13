@@ -2167,6 +2167,87 @@ tests! {
             expected_gas: GAS_WHAT_INTERPRETER_SAYS,
         }),
 
+        dedup_fallthrough_redirect_keeps_case_a_constant(@raw {
+            bytecode: &asm("
+                CALLVALUE
+                PUSH 123456789
+                SUB
+                PUSH %join_a
+                JUMPI
+                CALLVALUE
+                PUSH 123456789
+                SUB
+                PUSH %join_b
+                JUMPI
+
+                CALLDATASIZE
+                ISZERO
+                PUSH %case_b
+                JUMPI
+
+                PUSH 1
+            join_a:
+                JUMPDEST
+                PUSH %done
+                JUMP
+
+            case_b:
+                JUMPDEST
+                PUSH 2
+            join_b:
+                JUMPDEST
+                PUSH %done
+                JUMP
+
+            done:
+                JUMPDEST
+                STOP
+            "),
+            expected_return: InstructionResult::Stop,
+            expected_stack: &[1_U256],
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+        }),
+
+        dedup_fallthrough_redirect_keeps_case_b_constant(@raw {
+            bytecode: &asm("
+                CALLVALUE
+                PUSH 123456789
+                SUB
+                PUSH %join_a
+                JUMPI
+                CALLVALUE
+                PUSH 123456789
+                SUB
+                PUSH %join_b
+                JUMPI
+
+                CALLDATASIZE
+                PUSH %case_b
+                JUMPI
+
+                PUSH 1
+            join_a:
+                JUMPDEST
+                PUSH %done
+                JUMP
+
+            case_b:
+                JUMPDEST
+                PUSH 2
+            join_b:
+                JUMPDEST
+                PUSH %done
+                JUMP
+
+            done:
+                JUMPDEST
+                STOP
+            "),
+            expected_return: InstructionResult::Stop,
+            expected_stack: &[2_U256],
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+        }),
+
         // Disabled opcodes must not poison stack sections.
         //
         // When a disabled opcode (e.g. TSTORE before Cancun) follows executable instructions
@@ -2216,6 +2297,51 @@ tests! {
             assert_host: Some(|host| {
                 assert_eq!(host.storage.get(&0_U256), Some(&1_U256));
             }),
+        }),
+
+        // The abstract interpreter clamps block-entry stacks to MAX_ABS_STACK_DEPTH (64).
+        // A block entered with a deeper stack that pops below the clamp boundary must not
+        // be treated as unreachable: its JUMP would be committed as INVALID_JUMP even
+        // though the clamped-away slots (including the jump target) are live at runtime.
+        // The resolvable internal-function return makes the analysis commit its results.
+        clamped_stack_underflow_jump(@raw {
+            bytecode: &asm(&format!(
+                "
+                PUSH %ret1
+                PUSH %func
+                JUMP
+            ret1:
+                JUMPDEST
+                POP
+                PUSH %ret2
+                PUSH %func
+                JUMP
+            ret2:
+                JUMPDEST
+                POP
+                PUSH %target
+                {pushes}
+                PUSH %popper
+                JUMP
+            popper:
+                JUMPDEST
+                {pops}
+                JUMP
+            target:
+                JUMPDEST
+                STOP
+            func:
+                JUMPDEST
+                PUSH1 0x42
+                SWAP1
+                JUMP
+                ",
+                pushes = "PUSH0\n".repeat(68),
+                pops = "POP\n".repeat(68),
+            )),
+            expected_return: InstructionResult::Stop,
+            expected_stack: &[],
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
         }),
     }
 }

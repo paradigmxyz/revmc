@@ -1,7 +1,7 @@
 //! Block deduplication pass.
 //!
-//! Identifies structurally identical non-fallthrough blocks (same opcode + immediate sequence)
-//! and eliminates duplicates by marking them as dead code and redirecting predecessors to a
+//! Identifies structurally identical blocks (same opcode + immediate sequence) that are safe to
+//! merge and eliminates duplicates by marking them as dead code and redirecting predecessors to a
 //! single canonical copy.
 
 use super::block_analysis::{Block, BlockData, Snapshots};
@@ -389,6 +389,94 @@ mod tests {
     }
 
     #[test]
+    fn dedup_keeps_pure_fallthrough_materialization() {
+        // These labels are only reached by fallthrough, so the materialization stays in the
+        // same block as the join suffix. Dedup must not split out only the identical suffix.
+        let bytecode = analyze_asm_with(
+            "
+            PUSH0
+            CALLDATALOAD
+            PUSH %case_b
+            JUMPI
+
+            PUSH0
+            PUSH1 0xAA
+            SWAP1
+            POP
+        join_a:
+            JUMPDEST
+            PUSH %done
+            JUMP
+
+        case_b:
+            JUMPDEST
+            PUSH0
+            PUSH1 0xBB
+            SWAP1
+            POP
+        join_b:
+            JUMPDEST
+            PUSH %done
+            JUMP
+
+        done:
+            JUMPDEST
+            POP
+            STOP
+        ",
+            AnalysisConfig::DEDUP,
+        );
+
+        assert!(bytecode.redirects.is_empty(), "fallthrough join blocks must not be deduped");
+    }
+
+    #[test]
+    fn dedup_redirects_fallthrough_joins_that_are_static_targets() {
+        let bytecode = analyze_asm_with(
+            "
+            CALLVALUE
+            PUSH 123456789
+            SUB
+            PUSH %join_a
+            JUMPI
+            CALLVALUE
+            PUSH 123456789
+            SUB
+            PUSH %join_b
+            JUMPI
+
+            CALLDATASIZE
+            PUSH %case_b
+            JUMPI
+
+            PUSH 1
+        join_a:
+            JUMPDEST
+            PUSH %done
+            JUMP
+
+        case_b:
+            JUMPDEST
+            PUSH 2
+        join_b:
+            JUMPDEST
+            PUSH %done
+            JUMP
+
+        done:
+            JUMPDEST
+            STOP
+        ",
+            AnalysisConfig::DEDUP,
+        );
+
+        assert_eq!(bytecode.redirects.len(), 1);
+        let (&redirected, &canonical) = bytecode.redirects.iter().next().unwrap();
+        assert!(bytecode.insts[redirected].is_jumpdest());
+        assert!(bytecode.insts[canonical].is_jumpdest());
+    }
+
+    #[test]
     fn dedup_jump_different_targets() {
         // Two byte-identical non-JUMPDEST JUMP tails with different resolved static targets.
         // Must NOT be merged — the JUMP target is context-sensitive.
@@ -447,7 +535,7 @@ mod tests {
         bytecode.config = AnalysisConfig::DEDUP;
         bytecode.analyze().unwrap();
 
-        assert_eq!(bytecode.redirects.len(), 13);
+        assert_eq!(bytecode.redirects.len(), 20);
     }
 
     fn fixture_entry_code(json: &str) -> Vec<u8> {
