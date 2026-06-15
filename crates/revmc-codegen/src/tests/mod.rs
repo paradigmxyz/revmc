@@ -2247,6 +2247,16 @@ fn bytecode_ternop(op: u8, a: U256, b: U256, c: U256) -> [u8; 100] {
     code
 }
 
+matrix_tests!(
+    stack_underflow_failure_does_not_write_below_stack = |jit| {
+        let bytecode = hex!(
+            "554242524058654061ff62f8a083ffffffff7fffffffffff01ff055865404040405557010142423e32475135353447474747473d473332949ff247474747473d473332989ff24332923b323a"
+        );
+        let test_case = TestCase::what_interpreter_says(&bytecode, SpecId::PRAGUE);
+        run_test_case(&test_case, jit);
+    }
+);
+
 /// Build opaque unop bytecode: MSTORE(a, 0), MLOAD(0), `<op>`.
 fn bytecode_unop_opaque(opcode: u8, a: U256) -> Vec<u8> {
     let mut code = Vec::with_capacity(64);
