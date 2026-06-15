@@ -540,6 +540,15 @@ mod tests {
     }
 
     #[test]
+    fn log_topics_do_not_affect_memory_range() {
+        let bytecode = analyze_asm("PUSH 2048 PUSH0 PUSH0 PUSH0 PUSH0 LOG3 STOP");
+        let log3 = nth_inst(&bytecode, op::LOG3, 0);
+
+        assert_eq!(bytecode.const_memory_access(log3), Some((Some(0), Some(0))));
+        assert_eq!(section(&bytecode, log3), MemorySection::default());
+    }
+
+    #[test]
     fn call_tracks_input_and_output_memory_ranges() {
         let bytecode = analyze_asm(
             "

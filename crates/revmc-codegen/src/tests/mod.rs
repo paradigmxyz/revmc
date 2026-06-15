@@ -1282,6 +1282,11 @@ tests! {
                 }]);
             }),
         }),
+        log3_topic_does_not_resize_memory(@raw {
+            bytecode: &hex!("6108005f5f5f5fa35f5f52"),
+            expected_memory: MEMORY_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+        }),
         create(@raw {
             bytecode: &[op::PUSH1, 0x69, op::PUSH0, op::MSTORE, op::PUSH1, 32, op::PUSH0, op::PUSH1, 0x42, op::CREATE],
             expected_return: InstructionResult::Stop,
