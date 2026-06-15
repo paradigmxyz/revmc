@@ -2247,6 +2247,26 @@ fn bytecode_ternop(op: u8, a: U256, b: U256, c: U256) -> [u8; 100] {
     code
 }
 
+matrix_tests!(
+    log_topics_do_not_preexpand_memory = |jit| {
+        let bytecode = [
+            op::PUSH2,
+            0x08,
+            0x00, // Topic value, not the LOG memory offset or length.
+            op::PUSH0,
+            op::PUSH0,
+            op::PUSH0,
+            op::PUSH0,
+            op::LOG3,
+            op::PUSH0,
+            op::PUSH0,
+            op::MSTORE,
+        ];
+        let test_case = TestCase::what_interpreter_says(&bytecode, SpecId::CANCUN);
+        run_test_case(&test_case, jit);
+    }
+);
+
 /// Build opaque unop bytecode: MSTORE(a, 0), MLOAD(0), `<op>`.
 fn bytecode_unop_opaque(opcode: u8, a: U256) -> Vec<u8> {
     let mut code = Vec::with_capacity(64);
