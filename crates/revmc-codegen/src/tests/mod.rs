@@ -1282,6 +1282,14 @@ tests! {
                 }]);
             }),
         }),
+        log3_topic_does_not_resize_memory(@raw {
+            bytecode: &[
+                op::PUSH2, 0x08, 0x00, op::PUSH0, op::PUSH0, op::PUSH0, op::PUSH0, op::LOG3,
+                op::PUSH0, op::PUSH0, op::MSTORE,
+            ],
+            expected_memory: MEMORY_WHAT_INTERPRETER_SAYS,
+            expected_gas: GAS_WHAT_INTERPRETER_SAYS,
+        }),
         create(@raw {
             bytecode: &[op::PUSH1, 0x69, op::PUSH0, op::MSTORE, op::PUSH1, 32, op::PUSH0, op::PUSH1, 0x42, op::CREATE],
             expected_return: InstructionResult::Stop,

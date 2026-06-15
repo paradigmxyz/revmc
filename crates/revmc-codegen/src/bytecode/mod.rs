@@ -710,7 +710,7 @@ impl<'a> Bytecode<'a> {
         let operand =
             |depth| self.const_operand(inst, depth).and_then(|value| u64::try_from(value).ok());
         match data.opcode {
-            op::KECCAK256 | op::RETURN | op::REVERT | op::LOG0 => {
+            op::KECCAK256 | op::RETURN | op::REVERT | op::LOG0..=op::LOG4 => {
                 [Some((operand(0), operand(1))), None]
             }
             op::MLOAD | op::MSTORE => [Some((operand(0), Some(32))), None],
@@ -723,10 +723,6 @@ impl<'a> Bytecode<'a> {
                 Some((operand(0).zip(operand(1)).map(|(dst, src)| dst.max(src)), operand(2))),
                 None,
             ],
-            op::LOG1 => [Some((operand(1), operand(2))), None],
-            op::LOG2 => [Some((operand(2), operand(3))), None],
-            op::LOG3 => [Some((operand(3), operand(4))), None],
-            op::LOG4 => [Some((operand(4), operand(5))), None],
             op::CREATE | op::CREATE2 => [Some((operand(1), operand(2))), None],
             op::CALL | op::CALLCODE => {
                 [Some((operand(3), operand(4))), Some((operand(5), operand(6)))]
