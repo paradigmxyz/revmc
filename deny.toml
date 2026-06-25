@@ -1,0 +1,16 @@
+[advisories]
+version = 2
+ignore = [
+    # Unmaintained transitive dependencies present at the time cargo-deny was added.
+    # Revisit these ignores as upstream alloy/revm dependencies move away from them.
+    "RUSTSEC-2024-0436", # paste
+    "RUSTSEC-2026-0173", # proc-macro-error2
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+
+[bans]
+multiple-versions = "warn"
+wildcards = "allow"

@@ -10,6 +10,9 @@ env:
   RUSTC_WRAPPER: sccache
   ALL_BACKENDS: "llvm"
 
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
@@ -34,6 +37,8 @@ jobs:
             arch: arm64
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Install LLVM
         if: ${{ matrix.os == 'ubuntu' }}
         run: .github/scripts/install_llvm.sh ubuntu
@@ -72,6 +77,8 @@ jobs:
             runner: depot-macos-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Checkout ethereum/tests
         run: git submodule update --init --checkout --depth 1 tests/ethereum-tests
       - name: Download test fixtures
@@ -99,6 +106,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Install LLVM
         run: .github/scripts/install_llvm.sh ubuntu
       - uses: dtolnay/rust-toolchain@stable
@@ -117,6 +126,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Install LLVM
         run: .github/scripts/install_llvm.sh ubuntu
       - uses: dtolnay/rust-toolchain@clippy
@@ -133,6 +144,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Install LLVM
         run: .github/scripts/install_llvm.sh ubuntu
       - uses: dtolnay/rust-toolchain@nightly
@@ -155,6 +168,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: [docs]
     permissions:
+      contents: read
       pages: write
       id-token: write
     environment:
@@ -171,10 +185,23 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: rustfmt
       - run: cargo fmt --all --check
+
+  cargo-deny:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@cargo-deny
+      - run: cargo deny check advisories sources bans
 
   success:
     name: success
@@ -188,6 +215,7 @@ jobs:
       - docs
       - deploy-docs
       - fmt
+      - cargo-deny
     timeout-minutes: 30
     steps:
       - name: Decide whether the needed jobs succeeded or failed
