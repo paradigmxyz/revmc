@@ -202,6 +202,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: taiki-e/install-action@cargo-deny
       - run: cargo deny check advisories sources bans
+        env:
+          RUSTC_WRAPPER: ""
 
   success:
     name: success
