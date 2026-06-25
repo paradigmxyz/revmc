@@ -16,6 +16,6 @@ permissions:
 jobs:
   update:
     if: github.repository == 'paradigmxyz/revmc'
-    uses: tempoxyz/ci/.github/workflows/cargo-update-pr.yml@main
+    uses: tempoxyz/ci/.github/workflows/cargo-update-pr.yml@934b6a6317ac26272eaecf0d265472f4105c99d6 # main
     secrets:
       token: ${{ secrets.GITHUB_TOKEN }}

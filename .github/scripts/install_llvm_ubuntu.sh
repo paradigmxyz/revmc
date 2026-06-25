@@ -16,6 +16,7 @@ apt-get install -y --no-install-recommends software-properties-common 2>/dev/nul
 # It handles distro detection, GPG key import, and apt source configuration.
 llvm_sh=$(mktemp)
 wget -qO "$llvm_sh" https://apt.llvm.org/llvm.sh
+echo "dd5978eafdd69ff7f95793b35f633beca37fe50d84101a9a4add2bf93512c511  $llvm_sh" | sha256sum -c -
 chmod +x "$llvm_sh"
 "$llvm_sh" "$v" all
 rm -f "$llvm_sh"

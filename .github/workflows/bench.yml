@@ -18,26 +18,28 @@ jobs:
     runs-on: depot-ubuntu-latest-4
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
       - name: Install LLVM
         run: .github/scripts/install_llvm.sh ubuntu
       - name: llvm-config
         run: llvm-config --version --bindir --libdir
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: mozilla-actions/sccache-action@v0.0.9
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537 # stable
+        with:
+          toolchain: stable
+      - uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           cache-on-failure: true
       - name: Install cargo-codspeed
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2.82.0
         with:
           tool: cargo-codspeed
       - name: Build the benchmark target(s)
         run: cargo codspeed build --profile profiling -p revmc-cli --bench bench
       - name: Run the benchmarks
-        uses: CodSpeedHQ/action@v4
+        uses: CodSpeedHQ/action@63f3e98b61959fe67f146a3ff022e4136fe9bb9c # v4.17.6
         with:
           run: cargo codspeed run -p revmc-cli --bench bench
           mode: instrumentation
