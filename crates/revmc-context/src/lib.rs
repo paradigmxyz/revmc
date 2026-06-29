@@ -136,9 +136,9 @@ const _: () = {
     // Key fields accessed by JIT code
     assert!(offset_of!(EvmContext<'_>, memory) == 0);
     assert!(offset_of!(EvmContext<'_>, gas) == 16);
-    assert!(offset_of!(EvmContext<'_>, spec_id) == 113);
-    assert!(offset_of!(EvmContext<'_>, resume_at) == 120);
-    assert!(offset_of!(EvmContext<'_>, calldatasize) == 160);
+    assert!(offset_of!(EvmContext<'_>, spec_id) == 121);
+    assert!(offset_of!(EvmContext<'_>, resume_at) == 128);
+    assert!(offset_of!(EvmContext<'_>, calldatasize) == 168);
 };
 
 impl fmt::Debug for EvmContext<'_> {
