@@ -387,9 +387,7 @@ impl JitBackend {
             .inner
             .shared
             .pause_depth
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |depth| {
-                Some(depth.saturating_sub(1))
-            })
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |depth| Some(depth.saturating_sub(1)))
             .is_ok_and(|depth| depth == 1)
         {
             self.try_send_control(Command::Resume);
