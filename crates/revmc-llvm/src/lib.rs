@@ -2077,7 +2077,7 @@ fn init_() -> Result<()> {
         info: true,
         machine_code: true,
     };
-    Target::initialize_all(&config);
+    Target::initialize_native(&config).map_err(|e| eyre::eyre!("{e}"))?;
 
     Ok(())
 }
