@@ -167,7 +167,9 @@ fn execute_test_suite_runtime(
                         return Err(TestError {
                             name,
                             path: path_str,
-                            kind: TestErrorKind::UnknownPrivateKey(unit.transaction.secret_key),
+                            kind: TestErrorKind::UnknownPrivateKey(
+                                unit.transaction.secret_key.unwrap_or_default(),
+                            ),
                         });
                     }
                 };
