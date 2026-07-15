@@ -36,7 +36,7 @@ pub fn fixture_from_bytecode(
     "env": {{
       "currentBaseFee": "0x0",
       "currentCoinbase": "0x0000000000000000000000000000000000000000",
-      "currentGasLimit": "0x{gas_limit:x}",
+      "currentGasLimit": "{gas_limit}",
       "currentNumber": "0x1",
       "currentTimestamp": "0x1"
     }},
