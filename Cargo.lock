@@ -1625,7 +1625,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2064,7 +2064,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi",
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2346,7 +2346,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3049,12 +3049,12 @@ dependencies = [
 [[package]]
 name = "revm-bytecode"
 version = "41.0.0"
-source = "git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9#30e04db0a6285a79f613dc404bfc04e4b757b0c9"
+source = "git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f#335a35ddb370b667bff248109524a4efc589213f"
 dependencies = [
  "bitvec",
  "paste",
  "phf",
- "revm-primitives 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
+ "revm-primitives 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
  "serde",
 ]
 
@@ -3077,16 +3077,16 @@ dependencies = [
 [[package]]
 name = "revm-context"
 version = "41.0.0"
-source = "git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9#30e04db0a6285a79f613dc404bfc04e4b757b0c9"
+source = "git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f#335a35ddb370b667bff248109524a4efc589213f"
 dependencies = [
  "bitvec",
  "cfg-if",
  "derive-where",
- "revm-bytecode 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-context-interface 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-database-interface 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-primitives 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-state 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
+ "revm-bytecode 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-context-interface 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-database-interface 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-primitives 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-state 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
  "serde",
 ]
 
@@ -3108,15 +3108,15 @@ dependencies = [
 [[package]]
 name = "revm-context-interface"
 version = "41.0.0"
-source = "git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9#30e04db0a6285a79f613dc404bfc04e4b757b0c9"
+source = "git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f#335a35ddb370b667bff248109524a4efc589213f"
 dependencies = [
  "alloy-eip2930",
  "alloy-eip7702",
  "auto_impl",
  "either",
- "revm-database-interface 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-primitives 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-state 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
+ "revm-database-interface 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-primitives 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-state 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
  "serde",
 ]
 
@@ -3137,15 +3137,15 @@ dependencies = [
 [[package]]
 name = "revm-database"
 version = "41.0.0"
-source = "git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9#30e04db0a6285a79f613dc404bfc04e4b757b0c9"
+source = "git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f#335a35ddb370b667bff248109524a4efc589213f"
 dependencies = [
  "alloy-eips",
  "derive_more",
  "either",
- "revm-bytecode 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-database-interface 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-primitives 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-state 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
+ "revm-bytecode 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-database-interface 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-primitives 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-state 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
  "serde",
 ]
 
@@ -3165,12 +3165,12 @@ dependencies = [
 [[package]]
 name = "revm-database-interface"
 version = "41.0.0"
-source = "git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9#30e04db0a6285a79f613dc404bfc04e4b757b0c9"
+source = "git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f#335a35ddb370b667bff248109524a4efc589213f"
 dependencies = [
  "auto_impl",
  "either",
- "revm-primitives 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-state 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
+ "revm-primitives 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-state 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
  "serde",
  "thiserror 2.0.18",
 ]
@@ -3196,18 +3196,18 @@ dependencies = [
 [[package]]
 name = "revm-handler"
 version = "41.0.0"
-source = "git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9#30e04db0a6285a79f613dc404bfc04e4b757b0c9"
+source = "git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f#335a35ddb370b667bff248109524a4efc589213f"
 dependencies = [
  "auto_impl",
  "derive-where",
- "revm-bytecode 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-context 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-context-interface 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-database-interface 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-interpreter 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-precompile 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-primitives 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-state 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
+ "revm-bytecode 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-context 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-context-interface 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-database-interface 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-interpreter 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-precompile 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-primitives 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-state 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
  "serde",
 ]
 
@@ -3230,16 +3230,16 @@ dependencies = [
 [[package]]
 name = "revm-inspector"
 version = "41.0.0"
-source = "git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9#30e04db0a6285a79f613dc404bfc04e4b757b0c9"
+source = "git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f#335a35ddb370b667bff248109524a4efc589213f"
 dependencies = [
  "auto_impl",
  "either",
- "revm-context 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-database-interface 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-handler 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-interpreter 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-primitives 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-state 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
+ "revm-context 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-database-interface 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-handler 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-interpreter 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-primitives 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-state 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
  "serde",
  "serde_json",
 ]
@@ -3259,12 +3259,12 @@ dependencies = [
 [[package]]
 name = "revm-interpreter"
 version = "41.0.0"
-source = "git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9#30e04db0a6285a79f613dc404bfc04e4b757b0c9"
+source = "git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f#335a35ddb370b667bff248109524a4efc589213f"
 dependencies = [
- "revm-bytecode 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-context-interface 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-primitives 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-state 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
+ "revm-bytecode 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-context-interface 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-primitives 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-state 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
  "serde",
 ]
 
@@ -3293,7 +3293,7 @@ dependencies = [
 [[package]]
 name = "revm-precompile"
 version = "41.0.0"
-source = "git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9#30e04db0a6285a79f613dc404bfc04e4b757b0c9"
+source = "git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f#335a35ddb370b667bff248109524a4efc589213f"
 dependencies = [
  "ark-bls12-381",
  "ark-bn254",
@@ -3306,8 +3306,8 @@ dependencies = [
  "cfg-if",
  "k256",
  "p256",
- "revm-context-interface 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-primitives 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
+ "revm-context-interface 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-primitives 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
  "ripemd",
  "secp256k1",
  "sha2",
@@ -3326,7 +3326,7 @@ dependencies = [
 [[package]]
 name = "revm-primitives"
 version = "41.0.0"
-source = "git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9#30e04db0a6285a79f613dc404bfc04e4b757b0c9"
+source = "git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f#335a35ddb370b667bff248109524a4efc589213f"
 dependencies = [
  "alloy-primitives",
  "once_cell",
@@ -3349,28 +3349,28 @@ dependencies = [
 [[package]]
 name = "revm-state"
 version = "41.0.0"
-source = "git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9#30e04db0a6285a79f613dc404bfc04e4b757b0c9"
+source = "git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f#335a35ddb370b667bff248109524a4efc589213f"
 dependencies = [
  "alloy-eip7928 0.4.3",
  "bitflags",
  "nonmax",
- "revm-bytecode 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-primitives 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
+ "revm-bytecode 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-primitives 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
  "serde",
 ]
 
 [[package]]
 name = "revm-statetest-types"
 version = "41.0.0"
-source = "git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9#30e04db0a6285a79f613dc404bfc04e4b757b0c9"
+source = "git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f#335a35ddb370b667bff248109524a4efc589213f"
 dependencies = [
  "alloy-eip7928 0.4.3",
  "k256",
- "revm-context 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-context-interface 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-database 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-primitives 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-state 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
+ "revm-context 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-context-interface 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-database 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-primitives 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-state 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -3380,12 +3380,12 @@ dependencies = [
 name = "revmc"
 version = "0.1.0"
 dependencies = [
- "revm-bytecode 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-context-interface 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-handler 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-inspector 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-interpreter 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-primitives 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
+ "revm-bytecode 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-context-interface 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-handler 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-inspector 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-interpreter 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-primitives 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
  "revmc-backend",
  "revmc-build",
  "revmc-builtins",
@@ -3413,10 +3413,10 @@ name = "revmc-builtins"
 version = "0.1.0"
 dependencies = [
  "paste",
- "revm-bytecode 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-context-interface 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-interpreter 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-primitives 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
+ "revm-bytecode 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-context-interface 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-interpreter 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-primitives 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
  "revmc-backend",
  "revmc-context",
  "tracing",
@@ -3433,15 +3433,15 @@ dependencies = [
  "hex",
  "libloading",
  "open",
- "revm-bytecode 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-context 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-context-interface 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-database 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-database-interface 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-handler 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-interpreter 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-primitives 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-state 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
+ "revm-bytecode 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-context 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-context-interface 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-database 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-database-interface 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-handler 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-interpreter 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-primitives 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-state 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
  "revm-statetest-types",
  "revmc",
  "revmc-build",
@@ -3474,15 +3474,15 @@ dependencies = [
  "indexmap 2.14.0",
  "oxc_index",
  "paste",
- "revm-bytecode 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-context 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-context-interface 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-database-interface 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-handler 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-inspector 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-interpreter 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-primitives 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-state 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
+ "revm-bytecode 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-context 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-context-interface 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-database-interface 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-handler 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-inspector 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-interpreter 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-primitives 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-state 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
  "revmc-backend",
  "revmc-build",
  "revmc-builtins",
@@ -3502,13 +3502,13 @@ dependencies = [
 name = "revmc-context"
 version = "0.1.0"
 dependencies = [
- "revm-context 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-context-interface 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-handler 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-inspector 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-interpreter 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-primitives 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-state 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
+ "revm-context 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-context-interface 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-handler 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-inspector 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-interpreter 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-primitives 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-state 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
  "ruint",
 ]
 
@@ -3527,13 +3527,13 @@ name = "revmc-examples-runner"
 version = "0.1.0"
 dependencies = [
  "cc",
- "revm-bytecode 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-context 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-database 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-database-interface 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-handler 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-primitives 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-state 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
+ "revm-bytecode 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-context 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-database 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-database-interface 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-handler 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-primitives 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-state 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
  "revmc",
  "revmc-build",
  "revmc-builtins",
@@ -3578,16 +3578,16 @@ dependencies = [
  "paste",
  "quanta",
  "rayon",
- "revm-bytecode 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-context 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-context-interface 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-database 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-database-interface 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-handler 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-inspector 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-interpreter 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-primitives 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-state 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
+ "revm-bytecode 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-context 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-context-interface 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-database 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-database-interface 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-handler 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-inspector 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-interpreter 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-primitives 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-state 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
  "revmc-backend",
  "revmc-builtins",
  "revmc-codegen",
@@ -3614,16 +3614,16 @@ dependencies = [
  "indicatif",
  "k256",
  "libloading",
- "revm-bytecode 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-context 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-context-interface 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-database 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-database-interface 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-handler 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-inspector 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-interpreter 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-primitives 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
- "revm-state 41.0.0 (git+https://github.com/bluealloy/revm?rev=30e04db0a6285a79f613dc404bfc04e4b757b0c9)",
+ "revm-bytecode 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-context 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-context-interface 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-database 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-database-interface 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-handler 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-inspector 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-interpreter 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-primitives 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
+ "revm-state 41.0.0 (git+https://github.com/bluealloy/revm?rev=335a35ddb370b667bff248109524a4efc589213f)",
  "revm-statetest-types",
  "revmc",
  "serde_json",
@@ -3744,7 +3744,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4169,7 +4169,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4694,7 +4694,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
