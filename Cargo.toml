@@ -100,4 +100,4 @@ inherits = "profiling"
 # TODO: remove once a version of alloy-evm built against revm 42 is released.
 # Needed so the optional `alloy-evm` feature resolves a single revm in the graph.
 [patch.crates-io]
-alloy-evm = { git = "https://github.com/alloy-rs/evm", rev = "28062bcdec074ff7344cebcd3bea95dbf5f2361b" }
+alloy-evm = { git = "https://github.com/alloy-rs/evm", rev = "42a2afeaaa0f110e0d596f48d62be3e5a8f8afb8" }
