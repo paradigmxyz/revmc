@@ -56,7 +56,7 @@ fn execute_single_test_runtime(
     journal.set_spec_id(*evm.ctx.cfg.spec());
     journal.set_eip7708_config(
         evm.ctx.cfg.is_eip7708_disabled(),
-        evm.ctx.cfg.is_eip7708_delayed_burn_disabled(),
+        evm.ctx.cfg.is_eip8246_delayed_clear_disabled(),
     );
 
     let timer = Instant::now();
@@ -167,7 +167,9 @@ fn execute_test_suite_runtime(
                         return Err(TestError {
                             name,
                             path: path_str,
-                            kind: TestErrorKind::UnknownPrivateKey(unit.transaction.secret_key),
+                            kind: TestErrorKind::UnknownPrivateKey(
+                                unit.transaction.secret_key.unwrap_or_default(),
+                            ),
                         });
                     }
                 };

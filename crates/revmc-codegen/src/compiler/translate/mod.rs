@@ -2114,8 +2114,10 @@ mod pf {
         pub(super) remaining: u64,
         /// State gas reservoir (EIP-8037).
         pub(super) reservoir: u64,
-        /// Total state gas spent.
-        pub(super) state_gas_spent: u64,
+        /// Net state gas spent.
+        pub(super) state_gas_spent: i64,
+        /// State gas drawn from regular gas because the reservoir was empty (EIP-8037).
+        pub(super) state_gas_spilled: u64,
         /// Refunded gas.
         pub(super) refunded: i64,
     }
