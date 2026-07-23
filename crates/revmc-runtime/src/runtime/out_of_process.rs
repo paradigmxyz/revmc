@@ -724,7 +724,7 @@ fn read_helper_init<R: Read + ?Sized>(stdin: &mut BufReader<R>) -> eyre::Result<
     match read_message(stdin)? {
         HelperRequest::Init(init) => runtime_config_from_init(init),
         HelperRequest::Compile(_) | HelperRequest::Pause { .. } | HelperRequest::Resume => {
-            eyre::bail!("JIT helper received request before init")
+            Err(eyre::eyre!("JIT helper received request before init"))
         }
     }
 }
@@ -740,7 +740,9 @@ fn read_helper_request<R: Read + ?Sized>(stdin: &mut BufReader<R>) -> eyre::Resu
         HelperRequest::Compile(req) => req,
         HelperRequest::Pause { id } => return Ok(HelperWork::Pause { id }),
         HelperRequest::Resume => return Ok(HelperWork::Resume),
-        HelperRequest::Init(_) => eyre::bail!("JIT helper received duplicate init"),
+        HelperRequest::Init(_) => {
+            return Err(eyre::eyre!("JIT helper received duplicate init"));
+        }
     };
     let spec_id = SpecId::try_from_u8(req.spec_id).ok_or_else(|| eyre::eyre!("invalid spec id"))?;
     let opt_level = opt_level_from_u8(req.opt_level)?;
@@ -827,7 +829,7 @@ fn opt_level_from_u8(level: u8) -> eyre::Result<OptimizationLevel> {
         1 => OptimizationLevel::Less,
         2 => OptimizationLevel::Default,
         3 => OptimizationLevel::Aggressive,
-        _ => eyre::bail!("invalid optimization level"),
+        _ => return Err(eyre::eyre!("invalid optimization level")),
     })
 }
 

@@ -307,8 +307,8 @@ fn parse_define<'a>(after: &'a str, macros: &mut HashMap<&'a str, MacroDef<'a>>)
 
     let name = match tok.next() {
         Some(Token { src, kind: TokenKind::Ident }) => src,
-        Some(other) => eyre::bail!("expected macro name after #define, got {other:?}"),
-        None => eyre::bail!("expected macro name after #define"),
+        Some(other) => return Err(eyre::eyre!("expected macro name after #define, got {other:?}")),
+        None => return Err(eyre::eyre!("expected macro name after #define")),
     };
 
     // Function-like macro: NAME(a, b).
@@ -330,7 +330,9 @@ fn parse_define<'a>(after: &'a str, macros: &mut HashMap<&'a str, MacroDef<'a>>)
                         i += 1;
                     }
                     other => {
-                        eyre::bail!("expected parameter name in #define {name}, got {other:?}")
+                        return Err(eyre::eyre!(
+                            "expected parameter name in #define {name}, got {other:?}"
+                        ));
                     }
                 }
                 match all_tokens.get(i) {
@@ -339,9 +341,11 @@ fn parse_define<'a>(after: &'a str, macros: &mut HashMap<&'a str, MacroDef<'a>>)
                         break;
                     }
                     Some(Token { kind: TokenKind::Comma, .. }) => i += 1,
-                    other => eyre::bail!(
-                        "expected ',' or ')' in #define {name} parameter list, got {other:?}"
-                    ),
+                    other => {
+                        return Err(eyre::eyre!(
+                            "expected ',' or ')' in #define {name} parameter list, got {other:?}"
+                        ));
+                    }
                 }
             }
         } else {
@@ -571,8 +575,8 @@ fn parse_items<'a>(tokens: &[Token<'a>]) -> Result<Vec<Item<'a>>> {
                     }
                 }
             }
-            TokenKind::Unknown => eyre::bail!("unexpected token: {:?}", tokens[i].src),
-            _ => eyre::bail!("unexpected token: {:?}", tokens[i]),
+            TokenKind::Unknown => return Err(eyre::eyre!("unexpected token: {:?}", tokens[i].src)),
+            _ => return Err(eyre::eyre!("unexpected token: {:?}", tokens[i])),
         }
     }
     Ok(items)
@@ -592,7 +596,7 @@ fn expect_number_u8(
                 n.try_into().map_err(|_| eyre::eyre!("invalid {ctx} immediate: too large"))?;
             u8::try_from(v).map_err(|_| eyre::eyre!("invalid {ctx} immediate: too large"))
         }
-        _ => eyre::bail!("expected numeric immediate for {ctx}, got {tok:?}"),
+        _ => Err(eyre::eyre!("expected numeric immediate for {ctx}, got {tok:?}")),
     }
 }
 
@@ -607,7 +611,7 @@ fn expect_imm<'a>(
     match &tok.kind {
         TokenKind::Number(n) => Ok(Imm::Number(*n)),
         TokenKind::LabelRef => Ok(Imm::Label(tok.src)),
-        _ => eyre::bail!("expected immediate for {ctx}, got {tok:?}"),
+        _ => Err(eyre::eyre!("expected immediate for {ctx}, got {tok:?}")),
     }
 }
 
