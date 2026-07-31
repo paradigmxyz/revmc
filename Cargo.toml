@@ -47,7 +47,7 @@ revmc-runtime = { version = "0.1.0", path = "crates/revmc-runtime", default-feat
 
 alloy-primitives = { version = "1.6.0", default-features = false }
 ruint = { version = "1.18", default-features = false }
-alloy-evm = { version = "0.37.0", default-features = false }
+alloy-evm = { version = "0.38.0", default-features = false }
 
 revm-bytecode = { version = "42.0.0", default-features = false, features = ["parse"] }
 revm-context = { version = "42.0.0", default-features = false }
@@ -96,8 +96,3 @@ strip = false
 
 [profile.bench]
 inherits = "profiling"
-
-# TODO: remove once a version of alloy-evm built against revm 42 is released.
-# Needed so the optional `alloy-evm` feature resolves a single revm in the graph.
-[patch.crates-io]
-alloy-evm = { git = "https://github.com/alloy-rs/evm", rev = "42a2afeaaa0f110e0d596f48d62be3e5a8f8afb8" }
