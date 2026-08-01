@@ -1204,7 +1204,8 @@ fn cold_entries_are_evicted() {
     let tb = TestBackend::with_tuning_1w(RuntimeTuning {
         jit_hot_threshold: 2,
         jit_max_pending_jobs: 1,
-        idle_evict_duration: Some(std::time::Duration::from_millis(20)),
+        idle_evict_duration: None,
+        cold_entry_idle_duration: Some(std::time::Duration::from_millis(20)),
         eviction_sweep_interval: std::time::Duration::from_millis(10),
         event_drain_interval: std::time::Duration::from_millis(10),
         ..Default::default()
@@ -1222,7 +1223,56 @@ fn cold_entries_are_evicted() {
     assert_eq!(tb.stats().resident_entries, 0);
 
     std::thread::sleep(std::time::Duration::from_millis(100));
+    let stats = tb.stats();
+    assert_eq!(stats.cold_entries, 0);
+    assert!(stats.cold_entry_evictions >= 10);
     tb.wait_compiled(&compile_me, SpecId::CANCUN);
+}
+
+#[test]
+#[cfg(feature = "llvm")]
+fn cold_entry_eviction_preserves_resident_programs() {
+    let tb = TestBackend::with_tuning_1w(RuntimeTuning {
+        jit_hot_threshold: 2,
+        jit_max_pending_jobs: 2,
+        idle_evict_duration: None,
+        cold_entry_idle_duration: Some(std::time::Duration::from_millis(50)),
+        eviction_sweep_interval: std::time::Duration::from_millis(10),
+        event_drain_interval: std::time::Duration::from_millis(10),
+        ..Default::default()
+    });
+
+    tb.trigger_jit_cancun(BYTECODE_RET42);
+    let resident_hash = alloy_primitives::keccak256(BYTECODE_RET42);
+    let _ = tb.lookup(TestBackend::req_cancun(&indexed_bytecode(42)));
+
+    tb.wait_stats(|stats| stats.cold_entries == 1);
+    let stats = tb.wait_stats(|stats| stats.cold_entry_evictions >= 1);
+    assert_eq!(stats.cold_entries, 0);
+    assert_eq!(stats.resident_entries, 1);
+    assert!(tb.get_compiled(resident_hash, SpecId::CANCUN).is_some());
+}
+
+#[test]
+fn observed_entry_capacity_is_reported() {
+    let tb = TestBackend::with_tuning(RuntimeTuning {
+        jit_hot_threshold: usize::MAX,
+        jit_max_pending_jobs: 1,
+        jit_worker_count: 0,
+        idle_evict_duration: None,
+        cold_entry_idle_duration: None,
+        event_drain_interval: std::time::Duration::from_millis(1),
+        ..Default::default()
+    });
+
+    for i in 0..11 {
+        let _ = tb.lookup(TestBackend::req_cancun(&indexed_bytecode(i)));
+    }
+
+    let stats = tb.wait_stats(|stats| stats.lookup_misses == 11);
+    assert_eq!(stats.tracked_entries, 10);
+    assert_eq!(stats.cold_entries, 10);
+    assert_eq!(stats.observed_entry_rejections, 1);
 }
 
 // ===========================================================================

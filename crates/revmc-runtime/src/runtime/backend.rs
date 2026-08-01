@@ -242,6 +242,14 @@ impl BackendState {
     fn tick(&mut self) {
         self.drain_events();
         self.run_eviction_sweep();
+        self.update_entry_stats();
+    }
+
+    fn update_entry_stats(&self) {
+        self.inner.stats.tracked_entries.store(self.entries.len() as u64, Ordering::Relaxed);
+        let cold_entries =
+            self.entries.values().filter(|entry| entry.phase == EntryPhase::Cold).count();
+        self.inner.stats.cold_entries.store(cold_entries as u64, Ordering::Relaxed);
     }
 
     /// Drains all currently-queued lookup events.
@@ -312,6 +320,7 @@ impl BackendState {
         if matches!(mode, AdmitMode::Observed) {
             let max_entries = self.tuning.jit_max_pending_jobs * 10;
             if !self.entries.contains_key(&key) && self.entries.len() >= max_entries {
+                self.inner.stats.observed_entry_rejections.fetch_add(1, Ordering::Relaxed);
                 return;
             }
         }
@@ -726,6 +735,7 @@ impl BackendState {
         self.last_sweep = now;
 
         let idle_duration = self.tuning.idle_evict_duration;
+        let cold_idle_duration = self.tuning.cold_entry_idle_duration;
         let budget = self.tuning.resident_code_cache_bytes;
 
         // Phase 1: evict idle entries.
@@ -750,14 +760,19 @@ impl BackendState {
         }
 
         // Phase 2: evict stale cold entries that never became hot enough to compile.
-        if let Some(idle) = idle_duration {
+        if let Some(idle) = cold_idle_duration {
             let resident = &self.inner.resident;
+            let before = self.entries.len();
             self.entries.retain(|key, entry| {
                 let stale = entry.phase == EntryPhase::Cold
                     && now.duration_since(entry.last_observed_at) > idle
                     && !resident.contains_key(key);
                 !stale
             });
+            self.inner
+                .stats
+                .cold_entry_evictions
+                .fetch_add((before - self.entries.len()) as u64, Ordering::Relaxed);
         }
 
         // Phase 3: enforce memory budget by evicting LRU JIT entries.
@@ -797,7 +812,8 @@ impl BackendState {
         if maxrss > 0 && jit_total_bytes() > maxrss {
             return true;
         }
-        self.tuning.idle_evict_duration.is_some()
+        (self.tuning.idle_evict_duration.is_some()
+            || self.tuning.cold_entry_idle_duration.is_some())
             && self.last_sweep.elapsed() >= self.tuning.eviction_sweep_interval
     }
 }

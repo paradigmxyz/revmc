@@ -321,7 +321,15 @@ pub struct RuntimeTuning {
     /// Defaults to `None`.
     pub idle_evict_duration: Option<Duration>,
 
-    /// How often the backend runs eviction sweeps, if `idle_evict_duration` is set.
+    /// Duration after which a cold observed entry that has not reached the compilation threshold
+    /// is forgotten. This is independent from [`Self::idle_evict_duration`], so applications can
+    /// bound miss-tracking state without evicting resident compiled programs.
+    /// `None` disables cold-entry eviction.
+    ///
+    /// Defaults to `10min`.
+    pub cold_entry_idle_duration: Option<Duration>,
+
+    /// How often the backend runs eviction sweeps, if resident or cold-entry idle eviction is set.
     ///
     /// Defaults to `60s`.
     pub eviction_sweep_interval: Duration,
@@ -369,6 +377,7 @@ impl Default for RuntimeTuning {
             aot_opt_level: crate::OptimizationLevel::default(),
             resident_code_cache_bytes: 1024 * 1024 * 1024,
             idle_evict_duration: Some(Duration::from_secs(600)),
+            cold_entry_idle_duration: Some(Duration::from_secs(600)),
             eviction_sweep_interval: Duration::from_secs(60),
             compiler_recycle_threshold: 1000,
         }

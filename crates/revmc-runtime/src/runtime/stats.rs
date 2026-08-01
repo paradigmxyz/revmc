@@ -11,6 +11,14 @@ pub(crate) struct RuntimeStats {
     pub(crate) lookup_misses: AtomicU64,
     /// Total lookup events dropped due to event-queue overflow.
     pub(crate) events_dropped: AtomicU64,
+    /// Total observed entries rejected because the cold-entry tracking table was full.
+    pub(crate) observed_entry_rejections: AtomicU64,
+    /// Number of observed entries currently tracked for hotness or compilation.
+    pub(crate) tracked_entries: AtomicU64,
+    /// Number of tracked entries that have not reached the compilation threshold.
+    pub(crate) cold_entries: AtomicU64,
+    /// Total stale cold entries forgotten by idle eviction.
+    pub(crate) cold_entry_evictions: AtomicU64,
     /// Total control commands dropped because the command channel was full.
     pub(crate) commands_dropped: AtomicU64,
     /// Total number of entries evicted (idle + budget).
@@ -62,6 +70,14 @@ pub struct RuntimeStatsSnapshot {
     pub lookup_misses: u64,
     /// Total lookup events dropped due to event-queue overflow.
     pub events_dropped: u64,
+    /// Total observed entries rejected because the cold-entry tracking table was full.
+    pub observed_entry_rejections: u64,
+    /// Number of observed entries currently tracked for hotness or compilation.
+    pub tracked_entries: u64,
+    /// Number of tracked entries that have not reached the compilation threshold.
+    pub cold_entries: u64,
+    /// Total stale cold entries forgotten by idle eviction.
+    pub cold_entry_evictions: u64,
     /// Total control commands dropped because the command channel was full.
     ///
     /// Pause/resume commands are best-effort and dropped instead of blocking the caller when
@@ -142,6 +158,10 @@ impl RuntimeStats {
             lookup_hits: self.lookup_hits.load(Ordering::Relaxed),
             lookup_misses: self.lookup_misses.load(Ordering::Relaxed),
             events_dropped: self.events_dropped.load(Ordering::Relaxed),
+            observed_entry_rejections: self.observed_entry_rejections.load(Ordering::Relaxed),
+            tracked_entries: self.tracked_entries.load(Ordering::Relaxed),
+            cold_entries: self.cold_entries.load(Ordering::Relaxed),
+            cold_entry_evictions: self.cold_entry_evictions.load(Ordering::Relaxed),
             commands_dropped: self.commands_dropped.load(Ordering::Relaxed),
             resident_entries: gauges.resident_entries,
             events_queued: gauges.events_queued,
