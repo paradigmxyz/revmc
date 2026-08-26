@@ -772,12 +772,13 @@ impl<'a> Bytecode<'a> {
             });
             entry.total += 1;
             let mut all = true;
-            for depth in 0..inputs as usize {
-                entry.per_input[depth][0] += 1;
+            for (depth, input_stats) in entry.per_input.iter_mut().enumerate().take(inputs as usize)
+            {
+                input_stats[0] += 1;
                 if let Some(val) = self.const_operand(inst, depth) {
-                    entry.per_input[depth][1] += 1;
+                    input_stats[1] += 1;
                     if val <= usize::MAX {
-                        entry.per_input[depth][2] += 1;
+                        input_stats[2] += 1;
                     }
                 } else {
                     all = false;
