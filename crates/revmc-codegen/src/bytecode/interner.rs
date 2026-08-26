@@ -68,10 +68,7 @@ impl<I: Idx, T: std::fmt::Debug, S> std::fmt::Debug for Interner<I, T, S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    oxc_index::define_index_type! {
-        struct TestIdx = u32;
-    }
+    use crate::bytecode::Inst as TestIdx;
 
     #[test]
     fn deduplication() {

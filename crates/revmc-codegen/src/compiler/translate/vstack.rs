@@ -55,8 +55,8 @@ impl<T: Copy> VStack<T> {
         self.slots.resize(capacity, None);
 
         // Section inputs are already in memory.
-        for i in 0..inputs {
-            self.slots[i] = Some(VSlot::Materialized);
+        for slot in self.slots.iter_mut().take(inputs) {
+            *slot = Some(VSlot::Materialized);
         }
     }
 
