@@ -26,9 +26,6 @@ fn should_skip(bytecode: &[u8], spec_id: SpecId) -> bool {
         let Some(info) = OPCODE_INFO[op.opcode as usize] else { return true };
         // Skip if the immediate is incomplete.
         // TODO: What is the expected behavior here?
-        if info.immediate_size() > 0 && op.immediate.is_none() {
-            return true;
-        }
-        false
+        info.immediate_size() > 0 && op.immediate.is_none()
     })
 }
