@@ -22,20 +22,23 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ["ubuntu", "macos"]
+        os: ["ubuntu", "ubuntu-arm", "macos"]
         toolchain: ["stable", "nightly"]
         profile: ["dev", "release"]
         include:
           - os: ubuntu
             runner: depot-ubuntu-latest
             arch: x64
+          - os: ubuntu-arm
+            runner: ubuntu-24.04-arm
+            arch: arm64
           - os: macos
             runner: macos-latest
             arch: arm64
     steps:
       - uses: actions/checkout@v4
       - name: Install LLVM
-        if: ${{ matrix.os == 'ubuntu' }}
+        if: ${{ startsWith(matrix.os, 'ubuntu') }}
         run: .github/scripts/install_llvm.sh ubuntu
       - name: Install LLVM
         if: ${{ matrix.os == 'macos' }}
@@ -60,7 +63,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ["ubuntu", "macos"]
+        os: ["ubuntu", "ubuntu-arm", "macos"]
         mode: [interpreter, jit, aot]
         exclude:
           - os: macos
@@ -68,6 +71,8 @@ jobs:
         include:
           - os: ubuntu
             runner: depot-ubuntu-latest-8
+          - os: ubuntu-arm
+            runner: ubuntu-24.04-arm
           - os: macos
             runner: depot-macos-latest
     steps:
@@ -77,7 +82,7 @@ jobs:
       - name: Download test fixtures
         run: ./scripts/setup-test-fixtures.sh
       - name: Install LLVM
-        if: ${{ matrix.os == 'ubuntu' }}
+        if: ${{ startsWith(matrix.os, 'ubuntu') }}
         run: .github/scripts/install_llvm.sh ubuntu
       - name: Install LLVM
         if: ${{ matrix.os == 'macos' }}
