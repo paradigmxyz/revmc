@@ -36,7 +36,9 @@ jobs:
           cache-bin: false
           cache-on-failure: true
       - name: Install cargo-codspeed
-        run: cargo install cargo-codspeed --version 5.0.2 --locked
+        uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2.87.12
+        with:
+          tool: cargo-codspeed
       - name: Build the benchmark target(s)
         run: cargo codspeed build --profile profiling -p revmc-cli --bench bench
       - name: Run the benchmarks
