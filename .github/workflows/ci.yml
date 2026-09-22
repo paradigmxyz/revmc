@@ -16,6 +16,9 @@ concurrency:
 
 jobs:
   test:
+    permissions:
+      contents: read
+      id-token: write
     name: test ${{ matrix.os }}-${{ matrix.arch }}-${{ matrix.toolchain }} ${{ matrix.profile }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
@@ -33,7 +36,11 @@ jobs:
             runner: macos-latest
             arch: arm64
     steps:
-      - uses: actions/checkout@v4
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@48ff2b0c97ede86c9f10d105424380b9605f790d
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - name: Install LLVM
         if: ${{ matrix.os == 'ubuntu' }}
         run: .github/scripts/install_llvm.sh ubuntu
@@ -42,18 +49,26 @@ jobs:
         run: .github/scripts/install_llvm.sh macos
       - name: llvm-config
         run: llvm-config --version --bindir --libdir
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
           toolchain: ${{ matrix.toolchain }}
-      - uses: mozilla-actions/sccache-action@v0.0.9
-      - uses: Swatinem/rust-cache@v2
+      - uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad # v0.0.9
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           cache-on-failure: true
-      - uses: taiki-e/install-action@nextest
+      - name: Install nextest
+        uses: tempoxyz/gh-actions/vendor/taiki-e/install-action@48ff2b0c97ede86c9f10d105424380b9605f790d
+        with:
+          tool: nextest@0.9.140
+          checksum: true
+          fallback: none
       - name: test
         run: cargo nextest run --workspace --cargo-profile ${{ matrix.profile }} --features ${{ env.ALL_BACKENDS }}
 
   state-tests:
+    permissions:
+      contents: read
+      id-token: write
     name: state-tests (${{ matrix.os }}, ${{ matrix.mode }})
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
@@ -71,7 +86,11 @@ jobs:
           - os: macos
             runner: depot-macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@48ff2b0c97ede86c9f10d105424380b9605f790d
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - name: Checkout ethereum/tests
         run: git submodule update --init --checkout --depth 1 tests/ethereum-tests
       - name: Download test fixtures
@@ -82,12 +101,19 @@ jobs:
       - name: Install LLVM
         if: ${{ matrix.os == 'macos' }}
         run: .github/scripts/install_llvm.sh macos
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: mozilla-actions/sccache-action@v0.0.9
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: stable
+      - uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad # v0.0.9
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           cache-on-failure: true
-      - uses: taiki-e/install-action@nextest
+      - name: Install nextest
+        uses: tempoxyz/gh-actions/vendor/taiki-e/install-action@48ff2b0c97ede86c9f10d105424380b9605f790d
+        with:
+          tool: nextest@0.9.140
+          checksum: true
+          fallback: none
       - name: Run state tests
         run: |
           cargo nextest run -p revmc --features llvm \
@@ -95,16 +121,30 @@ jobs:
             -E 'test(statetest::${{ matrix.mode }})'
 
   feature-checks:
+    permissions:
+      contents: read
+      id-token: write
     runs-on: depot-ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@48ff2b0c97ede86c9f10d105424380b9605f790d
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - name: Install LLVM
         run: .github/scripts/install_llvm.sh ubuntu
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: mozilla-actions/sccache-action@v0.0.9
-      - uses: taiki-e/install-action@cargo-hack
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: stable
+      - uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad # v0.0.9
+      - name: Install cargo-hack
+        uses: tempoxyz/gh-actions/vendor/taiki-e/install-action@48ff2b0c97ede86c9f10d105424380b9605f790d
+        with:
+          tool: cargo-hack@0.6.45
+          checksum: true
+          fallback: none
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           cache-on-failure: true
       - name: cargo hack
@@ -113,15 +153,25 @@ jobs:
             --skip llvm-prefer-static --skip prefer-static
 
   clippy:
+    permissions:
+      contents: read
+      id-token: write
     runs-on: depot-ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@48ff2b0c97ede86c9f10d105424380b9605f790d
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - name: Install LLVM
         run: .github/scripts/install_llvm.sh ubuntu
-      - uses: dtolnay/rust-toolchain@clippy
-      - uses: mozilla-actions/sccache-action@v0.0.9
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: nightly
+          components: clippy
+      - uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad # v0.0.9
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           cache-on-failure: true
       - run: cargo clippy --workspace --all-targets --features ${{ env.ALL_BACKENDS }}
@@ -129,24 +179,33 @@ jobs:
           RUSTFLAGS: -Dwarnings
 
   docs:
+    permissions:
+      contents: read
+      id-token: write
     runs-on: depot-ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@48ff2b0c97ede86c9f10d105424380b9605f790d
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - name: Install LLVM
         run: .github/scripts/install_llvm.sh ubuntu
-      - uses: dtolnay/rust-toolchain@nightly
-      - uses: mozilla-actions/sccache-action@v0.0.9
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: nightly
+      - uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad # v0.0.9
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           cache-on-failure: true
       - run: cargo doc --workspace --features ${{ env.ALL_BACKENDS }} --no-deps --document-private-items
         env:
           RUSTDOCFLAGS: --cfg docsrs -D warnings --show-type-layout --generate-link-to-definition --enable-index-page -Zunstable-options
       - name: Setup Pages
-        uses: actions/configure-pages@v5
+        uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
       - name: Upload artifact
-        uses: actions/upload-pages-artifact@v4
+        uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4
         with:
           path: target/doc
 
@@ -167,12 +226,20 @@ jobs:
         uses: actions/deploy-pages@v4
 
   fmt:
+    permissions:
+      contents: read
+      id-token: write
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@48ff2b0c97ede86c9f10d105424380b9605f790d
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: nightly
           components: rustfmt
       - run: cargo fmt --all --check
 
