@@ -29,6 +29,11 @@ revmc-backend = { workspace = true, optional = true }
 tracing = { workspace = true, optional = true }
 
 [features]
+# Enables opaque account payloads in revm; disabled by default.
+account-ext = [
+    "revmc-context/account-ext",
+    "revm-context-interface/account-ext",
+]
 default = ["std", "ir"]
 std = ["revmc-context/std", "revm-primitives/std", "revm-interpreter/std"]
 ir = ["std", "dep:tracing", "dep:revmc-backend"]

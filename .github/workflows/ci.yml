@@ -66,6 +66,9 @@ jobs:
           fallback: none
       - name: test
         run: cargo nextest run --workspace --cargo-profile ${{ matrix.profile }} --features ${{ env.ALL_BACKENDS }}
+      - name: test account extensions
+        if: matrix.os == 'ubuntu' && matrix.toolchain == 'stable' && matrix.profile == 'dev'
+        run: cargo nextest run --workspace --features llvm,account-ext
 
   state-tests:
     permissions:

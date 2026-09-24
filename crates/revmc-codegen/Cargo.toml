@@ -67,6 +67,14 @@ serde_json = "1.0"
 tracing-subscriber = { workspace = true, features = ["fmt"] }
 
 [features]
+# Enables opaque account payloads in revm; disabled by default.
+account-ext = [
+    "revmc-builtins/account-ext",
+    "revmc-context/account-ext",
+    "revm-context/account-ext",
+    "revm-context-interface/account-ext",
+    "revm-state/account-ext",
+]
 default = ["llvm"]
 llvm = ["dep:revmc-llvm"]
 llvm-prefer-static = ["llvm", "revmc-llvm?/prefer-static"]

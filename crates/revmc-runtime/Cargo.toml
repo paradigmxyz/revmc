@@ -63,6 +63,15 @@ similar-asserts = "2.0"
 tracing-subscriber = { workspace = true, features = ["fmt"] }
 
 [features]
+# Enables opaque account payloads in revm; disabled by default.
+account-ext = [
+    "revmc-builtins/account-ext",
+    "revmc-codegen/account-ext",
+    "revmc-context/account-ext",
+    "revm-context/account-ext",
+    "revm-context-interface/account-ext",
+    "revm-state/account-ext",
+]
 default = ["llvm"]
 llvm = ["revmc-codegen/llvm", "dep:revmc-llvm"]
 llvm-prefer-static = ["llvm", "revmc-codegen/llvm-prefer-static", "revmc-llvm?/prefer-static"]

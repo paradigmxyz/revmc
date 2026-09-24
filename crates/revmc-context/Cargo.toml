@@ -28,6 +28,12 @@ revm-inspector = { workspace = true, optional = true }
 revm-state = { workspace = true, optional = true }
 
 [features]
+# Enables opaque account payloads in revm; disabled by default.
+account-ext = [
+    "revm-context?/account-ext",
+    "revm-context-interface?/account-ext",
+    "revm-state?/account-ext",
+]
 default = ["std"]
 std = [
     "revm-interpreter/std",

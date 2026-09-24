@@ -46,3 +46,12 @@ walkdir = "2.5"
 
 [lib]
 path = "src/lib.rs"
+
+[features]
+# Enables opaque account payloads in revm; disabled by default.
+account-ext = [
+    "revmc/account-ext",
+    "revm-context/account-ext",
+    "revm-context-interface/account-ext",
+    "revm-state/account-ext",
+]

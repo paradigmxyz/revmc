@@ -42,6 +42,14 @@ revmc-build.workspace = true
 revmc-statetest = { path = "../revmc-statetest" }
 
 [features]
+# Enables opaque account payloads in revm; disabled by default.
+account-ext = [
+    "revmc-builtins/account-ext",
+    "revmc-codegen/account-ext",
+    "revmc-context/account-ext",
+    "revmc-runtime/account-ext",
+    "revm-context-interface/account-ext",
+]
 default = ["llvm"]
 llvm = ["dep:revmc-llvm", "revmc-codegen/llvm", "revmc-runtime/llvm"]
 llvm-prefer-static = ["llvm", "revmc-codegen/llvm-prefer-static", "revmc-runtime/llvm-prefer-static"]
