@@ -42,6 +42,14 @@ revmc-build.workspace = true
 revmc-statetest = { path = "../revmc-statetest" }
 
 [features]
+default = ["llvm"]
+llvm = ["dep:revmc-llvm", "revmc-codegen/llvm", "revmc-runtime/llvm"]
+llvm-prefer-static = ["llvm", "revmc-codegen/llvm-prefer-static", "revmc-runtime/llvm-prefer-static"]
+llvm-prefer-dynamic = ["llvm", "revmc-codegen/llvm-prefer-dynamic", "revmc-runtime/llvm-prefer-dynamic"]
+alloy-evm = ["revmc-runtime/alloy-evm"]
+asm-keccak = ["revmc-codegen/asm-keccak", "revmc-runtime/asm-keccak"]
+__fuzzing = ["revmc-codegen/__fuzzing"]
+
 # Enables opaque account payloads in revm; disabled by default.
 account-ext = [
     "revmc-builtins/account-ext",
@@ -50,10 +58,3 @@ account-ext = [
     "revmc-runtime/account-ext",
     "revm-context-interface/account-ext",
 ]
-default = ["llvm"]
-llvm = ["dep:revmc-llvm", "revmc-codegen/llvm", "revmc-runtime/llvm"]
-llvm-prefer-static = ["llvm", "revmc-codegen/llvm-prefer-static", "revmc-runtime/llvm-prefer-static"]
-llvm-prefer-dynamic = ["llvm", "revmc-codegen/llvm-prefer-dynamic", "revmc-runtime/llvm-prefer-dynamic"]
-alloy-evm = ["revmc-runtime/alloy-evm"]
-asm-keccak = ["revmc-codegen/asm-keccak", "revmc-runtime/asm-keccak"]
-__fuzzing = ["revmc-codegen/__fuzzing"]

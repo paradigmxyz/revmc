@@ -63,6 +63,13 @@ similar-asserts = "2.0"
 tracing-subscriber = { workspace = true, features = ["fmt"] }
 
 [features]
+default = ["llvm"]
+llvm = ["revmc-codegen/llvm", "dep:revmc-llvm"]
+llvm-prefer-static = ["llvm", "revmc-codegen/llvm-prefer-static", "revmc-llvm?/prefer-static"]
+llvm-prefer-dynamic = ["llvm", "revmc-codegen/llvm-prefer-dynamic", "revmc-llvm?/prefer-dynamic"]
+alloy-evm = ["dep:alloy-evm"]
+asm-keccak = ["revmc-codegen/asm-keccak", "alloy-primitives/asm-keccak"]
+
 # Enables opaque account payloads in revm; disabled by default.
 account-ext = [
     "revmc-builtins/account-ext",
@@ -72,9 +79,3 @@ account-ext = [
     "revm-context-interface/account-ext",
     "revm-state/account-ext",
 ]
-default = ["llvm"]
-llvm = ["revmc-codegen/llvm", "dep:revmc-llvm"]
-llvm-prefer-static = ["llvm", "revmc-codegen/llvm-prefer-static", "revmc-llvm?/prefer-static"]
-llvm-prefer-dynamic = ["llvm", "revmc-codegen/llvm-prefer-dynamic", "revmc-llvm?/prefer-dynamic"]
-alloy-evm = ["dep:alloy-evm"]
-asm-keccak = ["revmc-codegen/asm-keccak", "alloy-primitives/asm-keccak"]
