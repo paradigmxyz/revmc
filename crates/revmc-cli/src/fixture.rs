@@ -326,7 +326,7 @@ impl PreparedBench {
                     nonce: acct.nonce,
                     code_hash: acct.code_hash,
                     code: Some(acct.bytecode.clone()),
-                    account_id: None,
+                    ..Default::default()
                 },
             );
             if !acct.storage.is_empty() {

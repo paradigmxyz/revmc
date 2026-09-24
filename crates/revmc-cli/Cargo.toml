@@ -54,6 +54,14 @@ hex = "0.4"
 revmc-build.workspace = true
 
 [features]
+# Enables opaque account payloads in revm; disabled by default.
+account-ext = [
+    "revmc/account-ext",
+    "revmc-statetest/account-ext",
+    "revm-context/account-ext",
+    "revm-context-interface/account-ext",
+    "revm-state/account-ext",
+]
 default = ["llvm-prefer-dynamic", "revmc/asm-keccak"]
 llvm = ["revmc/llvm"]
 llvm-prefer-static = ["llvm", "revmc/llvm-prefer-static"]

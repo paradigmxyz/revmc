@@ -398,7 +398,7 @@ impl Host for TestHost {
         };
 
         // Create owned account info
-        let info = AccountInfo { balance, nonce: 0, code_hash, account_id: None, code };
+        let info = AccountInfo { balance, nonce: 0, code_hash, code, ..Default::default() };
 
         let is_empty = info.code.is_none() && info.balance.is_zero() && info.nonce == 0;
 

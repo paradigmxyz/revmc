@@ -51,6 +51,14 @@ fn main() {
 
 You can check out the [examples](/examples) directory for example usage.
 
+## Account extensions
+
+Enable the optional `account-ext` feature on `revmc` to use revm's opaque account
+payloads. The feature is also available on the runtime, codegen, context, builtins,
+CLI, and state-test crates, and is disabled by default.
+
+To build the CLI with account extensions, use `cargo build --features account-ext`.
+
 ## Testing
 
 The [Ethereum state tests](https://github.com/ethereum/tests) are included as a git submodule.
