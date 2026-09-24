@@ -341,6 +341,13 @@ impl BackendState {
             if (entry.hotness as usize) < self.tuning.jit_hot_threshold {
                 return;
             }
+
+            // The helper cannot drain compilation requests while paused. Keep observing hotness,
+            // but defer dispatch until a lookup after resume instead of repeatedly filling the
+            // worker queue with requests for the same bytecode.
+            if self.inner.pause_depth.load(Ordering::Relaxed) != 0 {
+                return;
+            }
         }
 
         if self.pending_jobs >= self.tuning.jit_max_pending_jobs {

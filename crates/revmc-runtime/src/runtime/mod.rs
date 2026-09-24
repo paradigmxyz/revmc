@@ -365,9 +365,10 @@ impl JitBackend {
     /// Pauses out-of-process helper execution.
     ///
     /// Resident compiled functions are still returned by [`lookup`](Self::lookup), and lookup
-    /// events are still processed for stats, hotness tracking, and compilation dispatch. In
-    /// out-of-process mode, the helper process group is stopped until the pause depth returns to
-    /// zero, so dispatched helper requests remain buffered and resume once the helper continues.
+    /// events are still processed for stats and hotness tracking. Observed compilation requests
+    /// are deferred until a lookup after the pause depth returns to zero. In out-of-process mode,
+    /// the helper process group is stopped while paused. Explicit requests may remain buffered
+    /// and resume once the helper continues.
     /// In in-process mode, pause only tracks pause depth.
     ///
     /// Pause delivery is best-effort and never blocks: callers pause around block validation on
