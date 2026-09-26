@@ -45,5 +45,5 @@ jobs:
         uses: CodSpeedHQ/action@f22792bfac16f3e14eb9fbea76f4a48e9cc22b93 # v4.19.1
         with:
           run: cargo codspeed run -p revmc-cli --bench bench
-          mode: instrumentation
+          mode: simulation
           token: ${{ secrets.CODSPEED_TOKEN }}
