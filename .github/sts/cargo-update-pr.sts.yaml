@@ -7,7 +7,7 @@ claim_pattern:
   repository_id: '769994886'
   event_name: 'workflow_dispatch'
   workflow_ref: 'paradigmxyz/revmc/\.github/workflows/dependencies\.yml@refs/heads/main'
-  job_workflow_ref: 'tempoxyz/gh-actions/\.github/workflows/cargo-update-pr\.yml@117919c943b804057be733b0c4034c5542e58959'
+  job_workflow_ref: 'tempoxyz/gh-actions/\.github/workflows/cargo-update-pr\.yml@ee2960a6cc25d99bda45614135bfe1197d879bac'
 
 permissions:
   contents: write
