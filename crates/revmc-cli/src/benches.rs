@@ -20,8 +20,14 @@ impl Bench {
     }
 }
 
-pub fn fixture_from_bytecode(name: &'static str, bytecode: Vec<u8>, spec_id: SpecId) -> Bench {
+pub fn fixture_from_bytecode(
+    name: &'static str,
+    bytecode: Vec<u8>,
+    spec_id: SpecId,
+    gas_limit: u64,
+) -> Bench {
     let bytecode = revmc::primitives::hex::encode(bytecode);
+    let gas_limit = format!("0x{gas_limit:x}");
     Bench {
         name,
         fixture_json: Some(Cow::Owned(format!(
@@ -30,7 +36,7 @@ pub fn fixture_from_bytecode(name: &'static str, bytecode: Vec<u8>, spec_id: Spe
     "env": {{
       "currentBaseFee": "0x0",
       "currentCoinbase": "0x0000000000000000000000000000000000000000",
-      "currentGasLimit": "0x7fffffffffffffff",
+      "currentGasLimit": "{gas_limit}",
       "currentNumber": "0x1",
       "currentTimestamp": "0x1"
     }},
@@ -51,7 +57,7 @@ pub fn fixture_from_bytecode(name: &'static str, bytecode: Vec<u8>, spec_id: Spe
     "transaction": [
       {{
         "data": "0x",
-        "gasLimit": "0x7fffffffffffffff",
+        "gasLimit": "{gas_limit}",
         "gasPrice": "0x0",
         "nonce": "0x0",
         "sender": "0x1111111111111111111111111111111111111111",

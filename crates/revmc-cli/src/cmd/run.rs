@@ -136,7 +136,12 @@ impl RunArgs {
                     .to_string();
                 (stem, path.to_path_buf())
             };
-            fixture_from_bytecode(name.leak(), read_code_path(&bytecode_path)?, spec_id)
+            fixture_from_bytecode(
+                name.leak(),
+                read_code_path(&bytecode_path)?,
+                spec_id,
+                self.gas_limit,
+            )
         } else {
             let bytecode = read_code_string(bench_name.trim().as_bytes(), None).map_err(|e| {
                 eyre!(
@@ -144,7 +149,7 @@ impl RunArgs {
                      or valid EVM hex/asm: {e}"
                 )
             })?;
-            fixture_from_bytecode("custom", bytecode, spec_id)
+            fixture_from_bytecode("custom", bytecode, spec_id, self.gas_limit)
         };
 
         let name = bench_entry.name;
