@@ -312,13 +312,13 @@ pub struct RuntimeTuning {
     ///
     /// When exceeded, least-recently-used entries are evicted.
     ///
-    /// Defaults to `0`.
+    /// Defaults to 1 GiB.
     pub resident_code_cache_bytes: usize,
 
     /// Duration after which a resident program with no lookup hits is evicted.
     /// `None` disables idle eviction.
     ///
-    /// Defaults to `None`.
+    /// Defaults to 600 seconds.
     pub idle_evict_duration: Option<Duration>,
 
     /// How often the backend runs eviction sweeps, if `idle_evict_duration` is set.
