@@ -706,7 +706,7 @@ impl BackendState {
                 }
             }
         } else {
-            // No store configured — can't persist, remove so JIT can retry.
+            // Only reachable through explicit `prepare_aot` requests; AOT mode requires a store.
             warn!(
                 code_hash = %key.code_hash,
                 "AOT compilation completed but no artifact store configured",

@@ -224,6 +224,13 @@ fn startup_store_failure() {
     assert!(result.is_err());
 }
 
+#[test]
+fn aot_without_store_is_rejected() {
+    let config = RuntimeConfig { enabled: true, aot: true, store: None, ..Default::default() };
+    let error = JitBackend::new(config).unwrap_err();
+    assert_eq!(error.to_string(), "AOT mode requires an artifact store");
+}
+
 // ===========================================================================
 // Tests: lookup behavior.
 // ===========================================================================
