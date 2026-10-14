@@ -130,7 +130,7 @@ pub struct EvmContext<'a> {
     ///
     /// `None` uses the standard Ethereum builtin. The callback must preserve the
     /// current fork's storage, gas, static-call, and refund semantics.
-    pub on_sstore: Option<fn(&mut EvmContext<'_>, U256, U256) -> Result<(), InstructionResult>>,
+    pub on_sstore: Option<SstoreCallback>,
 }
 
 // Static assertions to ensure the struct layout matches expectations.
@@ -868,3 +868,6 @@ mod tests {
         assert!(core::ptr::fn_addr_eq(f1, f2), "{f1:?} != {f2:?}");
     }
 }
+
+/// Chain-specific storage write and gas-accounting callback.
+pub type SstoreCallback = fn(&mut EvmContext<'_>, U256, U256) -> Result<(), InstructionResult>;
