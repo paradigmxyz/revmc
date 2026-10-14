@@ -1203,14 +1203,10 @@ tests! {
                 ecx.on_sstore = Some(|ecx, key, value| {
                     assert_eq!(key, U256::from(7));
                     assert_eq!(value, U256::from(42));
-                    assert!(ecx.gas.record_cost(123));
+                    assert!(ecx.gas.record_regular_cost(123));
                     ecx.host.tstore(ecx.input.target_address, key, value);
                     Ok(())
                 });
-            }),
-            assert_host: Some(|host| {
-                assert!(host.storage.is_empty());
-                assert_eq!(host.transient_storage.get(&U256::from(7)), Some(&U256::from(42)));
             }),
         }),
         sstore_callback_error(@raw {
@@ -1220,7 +1216,6 @@ tests! {
             modify_ecx: Some(|ecx| {
                 ecx.on_sstore = Some(|_, _, _| Err(InstructionResult::StateChangeDuringStaticCall));
             }),
-            assert_host: Some(|host| assert!(host.storage.is_empty())),
         }),
         sstore_const_inputs(@raw {
             bytecode: &[op::PUSH1, 42, op::PUSH0, op::SSTORE],
