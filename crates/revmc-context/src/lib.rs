@@ -247,6 +247,9 @@ pub type RawEvmCompilerFn = unsafe extern "C" fn(
     stack_len: NonNull<usize>,
 ) -> InstructionResult;
 
+/// Chain-specific storage write and gas-accounting callback.
+pub type SstoreCallback = fn(&mut EvmContext<'_>, U256, U256) -> Result<(), InstructionResult>;
+
 /// An EVM bytecode function.
 #[derive(Clone, Copy, Debug, Hash)]
 pub struct EvmCompilerFn(RawEvmCompilerFn);
@@ -868,6 +871,3 @@ mod tests {
         assert!(core::ptr::fn_addr_eq(f1, f2), "{f1:?} != {f2:?}");
     }
 }
-
-/// Chain-specific storage write and gas-accounting callback.
-pub type SstoreCallback = fn(&mut EvmContext<'_>, U256, U256) -> Result<(), InstructionResult>;
