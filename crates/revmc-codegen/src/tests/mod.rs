@@ -1196,6 +1196,27 @@ tests! {
                 assert_eq!(host.storage.get(&200_U256), Some(&100_U256));
             }),
         }),
+        sstore_callback(@raw {
+            bytecode: &[op::PUSH1, 42, op::PUSH1, 7, op::SSTORE],
+            expected_gas: 6 + 123,
+            modify_ecx: Some(|ecx| {
+                ecx.on_sstore = Some(|ecx, key, value| {
+                    assert_eq!(key, U256::from(7));
+                    assert_eq!(value, U256::from(42));
+                    assert!(ecx.gas.record_regular_cost(123));
+                    ecx.host.tstore(ecx.input.target_address, key, value);
+                    Ok(())
+                });
+            }),
+        }),
+        sstore_callback_error(@raw {
+            bytecode: &[op::PUSH1, 42, op::PUSH0, op::SSTORE],
+            expected_gas: 5,
+            expected_return: InstructionResult::StateChangeDuringStaticCall,
+            modify_ecx: Some(|ecx| {
+                ecx.on_sstore = Some(|_, _, _| Err(InstructionResult::StateChangeDuringStaticCall));
+            }),
+        }),
         sstore_const_inputs(@raw {
             bytecode: &[op::PUSH1, 42, op::PUSH0, op::SSTORE],
             expected_gas: GAS_WHAT_INTERPRETER_SAYS,

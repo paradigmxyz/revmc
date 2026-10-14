@@ -24,7 +24,7 @@ pub mod simple_revm_evm {
 }
 
 /// ABI version of compiled artifacts. Bump when the calling convention changes.
-pub const ABI_VERSION: u32 = 0;
+pub const ABI_VERSION: u32 = 1;
 
 /// Internal tests and testing utilities. Not public API.
 #[cfg(any(test, feature = "__fuzzing"))]

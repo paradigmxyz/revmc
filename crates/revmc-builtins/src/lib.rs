@@ -521,6 +521,9 @@ pub unsafe extern "C" fn __revmc_builtin_sstore(
     sp: &mut [EvmWord; 2],
 ) -> BuiltinResult {
     let rev![index, value] = sp;
+    if let Some(on_sstore) = ecx.on_sstore {
+        return on_sstore(ecx, index.to_u256(), value.to_u256()).map_err(Into::into);
+    }
     ensure_non_staticcall!(ecx);
 
     let target = ecx.input.target_address;

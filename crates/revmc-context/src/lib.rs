@@ -126,6 +126,11 @@ pub struct EvmContext<'a> {
     /// Cached length of the current memory context in bytes.
     /// Refreshed after any memory resize.
     pub mem_len: usize,
+    /// Optional chain-specific SSTORE implementation, including gas accounting.
+    ///
+    /// `None` uses the standard Ethereum builtin. The callback must preserve the
+    /// current fork's storage, gas, static-call, and refund semantics.
+    pub on_sstore: Option<SstoreCallback>,
 }
 
 // Static assertions to ensure the struct layout matches expectations.
@@ -183,6 +188,7 @@ impl<'a> EvmContext<'a> {
             gas_params,
             mem_base: ptr::null_mut(),
             mem_len: 0,
+            on_sstore: None,
         };
         this.refresh_memory_cache();
         (this, stack, stack_len)
@@ -240,6 +246,9 @@ pub type RawEvmCompilerFn = unsafe extern "C" fn(
     stack: NonNull<EvmStack>,
     stack_len: NonNull<usize>,
 ) -> InstructionResult;
+
+/// Chain-specific storage write and gas-accounting callback.
+pub type SstoreCallback = fn(&mut EvmContext<'_>, U256, U256) -> Result<(), InstructionResult>;
 
 /// An EVM bytecode function.
 #[derive(Clone, Copy, Debug, Hash)]
