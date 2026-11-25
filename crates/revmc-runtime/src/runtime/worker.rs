@@ -533,6 +533,8 @@ pub(super) fn create_compiler(
         config.tuning.jit_opt_level
     });
     compiler.debug_assertions(config.debug_assertions);
+    compiler.set_debug_support(config.debug_support);
+    compiler.set_simple_perf(config.simple_perf);
     compiler.single_error(config.single_error);
     compiler.set_dedup(!config.no_dedup);
     compiler.set_dse(!config.no_dse);

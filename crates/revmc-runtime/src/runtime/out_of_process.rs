@@ -500,6 +500,8 @@ fn limit_cpu_affinity(_cpu_count: usize) -> std::io::Result<()> {
 #[derive(Clone, PartialEq, Eq, SchemaWrite, SchemaRead)]
 struct HelperInit {
     debug_assertions: bool,
+    debug_support: bool,
+    simple_perf: bool,
     single_error: bool,
     no_dedup: bool,
     no_dse: bool,
@@ -867,6 +869,8 @@ fn gas_params_from_pairs(pairs: GasParamPairs) -> eyre::Result<GasParams> {
 fn helper_init(config: &RuntimeConfig) -> HelperInit {
     HelperInit {
         debug_assertions: config.debug_assertions,
+        debug_support: config.debug_support,
+        simple_perf: config.simple_perf,
         single_error: config.single_error,
         no_dedup: config.no_dedup,
         no_dse: config.no_dse,
@@ -881,6 +885,8 @@ fn runtime_config_from_init(init: HelperInit) -> eyre::Result<RuntimeConfig> {
     let mut config = RuntimeConfig {
         dump_dir: init.dump_dir.map(PathBuf::from),
         debug_assertions: init.debug_assertions,
+        debug_support: init.debug_support,
+        simple_perf: init.simple_perf,
         single_error: init.single_error,
         no_dedup: init.no_dedup,
         no_dse: init.no_dse,
@@ -912,6 +918,15 @@ mod tests {
         pause_state.resume();
         rx.recv_timeout(Duration::from_secs(1)).unwrap();
         thread.join().unwrap();
+    }
+
+    #[test]
+    fn helper_init_keeps_debug_and_perf_support() {
+        let config =
+            RuntimeConfig { debug_support: false, simple_perf: false, ..Default::default() };
+        let helper_config = runtime_config_from_init(helper_init(&config)).unwrap();
+        assert!(!helper_config.debug_support);
+        assert!(!helper_config.simple_perf);
     }
 
     #[test]

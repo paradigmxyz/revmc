@@ -231,6 +231,15 @@ fn aot_without_store_is_rejected() {
     assert_eq!(error.to_string(), "AOT mode requires an artifact store");
 }
 
+#[cfg(feature = "llvm")]
+#[test]
+fn compiler_takes_debug_and_perf_support_from_config() {
+    let config = RuntimeConfig { debug_support: false, simple_perf: false, ..Default::default() };
+    let compiler = worker::create_compiler(&config, false).unwrap();
+    assert!(!compiler.debug_support());
+    assert!(!compiler.simple_perf());
+}
+
 // ===========================================================================
 // Tests: lookup behavior.
 // ===========================================================================

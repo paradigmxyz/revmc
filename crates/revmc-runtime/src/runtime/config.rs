@@ -50,6 +50,27 @@ pub struct RuntimeConfig {
     /// Defaults to `false`.
     pub debug_assertions: bool,
 
+    /// Register JIT-compiled code with debuggers via `__jit_debug_register_code`.
+    ///
+    /// LLVM keeps a full copy of every compiled object for this. That memory is not counted
+    /// by [`RuntimeTuning::resident_code_cache_bytes`] and is only freed when the code is
+    /// evicted, so long-running processes that never attach a debugger may want it off.
+    ///
+    /// Applied once per process, by the first JIT compilation.
+    ///
+    /// Defaults to `true`.
+    pub debug_support: bool,
+
+    /// Write `/tmp/perf-<pid>.map` so profilers can resolve JIT-compiled symbols.
+    ///
+    /// The map file is append-only and never cleaned up, so entries for evicted code
+    /// accumulate for as long as the process runs.
+    ///
+    /// Applied once per process, by the first JIT compilation.
+    ///
+    /// Defaults to `true`.
+    pub simple_perf: bool,
+
     /// Collapse every JIT failure path to a single
     /// [`OutOfGas`](revm_interpreter::InstructionResult::OutOfGas) constant.
     ///
@@ -214,6 +235,8 @@ impl Default for RuntimeConfig {
             tuning: RuntimeTuning::default(),
             dump_dir: None,
             debug_assertions: false,
+            debug_support: true,
+            simple_perf: true,
             single_error: true,
             no_dedup: false,
             no_dse: false,
